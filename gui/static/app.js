@@ -197,35 +197,67 @@ function md(src) {
 // ---------------------------------------------------------------- chrome
 
 function channelStateText(s) {
-  if (!s.configured) return ["dot-grey", "Not set up yet — the wizard will guide you"];
-  if (s.paused) return ["dot-red", "Paused — both agents are standing by"];
+  if (!s.configured) return ["dot-grey", "Not set up yet"];
+  if (s.paused) return ["dot-red", "Paused — all agents are standing by"];
   if (!s.shared_ok) return ["dot-red", "Shared folder unreachable — check OneDrive"];
-  if (s.inbound_waiting) return ["dot-orange", `New message from ${dn(s.peer)} waiting`];
-  if (s.outbound_undelivered) return ["dot-orange", `Delivering to ${dn(s.peer)}…`];
-  return ["dot-green", "All caught up — every message delivered"];
+  return ["dot-green", "Connected — everything is syncing"];
 }
 
 function renderChrome() {
   const s = App.state;
   if (!s) return;
-  const chip = $("#channel-chip");
-  if (s.configured) {
-    chip.hidden = false;
-    chip.textContent = `${dn(s.role)} ⇄ ${dn(s.peer)}`;
-  } else {
-    chip.hidden = true;
-  }
   $("#paused-badge").hidden = !s.paused;
   const [dot, text] = channelStateText(s);
   $("#status-dot").className = "dot " + dot;
   $("#status-text").textContent = text;
   $("#status-versions").textContent =
     `App v${s.gui_version} · Bridge v${s.bridge_version}`;
-  $("#nav-inbound-dot").hidden = !s.inbound_waiting;
-  document.querySelectorAll("#navrail a").forEach((a) => {
-    a.classList.toggle("active", a.dataset.page === App.page);
+}
+
+// theme (basic dark mode; persisted, defaults to the OS preference)
+function initTheme() {
+  const saved = localStorage.getItem("theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+  else if (matchMedia("(prefers-color-scheme: dark)").matches) {
+    document.documentElement.dataset.theme = "dark";
+  }
+}
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem("theme", t);
+}
+
+// ---------------------------------------------------------------- sidebar
+
+function renderSidebar() {
+  const ms = Mesh.state;
+  const box = $("#side-chats");
+  if (!ms?.available || !ms.user) {
+    box.innerHTML = `<div class="empty" style="padding:24px 10px">${
+      !ms?.available ? "Mesh not started yet" : "Sign in to see your chats"}</div>`;
+    $("#acct-name").textContent = "Sign in";
+    $("#acct-avatar").textContent = "?";
+    return;
+  }
+  $("#acct-name").textContent = meshDn(ms.user);
+  $("#acct-avatar").textContent = (meshDn(ms.user)[0] || "?").toUpperCase();
+  box.innerHTML = (ms.chats || []).filter((c) => !c.archived).map((c) => `
+    <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
+      <div class="chat-avatar">${esc((c.name[0] || "#").toUpperCase())}</div>
+      <div class="chat-mid">
+        <div class="chat-name">${esc(c.name)}</div>
+        <div class="chat-last">${c.last
+          ? esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file") : "No messages yet"}</div>
+      </div>
+      <div class="chat-side">
+        <div class="chat-time">${c.last ? esc(fmtTime(c.last.ts)) : ""}</div>
+        ${c.unread ? `<span class="unread-badge">${c.unread}</span>` : ""}
+      </div>
+    </div>`).join("") ||
+    `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`;
+  box.querySelectorAll(".chat-row").forEach((r) => {
+    r.addEventListener("click", () => { location.hash = `#/chats/${r.dataset.chat}`; });
   });
-  $("#settings-btn").classList.toggle("active", App.page === "settings");
 }
 
 // ---------------------------------------------------------------- status page
@@ -514,7 +546,7 @@ async function renderChats(force) {
   if (!s?.configured) { location.hash = "#/setup"; return; }
   Mesh.state = await api("/api/mesh/state");
   const ms = Mesh.state;
-  $("#nav-mesh-dot").hidden = !(ms.chats || []).some((c) => c.unread > 0);
+  renderSidebar();
 
   if (!ms.available) {
     $("#content").innerHTML = `
@@ -537,8 +569,25 @@ async function renderChats(force) {
   }
 
   if (!ms.user) { renderMeshAuth(); return; }
-  if (Mesh.chatId) { renderMeshChat(force); return; }
+  if (Mesh.chatId) {
+    if (Mesh.detailsView) return renderChatDetails(force);
+    return renderMeshChat(force);
+  }
 
+  // no chat selected: WhatsApp-style empty pane (the list lives in the sidebar)
+  if (!force && Mesh.listKey === "empty" && App.page === "chats") return;
+  Mesh.listKey = "empty";
+  $("#content").innerHTML = `
+    <div class="empty-state">
+      <div>
+        <div style="font-size:42px;margin-bottom:10px">💬</div>
+        <p><b>Select a chat</b> — or start one with the ✎ button.</p>
+        <p class="hint">Humans and agents, working in the same rooms.</p>
+      </div>
+    </div>`;
+  return;
+
+  /* legacy list body below — unreachable, removed in the component split */
   const key = JSON.stringify(ms.chats);
   if (!force && key === Mesh.listKey && App.page === "chats") return;
   Mesh.listKey = key;
@@ -715,14 +764,13 @@ async function renderMeshChat(force) {
 
   $("#content").innerHTML = `
     <div class="chat-head">
-      <button id="chat-back" title="All chats">←</button>
-      <div style="min-width:0">
+      <div id="chat-info-btn" style="min-width:0;cursor:pointer" title="Chat details">
         <div class="chat-head-name">${esc(meta.name)}
           ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
         <div class="chat-head-members">${memberChips}</div>
       </div>
       <span class="spacer"></span>
-      ${isOwner ? `<button id="chat-archive">${meta.archived ? "Unarchive" : "Archive"}</button>` : ""}
+      <button id="chat-details-btn" title="Chat details">Details</button>
     </div>
     <div id="transcript">${bubbles}</div>
     <div id="pending-area">${draft.att ? `
@@ -736,15 +784,9 @@ async function renderMeshChat(force) {
     </div>`}`;
 
   $("#content").classList.add("chat-mode");
-  $("#chat-back").addEventListener("click", () => { location.hash = "#/chats"; });
-  const archiveBtn = $("#chat-archive");
-  if (archiveBtn) archiveBtn.addEventListener("click", async () => {
-    const r = await api("/api/mesh/archive",
-      { chat_id: chatId, archived: !meta.archived });
-    if (r.error) { toast(r.error, true); return; }
-    toast(r.archived ? "Chat archived" : "Chat restored");
-    renderMeshChat(true);
-  });
+  const openDetails = () => { location.hash = `#/chats/${chatId}/details`; };
+  $("#chat-info-btn").addEventListener("click", openDetails);
+  $("#chat-details-btn").addEventListener("click", openDetails);
 
   const body = $("#mesh-body");
   if (body) {
@@ -783,6 +825,151 @@ async function renderMeshChat(force) {
   if (nearBottom) tr.scrollTop = tr.scrollHeight;
   else if (prevScrollTop != null) tr.scrollTop = prevScrollTop;
   if (hadNew) api("/api/mesh/read", { chat_id: chatId });
+}
+
+// ---------------------------------------------------------------- chat details
+
+const RULE_LABELS = {
+  all: "Reply to every message",
+  tagged: "Reply only when tagged",
+  humans: "Reply only to humans",
+};
+
+async function renderChatDetails() {
+  const ms = Mesh.state;
+  const chatId = Mesh.chatId;
+  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}&tail=1000`);
+  if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
+  const meta = data.meta;
+  const s = App.state;
+  const isOwner = meta.owner === ms.user;
+  const media = [];
+  for (const m of data.messages) {
+    for (const f of (m.files || [])) media.push({ ...f, from: m.from, ts: m.ts });
+  }
+  const myAgentsHere = Object.values(ms.users).filter((u) =>
+    u.kind === "agent" && (u.owners || []).includes(ms.user)
+    && (meta.members || []).includes(u.username));
+  const ruleSel = (a) => {
+    const current = ((a.settings || {}).rules || {})[chatId] || "";
+    const defRule = (a.settings || {}).default_rule || "tagged";
+    return `<select class="cd-rule" data-agent="${esc(a.username)}">
+      <option value="" ${current === "" ? "selected" : ""}>Default — ${RULE_LABELS[defRule].toLowerCase()}</option>
+      ${Object.entries(RULE_LABELS).map(([r, label]) =>
+        `<option value="${r}" ${current === r ? "selected" : ""}>${label}</option>`).join("")}
+    </select>`;
+  };
+
+  $("#content").innerHTML = `
+    <div class="chat-head">
+      <button id="cd-back" title="Back to chat">←</button>
+      <div class="chat-head-name">${esc(meta.name)} — details</div>
+    </div>
+    <div class="card" style="max-width:640px">
+      <h2>About</h2>
+      <dl class="kv">
+        <dt>Created by</dt><dd>${esc(meshDn(meta.created_by))}</dd>
+        <dt>Owner</dt><dd>${esc(meshDn(meta.owner))}</dd>
+        <dt>Created</dt><dd>${esc(fmtTime(meta.created))}</dd>
+        <dt>State</dt><dd>${meta.archived ? "Archived" : "Active"}</dd>
+      </dl>
+      ${isOwner ? `<div class="row" style="margin-top:10px">
+        <button id="cd-archive">${meta.archived ? "Unarchive chat" : "Archive chat"}</button>
+      </div>` : ""}
+    </div>
+    <div class="card" style="max-width:640px">
+      <h2>Members</h2>
+      ${(meta.members || []).map((u) => `<span class="member-chip">${esc(meshDn(u))}
+        ${ms.users[u]?.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</span>`).join(" ")}
+    </div>
+    ${myAgentsHere.length ? `
+    <div class="card" style="max-width:640px">
+      <h2>Your agents in this chat</h2>
+      <dl class="kv" style="grid-template-columns:140px 1fr">
+        ${myAgentsHere.map((a) => `<dt>${esc(a.display)}</dt><dd>${ruleSel(a)}</dd>`).join("")}
+      </dl>
+      <p class="hint" style="margin-bottom:0">Rule changes apply from the agent's next check.</p>
+    </div>` : ""}
+    <div class="card" style="max-width:640px">
+      <h2>Media and files</h2>
+      ${media.length ? media.map((f) => `
+        <button class="att-btn cd-file" data-path="${esc(f.path)}" title="Open ${esc(f.name)}"
+                style="max-width:100%;margin-top:6px">
+          <span class="att-icon">${extIcon(f.name)}</span>
+          <span style="min-width:0">
+            <div class="att-name">${esc(f.name)}</div>
+            <div class="att-size">${fmtSize(f.bytes)} · ${esc(meshDn(f.from))} · ${esc(fmtTime(f.ts))}</div>
+          </span>
+        </button>`).join("") : `<div class="empty">Nothing shared yet.</div>`}
+    </div>
+    <div class="card" style="max-width:640px">
+      <h2>Connection</h2>
+      <dl class="kv">
+        <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
+        <dt>OneDrive</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
+        <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
+      </dl>
+    </div>`;
+
+  $("#cd-back").addEventListener("click", () => { location.hash = `#/chats/${chatId}`; });
+  const arch = $("#cd-archive");
+  if (arch) arch.addEventListener("click", async () => {
+    const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
+    if (r.error) { toast(r.error, true); return; }
+    toast(r.archived ? "Chat archived" : "Chat restored");
+    renderChatDetails();
+  });
+  document.querySelectorAll(".cd-rule").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      if (!sel.value) { toast("Kept the agent's default rule"); return; }
+      const r = await api("/api/mesh/agent", {
+        username: sel.dataset.agent, patch: { rules: { [chatId]: sel.value } },
+      });
+      if (r.error) toast(r.error, true);
+      else toast(`@${sel.dataset.agent}: ${RULE_LABELS[sel.value].toLowerCase()} here`);
+    });
+  });
+  document.querySelectorAll(".cd-file").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/mesh/open_file", { chat_id: chatId, path: b.dataset.path });
+      if (r.error) toast(r.error, true);
+    });
+  });
+}
+
+// ---------------------------------------------------------------- new chat
+
+async function renderNewChat() {
+  Mesh.state = await api("/api/mesh/state");
+  renderSidebar();
+  const ms = Mesh.state;
+  if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
+  const myAgents = Object.values(ms.users)
+    .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+  $("#content").innerHTML = `
+    <h1>New chat</h1>
+    <p class="page-sub">Name it, add your agents — every human is in automatically.</p>
+    <div class="card" style="max-width:520px">
+      <input type="text" id="new-chat-name" placeholder="Chat name" style="width:100%">
+      <p class="hint" style="margin:12px 0 4px">Your agents:</p>
+      ${myAgents.map((a) => `
+        <label class="row" style="padding:3px 0">
+          <input type="checkbox" class="nc-member" value="${esc(a.username)}">
+          ${esc(a.display)} <span class="hint">@${esc(a.username)}</span>
+        </label>`).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="create-chat-btn">Create</button>
+        <button onclick="location.hash='#/chats'">Cancel</button>
+      </div>
+    </div>`;
+  $("#create-chat-btn").addEventListener("click", async () => {
+    const members = [...document.querySelectorAll(".nc-member:checked")].map((c) => c.value);
+    const r = await api("/api/mesh/create_chat",
+      { name: $("#new-chat-name").value, members });
+    if (r.error) { toast(r.error, true); return; }
+    location.hash = `#/chats/${r.chat.id}`;
+  });
+  $("#new-chat-name").focus();
 }
 
 // ---------------------------------------------------------------- agents page
@@ -883,57 +1070,114 @@ async function renderAgents() {
 
 // ---------------------------------------------------------------- settings
 
-function renderSettings() {
+async function renderSettings() {
   const s = App.state;
-  if (!s.configured) {
-    $("#content").innerHTML = `
-      <h1>Settings</h1>
-      <div class="card" style="max-width:640px">
-        <div class="empty">Not set up yet — run the <a href="#/setup">setup wizard</a> first.</div>
+  if (!s.configured) { location.hash = "#/setup"; return; }
+  Mesh.state = await api("/api/mesh/state");
+  renderSidebar();
+  const ms = Mesh.state;
+  const dark = document.documentElement.dataset.theme === "dark";
+
+  const mine = ms.available && ms.user ? Object.values(ms.users)
+    .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user)) : [];
+  const agentCards = mine.map((a) => {
+    const st = a.settings || {};
+    return `
+      <div class="card" style="max-width:680px">
+        <h2>${esc(a.display)} <span class="hint" style="text-transform:none">@${esc(a.username)}</span></h2>
+        <dl class="kv" style="grid-template-columns:160px 1fr">
+          <dt>Model</dt><dd><input type="text" class="ag-model" data-agent="${esc(a.username)}"
+            value="${esc(st.model || "")}" placeholder="agent default"></dd>
+          <dt>Reasoning effort</dt><dd><input type="text" class="ag-reason" data-agent="${esc(a.username)}"
+            value="${esc(st.reasoning || "")}" placeholder="agent default"></dd>
+          <dt>Default reply rule</dt><dd><select class="ag-default" data-agent="${esc(a.username)}">
+            ${Object.entries(RULE_LABELS).map(([r, label]) =>
+              `<option value="${r}" ${(st.default_rule || "tagged") === r ? "selected" : ""}>${label}</option>`).join("")}
+          </select></dd>
+          <dt>Owners</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
+        </dl>
+        <p class="hint">Per-chat rules live in each chat's details page.</p>
+        <div class="row"><button class="primary ag-save" data-agent="${esc(a.username)}">Save</button></div>
       </div>`;
-    return;
-  }
-  const cfg = { role: s.role, peer: s.peer, shared_dir: s.shared_dir,
-                poll_seconds: s.poll };
-  if (s.handler_cmd) cfg.handler_cmd = s.handler_cmd;
+  }).join("");
+
   $("#content").innerHTML = `
     <h1>Settings</h1>
-    <p class="page-sub">How this machine's side of the bridge is configured.</p>
     <div class="card" style="max-width:680px">
-      <h2>Bridge</h2>
+      <h2>Account</h2>
+      ${ms.available && ms.user ? `
+        <dl class="kv">
+          <dt>Signed in as</dt><dd><b>${esc(meshDn(ms.user))}</b> @${esc(ms.user)}</dd>
+        </dl>
+        <div class="row" style="margin-top:10px"><button id="st-logout">Sign out</button></div>`
+        : `<div class="empty">Not signed in — head to <a href="#/chats">Chats</a>.</div>`}
+      <div class="row" style="margin-top:14px">
+        <label class="switch">
+          <input type="checkbox" id="theme-toggle" ${dark ? "checked" : ""}>
+          <span class="slider"></span>
+        </label>
+        <span><b>Dark mode</b></span>
+      </div>
+    </div>
+    ${agentCards}
+    ${ms.available && ms.user ? `
+    <div class="card" style="max-width:680px">
+      <h2>Add an agent</h2>
+      <div class="row">
+        <input type="text" id="new-agent-user" placeholder="username (e.g. coco2)">
+        <input type="text" id="new-agent-display" placeholder="Display name">
+        <button class="primary" id="new-agent-btn">Create</button>
+      </div>
+      <p class="hint" style="margin-bottom:0">You become its responsible human;
+      its machine runs <code>agent_worker.py</code>.</p>
+    </div>` : ""}
+    <div class="card" style="max-width:680px">
+      <h2>Connection</h2>
       <dl class="kv">
-        <dt>My side</dt><dd>${esc(dn(s.role))}</dd>
-        <dt>Remote side</dt><dd>${esc(dn(s.peer))}</dd>
         <dt>Shared folder</dt><dd class="mono">${esc(s.shared_dir)}
           <a href="#" id="open-shared2">open</a></dd>
-        <dt>Checks every</dt><dd>${s.poll} seconds</dd>
-        <dt>Automation</dt><dd>${esc(s.handler_cmd || "None — this side is driven by you and Claude")}</dd>
+        <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
+        <dt>OneDrive</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
+        <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
       </dl>
-    </div>
-    <div class="card" style="max-width:680px">
-      <h2>Maintenance</h2>
-      <div class="row">
-        <button onclick="location.hash='#/setup'">Re-run setup wizard</button>
+      <div class="row" style="margin-top:10px">
         <button onclick="openTarget('home')">Open config folder</button>
-        <button onclick="openTarget('inbox')">Open inbox copies</button>
       </div>
-      <p class="hint" style="margin-bottom:0">The wizard preserves automation
-      settings. Power users can keep using the CLI: <code>python bridge.py …</code></p>
-    </div>
-    <div class="card" style="max-width:680px">
-      <h2>Advanced</h2>
-      <dl class="kv">
-        <dt>Message counters</dt>
-        <dd>me: sent ${s.me.seq}, read up to ${s.me.ack} ·
-            ${esc(dn(s.peer))}: sent ${s.peer_env?.seq ?? 0}, read up to ${s.peer_env?.ack ?? 0}</dd>
-        <dt>Config file</dt><dd class="mono">${esc(s.home)}\\config.json</dd>
-        <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}
-          ${s.peer_env ? "· " + esc(dn(s.peer)) + " bridge v" + esc(s.peer_env.app_version || "?") : ""}</dd>
-      </dl>
-      <pre class="configdump mono">${esc(JSON.stringify(cfg, null, 2))}</pre>
     </div>`;
+
+  $("#theme-toggle").addEventListener("change", (e) => {
+    setTheme(e.target.checked ? "dark" : "light");
+  });
+  const logout = $("#st-logout");
+  if (logout) logout.addEventListener("click", async () => {
+    await api("/api/mesh/logout", {});
+    location.hash = "#/chats";
+  });
   $("#open-shared2").addEventListener("click", (e) => {
     e.preventDefault(); openTarget("shared");
+  });
+  document.querySelectorAll(".ag-save").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const agent = btn.dataset.agent;
+      const patch = {
+        model: document.querySelector(`.ag-model[data-agent="${agent}"]`).value.trim() || null,
+        reasoning: document.querySelector(`.ag-reason[data-agent="${agent}"]`).value.trim() || null,
+        default_rule: document.querySelector(`.ag-default[data-agent="${agent}"]`).value,
+      };
+      const r = await api("/api/mesh/agent", { username: agent, patch });
+      if (r.error) toast(r.error, true);
+      else toast(`Saved @${agent}`);
+    });
+  });
+  const newAgent = $("#new-agent-btn");
+  if (newAgent) newAgent.addEventListener("click", async () => {
+    const r = await api("/api/mesh/create_agent", {
+      username: $("#new-agent-user").value.trim(),
+      display: $("#new-agent-display").value.trim(),
+    });
+    if (r.error) { toast(r.error, true); return; }
+    toast(`Agent @${r.agent.username} created`);
+    renderSettings();
   });
 }
 
@@ -1293,21 +1537,30 @@ async function renderWizardStep() {
 
 const PAGES = {
   chats: () => renderChats(true),
-  agents: renderAgents,
-  home: renderHome,
-  messages: () => renderMessages(true),
-  setup: renderSetup,
+  new: renderNewChat,
   settings: renderSettings,
+  setup: renderSetup,   // hidden from the UI; reachable while unconfigured
 };
 
 function route() {
   const hash = location.hash.replace("#/", "");
-  const [page, sub] = hash.split("/");
-  App.page = PAGES[page] ? page : "chats";
-  const newChatId = (App.page === "chats" && sub) ? sub : null;
-  if (newChatId !== Mesh.chatId) { Mesh.chatId = newChatId; Mesh.chatKey = ""; }
+  const [page0, sub, sub2] = hash.split("/");
+  let page = page0 || "chats";
+  if (page === "agents") page = "settings";        // merged into settings
+  if (!PAGES[page]) page = "chats";                // home/messages retired
+  App.page = page;
+  if (page === "chats") {
+    const chatId = sub || null;
+    const details = sub2 === "details";
+    if (chatId !== Mesh.chatId || details !== Mesh.detailsView) {
+      Mesh.chatId = chatId;
+      Mesh.detailsView = details;
+      Mesh.chatKey = "";
+      Mesh.listKey = "";
+    }
+  }
   $("#content").classList.toggle("chat-mode",
-    App.page === "messages" || (App.page === "chats" && !!Mesh.chatId));
+    App.page === "chats" && !!Mesh.chatId && !Mesh.detailsView);
   renderChrome();
   PAGES[App.page]();
 }
@@ -1322,14 +1575,14 @@ async function refresh(rerender) {
   }
   renderChrome();
   if (rerender && App.page !== "setup") PAGES[App.page]();
-  else if (App.page === "messages") renderMessages(false);
-  else if (App.page === "home") renderHome();
   else if (App.page === "chats" && Mesh.state?.user) renderChats(false);
 }
 
 window.addEventListener("hashchange", route);
 
 (async function start() {
+  initTheme();
+  $("#side-new").addEventListener("click", () => { location.hash = "#/new"; });
   App.state = await api("/api/state");
   if (!location.hash) {
     location.hash = App.state.configured ? "#/chats" : "#/setup";

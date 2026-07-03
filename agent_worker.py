@@ -62,7 +62,7 @@ CMD_TEMPLATES = {
     "cortex": ('cortex -w "{workdir}" --sql-read-only --auto-accept-plans '
                '--max-turns 60 --output-format stream-json {blocklist} '
                '-o "{reply_file}" -p "{prompt}"'),
-    "claude": ('claude --output-format stream-json --max-turns 60 '
+    "claude": ('claude --output-format stream-json --verbose --max-turns 60 '
                '{blocklist} -p "{prompt}"'),
 }
 
@@ -71,7 +71,8 @@ PROMPT = (
     "'{chat_name}' (members: {members}). New message(s) arrived that you "
     "must answer; the conversation so far is in the file {context_file} - "
     "read it first. Rules: your final message is posted to the chat as-is, "
-    "so make it complete and self-contained; to address or notify someone, "
+    "so it must contain ONLY the chat message — no narration about what you "
+    "are doing or preamble; to address or notify someone, "
     "tag them like @username (humans and agents alike); to share files, "
     "save them into {outbox} and mention them by name; never edit anything "
     "in the shared mesh folder by hand. If a request is unclear, say so in "
@@ -127,11 +128,13 @@ def reply_from_stream(stdout_text):
     return result
 
 
-def run_agent(cmd, timeout=3300):
-    """Streamed run (stdout consumed line-wise; watchdog kill on timeout)."""
+def run_agent(cmd, timeout=3300, cwd=None):
+    """Streamed run (stdout consumed line-wise; watchdog kill on timeout).
+    cwd should be the worker dir — CLI agents load project context from it."""
     proc = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace",
+                            cwd=str(cwd) if cwd else None)
     timed_out = threading.Event()
     watchdog = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
     watchdog.daemon = True
@@ -228,7 +231,8 @@ class Worker:
             say(f"[dry-run] {chat_id} rule={rule} would run: {cmd[:160]}…")
             return False
         say(f"[worker] {chat_id}: rule={rule} → running agent")
-        rc, out, err = run_agent(cmd, int(self.cfg.get("timeout", 3300)))
+        rc, out, err = run_agent(cmd, int(self.cfg.get("timeout", 3300)),
+                                 cwd=self.workdir)
         reply = None
         if reply_file.is_file():
             reply = reply_file.read_text(encoding="utf-8-sig").strip()

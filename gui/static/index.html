@@ -17,36 +17,24 @@
     <svg viewBox="0 0 32 32" width="20" height="20"><path d="M4 22c3.5-8 20.5-8 24 0M4 22v-4M28 22v-4" stroke="white" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
   </div>
   <span class="app-name">AgentBridge</span>
-  <span id="channel-chip" class="chip" hidden></span>
   <span class="spacer"></span>
   <span id="paused-badge" class="badge-paused" hidden>⏸ Paused</span>
-  <a href="#/settings" id="settings-btn" class="icon-btn" data-page="settings" title="Settings">
-    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3v2.2M10 14.8V17M3 10h2.2M14.8 10H17M5.1 5.1l1.6 1.6M13.3 13.3l1.6 1.6M14.9 5.1l-1.6 1.6M6.7 13.3l-1.6 1.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-  </a>
 </header>
 
 <div id="shell">
   <nav id="navrail">
-    <a href="#/chats" data-page="chats">
-      <svg viewBox="0 0 20 20"><path d="M2.5 4h11v7H7l-3 2.5V11H2.5zM9 13.5h8.5v-7H15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
-      <span>Chats</span><span id="nav-mesh-dot" class="nav-dot" hidden></span>
-    </a>
-    <a href="#/agents" data-page="agents">
-      <svg viewBox="0 0 20 20"><circle cx="7" cy="6.5" r="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.5 16c.6-3 2.6-4.5 4.5-4.5S10.9 13 11.5 16M13 4.5a2.5 2.5 0 1 1 .8 4.9M13.5 11.6c1.9.2 3.5 1.6 4 4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      <span>My agents</span>
-    </a>
-    <a href="#/messages" data-page="messages">
-      <svg viewBox="0 0 20 20"><path d="M2 14c3-6 13-6 16 0M2 14v-3M18 14v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      <span>Bridge</span><span id="nav-inbound-dot" class="nav-dot" hidden></span>
-    </a>
-    <a href="#/home" data-page="home">
-      <svg viewBox="0 0 20 20"><path d="M3 9.5 10 3l7 6.5M5 8.8V17h10V8.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <span>Status</span>
-    </a>
-    <span class="spacer"></span>
-    <a href="#/setup" data-page="setup">
-      <svg viewBox="0 0 20 20"><path d="M4 16 13.5 6.5l2-4 2 2-4 2L4 16zM3 17l1-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <span>Setup</span>
+    <div id="side-head">
+      <span class="side-title">Chats</span>
+      <span class="spacer"></span>
+      <button id="side-new" class="icon-btn" title="New chat">
+        <svg viewBox="0 0 20 20"><path d="M4 16 14 6l2.5-1.5L18 6l-1.5 2.5L6.5 18.5H4z M3 17l1-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div id="side-chats"><div class="empty" style="padding:20px 0">…</div></div>
+    <a id="side-account" href="#/settings" title="Settings">
+      <span class="acct-avatar" id="acct-avatar">?</span>
+      <span id="acct-name" style="flex:1">Sign in</span>
+      <svg viewBox="0 0 20 20" width="16" height="16"><circle cx="10" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3v2.2M10 14.8V17M3 10h2.2M14.8 10H17M5.1 5.1l1.6 1.6M13.3 13.3l1.6 1.6M14.9 5.1l-1.6 1.6M6.7 13.3l-1.6 1.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     </a>
   </nav>
 
