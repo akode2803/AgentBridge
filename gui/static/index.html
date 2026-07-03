@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentBridge</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23D83B01'/%3E%3Cpath d='M6 21c3-7 17-7 20 0M6 21v-3M26 21v-3' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="titlebar">
+  <div class="app-glyph">
+    <svg viewBox="0 0 32 32" width="20" height="20"><path d="M4 22c3.5-8 20.5-8 24 0M4 22v-4M28 22v-4" stroke="white" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+  </div>
+  <span class="app-name">AgentBridge</span>
+  <span id="channel-chip" class="chip" hidden></span>
+  <span class="spacer"></span>
+  <span id="paused-badge" class="badge-paused" hidden>⏸ PAUSED</span>
+</header>
+
+<div id="shell">
+  <nav id="navrail">
+    <a href="#/home" data-page="home">
+      <svg viewBox="0 0 20 20"><path d="M3 9.5 10 3l7 6.5M5 8.8V17h10V8.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Home</span>
+    </a>
+    <a href="#/messages" data-page="messages">
+      <svg viewBox="0 0 20 20"><path d="M3 4h14v9H8l-4 3v-3H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <span>Messages</span><span id="nav-inbound-dot" class="nav-dot" hidden></span>
+    </a>
+    <a href="#/activity" data-page="activity">
+      <svg viewBox="0 0 20 20"><path d="M2 11h4l2-6 4 10 2-4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Activity</span>
+    </a>
+    <a href="#/setup" data-page="setup">
+      <svg viewBox="0 0 20 20"><path d="M4 16 13.5 6.5l2-4 2 2-4 2L4 16zM3 17l1-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Setup</span>
+    </a>
+    <a href="#/settings" data-page="settings">
+      <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3v2.2M10 14.8V17M3 10h2.2M14.8 10H17M5.1 5.1l1.6 1.6M13.3 13.3l1.6 1.6M14.9 5.1l-1.6 1.6M6.7 13.3l-1.6 1.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span>Settings</span>
+    </a>
+  </nav>
+
+  <main id="content"></main>
+</div>
+
+<footer id="statusbar">
+  <span id="status-dot" class="dot dot-grey"></span>
+  <span id="status-text">connecting…</span>
+  <span class="spacer"></span>
+  <span id="status-versions"></span>
+</footer>
+
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
