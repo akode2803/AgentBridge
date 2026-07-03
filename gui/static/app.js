@@ -8,9 +8,19 @@ const App = {
   state: null,          // last /api/state payload
   page: null,
   logKey: "",           // change detector so the transcript only re-renders on news
-  wizard: { step: 0, shared: "", validated: null, role: "claude", peer: "coco",
-            initDone: false, skills: null },
+  draft: { body: "", type: "chat" },   // composer survives re-renders
+  pendingAtt: null,     // attachment picked but not yet sent
+  wizard: null,
 };
+
+window.App = App;  // console/debug access
+
+function freshWizard() {
+  return { step: 0, mode: "install", dest: "", installed: null,
+           shared: "", validated: null, role: "claude", peer: "coco",
+           initDone: false, skills: null, kitSent: false };
+}
+App.wizard = freshWizard();
 
 // ---------------------------------------------------------------- helpers
 
@@ -29,6 +39,40 @@ function esc(s) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Display names: role slugs are lowercase in the protocol; people aren't.
+function dn(role) {
+  const known = { claude: "Claude", coco: "CoCo" };
+  return known[role] || (role ? role[0].toUpperCase() + role.slice(1) : "");
+}
+
+function fmtTime(tsUtc) {
+  if (!tsUtc) return "never";
+  const d = new Date(tsUtc);
+  if (isNaN(d)) return tsUtc;
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+  if (sameDay(d, now)) return `Today ${time}`;
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  if (sameDay(d, yest)) return `Yesterday ${time}`;
+  return d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + time;
+}
+
+function fmtSize(bytes) {
+  if (bytes == null) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function extIcon(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  if (["csv", "xlsx", "xls"].includes(ext)) return "📊";
+  if (["png", "jpg", "jpeg", "gif", "svg"].includes(ext)) return "🖼️";
+  if (["md", "txt", "docx", "pdf"].includes(ext)) return "📄";
+  return "📎";
+}
+
 let toastTimer = null;
 function toast(msg, isError) {
   const t = $("#toast");
@@ -42,12 +86,12 @@ function toast(msg, isError) {
 // ---------------------------------------------------------------- chrome
 
 function channelStateText(s) {
-  if (!s.configured) return ["dot-grey", "not configured — run Setup"];
-  if (s.paused) return ["dot-red", "PAUSED via control.json"];
-  if (!s.shared_ok) return ["dot-red", "shared folder unreachable"];
-  if (s.inbound_waiting) return ["dot-orange", `inbound waiting: ${s.peer} seq ${s.inbound_seq}`];
-  if (s.outbound_undelivered) return ["dot-orange", `outbound in flight: seq ${s.me.seq} not yet acked`];
-  return ["dot-green", "channel idle — all messages delivered"];
+  if (!s.configured) return ["dot-grey", "Not set up yet — the wizard will guide you"];
+  if (s.paused) return ["dot-red", "Paused — both agents are standing by"];
+  if (!s.shared_ok) return ["dot-red", "Shared folder unreachable — check OneDrive"];
+  if (s.inbound_waiting) return ["dot-orange", `New message from ${dn(s.peer)} waiting`];
+  if (s.outbound_undelivered) return ["dot-orange", `Delivering to ${dn(s.peer)}…`];
+  return ["dot-green", "All caught up — every message delivered"];
 }
 
 function renderChrome() {
@@ -56,7 +100,7 @@ function renderChrome() {
   const chip = $("#channel-chip");
   if (s.configured) {
     chip.hidden = false;
-    chip.textContent = `${s.role} ⇄ ${s.peer}`;
+    chip.textContent = `${dn(s.role)} ⇄ ${dn(s.peer)}`;
   } else {
     chip.hidden = true;
   }
@@ -65,76 +109,91 @@ function renderChrome() {
   $("#status-dot").className = "dot " + dot;
   $("#status-text").textContent = text;
   $("#status-versions").textContent =
-    `GUI v${s.gui_version} · bridge v${s.bridge_version}`;
+    `App v${s.gui_version} · Bridge v${s.bridge_version}`;
   $("#nav-inbound-dot").hidden = !s.inbound_waiting;
   document.querySelectorAll("#navrail a").forEach((a) => {
     a.classList.toggle("active", a.dataset.page === App.page);
   });
+  $("#settings-btn").classList.toggle("active", App.page === "settings");
 }
 
-// ---------------------------------------------------------------- pages
+// ---------------------------------------------------------------- home
 
-function renderHome() {
+async function renderHome() {
   const s = App.state;
   if (!s.configured) {
     $("#content").innerHTML = `
       <h1>Welcome to AgentBridge</h1>
-      <p class="page-sub">The bridge is not configured on this machine yet.</p>
+      <p class="page-sub">Your local Claude, connected to a remote agent — no servers, no passwords.</p>
       <div class="card" style="max-width:560px">
-        <p>AgentBridge connects your local Claude to a remote agent through a
-        OneDrive/SharePoint synced folder — no credentials, no servers.</p>
-        <button class="primary" onclick="location.hash='#/setup'">Open the setup wizard</button>
+        <p>AgentBridge links the two agents through a shared OneDrive/SharePoint
+        folder. Setup takes a few minutes and the wizard walks you through it.</p>
+        <button class="primary" onclick="location.hash='#/setup'">Start setup</button>
       </div>`;
     return;
   }
   const [dot, text] = channelStateText(s);
-  const peerEnv = s.peer_env;
+  const log = await api("/api/log?tail=3");
+  const recent = (log.entries || []).map((e) => `
+    <li class="recent-item">
+      <b>${esc(dn(e.from))}</b>
+      <span class="recent-preview">${esc((e.body || "").split("\n")[0].slice(0, 90))}</span>
+      <span class="recent-time">${esc(fmtTime(e.ts))}</span>
+    </li>`).join("") || `<li class="empty">No messages yet.</li>`;
+  const leaf = s.shared_dir.split("\\").pop();
   $("#content").innerHTML = `
     <h1>Home</h1>
-    <p class="page-sub">Bridge status at a glance.</p>
-    <div class="statepill"><span class="dot ${dot}"></span>${esc(text)}</div>
+    <p class="page-sub">Everything at a glance.</p>
+    <div class="statepill"><span class="dot ${dot}"></span>${esc(text)}
+      ${s.inbound_waiting ? `<button class="primary" style="margin-left:6px"
+        onclick="location.hash='#/messages'">Read it</button>` : ""}
+    </div>
     <div class="card-grid">
       <div class="card">
-        <h2>Channel</h2>
+        <h2>Remote agent</h2>
         <dl class="kv">
-          <dt>Me (${esc(s.role)})</dt><dd>seq ${s.me.seq} · ack ${s.me.ack}</dd>
-          <dt>Last sent</dt><dd>${esc(s.me.ts_local || "never")}</dd>
-          <dt>Peer (${esc(s.peer)})</dt>
-          <dd>${peerEnv ? `seq ${peerEnv.seq} · ack ${peerEnv.ack}` : "no envelope yet — peer has never sent"}</dd>
-          <dt>Peer last sent</dt><dd>${esc(peerEnv?.ts_local || "—")}</dd>
-          <dt>Peer app</dt><dd>${peerEnv ? "v" + esc(peerEnv.app_version || "?") : "—"}</dd>
+          <dt>Agent</dt><dd>${esc(dn(s.peer))}</dd>
+          <dt>Last message</dt><dd>${esc(fmtTime(s.peer_env?.ts))}</dd>
+          <dt>Bridge app</dt><dd>${s.peer_env ? "v" + esc(s.peer_env.app_version || "?") : "not seen yet"}</dd>
+          <dt>Has read up to</dt><dd>${s.peer_env ? (s.peer_env.ack >= s.me.seq ? "everything you sent" : "your message #" + s.peer_env.ack) : "—"}</dd>
         </dl>
       </div>
       <div class="card">
         <h2>Connection</h2>
         <dl class="kv">
-          <dt>Shared folder</dt><dd class="mono">${esc(s.shared_dir)}</dd>
-          <dt>Reachable</dt><dd>${s.shared_ok ? "✓ yes" : "✗ NO — check OneDrive"}</dd>
-          <dt>OneDrive client</dt><dd>${s.onedrive_running === null ? "unknown" : s.onedrive_running ? "✓ running" : "✗ not running"}</dd>
-          <dt>Poll interval</dt><dd>${s.poll}s</dd>
-          <dt>Handler</dt><dd>${esc(s.handler_cmd || "none (this side is human/Claude-driven)")}</dd>
+          <dt>Shared folder</dt><dd title="${esc(s.shared_dir)}">${esc(leaf)}
+            <a href="#" id="open-shared" style="margin-left:4px">open</a></dd>
+          <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
+          <dt>OneDrive</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
         </dl>
       </div>
       <div class="card">
-        <h2>Controls</h2>
+        <h2>Bridge control</h2>
         <div class="row" style="margin-bottom:12px">
           <label class="switch">
             <input type="checkbox" id="pause-toggle" ${s.paused ? "checked" : ""}>
             <span class="slider"></span>
           </label>
-          <span><b>Kill switch</b> — pause both agents (control.json)</span>
+          <span><b>Pause the bridge</b> — both agents stand down until resumed</span>
         </div>
         <div class="row">
-          <button onclick="openTarget('shared')">Open shared folder</button>
-          <button onclick="openTarget('files')">Attachments</button>
-          <button onclick="openTarget('inbox')">Inbox copies</button>
+          <button onclick="openTarget('files')">Received files</button>
+          <button onclick="openTarget('shared')">Shared folder</button>
         </div>
       </div>
+      <div class="card">
+        <h2>Recent messages</h2>
+        <ul class="recent-list">${recent}</ul>
+        <button style="margin-top:10px" onclick="location.hash='#/messages'">Open Messages</button>
+      </div>
     </div>`;
+  $("#open-shared").addEventListener("click", (e) => {
+    e.preventDefault(); openTarget("shared");
+  });
   $("#pause-toggle").addEventListener("change", async (e) => {
     const r = await api("/api/pause", { paused: e.target.checked });
     if (r.error) toast(r.error, true);
-    else toast(r.paused ? "Bridge PAUSED for both agents" : "Bridge resumed");
+    else toast(r.paused ? "Bridge paused — both agents stand down" : "Bridge resumed");
     refresh(true);
   });
 }
@@ -142,6 +201,20 @@ function renderHome() {
 async function openTarget(target) {
   const r = await api("/api/open", { target });
   if (r.error) toast(r.error, true);
+}
+
+// ---------------------------------------------------------------- messages
+
+function attButton(f) {
+  return `
+    <button class="att-btn" data-path="${esc(f.path || "files/" + f.name)}"
+            title="Open ${esc(f.name)}">
+      <span class="att-icon">${extIcon(f.name)}</span>
+      <span style="min-width:0">
+        <div class="att-name">${esc(f.name)}</div>
+        <div class="att-size">${fmtSize(f.bytes)}</div>
+      </span>
+    </button>`;
 }
 
 async function renderMessages(force) {
@@ -154,105 +227,182 @@ async function renderMessages(force) {
   if (!force && key === App.logKey && App.page === "messages") return;
   App.logKey = key;
 
+  const oldTr = $("#transcript");
+  const nearBottom = !oldTr ||
+    (oldTr.scrollHeight - oldTr.scrollTop - oldTr.clientHeight < 120);
+
   const bubbles = log.entries.map((e) => {
-    const files = (e.files || []).map((f) =>
-      `<span class="file-chip">📎 ${esc(f.name)} · ${f.bytes ?? "?"} B</span>`).join(" ");
+    const files = (e.files || []).map(attButton).join("");
+    const tag = e.type && e.type !== "chat"
+      ? `<span class="type-tag">${esc(e.type)}</span>` : "";
     return `
       <div class="msg ${e.mine ? "mine" : ""}">
-        <div class="bubble">${esc(e.body)}${files ? "<br>" + files : ""}</div>
-        <div class="meta">${esc(e.from)} · seq ${e.seq} · ${esc(e.type || "chat")} · ${esc(e.ts_local || "")}</div>
+        ${e.mine ? "" : `<div class="sender">${esc(dn(e.from))}</div>`}
+        <div class="bubble">${esc(e.body)}${files}</div>
+        <div class="meta">${tag}${esc(fmtTime(e.ts))}</div>
       </div>`;
-  }).join("") || `<div class="empty">No messages yet.</div>`;
+  }).join("") || `<div class="empty">No messages yet — say hello below.</div>`;
 
   const banner = inbound.waiting ? `
     <div class="banner">
-      <span>⬇ <b>Unacknowledged message</b> from ${esc(inbound.from)}
-        (seq ${inbound.seq}, ${esc(inbound.type || "chat")}) — your Claude session
-        will pick it up with <code>recv --mark</code>, or acknowledge it here.</span>
+      <span>⬇ <b>New message from ${esc(dn(inbound.from))}</b> — your Claude
+        session will pick it up automatically, or mark it read here.</span>
       <span class="spacer"></span>
       <button class="primary" id="ack-btn">Mark read</button>
     </div>` : "";
 
   $("#content").innerHTML = `
     <h1>Messages</h1>
-    <p class="page-sub">Transcript from the shared audit logs (${esc(log.role)} ⇄ ${esc(log.peer)}).</p>
+    <p class="page-sub">Your conversation with ${esc(dn(s.peer))}.</p>
     ${banner}
     <div id="transcript">${bubbles}</div>
+    <div id="pending-area"></div>
     <div id="composer">
-      <textarea id="compose-body" placeholder="Message ${esc(s.peer)}…  (Ctrl+Enter to send)"></textarea>
-      <select id="compose-type">
+      <button id="attach-btn" title="Attach a file">📎</button>
+      <textarea id="compose-body" placeholder="Message ${esc(dn(s.peer))}…  (Ctrl+Enter to send)"></textarea>
+      <select id="compose-type" title="Message type">
         <option>chat</option><option>task</option><option>result</option>
         <option>control</option><option>ping</option>
       </select>
       <button class="primary" id="send-btn">Send</button>
     </div>`;
 
+  // restore the draft that a re-render would otherwise wipe
+  $("#compose-body").value = App.draft.body;
+  $("#compose-type").value = App.draft.type;
+  $("#compose-body").addEventListener("input", (e) => { App.draft.body = e.target.value; });
+  $("#compose-type").addEventListener("change", (e) => { App.draft.type = e.target.value; });
+  renderPendingAtt();
+
   const doSend = async () => {
     const body = $("#compose-body").value.trim();
-    if (!body) return;
+    if (!body && !App.pendingAtt) return;
     $("#send-btn").disabled = true;
-    const r = await api("/api/send", { body, type: $("#compose-type").value });
+    const r = await api("/api/send", {
+      body, type: $("#compose-type").value,
+      attachments: App.pendingAtt ? [App.pendingAtt.path] : [],
+    });
     $("#send-btn").disabled = false;
     if (r.error) { toast(r.error, true); return; }
-    $("#compose-body").value = "";
-    toast(`Sent seq ${r.seq} to ${s.peer}`);
+    App.draft = { body: "", type: "chat" };
+    App.pendingAtt = null;
+    toast(`Sent to ${dn(s.peer)}`);
     refresh(true);
   };
   $("#send-btn").addEventListener("click", doSend);
   $("#compose-body").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.ctrlKey) doSend();
   });
+  $("#attach-btn").addEventListener("click", async () => {
+    toast("File picker opened — check your taskbar");
+    const r = await api("/api/pick_file", {});
+    if (r.path) { App.pendingAtt = r; renderPendingAtt(); }
+  });
   const ackBtn = $("#ack-btn");
   if (ackBtn) ackBtn.addEventListener("click", async () => {
     const r = await api("/api/ack", {});
     if (r.error) toast(r.error, true);
-    else toast(`Acknowledged seq ${r.seq}`);
+    else toast("Marked read");
     refresh(true);
   });
+  document.querySelectorAll(".att-btn").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/open_attachment", { path: b.dataset.path });
+      if (r.error) toast(r.error, true);
+    });
+  });
+
   const tr = $("#transcript");
-  tr.scrollTop = tr.scrollHeight;
-  window.scrollTo(0, document.body.scrollHeight);
+  if (nearBottom) tr.scrollTop = tr.scrollHeight;
 }
 
+function renderPendingAtt() {
+  const area = $("#pending-area");
+  if (!area) return;
+  area.innerHTML = App.pendingAtt ? `
+    <span class="pending-att">${extIcon(App.pendingAtt.name)}
+      ${esc(App.pendingAtt.name)} · ${fmtSize(App.pendingAtt.bytes)}
+      <button id="remove-att" title="Remove">✕</button>
+    </span>` : "";
+  const rm = $("#remove-att");
+  if (rm) rm.addEventListener("click", () => { App.pendingAtt = null; renderPendingAtt(); });
+}
+
+// ---------------------------------------------------------------- activity
+
 function renderActivity() {
+  const s = App.state;
   $("#content").innerHTML = `
     <h1>Activity</h1>
-    <p class="page-sub">Live view of what the remote agent is doing.</p>
+    <p class="page-sub">Live view of what ${esc(dn(s?.peer || "the remote agent"))} is doing.</p>
     <div class="card" style="max-width:640px">
-      <h2>Livestream — coming next</h2>
-      <p>When CoCo runs a task, its handler will tail the Cortex
-      <code>stream-json</code> events into a status file in the shared folder.
-      This pane will render that feed as a live progress view, so anyone can
-      see "is it working?" without reading logs.</p>
-      <p class="hint">Requires the handler-side feed writer (planned) — nothing
-      to configure here yet.</p>
-      <div class="empty">Waiting for a livestream feed…</div>
+      <h2>Livestream — coming soon</h2>
+      <p>When ${esc(dn(s?.peer || "CoCo"))} works on a task, this pane will show
+      its progress live — so you can see it's working without reading any logs.</p>
+      <div class="empty">Nothing running right now.</div>
     </div>`;
 }
+
+// ---------------------------------------------------------------- settings
 
 function renderSettings() {
   const s = App.state;
-  const cfg = s.configured ? {
-    role: s.role, peer: s.peer, shared_dir: s.shared_dir,
-    poll_seconds: s.poll, handler_cmd: s.handler_cmd || undefined,
-  } : null;
+  if (!s.configured) {
+    $("#content").innerHTML = `
+      <h1>Settings</h1>
+      <div class="card" style="max-width:640px">
+        <div class="empty">Not set up yet — run the <a href="#/setup">setup wizard</a> first.</div>
+      </div>`;
+    return;
+  }
+  const cfg = { role: s.role, peer: s.peer, shared_dir: s.shared_dir,
+                poll_seconds: s.poll };
+  if (s.handler_cmd) cfg.handler_cmd = s.handler_cmd;
   $("#content").innerHTML = `
     <h1>Settings</h1>
-    <p class="page-sub">Local bridge configuration on this machine.</p>
-    <div class="card" style="max-width:640px">
-      <h2>Config <span class="mono" style="text-transform:none">(${esc(s.home)}\\config.json)</span></h2>
-      ${cfg ? `<pre class="configdump mono">${esc(JSON.stringify(cfg, null, 2))}</pre>`
-            : `<div class="empty">Not configured — run the setup wizard.</div>`}
-      <p class="hint">To change role, peer or the shared folder, re-run the
-      <a href="#/setup">setup wizard</a> — it preserves any handler settings.
-      Power users can keep using the CLI: <code>python bridge.py …</code></p>
+    <p class="page-sub">How this machine's side of the bridge is configured.</p>
+    <div class="card" style="max-width:680px">
+      <h2>Bridge</h2>
+      <dl class="kv">
+        <dt>My side</dt><dd>${esc(dn(s.role))}</dd>
+        <dt>Remote side</dt><dd>${esc(dn(s.peer))}</dd>
+        <dt>Shared folder</dt><dd class="mono">${esc(s.shared_dir)}
+          <a href="#" id="open-shared2">open</a></dd>
+        <dt>Checks every</dt><dd>${s.poll} seconds</dd>
+        <dt>Automation</dt><dd>${esc(s.handler_cmd || "None — this side is driven by you and Claude")}</dd>
+      </dl>
+    </div>
+    <div class="card" style="max-width:680px">
+      <h2>Maintenance</h2>
+      <div class="row">
+        <button onclick="location.hash='#/setup'">Re-run setup wizard</button>
+        <button onclick="openTarget('home')">Open config folder</button>
+        <button onclick="openTarget('inbox')">Open inbox copies</button>
+      </div>
+      <p class="hint" style="margin-bottom:0">The wizard preserves automation
+      settings. Power users can keep using the CLI: <code>python bridge.py …</code></p>
+    </div>
+    <div class="card" style="max-width:680px">
+      <h2>Advanced</h2>
+      <dl class="kv">
+        <dt>Message counters</dt>
+        <dd>me: sent ${s.me.seq}, read up to ${s.me.ack} ·
+            ${esc(dn(s.peer))}: sent ${s.peer_env?.seq ?? 0}, read up to ${s.peer_env?.ack ?? 0}</dd>
+        <dt>Config file</dt><dd class="mono">${esc(s.home)}\\config.json</dd>
+        <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}
+          ${s.peer_env ? "· " + esc(dn(s.peer)) + " bridge v" + esc(s.peer_env.app_version || "?") : ""}</dd>
+      </dl>
+      <pre class="configdump mono">${esc(JSON.stringify(cfg, null, 2))}</pre>
     </div>`;
+  $("#open-shared2").addEventListener("click", (e) => {
+    e.preventDefault(); openTarget("shared");
+  });
 }
 
 // ---------------------------------------------------------------- wizard
 
-const WIZ_STEPS = ["Welcome", "System checks", "Shared folder", "Identity",
-                   "Create bridge", "Install skills", "Done"];
+const WIZ_STEPS = ["Welcome", "Install location", "System checks", "Shared folder",
+                   "Identity", "Create bridge", "Claude skills", "Remote agent", "Finish"];
 
 function renderSetup() {
   const w = App.wizard;
@@ -262,7 +412,7 @@ function renderSetup() {
     </li>`).join("");
   $("#content").innerHTML = `
     <h1>Setup</h1>
-    <p class="page-sub">Guided onboarding for this machine's side of the bridge.</p>
+    <p class="page-sub">Guided onboarding — from nothing to a working bridge.</p>
     <div id="wizard">
       <div id="wizard-steps" class="card"><ol>${stepsHtml}</ol></div>
       <div id="wizard-body"></div>
@@ -288,6 +438,27 @@ function bindWizardNav(onNext) {
   });
 }
 
+function cmdBlock(id, text) {
+  return `<div class="cmd-block">
+    <pre>${esc(text)}</pre>
+    <button class="copy-btn" data-copy="${esc(id)}">Copy</button>
+  </div>`;
+}
+
+function bindCopyButtons(texts) {
+  document.querySelectorAll(".copy-btn").forEach((b) => {
+    b.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(texts[b.dataset.copy]);
+        b.textContent = "Copied ✓";
+        setTimeout(() => { b.textContent = "Copy"; }, 1800);
+      } catch {
+        toast("Could not access the clipboard", true);
+      }
+    });
+  });
+}
+
 async function renderWizardStep() {
   const w = App.wizard;
   const body = $("#wizard-body");
@@ -296,20 +467,72 @@ async function renderWizardStep() {
   if (w.step === 0) {
     body.innerHTML = `<div class="card">
       <h2>Welcome</h2>
-      <p>This wizard sets up <b>your side</b> of an AgentBridge — the message
-      bus that connects your local Claude to a remote agent through a synced
-      OneDrive/SharePoint folder.</p>
-      <p>It will: check your system, point the bridge at the shared folder,
-      create the local config, and install the Claude Code skills your
-      sessions use to drive the bridge.</p>
-      ${s.configured ? `<p class="hint">⚠ This machine is already configured
-        (${esc(s.role)} ⇄ ${esc(s.peer)}). Re-running the wizard will update the
-        config; handler settings are preserved.</p>` : ""}
+      <p>This wizard sets up <b>your side</b> of an AgentBridge — the link that
+      lets your local Claude work hand-in-hand with a remote agent through a
+      shared OneDrive/SharePoint folder.</p>
+      <p>It will: choose where the app lives, check your system, connect the
+      shared folder, create the bridge, install the Claude skills, and walk
+      you through the remote machine's setup.</p>
+      ${s.configured ? `<p class="hint">⚠ This machine is already set up
+        (${esc(dn(s.role))} ⇄ ${esc(dn(s.peer))}). Re-running the wizard updates the
+        configuration; automation settings are preserved.</p>` : ""}
       ${wizardNav(false, true, "Start")}</div>`;
     bindWizardNav();
   }
 
   else if (w.step === 1) {
+    body.innerHTML = `<div class="card"><h2>Install location</h2>
+      <p>Where should AgentBridge live on this PC?</p>
+      <label class="choice-card ${w.mode === "install" ? "selected" : ""}" id="choice-install">
+        <input type="radio" name="mode" ${w.mode === "install" ? "checked" : ""}>
+        <span>
+          <div class="choice-title">Install on this PC (recommended)</div>
+          <div class="choice-desc">Copies the app to a proper location and adds
+          Start Menu and Desktop shortcuts — like a normal installed program.</div>
+          <div class="row" style="margin-top:9px">
+            <input type="text" id="dest-input" style="flex:1;min-width:260px"
+                   placeholder="Default: AppData\\Local\\AgentBridge" value="${esc(w.dest)}">
+            <button id="dest-browse" type="button">Browse…</button>
+          </div>
+        </span>
+      </label>
+      <label class="choice-card ${w.mode === "portable" ? "selected" : ""}" id="choice-portable">
+        <input type="radio" name="mode" ${w.mode === "portable" ? "checked" : ""}>
+        <span>
+          <div class="choice-title">Portable — run from where it is</div>
+          <div class="choice-desc">Nothing is copied and no shortcuts are made.
+          Good for USB sticks or trying it out.</div>
+        </span>
+      </label>
+      <p id="install-result" class="hint">${w.installed
+        ? `<span class="result-ok">✓ Installed to ${esc(w.installed.dest)}${w.installed.shortcuts
+            ? " — Start Menu and Desktop shortcuts created" : " (shortcuts could not be created)"}</span>` : ""}</p>
+      ${wizardNav(true, true, w.mode === "install" && !w.installed ? "Install" : "Next")}</div>`;
+    const sync = (mode) => { w.mode = mode; renderSetup(); };
+    $("#choice-install").addEventListener("click", () => { if (w.mode !== "install") sync("install"); });
+    $("#choice-portable").addEventListener("click", () => { if (w.mode !== "portable") sync("portable"); });
+    $("#dest-input").addEventListener("input", (e) => { w.dest = e.target.value; });
+    $("#dest-browse").addEventListener("click", async (e) => {
+      e.preventDefault();
+      toast("Folder picker opened — check your taskbar");
+      const r = await api("/api/pick_folder", {});
+      if (r.path) { w.dest = r.path; $("#dest-input").value = r.path; }
+    });
+    bindWizardNav(async () => {
+      if (w.mode !== "install" || w.installed) return true;
+      const r = await api("/api/install_app", { dest: w.dest });
+      if (r.error) {
+        $("#install-result").innerHTML = `<span class="result-bad">✗ ${esc(r.error)}</span>`;
+        return false;
+      }
+      w.installed = r;
+      toast(r.already_there ? "Already running from the install location"
+                            : "Installed — shortcuts created");
+      return true;
+    });
+  }
+
+  else if (w.step === 2) {
     body.innerHTML = `<div class="card"><h2>System checks</h2>
       <ul class="checklist" id="checks"><li>Running checks…</li></ul>
       ${wizardNav(true, true)}</div>`;
@@ -320,17 +543,18 @@ async function renderWizardStep() {
         ${esc(c.label)} <span class="detail">${esc(c.detail || "")}</span></li>`).join("");
   }
 
-  else if (w.step === 2) {
+  else if (w.step === 3) {
     body.innerHTML = `<div class="card"><h2>Shared folder</h2>
-      <p>Pick the locally-synced copy of the shared SharePoint folder
-      (add it in OneDrive first via <i>"Add shortcut to My files"</i>).</p>
+      <p>Pick the locally-synced copy of the shared SharePoint folder.
+      If you haven't synced it yet: open the folder in your browser and click
+      <i>"Add shortcut to My files"</i>, then wait for OneDrive to sync it.</p>
       <div class="row">
         <input type="text" id="shared-input" style="flex:1;min-width:280px"
                placeholder="C:\\Users\\you\\OneDrive - …" value="${esc(w.shared)}">
         <button id="browse-btn">Browse…</button>
       </div>
       <p id="validate-result" class="hint">${w.validated?.ok
-        ? `<span class="result-ok">✓ folder is writable${w.validated.looks_synced ? " and looks synced" : ""}</span>` : ""}</p>
+        ? `<span class="result-ok">✓ Folder is writable${w.validated.looks_synced ? " and looks synced" : ""}</span>` : ""}</p>
       ${wizardNav(true, true)}</div>`;
     $("#browse-btn").addEventListener("click", async () => {
       toast("Folder picker opened — check your taskbar");
@@ -346,18 +570,18 @@ async function renderWizardStep() {
         return false;
       }
       w.shared = v.path; w.validated = v;
-      if (!v.looks_synced) toast("Note: path doesn't look like a OneDrive/SharePoint folder", true);
+      if (!v.looks_synced) toast("Note: the path doesn't look like a OneDrive/SharePoint folder", true);
       return true;
     });
   }
 
-  else if (w.step === 3) {
+  else if (w.step === 4) {
     body.innerHTML = `<div class="card"><h2>Identity</h2>
-      <p>Who is this machine, and who is the peer? The defaults fit the
-      standard analyst setup (your Claude ⇄ remote CoCo).</p>
+      <p>Who is this machine, and who is on the other side? The defaults fit
+      the standard analyst setup (your Claude ⇄ remote CoCo).</p>
       <dl class="kv" style="max-width:380px">
         <dt>My role</dt><dd><input type="text" id="role-input" value="${esc(w.role)}"></dd>
-        <dt>Peer role</dt><dd><input type="text" id="peer-input" value="${esc(w.peer)}"></dd>
+        <dt>Remote role</dt><dd><input type="text" id="peer-input" value="${esc(w.peer)}"></dd>
       </dl>
       <p class="hint">Custom names work too (e.g. analyst ⇄ sqlbot) — any pair,
       as long as they differ.</p>
@@ -366,7 +590,7 @@ async function renderWizardStep() {
       const role = $("#role-input").value.trim();
       const peer = $("#peer-input").value.trim();
       if (!role || !peer || role === peer) {
-        toast("Role and peer must be non-empty and different", true);
+        toast("The two roles must be filled in and different", true);
         return false;
       }
       w.role = role; w.peer = peer;
@@ -374,14 +598,14 @@ async function renderWizardStep() {
     });
   }
 
-  else if (w.step === 4) {
+  else if (w.step === 5) {
     body.innerHTML = `<div class="card"><h2>Create bridge</h2>
       <dl class="kv">
-        <dt>Role</dt><dd>${esc(w.role)} ⇄ ${esc(w.peer)}</dd>
+        <dt>Sides</dt><dd>${esc(dn(w.role))} ⇄ ${esc(dn(w.peer))}</dd>
         <dt>Shared folder</dt><dd class="mono">${esc(w.shared)}</dd>
-        <dt>Config location</dt><dd class="mono">${esc(s.home)}</dd>
+        <dt>Settings stored in</dt><dd class="mono">${esc(s.home)}</dd>
       </dl>
-      <p id="init-result" class="hint">${w.initDone ? '<span class="result-ok">✓ bridge created</span>' : ""}</p>
+      <p id="init-result" class="hint">${w.initDone ? '<span class="result-ok">✓ Bridge created</span>' : ""}</p>
       ${wizardNav(true, true, w.initDone ? "Next" : "Create")}</div>`;
     bindWizardNav(async () => {
       if (w.initDone) return true;
@@ -396,15 +620,15 @@ async function renderWizardStep() {
     });
   }
 
-  else if (w.step === 5) {
-    body.innerHTML = `<div class="card"><h2>Install skills</h2>
-      <p>Installs the AgentBridge skills into <code>~\\.claude\\skills</code> so
-      your Claude Code sessions know how to drive the bridge.</p>
+  else if (w.step === 6) {
+    body.innerHTML = `<div class="card"><h2>Claude skills</h2>
+      <p>Installs the AgentBridge skills so your Claude Code sessions know how
+      to drive the bridge — checking messages, sending tasks, receiving results.</p>
       <p id="skills-result" class="hint">${w.skills
-        ? `<span class="result-ok">✓ installed: ${esc(w.skills.join(", "))}</span>` : ""}</p>
-      <p class="hint">Heads-up: this covers Claude Code (CLI/desktop/IDE).
-      claude.ai chat needs the pre-built zips uploaded via
-      Settings → Capabilities → Skills.</p>
+        ? `<span class="result-ok">✓ Installed: ${esc(w.skills.join(", "))}</span>` : ""}</p>
+      <p class="hint">This covers Claude Code (CLI, desktop and IDE). For
+      claude.ai chat, upload the pre-built zips from the app's
+      <code>skills\\</code> folder via Settings → Capabilities → Skills.</p>
       ${wizardNav(true, true, w.skills ? "Next" : "Install")}</div>`;
     bindWizardNav(async () => {
       if (w.skills) return true;
@@ -418,22 +642,101 @@ async function renderWizardStep() {
     });
   }
 
+  else if (w.step === 7) {
+    body.innerHTML = `<div class="card"><h2>Remote agent</h2>
+      <p>Loading the personalized guide…</p></div>`;
+    const g = await api("/api/remote_guide");
+    if (g.error) {
+      body.innerHTML = `<div class="card"><h2>Remote agent</h2>
+        <p class="result-bad">✗ ${esc(g.error)} — create the bridge first (step 6).</p>
+        ${wizardNav(true, true, "Skip for now")}</div>`;
+      bindWizardNav();
+      return;
+    }
+    const remoteShared = `C:\\Users\\<username>\\OneDrive - Employbridge\\${g.shared_leaf}`;
+    const binFile = g.published_file || "bridge_<newest>.py";
+    const texts = {
+      install: [
+        `mkdir C:\\AgentBridge`,
+        `copy "${remoteShared}\\bin\\${binFile}" C:\\AgentBridge\\bridge.py`,
+        `cd C:\\AgentBridge`,
+        `python bridge.py init --role ${g.peer} --peer ${g.role} --shared "${remoteShared}"`,
+        `python bridge.py doctor`,
+        `python bridge.py send "${dn(g.peer)} online" --type ping`,
+      ].join("\n"),
+      autostart: `schtasks /create /tn "AgentBridge Watch" /sc onlogon /tr "cmd /c cd /d C:\\AgentBridge && python bridge.py watch >> watch.out.log 2>&1"`,
+      handler: `python C:\\AgentBridge\\bridge.py init --role ${g.peer} --peer ${g.role} --shared "${remoteShared}" --handler-cmd "python C:\\AgentBridge\\handler_coco.py {body_file} {seq}" --handler-timeout 3600`,
+    };
+    body.innerHTML = `<div class="card"><h2>Remote agent (${esc(dn(g.peer))}'s machine)</h2>
+      <p>The other half of the bridge runs on the remote machine. These steps
+      happen <b>on that machine</b> — about 10 minutes. Replace
+      <code>&lt;username&gt;</code> with that machine's Windows account name.</p>
+
+      <div class="guide-step"><h3><span class="n">1</span> Sync the shared folder</h3>
+        <p class="hint">Sign OneDrive into the EB account, open the shared folder
+        in the browser and click <i>"Add shortcut to My files"</i>. It will appear at
+        <code>${esc(remoteShared)}</code>.</p>
+      </div>
+
+      <div class="guide-step"><h3><span class="n">2</span> Install the bridge</h3>
+        <p class="hint">The app is already in the shared folder — no download needed.
+        Run in PowerShell or Command Prompt:</p>
+        ${cmdBlock("install", texts.install)}
+      </div>
+
+      <div class="guide-step"><h3><span class="n">3</span> Keep it listening</h3>
+        <p class="hint">Auto-start the listener at every logon (or just keep a
+        terminal open running <code>python bridge.py watch</code>):</p>
+        ${cmdBlock("autostart", texts.autostart)}
+      </div>
+
+      <div class="guide-step"><h3><span class="n">4</span> Brief the remote agent</h3>
+        <p class="hint">Paste the operating prompt (in the full guide, step 4)
+        into an interactive session of the remote agent so it knows the rules
+        of the bridge.</p>
+        <button onclick="openTarget('remote_md')">Open the full guide</button>
+      </div>
+
+      <div class="guide-step"><h3><span class="n">5</span> Full automation (optional)</h3>
+        <p class="hint">A handler can run the remote agent automatically for every
+        message. Send the kit through the bridge, then run the command below on
+        the remote machine. <b>Careful:</b> this init must always include the
+        handler flags — running a plain init afterwards silently removes them.</p>
+        <div class="row" style="margin-bottom:6px">
+          <button id="send-kit-btn" ${!g.handler_available ? "disabled" : ""}>
+            ${w.kitSent ? "Kit sent ✓" : `Send automation kit to ${esc(dn(g.peer))}`}</button>
+        </div>
+        ${cmdBlock("handler", texts.handler)}
+      </div>
+      ${wizardNav(true, true)}</div>`;
+    bindCopyButtons(texts);
+    bindWizardNav();
+    $("#send-kit-btn").addEventListener("click", async (e) => {
+      if (w.kitSent) return;
+      if (!confirm(`Send handler_coco.py, disallowed_tools.json and REMOTE_SETUP.md to ${dn(g.peer)} over the bridge?`)) return;
+      e.target.disabled = true;
+      const r = await api("/api/send_remote_kit", {});
+      if (r.error) { toast(r.error, true); e.target.disabled = false; return; }
+      w.kitSent = true;
+      e.target.textContent = "Kit sent ✓";
+      toast("Automation kit sent over the bridge");
+    });
+  }
+
   else {
     body.innerHTML = `<div class="card"><h2>All set 🎉</h2>
-      <p>This machine is configured${w.role ? ` as <b>${esc(w.role)}</b>` : ""}.
-      Next steps:</p>
+      <p>This machine is ready${w.role ? ` as <b>${esc(dn(w.role))}</b>` : ""}.</p>
       <ul>
-        <li>Set up the <b>remote side</b> on the peer machine — follow
-          <code>REMOTE_SETUP.md</code> (the wizard will cover this soon).</li>
-        <li>Send a first <code>ping</code> from the Messages page.</li>
+        ${w.installed ? `<li>App installed to <code>${esc(w.installed.dest)}</code> — use the Start Menu shortcut next time.</li>` : ""}
+        <li>Send a first <b>ping</b> from the Messages page to test the line.</li>
+        <li>Once the remote side is up, everything else happens by itself.</li>
       </ul>
       <div class="wizard-nav">
         <button class="primary" onclick="location.hash='#/home'">Go to Home</button>
-        <button id="wiz-restart">Run wizard again</button>
+        <button id="wiz-restart">Run the wizard again</button>
       </div></div>`;
     $("#wiz-restart").addEventListener("click", () => {
-      App.wizard = { step: 0, shared: "", validated: null, role: "claude",
-                     peer: "coco", initDone: false, skills: null };
+      App.wizard = freshWizard();
       renderSetup();
     });
   }
@@ -452,6 +755,7 @@ const PAGES = {
 function route() {
   const page = (location.hash.replace("#/", "") || "home");
   App.page = PAGES[page] ? page : "home";
+  $("#content").classList.toggle("chat-mode", App.page === "messages");
   renderChrome();
   PAGES[App.page]();
 }
@@ -461,7 +765,7 @@ async function refresh(rerender) {
     App.state = await api("/api/state");
   } catch {
     $("#status-dot").className = "dot dot-red";
-    $("#status-text").textContent = "GUI server not reachable";
+    $("#status-text").textContent = "App server not reachable — relaunch AgentBridge";
     return;
   }
   renderChrome();

@@ -154,10 +154,12 @@ def api_send(data):
         return {"error": "bridge not configured"}
     body = (data.get("body") or "").strip()
     msg_type = data.get("type") or "chat"
-    if not body:
+    attachments = data.get("attachments") or []
+    if not body and not attachments:
         return {"error": "empty message"}
     try:
-        seq = bridge.do_send(br, body, msg_type=msg_type)
+        seq = bridge.do_send(br, body or "(file transfer)", attachments=attachments,
+                             msg_type=msg_type)
     except SystemExit as e:
         return {"error": str(e)}
     return {"ok": True, "seq": seq}
@@ -282,20 +284,150 @@ def api_install_skills():
 def api_open(data):
     """Open a bridge-owned location in Explorer. Deliberately a fixed menu of
     targets, not a free path — the GUI must never become a generic file opener."""
-    br = get_bridge()
-    if br is None:
-        return {"error": "bridge not configured"}
-    targets = {
-        "shared": br.shared,
-        "files": br.files_dir,
-        "inbox": br.inbox_dir,
-        "home": Path(HOME),
-    }
-    target = targets.get(data.get("target"))
+    name = data.get("target")
+    if name == "remote_md":
+        target = REPO_ROOT / "REMOTE_SETUP.md"
+    else:
+        br = get_bridge()
+        if br is None:
+            return {"error": "bridge not configured"}
+        target = {
+            "shared": br.shared,
+            "files": br.files_dir,
+            "inbox": br.inbox_dir,
+            "home": Path(HOME),
+        }.get(name)
     if target is None or not target.exists():
         return {"error": "unknown or missing target"}
     os.startfile(str(target))  # noqa: S606 — local desktop app by design
     return {"ok": True}
+
+
+def api_open_attachment(data):
+    """Open a received/sent attachment with its default app. Only paths inside
+    the shared files/ directory are allowed."""
+    br = get_bridge()
+    if br is None:
+        return {"error": "bridge not configured"}
+    rel = (data.get("path") or "").replace("\\", "/")
+    target = (br.shared / rel).resolve()
+    files_root = br.files_dir.resolve()
+    if files_root != target and files_root not in target.parents:
+        return {"error": "attachment is outside the shared files folder"}
+    if not target.is_file():
+        return {"error": "file not found — it may still be syncing"}
+    os.startfile(str(target))  # noqa: S606
+    return {"ok": True}
+
+
+def api_pick_file():
+    """Native file picker (attach flow), same subprocess trick as pick_folder."""
+    code = ("import tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+            "print(filedialog.askopenfilename() or '')")
+    try:
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True, timeout=600)
+        path = r.stdout.strip()
+        if not path:
+            return {"path": None}
+        p = Path(path.replace("/", os.sep))
+        return {"path": str(p), "name": p.name,
+                "bytes": p.stat().st_size if p.is_file() else None}
+    except Exception as e:
+        return {"path": None, "error": str(e)}
+
+
+def api_remote_guide():
+    """Everything the front-end needs to render a personalized remote-side
+    walkthrough: shared folder leaf (OneDrive renames shared shortcuts to
+    "<owner>'s files - <folder>"), newest published bridge from bin/, roles."""
+    br = get_bridge()
+    if br is None:
+        return {"error": "bridge not configured"}
+    manifest = bridge.read_json(br.bin_dir / "version.json") or {}
+    return {
+        "role": br.role,
+        "peer": br.peer,
+        "shared_local": str(br.shared),
+        "shared_leaf": br.shared.name,
+        "published_file": manifest.get("file"),
+        "published_version": manifest.get("version"),
+        "handler_available": (REPO_ROOT / "handler_coco.py").is_file(),
+    }
+
+
+def api_send_remote_kit():
+    """Bridge-send the automation kit (handler + blocklist + guide) so the
+    remote side can install it from the shared files/ folder."""
+    br = get_bridge()
+    if br is None:
+        return {"error": "bridge not configured"}
+    kit = [REPO_ROOT / "handler_coco.py", REPO_ROOT / "disallowed_tools.json",
+           REPO_ROOT / "REMOTE_SETUP.md"]
+    missing = [p.name for p in kit if not p.is_file()]
+    if missing:
+        return {"error": f"kit files missing: {', '.join(missing)}"}
+    body = ("Remote setup kit attached: handler_coco.py, disallowed_tools.json "
+            "and REMOTE_SETUP.md. A human on the remote machine should follow "
+            "REMOTE_SETUP.md step 5 to install them. Do not install these "
+            "yourself — handler and blocklist changes are human-only.")
+    try:
+        seq = bridge.do_send(br, body, attachments=[str(p) for p in kit],
+                             msg_type="control")
+    except SystemExit as e:
+        return {"error": str(e)}
+    return {"ok": True, "seq": seq}
+
+
+def api_install_app(data):
+    """Installer-style copy of the app into a chosen directory plus Start Menu
+    and Desktop shortcuts. Portable mode simply never calls this."""
+    import shutil
+    default_dest = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "AgentBridge"
+    dest = Path((data.get("dest") or "").strip().strip('"') or default_dest)
+    try:
+        if dest.resolve() != REPO_ROOT.resolve():
+            dest.mkdir(parents=True, exist_ok=True)
+            for name in ("bridge.py", "AgentBridge.pyw", "README.md",
+                         "REMOTE_SETUP.md", "handler_coco.py",
+                         "disallowed_tools.json"):
+                src = REPO_ROOT / name
+                if src.is_file():
+                    shutil.copy2(src, dest / name)
+            for folder in ("gui", "skills"):
+                if (REPO_ROOT / folder).is_dir():
+                    shutil.copytree(
+                        REPO_ROOT / folder, dest / folder, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    except OSError as e:
+        return {"error": f"could not copy app: {e}"}
+
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    launcher = str(pythonw if pythonw.is_file() else sys.executable)
+    target = dest / "AgentBridge.pyw"
+    icon = dest / "gui" / "static" / "app.ico"
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        "foreach ($dir in @([Environment]::GetFolderPath('Programs'), "
+        "[Environment]::GetFolderPath('Desktop'))) { "
+        "$s = $ws.CreateShortcut((Join-Path $dir 'AgentBridge.lnk')); "
+        f"$s.TargetPath = '{launcher}'; "
+        f"$s.Arguments = '\"{target}\"'; "
+        f"$s.WorkingDirectory = '{dest}'; "
+        f"$s.IconLocation = '{icon}'; "
+        "$s.Description = 'AgentBridge'; $s.Save() }"
+    )
+    shortcuts_ok = True
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=60)
+        shortcuts_ok = r.returncode == 0
+    except Exception:
+        shortcuts_ok = False
+    return {"ok": True, "dest": str(dest), "shortcuts": shortcuts_ok,
+            "already_there": dest.resolve() == REPO_ROOT.resolve()}
 
 
 def find_edge():
@@ -315,6 +447,7 @@ GET_ROUTES = {
     "/api/log": api_log,
     "/api/inbound": lambda params: api_inbound(),
     "/api/doctor": lambda params: api_doctor(),
+    "/api/remote_guide": lambda params: api_remote_guide(),
 }
 
 POST_ROUTES = {
@@ -323,9 +456,13 @@ POST_ROUTES = {
     "/api/pause": api_pause,
     "/api/validate_shared": api_validate_shared,
     "/api/pick_folder": lambda data: api_pick_folder(),
+    "/api/pick_file": lambda data: api_pick_file(),
     "/api/init": api_init,
     "/api/install_skills": lambda data: api_install_skills(),
+    "/api/install_app": api_install_app,
+    "/api/send_remote_kit": lambda data: api_send_remote_kit(),
     "/api/open": api_open,
+    "/api/open_attachment": api_open_attachment,
 }
 
 

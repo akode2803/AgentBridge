@@ -61,6 +61,15 @@ body { display: flex; flex-direction: column; }
   background: var(--bad); border-radius: 4px; padding: 4px 10px;
 }
 
+.icon-btn {
+  width: 34px; height: 34px; border-radius: 6px;
+  display: grid; place-items: center;
+  color: var(--text-dim);
+}
+.icon-btn svg { width: 19px; height: 19px; }
+.icon-btn:hover { background: var(--bg-alt); color: var(--text); }
+.icon-btn.active { color: var(--accent); background: var(--accent-soft); }
+
 #shell { display: flex; flex: 1; min-height: 0; }
 
 #navrail {
@@ -140,6 +149,19 @@ h1 {
 .kv dt { color: var(--text-dim); }
 .kv dd { margin: 0; word-break: break-all; }
 
+.recent-list { list-style: none; margin: 0; padding: 0; }
+.recent-item {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--bg-alt);
+  font-size: 13px;
+}
+.recent-item b { flex: none; }
+.recent-preview {
+  flex: 1; min-width: 0; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recent-time { flex: none; color: var(--text-faint); font-size: 11.5px; }
+
 .statepill {
   display: inline-flex; align-items: center; gap: 9px;
   font-size: 15px; font-weight: 600;
@@ -190,48 +212,97 @@ input[type=text], select, textarea {
 
 /* ---------------------------------------------------------------- messages */
 
-#transcript { display: flex; flex-direction: column; gap: 12px; }
+#content.chat-mode {
+  display: flex; flex-direction: column; overflow: hidden;
+  padding-bottom: 14px;
+}
+#content.chat-mode > h1, #content.chat-mode > .page-sub { flex: none; }
+
+#transcript {
+  display: flex; flex-direction: column; gap: 10px;
+  flex: 1; overflow-y: auto; min-height: 0;
+  padding: 4px 6px 12px 2px;
+}
 
 .msg { max-width: 74%; }
 .msg.mine { align-self: flex-end; }
 
+.msg .sender {
+  font-size: 11.5px; font-weight: 600; color: var(--accent);
+  margin: 0 6px 2px;
+}
+
 .msg .bubble {
-  border: 1px solid var(--border); border-radius: 8px;
-  background: #fff; padding: 10px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: #fff; padding: 9px 13px;
   white-space: pre-wrap; word-break: break-word;
   box-shadow: var(--shadow);
 }
 .msg.mine .bubble {
   background: var(--accent-soft); border-color: var(--accent-border);
+  border-bottom-right-radius: 3px;
 }
+.msg:not(.mine) .bubble { border-bottom-left-radius: 3px; }
 
 .msg .meta {
-  font-size: 11px; color: var(--text-faint); margin: 3px 4px;
+  font-size: 10.5px; color: var(--text-faint); margin: 3px 6px 0;
 }
 .msg.mine .meta { text-align: right; }
 
-.file-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; background: var(--bg-alt);
-  border: 1px solid var(--border); border-radius: 999px;
-  padding: 2px 10px; margin-top: 6px;
+.type-tag {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-dim); background: var(--bg-alt);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 5px; margin-right: 5px; vertical-align: 1px;
 }
+
+.att-btn {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; max-width: 320px; text-align: left;
+  background: #fff; border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 11px; margin-top: 7px;
+  cursor: pointer;
+}
+.msg.mine .att-btn { background: rgba(255,255,255,.65); border-color: var(--accent-border); }
+.att-btn:hover { border-color: var(--accent); background: #fff; }
+.att-btn .att-icon {
+  width: 32px; height: 32px; flex: none; border-radius: 6px;
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center; font-size: 15px;
+}
+.att-btn .att-name {
+  font-size: 12.5px; font-weight: 600; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.att-btn .att-size { font-size: 11px; color: var(--text-faint); }
 
 .banner {
   display: flex; align-items: center; gap: 12px;
   background: var(--accent-soft); border: 1px solid var(--accent-border);
-  border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px;
+  border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px;
+  flex: none;
 }
 
 #composer {
   display: flex; gap: 8px; align-items: flex-end;
   background: #fff; border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow);
-  padding: 10px; margin-top: 16px;
+  padding: 9px; margin-top: 10px; flex: none;
 }
 #composer textarea {
-  flex: 1; border: none; resize: vertical;
-  min-height: 52px; max-height: 220px; outline: none; padding: 4px 6px;
+  flex: 1; border: none; resize: none;
+  min-height: 44px; max-height: 200px; outline: none; padding: 4px 6px;
+}
+.pending-att {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; background: var(--bg-alt);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 11px; margin: 0 0 6px;
+}
+.pending-att button {
+  border: none; background: none; padding: 0 2px;
+  color: var(--text-dim); font-size: 13px;
 }
 
 /* ---------------------------------------------------------------- wizard */
@@ -275,6 +346,48 @@ input[type=text], select, textarea {
 
 .result-ok { color: var(--good); }
 .result-bad { color: var(--bad); }
+
+/* installer-style choice cards */
+.choice-card {
+  display: flex; gap: 12px; align-items: flex-start;
+  border: 1.6px solid var(--border); border-radius: var(--radius);
+  padding: 13px 15px; margin-bottom: 10px; cursor: pointer;
+  background: #fff;
+}
+.choice-card:hover { border-color: var(--border-strong); }
+.choice-card.selected {
+  border-color: var(--accent); background: var(--accent-soft);
+}
+.choice-card input[type=radio] { margin-top: 3px; accent-color: var(--accent); }
+.choice-card .choice-title { font-weight: 600; }
+.choice-card .choice-desc { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; }
+
+/* copyable command blocks (remote guide) */
+.cmd-block { position: relative; margin: 8px 0 14px; }
+.cmd-block pre {
+  background: #2B2A29; color: #F3F2F1; border-radius: 6px;
+  padding: 11px 84px 11px 13px; overflow-x: auto; margin: 0;
+  font-family: Consolas, monospace; font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-all;
+}
+.cmd-block .copy-btn {
+  position: absolute; top: 7px; right: 7px;
+  font-size: 11.5px; padding: 3px 10px;
+  background: rgba(255,255,255,.12); color: #fff;
+  border: 1px solid rgba(255,255,255,.25);
+}
+.cmd-block .copy-btn:hover { background: rgba(255,255,255,.22); }
+
+.guide-step { margin-bottom: 18px; }
+.guide-step h3 {
+  font-size: 13.5px; margin: 0 0 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.guide-step h3 .n {
+  width: 20px; height: 20px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; font-size: 11px; font-weight: 600;
+  background: var(--accent); color: #fff;
+}
 
 /* ---------------------------------------------------------------- misc */
 

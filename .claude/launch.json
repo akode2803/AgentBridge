@@ -4,8 +4,8 @@
     {
       "name": "agentbridge-gui",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "gui", "--no-browser", "--port", "7787"],
-      "port": 7787
+      "runtimeArgs": ["-m", "gui", "--no-browser", "--port", "7788"],
+      "port": 7788
     }
   ]
 }
