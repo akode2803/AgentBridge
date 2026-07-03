@@ -1,4 +1,5 @@
-/* AgentBridge GUI front-end — vanilla JS single page, hash routing. */
+/* AgentBridge GUI front-end — vanilla JS single page, hash routing.
+   Chat-first: the conversation is the main surface; Status/Setup support it. */
 
 "use strict";
 
@@ -12,7 +13,6 @@ const App = {
   pendingAtt: null,     // attachment picked but not yet sent
   wizard: null,
 };
-
 window.App = App;  // console/debug access
 
 function freshWizard() {
@@ -58,6 +58,22 @@ function fmtTime(tsUtc) {
   return d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + time;
 }
 
+function timeOnly(tsUtc) {
+  const d = new Date(tsUtc);
+  return isNaN(d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function dayLabel(tsUtc) {
+  const d = new Date(tsUtc);
+  if (isNaN(d)) return "";
+  const now = new Date();
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+  if (sameDay(d, now)) return "Today";
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  if (sameDay(d, yest)) return "Yesterday";
+  return d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
 function fmtSize(bytes) {
   if (bytes == null) return "";
   if (bytes < 1024) return `${bytes} B`;
@@ -81,6 +97,99 @@ function toast(msg, isError) {
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+}
+
+// ---------------------------------------------------------------- markdown
+
+/* Agents write markdown: headings, **bold**, `code`, fenced blocks, pipe
+   tables, and plain-ASCII tables ruled with dashes. Render the common cases;
+   everything is HTML-escaped before any tags are introduced. */
+
+function mdInline(t) {
+  t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  t = t.replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>");
+  t = t.replace(/(https?:\/\/[^\s<]+[^\s<.,)])/g,
+    '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return t;
+}
+
+function mdRow(line) {
+  const cells = line.split("|").map((c) => c.trim());
+  if (cells.length && cells[0] === "") cells.shift();
+  if (cells.length && cells.at(-1) === "") cells.pop();
+  return cells;
+}
+
+function md(src) {
+  let text = esc(src);
+  const stash = [];
+  text = text.replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, (m, code) => {
+    stash.push(`<pre class="md-pre">${code.replace(/\n$/, "")}</pre>`);
+    return `@@MD${stash.length - 1}@@`;
+  });
+
+  const out = [];
+  for (const para of text.split(/\n{2,}/)) {
+    if (!para.trim()) continue;
+    const lines = para.split("\n");
+
+    // whole paragraph is a stashed code block
+    const only = para.trim().match(/^@@MD(\d+)@@$/);
+    if (only) { out.push(stash[only[1]]); continue; }
+
+    // markdown pipe table (checked before the ASCII heuristic — its
+    // |---|---| separator row would otherwise match the ruler pattern)
+    if (lines.length >= 2 && lines[0].includes("|")
+        && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[1]) && lines[1].includes("-")) {
+      const head = mdRow(lines[0]).map((c) => `<th>${mdInline(c)}</th>`).join("");
+      const rows = lines.slice(2).filter((l) => l.includes("|")).map((l) =>
+        `<tr>${mdRow(l).map((c) => `<td>${mdInline(c)}</td>`).join("")}</tr>`).join("");
+      out.push(`<table class="md-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`);
+      continue;
+    }
+
+    // ASCII table / ruled block (dashes, plus-signs, underscores) → monospace
+    if (lines.length >= 2 && lines.some((l) => /^[\s\-+=|_]{6,}$/.test(l))) {
+      out.push(`<pre class="md-mono">${para}</pre>`);
+      continue;
+    }
+
+    // line-based: headings, lists, plain text
+    let plain = [];
+    let list = null;   // {tag, items}
+    const flushPlain = () => {
+      if (plain.length) out.push(`<p>${plain.map(mdInline).join("<br>")}</p>`);
+      plain = [];
+    };
+    const flushList = () => {
+      if (list) out.push(`<${list.tag}>${list.items.map((i) =>
+        `<li>${mdInline(i)}</li>`).join("")}</${list.tag}>`);
+      list = null;
+    };
+    for (const line of lines) {
+      const h = line.match(/^(#{1,4})\s+(.*)/);
+      const b = line.match(/^\s*[-*•]\s+(.*)/);
+      const n = line.match(/^\s*\d+[.)]\s+(.*)/);
+      if (h) {
+        flushPlain(); flushList();
+        out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`);
+      } else if (b) {
+        flushPlain();
+        if (!list || list.tag !== "ul") { flushList(); list = { tag: "ul", items: [] }; }
+        list.items.push(b[1]);
+      } else if (n) {
+        flushPlain();
+        if (!list || list.tag !== "ol") { flushList(); list = { tag: "ol", items: [] }; }
+        list.items.push(n[1]);
+      } else {
+        flushList();
+        plain.push(line);
+      }
+    }
+    flushPlain(); flushList();
+  }
+  return out.join("").replace(/@@MD(\d+)@@/g, (m, n) => stash[n]);
 }
 
 // ---------------------------------------------------------------- chrome
@@ -117,7 +226,7 @@ function renderChrome() {
   $("#settings-btn").classList.toggle("active", App.page === "settings");
 }
 
-// ---------------------------------------------------------------- home
+// ---------------------------------------------------------------- status page
 
 async function renderHome() {
   const s = App.state;
@@ -142,7 +251,7 @@ async function renderHome() {
     </li>`).join("") || `<li class="empty">No messages yet.</li>`;
   const leaf = s.shared_dir.split("\\").pop();
   $("#content").innerHTML = `
-    <h1>Home</h1>
+    <h1>Status</h1>
     <p class="page-sub">Everything at a glance.</p>
     <div class="statepill"><span class="dot ${dot}"></span>${esc(text)}
       ${s.inbound_waiting ? `<button class="primary" style="margin-left:6px"
@@ -184,7 +293,7 @@ async function renderHome() {
       <div class="card">
         <h2>Recent messages</h2>
         <ul class="recent-list">${recent}</ul>
-        <button style="margin-top:10px" onclick="location.hash='#/messages'">Open Messages</button>
+        <button style="margin-top:10px" onclick="location.hash='#/messages'">Open chat</button>
       </div>
     </div>`;
   $("#open-shared").addEventListener("click", (e) => {
@@ -202,8 +311,9 @@ async function openTarget(target) {
   const r = await api("/api/open", { target });
   if (r.error) toast(r.error, true);
 }
+window.openTarget = openTarget;
 
-// ---------------------------------------------------------------- messages
+// ---------------------------------------------------------------- chat
 
 function attButton(f) {
   return `
@@ -217,13 +327,31 @@ function attButton(f) {
     </button>`;
 }
 
+function typingBubble(s, entries) {
+  // Activity, merged into the chat: after your message goes out, show what the
+  // remote side is up to. (The live task feed will plug in here later.)
+  const lastMsg = [...entries].reverse().find((e) => e.seq != null);
+  if (!lastMsg || !lastMsg.mine) return "";
+  const ageH = (Date.now() - new Date(lastMsg.ts)) / 3.6e6;
+  if (isNaN(ageH) || ageH > 4) return "";
+  const label = s.outbound_undelivered
+    ? "Delivering your message…" : `${dn(s.peer)} is working…`;
+  return `
+    <div class="msg">
+      <div class="sender">${esc(dn(s.peer))}</div>
+      <div class="bubble typing"><span class="tdot"></span><span class="tdot"></span>
+        <span class="tdot"></span><span class="typing-label">${esc(label)}</span></div>
+    </div>`;
+}
+
 async function renderMessages(force) {
   const s = App.state;
   if (!s.configured) { location.hash = "#/setup"; return; }
   const log = await api(`/api/log?tail=200`);
   const inbound = s.inbound_waiting ? await api("/api/inbound") : { waiting: false };
-  const key = JSON.stringify([log.entries.length,
-    log.entries.at(-1)?.seq, log.entries.at(-1)?.from, inbound.seq]);
+  const typing = typingBubble(s, log.entries);
+  const key = JSON.stringify([log.entries.length, log.entries.at(-1)?.seq,
+    log.entries.at(-1)?.from, inbound.seq, s.outbound_undelivered, !!typing]);
   if (!force && key === App.logKey && App.page === "messages") return;
   App.logKey = key;
 
@@ -231,31 +359,40 @@ async function renderMessages(force) {
   const nearBottom = !oldTr ||
     (oldTr.scrollHeight - oldTr.scrollTop - oldTr.clientHeight < 120);
 
-  const bubbles = log.entries.map((e) => {
+  const parts = [];
+  let prevFrom = null, prevDay = null;
+  for (const e of log.entries) {
+    const day = new Date(e.ts).toDateString();
+    if (day !== prevDay) {
+      parts.push(`<div class="day-sep"><span>${esc(dayLabel(e.ts))}</span></div>`);
+      prevDay = day; prevFrom = null;
+    }
     const files = (e.files || []).map(attButton).join("");
     const tag = e.type && e.type !== "chat"
       ? `<span class="type-tag">${esc(e.type)}</span>` : "";
-    return `
+    const showSender = !e.mine && e.from !== prevFrom;
+    prevFrom = e.from;
+    parts.push(`
       <div class="msg ${e.mine ? "mine" : ""}">
-        ${e.mine ? "" : `<div class="sender">${esc(dn(e.from))}</div>`}
-        <div class="bubble">${esc(e.body)}${files}</div>
-        <div class="meta">${tag}${esc(fmtTime(e.ts))}</div>
-      </div>`;
-  }).join("") || `<div class="empty">No messages yet — say hello below.</div>`;
+        ${showSender ? `<div class="sender">${esc(dn(e.from))}</div>` : ""}
+        <div class="bubble">${md(e.body || "")}${files}</div>
+        <div class="meta">${tag}${esc(timeOnly(e.ts))}</div>
+      </div>`);
+  }
+  parts.push(typing);
+  const bubbles = parts.join("") ||
+    `<div class="empty">No messages yet — say hello below.</div>`;
 
-  const banner = inbound.waiting ? `
-    <div class="banner">
-      <span>⬇ <b>New message from ${esc(dn(inbound.from))}</b> — your Claude
-        session will pick it up automatically, or mark it read here.</span>
-      <span class="spacer"></span>
-      <button class="primary" id="ack-btn">Mark read</button>
+  const unread = inbound.waiting ? `
+    <div class="unread-pill">
+      <span>New message from ${esc(dn(inbound.from))} — Claude picks it up
+      automatically</span>
+      <button id="ack-btn">Mark read</button>
     </div>` : "";
 
   $("#content").innerHTML = `
-    <h1>Messages</h1>
-    <p class="page-sub">Your conversation with ${esc(dn(s.peer))}.</p>
-    ${banner}
     <div id="transcript">${bubbles}</div>
+    ${unread}
     <div id="pending-area"></div>
     <div id="composer">
       <button id="attach-btn" title="Attach a file">📎</button>
@@ -296,7 +433,8 @@ async function renderMessages(force) {
   $("#attach-btn").addEventListener("click", async () => {
     toast("File picker opened — check your taskbar");
     const r = await api("/api/pick_file", {});
-    if (r.path) { App.pendingAtt = r; renderPendingAtt(); }
+    if (r.error) toast(r.error, true);
+    else if (r.path) { App.pendingAtt = r; renderPendingAtt(); }
   });
   const ackBtn = $("#ack-btn");
   if (ackBtn) ackBtn.addEventListener("click", async () => {
@@ -326,21 +464,6 @@ function renderPendingAtt() {
     </span>` : "";
   const rm = $("#remove-att");
   if (rm) rm.addEventListener("click", () => { App.pendingAtt = null; renderPendingAtt(); });
-}
-
-// ---------------------------------------------------------------- activity
-
-function renderActivity() {
-  const s = App.state;
-  $("#content").innerHTML = `
-    <h1>Activity</h1>
-    <p class="page-sub">Live view of what ${esc(dn(s?.peer || "the remote agent"))} is doing.</p>
-    <div class="card" style="max-width:640px">
-      <h2>Livestream — coming soon</h2>
-      <p>When ${esc(dn(s?.peer || "CoCo"))} works on a task, this pane will show
-      its progress live — so you can see it's working without reading any logs.</p>
-      <div class="empty">Nothing running right now.</div>
-    </div>`;
 }
 
 // ---------------------------------------------------------------- settings
@@ -419,6 +542,7 @@ function renderSetup() {
     </div>`;
   renderWizardStep();
 }
+window.renderSetup = renderSetup;
 
 function wizardNav(backOk, nextOk, nextLabel) {
   return `<div class="wizard-nav">
@@ -653,7 +777,7 @@ async function renderWizardStep() {
       bindWizardNav();
       return;
     }
-    const remoteShared = `C:\\Users\\<username>\\OneDrive - Employbridge\\${g.shared_leaf}`;
+    const remoteShared = `C:\\Users\\<username>\\${g.sync_segment}\\${g.shared_leaf}`;
     const binFile = g.published_file || "bridge_<newest>.py";
     const texts = {
       install: [
@@ -673,7 +797,7 @@ async function renderWizardStep() {
       <code>&lt;username&gt;</code> with that machine's Windows account name.</p>
 
       <div class="guide-step"><h3><span class="n">1</span> Sync the shared folder</h3>
-        <p class="hint">Sign OneDrive into the EB account, open the shared folder
+        <p class="hint">Sign OneDrive into the work account, open the shared folder
         in the browser and click <i>"Add shortcut to My files"</i>. It will appear at
         <code>${esc(remoteShared)}</code>.</p>
       </div>
@@ -728,11 +852,11 @@ async function renderWizardStep() {
       <p>This machine is ready${w.role ? ` as <b>${esc(dn(w.role))}</b>` : ""}.</p>
       <ul>
         ${w.installed ? `<li>App installed to <code>${esc(w.installed.dest)}</code> — use the Start Menu shortcut next time.</li>` : ""}
-        <li>Send a first <b>ping</b> from the Messages page to test the line.</li>
+        <li>Send a first <b>ping</b> from the Chat page to test the line.</li>
         <li>Once the remote side is up, everything else happens by itself.</li>
       </ul>
       <div class="wizard-nav">
-        <button class="primary" onclick="location.hash='#/home'">Go to Home</button>
+        <button class="primary" onclick="location.hash='#/messages'">Open chat</button>
         <button id="wiz-restart">Run the wizard again</button>
       </div></div>`;
     $("#wiz-restart").addEventListener("click", () => {
@@ -747,14 +871,13 @@ async function renderWizardStep() {
 const PAGES = {
   home: renderHome,
   messages: () => renderMessages(true),
-  activity: renderActivity,
   setup: renderSetup,
   settings: renderSettings,
 };
 
 function route() {
-  const page = (location.hash.replace("#/", "") || "home");
-  App.page = PAGES[page] ? page : "home";
+  const page = (location.hash.replace("#/", "") || "messages");
+  App.page = PAGES[page] ? page : "messages";
   $("#content").classList.toggle("chat-mode", App.page === "messages");
   renderChrome();
   PAGES[App.page]();
@@ -765,7 +888,7 @@ async function refresh(rerender) {
     App.state = await api("/api/state");
   } catch {
     $("#status-dot").className = "dot dot-red";
-    $("#status-text").textContent = "App server not reachable — relaunch AgentBridge";
+    $("#status-text").textContent = "App not running — relaunch AgentBridge";
     return;
   }
   renderChrome();
@@ -778,7 +901,9 @@ window.addEventListener("hashchange", route);
 
 (async function start() {
   App.state = await api("/api/state");
-  if (!App.state.configured && !location.hash) location.hash = "#/setup";
+  if (!location.hash) {
+    location.hash = App.state.configured ? "#/messages" : "#/setup";
+  }
   route();
   setInterval(() => refresh(false), 2500);
 })();

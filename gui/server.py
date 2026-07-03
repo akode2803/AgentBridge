@@ -41,7 +41,47 @@ CONTENT_TYPES = {
 
 HOME = bridge.DEFAULT_HOME  # overridable via --home in __main__
 
-# OneDrive process check shells out to tasklist (~1s); cache it.
+# ---------------------------------------------------------------- platform
+# Every OS-specific call lives behind these helpers so the app ports to the
+# macOS/Linux personal build without touching feature code.
+
+# Without this flag, every subprocess from a pythonw-launched server flashes
+# a console window on screen.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def open_path(path):
+    """Open a file or folder with the OS default handler."""
+    if sys.platform == "win32":
+        os.startfile(str(path))  # noqa: S606 — local desktop app by design
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+def sync_client_running():
+    """Is the sync client (OneDrive today; anything later) alive? None = unknown."""
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq OneDrive.exe"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=NO_WINDOW).stdout
+            return "OneDrive.exe" in out
+        except Exception:
+            return None
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["pgrep", "-x", "OneDrive"],
+                               capture_output=True, timeout=15)
+            return r.returncode == 0
+        except Exception:
+            return None
+    return None
+
+
+# process check shells out (~1s); cache it
 _onedrive_cache = {"ts": 0.0, "running": None}
 
 
@@ -56,16 +96,7 @@ def get_bridge():
 def onedrive_running():
     now = time.time()
     if now - _onedrive_cache["ts"] > 60 or _onedrive_cache["running"] is None:
-        running = None
-        if sys.platform == "win32":
-            try:
-                out = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq OneDrive.exe"],
-                    capture_output=True, text=True, timeout=15).stdout
-                running = "OneDrive.exe" in out
-            except Exception:
-                running = None
-        _onedrive_cache.update(ts=now, running=running)
+        _onedrive_cache.update(ts=now, running=sync_client_running())
     return _onedrive_cache["running"]
 
 
@@ -238,7 +269,8 @@ def api_pick_folder():
             "print(filedialog.askdirectory() or '')")
     try:
         r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, timeout=600,
+                           creationflags=NO_WINDOW)
         path = r.stdout.strip()
         return {"path": path.replace("/", os.sep) if path else None}
     except Exception as e:
@@ -299,7 +331,7 @@ def api_open(data):
         }.get(name)
     if target is None or not target.exists():
         return {"error": "unknown or missing target"}
-    os.startfile(str(target))  # noqa: S606 — local desktop app by design
+    open_path(target)
     return {"ok": True}
 
 
@@ -316,7 +348,7 @@ def api_open_attachment(data):
         return {"error": "attachment is outside the shared files folder"}
     if not target.is_file():
         return {"error": "file not found — it may still be syncing"}
-    os.startfile(str(target))  # noqa: S606
+    open_path(target)
     return {"ok": True}
 
 
@@ -328,7 +360,8 @@ def api_pick_file():
             "print(filedialog.askopenfilename() or '')")
     try:
         r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, timeout=600,
+                           creationflags=NO_WINDOW)
         path = r.stdout.strip()
         if not path:
             return {"path": None}
@@ -347,11 +380,17 @@ def api_remote_guide():
     if br is None:
         return {"error": "bridge not configured"}
     manifest = bridge.read_json(br.bin_dir / "version.json") or {}
+    # reuse the local path's sync-root segment (e.g. "OneDrive - Employbridge")
+    # so the guide adapts to whatever tenant/transport this deployment uses
+    sync_segment = next(
+        (p for p in br.shared.parts if p.lower().startswith("onedrive")),
+        "OneDrive - <organisation>")
     return {
         "role": br.role,
         "peer": br.peer,
         "shared_local": str(br.shared),
         "shared_leaf": br.shared.name,
+        "sync_segment": sync_segment,
         "published_file": manifest.get("file"),
         "published_version": manifest.get("version"),
         "handler_available": (REPO_ROOT / "handler_coco.py").is_file(),
@@ -404,28 +443,30 @@ def api_install_app(data):
     except OSError as e:
         return {"error": f"could not copy app: {e}"}
 
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    launcher = str(pythonw if pythonw.is_file() else sys.executable)
-    target = dest / "AgentBridge.pyw"
-    icon = dest / "gui" / "static" / "app.ico"
-    ps = (
-        "$ws = New-Object -ComObject WScript.Shell; "
-        "foreach ($dir in @([Environment]::GetFolderPath('Programs'), "
-        "[Environment]::GetFolderPath('Desktop'))) { "
-        "$s = $ws.CreateShortcut((Join-Path $dir 'AgentBridge.lnk')); "
-        f"$s.TargetPath = '{launcher}'; "
-        f"$s.Arguments = '\"{target}\"'; "
-        f"$s.WorkingDirectory = '{dest}'; "
-        f"$s.IconLocation = '{icon}'; "
-        "$s.Description = 'AgentBridge'; $s.Save() }"
-    )
-    shortcuts_ok = True
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=60)
-        shortcuts_ok = r.returncode == 0
-    except Exception:
-        shortcuts_ok = False
+    shortcuts_ok = False
+    if sys.platform == "win32":
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        launcher = str(pythonw if pythonw.is_file() else sys.executable)
+        target = dest / "AgentBridge.pyw"
+        icon = dest / "gui" / "static" / "app.ico"
+        ps = (
+            "$ws = New-Object -ComObject WScript.Shell; "
+            "foreach ($dir in @([Environment]::GetFolderPath('Programs'), "
+            "[Environment]::GetFolderPath('Desktop'))) { "
+            "$s = $ws.CreateShortcut((Join-Path $dir 'AgentBridge.lnk')); "
+            f"$s.TargetPath = '{launcher}'; "
+            f"$s.Arguments = '\"{target}\"'; "
+            f"$s.WorkingDirectory = '{dest}'; "
+            f"$s.IconLocation = '{icon}'; "
+            "$s.Description = 'AgentBridge'; $s.Save() }"
+        )
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, text=True, timeout=60,
+                               creationflags=NO_WINDOW)
+            shortcuts_ok = r.returncode == 0
+        except Exception:
+            shortcuts_ok = False
     return {"ok": True, "dest": str(dest), "shortcuts": shortcuts_ok,
             "already_there": dest.resolve() == REPO_ROOT.resolve()}
 
@@ -538,9 +579,18 @@ def serve(port, host="127.0.0.1"):
 
 
 def launch_window(url):
-    edge = find_edge()
-    if edge:
-        subprocess.Popen([str(edge), f"--app={url}", "--window-size=1240,860"])
-    else:
-        import webbrowser
-        webbrowser.open(url)
+    """Chromeless app window: Edge on Windows, Edge/Chrome on macOS,
+    default browser everywhere else."""
+    if sys.platform == "win32":
+        edge = find_edge()
+        if edge:
+            subprocess.Popen([str(edge), f"--app={url}", "--window-size=1240,860"])
+            return
+    elif sys.platform == "darwin":
+        for app in ("Microsoft Edge", "Google Chrome"):
+            if Path(f"/Applications/{app}.app").exists():
+                subprocess.Popen(["open", "-na", app, "--args",
+                                  f"--app={url}", "--window-size=1240,860"])
+                return
+    import webbrowser
+    webbrowser.open(url)

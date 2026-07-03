@@ -235,8 +235,80 @@ input[type=text], select, textarea {
 .msg .bubble {
   border: 1px solid var(--border); border-radius: 10px;
   background: #fff; padding: 9px 13px;
-  white-space: pre-wrap; word-break: break-word;
+  word-break: break-word;
   box-shadow: var(--shadow);
+  font-size: 13.5px; line-height: 1.5;
+}
+
+/* rendered message content (markdown-ish) */
+.bubble p { margin: 0 0 8px; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 {
+  font-size: 14px; margin: 10px 0 6px; font-weight: 600;
+}
+.bubble h1:first-child, .bubble h2:first-child,
+.bubble h3:first-child, .bubble h4:first-child { margin-top: 0; }
+.bubble h1 { font-size: 15.5px; }
+.bubble h2 { font-size: 14.5px; }
+.bubble ul, .bubble ol { margin: 4px 0 8px; padding-left: 22px; }
+.bubble li { margin: 2px 0; }
+.bubble code {
+  background: rgba(0,0,0,.055); border-radius: 3px;
+  padding: 1px 5px; font-size: 12px;
+}
+.bubble .md-pre, .bubble .md-mono {
+  background: #FAF9F8; border: 1px solid var(--border);
+  border-radius: 6px; padding: 9px 11px; margin: 6px 0 8px;
+  overflow-x: auto; white-space: pre;
+  font-family: Consolas, monospace; font-size: 12px; line-height: 1.45;
+}
+.msg.mine .md-pre, .msg.mine .md-mono,
+.msg.mine .bubble code { background: rgba(255,255,255,.7); }
+.bubble a { color: var(--accent); }
+.bubble table.md-table {
+  border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px;
+  display: block; overflow-x: auto; max-width: 100%;
+}
+.bubble table.md-table th, .bubble table.md-table td {
+  border: 1px solid var(--border-strong); padding: 4px 10px; text-align: left;
+}
+.bubble table.md-table th {
+  background: var(--accent-soft); font-weight: 600;
+}
+.msg.mine table.md-table th { background: rgba(255,255,255,.7); }
+
+/* typing / working indicator */
+.bubble.typing { display: inline-flex; align-items: center; gap: 4px; }
+.bubble.typing .typing-label {
+  color: var(--text-dim); font-size: 12.5px; margin-left: 6px;
+}
+.tdot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); opacity: .35;
+  animation: tblink 1.2s infinite;
+}
+.tdot:nth-child(2) { animation-delay: .2s; }
+.tdot:nth-child(3) { animation-delay: .4s; }
+@keyframes tblink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+/* day separator */
+.day-sep {
+  display: flex; align-items: center; gap: 12px;
+  margin: 8px 0 2px; color: var(--text-faint); font-size: 11px;
+}
+.day-sep::before, .day-sep::after {
+  content: ""; flex: 1; border-top: 1px solid var(--border);
+}
+
+/* compact unread control */
+.unread-pill {
+  align-self: center; display: inline-flex; align-items: center; gap: 10px;
+  background: var(--accent-soft); border: 1px solid var(--accent-border);
+  border-radius: 999px; padding: 4px 6px 4px 14px; margin: 8px 0 2px;
+  font-size: 12.5px; flex: none;
+}
+.unread-pill button {
+  border-radius: 999px; padding: 3px 12px; font-size: 12px;
 }
 .msg.mine .bubble {
   background: var(--accent-soft); border-color: var(--accent-border);
