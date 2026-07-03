@@ -406,7 +406,8 @@ class Mesh:
                           "sha256": sha256_file(dest)})
         if not body and not files:
             raise MeshError("Type a message or attach a file first")
-        msg = {"id": f"{time.time_ns():x}-{sender}", "ts": utcnow(),
+        ns = time.time_ns()
+        msg = {"id": f"{ns:x}-{sender}", "ns": ns, "ts": utcnow(),
                "from": sender, "kind": u["kind"], "body": body,
                "tags": self.parse_tags(body), "files": files}
         append_jsonl(self._msgs_dir(chat_id) / f"{sender}.jsonl", msg)
