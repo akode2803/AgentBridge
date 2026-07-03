@@ -111,6 +111,8 @@ function mdInline(t) {
   t = t.replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>");
   t = t.replace(/(https?:\/\/[^\s<]+[^\s<.,)])/g,
     '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  t = t.replace(/(^|[\s(&gt;])@([a-z][a-z0-9_]{1,31})/g,
+    '$1<span class="mention">@$2</span>');
   return t;
 }
 
@@ -483,6 +485,400 @@ function renderPendingAtt() {
     </span>` : "";
   const rm = $("#remove-att");
   if (rm) rm.addEventListener("click", () => { App.pendingAtt = null; renderPendingAtt(); });
+}
+
+// ---------------------------------------------------------------- mesh (chats)
+
+const Mesh = {
+  state: null,        // /api/mesh/state payload
+  chatId: null,       // open chat, from #/chats/<id>
+  listKey: "",
+  chatKey: "",
+  drafts: {},         // per-chat composer drafts {body, att}
+  newChat: { open: false, name: "" },
+  auth: { mode: "login" },
+};
+window.Mesh = Mesh;
+
+function meshDn(username) {
+  const u = Mesh.state?.users?.[username];
+  return u?.display || dn(username);
+}
+
+function meshDraft(chatId) {
+  return Mesh.drafts[chatId] || (Mesh.drafts[chatId] = { body: "", att: null });
+}
+
+async function renderChats(force) {
+  const s = App.state;
+  if (!s?.configured) { location.hash = "#/setup"; return; }
+  Mesh.state = await api("/api/mesh/state");
+  const ms = Mesh.state;
+  $("#nav-mesh-dot").hidden = !(ms.chats || []).some((c) => c.unread > 0);
+
+  if (!ms.available) {
+    $("#content").innerHTML = `
+      <h1>Chats</h1>
+      <p class="page-sub">Humans and agents, working in the same rooms.</p>
+      <div class="card" style="max-width:560px">
+        <h2>Start the mesh</h2>
+        <p>This creates the shared user directory and chat space inside the
+        bridge's synced folder. The classic two-way bridge keeps working
+        alongside it.</p>
+        <button class="primary" id="mesh-init-btn">Start the mesh</button>
+      </div>`;
+    $("#mesh-init-btn").addEventListener("click", async () => {
+      const r = await api("/api/mesh/init", {});
+      if (r.error) { toast(r.error, true); return; }
+      toast(r.seeded?.length ? `Mesh started — seeded ${r.seeded.join(", ")}` : "Mesh started");
+      renderChats(true);
+    });
+    return;
+  }
+
+  if (!ms.user) { renderMeshAuth(); return; }
+  if (Mesh.chatId) { renderMeshChat(force); return; }
+
+  const key = JSON.stringify(ms.chats);
+  if (!force && key === Mesh.listKey && App.page === "chats") return;
+  Mesh.listKey = key;
+
+  const rows = (ms.chats || []).filter((c) => !c.archived).map((c) => {
+    const last = c.last ? `<b>${esc(meshDn(c.last.from))}:</b> ${esc(c.last.body || (c.last.files ? "📎 file" : ""))}` : "No messages yet";
+    return `
+      <div class="chat-row" data-chat="${esc(c.id)}">
+        <div class="chat-avatar">${esc((c.name[0] || "#").toUpperCase())}</div>
+        <div class="chat-mid">
+          <div class="chat-name">${esc(c.name)}</div>
+          <div class="chat-last">${last}</div>
+        </div>
+        <div class="chat-side">
+          <div class="chat-time">${c.last ? esc(fmtTime(c.last.ts)) : ""}</div>
+          ${c.unread ? `<span class="unread-badge">${c.unread}</span>` : ""}
+        </div>
+      </div>`;
+  }).join("") || `<div class="empty">No chats yet — create the first one.</div>`;
+
+  const archived = (ms.chats || []).filter((c) => c.archived);
+  const myAgents = Object.values(ms.users)
+    .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+  const nc = Mesh.newChat;
+  $("#content").innerHTML = `
+    <h1>Chats</h1>
+    <p class="page-sub">Signed in as <b>${esc(meshDn(ms.user))}</b> (@${esc(ms.user)})
+      · <a href="#" id="mesh-logout">sign out</a></p>
+    <div class="row" style="margin-bottom:12px">
+      <button class="primary" id="new-chat-btn">${nc.open ? "Cancel" : "New chat"}</button>
+    </div>
+    ${nc.open ? `
+      <div class="card" style="max-width:560px">
+        <h2>New chat</h2>
+        <input type="text" id="new-chat-name" placeholder="Chat name"
+               style="width:100%" value="${esc(nc.name)}">
+        <p class="hint" style="margin:10px 0 4px">Add your agents (every human
+        can see every chat automatically):</p>
+        ${myAgents.map((a) => `
+          <label class="row" style="padding:3px 0">
+            <input type="checkbox" class="nc-member" value="${esc(a.username)}">
+            ${esc(a.display)} <span class="hint">@${esc(a.username)}</span>
+          </label>`).join("") || `<p class="hint">You have no agents yet — add one under My agents.</p>`}
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="create-chat-btn">Create</button>
+        </div>
+      </div>` : ""}
+    <div class="card chat-list" style="max-width:680px;padding:6px 8px">${rows}</div>
+    ${archived.length ? `
+      <details style="max-width:680px"><summary class="hint">Archived (${archived.length})</summary>
+        <div class="card chat-list" style="padding:6px 8px">${archived.map((c) => `
+          <div class="chat-row" data-chat="${esc(c.id)}">
+            <div class="chat-avatar arch">${esc((c.name[0] || "#").toUpperCase())}</div>
+            <div class="chat-mid"><div class="chat-name">${esc(c.name)}</div>
+            <div class="chat-last">Archived</div></div>
+          </div>`).join("")}</div>
+      </details>` : ""}`;
+
+  $("#mesh-logout").addEventListener("click", async (e) => {
+    e.preventDefault();
+    await api("/api/mesh/logout", {});
+    renderChats(true);
+  });
+  $("#new-chat-btn").addEventListener("click", () => {
+    nc.open = !nc.open;
+    renderChats(true);
+  });
+  const nameInput = $("#new-chat-name");
+  if (nameInput) nameInput.addEventListener("input", (e) => { nc.name = e.target.value; });
+  const createBtn = $("#create-chat-btn");
+  if (createBtn) createBtn.addEventListener("click", async () => {
+    const members = [...document.querySelectorAll(".nc-member:checked")]
+      .map((c) => c.value);
+    const r = await api("/api/mesh/create_chat", { name: nc.name, members });
+    if (r.error) { toast(r.error, true); return; }
+    Mesh.newChat = { open: false, name: "" };
+    location.hash = `#/chats/${r.chat.id}`;
+  });
+  document.querySelectorAll(".chat-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      location.hash = `#/chats/${row.dataset.chat}`;
+    });
+  });
+}
+
+function renderMeshAuth() {
+  const mode = Mesh.auth.mode;
+  $("#content").innerHTML = `
+    <h1>Chats</h1>
+    <p class="page-sub">Sign in to join the conversation.</p>
+    <div class="card" style="max-width:420px">
+      <div class="row" style="margin-bottom:14px">
+        <button id="auth-login" class="${mode === "login" ? "primary" : ""}">Sign in</button>
+        <button id="auth-signup" class="${mode === "signup" ? "primary" : ""}">Create account</button>
+      </div>
+      <dl class="kv" style="grid-template-columns:110px 1fr">
+        <dt>Username</dt><dd><input type="text" id="auth-user" autocomplete="username"></dd>
+        ${mode === "signup" ? `<dt>Display name</dt><dd><input type="text" id="auth-display"></dd>` : ""}
+        <dt>Password</dt><dd><input type="password" id="auth-pass"></dd>
+      </dl>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="auth-go">${mode === "signup" ? "Create account" : "Sign in"}</button>
+      </div>
+      <p class="hint" style="margin-top:12px">Accounts live in the shared
+      folder — one account works from any machine that syncs it.</p>
+    </div>`;
+  $("#auth-login").addEventListener("click", () => { Mesh.auth.mode = "login"; renderMeshAuth(); });
+  $("#auth-signup").addEventListener("click", () => { Mesh.auth.mode = "signup"; renderMeshAuth(); });
+  const go = async () => {
+    const payload = {
+      username: $("#auth-user").value.trim(),
+      password: $("#auth-pass").value,
+      display: $("#auth-display")?.value?.trim(),
+    };
+    const r = await api(mode === "signup" ? "/api/mesh/signup" : "/api/mesh/login", payload);
+    if (r.error) { toast(r.error, true); return; }
+    toast(`Welcome, ${payload.username}!`);
+    renderChats(true);
+  };
+  $("#auth-go").addEventListener("click", go);
+  $("#auth-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+}
+
+async function renderMeshChat(force) {
+  const ms = Mesh.state;
+  const chatId = Mesh.chatId;
+  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
+  if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
+  const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
+    data.meta.archived, (data.meta.members || []).length]);
+  if (!force && key === Mesh.chatKey && App.page === "chats") return;
+  const hadNew = key !== Mesh.chatKey;
+  Mesh.chatKey = key;
+
+  const oldTr = $("#transcript");
+  const nearBottom = !oldTr ||
+    (oldTr.scrollHeight - oldTr.scrollTop - oldTr.clientHeight < 120);
+  const prevScrollTop = oldTr ? oldTr.scrollTop : null;
+
+  const parts = [];
+  let prevFrom = null, prevDay = null;
+  for (const msg of data.messages) {
+    const day = new Date(msg.ts).toDateString();
+    if (day !== prevDay) {
+      parts.push(`<div class="day-sep"><span>${esc(dayLabel(msg.ts))}</span></div>`);
+      prevDay = day; prevFrom = null;
+    }
+    const files = (msg.files || []).map((f) => `
+      <button class="att-btn mesh-att" data-path="${esc(f.path)}" title="Open ${esc(f.name)}">
+        <span class="att-icon">${extIcon(f.name)}</span>
+        <span style="min-width:0">
+          <div class="att-name">${esc(f.name)}</div>
+          <div class="att-size">${fmtSize(f.bytes)}</div>
+        </span>
+      </button>`).join("");
+    const showSender = !msg.mine && msg.from !== prevFrom;
+    prevFrom = msg.from;
+    const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
+    parts.push(`
+      <div class="msg ${msg.mine ? "mine" : ""}">
+        ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
+        <div class="bubble">${md(msg.body || "")}${files}</div>
+        <div class="meta">${esc(timeOnly(msg.ts))}</div>
+      </div>`);
+  }
+  const bubbles = parts.join("") ||
+    `<div class="empty">No messages yet — say hello.</div>`;
+
+  const meta = data.meta;
+  const isOwner = meta.owner === ms.user;
+  const memberChips = (meta.members || []).map((u) =>
+    `<span class="member-chip">${esc(meshDn(u))}</span>`).join(" ");
+  const draft = meshDraft(chatId);
+
+  $("#content").innerHTML = `
+    <div class="chat-head">
+      <button id="chat-back" title="All chats">←</button>
+      <div style="min-width:0">
+        <div class="chat-head-name">${esc(meta.name)}
+          ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
+        <div class="chat-head-members">${memberChips}</div>
+      </div>
+      <span class="spacer"></span>
+      ${isOwner ? `<button id="chat-archive">${meta.archived ? "Unarchive" : "Archive"}</button>` : ""}
+    </div>
+    <div id="transcript">${bubbles}</div>
+    <div id="pending-area">${draft.att ? `
+      <span class="pending-att">${extIcon(draft.att.name)} ${esc(draft.att.name)}
+        · ${fmtSize(draft.att.bytes)} <button id="remove-matt" title="Remove">✕</button></span>` : ""}</div>
+    ${meta.archived ? "" : `
+    <div id="composer">
+      <button id="mesh-attach-btn" title="Attach a file">📎</button>
+      <textarea id="mesh-body" placeholder="Message ${esc(meta.name)}…  (Ctrl+Enter to send, @ to tag)"></textarea>
+      <button class="primary" id="mesh-send-btn">Send</button>
+    </div>`}`;
+
+  $("#content").classList.add("chat-mode");
+  $("#chat-back").addEventListener("click", () => { location.hash = "#/chats"; });
+  const archiveBtn = $("#chat-archive");
+  if (archiveBtn) archiveBtn.addEventListener("click", async () => {
+    const r = await api("/api/mesh/archive",
+      { chat_id: chatId, archived: !meta.archived });
+    if (r.error) { toast(r.error, true); return; }
+    toast(r.archived ? "Chat archived" : "Chat restored");
+    renderMeshChat(true);
+  });
+
+  const body = $("#mesh-body");
+  if (body) {
+    body.value = draft.body;
+    body.addEventListener("input", (e) => { draft.body = e.target.value; });
+    const doSend = async () => {
+      if (!body.value.trim() && !draft.att) return;
+      $("#mesh-send-btn").disabled = true;
+      const r = await api("/api/mesh/post", {
+        chat_id: chatId, body: body.value.trim(),
+        attachments: draft.att ? [draft.att.path] : [],
+      });
+      $("#mesh-send-btn").disabled = false;
+      if (r.error) { toast(r.error, true); return; }
+      Mesh.drafts[chatId] = { body: "", att: null };
+      renderMeshChat(true);
+    };
+    $("#mesh-send-btn").addEventListener("click", doSend);
+    body.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.ctrlKey) doSend(); });
+    $("#mesh-attach-btn").addEventListener("click", async () => {
+      const r = await api("/api/mesh/pick_attach", {});
+      if (r.error) toast(r.error, true);
+      else if (r.path) { draft.att = r; renderMeshChat(true); }
+    });
+  }
+  const rmAtt = $("#remove-matt");
+  if (rmAtt) rmAtt.addEventListener("click", () => { draft.att = null; renderMeshChat(true); });
+  document.querySelectorAll(".mesh-att").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/mesh/open_file", { chat_id: chatId, path: b.dataset.path });
+      if (r.error) toast(r.error, true);
+    });
+  });
+
+  const tr = $("#transcript");
+  if (nearBottom) tr.scrollTop = tr.scrollHeight;
+  else if (prevScrollTop != null) tr.scrollTop = prevScrollTop;
+  if (hadNew) api("/api/mesh/read", { chat_id: chatId });
+}
+
+// ---------------------------------------------------------------- agents page
+
+async function renderAgents() {
+  const s = App.state;
+  if (!s?.configured) { location.hash = "#/setup"; return; }
+  Mesh.state = await api("/api/mesh/state");
+  const ms = Mesh.state;
+  if (!ms.available || !ms.user) {
+    $("#content").innerHTML = `
+      <h1>My agents</h1>
+      <div class="card" style="max-width:560px">
+        <div class="empty">${!ms.available
+          ? 'Start the mesh from the <a href="#/chats">Chats</a> page first.'
+          : 'Sign in on the <a href="#/chats">Chats</a> page first.'}</div>
+      </div>`;
+    return;
+  }
+  const mine = Object.values(ms.users)
+    .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+  const chats = ms.chats || [];
+  const ruleOpts = (sel) => ["all", "tagged", "humans"].map((r) =>
+    `<option value="${r}" ${sel === r ? "selected" : ""}>${
+      { all: "Reply to every message", tagged: "Reply only when tagged",
+        humans: "Reply only to humans" }[r]}</option>`).join("");
+
+  const cards = mine.map((a) => {
+    const st = a.settings || {};
+    const perChat = chats.filter((c) => (c.members || []).includes(a.username))
+      .map((c) => `
+        <dt>${esc(c.name)}</dt>
+        <dd><select class="ag-rule" data-agent="${esc(a.username)}" data-chat="${esc(c.id)}">
+          <option value="">Default</option>${ruleOpts((st.rules || {})[c.id] || "")}
+        </select></dd>`).join("");
+    return `
+      <div class="card" style="max-width:680px">
+        <h2>${esc(a.display)} <span class="hint" style="text-transform:none">@${esc(a.username)}</span></h2>
+        <dl class="kv" style="grid-template-columns:160px 1fr">
+          <dt>Model</dt><dd><input type="text" class="ag-model" data-agent="${esc(a.username)}"
+            value="${esc(st.model || "")}" placeholder="agent default"></dd>
+          <dt>Reasoning effort</dt><dd><input type="text" class="ag-reason" data-agent="${esc(a.username)}"
+            value="${esc(st.reasoning || "")}" placeholder="agent default"></dd>
+          <dt>Default reply rule</dt><dd><select class="ag-default" data-agent="${esc(a.username)}">
+            ${ruleOpts(st.default_rule || "tagged")}</select></dd>
+          ${perChat}
+          <dt>Owners</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
+        </dl>
+        <div class="row" style="margin-top:10px">
+          <button class="primary ag-save" data-agent="${esc(a.username)}">Save</button>
+        </div>
+      </div>`;
+  }).join("") || `<div class="card" style="max-width:680px"><div class="empty">No agents yet.</div></div>`;
+
+  $("#content").innerHTML = `
+    <h1>My agents</h1>
+    <p class="page-sub">Agents you are responsible for — their identity, model
+    and when they reply.</p>
+    ${cards}
+    <div class="card" style="max-width:680px">
+      <h2>Add an agent</h2>
+      <div class="row">
+        <input type="text" id="new-agent-user" placeholder="username (e.g. coco2)">
+        <input type="text" id="new-agent-display" placeholder="Display name">
+        <button class="primary" id="new-agent-btn">Create</button>
+      </div>
+      <p class="hint" style="margin-bottom:0">You become its responsible human.
+      Its machine setup comes later in the worker install.</p>
+    </div>`;
+
+  document.querySelectorAll(".ag-save").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const agent = btn.dataset.agent;
+      const patch = {
+        model: document.querySelector(`.ag-model[data-agent="${agent}"]`).value.trim() || null,
+        reasoning: document.querySelector(`.ag-reason[data-agent="${agent}"]`).value.trim() || null,
+        default_rule: document.querySelector(`.ag-default[data-agent="${agent}"]`).value,
+        rules: {},
+      };
+      document.querySelectorAll(`.ag-rule[data-agent="${agent}"]`).forEach((sel) => {
+        if (sel.value) patch.rules[sel.dataset.chat] = sel.value;
+      });
+      const r = await api("/api/mesh/agent", { username: agent, patch });
+      if (r.error) toast(r.error, true);
+      else toast(`Saved @${agent}`);
+    });
+  });
+  $("#new-agent-btn").addEventListener("click", async () => {
+    const r = await api("/api/mesh/create_agent", {
+      username: $("#new-agent-user").value.trim(),
+      display: $("#new-agent-display").value.trim(),
+    });
+    if (r.error) { toast(r.error, true); return; }
+    toast(`Agent @${r.agent.username} created`);
+    renderAgents();
+  });
 }
 
 // ---------------------------------------------------------------- settings
@@ -896,6 +1292,8 @@ async function renderWizardStep() {
 // ---------------------------------------------------------------- router/loop
 
 const PAGES = {
+  chats: () => renderChats(true),
+  agents: renderAgents,
   home: renderHome,
   messages: () => renderMessages(true),
   setup: renderSetup,
@@ -903,9 +1301,13 @@ const PAGES = {
 };
 
 function route() {
-  const page = (location.hash.replace("#/", "") || "messages");
-  App.page = PAGES[page] ? page : "messages";
-  $("#content").classList.toggle("chat-mode", App.page === "messages");
+  const hash = location.hash.replace("#/", "");
+  const [page, sub] = hash.split("/");
+  App.page = PAGES[page] ? page : "chats";
+  const newChatId = (App.page === "chats" && sub) ? sub : null;
+  if (newChatId !== Mesh.chatId) { Mesh.chatId = newChatId; Mesh.chatKey = ""; }
+  $("#content").classList.toggle("chat-mode",
+    App.page === "messages" || (App.page === "chats" && !!Mesh.chatId));
   renderChrome();
   PAGES[App.page]();
 }
@@ -922,6 +1324,7 @@ async function refresh(rerender) {
   if (rerender && App.page !== "setup") PAGES[App.page]();
   else if (App.page === "messages") renderMessages(false);
   else if (App.page === "home") renderHome();
+  else if (App.page === "chats" && Mesh.state?.user) renderChats(false);
 }
 
 window.addEventListener("hashchange", route);
@@ -929,7 +1332,7 @@ window.addEventListener("hashchange", route);
 (async function start() {
   App.state = await api("/api/state");
   if (!location.hash) {
-    location.hash = App.state.configured ? "#/messages" : "#/setup";
+    location.hash = App.state.configured ? "#/chats" : "#/setup";
   }
   route();
   setInterval(() => refresh(false), 2500);

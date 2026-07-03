@@ -26,6 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 import bridge  # noqa: E402
+import mesh as meshlib  # noqa: E402
 
 from gui import __version__ as GUI_VERSION  # noqa: E402
 
@@ -505,6 +506,210 @@ def find_edge():
 
 # ---------------------------------------------------------------- http plumbing
 
+# ---------------------------------------------------------------- mesh api
+
+def get_mesh():
+    br = get_bridge()
+    return meshlib.Mesh(br.shared) if br else None
+
+
+def session_user(m):
+    """Logged-in human for this machine's GUI, if the account still exists."""
+    s = bridge.read_json(Path(HOME) / "gui_session.json") or {}
+    username = s.get("username")
+    if username and m and m.get_user(username):
+        return username
+    return None
+
+
+def _set_session(username):
+    path = Path(HOME) / "gui_session.json"
+    if username is None:
+        path.unlink(missing_ok=True)
+    else:
+        bridge.atomic_write_json(path, {"username": username, "ts": bridge.utcnow()})
+
+
+def _public_user(u):
+    out = {"username": u["username"], "kind": u["kind"],
+           "display": u.get("display")}
+    if u["kind"] == "agent":
+        out["owners"] = u.get("owners") or []
+        out["settings"] = u.get("settings") or {}
+    return out
+
+
+def _msg_snippet(msg):
+    if not msg:
+        return None
+    return {"from": msg.get("from"), "ts": msg.get("ts"),
+            "body": (msg.get("body") or "")[:120],
+            "files": len(msg.get("files") or [])}
+
+
+def api_mesh_state():
+    m = get_mesh()
+    if m is None:
+        return {"available": False, "reason": "bridge not configured"}
+    if not m.exists():
+        return {"available": False, "reason": "mesh not initialized"}
+    user = session_user(m)
+    out = {"available": True, "user": user,
+           "users": {k: _public_user(v) for k, v in m.users().items()}}
+    if user:
+        chats = []
+        for meta in m.chats_for(user, include_archived=True):
+            chats.append({
+                "id": meta["id"], "name": meta["name"],
+                "owner": meta.get("owner"), "members": meta.get("members"),
+                "archived": bool(meta.get("archived")),
+                "created_by": meta.get("created_by"),
+                "last": _msg_snippet(meta.get("last")),
+                "unread": m.unread_count(meta["id"], user),
+            })
+        out["chats"] = chats
+    return out
+
+
+def api_mesh_init():
+    m = get_mesh()
+    if m is None:
+        return {"error": "Set up the bridge first (it provides the shared folder)"}
+    m.init()
+    created = m.seed_defaults()
+    return {"ok": True, "seeded": created}
+
+
+def api_mesh_signup(data):
+    m = get_mesh()
+    if m is None or not m.exists():
+        return {"error": "The mesh is not initialized yet"}
+    rec = m.create_human((data.get("username") or "").strip().lower(),
+                         (data.get("display") or "").strip(),
+                         data.get("password") or "")
+    _set_session(rec["username"])
+    return {"ok": True, "user": rec["username"]}
+
+
+def api_mesh_login(data):
+    m = get_mesh()
+    if m is None or not m.exists():
+        return {"error": "The mesh is not initialized yet"}
+    username = (data.get("username") or "").strip().lower()
+    if not m.verify_login(username, data.get("password") or ""):
+        return {"error": "Wrong username or password"}
+    _set_session(username)
+    return {"ok": True, "user": username}
+
+
+def api_mesh_logout():
+    _set_session(None)
+    return {"ok": True}
+
+
+def api_mesh_chat(params):
+    m = get_mesh()
+    if m is None or not m.exists():
+        return {"error": "The mesh is not initialized yet"}
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    chat_id = params.get("id", "")
+    meta = m.get_chat(chat_id)
+    if not meta:
+        return {"error": "No such chat"}
+    try:
+        tail = max(1, min(1000, int(params.get("tail", "200"))))
+    except ValueError:
+        tail = 200
+    msgs = m.messages(chat_id, tail=tail)
+    for msg in msgs:
+        msg["mine"] = msg.get("from") == user
+    return {"meta": meta, "messages": msgs, "me": user}
+
+
+def api_mesh_post(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    msg = m.post(data.get("chat_id") or "", user, data.get("body") or "",
+                 attachments=data.get("attachments") or [])
+    m.mark_read(data.get("chat_id"), user)
+    return {"ok": True, "id": msg["id"]}
+
+
+def api_mesh_create_chat(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.create_chat(data.get("name") or "", user,
+                         members=data.get("members") or [])
+    return {"ok": True, "chat": meta}
+
+
+def api_mesh_archive(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.archive_chat(data.get("chat_id") or "", user,
+                          archived=bool(data.get("archived", True)))
+    return {"ok": True, "archived": meta["archived"]}
+
+
+def api_mesh_read(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    m.mark_read(data.get("chat_id") or "", user)
+    return {"ok": True}
+
+
+def api_mesh_create_agent(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    rec = m.create_agent((data.get("username") or "").strip().lower(),
+                         (data.get("display") or "").strip(), owner=user)
+    return {"ok": True, "agent": _public_user(rec)}
+
+
+def api_mesh_agent(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    rec = m.update_agent(data.get("username") or "", user,
+                         data.get("patch") or {})
+    return {"ok": True, "agent": _public_user(rec)}
+
+
+def api_mesh_open_file(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    chat_id = data.get("chat_id") or ""
+    rel = (data.get("path") or "").replace("\\", "/")
+    files_root = (m.chat_dir(chat_id) / "files").resolve()
+    target = (m.chat_dir(chat_id) / rel).resolve()
+    if files_root != target and files_root not in target.parents:
+        return {"error": "That file is outside the chat's files folder"}
+    if not target.is_file():
+        return {"error": "File not found — it may still be syncing"}
+    open_path(target)
+    return {"ok": True}
+
+
+def api_mesh_pick_attach(data):
+    """Pick a file and return its path (mesh composer attach flow)."""
+    return api_pick_file()
+
+
 def api_shutdown():
     """Let a newer launch replace a running instance (single-instance UX:
     without this, a relaunch silently lands on a random port while the stale
@@ -521,6 +726,8 @@ GET_ROUTES = {
     "/api/livefeed": lambda params: api_livefeed(),
     "/api/doctor": lambda params: api_doctor(),
     "/api/remote_guide": lambda params: api_remote_guide(),
+    "/api/mesh/state": lambda params: api_mesh_state(),
+    "/api/mesh/chat": api_mesh_chat,
 }
 
 POST_ROUTES = {
@@ -537,6 +744,18 @@ POST_ROUTES = {
     "/api/open": api_open,
     "/api/open_attachment": api_open_attachment,
     "/api/shutdown": lambda data: api_shutdown(),
+    "/api/mesh/init": lambda data: api_mesh_init(),
+    "/api/mesh/signup": api_mesh_signup,
+    "/api/mesh/login": api_mesh_login,
+    "/api/mesh/logout": lambda data: api_mesh_logout(),
+    "/api/mesh/post": api_mesh_post,
+    "/api/mesh/create_chat": api_mesh_create_chat,
+    "/api/mesh/archive": api_mesh_archive,
+    "/api/mesh/read": api_mesh_read,
+    "/api/mesh/create_agent": api_mesh_create_agent,
+    "/api/mesh/agent": api_mesh_agent,
+    "/api/mesh/open_file": api_mesh_open_file,
+    "/api/mesh/pick_attach": api_mesh_pick_attach,
 }
 
 
@@ -566,6 +785,8 @@ class Handler(BaseHTTPRequestHandler):
         if route:
             try:
                 return self._json(route(params))
+            except meshlib.MeshError as e:
+                return self._json({"error": str(e)}, 400)
             except Exception as e:
                 return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
         return self._static(path)
@@ -581,6 +802,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad request body"}, 400)
         try:
             result = route(data)
+        except meshlib.MeshError as e:
+            return self._json({"error": str(e)}, 400)
         except Exception as e:
             return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
         status = 200 if "error" not in result else 400
