@@ -207,11 +207,6 @@ function renderChrome() {
   const s = App.state;
   if (!s) return;
   $("#paused-badge").hidden = !s.paused;
-  const [dot, text] = channelStateText(s);
-  $("#status-dot").className = "dot " + dot;
-  $("#status-text").textContent = text;
-  $("#status-versions").textContent =
-    `App v${s.gui_version} · Bridge v${s.bridge_version}`;
 }
 
 // theme (basic dark mode; persisted, defaults to the OS preference)
@@ -779,8 +774,10 @@ async function renderMeshChat(force) {
     ${meta.archived ? "" : `
     <div id="composer">
       <button id="mesh-attach-btn" title="Attach a file">📎</button>
-      <textarea id="mesh-body" placeholder="Message ${esc(meta.name)}…  (Ctrl+Enter to send, @ to tag)"></textarea>
-      <button class="primary" id="mesh-send-btn">Send</button>
+      <textarea id="mesh-body"></textarea>
+      <button class="primary send-icon" id="mesh-send-btn" title="Send (Ctrl+Enter)">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M3.4 20.4 20.85 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z" fill="currentColor"/></svg>
+      </button>
     </div>`}`;
 
   $("#content").classList.add("chat-mode");
@@ -1569,9 +1566,7 @@ async function refresh(rerender) {
   try {
     App.state = await api("/api/state");
   } catch {
-    $("#status-dot").className = "dot dot-red";
-    $("#status-text").textContent = "App not running — relaunch AgentBridge";
-    return;
+    return;  // server unreachable; next poll retries
   }
   renderChrome();
   if (rerender && App.page !== "setup") PAGES[App.page]();
