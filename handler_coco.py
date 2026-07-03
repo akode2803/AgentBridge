@@ -171,6 +171,7 @@ class FeedWriter:
         self.turns = 0
         self.activity = "Starting up…"
         self.recent = []
+        self.draft = ""            # the reply as it forms, streamed to the GUI
         self.started = self._now()
         self._last_write = 0.0
         try:
@@ -191,6 +192,11 @@ class FeedWriter:
         try:
             if obj.get("type") == "assistant":
                 self.turns += 1
+                for c in (obj.get("message") or {}).get("content") or []:
+                    if c.get("type") == "text" and c.get("text"):
+                        # keep the tail — the GUI shows the reply forming live
+                        self.draft = (self.draft + c["text"].strip()
+                                      + "\n\n")[-4000:]
             line = summarize_event(obj)
             if line:
                 self.activity = line
@@ -207,7 +213,8 @@ class FeedWriter:
         try:
             doc = {"state": state, "seq": self.seq, "started": self.started,
                    "updated": self._now(), "turns": self.turns,
-                   "activity": self.activity, "recent": self.recent}
+                   "activity": self.activity, "recent": self.recent,
+                   "draft": self.draft}
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.path)

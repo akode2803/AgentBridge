@@ -330,10 +330,11 @@ function attButton(f) {
 function typingBubble(s, entries, feed) {
   // Activity, merged into the chat: while the remote side works, its handler
   // livestreams progress into the shared folder and it shows up right here.
-  let label = null, sub = null;
+  let label = null, sub = null, draft = null;
   if (feed?.present && feed.state === "running") {
     const stale = feed.age_s != null && feed.age_s > 180;
-    label = `${dn(s.peer)} is working…`;
+    draft = (feed.draft || "").trim() || null;
+    label = draft ? `${dn(s.peer)} is writing…` : `${dn(s.peer)} is working…`;
     if (stale) label += ` (no updates for ${Math.round(feed.age_s / 60)} min)`;
     sub = feed.activity || "";
     if (feed.turns) sub += `${sub ? "  ·  " : ""}step ${feed.turns}`;
@@ -352,6 +353,7 @@ function typingBubble(s, entries, feed) {
       <div class="bubble typing">
         <div class="typing-row"><span class="tdot"></span><span class="tdot"></span>
           <span class="tdot"></span><span class="typing-label">${esc(label)}</span></div>
+        ${draft ? `<div class="typing-draft">${md(draft)}<span class="caret">▍</span></div>` : ""}
         ${sub ? `<div class="typing-sub">${esc(sub)}</div>` : ""}
       </div>
     </div>`;
@@ -366,13 +368,14 @@ async function renderMessages(force) {
   const typing = typingBubble(s, log.entries, feed);
   const key = JSON.stringify([log.entries.length, log.entries.at(-1)?.seq,
     log.entries.at(-1)?.from, inbound.seq, s.outbound_undelivered,
-    feed.state, feed.activity, feed.turns, !!typing]);
+    feed.state, feed.activity, feed.turns, (feed.draft || "").length, !!typing]);
   if (!force && key === App.logKey && App.page === "messages") return;
   App.logKey = key;
 
   const oldTr = $("#transcript");
   const nearBottom = !oldTr ||
     (oldTr.scrollHeight - oldTr.scrollTop - oldTr.clientHeight < 120);
+  const prevScrollTop = oldTr ? oldTr.scrollTop : null;
 
   const parts = [];
   let prevFrom = null, prevDay = null;
@@ -413,8 +416,9 @@ async function renderMessages(force) {
       <button id="attach-btn" title="Attach a file">📎</button>
       <textarea id="compose-body" placeholder="Message ${esc(dn(s.peer))}…  (Ctrl+Enter to send)"></textarea>
       <select id="compose-type" title="Message type">
-        <option>chat</option><option>task</option><option>result</option>
-        <option>control</option><option>ping</option>
+        <option value="chat">Chat</option><option value="task">Task</option>
+        <option value="result">Result</option><option value="control">Control</option>
+        <option value="ping">Ping</option>
       </select>
       <button class="primary" id="send-btn">Send</button>
     </div>`;
@@ -446,7 +450,6 @@ async function renderMessages(force) {
     if (e.key === "Enter" && e.ctrlKey) doSend();
   });
   $("#attach-btn").addEventListener("click", async () => {
-    toast("File picker opened — check your taskbar");
     const r = await api("/api/pick_file", {});
     if (r.error) toast(r.error, true);
     else if (r.path) { App.pendingAtt = r; renderPendingAtt(); }
@@ -467,6 +470,7 @@ async function renderMessages(force) {
 
   const tr = $("#transcript");
   if (nearBottom) tr.scrollTop = tr.scrollHeight;
+  else if (prevScrollTop != null) tr.scrollTop = prevScrollTop;  // don't yank the reader to the top
 }
 
 function renderPendingAtt() {
@@ -653,7 +657,6 @@ async function renderWizardStep() {
     $("#dest-input").addEventListener("input", (e) => { w.dest = e.target.value; });
     $("#dest-browse").addEventListener("click", async (e) => {
       e.preventDefault();
-      toast("Folder picker opened — check your taskbar");
       const r = await api("/api/pick_folder", {});
       if (r.path) { w.dest = r.path; $("#dest-input").value = r.path; }
     });
@@ -696,7 +699,6 @@ async function renderWizardStep() {
         ? `<span class="result-ok">✓ Folder is writable${w.validated.looks_synced ? " and looks synced" : ""}</span>` : ""}</p>
       ${wizardNav(true, true)}</div>`;
     $("#browse-btn").addEventListener("click", async () => {
-      toast("Folder picker opened — check your taskbar");
       const r = await api("/api/pick_folder", {});
       if (r.path) { $("#shared-input").value = r.path; }
     });

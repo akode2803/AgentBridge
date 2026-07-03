@@ -288,6 +288,12 @@ input[type=text], select, textarea {
   font-family: Consolas, monospace;
   max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.typing-draft {
+  margin-top: 8px; max-width: 560px; font-size: 13.5px; color: var(--text);
+}
+.typing-draft .caret {
+  color: var(--accent); animation: tblink 1s infinite; font-weight: 700;
+}
 .tdot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); opacity: .35;

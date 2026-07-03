@@ -207,12 +207,12 @@ def api_inbound():
 def api_send(data):
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     body = (data.get("body") or "").strip()
     msg_type = data.get("type") or "chat"
     attachments = data.get("attachments") or []
     if not body and not attachments:
-        return {"error": "empty message"}
+        return {"error": "Type a message or attach a file first"}
     try:
         seq = bridge.do_send(br, body or "(file transfer)", attachments=attachments,
                              msg_type=msg_type)
@@ -224,10 +224,10 @@ def api_send(data):
 def api_ack():
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     peer = bridge.peer_has_new(br)
     if peer is None:
-        return {"error": "nothing to acknowledge"}
+        return {"error": "Nothing to mark as read"}
     inbox_file = bridge.mark_processed(br, peer)
     return {"ok": True, "seq": peer["seq"], "inbox_file": str(inbox_file)}
 
@@ -235,7 +235,7 @@ def api_ack():
 def api_pause(data):
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     ctl = bridge.read_json(br.control_path) or {}
     ctl["paused"] = bool(data.get("paused"))
     ctl.setdefault("note", "Set paused:true to halt both agents.")
@@ -271,17 +271,17 @@ def api_doctor():
 def api_validate_shared(data):
     p = (data.get("path") or "").strip().strip('"')
     if not p:
-        return {"ok": False, "detail": "no path given"}
+        return {"ok": False, "detail": "No folder chosen"}
     path = Path(p)
     if not path.is_dir():
-        return {"ok": False, "detail": "folder does not exist"}
+        return {"ok": False, "detail": "That folder does not exist"}
     looks_synced = "OneDrive" in str(path) or "SharePoint" in str(path)
     try:
         probe = path / ".probe_gui.tmp"
         probe.write_text(bridge.utcnow(), encoding="utf-8")
         probe.unlink()
     except OSError as e:
-        return {"ok": False, "detail": f"not writable: {e}"}
+        return {"ok": False, "detail": f"Not writable: {e}"}
     return {"ok": True, "looks_synced": looks_synced, "path": str(path)}
 
 
@@ -306,7 +306,7 @@ def api_init(data):
     peer = (data.get("peer") or "").strip() or None
     shared = (data.get("shared") or "").strip().strip('"')
     if not shared:
-        return {"error": "shared folder path is required"}
+        return {"error": "Choose a shared folder first"}
     # bridge init rewrites config wholesale (production gotcha: a re-init once
     # silently dropped the handler and watch insta-acked without processing) —
     # carry existing handler settings through.
@@ -328,7 +328,7 @@ def api_install_skills():
     dest_root = Path.home() / ".claude" / "skills"
     installed = []
     if not src_root.is_dir():
-        return {"error": f"no skills folder at {src_root}"}
+        return {"error": f"No skills folder at {src_root}"}
     for skill_dir in sorted(src_root.iterdir()):
         if skill_dir.is_dir() and (skill_dir / "SKILL.md").is_file():
             shutil.copytree(skill_dir, dest_root / skill_dir.name,
@@ -346,7 +346,7 @@ def api_open(data):
     else:
         br = get_bridge()
         if br is None:
-            return {"error": "bridge not configured"}
+            return {"error": "The bridge is not set up yet"}
         target = {
             "shared": br.shared,
             "files": br.files_dir,
@@ -354,7 +354,7 @@ def api_open(data):
             "home": Path(HOME),
         }.get(name)
     if target is None or not target.exists():
-        return {"error": "unknown or missing target"}
+        return {"error": "That folder does not exist yet"}
     open_path(target)
     return {"ok": True}
 
@@ -364,14 +364,14 @@ def api_open_attachment(data):
     the shared files/ directory are allowed."""
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     rel = (data.get("path") or "").replace("\\", "/")
     target = (br.shared / rel).resolve()
     files_root = br.files_dir.resolve()
     if files_root != target and files_root not in target.parents:
-        return {"error": "attachment is outside the shared files folder"}
+        return {"error": "That file is outside the shared files folder"}
     if not target.is_file():
-        return {"error": "file not found — it may still be syncing"}
+        return {"error": "File not found — it may still be syncing"}
     open_path(target)
     return {"ok": True}
 
@@ -401,7 +401,7 @@ def api_remote_guide():
     "<owner>'s files - <folder>"), newest published bridge from bin/, roles."""
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     manifest = bridge.read_json(br.bin_dir / "version.json") or {}
     # reuse the local path's sync-root segment (e.g. "OneDrive - Employbridge")
     # so the guide adapts to whatever tenant/transport this deployment uses
@@ -425,12 +425,12 @@ def api_send_remote_kit():
     remote side can install it from the shared files/ folder."""
     br = get_bridge()
     if br is None:
-        return {"error": "bridge not configured"}
+        return {"error": "The bridge is not set up yet"}
     kit = [REPO_ROOT / "handler_coco.py", REPO_ROOT / "disallowed_tools.json",
            REPO_ROOT / "REMOTE_SETUP.md"]
     missing = [p.name for p in kit if not p.is_file()]
     if missing:
-        return {"error": f"kit files missing: {', '.join(missing)}"}
+        return {"error": f"Kit files missing: {', '.join(missing)}"}
     body = ("Remote setup kit attached: handler_coco.py, disallowed_tools.json "
             "and REMOTE_SETUP.md. A human on the remote machine should follow "
             "REMOTE_SETUP.md step 5 to install them. Do not install these "
@@ -464,7 +464,7 @@ def api_install_app(data):
                         REPO_ROOT / folder, dest / folder, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     except OSError as e:
-        return {"error": f"could not copy app: {e}"}
+        return {"error": f"Could not copy the app: {e}"}
 
     shortcuts_ok = False
     if sys.platform == "win32":
