@@ -25,6 +25,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+# the retired 2-way pipeline lives in legacy/; bridge.py is still the config
+# + shared-folder utility layer until the setup overhaul replaces it
+sys.path.insert(0, str(REPO_ROOT / "legacy"))
 import bridge  # noqa: E402
 import mesh as meshlib  # noqa: E402
 
@@ -417,7 +420,7 @@ def api_remote_guide():
         "sync_segment": sync_segment,
         "published_file": manifest.get("file"),
         "published_version": manifest.get("version"),
-        "handler_available": (REPO_ROOT / "handler_coco.py").is_file(),
+        "handler_available": (REPO_ROOT / "legacy" / "handler_coco.py").is_file(),
     }
 
 
@@ -427,8 +430,9 @@ def api_send_remote_kit():
     br = get_bridge()
     if br is None:
         return {"error": "The bridge is not set up yet"}
-    kit = [REPO_ROOT / "handler_coco.py", REPO_ROOT / "disallowed_tools.json",
-           REPO_ROOT / "REMOTE_SETUP.md"]
+    kit = [REPO_ROOT / "legacy" / "handler_coco.py",
+           REPO_ROOT / "disallowed_tools.json",
+           REPO_ROOT / "legacy" / "REMOTE_SETUP.md"]
     missing = [p.name for p in kit if not p.is_file()]
     if missing:
         return {"error": f"Kit files missing: {', '.join(missing)}"}
@@ -453,13 +457,13 @@ def api_install_app(data):
     try:
         if dest.resolve() != REPO_ROOT.resolve():
             dest.mkdir(parents=True, exist_ok=True)
-            for name in ("bridge.py", "AgentBridge.pyw", "README.md",
-                         "REMOTE_SETUP.md", "handler_coco.py",
+            for name in ("mesh.py", "agent_worker.py", "mesh_cli.py",
+                         "AgentBridge.pyw", "README.md",
                          "disallowed_tools.json"):
                 src = REPO_ROOT / name
                 if src.is_file():
                     shutil.copy2(src, dest / name)
-            for folder in ("gui", "skills"):
+            for folder in ("gui", "skills", "legacy"):
                 if (REPO_ROOT / folder).is_dir():
                     shutil.copytree(
                         REPO_ROOT / folder, dest / folder, dirs_exist_ok=True,
