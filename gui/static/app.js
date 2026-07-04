@@ -378,36 +378,92 @@ function renderNewChatSidebar() {
     .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
   const humans = Object.values(ms.users)
     .filter((u) => u.kind === "human" && u.username !== ms.user);
-  const pick = (u) => `
-    <label class="row" style="padding:3px 0">
-      <input type="checkbox" class="nc-member" value="${esc(u.username)}">
-      ${esc(u.display)} <span class="hint">@${esc(u.username)}</span>
-    </label>`;
+
+  if (Mesh.newMode === "group") {
+    const pick = (u) => `
+      <label class="row" style="padding:3px 0">
+        <input type="checkbox" class="nc-member" value="${esc(u.username)}">
+        ${esc(u.display)} <span class="hint">@${esc(u.username)}</span>
+      </label>`;
+    const html = `
+      <div style="padding:12px 10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <button class="icon-btn" id="nc-back">${ICONS.back}</button>
+          <b>New group</b>
+        </div>
+        <input type="text" id="new-chat-name" placeholder="Group name" style="width:100%">
+        <p class="hint" style="margin:12px 0 4px">Your agents:</p>
+        ${myAgents.map(pick).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
+        ${humans.length ? `<p class="hint" style="margin:10px 0 4px">Members:</p>
+          ${humans.map(pick).join("")}` : ""}
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="create-chat-btn">Create</button>
+        </div>
+      </div>`;
+    if (!setSide(html)) return;
+    $("#nc-back").addEventListener("click", () => {
+      Mesh.newMode = "dm";
+      $("#side-chats").dataset.key = "";
+      renderNewChatSidebar();
+    });
+    $("#create-chat-btn").addEventListener("click", async () => {
+      const members = [...document.querySelectorAll(".nc-member:checked")].map((c) => c.value);
+      const r = await api("/api/mesh/create_chat",
+        { name: $("#new-chat-name").value, members });
+      if (r.error) { toast(r.error, true); return; }
+      location.hash = `#/chats/${r.chat.id}`;
+    });
+    $("#new-chat-name").focus();
+    return;
+  }
+
+  // default: WhatsApp-style — pick a person for a direct chat, or New group
+  const person = (u) => `
+    <button class="mem-add nc-dm" data-user="${esc(u.username)}">
+      <span class="mem-avatar" style="background:var(--accent)">${esc((u.display[0] || "?").toUpperCase())}</span>
+      <span style="min-width:0">
+        <div class="mem-name">${esc(u.display)}
+          ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+        <div class="mem-sub">@${esc(u.username)}</div>
+      </span>
+    </button>`;
+  const dmables = [...myAgents, ...humans];
   const html = `
     <div style="padding:12px 10px">
-      <div style="font-weight:600;margin-bottom:10px">New chat</div>
-      <input type="text" id="new-chat-name" placeholder="Chat name" style="width:100%">
-      <p class="hint" style="margin:12px 0 4px">Your agents:</p>
-      ${myAgents.map(pick).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
-      ${humans.length ? `<p class="hint" style="margin:10px 0 4px">Members:</p>
-        ${humans.map(pick).join("")}` : ""}
-      <p class="hint" style="margin:10px 0 4px">You join as the owner; anyone
-      else can be added later from the chat info page.</p>
-      <div class="row" style="margin-top:12px">
-        <button class="primary" id="create-chat-btn">Create</button>
-        <button id="nc-cancel">Cancel</button>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <button class="icon-btn" id="nc-close">${ICONS.back}</button>
+        <b>New chat</b>
       </div>
+      <div class="search-box" style="margin-bottom:8px">${ICONS.search}
+        <input type="text" id="nc-q" placeholder="Search" autocomplete="off"></div>
+      <button class="mem-add" id="nc-group">
+        <span class="mem-avatar">${ICONS.addUser}</span>
+        <span style="min-width:0"><div class="mem-name">New group</div></span>
+      </button>
+      ${dmables.map(person).join("") ||
+        `<div class="empty" style="padding:20px 0">No one else yet</div>`}
     </div>`;
   if (!setSide(html)) return;
-  $("#create-chat-btn").addEventListener("click", async () => {
-    const members = [...document.querySelectorAll(".nc-member:checked")].map((c) => c.value);
-    const r = await api("/api/mesh/create_chat",
-      { name: $("#new-chat-name").value, members });
-    if (r.error) { toast(r.error, true); return; }
-    location.hash = `#/chats/${r.chat.id}`;
+  $("#nc-close").addEventListener("click", () => { location.hash = "#/chats"; });
+  $("#nc-group").addEventListener("click", () => {
+    Mesh.newMode = "group";
+    $("#side-chats").dataset.key = "";
+    renderNewChatSidebar();
   });
-  $("#nc-cancel").addEventListener("click", () => { location.hash = "#/chats"; });
-  $("#new-chat-name").focus();
+  $("#nc-q").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#side-chats .nc-dm").forEach((b) => {
+      b.hidden = !!q && !b.textContent.toLowerCase().includes(q);
+    });
+  });
+  document.querySelectorAll("#side-chats .nc-dm").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/mesh/create_dm", { username: b.dataset.user });
+      if (r.error) { toast(r.error, true); return; }
+      location.hash = `#/chats/${r.chat.id}`;
+    });
+  });
+  $("#nc-q").focus();
 }
 
 function renderChatListSidebar() {
@@ -422,9 +478,9 @@ function renderChatListSidebar() {
   const listed = Mesh.showArchived ? archived : chats.filter((c) => !c.archived);
   const row = (c) => `
     <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
-      <div class="chat-avatar ${c.archived ? "arch" : ""}">${esc((c.name[0] || "#").toUpperCase())}</div>
+      <div class="chat-avatar ${c.archived ? "arch" : ""}">${esc((chatDisplay(c, ms.user)[0] || "#").toUpperCase())}</div>
       <div class="chat-mid">
-        <div class="chat-name">${esc(c.name)}</div>
+        <div class="chat-name">${esc(chatDisplay(c, ms.user))}</div>
         <div class="chat-last">${!c.last ? "No messages yet"
           : c.last.kind === "info" ? esc(c.last.body || "")
           : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file")}</div>
@@ -486,6 +542,15 @@ function meshDn(username) {
   return u?.display || dn(username);
 }
 
+// DMs display as the OTHER member, groups as their name
+function dmOther(meta, viewer) {
+  return (meta.members || []).find((u) => u !== viewer) ||
+    (meta.members || [])[0] || "";
+}
+function chatDisplay(meta, viewer) {
+  return meta.kind === "dm" ? meshDn(dmOther(meta, viewer)) : meta.name;
+}
+
 function meshDraft(chatId) {
   const d = Mesh.drafts[chatId] || (Mesh.drafts[chatId] = { body: "", atts: [] });
   if (!d.atts) d.atts = d.att ? [d.att] : [];   // pre-multifile drafts
@@ -523,7 +588,16 @@ async function renderChats(force) {
   if (Mesh.chatId) {
     await renderMeshChat(force);
     const pane = $("#details-pane");
-    if (Mesh.detailsView) { pane.hidden = false; await renderChatDetails(); }
+    if (Mesh.detailsView) {
+      const opening = pane.hidden;
+      pane.hidden = false;
+      if (opening) {   // slide in only when the pane first opens
+        pane.classList.remove("slide");
+        void pane.offsetWidth;
+        pane.classList.add("slide");
+      }
+      await renderChatDetails();
+    }
     else { pane.hidden = true; pane.innerHTML = ""; Mesh.detailsKey = ""; }
     return;
   }
@@ -575,7 +649,6 @@ function renderMeshAuth() {
     };
     const r = await api(mode === "signup" ? "/api/mesh/signup" : "/api/mesh/login", payload);
     if (r.error) { toast(r.error, true); return; }
-    toast(`Welcome, ${payload.username}!`);
     renderChats(true);
   };
   $("#auth-go").addEventListener("click", go);
@@ -633,9 +706,11 @@ async function renderMeshChat(force) {
     const showSender = !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
     const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
+    // sender avatar only on the first message of a consecutive block
     parts.push(`
       <div class="msg ${msg.mine ? "mine" : ""}" data-mid="${esc(msg.id || "")}">
-        ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
+        ${showSender ? `<span class="msg-avatar">${esc((meshDn(msg.from)[0] || "?").toUpperCase())}</span>
+          <div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
         <div class="bubble">${md(msg.body || "")}${files}</div>
         <div class="meta">${esc(timeOnly(msg.ts))}</div>
       </div>`);
@@ -687,19 +762,22 @@ async function renderMeshChat(force) {
     .map(meshDn).concat(isMember ? ["You"] : []).join(", ");
 
   const isOwner = meta.owner === ms.user;
+  const isDm = meta.kind === "dm";
+  const title = chatDisplay(meta, ms.user);
   $("#content").innerHTML = `
     <div class="chat-top" id="chat-top" title="Open chat info">
       <button class="chat-back" id="chat-back">${ICONS.back}</button>
+      <span class="chat-avatar" style="width:36px;height:36px;font-size:15px;flex:none">${esc((title[0] || "#").toUpperCase())}</span>
       <div class="chat-title-btn" style="min-width:0">
-        <div class="chat-head-name">${esc(meta.name)}
+        <div class="chat-head-name">${esc(title)}
           ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
-        <div class="chat-head-sub">${esc(memberLine)}</div>
+        ${isDm ? "" : `<div class="chat-head-sub">${esc(memberLine)}</div>`}
       </div>
       <span class="spacer"></span>
       <button class="icon-btn" id="chat-more">${ICONS.more}</button>
       <div class="menu" id="chat-menu" hidden>
-        <button data-act="info">${ICONS.info} Chat info</button>
-        ${isMember ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
+        <button data-act="info">${ICONS.info} ${isDm ? "Chat info" : "Group info"}</button>
+        ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
         ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
         <div class="menu-sep"></div>
@@ -762,7 +840,6 @@ async function renderMeshChat(force) {
         if (r.error) { toast(r.error, true); return; }
         Mesh.state.paused = r.paused;
         renderChrome();
-        toast(r.paused ? "All agents standing down" : "Agents resumed");
         Mesh.structKey = ""; renderChats(true);
       }
     });
@@ -961,13 +1038,14 @@ async function renderChatDetails() {
   // knock dropdowns and toggles out from under the user
   const dKey = JSON.stringify([meta, media.length, ms.paused,
     myAgentsHere.map((a) => a.settings), !!Mesh.searchView,
-    !!Mesh.mediaView, Mesh.mediaTab]);
+    !!Mesh.mediaView, Mesh.mediaTab, !!Mesh.agentsView]);
   if (dKey === Mesh.detailsKey && App.page === "chats") return;
   Mesh.detailsKey = dKey;
 
-  // search and the media browser slide in over chat info, same pane
+  // search / media browser / agents page slide in over chat info, same pane
   if (Mesh.searchView) return renderChatSearch(data);
   if (Mesh.mediaView) return renderChatMedia(data, media);
+  if (Mesh.agentsView) return renderChatAgents(myAgentsHere);
 
   const isMember = (meta.members || []).includes(ms.user);
   const memberRow = (u) => {
@@ -986,49 +1064,52 @@ async function renderChatDetails() {
       </div>`;
   };
 
+  const isDm = meta.kind === "dm";
+  const title = chatDisplay(meta, ms.user);
+  const noun = isDm ? "chat" : "group";
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <span class="pane-title">Chat info</span>
+      <span class="pane-title">${isDm ? "Chat info" : "Group info"}</span>
       <button class="icon-btn" id="cd-close">${ICONS.close}</button>
     </div>
     <div class="ci-identity">
-      <div class="ci-avatar">${esc((meta.name[0] || "#").toUpperCase())}</div>
-      <div class="ci-name">${esc(meta.name)}
+      <div class="ci-avatar">${esc((title[0] || "#").toUpperCase())}</div>
+      <div class="ci-name">${esc(title)}
+        ${!isDm && isOwner ? `<button class="icon-btn ci-rename" id="ci-rename">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>` : ""}
         ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
-      <div class="ci-sub">Chat · ${(meta.members || []).length} members</div>
+      <div class="ci-sub">${isDm ? "@" + esc(dmOther(meta, ms.user))
+        : `Group · ${(meta.members || []).length} members`}</div>
       <div class="ci-actions">
-        <button class="ci-act" id="ci-add">
-          <span class="ci-act-circle">${ICONS.addUser}</span>Add</button>
+        ${isDm ? "" : `<button class="ci-act" id="ci-add">
+          <span class="ci-act-circle">${ICONS.addUser}</span>Add</button>`}
         <button class="ci-act" id="ci-search">
           <span class="ci-act-circle">${ICONS.search}</span>Search</button>
       </div>
     </div>
+    ${isDm ? "" : `
     <div class="card" id="ci-desc-wrap" style="text-align:center">
       ${meta.description ? `<div class="ci-desc">${esc(meta.description)}</div>` : ""}
       ${isOwner ? `<button class="ci-desc-btn" id="ci-desc-edit">
-        ${meta.description ? "Edit description" : "Add chat description"}</button>`
+        ${meta.description ? "Edit description" : "Add group description"}</button>`
         : (meta.description ? "" : `<div class="hint">No description</div>`)}
-    </div>
-    <button class="card media-sec" id="media-sec">
-      <div class="mem-head" style="margin-bottom:${media.length ? 8 : 0}px">
-        <span>Media and files</span><span class="hint">${media.length}</span>
-      </div>
+    </div>`}
+    <div class="card" style="padding-top:8px;padding-bottom:10px">
+      <button class="sec-head" id="media-sec">
+        <span>Media and files</span><span class="sec-count">${media.length}</span>
+      </button>
       ${media.length ? `<div class="media-strip">
-        ${media.slice(-6).reverse().map((f) => mediaThumb(chatId, f)).join("")}
+        ${media.slice(-6).reverse().map((f) => `
+          <button class="media-tile-btn cd-file" data-path="${esc(f.path)}">
+            ${mediaThumb(chatId, f)}</button>`).join("")}
       </div>` : ""}
-    </button>
+    </div>
     ${myAgentsHere.length ? `
-    <div class="card">
-      <h2>Your agents in this chat</h2>
-      <dl class="kv" style="grid-template-columns:minmax(90px,130px) 1fr">
-        ${myAgentsHere.map((a) => {
-          const current = ((a.settings || {}).rules || {})[chatId] || "";
-          return `<dt>${esc(a.display)}</dt>
-            <dd><div class="csel-slot cd-rule" data-agent="${esc(a.username)}"
-                     data-value="${esc(current)}" data-def="${esc((a.settings || {}).default_rule || "tagged")}"></div></dd>`;
-        }).join("")}
-      </dl>
-      <p class="hint" style="margin-bottom:0">Rule changes apply from the agent's next check.</p>
+    <div class="card" style="padding-top:8px;padding-bottom:8px">
+      <button class="sec-head" id="agents-sec">
+        <span>Your agents in this ${noun}</span><span class="sec-count">${myAgentsHere.length}</span>
+      </button>
     </div>` : ""}
     <div class="card">
       <h2>Emergency stand-down</h2>
@@ -1043,6 +1124,7 @@ async function renderChatDetails() {
       <p class="hint" style="margin-bottom:0">Any human can flip this. Pending
       requests get one consolidated reply per chat after resuming.</p>
     </div>
+    ${isDm ? "" : `
     <div class="card">
       <div class="mem-head">
         <span>${(meta.members || []).length} members</span>
@@ -1053,7 +1135,7 @@ async function renderChatDetails() {
         <span style="min-width:0"><div class="mem-name">Add member</div></span>
       </button>` : ""}
       ${(meta.members || []).map(memberRow).join("")}
-    </div>
+    </div>`}
     <div class="card">
       <h2>Connection</h2>
       <dl class="kv">
@@ -1064,14 +1146,14 @@ async function renderChatDetails() {
     </div>
     <div class="card danger-card">
       ${isOwner ? `<button class="danger-row neutral" id="dg-archive">
-        ${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
-      ${isMember && !isOwner ? `<button class="danger-row" id="dg-exit">
-        ${ICONS.exit} Exit chat</button>` : ""}
+        ${ICONS.archive} ${meta.archived ? `Unarchive ${noun}` : `Archive ${noun}`}</button>` : ""}
+      ${isMember && !isOwner && !isDm ? `<button class="danger-row" id="dg-exit">
+        ${ICONS.exit} Exit group</button>` : ""}
       ${isOwner ? `<button class="danger-row" id="dg-delete">
-        ${ICONS.trash} Delete chat</button>` : ""}
+        ${ICONS.trash} Delete ${noun}</button>` : ""}
     </div>
-    <div class="ci-footer">Chat created by ${esc(meshDn(meta.created_by))},
-      ${esc(fmtTime(meta.created))}</div>`;
+    <div class="ci-footer">${isDm ? "Direct chat since" : "Group created by " +
+      esc(meshDn(meta.created_by)) + ","} ${esc(fmtTime(meta.created))}</div>`;
 
   $("#cd-close").addEventListener("click", () => { location.hash = `#/chats/${chatId}`; });
   $("#ci-search").addEventListener("click", () => {
@@ -1079,21 +1161,60 @@ async function renderChatDetails() {
     Mesh.detailsKey = "";
     renderChatDetails();
   });
-  $("#ci-add").addEventListener("click", () => showAddMembers(chatId));
+  const ciAdd = $("#ci-add");
+  if (ciAdd) ciAdd.addEventListener("click", () => showAddMembers(chatId));
   const add2 = $("#ci-add2");
   if (add2) add2.addEventListener("click", () => showAddMembers(chatId));
-  $("#mem-search").addEventListener("click", () => showSearchMembers(chatId));
+  const memSearch = $("#mem-search");
+  if (memSearch) memSearch.addEventListener("click", () => showSearchMembers(chatId));
   $("#media-sec").addEventListener("click", () => {
     Mesh.mediaView = true;
     Mesh.mediaTab = Mesh.mediaTab || "media";
     Mesh.detailsKey = "";
     renderChatDetails();
   });
+  const agentsSec = $("#agents-sec");
+  if (agentsSec) agentsSec.addEventListener("click", () => {
+    Mesh.agentsView = true;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  // thumbnails open their file directly (the header opens the browser)
+  document.querySelectorAll("#details-pane .media-tile-btn").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/mesh/open_file", { chat_id: chatId, path: b.dataset.path });
+      if (r.error) toast(r.error, true);
+    });
+  });
+  const rename = $("#ci-rename");
+  if (rename) rename.addEventListener("click", () => {
+    const id2 = $("#details-pane .ci-identity");
+    id2.innerHTML = `
+      <input type="text" id="ci-name-input" maxlength="60" value="${esc(meta.name)}"
+             style="width:80%;text-align:center;font-weight:600">
+      <div class="row" style="justify-content:center;margin-top:8px">
+        <button class="primary" id="ci-name-save">Save</button>
+        <button id="ci-name-cancel">Cancel</button>
+      </div>`;
+    $("#ci-name-input").focus();
+    $("#ci-name-cancel").addEventListener("click", () => {
+      Mesh.detailsKey = "";
+      renderChatDetails();
+    });
+    $("#ci-name-save").addEventListener("click", async () => {
+      const r = await api("/api/mesh/rename",
+        { chat_id: chatId, name: $("#ci-name-input").value });
+      if (r.error) { toast(r.error, true); return; }
+      Mesh.detailsKey = "";
+      Mesh.structKey = "";
+      renderChats(true);
+    });
+  });
   const descEdit = $("#ci-desc-edit");
   if (descEdit) descEdit.addEventListener("click", () => {
     $("#ci-desc-wrap").innerHTML = `
       <input type="text" id="ci-desc-input" maxlength="300" style="width:100%"
-             placeholder="What is this chat for?" value="${esc(meta.description || "")}">
+             placeholder="What is this group for?" value="${esc(meta.description || "")}">
       <div class="row" style="justify-content:center;margin-top:8px">
         <button class="primary" id="ci-desc-save">Save</button>
         <button id="ci-desc-cancel">Cancel</button>
@@ -1107,7 +1228,6 @@ async function renderChatDetails() {
       const r = await api("/api/mesh/set_description",
         { chat_id: chatId, description: $("#ci-desc-input").value });
       if (r.error) { toast(r.error, true); return; }
-      toast("Description saved");
       Mesh.detailsKey = "";
       renderChatDetails();
     });
@@ -1127,10 +1247,9 @@ async function renderChatDetails() {
         const r = await api("/api/mesh/remove_member",
           { chat_id: chatId, username: b.dataset.user });
         if (r.error) { toast(r.error, true); return; }
-        toast(`@${b.dataset.user} removed from the chat`);
         Mesh.detailsKey = "";
         Mesh.structKey = "";
-        renderChats(true);
+        renderChats(true);   // the membership event pill is the feedback
       });
       document.addEventListener("mousedown", function away(ev) {
         if (!menu.contains(ev.target)) {
@@ -1144,25 +1263,30 @@ async function renderChatDetails() {
   if (dgArch) dgArch.addEventListener("click", async () => {
     const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
     if (r.error) { toast(r.error, true); return; }
-    toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
     location.hash = "#/chats";
   });
   const dgExit = $("#dg-exit");
   if (dgExit) dgExit.addEventListener("click", async () => {
-    if (!confirm(`Exit "${meta.name}"? You can be re-added by a member.`)) return;
+    if (!await confirmModal({
+      title: `Exit "${esc(title)}"?`,
+      body: "You can be added back by a member.",
+      action: "Exit",
+    })) return;
     const r = await api("/api/mesh/remove_member",
       { chat_id: chatId, username: ms.user });
     if (r.error) { toast(r.error, true); return; }
-    toast("You left the chat");
     location.hash = "#/chats";
   });
   const dgDel = $("#dg-delete");
   if (dgDel) dgDel.addEventListener("click", async () => {
-    if (!confirm(`Delete "${meta.name}" permanently, for everyone? ` +
-        "Messages and files are gone for good — archiving keeps them.")) return;
+    if (!await confirmModal({
+      title: `Delete ${isDm ? "chat with" : ""} ${esc(title)}?`,
+      body: "Messages and files will be removed for everyone. " +
+            "Archiving keeps them instead.",
+      action: "Delete",
+    })) return;
     const r = await api("/api/mesh/delete_chat", { chat_id: chatId });
     if (r.error) { toast(r.error, true); return; }
-    toast("Chat deleted");
     location.hash = "#/chats";
   });
   $("#cd-pause").addEventListener("change", async (e) => {
@@ -1170,19 +1294,17 @@ async function renderChatDetails() {
     if (r.error) { toast(r.error, true); return; }
     Mesh.state.paused = r.paused;
     renderChrome();
-    toast(r.paused ? "All agents standing down" : "Agents resumed");
   });
   mountCsels($("#details-pane"), (slot) => {
     const def = RULE_LABELS[slot.dataset.def] || "";
     return [{ v: "", label: `Default — ${def.toLowerCase()}` },
       ...Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }))];
   }, async (slot, v) => {
-    if (!v) { toast("Kept the agent's default rule"); return; }
+    if (!v) return;   // keeping the default — nothing to write
     const r = await api("/api/mesh/agent", {
       username: slot.dataset.agent, patch: { rules: { [chatId]: v } },
     });
     if (r.error) toast(r.error, true);
-    else toast(`@${slot.dataset.agent}: ${RULE_LABELS[v].toLowerCase()} here`);
   });
   document.querySelectorAll(".cd-file").forEach((b) => {
     b.addEventListener("click", async () => {
@@ -1298,6 +1420,46 @@ function renderChatMedia(data, media) {
   });
 }
 
+// per-chat agent rules — its own page off chat info (a full permissions
+// overhaul comes later)
+function renderChatAgents(agents) {
+  const chatId = Mesh.chatId;
+  $("#details-pane").innerHTML = `
+    <div class="pane-head">
+      <button class="icon-btn" id="ca-back">${ICONS.back}</button>
+      <span class="pane-title">Your agents</span>
+    </div>
+    <div class="card" style="border-bottom:none">
+      <dl class="kv" style="grid-template-columns:minmax(90px,130px) 1fr">
+        ${agents.map((a) => {
+          const current = ((a.settings || {}).rules || {})[chatId] || "";
+          return `<dt>${esc(a.display)}</dt>
+            <dd><div class="csel-slot cd-rule" data-agent="${esc(a.username)}"
+                     data-value="${esc(current)}" data-def="${esc((a.settings || {}).default_rule || "tagged")}"></div></dd>`;
+        }).join("")}
+      </dl>
+      <p class="hint" style="margin-bottom:0">Rules apply from the agent's
+      next check and only in this chat. Defaults live in Settings → My
+      agents.</p>
+    </div>`;
+  $("#ca-back").addEventListener("click", () => {
+    Mesh.agentsView = false;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  mountCsels($("#details-pane"), (slot) => {
+    const def = RULE_LABELS[slot.dataset.def] || "";
+    return [{ v: "", label: `Default — ${def.toLowerCase()}` },
+      ...Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }))];
+  }, async (slot, v) => {
+    if (!v) return;   // keeping the default — nothing to write
+    const r = await api("/api/mesh/agent", {
+      username: slot.dataset.agent, patch: { rules: { [chatId]: v } },
+    });
+    if (r.error) toast(r.error, true);
+  });
+}
+
 // in-chat message search (WhatsApp-style results: date, sender, snippet)
 function renderChatSearch(data) {
   const chatId = Mesh.chatId;
@@ -1383,6 +1545,27 @@ function closeModal() {
   if (m) m.remove();
 }
 
+// WhatsApp-style confirmation dialog (replaces browser confirm())
+function confirmModal({ title, body, action = "Delete" }) {
+  return new Promise((resolve) => {
+    const box = openModal(`
+      <div class="cf-title">${title}</div>
+      <div class="cf-body">${esc(body)}</div>
+      <div class="cf-actions">
+        <button class="cf-cancel" id="cf-cancel">Cancel</button>
+        <button class="cf-go" id="cf-go">${esc(action)}</button>
+      </div>`);
+    box.classList.add("confirm");
+    box.parentElement.classList.add("confirm-scrim");
+    box.querySelector("#cf-cancel").addEventListener("click", () => {
+      closeModal(); resolve(false);
+    });
+    box.querySelector("#cf-go").addEventListener("click", () => {
+      closeModal(); resolve(true);
+    });
+  });
+}
+
 function bindModalFilter(box) {
   const q = box.querySelector(".modal-q");
   if (!q) return;
@@ -1454,8 +1637,7 @@ async function showAddMembers(chatId) {
       const r = await api("/api/mesh/add_member", { chat_id: chatId, username: u });
       if (r.error) { toast(r.error, true); go.disabled = false; return; }
     }
-    toast(picked.length > 1 ? `${picked.length} members added` : `@${picked[0]} added`);
-    closeModal();
+    closeModal();   // the membership event pill is the feedback
     Mesh.structKey = "";
     Mesh.detailsKey = "";
     renderChats(true);
@@ -2037,7 +2219,12 @@ function route() {
     }
     if (details !== Mesh.detailsView) {
       Mesh.detailsKey = "";
-      if (!details) { Mesh.searchView = false; Mesh.mediaView = false; Mesh.searchQ = ""; }
+      if (!details) {
+        Mesh.searchView = false;
+        Mesh.mediaView = false;
+        Mesh.agentsView = false;
+        Mesh.searchQ = "";
+      }
     }
     Mesh.chatId = chatId;
     Mesh.detailsView = details;
@@ -2046,8 +2233,10 @@ function route() {
     Mesh.detailsView = false;
     Mesh.searchView = false;
     Mesh.mediaView = false;
+    Mesh.agentsView = false;
     Mesh.structKey = "";
   }
+  if (page !== "new") Mesh.newMode = "dm";
   $("#side-new").hidden = page !== "chats";
   Settings.section = page === "settings" ? (sub || null) : null;
   $("#content").classList.toggle("chat-mode",

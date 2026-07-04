@@ -106,7 +106,7 @@ body { display: flex; flex-direction: column; }
 .icon-btn:hover { background: var(--bg-alt); color: var(--text); }
 .icon-btn.active { color: var(--accent); background: var(--accent-soft); }
 
-#shell { display: flex; flex: 1; min-height: 0; }
+#shell { display: flex; flex: 1; min-height: 0; overflow-x: hidden; }
 
 #navrail {
   width: 300px; flex: none; position: relative;
@@ -348,6 +348,15 @@ input[type=text], select, textarea {
 
 .msg { max-width: 74%; }
 .msg.mine { align-self: flex-end; }
+.msg:not(.mine) { padding-left: 38px; position: relative; }
+
+/* sender avatar: only on the first message of a consecutive block */
+.msg-avatar {
+  position: absolute; left: 0; top: 18px;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 13px;
+  display: grid; place-items: center;
+}
 
 .msg .sender {
   font-size: 11.5px; font-weight: 600; color: var(--accent);
@@ -819,10 +828,10 @@ pre.configdump {
 #details-pane {
   width: 400px; flex: none; min-width: 0;
   border-left: 1px solid var(--border);
-  background: var(--bg-alt); overflow-y: auto;
+  background: var(--bg-alt); overflow-y: auto; overflow-x: hidden;
   padding: 16px 18px;
-  animation: slide-in-right .18s ease;
 }
+#details-pane.slide { animation: slide-in-right .18s ease; }
 /* chat info reads as one sheet: borderless sections split by dividers */
 #details-pane .card {
   max-width: none;
@@ -842,11 +851,21 @@ pre.configdump {
   background: none; text-decoration: underline;
 }
 
-/* media strip (chat info) + media browser pane */
-.media-sec { display: block; width: 100%; text-align: left; cursor: pointer;
-  font: inherit; color: var(--text); }
-.media-sec:hover, [data-theme="dark"] .media-sec:hover { background: var(--bg-alt); }
-.media-strip { display: flex; gap: 6px; overflow: hidden; }
+/* section header rows (Media and files, Your agents): ONLY the header is
+   clickable, standard height, hover highlight, count at the right */
+.sec-head {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  height: 44px; padding: 0 10px; margin: 0 0 4px;
+  border: none; border-radius: 8px; background: none;
+  font: inherit; font-size: 13.5px; font-weight: 600; color: var(--text-dim);
+  cursor: pointer; text-align: left;
+}
+.sec-head:hover, [data-theme="dark"] .sec-head:hover { background: var(--hover); }
+.sec-head span:first-child { flex: 1; }
+.sec-count { font-weight: 400; color: var(--text-faint); }
+
+.media-strip { display: flex; gap: 6px; overflow: hidden; padding: 0 10px; }
+.media-tile-btn { border: none; padding: 0; background: none; cursor: pointer; }
 .media-tile {
   width: 74px; height: 74px; flex: none; border-radius: 8px;
   background: var(--bg-alt); border: 1px solid var(--border);
@@ -936,9 +955,10 @@ pre.configdump {
 .mem-head span { flex: 1; }
 .mem-row {
   display: flex; align-items: center; gap: 12px;
-  padding: 8px 6px; border-radius: 6px; position: relative;
+  padding: 11px 8px; border-radius: 6px; position: relative;
 }
-.mem-row:hover { background: var(--bg-alt); }
+/* --bg-alt is invisible here (the pane background IS --bg-alt) */
+.mem-row:hover { background: var(--hover); }
 .mem-chevron {
   width: 28px; height: 28px; flex: none;
   visibility: hidden;
@@ -967,10 +987,10 @@ pre.configdump {
 }
 .mem-add {
   display: flex; align-items: center; gap: 12px; width: 100%;
-  padding: 8px 6px; border: none; background: none; border-radius: 6px;
+  padding: 11px 8px; border: none; background: none; border-radius: 6px;
   font: inherit; color: var(--text); cursor: pointer; text-align: left;
 }
-.mem-add:hover { background: var(--bg-alt); }
+.mem-add:hover, [data-theme="dark"] .mem-add:hover { background: var(--hover); }
 .mem-add .mem-avatar { background: var(--good); }
 .mem-add .mem-avatar svg { width: 18px; height: 18px; }
 
@@ -1021,12 +1041,30 @@ pre.configdump {
   font-weight: 600; flex: none;
 }
 @media (max-width: 760px) {
-  .modal-scrim { place-items: stretch; }
-  .modal-box {
+  .modal-scrim:not(.confirm-scrim) { place-items: stretch; }
+  .modal-scrim:not(.confirm-scrim) .modal-box {
     width: 100%; max-width: none; max-height: none;
     border-radius: 0; border: none;
   }
 }
+
+/* confirmation dialog (always centered, even on mobile) */
+.modal-box.confirm { width: min(430px, calc(100vw - 44px)); }
+.cf-title { font-size: 16.5px; font-weight: 600; margin: 2px 0 10px; }
+.cf-body { color: var(--text-dim); font-size: 13.5px; }
+.cf-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px;
+}
+.cf-cancel {
+  border: none; background: none; color: var(--accent);
+  font-weight: 600; padding: 8px 14px;
+}
+.cf-cancel:hover, [data-theme="dark"] .cf-cancel:hover { background: var(--hover); }
+.cf-go {
+  border: none; border-radius: 999px; padding: 8px 22px;
+  background: var(--bad); color: #fff; font-weight: 600;
+}
+.cf-go:hover, [data-theme="dark"] .cf-go:hover { filter: brightness(1.12); background: var(--bad); }
 
 /* in-chat search (slides over chat info in the same pane) */
 .search-box {
@@ -1138,8 +1176,9 @@ body.side-collapsed #side-resizer { display: none; }
 
 #toast {
   position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
-  background: var(--text); color: #fff; border-radius: 6px;
-  padding: 9px 18px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.25);
-  z-index: 10;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  padding: 9px 18px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.3);
+  z-index: 50;
 }
-#toast.error { background: var(--bad); }
+#toast.error { background: var(--bad); color: #fff; border-color: var(--bad); }

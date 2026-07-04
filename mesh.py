@@ -314,11 +314,65 @@ class Mesh:
         if creator not in members:
             members.insert(0, creator)
         chat_id = f"{slugify(name)}-{secrets.token_hex(3)}"
-        meta = {"id": chat_id, "name": name, "created": utcnow(),
-                "created_by": creator, "owner": owner,
+        meta = {"id": chat_id, "kind": "group", "name": name,
+                "created": utcnow(), "created_by": creator, "owner": owner,
                 "members": members, "archived": False}
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         self.cx.mkdir(f"chats/{chat_id}/msgs")
+        return meta
+
+    def create_dm(self, creator, other):
+        """A direct chat: exactly two members, fixed forever, displayed under
+        the other member's name. Creating a DM that already exists returns
+        the existing one."""
+        users = self.users()
+        cu, ou = users.get(creator), users.get(other)
+        if not cu:
+            raise MeshError(f"Unknown user @{creator}")
+        if not ou:
+            raise MeshError(f"Unknown user @{other}")
+        if creator == other:
+            raise MeshError("A direct chat needs someone else")
+        # same ownership rules as groups
+        if ou["kind"] == "agent" and cu["kind"] == "human" \
+                and not self.owns(creator, other):
+            raise MeshError(f"@{other} is not your agent — message its owner")
+        if cu["kind"] == "agent" and creator not in \
+                ([other] if ou["kind"] == "human" and self.owns(other, creator)
+                 else []):
+            raise MeshError("An agent can only start a direct chat with "
+                            "its responsible human")
+        for cid in self.cx.listdir("chats"):
+            meta = self.cx.read_json(f"chats/{cid}/meta.json")
+            if meta and meta.get("kind") == "dm" \
+                    and set(meta.get("members") or []) == {creator, other}:
+                return meta
+        owner = creator if cu["kind"] == "human" else other
+        chat_id = f"dm-{secrets.token_hex(4)}"
+        meta = {"id": chat_id, "kind": "dm",
+                "name": f"{cu['display']} · {ou['display']}",
+                "created": utcnow(), "created_by": creator, "owner": owner,
+                "members": [creator, other], "archived": False}
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        self.cx.mkdir(f"chats/{chat_id}/msgs")
+        return meta
+
+    def rename_chat(self, chat_id, by, name):
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if meta.get("kind") == "dm":
+            raise MeshError("Direct chats are named after the other person")
+        if meta.get("owner") != by:
+            raise MeshError("Only the group's owner can rename it")
+        name = (name or "").strip()
+        if not name:
+            raise MeshError("Give the group a name")
+        meta["name"] = name
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        by_dn = (self.get_user(by) or {}).get("display", by)
+        self.post_event(chat_id, by, f'{by_dn} renamed the group to "{name}"',
+                        "rename")
         return meta
 
     def archive_chat(self, chat_id, by_human, archived=True):
@@ -354,6 +408,9 @@ class Mesh:
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
+        if meta.get("kind") == "dm":
+            raise MeshError("Direct chats stay between two people — "
+                            "start a group instead")
         u = self.get_user(username)
         if not u:
             raise MeshError(f"Unknown user @{username}")
@@ -372,6 +429,9 @@ class Mesh:
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
+        if meta.get("kind") == "dm":
+            raise MeshError("Direct chats stay between two people — "
+                            "archive it instead")
         if username == meta.get("owner"):
             raise MeshError("The owner cannot leave — archive or delete "
                             "the chat instead")

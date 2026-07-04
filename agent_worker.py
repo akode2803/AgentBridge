@@ -435,9 +435,14 @@ class Worker:
             else:
                 rule = self.mesh.reply_rule(member, chat_id)
                 roster.append(f"@{member} ({RULE_DESC.get(rule, rule)})")
+        chat_name = meta.get("name")
+        if meta.get("kind") == "dm":
+            other = next((u for u in meta.get("members", [])
+                          if u != self.agent), "")
+            chat_name = f"direct chat with @{other}"
         prompt = PROMPT.format(
             display=me.get("display", self.agent), agent=self.agent,
-            chat_name=meta.get("name"), roster="; ".join(roster),
+            chat_name=chat_name, roster="; ".join(roster),
             context_file=context_file, outbox=self.outbox)
         reply_file = self.workdir / "reply.md"
         reply_file.unlink(missing_ok=True)
@@ -522,7 +527,15 @@ class Worker:
         acted = False
         for meta in self.mesh.chats_for(self.agent):
             try:
-                acted |= bool(self.process_chat(meta, users, dry_run=dry_run))
+                # queue drain: messages that land WHILE the agent is running
+                # get answered immediately after, not a poll later — rapid
+                # back-to-back calls each get a proper response (rate cap
+                # still applies inside process_chat)
+                for _ in range(4):
+                    if not self.process_chat(meta, users, dry_run=dry_run):
+                        break
+                    acted = True
+                    users = self.mesh.users()
             except Exception as e:
                 say(f"[worker] {meta['id']}: {type(e).__name__}: {e}")
         return acted

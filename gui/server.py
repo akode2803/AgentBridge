@@ -703,6 +703,25 @@ def api_mesh_add_member(data):
     return {"ok": True, "members": meta["members"]}
 
 
+def api_mesh_create_dm(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.create_dm(user, (data.get("username") or "").strip().lower())
+    return {"ok": True, "chat": meta}
+
+
+def api_mesh_rename(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.rename_chat(data.get("chat_id") or "", by=user,
+                         name=data.get("name"))
+    return {"ok": True, "name": meta["name"]}
+
+
 def api_mesh_set_description(data):
     m = get_mesh()
     user = session_user(m)
@@ -861,6 +880,8 @@ POST_ROUTES = {
     "/api/mesh/remove_member": api_mesh_remove_member,
     "/api/mesh/delete_chat": api_mesh_delete_chat,
     "/api/mesh/set_description": api_mesh_set_description,
+    "/api/mesh/create_dm": api_mesh_create_dm,
+    "/api/mesh/rename": api_mesh_rename,
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,
     "/api/mesh/open_file": api_mesh_open_file,
