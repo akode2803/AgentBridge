@@ -12,6 +12,7 @@
   --bg-rail2: #EFECEA;
   --hover: rgba(0, 0, 0, .07);
   --side-hover: #ECEAE8;
+  --selection: rgba(216, 59, 1, .28);
   --code-bg: #FAF9F8;
   --terminal-bg: #2B2A29;
   --terminal-fg: #F3F2F1;
@@ -515,22 +516,28 @@ input[type=text], select, textarea {
 /* textarea + a backdrop that paints soft pills behind valid @tags (the
    textarea draws the text itself; the backdrop only shows backgrounds) */
 #composer-ta-wrap { flex: 1; position: relative; min-width: 0; }
+/* the backdrop draws ALL the text (mentions in accent, like bubbles);
+   the textarea's own glyphs are transparent — only its caret shows */
 #composer-pill textarea {
   display: block; width: 100%;
   border: none; resize: none; outline: none;
-  background: transparent; color: var(--text); font: inherit;
+  background: transparent; font: inherit;
+  color: transparent; caret-color: var(--text);
   min-height: 22px; max-height: 160px; line-height: 1.45;
   padding: 3px 0 5px;  /* asymmetric: centers the caret in the 44px pill */
   position: relative; z-index: 1;
+}
+#composer-pill textarea::selection {
+  background: var(--selection); color: transparent;
 }
 #composer-hl {
   position: absolute; inset: 0; z-index: 0; overflow: hidden;
   font: inherit; line-height: 1.45; padding: 3px 0 5px;
   white-space: pre-wrap; word-wrap: break-word;
-  color: transparent; pointer-events: none;
+  color: var(--text); pointer-events: none;
 }
 #composer-hl .hl-tag {
-  background: var(--accent-soft); border-radius: 4px;
+  color: var(--accent); background: var(--accent-soft); border-radius: 4px;
   box-shadow: 0 0 0 1.5px var(--accent-soft);
 }
 #composer #mesh-attach-btn {
@@ -547,14 +554,19 @@ input[type=text], select, textarea {
 }
 #composer .send-icon svg { display: block; margin-left: 2px; }
 
-/* @tag autofill popup */
+/* @tag autofill popup — follows the "@" horizontally, opens upward */
 #tag-pop {
   position: absolute; bottom: calc(100% + 8px); left: 52px;
   min-width: 250px; z-index: 6;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 4px;
   box-shadow: 0 6px 22px rgba(0, 0, 0, .18);
+  animation: pop-above .12s ease;
 }
+@keyframes pop-above {
+  from { opacity: 0; transform: translateY(6px); }
+}
+.csel-pop.above { animation: pop-above .12s ease; }
 .tag-opt {
   display: flex; align-items: center; gap: 9px;
   padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
@@ -846,7 +858,8 @@ pre.configdump {
   display: grid; place-items: center; color: var(--accent);
   box-shadow: var(--shadow);
 }
-.ci-act:hover { background: none; }
+/* hovering anywhere on Add/Search highlights only the icon circle */
+.ci-act:hover, [data-theme="dark"] .ci-act:hover { background: none; }
 .ci-act:hover .ci-act-circle { background: var(--accent-soft); }
 .ci-act svg { width: 19px; height: 19px; }
 .ci-footer {
@@ -855,10 +868,26 @@ pre.configdump {
 }
 
 /* member rows in chat info */
+.mem-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13.5px; font-weight: 600; color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.mem-head span { flex: 1; }
 .mem-row {
   display: flex; align-items: center; gap: 12px;
-  padding: 8px 4px; border-radius: 6px;
+  padding: 8px 4px; border-radius: 6px; position: relative;
 }
+.mem-chevron {
+  width: 28px; height: 28px; flex: none;
+  visibility: hidden;
+}
+.mem-row:hover .mem-chevron { visibility: visible; }
+.mem-menu {
+  top: calc(100% - 6px); right: 6px; min-width: 190px;
+}
+.mem-menu .danger-item, .menu .danger-item { color: var(--bad); }
+.mem-menu .danger-item svg, .menu .danger-item svg { color: var(--bad); }
 .mem-row + .mem-row { border-top: 1px solid var(--bg-alt); }
 .mem-row .mem-avatar {
   width: 34px; height: 34px; border-radius: 50%; flex: none;
@@ -881,6 +910,60 @@ pre.configdump {
 .mem-add:hover { background: var(--bg-alt); }
 .mem-add .mem-avatar { background: var(--good); }
 .mem-add .mem-avatar svg { width: 17px; height: 17px; }
+
+/* dangerous actions at the bottom of chat info (WhatsApp-style list) */
+.danger-card { padding: 6px 8px; }
+.danger-row {
+  display: flex; align-items: center; gap: 13px; width: 100%;
+  padding: 11px 10px; border: none; border-radius: 6px;
+  background: none; font: inherit; font-weight: 600;
+  color: var(--bad); cursor: pointer; text-align: left;
+}
+.danger-row svg { flex: none; color: var(--bad); }
+.danger-row.neutral, .danger-row.neutral svg { color: var(--text); }
+.danger-row:hover { background: var(--bg-alt); }
+.danger-row + .danger-row { border-top: 1px solid var(--bg-alt); }
+
+/* ------------------------------------------------------------ modal */
+
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(0, 0, 0, .45);
+  display: grid; place-items: center;
+  animation: scrim-in .14s ease;
+}
+@keyframes scrim-in { from { opacity: 0; } }
+.modal-box {
+  width: 430px; max-width: calc(100vw - 36px); max-height: min(620px, 86vh);
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; padding: 16px;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, .35);
+  animation: modal-in .16s ease;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(14px) scale(.98); }
+}
+.modal-list { flex: 1; overflow-y: auto; min-height: 120px; }
+.modal-list .mem-row { padding: 8px 6px; cursor: pointer; }
+.modal-list label.mem-row:hover { background: var(--bg-alt); }
+.modal-list input[type=checkbox] { accent-color: var(--accent); }
+.modal-sec {
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--text-dim);
+  padding: 10px 6px 4px;
+}
+.modal-cta {
+  margin-top: 12px; border-radius: 999px; padding: 10px 16px;
+  font-weight: 600; flex: none;
+}
+@media (max-width: 760px) {
+  .modal-scrim { place-items: stretch; }
+  .modal-box {
+    width: 100%; max-width: none; max-height: none;
+    border-radius: 0; border: none;
+  }
+}
 
 /* in-chat search (slides over chat info in the same pane) */
 .search-box {
@@ -977,7 +1060,9 @@ body.side-collapsed #side-resizer { display: none; }
 .mob-back { display: none; align-items: center; gap: 5px;
   border: none; background: none; color: var(--text-dim); font: inherit;
   padding: 0 0 10px; cursor: pointer; }
-.mob-back:hover { background: none; color: var(--text); }
+.mob-back:hover, [data-theme="dark"] .mob-back:hover {
+  background: none; color: var(--text);   /* text highlight only */
+}
 
 /* settings section pages: a centered column, not a top-left corner */
 .settings-body { max-width: 660px; margin: 0 auto; }

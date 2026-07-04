@@ -54,8 +54,8 @@ def resolve_chat(m, ref):
     if m.get_chat(ref):
         return ref
     matches = []
-    for d in sorted(m.chats_dir.iterdir()) if m.chats_dir.is_dir() else []:
-        meta = read_json(d / "meta.json")
+    for cid in m.cx.listdir("chats"):
+        meta = m.cx.read_json(f"chats/{cid}/meta.json")
         if not meta:
             continue
         name = (meta.get("name") or "").lower()

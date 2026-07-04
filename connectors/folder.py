@@ -78,6 +78,11 @@ class FolderConnector(Connector):
         except OSError:
             return None
 
+    def delete_tree(self, rel):
+        if not rel or rel in (".", "/"):
+            raise ValueError("refusing to delete the store root")
+        shutil.rmtree(self._p(rel), ignore_errors=True)
+
     def sha256(self, rel, chunk=1 << 20):
         h = hashlib.sha256()
         try:

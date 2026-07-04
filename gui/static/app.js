@@ -237,6 +237,9 @@ const ICONS = {
   search: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="10.8" cy="10.8" r="6.2"/><path d="M15.6 15.6 20.4 20.4"/></svg>',
   addUser: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="8" r="3.4"/><path d="M3.4 19.5c1.4-3.4 11.8-3.4 13.2 0M18.5 8v6M15.5 11h6"/></svg>',
   more: '<svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><circle cx="12" cy="5.2" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="18.8" r="1.7"/></svg>',
+  chevD: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 9.5 12 15l5.5-5.5"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/></svg>',
+  exit: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 4H5.8a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h3.7M15 8l4 4-4 4M19 12H9.5"/></svg>',
 };
 
 const SETTINGS_SECTIONS = [
@@ -280,8 +283,9 @@ function csel({ options, value, onChange }) {
     const r = btn.getBoundingClientRect();
     pop.style.minWidth = Math.max(180, r.width) + "px";
     const ph = pop.offsetHeight, pw = pop.offsetWidth;
-    pop.style.top = Math.max(8, (r.bottom + ph + 8 > innerHeight)
-      ? r.top - ph - 4 : r.bottom + 4) + "px";
+    const above = r.bottom + ph + 8 > innerHeight;
+    if (above) pop.classList.add("above");   // slide up, not down
+    pop.style.top = Math.max(8, above ? r.top - ph - 4 : r.bottom + 4) + "px";
     pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pw - 8)) + "px";
     pop.querySelectorAll(".csel-opt").forEach((ob) => {
       ob.addEventListener("click", () => {
@@ -369,20 +373,27 @@ function renderSettingsSidebar() {
 function renderNewChatSidebar() {
   const ms = Mesh.state;
   if (!ms?.available || !ms.user) { location.hash = "#/chats"; return; }
+  // symmetric membership: humans join only if added, exactly like agents
   const myAgents = Object.values(ms.users)
     .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+  const humans = Object.values(ms.users)
+    .filter((u) => u.kind === "human" && u.username !== ms.user);
+  const pick = (u) => `
+    <label class="row" style="padding:3px 0">
+      <input type="checkbox" class="nc-member" value="${esc(u.username)}">
+      ${esc(u.display)} <span class="hint">@${esc(u.username)}</span>
+    </label>`;
   const html = `
     <div style="padding:12px 10px">
       <div style="font-weight:600;margin-bottom:10px">New chat</div>
       <input type="text" id="new-chat-name" placeholder="Chat name" style="width:100%">
-      <p class="hint" style="margin:12px 0 4px">Your agents (every human joins
-      automatically):</p>
-      ${myAgents.map((a) => `
-        <label class="row" style="padding:3px 0">
-          <input type="checkbox" class="nc-member" value="${esc(a.username)}">
-          ${esc(a.display)} <span class="hint">@${esc(a.username)}</span>
-        </label>`).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
-      <div class="row" style="margin-top:14px">
+      <p class="hint" style="margin:12px 0 4px">Your agents:</p>
+      ${myAgents.map(pick).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
+      ${humans.length ? `<p class="hint" style="margin:10px 0 4px">Members:</p>
+        ${humans.map(pick).join("")}` : ""}
+      <p class="hint" style="margin:10px 0 4px">You join as the owner; anyone
+      else can be added later from the chat info page.</p>
+      <div class="row" style="margin-top:12px">
         <button class="primary" id="create-chat-btn">Create</button>
         <button id="nc-cancel">Cancel</button>
       </div>
@@ -582,11 +593,10 @@ async function renderMeshChat(force) {
   Mesh.chatKey = key;
   const meta = data.meta;
 
-  // mentions highlight only people actually in this chat (plus humans,
-  // who are implicitly in every chat)
-  const humanNames = Object.values(ms.users)
-    .filter((u) => u.kind === "human").map((u) => u.username);
-  MD_TAGGABLE = new Set([...(meta.members || []), ...humanNames]);
+  // mentions highlight only actual members — membership is symmetric now:
+  // humans need adding to a chat just like agents
+  MD_TAGGABLE = new Set(meta.members || []);
+  const isMember = (meta.members || []).includes(ms.user);
 
   const parts = [];
   let prevFrom = null, prevDay = null;
@@ -671,7 +681,7 @@ async function renderMeshChat(force) {
 
   // members line under the chat name, WhatsApp-style: "Claude, CoCo, You"
   const memberLine = (meta.members || []).filter((u) => u !== ms.user)
-    .map(meshDn).concat("You").join(", ");
+    .map(meshDn).concat(isMember ? ["You"] : []).join(", ");
 
   const isOwner = meta.owner === ms.user;
   $("#content").innerHTML = `
@@ -686,6 +696,7 @@ async function renderMeshChat(force) {
       <button class="icon-btn" id="chat-more">${ICONS.more}</button>
       <div class="menu" id="chat-menu" hidden>
         <button data-act="info">${ICONS.info} Chat info</button>
+        ${isMember ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
         ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
         <div class="menu-sep"></div>
@@ -694,7 +705,10 @@ async function renderMeshChat(force) {
     </div>
     <div id="transcript">${bubbles}</div>
     <div id="pending-area"></div>
-    ${meta.archived ? "" : `
+    ${!isMember && !meta.archived ? `
+    <div class="banner" style="margin:10px 18px 12px">You are reading as a
+      non-member — a member can add you from the chat info page.</div>` : ""}
+    ${meta.archived || !isMember ? "" : `
     <div id="composer">
       <div id="composer-pill">
         <div id="composer-ta-wrap">
@@ -733,6 +747,7 @@ async function renderMeshChat(force) {
       menu.hidden = true;
       const act = b.dataset.act;
       if (act === "info") location.hash = `#/chats/${chatId}/details`;
+      else if (act === "add") showAddMembers(chatId);
       else if (act === "close") location.hash = "#/chats";
       else if (act === "archive") {
         const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
@@ -790,6 +805,24 @@ async function renderMeshChat(force) {
       closePop();
       body.focus();
     };
+    // x position of the "@" being typed — the popup follows it (a ghost
+    // mirror of the textarea measures where the caret line wraps to)
+    const tagX = () => {
+      const cs = getComputedStyle(body);
+      const ghost = document.createElement("div");
+      ghost.style.cssText =
+        "position:absolute;visibility:hidden;white-space:pre-wrap;" +
+        `word-wrap:break-word;box-sizing:border-box;width:${body.clientWidth}px;` +
+        `font:${cs.font};line-height:${cs.lineHeight};padding:${cs.padding};`;
+      ghost.textContent = body.value.slice(0, Math.max(0, (tagCtx ? tagCtx.start : 1) - 1));
+      const mark = document.createElement("span");
+      mark.textContent = "@";
+      ghost.appendChild(mark);
+      document.body.appendChild(ghost);
+      const x = mark.offsetLeft;
+      ghost.remove();
+      return x;
+    };
     const renderPop = () => {
       if (!tagCtx || !tagCtx.items.length) { closePop(); return; }
       pop.innerHTML = tagCtx.items.map((t, i) => `
@@ -798,6 +831,10 @@ async function renderMeshChat(force) {
           <span>${esc(t.d)}</span><span class="hint">@${esc(t.u)}</span>
         </div>`).join("");
       pop.hidden = false;
+      const wrap = $("#composer-ta-wrap");
+      const base = wrap.offsetLeft + tagX();
+      const max = $("#composer").clientWidth - pop.offsetWidth - 4;
+      pop.style.left = Math.max(0, Math.min(base, max)) + "px";
       pop.querySelectorAll(".tag-opt").forEach((el) => {
         el.addEventListener("mousedown", (e) => { e.preventDefault(); pickTag(+el.dataset.i); });
       });
@@ -830,7 +867,12 @@ async function renderMeshChat(force) {
       });
       $("#mesh-send-btn").disabled = false;
       if (r.error) { toast(r.error, true); return; }
-      Mesh.drafts[chatId] = { body: "", att: null };
+      // MUTATE the draft — replacing the object orphans this closure's
+      // reference, so later attaches update a ghost while sends keep
+      // posting the already-consumed staged path (the "attach errors
+      // forever after the first file" bug)
+      draft.body = "";
+      draft.att = null;
       body.value = "";
       autosize();
       renderMeshPending(chatId);
@@ -913,15 +955,17 @@ async function renderChatDetails() {
   // only re-render when something actually changed — a poll redraw would
   // knock dropdowns and toggles out from under the user
   const dKey = JSON.stringify([meta, media.length, ms.paused,
-    myAgentsHere.map((a) => a.settings), !!Mesh.searchView, !!Mesh.addingMember]);
+    myAgentsHere.map((a) => a.settings), !!Mesh.searchView]);
   if (dKey === Mesh.detailsKey && App.page === "chats") return;
   Mesh.detailsKey = dKey;
 
   // in-chat search slides in over chat info, in the same pane
   if (Mesh.searchView) return renderChatSearch(data);
 
+  const isMember = (meta.members || []).includes(ms.user);
   const memberRow = (u) => {
     const rec = ms.users[u] || {};
+    const removable = isOwner && u !== meta.owner;
     return `
       <div class="mem-row">
         <span class="mem-avatar">${esc((meshDn(u)[0] || "?").toUpperCase())}</span>
@@ -931,12 +975,9 @@ async function renderChatDetails() {
           <div class="mem-sub">@${esc(u)}</div>
         </span>
         ${meta.owner === u ? '<span class="owner-chip">Owner</span>' : ""}
+        ${removable ? `<button class="mem-chevron icon-btn" data-user="${esc(u)}">${ICONS.chevD}</button>` : ""}
       </div>`;
   };
-  // addable: my own agents + any human, minus current members
-  const candidates = Object.values(ms.users).filter((u) =>
-    !(meta.members || []).includes(u.username)
-    && (u.kind === "human" || (u.owners || []).includes(ms.user)));
 
   $("#details-pane").innerHTML = `
     <div class="pane-head">
@@ -994,22 +1035,13 @@ async function renderChatDetails() {
       requests get one consolidated reply per chat after resuming.</p>
     </div>
     <div class="card">
-      <h2>${(meta.members || []).length} members</h2>
-      ${Mesh.addingMember ? `
-        ${candidates.length ? candidates.map((u) => `
-          <button class="mem-add ci-candidate" data-user="${esc(u.username)}">
-            <span class="mem-avatar">${esc((u.display[0] || "?").toUpperCase())}</span>
-            <span style="min-width:0">
-              <div class="mem-name">${esc(u.display)}
-                ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
-              <div class="mem-sub">@${esc(u.username)}</div>
-            </span>
-          </button>`).join("") : `<div class="empty" style="padding:14px 0">Everyone is already here.</div>`}
-        <button class="mem-add" id="ci-add-cancel"><span class="mem-avatar" style="background:var(--text-faint)">✕</span><b>Cancel</b></button>`
-      : `
-        <button class="mem-add" id="ci-add2">
-          <span class="mem-avatar">${ICONS.addUser}</span><b>Add member</b></button>
-        ${(meta.members || []).map(memberRow).join("")}`}
+      <div class="mem-head">
+        <span>${(meta.members || []).length} members</span>
+        <button class="icon-btn" id="mem-search">${ICONS.search}</button>
+      </div>
+      ${isMember ? `<button class="mem-add" id="ci-add2">
+        <span class="mem-avatar">${ICONS.addUser}</span><b>Add member</b></button>` : ""}
+      ${(meta.members || []).map(memberRow).join("")}
     </div>
     <div class="card">
       <h2>Connection</h2>
@@ -1019,9 +1051,14 @@ async function renderChatDetails() {
         <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
       </dl>
     </div>
-    ${isOwner ? `<div class="row" style="justify-content:center;margin-bottom:10px">
-      <button id="cd-archive">${meta.archived ? "Unarchive chat" : "Archive chat"}</button>
-    </div>` : ""}
+    <div class="card danger-card">
+      ${isOwner ? `<button class="danger-row neutral" id="dg-archive">
+        ${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
+      ${isMember && !isOwner ? `<button class="danger-row" id="dg-exit">
+        ${ICONS.exit} Exit chat</button>` : ""}
+      ${isOwner ? `<button class="danger-row" id="dg-delete">
+        ${ICONS.trash} Delete chat</button>` : ""}
+    </div>
     <div class="ci-footer">Chat created by ${esc(meshDn(meta.created_by))},
       ${esc(fmtTime(meta.created))}</div>`;
 
@@ -1031,37 +1068,61 @@ async function renderChatDetails() {
     Mesh.detailsKey = "";
     renderChatDetails();
   });
-  const startAdd = () => {
-    Mesh.addingMember = true;
-    Mesh.detailsKey = "";
-    renderChatDetails();
-  };
-  $("#ci-add").addEventListener("click", startAdd);
+  $("#ci-add").addEventListener("click", () => showAddMembers(chatId));
   const add2 = $("#ci-add2");
-  if (add2) add2.addEventListener("click", startAdd);
-  const addCancel = $("#ci-add-cancel");
-  if (addCancel) addCancel.addEventListener("click", () => {
-    Mesh.addingMember = false;
-    Mesh.detailsKey = "";
-    renderChatDetails();
-  });
-  document.querySelectorAll(".ci-candidate").forEach((b) => {
-    b.addEventListener("click", async () => {
-      const r = await api("/api/mesh/add_member",
-        { chat_id: chatId, username: b.dataset.user });
-      if (r.error) { toast(r.error, true); return; }
-      toast(`@${b.dataset.user} added to the chat`);
-      Mesh.addingMember = false;
-      Mesh.detailsKey = "";
-      Mesh.structKey = "";     // the header's member line changed too
-      renderChats(true);
+  if (add2) add2.addEventListener("click", () => showAddMembers(chatId));
+  $("#mem-search").addEventListener("click", () => showSearchMembers(chatId));
+  // owner-only remove: chevron appears on hover, opens a small menu
+  document.querySelectorAll(".mem-chevron").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      document.querySelectorAll(".mem-menu").forEach((m) => m.remove());
+      const row = b.closest(".mem-row");
+      const menu = document.createElement("div");
+      menu.className = "menu mem-menu";
+      menu.innerHTML = `<button class="danger-item">${ICONS.close} Remove @${esc(b.dataset.user)}</button>`;
+      row.appendChild(menu);
+      menu.querySelector("button").addEventListener("click", async () => {
+        menu.remove();
+        const r = await api("/api/mesh/remove_member",
+          { chat_id: chatId, username: b.dataset.user });
+        if (r.error) { toast(r.error, true); return; }
+        toast(`@${b.dataset.user} removed from the chat`);
+        Mesh.detailsKey = "";
+        Mesh.structKey = "";
+        renderChats(true);
+      });
+      document.addEventListener("mousedown", function away(ev) {
+        if (!menu.contains(ev.target)) {
+          menu.remove();
+          document.removeEventListener("mousedown", away);
+        }
+      });
     });
   });
-  const arch = $("#cd-archive");
-  if (arch) arch.addEventListener("click", async () => {
+  const dgArch = $("#dg-archive");
+  if (dgArch) dgArch.addEventListener("click", async () => {
     const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
     if (r.error) { toast(r.error, true); return; }
     toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
+    location.hash = "#/chats";
+  });
+  const dgExit = $("#dg-exit");
+  if (dgExit) dgExit.addEventListener("click", async () => {
+    if (!confirm(`Exit "${meta.name}"? You can be re-added by a member.`)) return;
+    const r = await api("/api/mesh/remove_member",
+      { chat_id: chatId, username: ms.user });
+    if (r.error) { toast(r.error, true); return; }
+    toast("You left the chat");
+    location.hash = "#/chats";
+  });
+  const dgDel = $("#dg-delete");
+  if (dgDel) dgDel.addEventListener("click", async () => {
+    if (!confirm(`Delete "${meta.name}" permanently, for everyone? ` +
+        "Messages and files are gone for good — archiving keeps them.")) return;
+    const r = await api("/api/mesh/delete_chat", { chat_id: chatId });
+    if (r.error) { toast(r.error, true); return; }
+    toast("Chat deleted");
     location.hash = "#/chats";
   });
   $("#cd-pause").addEventListener("change", async (e) => {
@@ -1156,6 +1217,135 @@ function jumpToMessage() {
   el.scrollIntoView({ block: "center" });
   el.classList.add("flash");
   setTimeout(() => el.classList.remove("flash"), 1700);
+}
+
+// ---------------------------------------------------------------- modals
+// centered dialog on desktop, full page on mobile (CSS switches)
+
+function openModal(html) {
+  closeModal();
+  const scrim = document.createElement("div");
+  scrim.className = "modal-scrim";
+  scrim.innerHTML = `<div class="modal-box">${html}</div>`;
+  scrim.addEventListener("mousedown", (e) => { if (e.target === scrim) closeModal(); });
+  document.body.appendChild(scrim);
+  return scrim.querySelector(".modal-box");
+}
+
+function closeModal() {
+  const m = document.querySelector(".modal-scrim");
+  if (m) m.remove();
+}
+
+function bindModalFilter(box) {
+  const q = box.querySelector(".modal-q");
+  if (!q) return;
+  q.addEventListener("input", () => {
+    const needle = q.value.trim().toLowerCase();
+    box.querySelectorAll(".modal-row").forEach((r) => {
+      r.hidden = !!needle && !r.textContent.toLowerCase().includes(needle);
+    });
+    box.querySelectorAll(".modal-sec").forEach((s) => {
+      let el = s.nextElementSibling, any = false;
+      while (el && !el.classList.contains("modal-sec")) {
+        if (el.classList.contains("modal-row") && !el.hidden) any = true;
+        el = el.nextElementSibling;
+      }
+      s.hidden = !any;
+    });
+  });
+  q.focus();
+}
+
+// Add member: agents first, then humans under "Members" — membership is
+// symmetric now, humans get added exactly like agents
+async function showAddMembers(chatId) {
+  const ms = Mesh.state = await api("/api/mesh/state");
+  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
+  if (data.error) { toast(data.error, true); return; }
+  const members = data.meta.members || [];
+  const addable = Object.values(ms.users).filter((u) =>
+    !members.includes(u.username)
+    && (u.kind === "human" || (u.owners || []).includes(ms.user)));
+  const agents = addable.filter((u) => u.kind === "agent");
+  const humans = addable.filter((u) => u.kind === "human");
+  const row = (u) => `
+    <label class="mem-row modal-row">
+      <input type="checkbox" class="am-check" value="${esc(u.username)}">
+      <span class="mem-avatar">${esc((u.display[0] || "?").toUpperCase())}</span>
+      <span style="min-width:0">
+        <div class="mem-name">${esc(u.display)}</div>
+        <div class="mem-sub">@${esc(u.username)}</div>
+      </span>
+    </label>`;
+  const section = (label, list) => list.length
+    ? `<div class="modal-sec">${label}</div>` + list.map(row).join("") : "";
+  const box = openModal(`
+    <div class="pane-head" style="margin:0 0 10px">
+      <button class="icon-btn" id="am-close">${ICONS.close}</button>
+      <span class="pane-title">Add member</span>
+    </div>
+    <div class="search-box" style="margin-bottom:10px">${ICONS.search}
+      <input type="text" class="modal-q" placeholder="Search" autocomplete="off"></div>
+    <div class="modal-list">
+      ${section("Agents", agents)}${section("Members", humans)}
+      ${!addable.length ? '<div class="empty">Everyone is already here.</div>' : ""}
+    </div>
+    ${addable.length ? '<button class="primary modal-cta" id="am-go" disabled>Add member</button>' : ""}`);
+  box.querySelector("#am-close").addEventListener("click", closeModal);
+  bindModalFilter(box);
+  const go = box.querySelector("#am-go");
+  if (!go) return;
+  const sync = () => {
+    const n = box.querySelectorAll(".am-check:checked").length;
+    go.disabled = !n;
+    go.textContent = n > 1 ? `Add ${n} members` : "Add member";
+  };
+  box.querySelectorAll(".am-check").forEach((c) => c.addEventListener("change", sync));
+  go.addEventListener("click", async () => {
+    const picked = [...box.querySelectorAll(".am-check:checked")].map((c) => c.value);
+    go.disabled = true;
+    for (const u of picked) {
+      const r = await api("/api/mesh/add_member", { chat_id: chatId, username: u });
+      if (r.error) { toast(r.error, true); go.disabled = false; return; }
+    }
+    toast(picked.length > 1 ? `${picked.length} members added` : `@${picked[0]} added`);
+    closeModal();
+    Mesh.structKey = "";
+    Mesh.detailsKey = "";
+    renderChats(true);
+  });
+}
+
+// Search members: same surface, view-only
+async function showSearchMembers(chatId) {
+  const ms = Mesh.state = await api("/api/mesh/state");
+  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
+  if (data.error) { toast(data.error, true); return; }
+  const meta = data.meta;
+  const row = (u) => {
+    const rec = ms.users[u] || {};
+    return `
+    <div class="mem-row modal-row">
+      <span class="mem-avatar">${esc((meshDn(u)[0] || "?").toUpperCase())}</span>
+      <span style="min-width:0">
+        <div class="mem-name">${esc(meshDn(u))}
+          ${rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+        <div class="mem-sub">@${esc(u)}</div>
+      </span>
+      ${meta.owner === u ? '<span class="owner-chip">Owner</span>' : ""}
+    </div>`;
+  };
+  const box = openModal(`
+    <div class="pane-head" style="margin:0 0 10px">
+      <button class="icon-btn" id="sm-close">${ICONS.close}</button>
+      <span class="pane-title">Search members</span>
+    </div>
+    <div class="search-box" style="margin-bottom:10px">${ICONS.search}
+      <input type="text" class="modal-q" placeholder="Search members" autocomplete="off"></div>
+    <div class="modal-list">${(meta.members || []).map(row).join("")}</div>`);
+  box.querySelector("#sm-close").addEventListener("click", closeModal);
+  bindModalFilter(box);
 }
 
 // ---------------------------------------------------------------- new chat

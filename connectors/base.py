@@ -70,6 +70,11 @@ class Connector:
         """File size in bytes, or None."""
         raise NotImplementedError
 
+    def delete_tree(self, rel):
+        """Remove a directory key and everything under it. The mesh uses
+        this ONLY for owner-initiated chat deletion."""
+        raise NotImplementedError
+
     def sha256(self, rel):
         """Hex digest of the file's content, or None."""
         raise NotImplementedError

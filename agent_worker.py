@@ -37,6 +37,7 @@ its reply text and mesh.post() parses mentions the same way for every user.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -106,14 +107,50 @@ RULE_DESC = {
 }
 
 
-def render_context(msgs, agent):
+def render_context(msgs, agent, staged=None):
+    """staged: {original file name -> local relative path in the workdir};
+    headless permissions only auto-allow reads inside the workdir, so
+    attachments must be referenced by their staged copies."""
     lines = []
     for m in msgs[-30:]:
         who = f"@{m.get('from')}" + (" (you)" if m.get("from") == agent else "")
-        files = ("  [files: " + ", ".join(f["name"] for f in m["files"]) + "]"
-                 if m.get("files") else "")
+        names = []
+        for f in (m.get("files") or []):
+            local = (staged or {}).get(f.get("name"))
+            names.append(f"{f['name']} -> read it at {local}" if local else f["name"])
+        files = ("  [files: " + ", ".join(names) + "]") if names else ""
         lines.append(f"[{m.get('ts')}] {who}: {m.get('body', '')}{files}")
     return "\n".join(lines)
+
+
+# leading paragraphs that are narration about the work, not the message —
+# smaller models leak these despite the prompt ban (seen live: haiku and
+# cortex both). Only stripped when real content follows.
+NARRATION_RE = re.compile(
+    r"^(wait[,;\s]|now i |i need to |i'll |i will |let me |reading |looking at "
+    r"|checking |the latest message|the user |the request |first, i )", re.I)
+
+
+def clean_reply(reply):
+    """Returns (reply, no_reply). Handles the NO_REPLY sentinel at either end
+    (leading = changed its mind, post the rest; trailing after narration =
+    silence) and strips leading narration paragraphs."""
+    s = (reply or "").strip().strip("`'\"").strip()
+    if not s:
+        return "", False
+    if s.upper().startswith("NO_REPLY"):
+        s = s[len("NO_REPLY"):].strip("`'\"").strip()
+        if not s:
+            return "", True
+    lines = s.splitlines()
+    if lines and lines[-1].strip().strip("`'\".").upper() == "NO_REPLY":
+        # sentinel as the final line: intent is silence, whatever narration
+        # preceded it (seen live with CoCo 2026-07-04)
+        return "", True
+    paras = re.split(r"\n\s*\n", s)
+    while len(paras) > 1 and NARRATION_RE.match(paras[0].strip()):
+        paras.pop(0)
+    return "\n\n".join(paras).strip(), False
 
 
 def summarize_event(obj):
@@ -295,6 +332,10 @@ class Worker:
         self.outbox = self.workdir / "outbox"
         self.state_path = self.workdir / "worker_state.json"
         self.state = read_json(self.state_path) or {"cursors": {}, "replies": {}}
+        # re-probe the full flag set once per process: a persisted fallback
+        # otherwise outlives the CLI bug that caused it (CoCo ran flagless —
+        # no -w workspace — for a whole day, which auto-denied its writes)
+        self.state.pop("minimal_flags", None)
 
     def save_state(self):
         atomic_write_json(self.state_path, self.state)
@@ -345,8 +386,29 @@ class Worker:
             self.save_state()
             return False
 
+        # stage inbound attachments into the workdir — headless CLI agents
+        # can only read inside it (same trick the legacy handler used)
+        staged = {}
+        chat_local = self.mesh.chat_dir(chat_id)
+        if chat_local:
+            inbox = self.workdir / "inbox_files"
+            for m in msgs[-30:]:
+                for f in (m.get("files") or []):
+                    src = chat_local / (f.get("path") or "")
+                    if not f.get("name") or not src.is_file():
+                        continue
+                    try:
+                        inbox.mkdir(exist_ok=True)
+                        dest = inbox / f["name"]
+                        if (not dest.is_file()
+                                or dest.stat().st_size != src.stat().st_size):
+                            shutil.copy2(src, dest)
+                        staged[f["name"]] = f"inbox_files/{f['name']}"
+                    except OSError:
+                        pass  # unreadable attachment: context shows the bare name
+
         context_file = self.workdir / "chat_context.md"
-        context_file.write_text(render_context(msgs, self.agent),
+        context_file.write_text(render_context(msgs, self.agent, staged),
                                 encoding="utf-8")
         me = users.get(self.agent) or {}
         roster = []
@@ -392,22 +454,17 @@ class Worker:
             rc, out, err = run_agent(cmd, timeout, cwd=self.workdir, feed=feed)
             if rc == 0:
                 self.state["minimal_flags"] = True
-        reply = None
-        if reply_file.is_file():
+        # the stream's final RESULT event is the reply — interim assistant
+        # text (thinking, tool narration) never reaches the chat. cortex's
+        # -o file accumulates ALL assistant text run together (that's how
+        # CoCo's thinking leaked verbatim on 2026-07-04), so the file is
+        # only the fallback when the stream yields nothing.
+        reply = reply_from_stream(out)
+        if not reply and reply_file.is_file():
             reply = reply_file.read_text(encoding="utf-8-sig").strip()
-        if not reply:
-            reply = reply_from_stream(out)
         no_reply = False
         if rc == 0 and reply:
-            s = reply.strip().strip("`'\"").strip()
-            if s.upper().startswith("NO_REPLY"):
-                # the sentinel is never chat content: alone it means silence;
-                # followed by a change of mind mid-stream ("NO_REPLY … wait,
-                # that needs an answer"), post only the real message (seen
-                # live with CoCo 2026-07-04 — the raw sentinel leaked)
-                remainder = s[len("NO_REPLY"):].strip("`'\"").strip()
-                no_reply = not remainder
-                reply = remainder
+            reply, no_reply = clean_reply(reply)
         if no_reply:
             # the agent judged no substantive response is needed — stay quiet
             feed.finish("done", "No reply needed")

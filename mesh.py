@@ -350,6 +350,32 @@ class Mesh:
             self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         return meta
 
+    def remove_member(self, chat_id, username, by):
+        """Chat owner removes anyone; anyone may remove themselves (exit)."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if username == meta.get("owner"):
+            raise MeshError("The owner cannot leave — archive or delete "
+                            "the chat instead")
+        if by != meta.get("owner") and by != username:
+            raise MeshError("Only the chat's owner can remove members")
+        if username in (meta.get("members") or []):
+            meta["members"].remove(username)
+            self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        return meta
+
+    def delete_chat(self, chat_id, by):
+        """Owner-only, permanent, for every member — unlike archiving.
+        (User decision 2026-07-04: delete exists alongside archive.)"""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if meta.get("owner") != by:
+            raise MeshError("Only the chat's owner can delete it")
+        self.cx.delete_tree(f"chats/{chat_id}")
+        return {"ok": True, "id": chat_id}
+
     def chats_for(self, username, include_archived=False):
         u = self.get_user(username)
         if not u:
@@ -398,8 +424,11 @@ class Mesh:
         u = self.get_user(sender)
         if not u:
             raise MeshError(f"Unknown user @{sender}")
-        if u["kind"] == "agent" and sender not in (meta.get("members") or []):
-            raise MeshError("This agent is not a member of the chat")
+        # membership is symmetric (2026-07-04): humans and agents alike must
+        # be members to post — humans may still READ every chat
+        if sender not in (meta.get("members") or []):
+            raise MeshError("You are not a member of this chat — "
+                            "ask a member to add you")
         body = (body or "").strip()
         files = []
         for src in attachments or []:

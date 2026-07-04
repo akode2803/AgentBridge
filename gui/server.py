@@ -696,6 +696,27 @@ def api_mesh_add_member(data):
     return {"ok": True, "members": meta["members"]}
 
 
+def api_mesh_remove_member(data):
+    """Owner removes anyone; anyone removes themselves (exit chat)."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.remove_member(data.get("chat_id") or "",
+                           (data.get("username") or "").strip().lower(), by=user)
+    return {"ok": True, "members": meta["members"]}
+
+
+def api_mesh_delete_chat(data):
+    """Owner-only, permanent, for everyone."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    m.delete_chat(data.get("chat_id") or "", by=user)
+    return {"ok": True}
+
+
 def api_mesh_create_agent(data):
     m = get_mesh()
     user = session_user(m)
@@ -820,6 +841,8 @@ POST_ROUTES = {
     "/api/mesh/archive": api_mesh_archive,
     "/api/mesh/read": api_mesh_read,
     "/api/mesh/add_member": api_mesh_add_member,
+    "/api/mesh/remove_member": api_mesh_remove_member,
+    "/api/mesh/delete_chat": api_mesh_delete_chat,
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,
     "/api/mesh/open_file": api_mesh_open_file,
