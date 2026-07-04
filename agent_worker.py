@@ -244,6 +244,30 @@ class FeedWriter:
         self.write(state=state, force=True)
 
 
+def retire_feed(mesh_root, agent, chat_id=None):
+    """Mark a leftover state="running" feed as done. Orphans happen when a
+    worker process dies mid-run (crash, restart) or a sync-wait resolves into
+    a batch that never triggers — either way the chat shows a ghost
+    "is writing…" bubble until the GUI's stale cutoff. Single writer per
+    agent, so rewriting our own file is always safe. Best-effort."""
+    try:
+        path = Path(mesh_root) / "status" / f"{agent}_run.json"
+        if not path.is_file():
+            return
+        d = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(d, dict) or d.get("state") != "running":
+            return
+        if chat_id is not None and d.get("chat_id") != chat_id:
+            return
+        d["state"] = "done"
+        d["updated"] = FeedWriter._now()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def msg_ns(m):
     """Nanosecond ordinal of a message. ts is second-resolution, so cursor
     comparisons use this — otherwise a message landing in the same second as
@@ -339,6 +363,9 @@ class Worker:
         # otherwise outlives the CLI bug that caused it (CoCo ran flagless —
         # no -w workspace — for a whole day, which auto-denied its writes)
         self.state.pop("minimal_flags", None)
+        # a previous process killed mid-run leaves its feed at "running" —
+        # the ghost "is writing…" bubble seen live 2026-07-05
+        retire_feed(self.mesh.root, self.agent)
 
     def save_state(self):
         atomic_write_json(self.state_path, self.state)
@@ -412,10 +439,14 @@ class Worker:
         trigger = any(should_reply(rule, m, self.agent, users) for m in new
                       if m.get("kind") != "info" and msg_ns(m) > joined_ns)
         if not trigger or msgs[-1].get("from") == self.agent:
+            # a sync-wait status bubble may be lingering from an earlier
+            # poll — this batch resolved without a run, so retire it
+            retire_feed(self.mesh.root, self.agent, chat_id)
             self.save_state()
             return False
         if not self.rate_ok(chat_id):
             say(f"[worker] {chat_id}: reply cap reached, skipping")
+            retire_feed(self.mesh.root, self.agent, chat_id)
             self.save_state()
             return False
 
@@ -564,6 +595,9 @@ class Worker:
                     users = self.mesh.users()
             except Exception as e:
                 say(f"[worker] {meta['id']}: {type(e).__name__}: {e}")
+                # a run that died mid-flight must not leave a ghost
+                # "is writing…" feed behind
+                retire_feed(self.mesh.root, self.agent, meta["id"])
         return acted
 
     def run(self, once=False, dry_run=False):

@@ -538,10 +538,13 @@ input[type=text], select, textarea {
 #pending-area { padding: 0 18px; flex: none; }
 #composer-pill {
   flex: 1; display: flex; align-items: flex-end; gap: 6px;
-  background: var(--surface); border: 1px solid var(--border);
+  /* border-strong, not border: the pill is white-on-white in light mode
+     and its boundary vanished with the soft divider gray (user-reported) */
+  background: var(--surface); border: 1px solid var(--border-strong);
   border-radius: 22px; box-shadow: var(--shadow);
   padding: 7px 8px 7px 16px; min-width: 0;
 }
+[data-theme="dark"] #composer-pill { border-color: var(--border); }
 /* textarea + a backdrop that paints soft pills behind valid @tags (the
    textarea draws the text itself; the backdrop only shows backgrounds) */
 #composer-ta-wrap { flex: 1; position: relative; min-width: 0; }
