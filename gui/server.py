@@ -685,6 +685,17 @@ def api_mesh_read(data):
     return {"ok": True}
 
 
+def api_mesh_add_member(data):
+    """Add a user to a chat: your own agent, or (chat owner) a human."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.add_member(data.get("chat_id") or "",
+                        (data.get("username") or "").strip().lower(), by=user)
+    return {"ok": True, "members": meta["members"]}
+
+
 def api_mesh_create_agent(data):
     m = get_mesh()
     user = session_user(m)
@@ -808,6 +819,7 @@ POST_ROUTES = {
     "/api/mesh/create_chat": api_mesh_create_chat,
     "/api/mesh/archive": api_mesh_archive,
     "/api/mesh/read": api_mesh_read,
+    "/api/mesh/add_member": api_mesh_add_member,
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,
     "/api/mesh/open_file": api_mesh_open_file,

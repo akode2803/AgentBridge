@@ -234,6 +234,8 @@ const ICONS = {
   pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M10 9v6M14 9v6"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   back: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>',
+  search: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="10.8" cy="10.8" r="6.2"/><path d="M15.6 15.6 20.4 20.4"/></svg>',
+  addUser: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="8" r="3.4"/><path d="M3.4 19.5c1.4-3.4 11.8-3.4 13.2 0M18.5 8v6M15.5 11h6"/></svg>',
   more: '<svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><circle cx="12" cy="5.2" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="18.8" r="1.7"/></svg>',
 };
 
@@ -246,11 +248,71 @@ const SETTINGS_SECTIONS = [
 ];
 const Settings = { section: null };   // explicit #/settings/<section>
 
+// ------------------------------------------------------- custom dropdown
+// native <select> popups ignore theming and clip inside scrolling panes
+function csel({ options, value, onChange }) {
+  const root = document.createElement("div");
+  root.className = "csel";
+  root.dataset.value = value ?? "";
+  const label = () =>
+    (options.find((o) => String(o.v) === String(root.dataset.value)) || options[0]).label;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.innerHTML = `<span class="csel-value"></span><span class="csel-caret">▾</span>`;
+  btn.querySelector(".csel-value").textContent = label();
+  root.appendChild(btn);
+  let pop = null;
+  const close = () => {
+    if (pop) { pop.remove(); pop = null; }
+    document.removeEventListener("mousedown", away, true);
+  };
+  const away = (e) => {
+    if (!root.contains(e.target) && !(pop && pop.contains(e.target))) close();
+  };
+  btn.addEventListener("click", () => {
+    if (pop) { close(); return; }
+    pop = document.createElement("div");
+    pop.className = "csel-pop";
+    pop.innerHTML = options.map((o) => `
+      <button type="button" class="csel-opt ${String(o.v) === String(root.dataset.value) ? "sel" : ""}"
+              data-v="${esc(o.v)}">${esc(o.label)}</button>`).join("");
+    document.body.appendChild(pop);
+    const r = btn.getBoundingClientRect();
+    pop.style.minWidth = Math.max(180, r.width) + "px";
+    const ph = pop.offsetHeight, pw = pop.offsetWidth;
+    pop.style.top = Math.max(8, (r.bottom + ph + 8 > innerHeight)
+      ? r.top - ph - 4 : r.bottom + 4) + "px";
+    pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pw - 8)) + "px";
+    pop.querySelectorAll(".csel-opt").forEach((ob) => {
+      ob.addEventListener("click", () => {
+        root.dataset.value = ob.dataset.v;
+        btn.querySelector(".csel-value").textContent = label();
+        close();
+        if (onChange) onChange(ob.dataset.v);
+      });
+    });
+    document.addEventListener("mousedown", away, true);
+  });
+  return root;
+}
+
+// mount a csel into every placeholder <div class="csel-slot" …>
+function mountCsels(scope, options, onChange) {
+  scope.querySelectorAll(".csel-slot").forEach((slot) => {
+    const el = csel({
+      options: typeof options === "function" ? options(slot) : options,
+      value: slot.dataset.value || "",
+      onChange: (v) => { slot.dataset.value = v; if (onChange) onChange(slot, v); },
+    });
+    slot.appendChild(el);
+  });
+}
+
 // the sidebar follows the rail selection: chat list, settings nav,
 // or the new-chat form
 function renderSidebar() {
   const ms = Mesh.state;
-  $("#rail-account").textContent =
+  $("#rail-avatar").textContent =
     ms?.user ? (meshDn(ms.user)[0] || "?").toUpperCase() : "?";
   $("#side-new").hidden = App.page !== "chats";
   if (App.page === "settings") return renderSettingsSidebar();
@@ -258,16 +320,31 @@ function renderSidebar() {
   renderChatListSidebar();
 }
 
+// swap the sidebar body only when it actually changed (poll redraws were
+// causing visible jitter); slide it in when the rail selection changed
+function setSide(html, padding) {
+  const box = $("#side-chats");
+  if (box.dataset.key === html) return false;
+  box.dataset.key = html;
+  box.style.padding = padding || "";
+  box.innerHTML = html;
+  if (App._sidePage !== App.page) {
+    App._sidePage = App.page;
+    box.classList.remove("slide");
+    void box.offsetWidth;
+    box.classList.add("slide");
+  }
+  return true;
+}
+
 function renderSettingsSidebar() {
   const ms = Mesh.state;
-  const box = $("#side-chats");
   if (!ms?.available || !ms.user) {
-    box.innerHTML = `<div class="empty" style="padding:24px 10px">Sign in first</div>`;
+    setSide(`<div class="empty" style="padding:24px 10px">Sign in first</div>`);
     return;
   }
   const active = Settings.section || (innerWidth > 760 ? "profile" : null);
-  box.style.padding = "0";
-  box.innerHTML = `
+  const html = `
     <div class="side-account-card">
       <span class="acct-big">${esc((meshDn(ms.user)[0] || "?").toUpperCase())}</span>
       <div style="min-width:0">
@@ -283,19 +360,18 @@ function renderSettingsSidebar() {
           <div class="snav-desc">${s.desc}</div>
         </span>
       </button>`).join("")}`;
-  box.querySelectorAll(".snav").forEach((b) => {
+  if (!setSide(html, "0")) return;
+  document.querySelectorAll("#side-chats .snav").forEach((b) => {
     b.addEventListener("click", () => { location.hash = `#/settings/${b.dataset.sec}`; });
   });
 }
 
 function renderNewChatSidebar() {
   const ms = Mesh.state;
-  const box = $("#side-chats");
-  box.style.padding = "";
   if (!ms?.available || !ms.user) { location.hash = "#/chats"; return; }
   const myAgents = Object.values(ms.users)
     .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
-  box.innerHTML = `
+  const html = `
     <div style="padding:12px 10px">
       <div style="font-weight:600;margin-bottom:10px">New chat</div>
       <input type="text" id="new-chat-name" placeholder="Chat name" style="width:100%">
@@ -311,6 +387,7 @@ function renderNewChatSidebar() {
         <button id="nc-cancel">Cancel</button>
       </div>
     </div>`;
+  if (!setSide(html)) return;
   $("#create-chat-btn").addEventListener("click", async () => {
     const members = [...document.querySelectorAll(".nc-member:checked")].map((c) => c.value);
     const r = await api("/api/mesh/create_chat",
@@ -324,16 +401,17 @@ function renderNewChatSidebar() {
 
 function renderChatListSidebar() {
   const ms = Mesh.state;
-  const box = $("#side-chats");
-  box.style.padding = "";
   if (!ms?.available || !ms.user) {
-    box.innerHTML = `<div class="empty" style="padding:24px 10px">${
-      !ms?.available ? "Mesh not started yet" : "Sign in to see your chats"}</div>`;
+    setSide(`<div class="empty" style="padding:24px 10px">${
+      !ms?.available ? "Mesh not started yet" : "Sign in to see your chats"}</div>`);
     return;
   }
-  box.innerHTML = (ms.chats || []).filter((c) => !c.archived).map((c) => `
+  const chats = ms.chats || [];
+  const archived = chats.filter((c) => c.archived);
+  const listed = Mesh.showArchived ? archived : chats.filter((c) => !c.archived);
+  const row = (c) => `
     <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
-      <div class="chat-avatar">${esc((c.name[0] || "#").toUpperCase())}</div>
+      <div class="chat-avatar ${c.archived ? "arch" : ""}">${esc((c.name[0] || "#").toUpperCase())}</div>
       <div class="chat-mid">
         <div class="chat-name">${esc(c.name)}</div>
         <div class="chat-last">${c.last
@@ -341,12 +419,30 @@ function renderChatListSidebar() {
       </div>
       <div class="chat-side">
         <div class="chat-time">${c.last ? esc(fmtTime(c.last.ts)) : ""}</div>
-        ${c.unread ? `<span class="unread-badge">${c.unread}</span>` : ""}
+        ${c.unread && !c.archived ? `<span class="unread-badge">${c.unread}</span>` : ""}
       </div>
-    </div>`).join("") ||
-    `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`;
-  box.querySelectorAll(".chat-row").forEach((r) => {
+    </div>`;
+  let html = "";
+  if (Mesh.showArchived) {
+    html = `<button class="arch-row" id="arch-toggle">${ICONS.back}
+        <b>Archived</b><span class="arch-count">back to chats</span></button>` +
+      (listed.map(row).join("") ||
+        `<div class="empty" style="padding:24px 10px">Nothing archived</div>`);
+  } else {
+    html = (archived.length ? `<button class="arch-row" id="arch-toggle">
+        ${ICONS.archive} Archived <span class="arch-count">${archived.length}</span></button>` : "") +
+      (listed.map(row).join("") ||
+        `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`);
+  }
+  if (!setSide(html)) return;
+  document.querySelectorAll("#side-chats .chat-row").forEach((r) => {
     r.addEventListener("click", () => { location.hash = `#/chats/${r.dataset.chat}`; });
+  });
+  const at = $("#arch-toggle");
+  if (at) at.addEventListener("click", () => {
+    Mesh.showArchived = !Mesh.showArchived;
+    $("#side-chats").dataset.key = "";
+    renderChatListSidebar();
   });
 }
 
@@ -525,7 +621,7 @@ async function renderMeshChat(force) {
     prevFrom = msg.from;
     const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
     parts.push(`
-      <div class="msg ${msg.mine ? "mine" : ""}">
+      <div class="msg ${msg.mine ? "mine" : ""}" data-mid="${esc(msg.id || "")}">
         ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
         <div class="bubble">${md(msg.body || "")}${files}</div>
         <div class="meta">${esc(timeOnly(msg.ts))}</div>
@@ -563,7 +659,8 @@ async function renderMeshChat(force) {
     const prevTop = tr.scrollTop;
     tr.innerHTML = bubbles;
     bindMeshAttachments(chatId);
-    if (nearBottom) tr.scrollTop = tr.scrollHeight;
+    if (Mesh.jumpTo) jumpToMessage();
+    else if (nearBottom) tr.scrollTop = tr.scrollHeight;
     else tr.scrollTop = prevTop;
     if (hadNew) api("/api/mesh/read", { chat_id: chatId });
     return;
@@ -600,7 +697,10 @@ async function renderMeshChat(force) {
     ${meta.archived ? "" : `
     <div id="composer">
       <div id="composer-pill">
-        <textarea id="mesh-body" rows="1"></textarea>
+        <div id="composer-ta-wrap">
+          <div id="composer-hl" aria-hidden="true"></div>
+          <textarea id="mesh-body" rows="1"></textarea>
+        </div>
         <input type="file" id="mesh-file" hidden>
         <button id="mesh-attach-btn">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05 12.25 20.2a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.83l8.49-8.48"/></svg>
@@ -637,8 +737,8 @@ async function renderMeshChat(force) {
       else if (act === "archive") {
         const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
         if (r.error) { toast(r.error, true); return; }
-        toast(r.archived ? "Chat archived" : "Chat restored");
-        Mesh.structKey = ""; renderChats(true);
+        toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
+        location.hash = "#/chats";   // archived chats leave the active list
       } else if (act === "pause") {
         const r = await api("/api/mesh/pause", { paused: !ms.paused });
         if (r.error) { toast(r.error, true); return; }
@@ -653,11 +753,23 @@ async function renderMeshChat(force) {
   const body = $("#mesh-body");
   if (body) {
     body.value = draft.body;
+    // backdrop pills behind valid @tags (chat members + humans)
+    const hl = $("#composer-hl");
+    const updateHl = () => {
+      let t = esc(body.value);
+      t = t.replace(/(^|[\s(])@([a-z][a-z0-9_]{1,31})/gi, (m, pre, u) =>
+        MD_TAGGABLE && MD_TAGGABLE.has(u.toLowerCase())
+          ? `${pre}<span class="hl-tag">@${u}</span>` : m);
+      hl.innerHTML = t + "&#8203;";  // phantom char mirrors the textarea's trailing line
+      hl.scrollTop = body.scrollTop;
+    };
     const autosize = () => {
       body.style.height = "auto";
       body.style.height = Math.min(body.scrollHeight, 160) + "px";
+      updateHl();
     };
     autosize();
+    body.addEventListener("scroll", () => { hl.scrollTop = body.scrollTop; });
     body.addEventListener("input", (e) => { draft.body = e.target.value; autosize(); });
 
     // @tag autofill: chat members + humans, keyboard + mouse
@@ -674,6 +786,7 @@ async function renderMeshChat(force) {
       const caret = tagCtx.start + t.u.length + 1;
       body.setSelectionRange(caret, caret);
       draft.body = body.value;
+      autosize();
       closePop();
       body.focus();
     };
@@ -746,7 +859,8 @@ async function renderMeshChat(force) {
   bindMeshAttachments(chatId);
 
   const tr = $("#transcript");
-  tr.scrollTop = tr.scrollHeight;
+  if (Mesh.jumpTo) jumpToMessage();
+  else tr.scrollTop = tr.scrollHeight;
   if (hadNew) api("/api/mesh/read", { chat_id: chatId });
 }
 
@@ -799,28 +913,47 @@ async function renderChatDetails() {
   // only re-render when something actually changed — a poll redraw would
   // knock dropdowns and toggles out from under the user
   const dKey = JSON.stringify([meta, media.length, ms.paused,
-    myAgentsHere.map((a) => a.settings)]);
+    myAgentsHere.map((a) => a.settings), !!Mesh.searchView, !!Mesh.addingMember]);
   if (dKey === Mesh.detailsKey && App.page === "chats") return;
   Mesh.detailsKey = dKey;
-  const ruleSel = (a) => {
-    const current = ((a.settings || {}).rules || {})[chatId] || "";
-    const defRule = (a.settings || {}).default_rule || "tagged";
-    return `<select class="cd-rule" data-agent="${esc(a.username)}">
-      <option value="" ${current === "" ? "selected" : ""}>Default — ${RULE_LABELS[defRule].toLowerCase()}</option>
-      ${Object.entries(RULE_LABELS).map(([r, label]) =>
-        `<option value="${r}" ${current === r ? "selected" : ""}>${label}</option>`).join("")}
-    </select>`;
+
+  // in-chat search slides in over chat info, in the same pane
+  if (Mesh.searchView) return renderChatSearch(data);
+
+  const memberRow = (u) => {
+    const rec = ms.users[u] || {};
+    return `
+      <div class="mem-row">
+        <span class="mem-avatar">${esc((meshDn(u)[0] || "?").toUpperCase())}</span>
+        <span style="min-width:0">
+          <div class="mem-name">${esc(meshDn(u))}
+            ${rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+          <div class="mem-sub">@${esc(u)}</div>
+        </span>
+        ${meta.owner === u ? '<span class="owner-chip">Owner</span>' : ""}
+      </div>`;
   };
+  // addable: my own agents + any human, minus current members
+  const candidates = Object.values(ms.users).filter((u) =>
+    !(meta.members || []).includes(u.username)
+    && (u.kind === "human" || (u.owners || []).includes(ms.user)));
 
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <span class="pane-title">${esc(meta.name)}</span>
+      <span class="pane-title">Chat info</span>
       <button class="icon-btn" id="cd-close">${ICONS.close}</button>
     </div>
-    <div class="card">
-      <h2>Members</h2>
-      ${(meta.members || []).map((u) => `<span class="member-chip">${esc(meshDn(u))}
-        ${ms.users[u]?.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</span>`).join(" ")}
+    <div class="ci-identity">
+      <div class="ci-avatar">${esc((meta.name[0] || "#").toUpperCase())}</div>
+      <div class="ci-name">${esc(meta.name)}
+        ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
+      <div class="ci-sub">Chat · ${(meta.members || []).length} members</div>
+      <div class="ci-actions">
+        <button class="ci-act" id="ci-add">
+          <span class="ci-act-circle">${ICONS.addUser}</span>Add</button>
+        <button class="ci-act" id="ci-search">
+          <span class="ci-act-circle">${ICONS.search}</span>Search</button>
+      </div>
     </div>
     <div class="card">
       <h2>Media and files</h2>
@@ -837,8 +970,13 @@ async function renderChatDetails() {
     ${myAgentsHere.length ? `
     <div class="card">
       <h2>Your agents in this chat</h2>
-      <dl class="kv" style="grid-template-columns:minmax(90px,140px) 1fr">
-        ${myAgentsHere.map((a) => `<dt>${esc(a.display)}</dt><dd>${ruleSel(a)}</dd>`).join("")}
+      <dl class="kv" style="grid-template-columns:minmax(90px,130px) 1fr">
+        ${myAgentsHere.map((a) => {
+          const current = ((a.settings || {}).rules || {})[chatId] || "";
+          return `<dt>${esc(a.display)}</dt>
+            <dd><div class="csel-slot cd-rule" data-agent="${esc(a.username)}"
+                     data-value="${esc(current)}" data-def="${esc((a.settings || {}).default_rule || "tagged")}"></div></dd>`;
+        }).join("")}
       </dl>
       <p class="hint" style="margin-bottom:0">Rule changes apply from the agent's next check.</p>
     </div>` : ""}
@@ -856,34 +994,75 @@ async function renderChatDetails() {
       requests get one consolidated reply per chat after resuming.</p>
     </div>
     <div class="card">
+      <h2>${(meta.members || []).length} members</h2>
+      ${Mesh.addingMember ? `
+        ${candidates.length ? candidates.map((u) => `
+          <button class="mem-add ci-candidate" data-user="${esc(u.username)}">
+            <span class="mem-avatar">${esc((u.display[0] || "?").toUpperCase())}</span>
+            <span style="min-width:0">
+              <div class="mem-name">${esc(u.display)}
+                ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+              <div class="mem-sub">@${esc(u.username)}</div>
+            </span>
+          </button>`).join("") : `<div class="empty" style="padding:14px 0">Everyone is already here.</div>`}
+        <button class="mem-add" id="ci-add-cancel"><span class="mem-avatar" style="background:var(--text-faint)">✕</span><b>Cancel</b></button>`
+      : `
+        <button class="mem-add" id="ci-add2">
+          <span class="mem-avatar">${ICONS.addUser}</span><b>Add member</b></button>
+        ${(meta.members || []).map(memberRow).join("")}`}
+    </div>
+    <div class="card">
       <h2>Connection</h2>
       <dl class="kv">
         <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
-        <dt>OneDrive</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
+        <dt>Sync client</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
         <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
       </dl>
     </div>
-    <div class="card">
-      <h2>About</h2>
-      <dl class="kv">
-        <dt>Created by</dt><dd>${esc(meshDn(meta.created_by))}</dd>
-        <dt>Owner</dt><dd>${esc(meshDn(meta.owner))}</dd>
-        <dt>Created</dt><dd>${esc(fmtTime(meta.created))}</dd>
-        <dt>State</dt><dd>${meta.archived ? "Archived" : "Active"}</dd>
-      </dl>
-      ${isOwner ? `<div class="row" style="margin-top:10px">
-        <button id="cd-archive">${meta.archived ? "Unarchive chat" : "Archive chat"}</button>
-      </div>` : ""}
-    </div>`;
+    ${isOwner ? `<div class="row" style="justify-content:center;margin-bottom:10px">
+      <button id="cd-archive">${meta.archived ? "Unarchive chat" : "Archive chat"}</button>
+    </div>` : ""}
+    <div class="ci-footer">Chat created by ${esc(meshDn(meta.created_by))},
+      ${esc(fmtTime(meta.created))}</div>`;
 
   $("#cd-close").addEventListener("click", () => { location.hash = `#/chats/${chatId}`; });
+  $("#ci-search").addEventListener("click", () => {
+    Mesh.searchView = true;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  const startAdd = () => {
+    Mesh.addingMember = true;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  };
+  $("#ci-add").addEventListener("click", startAdd);
+  const add2 = $("#ci-add2");
+  if (add2) add2.addEventListener("click", startAdd);
+  const addCancel = $("#ci-add-cancel");
+  if (addCancel) addCancel.addEventListener("click", () => {
+    Mesh.addingMember = false;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  document.querySelectorAll(".ci-candidate").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = await api("/api/mesh/add_member",
+        { chat_id: chatId, username: b.dataset.user });
+      if (r.error) { toast(r.error, true); return; }
+      toast(`@${b.dataset.user} added to the chat`);
+      Mesh.addingMember = false;
+      Mesh.detailsKey = "";
+      Mesh.structKey = "";     // the header's member line changed too
+      renderChats(true);
+    });
+  });
   const arch = $("#cd-archive");
   if (arch) arch.addEventListener("click", async () => {
     const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
     if (r.error) { toast(r.error, true); return; }
-    toast(r.archived ? "Chat archived" : "Chat restored");
-    Mesh.structKey = "";
-    renderChats(true);
+    toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
+    location.hash = "#/chats";
   });
   $("#cd-pause").addEventListener("change", async (e) => {
     const r = await api("/api/mesh/pause", { paused: e.target.checked });
@@ -892,15 +1071,17 @@ async function renderChatDetails() {
     renderChrome();
     toast(r.paused ? "All agents standing down" : "Agents resumed");
   });
-  document.querySelectorAll(".cd-rule").forEach((sel) => {
-    sel.addEventListener("change", async () => {
-      if (!sel.value) { toast("Kept the agent's default rule"); return; }
-      const r = await api("/api/mesh/agent", {
-        username: sel.dataset.agent, patch: { rules: { [chatId]: sel.value } },
-      });
-      if (r.error) toast(r.error, true);
-      else toast(`@${sel.dataset.agent}: ${RULE_LABELS[sel.value].toLowerCase()} here`);
+  mountCsels($("#details-pane"), (slot) => {
+    const def = RULE_LABELS[slot.dataset.def] || "";
+    return [{ v: "", label: `Default — ${def.toLowerCase()}` },
+      ...Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }))];
+  }, async (slot, v) => {
+    if (!v) { toast("Kept the agent's default rule"); return; }
+    const r = await api("/api/mesh/agent", {
+      username: slot.dataset.agent, patch: { rules: { [chatId]: v } },
     });
+    if (r.error) toast(r.error, true);
+    else toast(`@${slot.dataset.agent}: ${RULE_LABELS[v].toLowerCase()} here`);
   });
   document.querySelectorAll(".cd-file").forEach((b) => {
     b.addEventListener("click", async () => {
@@ -908,6 +1089,73 @@ async function renderChatDetails() {
       if (r.error) toast(r.error, true);
     });
   });
+}
+
+// in-chat message search (WhatsApp-style results: date, sender, snippet)
+function renderChatSearch(data) {
+  const chatId = Mesh.chatId;
+  $("#details-pane").innerHTML = `
+    <div class="pane-head">
+      <button class="icon-btn" id="cs-back">${ICONS.back}</button>
+      <span class="pane-title">Search messages</span>
+    </div>
+    <div class="search-box">${ICONS.search}
+      <input type="text" id="cs-input" placeholder="Search" autocomplete="off">
+    </div>
+    <div id="cs-results"></div>`;
+  $("#cs-back").addEventListener("click", () => {
+    Mesh.searchView = false;
+    Mesh.searchQ = "";
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  const input = $("#cs-input");
+  const results = $("#cs-results");
+  const run = () => {
+    const q = input.value.trim();
+    Mesh.searchQ = q;
+    if (q.length < 2) { results.innerHTML = ""; return; }
+    const ql = q.toLowerCase();
+    const hits = data.messages
+      .filter((m) => (m.body || "").toLowerCase().includes(ql))
+      .slice(-50).reverse();
+    const mark = (body) => {
+      const i = body.toLowerCase().indexOf(ql);
+      const start = Math.max(0, i - 34);
+      const snip = (start > 0 ? "…" : "") + body.slice(start, i + ql.length + 90);
+      return esc(snip).replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+        (mm) => `<b>${mm}</b>`);
+    };
+    results.innerHTML = hits.map((m) => `
+      <button class="search-hit" data-mid="${esc(m.id || "")}">
+        <div class="sh-date">${esc(dayLabel(m.ts))} · ${esc(timeOnly(m.ts))}</div>
+        <div class="sh-body">${esc(meshDn(m.from))}: ${mark(m.body || "")}</div>
+      </button>`).join("") ||
+      `<div class="empty" style="padding:26px 0">No messages found</div>`;
+    results.querySelectorAll(".search-hit").forEach((b) => {
+      b.addEventListener("click", () => {
+        Mesh.jumpTo = b.dataset.mid;
+        Mesh.searchView = false;
+        Mesh.searchQ = "";
+        location.hash = `#/chats/${chatId}`;   // close info, land on the message
+      });
+    });
+  };
+  input.addEventListener("input", run);
+  input.value = Mesh.searchQ || "";
+  if (input.value) run();
+  input.focus();
+}
+
+function jumpToMessage() {
+  const id = Mesh.jumpTo;
+  Mesh.jumpTo = null;
+  if (!id) return;
+  const el = document.querySelector(`#transcript .msg[data-mid="${CSS.escape(id)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: "center" });
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1700);
 }
 
 // ---------------------------------------------------------------- new chat
@@ -1033,7 +1281,7 @@ async function renderSettings() {
         </div>
       </div>`;
   }
-  $("#content").innerHTML = html;
+  $("#content").innerHTML = `<div class="settings-body">${html}</div>`;
 
   const theme = $("#theme-toggle");
   if (theme) theme.addEventListener("change", (e) => {
@@ -1444,19 +1692,28 @@ function route() {
   if (page === "chats") {
     const chatId = sub || null;
     const details = sub2 === "details";
-    if (chatId !== Mesh.chatId || details !== Mesh.detailsView) {
-      Mesh.chatId = chatId;
-      Mesh.detailsView = details;
+    if (chatId !== Mesh.chatId) {
       Mesh.chatKey = "";
       Mesh.listKey = "";
-      Mesh.detailsKey = "";
       Mesh.structKey = "";
+      // blank surface while the chat loads — the mobile slide-in shows
+      // this instead of the previous page flashing by
+      if (chatId) $("#content").innerHTML = '<div class="chat-loading"></div>';
     }
+    if (details !== Mesh.detailsView) {
+      Mesh.detailsKey = "";
+      if (!details) { Mesh.searchView = false; Mesh.addingMember = false; Mesh.searchQ = ""; }
+    }
+    Mesh.chatId = chatId;
+    Mesh.detailsView = details;
   } else {
     Mesh.chatId = null;
     Mesh.detailsView = false;
+    Mesh.searchView = false;
+    Mesh.addingMember = false;
     Mesh.structKey = "";
   }
+  $("#side-new").hidden = page !== "chats";
   Settings.section = page === "settings" ? (sub || null) : null;
   $("#content").classList.toggle("chat-mode",
     App.page === "chats" && !!Mesh.chatId);
