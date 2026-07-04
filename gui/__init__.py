@@ -1,4 +1,4 @@
-﻿"""AgentBridge GUI â€” local web app (stdlib only) rendered in an Edge app window.
+"""AgentBridge GUI — local web app (stdlib only) rendered in an Edge app window.
 
 Serves the analyst-facing interface for the bridge: setup wizard, channel
 dashboard, transcript/composer, and (later) the CoCo livestream pane.
