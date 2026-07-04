@@ -228,12 +228,10 @@ function renderSidebar() {
   if (!ms?.available || !ms.user) {
     box.innerHTML = `<div class="empty" style="padding:24px 10px">${
       !ms?.available ? "Mesh not started yet" : "Sign in to see your chats"}</div>`;
-    $("#acct-name").textContent = "Sign in";
-    $("#acct-avatar").textContent = "?";
+    $("#rail-account").textContent = "?";
     return;
   }
-  $("#acct-name").textContent = meshDn(ms.user);
-  $("#acct-avatar").textContent = (meshDn(ms.user)[0] || "?").toUpperCase();
+  $("#rail-account").textContent = (meshDn(ms.user)[0] || "?").toUpperCase();
   box.innerHTML = (ms.chats || []).filter((c) => !c.archived).map((c) => `
     <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
       <div class="chat-avatar">${esc((c.name[0] || "#").toUpperCase())}</div>
@@ -324,8 +322,8 @@ async function renderChats(force) {
   $("#content").innerHTML = `
     <div class="empty-state">
       <div>
-        <div style="font-size:42px;margin-bottom:10px">💬</div>
-        <p><b>Select a chat</b> — or start one with the ✎ button.</p>
+        <svg viewBox="0 0 32 32" width="76" height="76" style="margin-bottom:8px"><path d="M4 22c3.5-8 20.5-8 24 0M4 22v-4M28 22v-4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>
+        <p><b>Select a chat</b> — or start a new one.</p>
         <p class="hint">Humans and agents, working in the same rooms.</p>
       </div>
     </div>`;
@@ -393,14 +391,27 @@ async function renderMeshChat(force) {
 
   const parts = [];
   let prevFrom = null, prevDay = null;
+  // we have the chat's beginning (tail didn't truncate): open with its
+  // birth — a date pill plus a "created by" pill, like Telegram
+  if (data.messages.length < 200 && meta.created) {
+    parts.push(`<div class="day-sep">${esc(dayLabel(meta.created))}</div>`);
+    parts.push(`<div class="info-pill">${esc(meshDn(meta.created_by))} created this chat</div>`);
+    prevDay = new Date(meta.created).toDateString();
+  }
   for (const msg of data.messages) {
     const day = new Date(msg.ts).toDateString();
     if (day !== prevDay) {
-      parts.push(`<div class="day-sep"><span>${esc(dayLabel(msg.ts))}</span></div>`);
+      parts.push(`<div class="day-sep">${esc(dayLabel(msg.ts))}</div>`);
       prevDay = day; prevFrom = null;
     }
+    // event messages (member added, left, …) render as centered pills
+    if (msg.kind === "info") {
+      parts.push(`<div class="info-pill">${esc(msg.body || "")}</div>`);
+      prevFrom = null;
+      continue;
+    }
     const files = (msg.files || []).map((f) => `
-      <button class="att-btn mesh-att" data-path="${esc(f.path)}" title="Open ${esc(f.name)}">
+      <button class="att-btn mesh-att" data-path="${esc(f.path)}">
         <span class="att-icon">${extIcon(f.name)}</span>
         <span style="min-width:0">
           <div class="att-name">${esc(f.name)}</div>
@@ -442,7 +453,7 @@ async function renderMeshChat(force) {
 
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
-  const structKey = chatId + "|" + !!meta.archived;
+  const structKey = chatId + "|" + !!meta.archived + "|" + (meta.members || []).join(",");
   if (Mesh.structKey === structKey && $("#transcript")) {
     const tr = $("#transcript");
     const nearBottom = tr.scrollHeight - tr.scrollTop - tr.clientHeight < 120;
@@ -458,13 +469,17 @@ async function renderMeshChat(force) {
 
   const draft = meshDraft(chatId);
 
+  // members line under the chat name, WhatsApp-style: "Claude, CoCo, You"
+  const memberLine = (meta.members || []).filter((u) => u !== ms.user)
+    .map(meshDn).concat("You").join(", ");
+
   $("#content").innerHTML = `
-    <div class="chat-head">
-      <div id="chat-info-btn" class="chat-title-btn" title="Open chat info">
+    <div class="chat-top">
+      <div id="chat-info-btn" class="chat-title-btn" title="Open chat info" style="min-width:0">
         <div class="chat-head-name">${esc(meta.name)}
           ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
+        <div class="chat-head-sub">${esc(memberLine)}</div>
       </div>
-      <span class="spacer"></span>
     </div>
     <div id="transcript">${bubbles}</div>
     <div id="pending-area"></div>
@@ -472,11 +487,12 @@ async function renderMeshChat(force) {
     <div id="composer">
       <div id="composer-pill">
         <textarea id="mesh-body" rows="1"></textarea>
-        <button id="mesh-attach-btn" title="Attach a file">
+        <input type="file" id="mesh-file" hidden>
+        <button id="mesh-attach-btn">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05 12.25 20.2a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.83l8.49-8.48"/></svg>
         </button>
       </div>
-      <button class="primary send-icon" id="mesh-send-btn" title="Send (Ctrl+Enter)">
+      <button class="primary send-icon" id="mesh-send-btn">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M3.4 20.4 20.85 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z" fill="currentColor"/></svg>
       </button>
       <div id="tag-pop" hidden></div>
@@ -564,10 +580,19 @@ async function renderMeshChat(force) {
     body.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && e.ctrlKey && !tagCtx) doSend();
     });
-    $("#mesh-attach-btn").addEventListener("click", async () => {
-      const r = await api("/api/mesh/pick_attach", {});
-      if (r.error) toast(r.error, true);
-      else if (r.path) { draft.att = r; renderMeshPending(chatId); }
+    // attach: browser file input (works everywhere, including mobile) —
+    // the file uploads to a local staging area, then rides the next post
+    $("#mesh-attach-btn").addEventListener("click", () => $("#mesh-file").click());
+    $("#mesh-file").addEventListener("change", async (e) => {
+      const f = e.target.files[0];
+      e.target.value = "";
+      if (!f) return;
+      const r = await fetch(`/api/mesh/upload?name=${encodeURIComponent(f.name)}`,
+        { method: "POST", body: f });
+      const j = await r.json();
+      if (j.error) { toast(j.error, true); return; }
+      draft.att = j;
+      renderMeshPending(chatId);
     });
   }
   renderMeshPending(chatId);
@@ -584,7 +609,7 @@ function renderMeshPending(chatId) {
   const draft = meshDraft(chatId);
   area.innerHTML = draft.att ? `
     <span class="pending-att">${extIcon(draft.att.name)} ${esc(draft.att.name)}
-      · ${fmtSize(draft.att.bytes)} <button id="remove-matt" title="Remove">✕</button></span>` : "";
+      · ${fmtSize(draft.att.bytes)} <button id="remove-matt">✕</button></span>` : "";
   const rm = $("#remove-matt");
   if (rm) rm.addEventListener("click", () => {
     draft.att = null;
@@ -642,7 +667,7 @@ async function renderChatDetails() {
 
   $("#content").innerHTML = `
     <div class="chat-head">
-      <button id="cd-back" title="Back to chat">←</button>
+      <button id="cd-back">←</button>
       <div class="chat-head-name">${esc(meta.name)}</div>
     </div>
     <div class="card" style="max-width:640px">
@@ -653,7 +678,7 @@ async function renderChatDetails() {
     <div class="card" style="max-width:640px">
       <h2>Media and files</h2>
       ${media.length ? media.map((f) => `
-        <button class="att-btn cd-file" data-path="${esc(f.path)}" title="Open ${esc(f.name)}"
+        <button class="att-btn cd-file" data-path="${esc(f.path)}"
                 style="max-width:100%;margin-top:6px">
           <span class="att-icon">${extIcon(f.name)}</span>
           <span style="min-width:0">
@@ -1267,6 +1292,8 @@ function route() {
   }
   $("#content").classList.toggle("chat-mode",
     App.page === "chats" && !!Mesh.chatId && !Mesh.detailsView);
+  $("#rail-chats").classList.toggle("active", page === "chats" || page === "new");
+  $("#rail-account").classList.toggle("active", page === "settings");
   renderChrome();
   PAGES[App.page]();
 }
@@ -1287,6 +1314,8 @@ window.addEventListener("hashchange", route);
 (async function start() {
   initTheme();
   $("#side-new").addEventListener("click", () => { location.hash = "#/new"; });
+  $("#rail-chats").addEventListener("click", () => { location.hash = "#/chats"; });
+  $("#rail-account").addEventListener("click", () => { location.hash = "#/settings"; });
   // resizable sidebar, width persisted
   const savedW = parseInt(localStorage.getItem("sidebarW"), 10);
   if (savedW) $("#navrail").style.width = savedW + "px";

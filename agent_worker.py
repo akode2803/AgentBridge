@@ -94,8 +94,9 @@ PROMPT = (
     "you do; never tag them as a courtesy or FYI. Reply etiquette: a reply "
     "is OPTIONAL — if the new messages need no substantive response from "
     "you (courtesy mentions, thanks, acknowledgments, FYIs), output exactly "
-    "NO_REPLY and nothing else, and no message will be posted. Do not keep "
-    "acknowledgment chains going.")
+    "NO_REPLY and nothing else, and no message will be posted. Decide "
+    "silence vs reply BEFORE you write — never output NO_REPLY and then "
+    "keep going. Do not keep acknowledgment chains going.")
 
 RULE_DESC = {
     "all": "an agent that replies to every message",
@@ -386,7 +387,18 @@ class Worker:
             reply = reply_file.read_text(encoding="utf-8-sig").strip()
         if not reply:
             reply = reply_from_stream(out)
-        if rc == 0 and reply and reply.strip().strip("`'\"") == "NO_REPLY":
+        no_reply = False
+        if rc == 0 and reply:
+            s = reply.strip().strip("`'\"").strip()
+            if s.upper().startswith("NO_REPLY"):
+                # the sentinel is never chat content: alone it means silence;
+                # followed by a change of mind mid-stream ("NO_REPLY … wait,
+                # that needs an answer"), post only the real message (seen
+                # live with CoCo 2026-07-04 — the raw sentinel leaked)
+                remainder = s[len("NO_REPLY"):].strip("`'\"").strip()
+                no_reply = not remainder
+                reply = remainder
+        if no_reply:
             # the agent judged no substantive response is needed — stay quiet
             feed.finish("done", "No reply needed")
             self.mesh.mark_read(chat_id, self.agent)

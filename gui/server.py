@@ -16,12 +16,14 @@ monitor; acking is an explicit button.
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -642,6 +644,15 @@ def api_mesh_post(data):
     msg = m.post(data.get("chat_id") or "", user, data.get("body") or "",
                  attachments=data.get("attachments") or [])
     m.mark_read(data.get("chat_id"), user)
+    # staged uploads are one-shot: post() copied them into the chat's files
+    staging = (HOME / "gui_uploads").resolve()
+    for a in data.get("attachments") or []:
+        try:
+            p = Path(a).resolve()
+            if p.parent == staging:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
     return {"ok": True, "id": msg["id"]}
 
 
@@ -754,11 +765,6 @@ def api_mesh_open_file(data):
     return {"ok": True}
 
 
-def api_mesh_pick_attach(data):
-    """Pick a file and return its path (mesh composer attach flow)."""
-    return api_pick_file()
-
-
 def api_shutdown():
     """Let a newer launch replace a running instance (single-instance UX:
     without this, a relaunch silently lands on a random port while the stale
@@ -805,7 +811,6 @@ POST_ROUTES = {
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,
     "/api/mesh/open_file": api_mesh_open_file,
-    "/api/mesh/pick_attach": api_mesh_pick_attach,
     "/api/mesh/pause": api_mesh_pause,
 }
 
@@ -843,6 +848,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._static(path)
 
     def do_POST(self):
+        if self.path.startswith("/api/mesh/upload"):
+            return self._upload()
         route = POST_ROUTES.get(self.path)
         if not route:
             return self._json({"error": "not found"}, 404)
@@ -859,6 +866,44 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
         status = 200 if "error" not in result else 400
         return self._json(result, status)
+
+    MAX_UPLOAD = 512 * 1024 * 1024
+
+    def _upload(self):
+        """Attachment staging (POST /api/mesh/upload?name=…, raw file body).
+        A browser file input can't reveal filesystem paths — the file itself
+        travels here (localhost) and the staged copy rides the next post.
+        Works from any browser, including phones, unlike a native dialog."""
+        _, _, query = self.path.partition("?")
+        name = ""
+        for pair in query.split("&"):
+            k, _, v = pair.partition("=")
+            if k == "name":
+                name = unquote(v)
+        name = Path(name).name or "attachment"  # strip any path components
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._json({"error": "Empty upload"}, 400)
+        if length > self.MAX_UPLOAD:
+            return self._json({"error": "File is too large (512 MB max)"}, 400)
+        staging = HOME / "gui_uploads"
+        staging.mkdir(parents=True, exist_ok=True)
+        dest = staging / name
+        if dest.exists():
+            dest = staging / f"{dest.stem}_{secrets.token_hex(3)}{dest.suffix}"
+        remaining = length
+        with open(dest, "wb") as fh:
+            while remaining:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                fh.write(chunk)
+                remaining -= len(chunk)
+        return self._json({"ok": True, "name": dest.name, "path": str(dest),
+                           "bytes": dest.stat().st_size})
 
     def _static(self, path):
         rel = path.lstrip("/") or "index.html"
