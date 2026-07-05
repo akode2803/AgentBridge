@@ -574,7 +574,9 @@ def api_mesh_state():
            "users": {k: _public_user(v) for k, v in m.users().items()}}
     if user:
         chats = []
+        starred_count = 0
         for meta in m.chats_for(user, include_archived=True):
+            starred_count += len(m.starred_ids(meta["id"], user))
             chats.append({
                 "id": meta["id"], "name": meta["name"],
                 "kind": meta.get("kind", "group"),   # DMs display per-viewer
@@ -585,6 +587,7 @@ def api_mesh_state():
                 "unread": m.unread_count(meta["id"], user),
             })
         out["chats"] = chats
+        out["starred_count"] = starred_count
     return out
 
 
@@ -642,7 +645,10 @@ def api_mesh_chat(params):
     msgs = m.messages(chat_id, tail=tail)
     for msg in msgs:
         msg["mine"] = msg.get("from") == user
-    return {"meta": meta, "messages": msgs, "me": user}
+    # expired pins are LAZY: readers just don't see them (no cleanup write)
+    meta["pin"] = m.pin_active(meta)
+    return {"meta": meta, "messages": msgs, "me": user,
+            "starred": m.starred_ids(chat_id, user)}
 
 
 def api_mesh_post(data):
@@ -865,6 +871,48 @@ def api_mesh_livefeed(params):
     return {"feeds": feeds}
 
 
+def api_mesh_pin(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    pin = m.pin_message(data.get("chat_id") or "", user,
+                        data.get("msg_id") or "",
+                        hours=int(data.get("hours") or 168))
+    return {"ok": True, "pin": pin}
+
+
+def api_mesh_unpin(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    m.unpin_message(data.get("chat_id") or "", user)
+    return {"ok": True}
+
+
+def api_mesh_star(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    starred = m.star_message(data.get("chat_id") or "", user,
+                             data.get("msg_id") or "",
+                             starred=bool(data.get("starred", True)),
+                             snapshot=data.get("snapshot") or {})
+    return {"ok": True, "starred": starred}
+
+
+def api_mesh_starred(params):
+    m = get_mesh()
+    if m is None or not m.exists():
+        return {"starred": []}
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    return {"starred": m.starred_all(user)}
+
+
 def api_mesh_typing(data):
     """Typing heartbeat: the composer pings while the user writes; other
     members' windows show a dots-only bubble until it goes stale. One file
@@ -926,6 +974,7 @@ GET_ROUTES = {
     "/api/mesh/chat": api_mesh_chat,
     "/api/mesh/livefeed": api_mesh_livefeed,
     "/api/mesh/chat_info": api_mesh_chat_info,
+    "/api/mesh/starred": api_mesh_starred,
 }
 
 POST_ROUTES = {
@@ -961,6 +1010,9 @@ POST_ROUTES = {
     "/api/mesh/open_file": api_mesh_open_file,
     "/api/mesh/pause": api_mesh_pause,
     "/api/mesh/typing": api_mesh_typing,
+    "/api/mesh/pin": api_mesh_pin,
+    "/api/mesh/unpin": api_mesh_unpin,
+    "/api/mesh/star": api_mesh_star,
 }
 
 

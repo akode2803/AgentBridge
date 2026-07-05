@@ -558,6 +558,66 @@ input[type=text], select, textarea {
 }
 .reply-quote.two .rq-body { -webkit-line-clamp: 2; padding-top: 2px; }
 
+/* pinned-message banner under the chat header (WhatsApp): pin icon + a
+   one-line preview; clicking jumps to the message */
+#pin-banner {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  flex: none; text-align: left; cursor: pointer;
+  background: var(--surface); border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 18px; font: inherit; font-size: 12.5px; color: var(--text);
+  border-radius: 0;
+  animation: reply-in .15s ease;
+}
+#pin-banner svg { width: 15px; height: 15px; flex: none; color: var(--accent); }
+#pin-banner .pin-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+
+/* tiny star beside the time of a message the viewer starred */
+.msg .meta .star-mini {
+  font-size: 9px; margin-right: 4px; color: var(--text-faint);
+}
+
+/* pin-duration dialog radios */
+.pin-opts { display: flex; flex-direction: column; gap: 2px; margin: 14px 0 4px; }
+.pin-opt {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 6px; border-radius: 6px; cursor: pointer; font-size: 13.5px;
+}
+.pin-opt:hover { background: var(--hover); }
+.pin-opt input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.cf-pill {
+  background: var(--accent); color: #fff; border: none; border-radius: 999px;
+  padding: 8px 26px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.cf-pill:hover { background: var(--accent-hover); }
+
+/* starred-messages sidebar page */
+.star-card {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: none; border-bottom: 1px solid var(--border);
+  padding: 11px 12px; font: inherit; color: var(--text); border-radius: 0;
+}
+.star-card:hover { background: var(--hover); }
+.sc-top { display: flex; align-items: center; gap: 6px; }
+.sc-names {
+  flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sc-arrow { color: var(--text-faint); font-weight: 400; }
+.sc-time { font-size: 11px; color: var(--text-faint); flex: none; }
+.sc-chev { flex: none; color: var(--text-faint); display: grid; }
+.sc-chev svg { width: 14px; height: 14px; transform: rotate(-90deg); }
+.sc-bubble {
+  display: inline-block; max-width: 100%; margin-top: 7px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+}
+
 /* reply-in-progress bar docked above the composer */
 #reply-area { padding: 0 18px; flex: none; }
 #reply-area .reply-bar {

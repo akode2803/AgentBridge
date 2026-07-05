@@ -469,6 +469,115 @@ class Mesh:
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         return meta
 
+    # ---------------------------------------------------------------- pins
+
+    PIN_HOURS = (24, 24 * 7, 24 * 30)
+
+    @staticmethod
+    def pin_active(meta, now=None):
+        """The pin members currently see. Expiry is LAZY: an expired pin is
+        simply ignored by every reader (no cleanup write, so no races
+        between machines) and physically replaced by the next pin/unpin."""
+        pin = (meta or {}).get("pin")
+        if not isinstance(pin, dict) or not pin.get("id"):
+            return None
+        if (pin.get("until") or "") <= (now or utcnow()):
+            return None
+        return pin
+
+    def pin_message(self, chat_id, by, msg_id, hours=168):
+        """WhatsApp semantics: any member pins any message FOR EVERYONE,
+        one pin per chat (a new pin replaces the old), duration-limited.
+        Deliberately loose for now — the permissions overhaul decides who
+        may pin."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if by not in (meta.get("members") or []):
+            raise MeshError("Only members can pin messages")
+        if int(hours) not in self.PIN_HOURS:
+            raise MeshError("Pin duration must be 24 hours, 7 days or 30 days")
+        msg = next((m for m in self.messages(chat_id, tail=0)
+                    if m.get("id") == msg_id and m.get("kind") != "info"), None)
+        if not msg:
+            raise MeshError("Message not found in this chat")
+        until = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                              time.gmtime(time.time() + int(hours) * 3600))
+        meta["pin"] = {"id": msg["id"], "from": msg.get("from"),
+                       "body": (msg.get("body") or "")[:220],
+                       "by": by, "at": utcnow(), "until": until}
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        by_dn = (self.get_user(by) or {}).get("display", by)
+        self.post_event(chat_id, by, f"{by_dn} pinned a message", "pin",
+                        target=msg["id"])
+        return meta["pin"]
+
+    def unpin_message(self, chat_id, by):
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if by not in (meta.get("members") or []):
+            raise MeshError("Only members can unpin messages")
+        if not meta.get("pin"):
+            return meta
+        was_active = bool(self.pin_active(meta))
+        meta.pop("pin", None)
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        if was_active:   # clearing an expired leftover isn't news
+            by_dn = (self.get_user(by) or {}).get("display", by)
+            self.post_event(chat_id, by, f"{by_dn} unpinned a message",
+                            "unpin")
+        return meta
+
+    # --------------------------------------------------------------- stars
+
+    def star_message(self, chat_id, username, msg_id, starred=True,
+                     snapshot=None):
+        """Private per-user overlay: stars live in the user's own per-chat
+        state file (single writer holds), beside the read cursor. The
+        snapshot (from/body/ts) makes the global starred list renderable
+        without scanning any message log."""
+        if not self.get_chat(chat_id):
+            raise MeshError("No such chat")
+        key = self._cursor_key(chat_id, username)
+        cur = self.cx.read_json(key) or {}
+        stars = cur.get("starred") or {}
+        if starred:
+            snap = snapshot or {}
+            stars[str(msg_id)[:80]] = {
+                "from": str(snap.get("from") or "")[:64],
+                "body": str(snap.get("body") or "")[:220],
+                "ts": str(snap.get("ts") or "")[:32],
+                "at": utcnow()}
+        else:
+            stars.pop(str(msg_id)[:80], None)
+        cur["starred"] = stars
+        cur["updated"] = utcnow()
+        self.cx.write_json(key, cur)
+        return sorted(stars)
+
+    def starred_ids(self, chat_id, username):
+        cur = self.cx.read_json(self._cursor_key(chat_id, username)) or {}
+        return list((cur.get("starred") or {}).keys())
+
+    def starred_all(self, username):
+        """Every starred message across chats, newest original first."""
+        out = []
+        for cid in self.cx.listdir("chats"):
+            meta = self.get_chat(cid)
+            if not meta:
+                continue
+            cur = self.cx.read_json(self._cursor_key(cid, username)) or {}
+            for mid, s in (cur.get("starred") or {}).items():
+                out.append({"chat_id": cid, "chat_name": meta.get("name"),
+                            "kind": meta.get("kind", "group"),
+                            "members": meta.get("members") or [],
+                            "id": mid, "from": s.get("from"),
+                            "body": s.get("body"), "ts": s.get("ts"),
+                            "at": s.get("at")})
+        out.sort(key=lambda s: s.get("ts") or "", reverse=True)
+        return out
+
     def delete_chat(self, chat_id, by):
         """Owner-only, permanent, for every member — unlike archiving.
         (User decision 2026-07-04: delete exists alongside archive.)"""
@@ -580,8 +689,13 @@ class Mesh:
         return f"chats/{chat_id}/state/{username}.json"
 
     def mark_read(self, chat_id, username, ts=None):
-        self.cx.write_json(self._cursor_key(chat_id, username),
-                           {"read_ts": ts or utcnow(), "updated": utcnow()})
+        # merge, never overwrite: the same file carries per-user overlays
+        # (starred messages, later hidden/deleted-for-me) beside the cursor
+        key = self._cursor_key(chat_id, username)
+        cur = self.cx.read_json(key) or {}
+        cur["read_ts"] = ts or utcnow()
+        cur["updated"] = utcnow()
+        self.cx.write_json(key, cur)
 
     def unread_count(self, chat_id, username):
         cur = self.cx.read_json(self._cursor_key(chat_id, username)) or {}

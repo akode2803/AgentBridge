@@ -8,6 +8,7 @@ import { md, stripMd, setTaggable } from "./markdown.js";
 import { App, Mesh, meshDn, chatDisplay, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply } from "./composer.js";
+import { openModal, closeModal } from "./modal.js";
 import { V } from "./views.js";
 
 async function renderChats(force) {
@@ -115,6 +116,7 @@ async function renderMeshChat(force) {
   const feeds = (await api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`)).feeds || [];
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     data.meta.archived, (data.meta.members || []).length,
+    data.meta.pin?.id, data.meta.pin?.until, (data.starred || []).join(","),
     feeds.map((f) => [f.agent, f.turns, f.activity, (f.draft || "").length])]);
   if (!force && key === Mesh.chatKey && App.page === "chats") return;
   const hadNew = key !== Mesh.chatKey;
@@ -126,6 +128,9 @@ async function renderMeshChat(force) {
   const members = new Set(meta.members || []);
   setTaggable(members);
   const isMember = members.has(ms.user);
+  // server already filtered expired pins (lazy expiry: ignore, never write)
+  const pin = meta.pin || null;
+  const starredSet = new Set(data.starred || []);
 
   const parts = [];
   const isDm = meta.kind === "dm";
@@ -172,6 +177,9 @@ async function renderMeshChat(force) {
     const showSender = !isDm && !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
     const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
+    // a starred message always shows its meta row (★ rides with the time,
+    // WhatsApp-style), even mid-block where clubbing would hide it
+    const starred = starredSet.has(msg.id);
     parts.push(`
       <div class="msg ${msg.mine ? "mine" : ""}" data-mid="${esc(msg.id || "")}">
         ${showSender ? `<span class="msg-avatar">${esc((meshDn(msg.from)[0] || "?").toUpperCase())}</span>` : ""}
@@ -180,7 +188,8 @@ async function renderMeshChat(force) {
           ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
           ${msg.reply_to ? replyQuote(msg.reply_to, isDm, ms) : ""}
           ${md(msg.body || "")}${files}</div>
-        ${lastOfMinute(i) ? `<div class="meta">${esc(timeOnly(msg.ts))}</div>` : ""}
+        ${lastOfMinute(i) || starred ? `<div class="meta">${
+          starred ? '<span class="star-mini">★</span>' : ""}${esc(timeOnly(msg.ts))}</div>` : ""}
       </div>`);
   }
   // live presence: agents working (dots + label + forming draft) and
@@ -235,11 +244,13 @@ async function renderMeshChat(force) {
 
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
-  const structKey = chatId + "|" + !!meta.archived + "|" + (meta.members || []).join(",");
+  const structKey = chatId + "|" + !!meta.archived + "|"
+    + (meta.members || []).join(",") + "|" + (pin ? pin.id + pin.until : "");
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
   const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;
-  const menuCtx = { isDm, canReply: isMember && !meta.archived };
+  const menuCtx = { isDm, canReply: isMember && !meta.archived,
+                    starred: starredSet, pin };
   if (Mesh.structKey === structKey && $("#transcript")) {
     const tr = $("#transcript");
     const nearBottom = tr.scrollHeight - tr.scrollTop - tr.clientHeight < 120;
@@ -285,6 +296,10 @@ async function renderMeshChat(force) {
         <button data-act="close">${ICONS.close} Close chat</button>
       </div>
     </div>
+    ${pin ? `
+    <button id="pin-banner" title="Go to the pinned message" data-jump="${esc(pin.id)}">
+      ${ICONS.pin}<span class="pin-text">${esc(stripMd(pin.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment")}</span>
+    </button>` : ""}
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
     <div id="reply-area"></div>
@@ -323,6 +338,11 @@ async function renderMeshChat(force) {
   if (permBtn) permBtn.addEventListener("click", () => {
     Mesh.agentsView = true;
     location.hash = `#/chats/${chatId}/details`;
+  });
+  const pinBanner = $("#pin-banner");
+  if (pinBanner) pinBanner.addEventListener("click", () => {
+    Mesh.jumpTo = pinBanner.dataset.jump;
+    jumpToMessage();
   });
   document.addEventListener("click", function away(e) {
     if (!e.target.closest("#chat-more") && !e.target.closest("#chat-menu")) {
@@ -419,20 +439,23 @@ function bindTranscript(tr, chatId, data, ctx) {
   });
 }
 
-// the message context menu. Reply and Copy work; Message X / Forward /
-// Pin / Star / Delete are placeholders for the coming rounds.
+// the message context menu. Reply / Message X / Copy / Pin / Star work;
+// Forward / Edit / Delete are placeholders for the coming rounds.
 function openMsgMenu(rect, msg, chatId, ctx) {
   document.querySelectorAll(".msg-menu").forEach((m) => m.remove());
   const menu = document.createElement("div");
   menu.className = "menu msg-menu";
+  const isPinned = !!(ctx.pin && ctx.pin.id === msg.id);
+  const isStarred = !!(ctx.starred && ctx.starred.has(msg.id));
   menu.innerHTML = [
     ctx.canReply ? `<button data-act="reply">${ICONS.reply} Reply</button>` : "",
     !msg.mine && !ctx.isDm
       ? `<button data-act="message">${ICONS.msgUser} Message ${esc(meshDn(msg.from))}</button>` : "",
     `<button data-act="copy">${ICONS.copy} Copy</button>`,
+    msg.mine ? `<button data-act="edit">${ICONS.pencil} Edit</button>` : "",
     `<button data-act="forward">${ICONS.forward} Forward</button>`,
-    `<button data-act="pin">${ICONS.pin} Pin</button>`,
-    `<button data-act="star">${ICONS.star} Star</button>`,
+    `<button data-act="pin">${ICONS.pin} ${isPinned ? "Unpin" : "Pin"}</button>`,
+    `<button data-act="star">${ICONS.star} ${isStarred ? "Unstar" : "Star"}</button>`,
     '<div class="menu-sep"></div>',
     `<button data-act="delete">${ICONS.trash} Delete</button>`,
   ].join("");
@@ -470,8 +493,57 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       } catch {
         toast("Could not access the clipboard", true);
       }
+    } else if (act === "pin") {
+      if (isPinned) {
+        const r = await api("/api/mesh/unpin", { chat_id: chatId });
+        if (r.error) { toast(r.error, true); return; }
+        refreshChat();
+      } else {
+        pinDialog(chatId, msg);
+      }
+    } else if (act === "star") {
+      const r = await api("/api/mesh/star", {
+        chat_id: chatId, msg_id: msg.id, starred: !isStarred,
+        snapshot: { from: msg.from, body: msg.body || "", ts: msg.ts },
+      });
+      if (r.error) { toast(r.error, true); return; }
+      refreshChat();
     }
-    // forward / pin / star / delete: coming rounds
+    // forward / edit / delete: coming rounds
+  });
+}
+
+// pin/star change per-chat state that lives outside the transcript keys —
+// force the next render through, and refresh whatever page is showing
+function refreshChat() {
+  Mesh.chatKey = "";
+  Mesh.structKey = "";
+  if (App.page === "chats") V.renderChats(true);
+}
+
+// WhatsApp's duration dialog: 24 hours / 7 days (default) / 30 days
+function pinDialog(chatId, msg) {
+  const box = openModal(`
+    <div class="cf-title">Choose how long your pin lasts</div>
+    <div class="cf-body">You can unpin at any time.</div>
+    <div class="pin-opts">
+      <label class="pin-opt"><input type="radio" name="pin-h" value="24"> 24 hours</label>
+      <label class="pin-opt"><input type="radio" name="pin-h" value="168" checked> 7 days</label>
+      <label class="pin-opt"><input type="radio" name="pin-h" value="720"> 30 days</label>
+    </div>
+    <div class="cf-actions">
+      <button class="cf-cancel" id="pin-cancel">Cancel</button>
+      <button class="cf-pill" id="pin-go">Pin</button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#pin-cancel").addEventListener("click", closeModal);
+  box.querySelector("#pin-go").addEventListener("click", async () => {
+    const hours = +box.querySelector('input[name="pin-h"]:checked').value;
+    closeModal();
+    const r = await api("/api/mesh/pin", { chat_id: chatId, msg_id: msg.id, hours });
+    if (r.error) { toast(r.error, true); return; }
+    refreshChat();
   });
 }
 
@@ -503,3 +575,4 @@ async function renderNewChat() {
     </div>`;
 }
 V.renderNewChat = renderNewChat;
+V.openMsgMenu = openMsgMenu;   // the starred sidebar reuses the menu

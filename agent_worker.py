@@ -107,11 +107,17 @@ RULE_DESC = {
 }
 
 
-def render_context(msgs, agent, staged=None):
+def render_context(msgs, agent, staged=None, pin=None):
     """staged: {original file name -> local relative path in the workdir};
     headless permissions only auto-allow reads inside the workdir, so
-    attachments must be referenced by their staged copies."""
+    attachments must be referenced by their staged copies.
+    pin: the chat's ACTIVE pinned message (already expiry-filtered) — agents
+    see it up top, like the banner humans get under the chat header."""
     lines = []
+    if pin:
+        excerpt = (pin.get("body") or "").replace("\n", " ")[:160]
+        lines.append(f'[PINNED by @{pin.get("by")} until {pin.get("until")}] '
+                     f'@{pin.get("from")}: "{excerpt}"')
     for m in msgs[-30:]:
         if m.get("kind") == "info":   # membership notes read as events
             lines.append(f"[{m.get('ts')}] · {m.get('body', '')}")
@@ -490,8 +496,10 @@ class Worker:
                         pass  # unreadable attachment: context shows the bare name
 
         context_file = self.workdir / "chat_context.md"
-        context_file.write_text(render_context(msgs, self.agent, staged),
-                                encoding="utf-8")
+        context_file.write_text(
+            render_context(msgs, self.agent, staged,
+                           pin=Mesh.pin_active(meta)),
+            encoding="utf-8")
         me = users.get(self.agent) or {}
         roster = []
         for member in meta.get("members", []):

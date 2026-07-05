@@ -4,7 +4,9 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, chatDisplay } from "./state.js";
+import { stripMd } from "./markdown.js";
+import { App, Mesh, Settings, meshDn, dmOther, chatDisplay } from "./state.js";
+import { V } from "./views.js";
 
 const SETTINGS_SECTIONS = [
   { id: "profile", label: "Profile", desc: "Name, username", icon: ICONS.user },
@@ -21,6 +23,7 @@ export function renderSidebar() {
   $("#side-new").hidden = App.page !== "chats";
   if (App.page === "settings") return renderSettingsSidebar();
   if (App.page === "new") return renderNewChatSidebar();
+  if (Mesh.starredView) return renderStarredSidebar();
   renderChatListSidebar();
 }
 
@@ -197,7 +200,9 @@ function renderChatListSidebar() {
       (listed.map(row).join("") ||
         `<div class="empty" style="padding:24px 10px">Nothing archived</div>`);
   } else {
-    html = (archived.length ? `<button class="arch-row" id="arch-toggle">
+    html = (ms.starred_count ? `<button class="arch-row" id="starred-open">
+        ${ICONS.star} Starred <span class="arch-count">${ms.starred_count}</span></button>` : "") +
+      (archived.length ? `<button class="arch-row" id="arch-toggle">
         ${ICONS.archive} Archived <span class="arch-count">${archived.length}</span></button>` : "") +
       (listed.map(row).join("") ||
         `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`);
@@ -211,5 +216,86 @@ function renderChatListSidebar() {
     Mesh.showArchived = !Mesh.showArchived;
     $("#side-chats").dataset.key = "";
     renderChatListSidebar();
+  });
+  const st = $("#starred-open");
+  if (st) st.addEventListener("click", () => {
+    Mesh.starredView = true;
+    $("#side-chats").dataset.key = "";
+    renderStarredSidebar();
+  });
+}
+
+// WhatsApp "Starred messages": search on top, then cards — sender ► receiver,
+// the message, date + chevron. Click = jump; right-click = the message menu.
+async function renderStarredSidebar() {
+  const ms = Mesh.state;
+  const data = await api("/api/mesh/starred");
+  if (data.error) { toast(data.error, true); Mesh.starredView = false; return; }
+  const items = data.starred || [];
+  const me = ms.user;
+  const card = (s) => {
+    const sender = s.from === me ? "You" : meshDn(s.from);
+    const receiver = s.kind === "dm"
+      ? (s.from === me ? meshDn(dmOther({ members: s.members }, me)) : "You")
+      : s.chat_name;
+    const preview = stripMd(s.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment";
+    return `
+    <button class="star-card" data-chat="${esc(s.chat_id)}" data-mid="${esc(s.id)}"
+            data-from="${esc(s.from)}" data-dm="${s.kind === "dm" ? 1 : 0}">
+      <span class="sc-top">
+        <span class="sc-names">${esc(sender)} <span class="sc-arrow">›</span> ${esc(receiver)}</span>
+        <span class="sc-time">${esc(fmtTime(s.ts))}</span>
+        <span class="sc-chev">${ICONS.chevD}</span>
+      </span>
+      <span class="sc-bubble">${esc(preview)}</span>
+    </button>`;
+  };
+  const html = `
+    <div style="padding:12px 10px 4px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <button class="icon-btn" id="starred-back">${ICONS.back}</button>
+        <b>Starred messages</b>
+      </div>
+      <div class="search-box" style="margin-bottom:8px">${ICONS.search}
+        <input type="text" id="starred-q" placeholder="Search" autocomplete="off"></div>
+    </div>
+    <div id="starred-list">${items.map(card).join("") ||
+      `<div class="empty" style="padding:24px 10px">Nothing starred yet</div>`}</div>`;
+  if (!setSide(html)) return;
+  $("#starred-back").addEventListener("click", () => {
+    Mesh.starredView = false;
+    $("#side-chats").dataset.key = "";
+    renderChatListSidebar();
+  });
+  $("#starred-q").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#starred-list .star-card").forEach((c) => {
+      c.hidden = !!q && !c.textContent.toLowerCase().includes(q);
+    });
+  });
+  const bySig = new Map(items.map((s) => [s.chat_id + "|" + s.id, s]));
+  const jumpTo = (c) => {
+    Mesh.jumpTo = c.dataset.mid;
+    if (Mesh.chatId === c.dataset.chat) {
+      Mesh.chatKey = "";
+      V.renderChats(true);
+    } else {
+      location.hash = `#/chats/${c.dataset.chat}`;
+    }
+  };
+  document.querySelectorAll("#starred-list .star-card").forEach((c) => {
+    c.addEventListener("click", () => jumpTo(c));
+    c.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const s = bySig.get(c.dataset.chat + "|" + c.dataset.mid);
+      if (!s) return;
+      V.openMsgMenu(
+        { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY },
+        { id: s.id, from: s.from, body: s.body, ts: s.ts, mine: s.from === me },
+        s.chat_id,
+        { isDm: s.kind === "dm",
+          canReply: (s.members || []).includes(me),
+          starred: new Set([s.id]), pin: null });
+    });
   });
 }
