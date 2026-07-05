@@ -1,9 +1,10 @@
 /* Chat info pane (WhatsApp "Group info" pattern) and the per-chat agents
    page. Subviews (search / media / agents) render into the same pane. */
 
-import { $, esc, fmtTime, toast } from "./util.js";
+import { $, esc, fmtTime, toast, clampLong } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
+import { md } from "./markdown.js";
 import { mountCsels } from "./csel.js";
 import { confirmModal } from "./modal.js";
 import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay } from "./state.js";
@@ -45,14 +46,16 @@ async function renderChatDetails() {
   // only re-render when something actually changed — a poll redraw would
   // knock dropdowns and toggles out from under the user
   const dKey = JSON.stringify([meta, media.length, (data.links || []).length,
-    myAgentsHere.map((a) => a.settings), !!Mesh.searchView,
-    !!Mesh.mediaView, Mesh.mediaTab, !!Mesh.agentsView]);
+    (data.starred || []).length, myAgentsHere.map((a) => a.settings),
+    !!Mesh.searchView, !!Mesh.mediaView, Mesh.mediaTab, !!Mesh.agentsView,
+    !!Mesh.starredPane]);
   if (dKey === Mesh.detailsKey && App.page === "chats") return;
   Mesh.detailsKey = dKey;
 
-  // search / media browser / agents page slide in over chat info, same pane
+  // search / media / starred / agents pages slide in over chat info
   if (Mesh.searchView) return V.renderChatSearch();
   if (Mesh.mediaView) return V.renderChatMedia(data);
+  if (Mesh.starredPane) return renderChatStarred(data);
   if (Mesh.agentsView) return renderChatAgents(myAgentsHere, meta);
 
   const isMember = (meta.members || []).includes(ms.user);
@@ -121,6 +124,12 @@ async function renderChatDetails() {
             ${mediaThumb(chatId, f)}</button>`).join("")}
       </div>` : ""}
     </div>
+    <div class="card" style="padding-top:8px;padding-bottom:8px">
+      <button class="sec-head" id="starred-sec">
+        ${ICONS.star}<span class="sec-label">Starred messages</span>
+        <span class="sec-count">${(data.starred || []).length}</span>
+      </button>
+    </div>
     ${myAgentsHere.length ? `
     <div class="card" style="padding-top:8px;padding-bottom:8px">
       <button class="sec-head" id="agents-sec">
@@ -180,6 +189,11 @@ async function renderChatDetails() {
   const agentsSec = $("#agents-sec");
   if (agentsSec) agentsSec.addEventListener("click", () => {
     Mesh.agentsView = true;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  $("#starred-sec").addEventListener("click", () => {
+    Mesh.starredPane = true;
     Mesh.detailsKey = "";
     renderChatDetails();
   });
@@ -298,6 +312,93 @@ async function renderChatDetails() {
   });
 }
 V.renderChatDetails = renderChatDetails;
+
+// starred messages for THIS chat (WhatsApp: a row in chat info, under
+// media). Cards carry a LITERAL snapshot of the message — same markdown,
+// same bubble colors, same read-more clamp as the transcript — plus the
+// message context menu on right-click.
+async function renderChatStarred(info) {
+  const ms = Mesh.state;
+  const chatId = Mesh.chatId;
+  const meta = info.meta || {};
+  const isDm = meta.kind === "dm";
+  const canReply = (meta.members || []).includes(ms.user) && !meta.archived;
+  const data = await api(`/api/mesh/starred?id=${encodeURIComponent(chatId)}`);
+  if (data.error) { toast(data.error, true); return; }
+  const items = data.starred || [];
+  const card = (s) => {
+    const mine = s.from === ms.user;
+    const sender = mine ? "You" : meshDn(s.from);
+    const receiver = isDm
+      ? (mine ? meshDn(dmOther(meta, ms.user)) : "You")
+      : meta.name;
+    return `
+    <div class="star-card" data-mid="${esc(s.id)}">
+      <span class="sc-top">
+        <span class="sc-names">${esc(sender)} <span class="sc-arrow">›</span> ${esc(receiver)}</span>
+        <span class="sc-time">${esc(fmtTime(s.ts))}</span>
+        <span class="sc-chev">${ICONS.chevD}</span>
+      </span>
+      <div class="msg sc-snap ${mine ? "mine" : ""}" data-mid="${esc(s.id)}">
+        <div class="bubble"><div class="msg-body">${md(s.body || "")}</div></div>
+      </div>
+    </div>`;
+  };
+  $("#details-pane").innerHTML = `
+    <div class="pane-head">
+      <button class="icon-btn" id="cst-back">${ICONS.back}</button>
+      <span class="pane-title">Starred messages</span>
+    </div>
+    <div class="pane-view">
+      <div class="search-box" style="margin:0 0 4px">${ICONS.search}
+        <input type="text" id="cst-q" placeholder="Search" autocomplete="off">
+      </div>
+      <div id="cst-list">${items.map(card).join("") ||
+        `<div class="empty" style="padding:26px 0">Nothing starred in this chat</div>`}</div>
+    </div>`;
+  $("#cst-back").addEventListener("click", () => {
+    Mesh.starredPane = false;
+    Mesh.detailsKey = "";
+    renderChatDetails();
+  });
+  $("#cst-q").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#cst-list .star-card").forEach((c) => {
+      c.hidden = !!q && !c.textContent.toLowerCase().includes(q);
+    });
+  });
+  const list = $("#cst-list");
+  // the pane has its OWN expansion state: snapshots always open in the
+  // default collapsed view, whatever was expanded in the transcript
+  const expand = {};
+  clampLong(list, expand);
+  const bySig = new Map(items.map((s) => [s.id, s]));
+  list.addEventListener("click", (e) => {
+    const rm = e.target.closest(".read-more");
+    if (rm) {
+      const mid = rm.closest("[data-mid]")?.dataset.mid;
+      expand[mid] = (expand[mid] || 10) + 10;
+      clampLong(rm.closest(".star-card"), expand);
+      return;
+    }
+    const c = e.target.closest(".star-card");
+    if (!c) return;
+    Mesh.jumpTo = c.dataset.mid;   // the chat is open beside the pane
+    Mesh.chatKey = "";
+    V.renderChats(true);
+  });
+  list.addEventListener("contextmenu", (e) => {
+    const c = e.target.closest(".star-card");
+    const s = c && bySig.get(c.dataset.mid);
+    if (!s) return;
+    e.preventDefault();
+    V.openMsgMenu(
+      { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY },
+      { id: s.id, from: s.from, body: s.body, ts: s.ts, mine: s.from === ms.user },
+      chatId,
+      { isDm, canReply, starred: new Set([s.id]), pins: [] });
+  });
+}
 
 // per-chat agent rules — its own page off chat info (a full permissions
 // overhaul comes later)

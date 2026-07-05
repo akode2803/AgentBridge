@@ -15,7 +15,8 @@
   --hover: rgba(0, 0, 0, .07);
   --side-hover: #ECEAE8;
   --selection: rgba(216, 59, 1, .28);
-  --code-bg: #FAF9F8;
+  --code-bg: #F1EFED;
+  --code-inline: rgba(0, 0, 0, .08);
   --terminal-bg: #2B2A29;
   --terminal-fg: #F3F2F1;
   /* dividers darkened twice on user request (#EDEBE9 → #E1DFDD → this):
@@ -72,7 +73,7 @@ body { display: flex; flex-direction: column; }
   background: transparent; color: var(--text-dim);
   display: grid; place-items: center; cursor: pointer; padding: 0;
 }
-.rail-btn:hover { background: var(--hover); color: var(--text); }
+.rail-btn:hover { background: var(--selected); color: var(--text); }
 .rail-btn.active, .rail-btn.active:hover {
   background: var(--accent-soft); color: var(--accent);
 }
@@ -87,7 +88,7 @@ body { display: flex; flex-direction: column; }
   background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
   display: grid; place-items: center;
 }
-.rail-avatar-wrap:hover .rail-avatar { box-shadow: 0 0 0 4px var(--hover); }
+.rail-avatar-wrap:hover .rail-avatar { box-shadow: 0 0 0 4px var(--selected); }
 .rail-avatar-wrap.active .rail-avatar {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
@@ -115,7 +116,7 @@ body { display: flex; flex-direction: column; }
   color: var(--text-dim); border: none; background: none; cursor: pointer;
 }
 .icon-btn svg { width: 19px; height: 19px; }
-.icon-btn:hover { background: var(--hover); color: var(--text); }
+.icon-btn:hover { background: var(--selected); color: var(--text); }
 .icon-btn.active { color: var(--accent); background: var(--accent-soft); }
 
 #shell { display: flex; flex: 1; min-height: 0; overflow-x: hidden; }
@@ -419,7 +420,7 @@ input[type=text], select, textarea {
 .bubble ul, .bubble ol { margin: 4px 0 8px; padding-left: 22px; }
 .bubble li { margin: 2px 0; }
 .bubble code {
-  background: rgba(0,0,0,.055); border-radius: 3px;
+  background: var(--code-inline); border-radius: 3px;
   padding: 1px 5px; font-size: 12px;
 }
 .bubble .md-pre, .bubble .md-mono {
@@ -569,10 +570,42 @@ input[type=text], select, textarea {
   border-radius: 0;
   animation: reply-in .15s ease;
 }
-#pin-banner svg { width: 15px; height: 15px; flex: none; color: var(--accent); }
+#pin-banner:hover { background: var(--bg-alt); }
+#pin-banner > svg { width: 15px; height: 15px; flex: none; color: var(--accent); }
 #pin-banner .pin-text {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 1;
 }
+/* multi-pin position indicator: one segment per pin, current one lit */
+#pin-banner .pin-segs {
+  display: flex; flex-direction: column; gap: 2px; flex: none;
+  align-self: stretch; justify-content: center;
+}
+#pin-banner .pin-segs .seg {
+  width: 3px; flex: 1; min-height: 6px; border-radius: 2px;
+  background: var(--border-strong);
+}
+#pin-banner .pin-segs .seg.on { background: var(--accent); }
+/* the chevron shows on banner hover, WhatsApp-style */
+#pin-banner .pin-arrow {
+  flex: none; display: grid; place-items: center;
+  width: 24px; height: 24px; border-radius: 50%;
+  color: var(--text-dim); visibility: hidden;
+}
+#pin-banner:hover .pin-arrow { visibility: visible; animation: arrow-in .16s ease; }
+#pin-banner .pin-arrow:hover { background: var(--hover); color: var(--text); }
+#pin-banner .pin-arrow svg { width: 16px; height: 16px; }
+
+/* long messages clamp at ~10 lines; every Read more click grants 10 more */
+.msg-body.clamped { overflow: hidden; }
+.read-more {
+  display: block; border: none; background: none; padding: 0; margin: 1px 0 0;
+  font: inherit; font-size: inherit; line-height: inherit;
+  color: var(--accent); cursor: pointer; font-weight: 600;
+}
+.read-more .rm-dots { color: var(--text-dim); font-weight: 400; margin-right: 5px; }
+.read-more:hover { background: none; }
+.read-more:hover .rm-label { text-decoration: underline; }
 
 /* tiny star beside the time of a message the viewer starred */
 .msg .meta .star-mini {
@@ -593,11 +626,13 @@ input[type=text], select, textarea {
 }
 .cf-pill:hover { background: var(--accent-hover); }
 
-/* starred-messages sidebar page */
+/* starred-messages page (chat info pane): each card is a LITERAL snapshot
+   of the message — real bubble, real colors, read-more and the context
+   menu included */
 .star-card {
   display: block; width: 100%; text-align: left; cursor: pointer;
   background: none; border: none; border-bottom: 1px solid var(--border);
-  padding: 11px 12px; font: inherit; color: var(--text); border-radius: 0;
+  padding: 11px 4px 13px; font: inherit; color: var(--text); border-radius: 0;
 }
 .star-card:hover { background: var(--hover); }
 .sc-top { display: flex; align-items: center; gap: 6px; }
@@ -609,14 +644,10 @@ input[type=text], select, textarea {
 .sc-time { font-size: 11px; color: var(--text-faint); flex: none; }
 .sc-chev { flex: none; color: var(--text-faint); display: grid; }
 .sc-chev svg { width: 14px; height: 14px; transform: rotate(-90deg); }
-.sc-bubble {
-  display: inline-block; max-width: 100%; margin-top: 7px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
-  color: var(--text);
-  overflow: hidden; display: -webkit-box;
-  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+.star-card .msg.sc-snap {
+  margin-top: 8px; max-width: 100%; padding-left: 0;
 }
+.star-card .msg.sc-snap .bubble { display: inline-block; max-width: 100%; }
 
 /* reply-in-progress bar docked above the composer */
 #reply-area { padding: 0 18px; flex: none; }
@@ -949,6 +980,7 @@ pre.configdump {
   --hover: rgba(255, 255, 255, .08);
   --side-hover: #2D2C2B;
   --code-bg: #1B1A19;
+  --code-inline: rgba(255, 255, 255, .1);
   --border: #3B3A39;
   --border-strong: #484644;
   --text: #F3F2F1;
@@ -960,7 +992,7 @@ pre.configdump {
   --shadow: none;
 }
 [data-theme="dark"] pre.configdump { background: var(--code-bg); }
-[data-theme="dark"] .bubble code { background: rgba(255,255,255,.08); }
+
 [data-theme="dark"] .msg.mine .att-btn { background: rgba(0,0,0,.25); }
 [data-theme="dark"] button:hover { background: var(--hover); }
 
@@ -1151,7 +1183,7 @@ pre.configdump {
 }
 /* hovering anywhere on Add/Search highlights only the icon circle */
 .ci-act:hover, [data-theme="dark"] .ci-act:hover { background: none; }
-.ci-act:hover .ci-act-circle { background: var(--accent-soft); }
+.ci-act:hover .ci-act-circle { background: var(--selected); }
 .ci-act svg { width: 19px; height: 19px; }
 .ci-footer {
   color: var(--text-faint); font-size: 12px; text-align: left;
@@ -1408,5 +1440,22 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   border: 1px solid var(--border-strong); border-radius: 8px;
   padding: 9px 18px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.3);
   z-index: 50;
+  display: flex; align-items: center; gap: 10px; max-width: min(92vw, 420px);
+  animation: reply-in .15s ease;
 }
 #toast.error { background: var(--bad); color: #fff; border-color: var(--bad); }
+/* left is set inline when docked inside the info pane */
+#toast.in-pane { bottom: 26px; }
+#toast .toast-check {
+  flex: none; width: 17px; height: 17px; border-radius: 50%;
+  border: 1.6px solid var(--text-dim); color: var(--text-dim);
+  display: grid; place-items: center; font-size: 10px; font-weight: 700;
+}
+#toast .toast-msg { min-width: 0; }
+#toast .toast-act {
+  flex: none; border: none; border-radius: 999px;
+  background: var(--bg-alt); color: var(--accent);
+  font: inherit; font-size: 12.5px; font-weight: 700;
+  padding: 5px 14px; cursor: pointer; margin: -3px -6px -3px 2px;
+}
+#toast .toast-act:hover { background: var(--hover); }

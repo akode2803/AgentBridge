@@ -59,13 +59,64 @@ export function extIcon(name) {
 }
 
 let toastTimer = null;
-export function toast(msg, isError) {
+// toast(msg, true) = error (legacy form). toast(msg, {check, action,
+// onAction, error, duration}) = snackbar with an optional ✓ and an action
+// pill (e.g. Undo). When the info pane is open, snackbars dock inside it
+// instead of covering the composer (WhatsApp behaviour, user-requested).
+export function toast(msg, opts) {
+  if (opts === true) opts = { error: true };
+  opts = opts || {};
   const t = $("#toast");
-  t.textContent = msg;
-  t.className = isError ? "error" : "";
+  t.innerHTML = `${opts.check ? '<span class="toast-check">✓</span>' : ""}` +
+    `<span class="toast-msg">${esc(msg)}</span>` +
+    (opts.action ? `<button class="toast-act">${esc(opts.action)}</button>` : "");
+  t.className = opts.error ? "error" : "";
+  const pane = document.querySelector("#details-pane");
+  if (pane && !pane.hidden && pane.offsetWidth) {
+    const r = pane.getBoundingClientRect();
+    t.style.left = (r.left + r.width / 2) + "px";
+    t.classList.add("in-pane");
+  } else {
+    t.style.left = "";
+  }
   t.hidden = false;
+  const act = t.querySelector(".toast-act");
+  if (act) act.addEventListener("click", () => {
+    clearTimeout(toastTimer);
+    t.hidden = true;
+    if (opts.onAction) opts.onAction();
+  });
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { t.hidden = true; }, opts.duration || 3600);
+}
+
+// "Read more" clamp for long messages: anything taller than `lines` is cut
+// to lines-1 (the Read-more line makes it `lines` total); every click on
+// Read more grants `lines` more. Expansion is remembered in `store`
+// (message id -> allowed lines), so the 2.5s re-renders don't re-collapse.
+export function clampLong(scope, store, lines = 10) {
+  scope.querySelectorAll(".msg-body").forEach((b) => {
+    const mid = b.closest("[data-mid]")?.dataset.mid;
+    if (!mid) return;
+    const lh = parseFloat(getComputedStyle(b).lineHeight) || 20;
+    const allowed = store[mid] || lines;
+    const total = b.scrollHeight / lh;
+    const existing = b.parentElement.querySelector(".read-more");
+    if (total <= allowed + 0.6) {   // fits (with slack): no clamp
+      b.style.maxHeight = "";
+      b.classList.remove("clamped");
+      if (existing) existing.remove();
+      return;
+    }
+    b.style.maxHeight = ((allowed - 1) * lh) + "px";
+    b.classList.add("clamped");
+    if (!existing) {
+      const btn = document.createElement("button");
+      btn.className = "read-more";
+      btn.innerHTML = '<span class="rm-dots">…</span><span class="rm-label">Read more</span>';
+      b.after(btn);
+    }
+  });
 }
 
 // theme (basic dark mode; persisted, defaults to the OS preference)

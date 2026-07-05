@@ -28,6 +28,8 @@ export const ICONS = {
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.3 3.8h5.4M10 3.8v4.9l-3 3a1 1 0 0 0 .7 1.7h8.6a1 1 0 0 0 .7-1.7l-3-3V3.8M12 13.4V20"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 4.2 2.35 4.85 5.25.72-3.85 3.7.95 5.33L12 16.3l-4.7 2.5.95-5.33-3.85-3.7 5.25-.72z"/></svg>',
   msgUser: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.8" y="4.5" width="16.4" height="13" rx="2.4"/><path d="M8 9h8M8 12.5h4.6M8.5 20.2l2.4-2.7"/></svg>',
+  pinOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.3 3.8h5.4M10 3.8v3.1M14 3.8v4.9l3 3a1 1 0 0 1-.7 1.7h-2.1M8.6 8.6 7 11.3a1 1 0 0 0 .7 1.7h4.5M12 13.4V20M4.5 4.5l15 15"/></svg>',
+  arrowR: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12h14M13 6.5 18.8 12 13 17.5"/></svg>',
   send: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M3.4 20.4 20.85 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z" fill="currentColor"/></svg>',
 };
 

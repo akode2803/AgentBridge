@@ -474,22 +474,42 @@ class Mesh:
     PIN_HOURS = (24, 24 * 7, 24 * 30)
 
     @staticmethod
-    def pin_active(meta, now=None):
-        """The pin members currently see. Expiry is LAZY: an expired pin is
-        simply ignored by every reader (no cleanup write, so no races
-        between machines) and physically replaced by the next pin/unpin."""
-        pin = (meta or {}).get("pin")
-        if not isinstance(pin, dict) or not pin.get("id"):
-            return None
-        if (pin.get("until") or "") <= (now or utcnow()):
-            return None
-        return pin
+    def pins_active(meta, now=None):
+        """The pins members currently see, ordered by the pinned MESSAGE's
+        date (latest first — that's what the banner cycles through, per the
+        WhatsApp pattern). Expiry is LAZY: an expired pin is simply ignored
+        by every reader (no cleanup write, so no races between machines)
+        and physically dropped on the next pin/unpin write.
+        Accepts the pre-v0.18 single meta.pin as a one-element list."""
+        raw = (meta or {}).get("pins")
+        if raw is None and isinstance((meta or {}).get("pin"), dict):
+            raw = [meta["pin"]]
+        now = now or utcnow()
+        pins = [p for p in (raw or [])
+                if isinstance(p, dict) and p.get("id")
+                and (p.get("until") or "") > now]
+
+        # the ns ordinal riding the id prefix IS the message date, at full
+        # resolution — ts (second-resolution, absent on v0.17 pins) would
+        # tie on rapid messages and missort legacy entries
+        def msg_order(p):
+            try:
+                return int(str(p.get("id", "0-")).split("-")[0], 16)
+            except ValueError:
+                return 0
+        pins.sort(key=msg_order, reverse=True)
+        return pins
+
+    # kept for older callers (worker builds in the field may lag a version)
+    @classmethod
+    def pin_active(cls, meta, now=None):
+        pins = cls.pins_active(meta, now=now)
+        return pins[0] if pins else None
 
     def pin_message(self, chat_id, by, msg_id, hours=168):
         """WhatsApp semantics: any member pins any message FOR EVERYONE,
-        one pin per chat (a new pin replaces the old), duration-limited.
-        Deliberately loose for now — the permissions overhaul decides who
-        may pin."""
+        several pins may coexist, duration-limited. Deliberately loose for
+        now — the permissions overhaul decides who may pin."""
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
@@ -503,27 +523,33 @@ class Mesh:
             raise MeshError("Message not found in this chat")
         until = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                               time.gmtime(time.time() + int(hours) * 3600))
-        meta["pin"] = {"id": msg["id"], "from": msg.get("from"),
-                       "body": (msg.get("body") or "")[:220],
-                       "by": by, "at": utcnow(), "until": until}
+        pins = [p for p in self.pins_active(meta) if p.get("id") != msg["id"]]
+        pins.append({"id": msg["id"], "ts": msg.get("ts"),
+                     "from": msg.get("from"),
+                     "body": (msg.get("body") or "")[:220],
+                     "by": by, "at": utcnow(), "until": until})
+        meta["pins"] = pins
+        meta.pop("pin", None)   # retire the single-pin field
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         by_dn = (self.get_user(by) or {}).get("display", by)
         self.post_event(chat_id, by, f"{by_dn} pinned a message", "pin",
                         target=msg["id"])
-        return meta["pin"]
+        return meta["pins"]
 
-    def unpin_message(self, chat_id, by):
+    def unpin_message(self, chat_id, by, msg_id=None):
+        """Remove one pin (msg_id) — or every pin when msg_id is None."""
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
         if by not in (meta.get("members") or []):
             raise MeshError("Only members can unpin messages")
-        if not meta.get("pin"):
-            return meta
-        was_active = bool(self.pin_active(meta))
+        before = self.pins_active(meta)
+        kept = [p for p in before
+                if msg_id is not None and p.get("id") != msg_id]
+        meta["pins"] = kept
         meta.pop("pin", None)
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
-        if was_active:   # clearing an expired leftover isn't news
+        if len(kept) < len(before):   # clearing expired leftovers isn't news
             by_dn = (self.get_user(by) or {}).get("display", by)
             self.post_event(chat_id, by, f"{by_dn} unpinned a message",
                             "unpin")
@@ -544,9 +570,11 @@ class Mesh:
         stars = cur.get("starred") or {}
         if starred:
             snap = snapshot or {}
+            # full body (generous cap): the starred page renders a literal
+            # snapshot of the message — markdown, read-more clamp and all
             stars[str(msg_id)[:80]] = {
                 "from": str(snap.get("from") or "")[:64],
-                "body": str(snap.get("body") or "")[:220],
+                "body": str(snap.get("body") or "")[:4000],
                 "ts": str(snap.get("ts") or "")[:32],
                 "at": utcnow()}
         else:

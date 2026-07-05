@@ -1,7 +1,7 @@
 /* The chats page: auth gate, empty state, and the open-chat transcript
    with its header menu. The composer lives in composer.js. */
 
-import { $, esc, extIcon, fmtSize, timeOnly, dayLabel, toast } from "./util.js";
+import { $, esc, extIcon, fmtSize, timeOnly, dayLabel, toast, clampLong } from "./util.js";
 import { ICONS, BIRD } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
@@ -114,9 +114,10 @@ async function renderMeshChat(force) {
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
   if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
   const feeds = (await api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`)).feeds || [];
+  const pinsSig = (data.meta.pins || []).map((p) => p.id + p.until).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     data.meta.archived, (data.meta.members || []).length,
-    data.meta.pin?.id, data.meta.pin?.until, (data.starred || []).join(","),
+    pinsSig, (data.starred || []).join(","),
     feeds.map((f) => [f.agent, f.turns, f.activity, (f.draft || "").length])]);
   if (!force && key === Mesh.chatKey && App.page === "chats") return;
   const hadNew = key !== Mesh.chatKey;
@@ -128,8 +129,9 @@ async function renderMeshChat(force) {
   const members = new Set(meta.members || []);
   setTaggable(members);
   const isMember = members.has(ms.user);
-  // server already filtered expired pins (lazy expiry: ignore, never write)
-  const pin = meta.pin || null;
+  // server already filtered expired pins (lazy expiry: ignore, never write);
+  // ordered by the pinned MESSAGE's date, latest first
+  const pins = meta.pins || [];
   const starredSet = new Set(data.starred || []);
 
   const parts = [];
@@ -187,7 +189,7 @@ async function renderMeshChat(force) {
           <button class="msg-arrow" aria-label="Message menu">${ICONS.chevD}</button>
           ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
           ${msg.reply_to ? replyQuote(msg.reply_to, isDm, ms) : ""}
-          ${md(msg.body || "")}${files}</div>
+          <div class="msg-body">${md(msg.body || "")}</div>${files}</div>
         ${lastOfMinute(i) || starred ? `<div class="meta">${
           starred ? '<span class="star-mini">★</span>' : ""}${esc(timeOnly(msg.ts))}</div>` : ""}
       </div>`);
@@ -245,12 +247,12 @@ async function renderMeshChat(force) {
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
   const structKey = chatId + "|" + !!meta.archived + "|"
-    + (meta.members || []).join(",") + "|" + (pin ? pin.id + pin.until : "");
+    + (meta.members || []).join(",") + "|" + pinsSig;
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
   const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;
   const menuCtx = { isDm, canReply: isMember && !meta.archived,
-                    starred: starredSet, pin };
+                    starred: starredSet, pins };
   if (Mesh.structKey === structKey && $("#transcript")) {
     const tr = $("#transcript");
     const nearBottom = tr.scrollHeight - tr.scrollTop - tr.clientHeight < 120;
@@ -258,6 +260,7 @@ async function renderMeshChat(force) {
     tr.innerHTML = bubbles;
     bindTranscript(tr, chatId, data, menuCtx);
     bindOpenFile(tr, chatId, ".mesh-att");
+    clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
     if (grew) {   // the newest bubble slides in
       const last = tr.querySelector(".msg:last-of-type");
       if (last) last.classList.add("msg-in");
@@ -296,10 +299,7 @@ async function renderMeshChat(force) {
         <button data-act="close">${ICONS.close} Close chat</button>
       </div>
     </div>
-    ${pin ? `
-    <button id="pin-banner" title="Go to the pinned message" data-jump="${esc(pin.id)}">
-      ${ICONS.pin}<span class="pin-text">${esc(stripMd(pin.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment")}</span>
-    </button>` : ""}
+    ${pins.length ? `<button id="pin-banner" title="Go to the pinned message"></button>` : ""}
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
     <div id="reply-area"></div>
@@ -339,11 +339,7 @@ async function renderMeshChat(force) {
     Mesh.agentsView = true;
     location.hash = `#/chats/${chatId}/details`;
   });
-  const pinBanner = $("#pin-banner");
-  if (pinBanner) pinBanner.addEventListener("click", () => {
-    Mesh.jumpTo = pinBanner.dataset.jump;
-    jumpToMessage();
-  });
+  initPinBanner(chatId, pins);
   document.addEventListener("click", function away(e) {
     if (!e.target.closest("#chat-more") && !e.target.closest("#chat-menu")) {
       if (!menu.isConnected) { document.removeEventListener("click", away); return; }
@@ -379,6 +375,7 @@ async function renderMeshChat(force) {
 
   const tr = $("#transcript");
   bindTranscript(tr, chatId, data, menuCtx);
+  clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
   else tr.scrollTop = tr.scrollHeight;
   if (hadNew) api("/api/mesh/read", { chat_id: chatId });
@@ -411,6 +408,16 @@ function bindTranscript(tr, chatId, data, ctx) {
   if (tr._delegated) return;
   tr._delegated = true;
   tr.addEventListener("click", (e) => {
+    const rm = e.target.closest(".read-more");
+    if (rm) {
+      // grant this message 10 more lines; remembered across re-renders
+      const mid = rm.closest("[data-mid]")?.dataset.mid;
+      if (!mid) return;
+      Mesh.msgExpand = Mesh.msgExpand || {};
+      Mesh.msgExpand[mid] = (Mesh.msgExpand[mid] || 10) + 10;
+      clampLong(rm.closest(".msg"), Mesh.msgExpand);
+      return;
+    }
     const q = e.target.closest(".reply-quote");
     if (q && q.dataset.jump) {
       Mesh.jumpTo = q.dataset.jump;
@@ -445,7 +452,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
   document.querySelectorAll(".msg-menu").forEach((m) => m.remove());
   const menu = document.createElement("div");
   menu.className = "menu msg-menu";
-  const isPinned = !!(ctx.pin && ctx.pin.id === msg.id);
+  const isPinned = !!(ctx.pins || []).some((p) => p.id === msg.id);
   const isStarred = !!(ctx.starred && ctx.starred.has(msg.id));
   menu.innerHTML = [
     ctx.canReply ? `<button data-act="reply">${ICONS.reply} Reply</button>` : "",
@@ -495,21 +502,98 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       }
     } else if (act === "pin") {
       if (isPinned) {
-        const r = await api("/api/mesh/unpin", { chat_id: chatId });
+        const r = await api("/api/mesh/unpin", { chat_id: chatId, msg_id: msg.id });
         if (r.error) { toast(r.error, true); return; }
         refreshChat();
       } else {
         pinDialog(chatId, msg);
       }
     } else if (act === "star") {
-      const r = await api("/api/mesh/star", {
-        chat_id: chatId, msg_id: msg.id, starred: !isStarred,
-        snapshot: { from: msg.from, body: msg.body || "", ts: msg.ts },
-      });
+      const doStar = async (val) => {
+        const r = await api("/api/mesh/star", {
+          chat_id: chatId, msg_id: msg.id, starred: val,
+          snapshot: { from: msg.from, body: msg.body || "", ts: msg.ts },
+        });
+        if (r.error) { toast(r.error, true); return false; }
+        refreshChat();
+        return true;
+      };
+      const next = !isStarred;
+      if (await doStar(next)) {
+        toast(`1 message ${next ? "starred" : "unstarred"}`, {
+          check: true, action: "Undo", onAction: () => doStar(!next),
+        });
+      }
+    }
+    // forward / edit / delete: coming rounds
+  });
+}
+
+// pinned banner (WhatsApp multi-pin): shows one pin at a time, segment
+// indicator on the left when several exist. Clicking jumps to the shown
+// pin AND advances the banner to the earlier one (cycling — pins are
+// ordered by message date, latest first). The hover chevron opens a small
+// menu: Unpin (this pin) / Go to message.
+function initPinBanner(chatId, pins) {
+  const banner = $("#pin-banner");
+  if (!banner || !pins.length) return;
+  if (!Mesh.pinIdx) Mesh.pinIdx = {};
+  const preview = (p) =>
+    stripMd(p.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment";
+  const show = () => {
+    const idx = (Mesh.pinIdx[chatId] || 0) % pins.length;
+    Mesh.pinIdx[chatId] = idx;
+    banner.innerHTML = `
+      ${pins.length > 1 ? `<span class="pin-segs">${pins.map((p, i) =>
+        `<span class="seg ${i === idx ? "on" : ""}"></span>`).join("")}</span>` : ""}
+      ${ICONS.pin}
+      <span class="pin-text">${esc(preview(pins[idx]))}</span>
+      <span class="pin-arrow">${ICONS.chevD}</span>`;
+  };
+  show();
+  banner.addEventListener("click", (e) => {
+    const idx = (Mesh.pinIdx[chatId] || 0) % pins.length;
+    if (e.target.closest(".pin-arrow")) {
+      openPinMenu(banner.querySelector(".pin-arrow").getBoundingClientRect(),
+                  chatId, pins[idx]);
+      return;
+    }
+    // jump to the shown pin, then cycle the banner to the earlier one
+    Mesh.jumpTo = pins[idx].id;
+    jumpToMessage();
+    Mesh.pinIdx[chatId] = (idx + 1) % pins.length;
+    show();
+  });
+}
+
+function openPinMenu(rect, chatId, pin) {
+  document.querySelectorAll(".msg-menu").forEach((m) => m.remove());
+  const menu = document.createElement("div");
+  menu.className = "menu msg-menu";
+  menu.innerHTML = `
+    <button data-act="unpin">${ICONS.pinOff} Unpin</button>
+    <button data-act="goto">${ICONS.arrowR} Go to message</button>`;
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth;
+  menu.style.top = (rect.bottom + 4) + "px";
+  menu.style.left = Math.max(8, Math.min(rect.right - mw, innerWidth - mw - 8)) + "px";
+  const close = () => {
+    menu.remove();
+    document.removeEventListener("mousedown", away, true);
+  };
+  const away = (e) => { if (!menu.contains(e.target)) close(); };
+  document.addEventListener("mousedown", away, true);
+  menu.addEventListener("click", async (e) => {
+    const act = e.target.closest("button")?.dataset.act;
+    close();
+    if (act === "goto") {
+      Mesh.jumpTo = pin.id;
+      jumpToMessage();
+    } else if (act === "unpin") {
+      const r = await api("/api/mesh/unpin", { chat_id: chatId, msg_id: pin.id });
       if (r.error) { toast(r.error, true); return; }
       refreshChat();
     }
-    // forward / edit / delete: coming rounds
   });
 }
 

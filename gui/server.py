@@ -574,9 +574,7 @@ def api_mesh_state():
            "users": {k: _public_user(v) for k, v in m.users().items()}}
     if user:
         chats = []
-        starred_count = 0
         for meta in m.chats_for(user, include_archived=True):
-            starred_count += len(m.starred_ids(meta["id"], user))
             chats.append({
                 "id": meta["id"], "name": meta["name"],
                 "kind": meta.get("kind", "group"),   # DMs display per-viewer
@@ -587,7 +585,6 @@ def api_mesh_state():
                 "unread": m.unread_count(meta["id"], user),
             })
         out["chats"] = chats
-        out["starred_count"] = starred_count
     return out
 
 
@@ -646,7 +643,8 @@ def api_mesh_chat(params):
     for msg in msgs:
         msg["mine"] = msg.get("from") == user
     # expired pins are LAZY: readers just don't see them (no cleanup write)
-    meta["pin"] = m.pin_active(meta)
+    meta["pins"] = m.pins_active(meta)
+    meta.pop("pin", None)
     return {"meta": meta, "messages": msgs, "me": user,
             "starred": m.starred_ids(chat_id, user)}
 
@@ -736,7 +734,8 @@ def api_mesh_chat_info(params):
         for url in link_re.findall(msg.get("body") or ""):
             links.append({"url": url, "from": msg.get("from"),
                           "ts": msg.get("ts")})
-    return {"meta": meta, "files": files, "links": links, "count": len(msgs)}
+    return {"meta": meta, "files": files, "links": links, "count": len(msgs),
+            "starred": m.starred_ids(chat_id, user)}
 
 
 def api_mesh_create_dm(data):
@@ -887,7 +886,8 @@ def api_mesh_unpin(data):
     user = session_user(m)
     if not user:
         return {"error": "Sign in first"}
-    m.unpin_message(data.get("chat_id") or "", user)
+    m.unpin_message(data.get("chat_id") or "", user,
+                    msg_id=data.get("msg_id"))
     return {"ok": True}
 
 
@@ -910,7 +910,11 @@ def api_mesh_starred(params):
     user = session_user(m)
     if not user:
         return {"error": "Sign in first"}
-    return {"starred": m.starred_all(user)}
+    items = m.starred_all(user)
+    chat_id = params.get("id", "")
+    if chat_id:   # the chat-info page lists one chat's stars
+        items = [s for s in items if s["chat_id"] == chat_id]
+    return {"starred": items}
 
 
 def api_mesh_typing(data):

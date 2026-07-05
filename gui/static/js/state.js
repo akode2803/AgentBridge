@@ -67,6 +67,7 @@ export function resetSubviews() {
   Mesh.searchView = false;
   Mesh.mediaView = false;
   Mesh.agentsView = false;
+  Mesh.starredPane = false;
   Mesh.searchQ = "";
   Mesh._mediaPrev = null;
   Mesh._inkLeft = null;

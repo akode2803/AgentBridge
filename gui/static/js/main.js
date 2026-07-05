@@ -71,7 +71,6 @@ function route() {
     Mesh.detailsView = false;
     resetSubviews();
     Mesh.structKey = "";
-    Mesh.starredView = false;   // the starred list is a chats-page view
   }
   if (page !== "new") Mesh.newMode = "dm";
   $("#side-new").hidden = page !== "chats";

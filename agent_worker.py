@@ -93,12 +93,15 @@ PROMPT = (
     "the chat rather than guessing. Tagging etiquette: tagging an agent that "
     "replies-only-when-tagged FORCES it to run — only tag such agents when "
     "you genuinely need something from them, and ask a direct question when "
-    "you do; never tag them as a courtesy or FYI. Reply etiquette: a reply "
-    "is OPTIONAL — if the new messages need no substantive response from "
-    "you (courtesy mentions, thanks, acknowledgments, FYIs), output exactly "
-    "NO_REPLY and nothing else, and no message will be posted. Decide "
-    "silence vs reply BEFORE you write — never output NO_REPLY and then "
-    "keep going. Do not keep acknowledgment chains going.")
+    "you do; never tag them as a courtesy or FYI. Your message is posted as "
+    "a THREADED REPLY to the message you are answering, so do NOT tag its "
+    "author just to address them — they are already notified; tag OTHER "
+    "members only when they specifically need attention. Reply etiquette: "
+    "a reply is OPTIONAL — if the new messages need no substantive response "
+    "from you (courtesy mentions, thanks, acknowledgments, FYIs), output "
+    "exactly NO_REPLY and nothing else, and no message will be posted. "
+    "Decide silence vs reply BEFORE you write — never output NO_REPLY and "
+    "then keep going. Do not keep acknowledgment chains going.")
 
 RULE_DESC = {
     "all": "an agent that replies to every message",
@@ -107,14 +110,14 @@ RULE_DESC = {
 }
 
 
-def render_context(msgs, agent, staged=None, pin=None):
+def render_context(msgs, agent, staged=None, pins=None):
     """staged: {original file name -> local relative path in the workdir};
     headless permissions only auto-allow reads inside the workdir, so
     attachments must be referenced by their staged copies.
-    pin: the chat's ACTIVE pinned message (already expiry-filtered) — agents
-    see it up top, like the banner humans get under the chat header."""
+    pins: the chat's ACTIVE pinned messages (already expiry-filtered) —
+    agents see them up top, like the banner humans get under the header."""
     lines = []
-    if pin:
+    for pin in pins or []:
         excerpt = (pin.get("body") or "").replace("\n", " ")[:160]
         lines.append(f'[PINNED by @{pin.get("by")} until {pin.get("until")}] '
                      f'@{pin.get("from")}: "{excerpt}"')
@@ -128,12 +131,17 @@ def render_context(msgs, agent, staged=None, pin=None):
             local = (staged or {}).get(f.get("name"))
             names.append(f"{f['name']} -> read it at {local}" if local else f["name"])
         files = ("  [files: " + ", ".join(names) + "]") if names else ""
-        # replies read as threads; replying to YOUR message = it addresses you
+        # replies read as threads; replying to YOUR message = it addresses
+        # you, and a reply to the sender's OWN earlier message means "about
+        # this one" (user expectation 2026-07-05)
         rt = m.get("reply_to") or {}
         rline = ""
         if rt.get("from"):
-            excerpt = (rt.get("body") or "").replace("\n", " ")[:70]
-            rline = f' [replying to @{rt["from"]}: "{excerpt}"]'
+            excerpt = (rt.get("body") or "").replace("\n", " ")[:120]
+            who_r = ("their own message"
+                     if rt["from"] == m.get("from")
+                     else f'@{rt["from"]}')
+            rline = f' [replying to {who_r}: "{excerpt}"]'
         lines.append(f"[{m.get('ts')}] {who}:{rline} {m.get('body', '')}{files}")
     return "\n".join(lines)
 
@@ -498,7 +506,7 @@ class Worker:
         context_file = self.workdir / "chat_context.md"
         context_file.write_text(
             render_context(msgs, self.agent, staged,
-                           pin=Mesh.pin_active(meta)),
+                           pins=Mesh.pins_active(meta)),
             encoding="utf-8")
         me = users.get(self.agent) or {}
         roster = []
