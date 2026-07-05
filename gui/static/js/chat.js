@@ -1,7 +1,8 @@
 /* The chats page: auth gate, empty state, and the open-chat transcript
    with its header menu. The composer lives in composer.js. */
 
-import { $, esc, extIcon, fmtSize, timeOnly, dayLabel, toast, clampLong } from "./util.js";
+import { $, esc, extIcon, fmtSize, timeOnly, dayLabel, toast, clampLong,
+         paneCoversChat } from "./util.js";
 import { ICONS, BIRD } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
@@ -188,6 +189,7 @@ async function renderMeshChat(force) {
         <div class="bubble">
           <button class="msg-arrow" aria-label="Message menu">${ICONS.chevD}</button>
           ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
+          ${msg.fwd ? `<div class="fwd-tag">${ICONS.forward} Forwarded from ${esc(meshDn(msg.fwd.from))}</div>` : ""}
           ${msg.reply_to ? replyQuote(msg.reply_to, isDm, ms) : ""}
           <div class="msg-body">${md(msg.body || "")}</div>${files}</div>
         ${lastOfMinute(i) || starred ? `<div class="meta">${
@@ -246,8 +248,10 @@ async function renderMeshChat(force) {
 
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
+  // pins are NOT part of structKey: pin/unpin must ride the partial path
+  // (scroll position survives) — the banner is synced imperatively
   const structKey = chatId + "|" + !!meta.archived + "|"
-    + (meta.members || []).join(",") + "|" + pinsSig;
+    + (meta.members || []).join(",");
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
   const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;
@@ -261,6 +265,7 @@ async function renderMeshChat(force) {
     bindTranscript(tr, chatId, data, menuCtx);
     bindOpenFile(tr, chatId, ".mesh-att");
     clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
+    syncPinBanner(chatId, pins);
     if (grew) {   // the newest bubble slides in
       const last = tr.querySelector(".msg:last-of-type");
       if (last) last.classList.add("msg-in");
@@ -299,7 +304,6 @@ async function renderMeshChat(force) {
         <button data-act="close">${ICONS.close} Close chat</button>
       </div>
     </div>
-    ${pins.length ? `<button id="pin-banner" title="Go to the pinned message"></button>` : ""}
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
     <div id="reply-area"></div>
@@ -339,7 +343,7 @@ async function renderMeshChat(force) {
     Mesh.agentsView = true;
     location.hash = `#/chats/${chatId}/details`;
   });
-  initPinBanner(chatId, pins);
+  syncPinBanner(chatId, pins);
   document.addEventListener("click", function away(e) {
     if (!e.target.closest("#chat-more") && !e.target.closest("#chat-menu")) {
       if (!menu.isConnected) { document.removeEventListener("click", away); return; }
@@ -487,6 +491,8 @@ function openMsgMenu(rect, msg, chatId, ctx) {
     close();
     if (act === "reply") {
       startReply(chatId, msg);
+      // replying needs the composer: a pane that COVERS the chat closes
+      if (ctx.fromPane && paneCoversChat()) location.hash = `#/chats/${chatId}`;
     } else if (act === "message") {
       // straight to a DM with the sender (created on first use, deduped
       // by the mesh after that)
@@ -534,9 +540,19 @@ function openMsgMenu(rect, msg, chatId, ctx) {
 // pin AND advances the banner to the earlier one (cycling — pins are
 // ordered by message date, latest first). The hover chevron opens a small
 // menu: Unpin (this pin) / Go to message.
-function initPinBanner(chatId, pins) {
-  const banner = $("#pin-banner");
-  if (!banner || !pins.length) return;
+// Synced IMPERATIVELY on every render path: pin/unpin must never force a
+// full re-render, which would slide the chat to the bottom (user report).
+function syncPinBanner(chatId, pins) {
+  const old = $("#pin-banner");
+  if (!pins.length) { if (old) old.remove(); return; }
+  const sig = pins.map((p) => p.id + p.until).join(",");
+  if (old && old.dataset.sig === sig) return;   // already current
+  const banner = document.createElement("button");
+  banner.id = "pin-banner";
+  banner.title = "Go to the pinned message";
+  banner.dataset.sig = sig;
+  if (old) old.replaceWith(banner);
+  else $("#transcript")?.before(banner);
   if (!Mesh.pinIdx) Mesh.pinIdx = {};
   const preview = (p) =>
     stripMd(p.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment";
@@ -597,11 +613,12 @@ function openPinMenu(rect, chatId, pin) {
   });
 }
 
-// pin/star change per-chat state that lives outside the transcript keys —
-// force the next render through, and refresh whatever page is showing
+// pin/star updates re-render through the PARTIAL path only: structKey is
+// left alone so the transcript swaps in place and the scroll position
+// survives — a full render would slide the chat to the bottom (user
+// report 2026-07-06)
 function refreshChat() {
   Mesh.chatKey = "";
-  Mesh.structKey = "";
   if (App.page === "chats") V.renderChats(true);
 }
 

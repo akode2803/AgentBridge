@@ -5,6 +5,7 @@ import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, meshDn, chatDisplay } from "./state.js";
+import { V } from "./views.js";
 
 const SETTINGS_SECTIONS = [
   { id: "profile", label: "Profile", desc: "Name, username", icon: ICONS.user },
@@ -73,61 +74,28 @@ function renderSettingsSidebar() {
 function renderNewChatSidebar() {
   const ms = Mesh.state;
   if (!ms?.available || !ms.user) { location.hash = "#/chats"; return; }
-  // symmetric membership: humans join only if added, exactly like agents
-  const myAgents = Object.values(ms.users)
-    .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+  // FREE CHATTING (2026-07-06): anyone can DM anyone — every agent is
+  // listed; the mesh pulls the agent's owner in (converting the DM to a
+  // small group) when needed. Agents and humans list in their own
+  // sections, like the add-members dialog.
+  const agents = Object.values(ms.users).filter((u) => u.kind === "agent");
   const humans = Object.values(ms.users)
     .filter((u) => u.kind === "human" && u.username !== ms.user);
-
-  if (Mesh.newMode === "group") {
-    const pick = (u) => `
-      <label class="row" style="padding:3px 0">
-        <input type="checkbox" class="nc-member" value="${esc(u.username)}">
-        ${esc(u.display)} <span class="hint">@${esc(u.username)}</span>
-      </label>`;
-    const html = `
-      <div style="padding:12px 10px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-          <button class="icon-btn" id="nc-back">${ICONS.back}</button>
-          <b>New group</b>
-        </div>
-        <input type="text" id="new-chat-name" placeholder="Group name" style="width:100%">
-        <p class="hint" style="margin:12px 0 4px">Your agents:</p>
-        ${myAgents.map(pick).join("") || `<p class="hint">No agents yet — add one in Settings.</p>`}
-        ${humans.length ? `<p class="hint" style="margin:10px 0 4px">Members:</p>
-          ${humans.map(pick).join("")}` : ""}
-        <div class="row" style="margin-top:12px">
-          <button class="primary" id="create-chat-btn">Create</button>
-        </div>
-      </div>`;
-    if (!setSide(html)) return;
-    $("#nc-back").addEventListener("click", () => {
-      Mesh.newMode = "dm";
-      $("#side-chats").dataset.key = "";
-      renderNewChatSidebar();
-    });
-    $("#create-chat-btn").addEventListener("click", async () => {
-      const members = [...document.querySelectorAll(".nc-member:checked")].map((c) => c.value);
-      const r = await api("/api/mesh/create_chat",
-        { name: $("#new-chat-name").value, members });
-      if (r.error) { toast(r.error, true); return; }
-      location.hash = `#/chats/${r.chat.id}`;
-    });
-    $("#new-chat-name").focus();
-    return;
-  }
-
-  // default: WhatsApp-style — pick a person for a direct chat, or New group
-  const person = (u) => `
+  const person = (u) => {
+    const ownerHint = u.kind === "agent" && !(u.owners || []).includes(ms.user)
+      ? ` · with @${esc((u.owners || [])[0] || "?")}` : "";
+    return `
     <button class="mem-add nc-dm" data-user="${esc(u.username)}">
       <span class="mem-avatar" style="background:var(--accent)">${esc((u.display[0] || "?").toUpperCase())}</span>
       <span style="min-width:0">
         <div class="mem-name">${esc(u.display)}
           ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
-        <div class="mem-sub">@${esc(u.username)}</div>
+        <div class="mem-sub">@${esc(u.username)}${ownerHint}</div>
       </span>
     </button>`;
-  const dmables = [...myAgents, ...humans];
+  };
+  const section = (label, list) => list.length
+    ? `<div class="modal-sec nc-sec">${label}</div>` + list.map(person).join("") : "";
   const html = `
     <div style="padding:12px 10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
@@ -140,20 +108,25 @@ function renderNewChatSidebar() {
         <span class="mem-avatar">${ICONS.addUser}</span>
         <span style="min-width:0"><div class="mem-name">New group</div></span>
       </button>
-      ${dmables.map(person).join("") ||
+      ${section("Agents", agents) + section("Members", humans) ||
         `<div class="empty" style="padding:20px 0">No one else yet</div>`}
     </div>`;
   if (!setSide(html)) return;
   $("#nc-close").addEventListener("click", () => { location.hash = "#/chats"; });
-  $("#nc-group").addEventListener("click", () => {
-    Mesh.newMode = "group";
-    $("#side-chats").dataset.key = "";
-    renderNewChatSidebar();
-  });
+  // New group opens the same dialog surface as add-members (user request)
+  $("#nc-group").addEventListener("click", () => V.showCreateGroup());
   $("#nc-q").addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
     document.querySelectorAll("#side-chats .nc-dm").forEach((b) => {
       b.hidden = !!q && !b.textContent.toLowerCase().includes(q);
+    });
+    document.querySelectorAll("#side-chats .nc-sec").forEach((s) => {
+      let el = s.nextElementSibling, any = false;
+      while (el && !el.classList.contains("nc-sec")) {
+        if (el.classList.contains("nc-dm") && !el.hidden) any = true;
+        el = el.nextElementSibling;
+      }
+      s.hidden = !any;
     });
   });
   document.querySelectorAll("#side-chats .nc-dm").forEach((b) => {

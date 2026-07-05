@@ -612,6 +612,14 @@ input[type=text], select, textarea {
   font-size: 9px; margin-right: 4px; color: var(--text-faint);
 }
 
+/* forwarded messages carry the original author's attribution */
+.fwd-tag {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11.5px; font-style: italic; color: var(--text-faint);
+  margin-bottom: 3px;
+}
+.fwd-tag svg { width: 13px; height: 13px; }
+
 /* pin-duration dialog radios */
 .pin-opts { display: flex; flex-direction: column; gap: 2px; margin: 14px 0 4px; }
 .pin-opt {
@@ -630,9 +638,13 @@ input[type=text], select, textarea {
    of the message — real bubble, real colors, read-more and the context
    menu included */
 .star-card {
-  display: block; width: 100%; text-align: left; cursor: pointer;
+  display: block; text-align: left; cursor: pointer;
   background: none; border: none; border-bottom: 1px solid var(--border);
-  padding: 11px 4px 13px; font: inherit; color: var(--text); border-radius: 0;
+  font: inherit; color: var(--text); border-radius: 0;
+  /* bleed through the pane's 18px gutters so the hover highlight spans
+     the sidebar's full width (user-requested) */
+  margin: 0 -18px; padding: 11px 18px 13px;
+  width: calc(100% + 36px);
 }
 .star-card:hover { background: var(--hover); }
 .sc-top { display: flex; align-items: center; gap: 6px; }

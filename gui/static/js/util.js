@@ -71,9 +71,13 @@ export function toast(msg, opts) {
     `<span class="toast-msg">${esc(msg)}</span>` +
     (opts.action ? `<button class="toast-act">${esc(opts.action)}</button>` : "");
   t.className = opts.error ? "error" : "";
-  const pane = document.querySelector("#details-pane");
-  if (pane && !pane.hidden && pane.offsetWidth) {
-    const r = pane.getBoundingClientRect();
+  // dock over the LEFT sidebar when it's open and not collapsed
+  // (WhatsApp; user corrected the earlier right-pane placement)
+  const side = document.querySelector("#navrail");
+  const sideVisible = side && side.offsetWidth > 60
+    && !document.body.classList.contains("side-collapsed");
+  if (sideVisible) {
+    const r = side.getBoundingClientRect();
     t.style.left = (r.left + r.width / 2) + "px";
     t.classList.add("in-pane");
   } else {
@@ -88,6 +92,12 @@ export function toast(msg, opts) {
   });
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, opts.duration || 3600);
+}
+
+// the ≤1100px breakpoint puts the details pane on TOP of the chat — pane
+// actions that need the chat visible (jump, reply) close the pane first
+export function paneCoversChat() {
+  return matchMedia("(max-width: 1100px)").matches;
 }
 
 // "Read more" clamp for long messages: anything taller than `lines` is cut

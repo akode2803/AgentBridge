@@ -291,10 +291,29 @@ class Mesh:
     def get_chat(self, chat_id):
         return self.cx.read_json(f"chats/{chat_id}/meta.json")
 
+    def _missing_owners(self, users, members):
+        """FREE CHATTING invariant (user decision 2026-07-06): no agent may
+        sit in any chat without one of its responsible humans. Returns the
+        owners that must join for the given member list to be legal."""
+        need = []
+        present = set(members)
+        for m in members:
+            u = users.get(m) or {}
+            if u.get("kind") != "agent":
+                continue
+            owners = u.get("owners") or []
+            if not (set(owners) & present):
+                for o in owners:
+                    if o not in present and o not in need and o in users:
+                        need.append(o)
+                        present.add(o)   # one owner satisfies the agent
+                        break
+        return need
+
     def create_chat(self, name, creator, members=None):
-        """members: agent/human usernames to include besides the creator.
-        Rules: an agent-created chat must include one of its owner humans;
-        a human may only add agents they are responsible for."""
+        """members: usernames to include besides the creator. Anyone may add
+        any agent (free chatting) — the agent's owner is pulled in
+        automatically so no agent is ever ownerless in a chat."""
         name = (name or "").strip()
         if not name:
             raise MeshError("Give the chat a name")
@@ -306,21 +325,17 @@ class Mesh:
         for m in members:
             if m not in users:
                 raise MeshError(f"Unknown user @{m}")
-        if cu["kind"] == "agent":
-            owners = cu.get("owners") or []
-            if not any(m in owners for m in members):
-                raise MeshError(
-                    "An agent-created chat must include one of its "
-                    "responsible humans")
-            owner = next(m for m in members if m in owners)
-        else:
-            for m in members:
-                if users[m]["kind"] == "agent" and not self.owns(creator, m):
-                    raise MeshError(
-                        f"@{m} is not your agent — its owner must add it")
-            owner = creator
         if creator not in members:
             members.insert(0, creator)
+        members += self._missing_owners(users, members)
+        if cu["kind"] == "agent":
+            owners = cu.get("owners") or []
+            owner = next((m for m in members if m in owners), None)
+            if owner is None:   # cannot happen after _missing_owners, but be safe
+                raise MeshError("An agent-created chat must include one of "
+                                "its responsible humans")
+        else:
+            owner = creator
         chat_id = f"{slugify(name)}-{secrets.token_hex(3)}"
         meta = {"id": chat_id, "kind": "group", "name": name,
                 "created": utcnow(), "created_by": creator, "owner": owner,
@@ -330,9 +345,11 @@ class Mesh:
         return meta
 
     def create_dm(self, creator, other):
-        """A direct chat: exactly two members, fixed forever, displayed under
-        the other member's name. Creating a DM that already exists returns
-        the existing one."""
+        """A direct chat between ANY two users (free chatting). When the
+        pair contains an agent whose owner isn't the other party, the
+        owner must be present too — a two-person chat can't hold three, so
+        it is born as a small GROUP instead (auto_dm marks it so repeated
+        DMs dedupe to the same room). Plain DMs dedupe as before."""
         users = self.users()
         cu, ou = users.get(creator), users.get(other)
         if not cu:
@@ -341,15 +358,33 @@ class Mesh:
             raise MeshError(f"Unknown user @{other}")
         if creator == other:
             raise MeshError("A direct chat needs someone else")
-        # same ownership rules as groups
-        if ou["kind"] == "agent" and cu["kind"] == "human" \
-                and not self.owns(creator, other):
-            raise MeshError(f"@{other} is not your agent — message its owner")
-        if cu["kind"] == "agent" and creator not in \
-                ([other] if ou["kind"] == "human" and self.owns(other, creator)
-                 else []):
-            raise MeshError("An agent can only start a direct chat with "
-                            "its responsible human")
+        pair = [creator, other]
+        extra = self._missing_owners(users, pair)
+        if extra:
+            # agent + non-owner: auto-convert to a group with the owner in
+            members = pair + extra
+            for cid in self.cx.listdir("chats"):
+                meta = self.cx.read_json(f"chats/{cid}/meta.json")
+                if meta and meta.get("auto_dm") \
+                        and set(meta.get("members") or []) == set(members):
+                    return meta
+            owner = creator if cu["kind"] == "human" else extra[0]
+            name = ", ".join((users[m] or {}).get("display", m)
+                             for m in members)[:60]
+            chat_id = f"{slugify(name) or 'chat'}-{secrets.token_hex(3)}"
+            meta = {"id": chat_id, "kind": "group", "name": name,
+                    "created": utcnow(), "created_by": creator,
+                    "owner": owner, "members": members,
+                    "archived": False, "auto_dm": True}
+            self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+            self.cx.mkdir(f"chats/{chat_id}/msgs")
+            for o in extra:
+                o_dn = (users.get(o) or {}).get("display", o)
+                a_dn = ou["display"] if ou["kind"] == "agent" else cu["display"]
+                self.post_event(chat_id, creator,
+                                f"{o_dn} joined as {a_dn}'s responsible human",
+                                "add_member", target=o)
+            return meta
         for cid in self.cx.listdir("chats"):
             meta = self.cx.read_json(f"chats/{cid}/meta.json")
             if meta and meta.get("kind") == "dm" \
@@ -414,7 +449,8 @@ class Mesh:
         return msg
 
     def add_member(self, chat_id, username, by):
-        """by = human adding their own agent, or the chat owner adding humans."""
+        """Any member may add any user (free chatting). Adding an agent
+        whose owner isn't in the chat pulls the owner in too."""
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
@@ -424,18 +460,28 @@ class Mesh:
         u = self.get_user(username)
         if not u:
             raise MeshError(f"Unknown user @{username}")
-        if u["kind"] == "agent" and not self.owns(by, username):
-            raise MeshError(f"@{username} is not your agent")
         if username not in meta["members"]:
             meta["members"].append(username)
+            users = self.users()
+            followers = self._missing_owners(users, meta["members"])
+            meta["members"] += followers
             self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
             by_dn = (self.get_user(by) or {}).get("display", by)
-            self.post_event(chat_id, by, f"{by_dn} added {u.get('display', username)}",
+            self.post_event(chat_id, by,
+                            f"{by_dn} added {u.get('display', username)}",
                             "add_member", target=username)
+            for o in followers:
+                o_dn = (users.get(o) or {}).get("display", o)
+                self.post_event(chat_id, by,
+                                f"{o_dn} joined as {u.get('display', username)}'s "
+                                f"responsible human",
+                                "add_member", target=o)
         return meta
 
     def remove_member(self, chat_id, username, by):
-        """Chat owner removes anyone; anyone may remove themselves (exit)."""
+        """Chat owner removes anyone; anyone may remove themselves (exit).
+        When a human goes, any agent left without a responsible human in
+        the chat leaves with them (free-chatting invariant)."""
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
@@ -449,13 +495,32 @@ class Mesh:
             raise MeshError("Only the chat's owner can remove members")
         if username in (meta.get("members") or []):
             meta["members"].remove(username)
+            users = self.users()
+            u_rec = users.get(username) or {}
+            # cascade: agents whose last owner just left leave too
+            orphaned = []
+            if u_rec.get("kind") == "human":
+                present = set(meta["members"])
+                for m in list(meta["members"]):
+                    rec = users.get(m) or {}
+                    if rec.get("kind") == "agent" \
+                            and not (set(rec.get("owners") or []) & (present - {m})):
+                        meta["members"].remove(m)
+                        present.discard(m)
+                        orphaned.append(m)
             self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
             by_dn = (self.get_user(by) or {}).get("display", by)
-            u_dn = (self.get_user(username) or {}).get("display", username)
+            u_dn = u_rec.get("display", username)
             self.post_event(chat_id, by,
                             f"{by_dn} left" if by == username
                             else f"{by_dn} removed {u_dn}",
                             "remove_member", target=username)
+            for a in orphaned:
+                a_dn = (users.get(a) or {}).get("display", a)
+                self.post_event(chat_id, by,
+                                f"{a_dn} left with {u_dn} — no responsible "
+                                f"human remains for it here",
+                                "remove_member", target=a)
         return meta
 
     def set_description(self, chat_id, by, description):
@@ -656,7 +721,8 @@ class Mesh:
         return [t for t in dict.fromkeys(TAG_RE.findall(body or ""))
                 if t in users]
 
-    def post(self, chat_id, sender, body, attachments=None, reply_to=None):
+    def post(self, chat_id, sender, body, attachments=None, reply_to=None,
+             forward_of=None):
         meta = self.get_chat(chat_id)
         if not meta:
             raise MeshError("No such chat")
@@ -698,6 +764,13 @@ class Mesh:
         msg = {"id": f"{ns:x}-{sender}", "ns": ns, "ts": utcnow(),
                "from": sender, "kind": u["kind"], "body": body,
                "tags": self.parse_tags(body), "files": files}
+        # a FORWARDED message keeps the original author's attribution and
+        # never re-triggers agents: @tags in the copied body are inert
+        # (WhatsApp semantics — groundwork for the forward feature)
+        if isinstance(forward_of, dict) and forward_of.get("from"):
+            msg["fwd"] = {"from": str(forward_of.get("from"))[:64],
+                          "ts": str(forward_of.get("ts") or "")[:32]}
+            msg["tags"] = []
         # replies carry a denormalized quote of the original — it renders
         # even when the original scrolled out of the fetched tail. Replying
         # to an agent's message triggers it exactly like a tag (workers
@@ -710,6 +783,30 @@ class Mesh:
             }
         self.cx.append_jsonl(f"chats/{chat_id}/msgs/{sender}.jsonl", msg)
         return msg
+
+    def forward_message(self, src_chat, msg_id, targets, by):
+        """Copy one message into other chats as `by` (groundwork for the
+        forward feature; the UI arrives with the select-messages round).
+        The copy carries fwd={from, ts} attribution, its @tags are inert,
+        and attachments are re-shipped into each target's files/."""
+        src = next((m for m in self.messages(src_chat, tail=0)
+                    if m.get("id") == msg_id and m.get("kind") != "info"), None)
+        if not src:
+            raise MeshError("Message not found in this chat")
+        chat_dir = self.chat_dir(src_chat)
+        attachments = []
+        for f in (src.get("files") or []):
+            local = chat_dir / (f.get("path") or "") if chat_dir else None
+            if local and local.is_file():
+                attachments.append(str(local))
+        out = []
+        for target in dict.fromkeys(targets or []):
+            # post() enforces membership + archived state per target
+            out.append(self.post(
+                target, by, src.get("body") or "",
+                attachments=attachments,
+                forward_of={"from": src.get("from"), "ts": src.get("ts")}))
+        return out
 
     # ------------------------------------------------------------- cursors
 

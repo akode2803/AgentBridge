@@ -1,7 +1,7 @@
 /* Chat info pane (WhatsApp "Group info" pattern) and the per-chat agents
    page. Subviews (search / media / agents) render into the same pane. */
 
-import { $, esc, fmtTime, toast, clampLong } from "./util.js";
+import { $, esc, fmtTime, toast, clampLong, paneCoversChat } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
@@ -340,7 +340,9 @@ async function renderChatStarred(info) {
         <span class="sc-chev">${ICONS.chevD}</span>
       </span>
       <div class="msg sc-snap ${mine ? "mine" : ""}" data-mid="${esc(s.id)}">
-        <div class="bubble"><div class="msg-body">${md(s.body || "")}</div></div>
+        <div class="bubble">
+          <button class="msg-arrow" aria-label="Message menu">${ICONS.chevD}</button>
+          <div class="msg-body">${md(s.body || "")}</div></div>
       </div>
     </div>`;
   };
@@ -373,6 +375,12 @@ async function renderChatStarred(info) {
   const expand = {};
   clampLong(list, expand);
   const bySig = new Map(items.map((s) => [s.id, s]));
+  // below 1100px the pane COVERS the chat — anything that needs the chat
+  // (jump, reply) closes the pane first; beside the chat it stays open
+  const menuCtx = { isDm, canReply, pins: [], fromPane: true };
+  const openCardMenu = (rect, s) => V.openMsgMenu(rect,
+    { id: s.id, from: s.from, body: s.body, ts: s.ts, mine: s.from === ms.user },
+    chatId, { ...menuCtx, starred: new Set([s.id]) });
   list.addEventListener("click", (e) => {
     const rm = e.target.closest(".read-more");
     if (rm) {
@@ -381,22 +389,32 @@ async function renderChatStarred(info) {
       clampLong(rm.closest(".star-card"), expand);
       return;
     }
+    const ar = e.target.closest(".msg-arrow");
+    if (ar) {
+      const s = bySig.get(ar.closest(".star-card")?.dataset.mid);
+      if (!s) return;
+      let rect = ar.getBoundingClientRect();
+      if (!rect.width) rect = ar.closest(".bubble").getBoundingClientRect();
+      openCardMenu(rect, s);
+      return;
+    }
     const c = e.target.closest(".star-card");
     if (!c) return;
-    Mesh.jumpTo = c.dataset.mid;   // the chat is open beside the pane
-    Mesh.chatKey = "";
-    V.renderChats(true);
+    Mesh.jumpTo = c.dataset.mid;
+    if (paneCoversChat()) {
+      location.hash = `#/chats/${chatId}`;   // close the pane, land on it
+    } else {
+      Mesh.chatKey = "";
+      V.renderChats(true);                   // chat is visible beside us
+    }
   });
   list.addEventListener("contextmenu", (e) => {
     const c = e.target.closest(".star-card");
     const s = c && bySig.get(c.dataset.mid);
     if (!s) return;
     e.preventDefault();
-    V.openMsgMenu(
-      { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY },
-      { id: s.id, from: s.from, body: s.body, ts: s.ts, mine: s.from === ms.user },
-      chatId,
-      { isDm, canReply, starred: new Set([s.id]), pins: [] });
+    openCardMenu({ left: e.clientX, right: e.clientX,
+                   top: e.clientY, bottom: e.clientY }, s);
   });
 }
 

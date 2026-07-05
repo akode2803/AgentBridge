@@ -917,6 +917,19 @@ def api_mesh_starred(params):
     return {"starred": items}
 
 
+def api_mesh_forward(data):
+    """Groundwork endpoint — the forward UI lands with the select-messages
+    round; kept API-complete so agents/CLI can already use it."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    out = m.forward_message(data.get("chat_id") or "",
+                            data.get("msg_id") or "",
+                            data.get("targets") or [], by=user)
+    return {"ok": True, "forwarded": len(out)}
+
+
 def api_mesh_typing(data):
     """Typing heartbeat: the composer pings while the user writes; other
     members' windows show a dots-only bubble until it goes stale. One file
@@ -1017,6 +1030,7 @@ POST_ROUTES = {
     "/api/mesh/pin": api_mesh_pin,
     "/api/mesh/unpin": api_mesh_unpin,
     "/api/mesh/star": api_mesh_star,
+    "/api/mesh/forward": api_mesh_forward,
 }
 
 
