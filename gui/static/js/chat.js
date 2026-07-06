@@ -346,9 +346,6 @@ async function renderMeshChat(force) {
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
     <div id="reply-area"></div>
-    ${!isMember && !meta.archived ? `
-    <div class="banner" style="margin:10px 18px 12px">You are reading as a
-      non-member — a member can add you from the chat info page.</div>` : ""}
     ${meta.archived || !isMember ? "" : `
     <div id="composer">
       <div id="composer-pill">

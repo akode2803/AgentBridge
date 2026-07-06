@@ -536,6 +536,15 @@ def session_user(m):
     return None
 
 
+def _not_member(meta, user):
+    """Read gate: you can only read a chat you belong to (mirrors post()'s
+    write gate). Returns an error dict to short-circuit, or None if allowed.
+    App-level privacy — see the access-model note in mesh.py."""
+    if user not in (meta.get("members") or []):
+        return {"error": "You don't have access to this chat"}
+    return None
+
+
 def _set_session(username):
     path = Path(HOME) / "gui_session.json"
     if username is None:
@@ -635,6 +644,9 @@ def api_mesh_chat(params):
     meta = m.get_chat(chat_id)
     if not meta:
         return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
     try:
         tail = max(1, min(1000, int(params.get("tail", "200"))))
     except ValueError:
@@ -722,6 +734,9 @@ def api_mesh_chat_info(params):
     meta = m.get_chat(chat_id)
     if not meta:
         return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
     link_re = re.compile(r"https?://[^\s<>\"')\]]+")
     files, links = [], []
     msgs = m.messages(chat_id, tail=0)
@@ -850,6 +865,11 @@ def api_mesh_livefeed(params):
         return {"feeds": []}
     chat_id = params.get("id", "")
     viewer = session_user(m)
+    # don't leak presence (who's typing/working) for a chat you're not in
+    if chat_id:
+        meta = m.get_chat(chat_id)
+        if not meta or _not_member(meta, viewer):
+            return {"feeds": []}
     feeds = []
     status_dir = m.root / "status"
     if status_dir.is_dir():
@@ -919,9 +939,15 @@ def api_mesh_starred(params):
     user = session_user(m)
     if not user:
         return {"error": "Sign in first"}
-    items = m.starred_all(user)
     chat_id = params.get("id", "")
     if chat_id:   # the chat-info page lists one chat's stars
+        meta = m.get_chat(chat_id)
+        if meta:
+            denied = _not_member(meta, user)
+            if denied:
+                return denied
+    items = m.starred_all(user)
+    if chat_id:
         items = [s for s in items if s["chat_id"] == chat_id]
     return {"starred": items}
 

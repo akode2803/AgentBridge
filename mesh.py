@@ -17,14 +17,18 @@ transport reliable):
     IS the data store.
 
 Access model (enforced cooperatively — the folder ACL is the real boundary):
-  * Humans see ALL chats (free knowledge sharing); agents only chats they are
-    members of.
+  * You see only chats you are a member of — humans and agents alike (WhatsApp
+    model, 2026-07-07; superseded the earlier "humans see everything"). The GUI
+    read endpoints enforce membership too, not just the chat list.
   * Chats are archived (never deleted), and only by their owner-human.
   * Agents are owned by one or more humans, who set their reply rules
     (all | tagged | humans), model/effort, and tool policy.
-  * Passwords gate the GUI login, hashed PBKDF2-SHA256. This keeps accounts
-    honest, not cryptographically sealed — anyone with folder access can
-    read everything by design (audit trail).
+  * Passwords gate the GUI login, hashed PBKDF2-SHA256. NOTE this is
+    APP-LEVEL/cooperative privacy only: on the shared-folder backend every
+    member's machine syncs the whole mesh/ tree, so anyone with folder access
+    can still read the JSON on disk. Real isolation (nobody — human or agent —
+    reads a chat they're not in) needs per-chat encryption or per-user
+    backends; that is a setup/account-overhaul item, deliberately deferred.
 
 Layout under <shared>/mesh/:
     users/<username>.json
@@ -714,12 +718,10 @@ class Mesh:
                 continue
             if meta.get("archived") and not include_archived:
                 continue
-            # a "message yourself" chat is private to its single member
-            if meta.get("kind") == "self" \
-                    and username not in (meta.get("members") or []):
-                continue
-            # humans see every chat; agents only their own
-            if u["kind"] == "agent" and username not in (meta.get("members") or []):
+            # you see only chats you belong to — humans and agents alike
+            # (WhatsApp model, 2026-07-07; was "humans see everything"). Covers
+            # the private self-chat too, so no separate kind check is needed.
+            if username not in (meta.get("members") or []):
                 continue
             meta["last"] = self._last_message(meta["id"])
             out.append(meta)

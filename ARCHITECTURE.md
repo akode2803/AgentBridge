@@ -101,6 +101,14 @@ mesh/
   **cooperative** security — anyone with folder access can read every file
   including `users/*.json` by design (audit trail). It gates the GUI login,
   not the data.
+- **Chat visibility = membership** (WhatsApp model, 2026-07-07): you see and can
+  read only chats you're a member of — humans and agents alike. Enforced in
+  `chats_for` (the list) AND on the GUI read endpoints (`chat`, `chat_info`,
+  `starred`, `livefeed` all reject non-members via `_not_member`). This is
+  APP-LEVEL privacy only: on the shared-folder backend every member's machine
+  syncs the whole `mesh/` tree, so the JSON is still readable on disk. Real
+  isolation (no one reads a chat they're not in) needs per-chat encryption or
+  per-user backends — a deferred setup/account-overhaul decision.
 - An agent has one or more `owners` (humans). **An agent must always have at
   least one owner** — `update_agent`'s `revoke_owner` refuses to drop the last
   one. Ownership is what makes the free-chatting invariant enforceable (§6).
@@ -284,7 +292,7 @@ Full public surface, grouped as they appear in the file:
 | `add_member`, `remove_member` | membership, cascades per §6 |
 | `pins_active` / `pin_active` / `pin_message` / `unpin_message` | §2.3 |
 | `star_message` / `starred_ids` / `starred_all` | §2.4 |
-| `chats_for(username, include_archived=False)` | the visibility rule: humans see every chat, agents only their memberships; sorted by last-activity |
+| `chats_for(username, include_archived=False)` | the visibility rule: everyone (human or agent) sees only chats they're a member of; sorted by last-activity |
 | `messages(chat_id, tail=200)` | reads every member's `.jsonl`, merges, sorts by `(ts, id)` — `tail=0` means "all" |
 | `parse_tags(body)` | regex `@name` extraction, filtered to real usernames |
 | `post(chat_id, sender, body, attachments, reply_to, forward_of)` | the single message-creation path; enforces membership + not-archived, stages attachments into `files/` with collision-safe renaming, stamps `ns`/`id`/`tags` |
