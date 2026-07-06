@@ -20,5 +20,5 @@ export const EXPECTED = [
   "renderChatDetails", "renderChatMedia", "renderChatSearch",
   "showAddMembers", "showSearchMembers",
   "renderSettings", "renderSetup", "refresh", "openMsgMenu",
-  "showCreateGroup",
+  "showCreateGroup", "exitGroup",
 ];

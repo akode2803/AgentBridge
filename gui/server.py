@@ -971,6 +971,61 @@ def api_mesh_open_file(data):
     return {"ok": True}
 
 
+def api_mesh_save(data):
+    """Save selected chat attachments to a user-chosen folder. The files
+    already live in the synced folder; this copies them OUT to wherever the
+    user picks (WhatsApp's "download"). Native folder picker via the same
+    tkinter subprocess trick as pick_folder — blocks until the dialog closes."""
+    import shutil
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    chat_id = data.get("chat_id") or ""
+    paths = data.get("paths") or []
+    if not paths:
+        return {"error": "Nothing to save"}
+    # validate every path is inside this chat's files/ dir (see open_file)
+    files_root = (m.chat_dir(chat_id) / "files").resolve()
+    targets = []
+    for rel in paths:
+        rel = (rel or "").replace("\\", "/")
+        t = (m.chat_dir(chat_id) / rel).resolve()
+        if files_root != t and files_root not in t.parents:
+            return {"error": "A selected file is outside the chat's files folder"}
+        if not t.is_file():
+            return {"error": "A file was not found — it may still be syncing"}
+        targets.append(t)
+    code = ("import tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+            "print(filedialog.askdirectory() or '')")
+    try:
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True, timeout=600, **SUBPROC)
+        dest = r.stdout.strip()
+    except Exception as e:
+        return {"error": str(e)}
+    if not dest:
+        return {"ok": True, "saved": 0, "cancelled": True}
+    dest_dir = Path(dest.replace("/", os.sep))
+    saved = 0
+    for t in targets:
+        out = dest_dir / t.name
+        # never clobber an existing file: name, name (1), name (2)...
+        if out.exists():
+            stem, suf, i = out.stem, out.suffix, 1
+            while out.exists():
+                out = dest_dir / f"{stem} ({i}){suf}"
+                i += 1
+        try:
+            shutil.copy2(t, out)
+            saved += 1
+        except OSError:
+            pass
+    return {"ok": True, "saved": saved, "dest": str(dest_dir)}
+
+
 def api_shutdown():
     """Let a newer launch replace a running instance (single-instance UX:
     without this, a relaunch silently lands on a random port while the stale
@@ -1031,6 +1086,7 @@ POST_ROUTES = {
     "/api/mesh/unpin": api_mesh_unpin,
     "/api/mesh/star": api_mesh_star,
     "/api/mesh/forward": api_mesh_forward,
+    "/api/mesh/save": api_mesh_save,
 }
 
 

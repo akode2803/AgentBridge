@@ -31,6 +31,14 @@ export const ICONS = {
   pinOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.3 3.8h5.4M10 3.8v3.1M14 3.8v4.9l3 3a1 1 0 0 1-.7 1.7h-2.1M8.6 8.6 7 11.3a1 1 0 0 0 .7 1.7h4.5M12 13.4V20M4.5 4.5l15 15"/></svg>',
   arrowR: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12h14M13 6.5 18.8 12 13 17.5"/></svg>',
   send: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M3.4 20.4 20.85 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z" fill="currentColor"/></svg>',
+  // save/download: arrow into a tray
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10.5 12 14.5 16 10.5M5 19.5h14"/></svg>',
+  // unstar: the star with a slash through it
+  starOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 4.2 2.35 4.85 5.25.72-3.85 3.7.95 5.33L12 16.3l-4.7 2.5.95-5.33-3.85-3.7 5.25-.72z"/><path d="M4 4l16 16"/></svg>',
+  // select messages: a checklist
+  select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 6.5 5 7.9 7.6 5.3M3.6 16.5 5 17.9l2.6-2.6M11 6.8h9M11 16.8h9"/></svg>',
+  // mute notifications: a bell
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/></svg>',
 };
 
 // the AgentBridge bird mark, used by empty states

@@ -61,6 +61,7 @@ async function renderChats(force) {
   // no chat selected: WhatsApp-style empty pane (the list lives in the sidebar)
   if (!force && Mesh.listKey === "empty" && App.page === "chats") return;
   Mesh.listKey = "empty";
+  clearSelectMode();   // left the chat while selecting: drop the mode + pane
   $("#content").innerHTML = `
     <div class="empty-state">
       <div>
@@ -109,12 +110,25 @@ function renderMeshAuth() {
   $("#auth-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
 }
 
+// the Read-more reveal schedule: +10, then +15, then +25, then fully expand.
+// `cur` is the message's current line budget (undefined before the first click).
+function nextClamp(cur) {
+  if (!cur || cur <= 10) return 20;   // 1st click: +10
+  if (cur <= 20) return 35;           // 2nd click: +15
+  if (cur <= 35) return 60;           // 3rd click: +25
+  return Infinity;                    // 4th click: expand completely
+}
+
 async function renderMeshChat(force) {
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
   if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
   const feeds = (await api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`)).feeds || [];
+  // a fetch that started before a chat switch must not paint the old chat over
+  // the new one — bail if the route moved on while we were awaiting (the rare
+  // "flash of the previous chat" on a fast switch)
+  if (App.page !== "chats" || Mesh.chatId !== chatId) return;
   const pinsSig = (data.meta.pins || []).map((p) => p.id + p.until).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     data.meta.archived, (data.meta.members || []).length,
@@ -185,6 +199,7 @@ async function renderMeshChat(force) {
     const starred = starredSet.has(msg.id);
     parts.push(`
       <div class="msg ${msg.mine ? "mine" : ""}" data-mid="${esc(msg.id || "")}">
+        <span class="msg-check" aria-hidden="true">${ICONS.check}</span>
         ${showSender ? `<span class="msg-avatar">${esc((meshDn(msg.from)[0] || "?").toUpperCase())}</span>` : ""}
         <div class="bubble">
           <button class="msg-arrow" aria-label="Message menu">${ICONS.chevD}</button>
@@ -264,6 +279,9 @@ async function renderMeshChat(force) {
     tr.innerHTML = bubbles;
     bindTranscript(tr, chatId, data, menuCtx);
     bindOpenFile(tr, chatId, ".mesh-att");
+    // select mode survives the poll swap: .selecting rides on #content, so
+    // only the per-row checkmarks (and stale ids) need reconciling
+    if (Mesh.select.on) applySelectAfterRender(chatId);
     clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
     syncPinBanner(chatId, pins);
     if (grew) {   // the newest bubble slides in
@@ -277,6 +295,9 @@ async function renderMeshChat(force) {
     return;
   }
   Mesh.structKey = structKey;
+  // a full rebuild throws away the composer/pane — any select mode goes with
+  // it (structural change or a chat switch, both rare mid-selection)
+  clearSelectMode();
 
   // members line under the chat name, WhatsApp-style: "Claude, CoCo, You"
   const memberLine = (meta.members || []).filter((u) => u !== ms.user)
@@ -298,10 +319,15 @@ async function renderMeshChat(force) {
       <div class="menu" id="chat-menu" hidden>
         <button data-act="info">${ICONS.info} ${isDm ? "Chat info" : "Group info"}</button>
         ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
+        <button data-act="search">${ICONS.search} Search</button>
+        <button data-act="select">${ICONS.select} Select messages</button>
+        <button data-act="mute">${ICONS.bell} Mute notifications</button>
         ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
         <div class="menu-sep"></div>
         <button data-act="close">${ICONS.close} Close chat</button>
+        <button data-act="clear">${ICONS.trash} Clear chat</button>
+        ${isMember && !isOwner && !isDm ? `<button data-act="exit">${ICONS.exit} Exit group</button>` : ""}
       </div>
     </div>
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
@@ -319,7 +345,7 @@ async function renderMeshChat(force) {
           ? `<button id="agents-perm-btn" title="Agent permissions">${ICONS.hand}</button>` : ""}
         <div id="composer-ta-wrap">
           <div id="composer-hl" aria-hidden="true"></div>
-          <textarea id="mesh-body" rows="1"></textarea>
+          <textarea id="mesh-body" rows="1" placeholder="Type a message…"></textarea>
         </div>
         <input type="file" id="mesh-file" multiple hidden>
         <button id="mesh-attach-btn">${ICONS.attach}</button>
@@ -337,7 +363,23 @@ async function renderMeshChat(force) {
     location.hash = `#/chats/${chatId}/details`;
   });
   $("#chat-back").addEventListener("click", () => { location.hash = "#/chats"; });
-  $("#chat-more").addEventListener("click", () => { menu.hidden = !menu.hidden; });
+  // the ⋮ button drops the menu under itself; a right-click on the chat area
+  // (bindTranscript) floats the SAME menu at the cursor via menu._openAt
+  menu._openAt = (x, y) => {
+    if (x == null) {   // button open: restore the CSS dropdown position
+      menu.style.position = ""; menu.style.left = ""; menu.style.top = "";
+      menu.hidden = false;
+      return;
+    }
+    menu.style.position = "fixed";
+    menu.hidden = false;
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(x, innerWidth - mw - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, innerHeight - mh - 8)) + "px";
+  };
+  $("#chat-more").addEventListener("click", () => {
+    if (menu.hidden) menu._openAt(); else menu.hidden = true;
+  });
   const permBtn = $("#agents-perm-btn");
   if (permBtn) permBtn.addEventListener("click", () => {
     Mesh.agentsView = true;
@@ -356,6 +398,15 @@ async function renderMeshChat(force) {
       const act = b.dataset.act;
       if (act === "info") location.hash = `#/chats/${chatId}/details`;
       else if (act === "add") V.showAddMembers(chatId);
+      else if (act === "search") {
+        // reuse the chat-info Search subview (renderChatSearch) — same search
+        Mesh.searchView = true; Mesh.detailsKey = "";
+        location.hash = `#/chats/${chatId}/details`;
+      }
+      else if (act === "select") enterSelect(chatId);
+      else if (act === "mute") toast("Muting arrives with notification support (PWA / LAN)");
+      else if (act === "clear") toast("Clear chat lands with the delete feature");
+      else if (act === "exit") V.exitGroup(chatId, title);
       else if (act === "close") location.hash = "#/chats";
       else if (act === "archive") {
         const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
@@ -412,13 +463,20 @@ function bindTranscript(tr, chatId, data, ctx) {
   if (tr._delegated) return;
   tr._delegated = true;
   tr.addEventListener("click", (e) => {
+    // select mode: a click anywhere on a row toggles its checkbox — nothing
+    // else fires (no read-more, reply-jump, file-open or hover menu)
+    if (Mesh.select.on) {
+      const row = e.target.closest(".msg[data-mid]");
+      if (row) toggleSelect(row.dataset.mid, row, chatId);
+      return;
+    }
     const rm = e.target.closest(".read-more");
     if (rm) {
-      // grant this message 10 more lines; remembered across re-renders
+      // progressive reveal (+10, +15, +25, then all); remembered across re-renders
       const mid = rm.closest("[data-mid]")?.dataset.mid;
       if (!mid) return;
       Mesh.msgExpand = Mesh.msgExpand || {};
-      Mesh.msgExpand[mid] = (Mesh.msgExpand[mid] || 10) + 10;
+      Mesh.msgExpand[mid] = nextClamp(Mesh.msgExpand[mid]);
       clampLong(rm.closest(".msg"), Mesh.msgExpand);
       return;
     }
@@ -439,14 +497,24 @@ function bindTranscript(tr, chatId, data, ctx) {
       if (msg) openMsgMenu(rect, msg, chatId, tr._ctx);
     }
   });
-  // right-clicking a bubble opens the same menu (WhatsApp desktop)
+  // right-click: a bubble opens the message menu; empty chat area opens the
+  // chat ⋮ menu — both at the cursor (WhatsApp desktop)
   tr.addEventListener("contextmenu", (e) => {
-    const mid = e.target.closest(".msg")?.dataset.mid;
-    const msg = mid && tr._msgs.get(mid);
-    if (!msg) return;
-    e.preventDefault();
-    openMsgMenu({ left: e.clientX, right: e.clientX,
-                  top: e.clientY, bottom: e.clientY }, msg, chatId, tr._ctx);
+    const row = e.target.closest(".msg[data-mid]");
+    if (Mesh.select.on) {   // in select mode a right-click just toggles too
+      if (row) { e.preventDefault(); toggleSelect(row.dataset.mid, row, chatId); }
+      return;
+    }
+    if (row) {
+      const msg = tr._msgs.get(row.dataset.mid);
+      if (!msg) return;
+      e.preventDefault();
+      openMsgMenu({ left: e.clientX, right: e.clientX,
+                    top: e.clientY, bottom: e.clientY }, msg, chatId, tr._ctx);
+      return;
+    }
+    const cm = document.getElementById("chat-menu");
+    if (cm && cm._openAt) { e.preventDefault(); cm._openAt(e.clientX, e.clientY); }
   });
 }
 
@@ -527,7 +595,8 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       const next = !isStarred;
       if (await doStar(next)) {
         toast(`1 message ${next ? "starred" : "unstarred"}`, {
-          check: true, action: "Undo", onAction: () => doStar(!next),
+          icon: next ? '<span class="toast-star">★</span>' : ICONS.starOff,
+          action: "Undo", onAction: () => doStar(!next),
         });
       }
     }
@@ -677,3 +746,151 @@ async function renderNewChat() {
 }
 V.renderNewChat = renderNewChat;
 V.openMsgMenu = openMsgMenu;   // the starred sidebar reuses the menu
+
+// ---- select-messages mode -------------------------------------------------
+// A UI mode toggled imperatively, never through a re-render: the composer
+// slides out, an action pane slides up in its place, and every message grows
+// a left-gutter checkbox (the avatar's slot). State lives on Mesh.select so it
+// survives the transcript's ~2.5s poll re-renders; the .selecting class rides
+// on #content (not #transcript), so the poll's innerHTML swap can't drop it —
+// only the per-row .sel marks are re-applied (applySelectAfterRender).
+
+function enterSelect(chatId) {
+  Mesh.select.on = true;
+  Mesh.select.ids = new Set();
+  buildSelectPane(chatId);
+  refreshSelectPane();
+}
+
+function buildSelectPane(chatId) {
+  const content = $("#content");
+  if (!content) return;
+  let pane = $("#select-pane");
+  if (!pane) {
+    pane = document.createElement("div");
+    pane.id = "select-pane";
+    content.appendChild(pane);
+  }
+  pane.innerHTML = `
+    <button class="icon-btn" id="sp-close" title="Cancel">${ICONS.close}</button>
+    <span class="sp-count" id="sp-count">0 selected</span>
+    <span class="spacer"></span>
+    <button class="sp-act" id="sp-star" title="Star">${ICONS.star}</button>
+    <button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>
+    <button class="sp-act" id="sp-forward" title="Forward">${ICONS.forward}</button>
+    <button class="sp-act" id="sp-save" title="Save to a folder">${ICONS.download}</button>`;
+  // paint the pane at its resting (off-screen) transform, force a reflow, then
+  // add .selecting — the state change between the two frames fires the slide
+  void pane.offsetWidth;
+  content.classList.add("selecting", "sel-enter");
+  setTimeout(() => content.classList.remove("sel-enter"), 280);
+  $("#sp-close").addEventListener("click", () => exitSelect());
+  $("#sp-star").addEventListener("click", () => bulkStar(chatId));
+  $("#sp-save").addEventListener("click", () => bulkSave(chatId));
+  // deferred to later rounds — wired so they slot in when implemented
+  $("#sp-delete").addEventListener("click", () => toast("Delete lands in a coming round"));
+  $("#sp-forward").addEventListener("click", () => toast("Forwarding UI lands next round"));
+}
+
+function toggleSelect(mid, row, chatId) {
+  const ids = Mesh.select.ids;
+  if (ids.has(mid)) { ids.delete(mid); row.classList.remove("sel"); }
+  else { ids.add(mid); row.classList.add("sel"); }
+  refreshSelectPane();
+}
+
+// counter + which actions are live. Star flips to Unstar when every selection
+// is already starred; Save is live only when every selection has a file.
+function refreshSelectPane() {
+  const ids = Mesh.select.ids;
+  const n = ids.size, empty = n === 0;
+  const cnt = $("#sp-count");
+  if (cnt) cnt.textContent = `${n} selected`;
+  const tr = $("#transcript");
+  const msgs = tr?._msgs, starred = tr?._ctx?.starred || new Set();
+  const allStarred = !empty && [...ids].every((id) => starred.has(id));
+  const starBtn = $("#sp-star");
+  if (starBtn) {
+    starBtn.disabled = empty;
+    starBtn.innerHTML = allStarred ? ICONS.starOff : ICONS.star;
+    starBtn.title = allStarred ? "Unstar" : "Star";
+  }
+  const del = $("#sp-delete"); if (del) del.disabled = empty;
+  const fwd = $("#sp-forward"); if (fwd) fwd.disabled = empty;
+  const save = $("#sp-save");
+  if (save) {
+    const allFiles = !empty && [...ids].every((id) => (msgs?.get(id)?.files || []).length > 0);
+    save.disabled = !allFiles;
+  }
+}
+
+// after a poll swap: prune ids whose message vanished, re-mark the rest
+function applySelectAfterRender() {
+  const tr = $("#transcript");
+  if (!tr) return;
+  const present = new Set([...tr.querySelectorAll(".msg[data-mid]")].map((m) => m.dataset.mid));
+  for (const id of [...Mesh.select.ids]) if (!present.has(id)) Mesh.select.ids.delete(id);
+  Mesh.select.ids.forEach((id) => {
+    const row = tr.querySelector(`.msg[data-mid="${CSS.escape(id)}"]`);
+    if (row) row.classList.add("sel");
+  });
+  refreshSelectPane();
+}
+
+function exitSelect() {
+  Mesh.select.on = false;
+  Mesh.select.ids = new Set();
+  $("#content")?.classList.remove("selecting", "sel-enter");
+  document.querySelectorAll("#transcript .msg.sel").forEach((m) => m.classList.remove("sel"));
+  const pane = $("#select-pane");
+  // let the slide-out play, then drop it — unless select mode was re-entered
+  if (pane) setTimeout(() => { if (!Mesh.select.on) pane.remove(); }, 260);
+}
+
+// hard reset when #content is about to be rebuilt (chat open/switch, leaving
+// to the empty state) — the element is going away, so no slide-out
+function clearSelectMode() {
+  Mesh.select.on = false;
+  Mesh.select.ids = new Set();
+  $("#content")?.classList.remove("selecting", "sel-enter");
+  $("#select-pane")?.remove();
+}
+
+async function bulkStar(chatId) {
+  const ids = [...Mesh.select.ids];
+  if (!ids.length) return;
+  const msgs = $("#transcript")?._msgs;
+  const starred = $("#transcript")?._ctx?.starred || new Set();
+  const val = !ids.every((id) => starred.has(id));   // all starred → unstar all
+  const snap = (id) => {
+    const m = msgs?.get(id);
+    return m ? { from: m.from, body: m.body || "", ts: m.ts } : {};
+  };
+  const setAll = async (v) => {
+    for (const id of ids) {
+      await api("/api/mesh/star", { chat_id: chatId, msg_id: id, starred: v, snapshot: snap(id) });
+    }
+  };
+  await setAll(val);
+  exitSelect();
+  refreshChat();
+  toast(`${ids.length} message${ids.length === 1 ? "" : "s"} ${val ? "starred" : "unstarred"}`, {
+    icon: val ? '<span class="toast-star">★</span>' : ICONS.starOff,
+    action: "Undo",
+    onAction: async () => { await setAll(!val); refreshChat(); },
+  });
+}
+
+async function bulkSave(chatId) {
+  const ids = [...Mesh.select.ids];
+  const msgs = $("#transcript")?._msgs;
+  const paths = [];
+  for (const id of ids) for (const f of (msgs?.get(id)?.files || [])) paths.push(f.path);
+  if (!paths.length) return;
+  const r = await api("/api/mesh/save", { chat_id: chatId, paths });
+  if (r.error) { toast(r.error, true); return; }
+  if (r.cancelled) return;   // backed out of the picker — stay in select mode
+  exitSelect();
+  const where = (r.dest || "").split(/[\\/]/).filter(Boolean).pop() || "the folder";
+  toast(`Saved ${r.saved} file${r.saved === 1 ? "" : "s"} to ${where}`, { check: true });
+}

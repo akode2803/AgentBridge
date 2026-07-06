@@ -287,17 +287,7 @@ async function renderChatDetails() {
     location.hash = "#/chats";
   });
   const dgExit = $("#dg-exit");
-  if (dgExit) dgExit.addEventListener("click", async () => {
-    if (!await confirmModal({
-      title: `Exit "${esc(title)}"?`,
-      body: "You can be added back by a member.",
-      action: "Exit",
-    })) return;
-    const r = await api("/api/mesh/remove_member",
-      { chat_id: chatId, username: ms.user });
-    if (r.error) { toast(r.error, true); return; }
-    location.hash = "#/chats";
-  });
+  if (dgExit) dgExit.addEventListener("click", () => exitGroup(chatId, title));
   const dgDel = $("#dg-delete");
   if (dgDel) dgDel.addEventListener("click", async () => {
     if (!await confirmModal({
@@ -312,6 +302,23 @@ async function renderChatDetails() {
   });
 }
 V.renderChatDetails = renderChatDetails;
+
+// Leaving a group = removing yourself. Shared by the chat-info danger row and
+// the header ⋮ menu (chat.js), so both confirm and behave identically. The
+// caller decides WHEN to show it (member, not owner, not a DM).
+export async function exitGroup(chatId, title) {
+  const ms = Mesh.state;
+  if (!await confirmModal({
+    title: `Exit "${esc(title)}"?`,
+    body: "You can be added back by a member.",
+    action: "Exit",
+  })) return;
+  const r = await api("/api/mesh/remove_member",
+    { chat_id: chatId, username: ms.user });
+  if (r.error) { toast(r.error, true); return; }
+  location.hash = "#/chats";
+}
+V.exitGroup = exitGroup;
 
 // starred messages for THIS chat (WhatsApp: a row in chat info, under
 // media). Cards carry a LITERAL snapshot of the message — same markdown,

@@ -351,6 +351,9 @@ input[type=text], select, textarea {
 .menu button:hover { background: var(--hover); }
 .menu button svg { width: 17px; height: 17px; color: var(--text-dim); flex: none; }
 .menu .menu-sep { border-top: 1px solid var(--border); margin: 5px 2px; }
+/* fixed width so the right-click (position:fixed) open can't stretch the menu
+   between its inline `left` and the stylesheet's `right` — it stays put */
+#chat-menu { width: 236px; }
 @keyframes menu-pop {
   from { opacity: 0; transform: translateY(-4px); }
 }
@@ -431,6 +434,11 @@ input[type=text], select, textarea {
 }
 .msg.mine .md-pre, .msg.mine .md-mono,
 .msg.mine .bubble code { background: rgba(255,255,255,.7); }
+/* dark theme: the light box above would carry light text on near-white and
+   wash out — use a dark tint instead so my own code/commands stay legible */
+[data-theme="dark"] .msg.mine .md-pre,
+[data-theme="dark"] .msg.mine .md-mono,
+[data-theme="dark"] .msg.mine .bubble code { background: rgba(0,0,0,.28); }
 .bubble a { color: var(--accent); }
 .bubble table.md-table {
   border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px;
@@ -521,6 +529,8 @@ input[type=text], select, textarea {
     color-mix(in srgb, var(--accent-soft) 60%, transparent) 64%, transparent 88%);
 }
 .msg .bubble:hover .msg-arrow { display: flex; animation: arrow-in .16s ease; }
+/* don't pop the reply-arrow over text the user is actively selecting */
+#content.sel-text #transcript .msg .bubble:hover .msg-arrow { display: none; }
 .msg-arrow:hover { color: var(--text); }
 .msg-arrow svg { flex: none; }
 @keyframes arrow-in {
@@ -597,14 +607,20 @@ input[type=text], select, textarea {
 #pin-banner .pin-arrow svg { width: 16px; height: 16px; }
 
 /* long messages clamp at ~10 lines; every Read more click grants 10 more */
-.msg-body.clamped { overflow: hidden; }
+.msg-body.clamped { overflow: hidden; position: relative; }
+/* "…Read more" overlays the END of the last visible line (it lives inside the
+   clamped body), fading the text beneath it into the bubble background so it
+   reads as an inline hyperlink rather than a full-width bar on its own line */
 .read-more {
-  display: block; border: none; background: none; padding: 0; margin: 1px 0 0;
+  position: absolute; right: 0; bottom: 0;
+  border: none; cursor: pointer; padding: 0 0 0 46px;
   font: inherit; font-size: inherit; line-height: inherit;
-  color: var(--accent); cursor: pointer; font-weight: 600;
+  color: var(--accent); font-weight: 600;
+  background: linear-gradient(to right, transparent, var(--rm-bg) 46%);
 }
-.read-more .rm-dots { color: var(--text-dim); font-weight: 400; margin-right: 5px; }
-.read-more:hover { background: none; }
+.msg .read-more { --rm-bg: var(--surface); }
+.msg.mine .read-more { --rm-bg: var(--accent-soft); }
+.read-more .rm-dots { color: var(--text-dim); font-weight: 400; margin-right: 4px; }
 .read-more:hover .rm-label { text-decoration: underline; }
 
 /* tiny star beside the time of a message the viewer starred */
@@ -757,6 +773,9 @@ input[type=text], select, textarea {
   scrollbar-width: none;
 }
 #composer-pill textarea::-webkit-scrollbar { display: none; }
+/* the textarea text is transparent (painted by #composer-hl), so the
+   placeholder needs an explicit colour or it renders invisible too */
+#composer-pill textarea::placeholder { color: var(--text-faint); opacity: 1; }
 #composer-pill textarea::selection {
   background: var(--selection); color: transparent;
 }
@@ -783,6 +802,68 @@ input[type=text], select, textarea {
   display: grid; place-items: center;
 }
 #composer .send-icon svg { display: block; margin-left: 2px; }
+
+/* ---- select-messages mode ------------------------------------------------
+   .selecting rides on #content so the transcript's poll re-render can't drop
+   it. The composer slides down/out; #select-pane slides up into its place;
+   every message grows a left-gutter checkbox (the avatar's slot) and the row
+   goes full width, so the checkbox sits at the far left for mine AND others
+   (matching WhatsApp). */
+#content.chat-mode { position: relative; }   /* containing block for the pane */
+
+#composer { transition: transform .24s ease, opacity .2s ease; }
+#content.selecting #composer {
+  transform: translateY(170%); opacity: 0; pointer-events: none;
+}
+
+#select-pane {
+  position: absolute; left: 18px; right: 18px; bottom: 12px; z-index: 6;
+  display: flex; align-items: center; gap: 2px;
+  height: 50px; box-sizing: border-box; padding: 5px 8px;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: 26px; box-shadow: var(--shadow);
+  transform: translateY(180%); transition: transform .24s ease;
+}
+[data-theme="dark"] #select-pane { border-color: var(--border); }
+#content.selecting #select-pane { transform: translateY(0); }
+#select-pane .sp-count {
+  font-size: 13.5px; font-weight: 600; color: var(--text); margin-left: 6px;
+}
+#select-pane #sp-close { color: var(--text-dim); }
+.sp-act {
+  width: 40px; height: 40px; flex: none; padding: 0;
+  border: none; background: transparent; border-radius: 50%;
+  color: var(--text-dim); display: grid; place-items: center; cursor: pointer;
+}
+.sp-act:hover:not(:disabled) { background: var(--bg-alt); color: var(--text); }
+.sp-act:disabled { opacity: .3; cursor: default; }
+.sp-act svg { width: 20px; height: 20px; display: block; }
+
+/* the per-row transformation (checkbox gutter + full-width row) */
+.msg { transition: padding-left .22s ease; }   /* content slides right on enter */
+.msg-check { display: none; }
+#content.selecting #transcript .msg {
+  max-width: 100%; width: 100%; align-self: stretch;
+  padding-left: 46px; position: relative;
+  display: flex; flex-direction: column; align-items: flex-start;
+}
+#content.selecting #transcript .msg.mine { align-items: flex-end; }
+#content.selecting #transcript .msg > .bubble { max-width: 74%; }
+#content.selecting #transcript .msg-avatar,
+#content.selecting #transcript .msg-arrow { display: none; }
+#content.selecting #transcript .msg-check {
+  display: grid; place-items: center; box-sizing: border-box;
+  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--text-faint); color: transparent; cursor: pointer;
+}
+#content.selecting #transcript .msg.sel .msg-check {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+#content.selecting #transcript .msg-check svg { width: 15px; height: 15px; }
+/* fade/slide the checkboxes in only on ENTER, not on every poll re-render */
+#content.selecting.sel-enter #transcript .msg-check { animation: check-in .24s ease; }
+@keyframes check-in { from { opacity: 0; transform: translate(-8px, -50%); } }
 
 /* @tag autofill popup — follows the "@" horizontally, opens upward */
 #tag-pop {
@@ -1464,10 +1545,17 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   display: grid; place-items: center; font-size: 10px; font-weight: 700;
 }
 #toast .toast-msg { min-width: 0; }
+/* leading icon slot: gold ★ for a star, the starOff glyph for an unstar */
+#toast .toast-ic { flex: none; display: inline-flex; align-items: center; }
+#toast .toast-ic svg { width: 17px; height: 17px; color: var(--text-dim); }
+#toast .toast-star { font-size: 16px; line-height: 1; color: #EAB308; }
 #toast .toast-act {
   flex: none; border: none; border-radius: 999px;
-  background: var(--bg-alt); color: var(--accent);
+  /* accent-tinted so the Undo pill actually reads as a button — plain
+     --bg-alt was nearly invisible against the dark toast surface */
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
   font: inherit; font-size: 12.5px; font-weight: 700;
   padding: 5px 14px; cursor: pointer; margin: -3px -6px -3px 2px;
 }
-#toast .toast-act:hover { background: var(--hover); }
+#toast .toast-act:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }

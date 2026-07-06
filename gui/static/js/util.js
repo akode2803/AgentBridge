@@ -67,7 +67,12 @@ export function toast(msg, opts) {
   if (opts === true) opts = { error: true };
   opts = opts || {};
   const t = $("#toast");
-  t.innerHTML = `${opts.check ? '<span class="toast-check">✓</span>' : ""}` +
+  // opts.icon is trusted markup (our own ICONS / a glyph span), rendered
+  // ahead of the message; opts.check is the plain ✓ success tick.
+  const lead = opts.icon
+    ? `<span class="toast-ic">${opts.icon}</span>`
+    : (opts.check ? '<span class="toast-check">✓</span>' : "");
+  t.innerHTML = lead +
     `<span class="toast-msg">${esc(msg)}</span>` +
     (opts.action ? `<button class="toast-act">${esc(opts.action)}</button>` : "");
   t.className = opts.error ? "error" : "";
@@ -100,33 +105,74 @@ export function paneCoversChat() {
   return matchMedia("(max-width: 1100px)").matches;
 }
 
-// "Read more" clamp for long messages: anything taller than `lines` is cut
-// to lines-1 (the Read-more line makes it `lines` total); every click on
-// Read more grants `lines` more. Expansion is remembered in `store`
-// (message id -> allowed lines), so the 2.5s re-renders don't re-collapse.
+// "Read more" clamp for long messages. `store[mid]` is the line budget the
+// message is currently allowed (undefined = the default `lines`; Infinity =
+// fully expanded). The clamp height is snapped to a clean boundary so the cut
+// never slices through the middle of a line, table or code block, and the
+// "…Read more" link sits INSIDE the body at the end of the last visible line
+// (WhatsApp/Instagram-style) rather than on a bar of its own. Expansion is
+// remembered in `store` so the 2.5s re-renders don't re-collapse.
 export function clampLong(scope, store, lines = 10) {
   scope.querySelectorAll(".msg-body").forEach((b) => {
     const mid = b.closest("[data-mid]")?.dataset.mid;
     if (!mid) return;
     const lh = parseFloat(getComputedStyle(b).lineHeight) || 20;
     const allowed = store[mid] || lines;
-    const total = b.scrollHeight / lh;
-    const existing = b.parentElement.querySelector(".read-more");
-    if (total <= allowed + 0.6) {   // fits (with slack): no clamp
+    const existing = b.querySelector(":scope > .read-more");
+    const unclamp = () => {
       b.style.maxHeight = "";
       b.classList.remove("clamped");
       if (existing) existing.remove();
-      return;
-    }
-    b.style.maxHeight = ((allowed - 1) * lh) + "px";
+    };
+    if (allowed === Infinity) { unclamp(); return; }
+    const budget = allowed * lh;
+    if (b.scrollHeight <= budget + 0.6) { unclamp(); return; }   // fits: no clamp
+    b.style.maxHeight = cleanCut(b, budget, lh) + "px";
     b.classList.add("clamped");
     if (!existing) {
       const btn = document.createElement("button");
       btn.className = "read-more";
       btn.innerHTML = '<span class="rm-dots">…</span><span class="rm-label">Read more</span>';
-      b.after(btn);
+      b.appendChild(btn);   // inside the body: it overlays the last line
     }
   });
+}
+
+// where to cut a clamped body so the last visible line/element is whole:
+// walk the children, keeping those that fit entirely; a straddling text
+// block is cut on a whole-line multiple, a straddling table/pre is left out
+// (cut at the previous boundary) rather than sliced.
+function cleanCut(body, budget, lh) {
+  const top = body.getBoundingClientRect().top;
+  const lineCut = Math.floor(budget / lh) * lh;   // whole body-lines within budget
+  let cut = 0;
+  for (const child of body.children) {
+    if (child.classList.contains("read-more")) continue;
+    const r = child.getBoundingClientRect();
+    const cTop = r.top - top, cBot = r.bottom - top;
+    if (cBot <= budget) { cut = cBot; continue; }   // whole child fits
+    if (cTop >= budget) break;                       // child starts past budget
+    if (/^(P|LI|UL|OL|H1|H2|H3|H4|DIV|BLOCKQUOTE)$/.test(child.tagName)) {
+      const n = Math.floor((budget - cTop) / lh);    // whole lines within a text block
+      if (n >= 1) cut = cTop + n * lh;
+    } else if (child.tagName === "TABLE") {
+      // show only WHOLE rows so a table is never sliced mid-row
+      let rowCut = 0;
+      child.querySelectorAll("tr").forEach((tr) => {
+        const rb = tr.getBoundingClientRect().bottom - top;
+        if (rb <= budget) rowCut = rb;
+      });
+      if (rowCut > cut) cut = rowCut;
+      else if (budget - cut > 1.5 * lh) cut = Math.max(cut, lineCut);  // even row 1 too tall
+    } else if (budget - cut > 1.5 * lh) {
+      // pre / other non-sliceable taller than the budget: slice on a whole
+      // body-line so each Read-more click keeps revealing more (no freeze)
+      cut = Math.max(cut, lineCut);
+    }   // else: element starts near the budget — snap cleanly before it
+    break;
+  }
+  if (cut < lh) cut = Math.max(lh, lineCut);   // fallback
+  return Math.round(cut);
 }
 
 // theme (basic dark mode; persisted, defaults to the OS preference)

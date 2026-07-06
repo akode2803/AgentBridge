@@ -55,6 +55,7 @@ function route() {
       Mesh.chatKey = "";
       Mesh.listKey = "";
       Mesh.structKey = "";
+      Mesh.msgExpand = {};   // expanded "Read more" messages collapse on switch
       resetSubviews();
       // blank surface while the chat loads — the mobile slide-in shows
       // this instead of the previous page flashing by
@@ -128,6 +129,16 @@ window.addEventListener("hashchange", route);
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
+  });
+  // while the user is selecting text inside a message, suppress the hover
+  // reply-arrow — otherwise the chevron pops up over the selection
+  document.addEventListener("selectionchange", () => {
+    const content = $("#content");
+    if (!content) return;
+    const sel = document.getSelection();
+    const active = !!(sel && !sel.isCollapsed && sel.rangeCount
+      && $("#transcript")?.contains(sel.anchorNode));
+    content.classList.toggle("sel-text", active);
   });
   App.state = await api("/api/state");
   if (!location.hash) {
