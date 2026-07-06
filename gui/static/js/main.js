@@ -10,6 +10,7 @@ import "./details.js";
 import "./media.js";
 import "./search.js";
 import "./members.js";
+import "./forward.js";
 import "./settings.js";
 import "./wizard.js";
 

@@ -6,25 +6,19 @@ import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter } from "./modal.js";
 import { Mesh, meshDn } from "./state.js";
+import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
-// one row + section layout shared by add-members and new-group. FREE
-// CHATTING (2026-07-06): every agent is listed for everyone — the mesh
-// pulls an agent's responsible human in automatically, so the owner
-// rides along in the sub-line as a heads-up.
-function pickerRow(u, me) {
+// one row + section layout shared by add-members and new-group, built on the
+// shared picker component (checkbox on the right). FREE CHATTING (2026-07-06):
+// every agent is listed for everyone — the mesh pulls an agent's responsible
+// human in automatically, so the owner rides along in the sub-line as a
+// heads-up.
+function userRow(u, me) {
   const ownerHint = u.kind === "agent" && !(u.owners || []).includes(me)
-    ? ` · joins with @${esc((u.owners || [])[0] || "?")}` : "";
-  return `
-    <label class="mem-row modal-row">
-      <input type="checkbox" class="am-check" value="${esc(u.username)}">
-      <span class="mem-avatar">${esc((u.display[0] || "?").toUpperCase())}</span>
-      <span style="min-width:0">
-        <div class="mem-name">${esc(u.display)}
-          ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
-        <div class="mem-sub">@${esc(u.username)}${ownerHint}</div>
-      </span>
-    </label>`;
+    ? ` · joins with @${(u.owners || [])[0] || "?"}` : "";
+  return pickerRow({ value: u.username, initial: u.display, name: u.display,
+    sub: `@${u.username}${ownerHint}`, tag: u.kind === "agent" ? "agent" : "" });
 }
 
 function pickerSections(users, me, exclude) {
@@ -32,10 +26,8 @@ function pickerSections(users, me, exclude) {
     .filter((u) => u.username !== me && !exclude.includes(u.username));
   const agents = listed.filter((u) => u.kind === "agent");
   const humans = listed.filter((u) => u.kind === "human");
-  const section = (label, list) => list.length
-    ? `<div class="modal-sec">${label}</div>`
-      + list.map((u) => pickerRow(u, me)).join("") : "";
-  return { html: section("Agents", agents) + section("Members", humans),
+  return { html: pickerSection("Agents", agents.map((u) => userRow(u, me)).join(""))
+                + pickerSection("Members", humans.map((u) => userRow(u, me)).join("")),
            any: listed.length > 0 };
 }
 
@@ -51,24 +43,18 @@ async function showAddMembers(chatId) {
     </div>
     <div class="search-box" style="margin-bottom:10px">${ICONS.search}
       <input type="text" class="modal-q" placeholder="Search" autocomplete="off"></div>
-    <div class="modal-list">${picker.html}</div>
-    ${picker.any ? '<button class="primary modal-cta" id="am-go" disabled>Add member</button>' : ""}`);
+    <div class="modal-list">${picker.any ? picker.html
+      : '<div class="empty" style="padding:22px 0">Everyone is already in this chat</div>'}</div>
+    ${picker.any ? pickerFooter(ICONS.check) : ""}`);
   box.querySelector("#am-close").addEventListener("click", closeModal);
   bindModalFilter(box);
-  const go = box.querySelector("#am-go");
-  if (!go) return;
-  const sync = () => {
-    const n = box.querySelectorAll(".am-check:checked").length;
-    go.disabled = !n;
-    go.textContent = n > 1 ? `Add ${n} members` : "Add member";
-  };
-  box.querySelectorAll(".am-check").forEach((c) => c.addEventListener("change", sync));
-  go.addEventListener("click", async () => {
-    const picked = [...box.querySelectorAll(".am-check:checked")].map((c) => c.value);
-    go.disabled = true;
+  if (!picker.any) return;
+  bindPicker(box, async (picked) => {
+    const go = box.querySelector(".pf-go");
+    if (go) go.disabled = true;
     for (const u of picked) {
       const r = await api("/api/mesh/add_member", { chat_id: chatId, username: u });
-      if (r.error) { toast(r.error, true); go.disabled = false; return; }
+      if (r.error) { toast(r.error, true); if (go) go.disabled = false; return; }
     }
     closeModal();   // the membership event pill is the feedback
     Mesh.structKey = "";

@@ -594,8 +594,15 @@ function openMsgMenu(rect, msg, chatId, ctx) {
           action: "Undo", onAction: () => doStar(!next),
         });
       }
+    } else if (act === "forward") {
+      // from the transcript: drop into a forward-only selection with this
+      // message ticked (WhatsApp — you can then tick more). From a pane that
+      // covers the chat (starred snapshots) there is no transcript to select,
+      // so open the picker straight away.
+      if (ctx.fromPane) V.openForwardPicker(chatId, [msg.id]);
+      else enterSelect(chatId, { mode: "forward", preselect: [msg.id] });
     }
-    // forward / edit / delete: coming rounds
+    // edit / delete: coming rounds
   });
 }
 
@@ -750,11 +757,14 @@ V.openMsgMenu = openMsgMenu;   // the starred sidebar reuses the menu
 // on #content (not #transcript), so the poll's innerHTML swap can't drop it —
 // only the per-row .sel marks are re-applied (applySelectAfterRender).
 
-function enterSelect(chatId) {
+// opts.mode: "select" (full action pane) | "forward" (forward-only pane).
+// opts.preselect: message ids to tick immediately (forward from the menu).
+function enterSelect(chatId, opts = {}) {
   Mesh.select.on = true;
-  Mesh.select.ids = new Set();
+  Mesh.select.mode = opts.mode || "select";
+  Mesh.select.ids = new Set(opts.preselect || []);
   buildSelectPane(chatId);
-  refreshSelectPane();
+  applySelectAfterRender(chatId);   // mark the preselected rows + sync the pane
 }
 
 function buildSelectPane(chatId) {
@@ -766,25 +776,41 @@ function buildSelectPane(chatId) {
     pane.id = "select-pane";
     content.appendChild(pane);
   }
+  // forward mode reuses the exact same pane, trimmed to the one action
+  const forwardOnly = Mesh.select.mode === "forward";
   pane.innerHTML = `
     <button class="sp-act" id="sp-close" title="Cancel">${ICONS.close}</button>
     <span class="sp-count" id="sp-count">0 selected</span>
     <span class="spacer"></span>
+    ${forwardOnly ? "" : `
     <button class="sp-act" id="sp-star" title="Star">${ICONS.star}</button>
-    <button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>
+    <button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>`}
     <button class="sp-act" id="sp-forward" title="Forward">${ICONS.forward}</button>
-    <button class="sp-act" id="sp-save" title="Save to a folder">${ICONS.download}</button>`;
+    ${forwardOnly ? "" : `
+    <button class="sp-act" id="sp-save" title="Save to a folder">${ICONS.download}</button>`}`;
   // paint the pane at its resting (off-screen) transform, force a reflow, then
   // add .selecting — the state change between the two frames fires the slide
   void pane.offsetWidth;
   content.classList.add("selecting", "sel-enter");
   setTimeout(() => content.classList.remove("sel-enter"), 280);
   $("#sp-close").addEventListener("click", () => exitSelect());
-  $("#sp-star").addEventListener("click", () => bulkStar(chatId));
-  $("#sp-save").addEventListener("click", () => bulkSave(chatId));
-  // deferred to later rounds — wired so they slot in when implemented
-  $("#sp-delete").addEventListener("click", () => toast("Delete lands in a coming round"));
-  $("#sp-forward").addEventListener("click", () => toast("Forwarding UI lands next round"));
+  $("#sp-forward").addEventListener("click", () =>
+    V.openForwardPicker(chatId, selectedInOrder()));
+  if (!forwardOnly) {
+    $("#sp-star").addEventListener("click", () => bulkStar(chatId));
+    $("#sp-save").addEventListener("click", () => bulkSave(chatId));
+    // delete is deferred to a later round — wired so it slots in when built
+    $("#sp-delete").addEventListener("click", () => toast("Delete lands in a coming round"));
+  }
+}
+
+// selected ids in transcript (chronological) order, so forwarding several
+// messages lands them in order in each target
+function selectedInOrder() {
+  const tr = $("#transcript");
+  if (!tr) return [...Mesh.select.ids];
+  return [...tr.querySelectorAll(".msg[data-mid]")]
+    .map((m) => m.dataset.mid).filter((id) => Mesh.select.ids.has(id));
 }
 
 function toggleSelect(mid, row, chatId) {
@@ -832,21 +858,26 @@ function applySelectAfterRender() {
   refreshSelectPane();
 }
 
+// idempotent: safe to call when not in select mode (forward.js calls it after
+// forwarding, which may have been opened from outside select mode)
 function exitSelect() {
   Mesh.select.on = false;
   Mesh.select.ids = new Set();
+  Mesh.select.mode = "select";
   $("#content")?.classList.remove("selecting", "sel-enter");
   document.querySelectorAll("#transcript .msg.sel").forEach((m) => m.classList.remove("sel"));
   const pane = $("#select-pane");
   // let the slide-out play, then drop it — unless select mode was re-entered
   if (pane) setTimeout(() => { if (!Mesh.select.on) pane.remove(); }, 260);
 }
+V.exitSelect = exitSelect;
 
 // hard reset when #content is about to be rebuilt (chat open/switch, leaving
 // to the empty state) — the element is going away, so no slide-out
 function clearSelectMode() {
   Mesh.select.on = false;
   Mesh.select.ids = new Set();
+  Mesh.select.mode = "select";
   $("#content")?.classList.remove("selecting", "sel-enter");
   $("#select-pane")?.remove();
 }

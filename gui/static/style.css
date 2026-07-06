@@ -623,10 +623,11 @@ input[type=text], select, textarea {
 }
 .msg .read-more { --rm-bg: var(--surface); }
 .msg.mine .read-more { --rm-bg: var(--accent-soft); }
-/* re-assert the fade on hover: the global `button:hover` (higher specificity
-   than `.read-more`) would otherwise paint a solid highlight and expose the
-   text/border underneath */
-.read-more:hover { background: linear-gradient(to right, transparent, var(--rm-bg) 18px); }
+/* re-assert the fade on hover. `[data-theme="dark"] button:hover` (0,2,1)
+   beats a bare `.read-more:hover` (0,2,0) and would paint a solid highlight
+   that exposes the text/border underneath — scope under `.msg` (0,3,0) so the
+   fade wins in both themes */
+.msg .read-more:hover { background: linear-gradient(to right, transparent, var(--rm-bg) 18px); }
 .read-more .rm-dots { color: var(--text-dim); font-weight: 400; margin-right: 4px; }
 .read-more:hover .rm-label { text-decoration: underline; }
 
@@ -854,20 +855,31 @@ input[type=text], select, textarea {
 .sp-act svg { width: 20px; height: 20px; display: block; }
 
 /* the per-row transformation (checkbox gutter + full-width row) */
-.msg { transition: padding-left .22s ease; }   /* content slides right on enter */
 .msg-check { display: none; }
+/* Rows go full-width so the checkbox can sit in a far-left column for mine AND
+   others (WhatsApp). Bubbles MUST keep their exact normal width or the chat
+   re-wraps and the transcript shifts on enter/exit (measured: the old
+   +34/−4 caps shrank it ~80–220px). With padding-left:0 both content-boxes
+   equal the full transcript width, so: mine = 74% (its normal cap); others =
+   74% minus the 38px avatar gutter; DM others = the full 74% (no gutter). The
+   checkbox clearance is a MARGIN (shifts position, never wrap width) → 0
+   reflow, verified across a long group and a DM. */
 #content.selecting #transcript .msg {
   max-width: 100%; width: 100%; align-self: stretch;
-  padding-left: 46px; position: relative;
+  padding-left: 0; position: relative;
   display: flex; flex-direction: column; align-items: flex-start;
 }
 #content.selecting #transcript .msg.mine { align-items: flex-end; }
-/* keep bubbles at their NORMAL width in select mode so nothing re-wraps and
-   the chat doesn't shift on enter/exit. The 46px checkbox gutter shrinks the
-   % base, so add it back: mine +0.74×46≈34px; others were already inside a
-   38px avatar gutter, so net −4px */
-#content.selecting #transcript .msg.mine > .bubble { max-width: calc(74% + 34px); }
-#content.selecting #transcript .msg:not(.mine) > .bubble { max-width: calc(74% - 4px); }
+#content.selecting #transcript .msg.mine > .bubble { max-width: 74%; }
+#content.selecting #transcript .msg:not(.mine) > .bubble {
+  max-width: calc(74% - 38px); margin-left: 46px;
+}
+#content.selecting #transcript.dm .msg:not(.mine) > .bubble {
+  max-width: 74%; margin-left: 46px;
+}
+/* subtle slide-in on enter — a transform, so it never reflows */
+#content.selecting.sel-enter #transcript .msg > .bubble { animation: sel-bubble .24s ease; }
+@keyframes sel-bubble { from { transform: translateX(-10px); } }
 #content.selecting #transcript .msg-avatar,
 #content.selecting #transcript .msg-arrow { display: none; }
 #content.selecting #transcript .msg-check {
@@ -1396,6 +1408,28 @@ pre.configdump {
   margin-top: 12px; border-radius: 999px; padding: 10px 16px;
   font-weight: 600; flex: none;
 }
+
+/* shared picker (picker.js): big checkbox on the RIGHT of the name, and the
+   WhatsApp send-bar listing the chosen names + a round confirm button */
+.pk-row .pk-text { flex: 1; min-width: 0; }
+.pk-check {
+  flex: none; margin-left: auto; width: 21px; height: 21px;
+  accent-color: var(--accent); cursor: pointer;
+}
+.picker-foot {
+  flex: none; display: flex; align-items: center; gap: 12px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+.pf-names {
+  flex: 1; min-width: 0; font-size: 13px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.picker-foot .pf-go {
+  flex: none; width: 48px; height: 48px; border-radius: 50%;
+  padding: 0; display: grid; place-items: center;
+}
+.picker-foot .pf-go svg { width: 22px; height: 22px; }
+.picker-foot .pf-go:disabled { opacity: .5; cursor: default; }
 @media (max-width: 760px) {
   .modal-scrim:not(.confirm-scrim) { place-items: stretch; }
   .modal-scrim:not(.confirm-scrim) .modal-box {

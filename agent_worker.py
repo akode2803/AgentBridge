@@ -152,7 +152,11 @@ def render_context(msgs, agent, staged=None, pins=None):
                      if rt["from"] == m.get("from")
                      else f'@{rt["from"]}')
             rline = f' [replying to {who_r}: "{excerpt}"]'
-        lines.append(f"[{m.get('ts')}] {who}:{rline} {m.get('body', '')}{files}")
+        # a forwarded message keeps the ORIGINAL author's attribution so the
+        # agent can tell it was relayed, not authored by the forwarder
+        fwd = m.get("fwd") or {}
+        fline = f' [forwarded from @{fwd["from"]}]' if fwd.get("from") else ""
+        lines.append(f"[{m.get('ts')}] {who}:{fline}{rline} {m.get('body', '')}{files}")
     return "\n".join(lines)
 
 

@@ -5,9 +5,9 @@
    Layering rule for gui/static/js:
      util / icons / api / markdown   (leaf helpers)
        → state                      (stores)
-         → csel / modal / composer  (UI primitives)
+         → csel / modal / composer / picker  (UI primitives)
            → sidebar                (below the page views)
-             → chat / details / media / search / members / settings / wizard
+             → chat / details / media / search / members / forward / settings / wizard
                → main               (router + boot; imports every view once)
 
    A module may import anything strictly below it; sideways or upward calls
@@ -20,5 +20,5 @@ export const EXPECTED = [
   "renderChatDetails", "renderChatMedia", "renderChatSearch",
   "showAddMembers", "showSearchMembers",
   "renderSettings", "renderSetup", "refresh", "openMsgMenu",
-  "showCreateGroup", "exitGroup",
+  "showCreateGroup", "exitGroup", "openForwardPicker", "exitSelect",
 ];

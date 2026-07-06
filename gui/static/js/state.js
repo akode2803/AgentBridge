@@ -29,9 +29,10 @@ export const Mesh = {
   drafts: {},         // per-chat composer drafts {body, atts}
   newChat: { open: false, name: "" },
   auth: { mode: "login" },
-  // select-messages mode: on = pane shown; ids = the checked message ids.
+  // select-messages mode: on = pane shown; ids = the checked message ids;
+  // mode = "select" (full action pane) or "forward" (forward-only pane).
   // Lives here so it survives the transcript's poll re-renders (see chat.js).
-  select: { on: false, ids: new Set() },
+  select: { on: false, ids: new Set(), mode: "select" },
 };
 window.Mesh = Mesh;
 
