@@ -159,14 +159,6 @@ async function renderMeshChat(force) {
     parts.push(`<div class="info-pill">${esc(meshDn(meta.created_by))} created this chat</div>`);
     prevDay = new Date(meta.created).toDateString();
   }
-  // same-minute clubbing (WhatsApp): consecutive messages from one sender
-  // within the same minute show the time only under the LAST of the block
-  const minuteOf = (ts) => Math.floor(new Date(ts).getTime() / 60000);
-  const lastOfMinute = (i) => {
-    const cur = data.messages[i], next = data.messages[i + 1];
-    return !next || next.kind === "info" || next.from !== cur.from
-      || minuteOf(next.ts) !== minuteOf(cur.ts);
-  };
   for (let i = 0; i < data.messages.length; i++) {
     const msg = data.messages[i];
     const day = new Date(msg.ts).toDateString();
@@ -194,9 +186,14 @@ async function renderMeshChat(force) {
     const showSender = !isDm && !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
     const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
-    // a starred message always shows its meta row (★ rides with the time,
-    // WhatsApp-style), even mid-block where clubbing would hide it
+    // time + star (+ read receipt for my own) ride at the bubble's bottom-right,
+    // WhatsApp-style — inside the bubble, on every message
     const starred = starredSet.has(msg.id);
+    const metaRow = `<span class="meta">${
+      starred ? '<span class="star-mini">★</span>' : ""
+    }<span class="meta-time">${esc(timeOnly(msg.ts))}</span>${
+      msg.mine ? `<span class="ticks" aria-label="Sent">${ICONS.ticks}</span>` : ""
+    }</span>`;
     parts.push(`
       <div class="msg ${msg.mine ? "mine" : ""}" data-mid="${esc(msg.id || "")}">
         <span class="msg-check" aria-hidden="true">${ICONS.check}</span>
@@ -206,9 +203,7 @@ async function renderMeshChat(force) {
           ${showSender ? `<div class="sender">${esc(meshDn(msg.from))} ${kindTag}</div>` : ""}
           ${msg.fwd ? `<div class="fwd-tag">${ICONS.forward} Forwarded from ${esc(meshDn(msg.fwd.from))}</div>` : ""}
           ${msg.reply_to ? replyQuote(msg.reply_to, isDm, ms) : ""}
-          <div class="msg-body">${md(msg.body || "")}</div>${files}</div>
-        ${lastOfMinute(i) || starred ? `<div class="meta">${
-          starred ? '<span class="star-mini">★</span>' : ""}${esc(timeOnly(msg.ts))}</div>` : ""}
+          <div class="msg-body">${md(msg.body || "")}</div>${files}${metaRow}</div>
       </div>`);
   }
   // live presence: agents working (dots + label + forming draft) and
@@ -595,7 +590,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       const next = !isStarred;
       if (await doStar(next)) {
         toast(`1 message ${next ? "starred" : "unstarred"}`, {
-          icon: next ? '<span class="toast-star">★</span>' : ICONS.starOff,
+          icon: next ? ICONS.star : ICONS.starOff,
           action: "Undo", onAction: () => doStar(!next),
         });
       }
@@ -772,7 +767,7 @@ function buildSelectPane(chatId) {
     content.appendChild(pane);
   }
   pane.innerHTML = `
-    <button class="icon-btn" id="sp-close" title="Cancel">${ICONS.close}</button>
+    <button class="sp-act" id="sp-close" title="Cancel">${ICONS.close}</button>
     <span class="sp-count" id="sp-count">0 selected</span>
     <span class="spacer"></span>
     <button class="sp-act" id="sp-star" title="Star">${ICONS.star}</button>
@@ -875,7 +870,7 @@ async function bulkStar(chatId) {
   exitSelect();
   refreshChat();
   toast(`${ids.length} message${ids.length === 1 ? "" : "s"} ${val ? "starred" : "unstarred"}`, {
-    icon: val ? '<span class="toast-star">★</span>' : ICONS.starOff,
+    icon: val ? ICONS.star : ICONS.starOff,
     action: "Undo",
     onAction: async () => { await setAll(!val); refreshChat(); },
   });

@@ -39,6 +39,8 @@ export const ICONS = {
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 6.5 5 7.9 7.6 5.3M3.6 16.5 5 17.9l2.6-2.6M11 6.8h9M11 16.8h9"/></svg>',
   // mute notifications: a bell
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/></svg>',
+  // read-receipt double-tick (frontend placeholder; real state comes later)
+  ticks: '<svg viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L10 4.5"/><path d="M8 8l3.5 3.5L21 3"/></svg>',
 };
 
 // the AgentBridge bird mark, used by empty states
