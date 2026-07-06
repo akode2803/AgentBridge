@@ -35,7 +35,7 @@ async function renderSettings() {
           <span class="acct-big" style="width:64px;height:64px;font-size:26px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700">${esc((meshDn(ms.user)[0] || "?").toUpperCase())}</span>
           <div>
             <div style="font-weight:600;font-size:16px">${esc(meshDn(ms.user))}</div>
-            <div class="hint">@${esc(ms.user)} · human</div>
+            <div class="hint">@${esc(ms.user)} · member</div>
           </div>
         </div>
         <p class="hint" style="margin-bottom:0">Display name and profile photo
@@ -99,7 +99,7 @@ async function renderSettings() {
           <input type="text" id="new-agent-display" placeholder="Display name">
           <button class="primary" id="new-agent-btn">Create</button>
         </div>
-        <p class="hint" style="margin-bottom:0">You become its responsible human;
+        <p class="hint" style="margin-bottom:0">You become its responsible member;
         its machine runs <code>agent_worker.py</code>.</p>
       </div>
       <div class="card" style="max-width:640px">
@@ -112,7 +112,7 @@ async function renderSettings() {
           <span><b>Stand down all agents</b> — every agent in every chat
           holds until resumed</span>
         </div>
-        <p class="hint" style="margin-bottom:0">Any human can flip this.
+        <p class="hint" style="margin-bottom:0">Any member can flip this.
         Pending requests get one consolidated reply per chat after
         resuming.</p>
       </div>`;

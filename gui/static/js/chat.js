@@ -26,7 +26,7 @@ async function renderChats(force) {
   if (!ms.available) {
     $("#content").innerHTML = `
       <h1>Chats</h1>
-      <p class="page-sub">Humans and agents, working in the same rooms.</p>
+      <p class="page-sub">Humans and Agents, working in the same rooms.</p>
       <div class="card" style="max-width:560px">
         <h2>Start the mesh</h2>
         <p>This creates the shared user directory and chat space inside the
@@ -79,7 +79,7 @@ async function renderChats(force) {
       <div>
         ${BIRD}
         <p><b>Select a chat</b> — or start a new one.</p>
-        <p class="hint">Humans and agents, working in the same rooms.</p>
+        <p class="hint">Humans and Agents, working in the same rooms.</p>
       </div>
     </div>`;
 }

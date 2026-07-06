@@ -45,7 +45,7 @@ export const Settings = { section: null };   // explicit #/settings/<section>
 export const RULE_LABELS = {
   all: "Reply to every message",
   tagged: "Reply only when tagged",
-  humans: "Reply only to humans",
+  humans: "Reply only to people",   // rule key stays "humans"; label avoids the word
 };
 
 export function meshDn(username) {

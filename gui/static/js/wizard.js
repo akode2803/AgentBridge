@@ -191,7 +191,7 @@ async function renderWizardStep() {
           <select id="relation-input" style="max-width:100%">
             <option value="drive" ${w.relation === "drive" ? "selected" : ""}>This side drives the remote agent</option>
             <option value="sym" ${w.relation === "sym" ? "selected" : ""}>Symmetrical — both sides autonomous</option>
-            <option value="manual" ${w.relation === "manual" ? "selected" : ""}>Manual — humans relay on both sides</option>
+            <option value="manual" ${w.relation === "manual" ? "selected" : ""}>Manual — people relay on both sides</option>
           </select></dd>
       </dl>
       <p class="hint">Custom names work too (e.g. analyst ⇄ sqlbot) — any pair,

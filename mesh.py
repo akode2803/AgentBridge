@@ -201,7 +201,7 @@ class Mesh:
             raise MeshError(f"Username @{username} is already taken")
         owner_rec = self.get_user(owner)
         if not owner_rec or owner_rec.get("kind") != "human":
-            raise MeshError("An agent needs a responsible human as owner")
+            raise MeshError("An agent needs a responsible member as owner")
         rec = {"username": username, "kind": "agent",
                "display": display or username.title(),
                "created": utcnow(), "owners": [owner],
@@ -243,7 +243,7 @@ class Mesh:
         if not a or a.get("kind") != "agent":
             raise MeshError(f"No agent named @{agent_username}")
         if not self.owns(by_human, agent_username):
-            raise MeshError("Only a responsible human can change this agent")
+            raise MeshError("Only a responsible member can change this agent")
         settings = a.setdefault("settings", {})
         for key in ("model", "reasoning", "tools_profile"):
             if key in patch:
@@ -261,7 +261,7 @@ class Mesh:
         if "add_owner" in patch:
             other = self.get_user(patch["add_owner"])
             if not other or other.get("kind") != "human":
-                raise MeshError("New owner must be an existing human user")
+                raise MeshError("New owner must be an existing member")
             if patch["add_owner"] not in a["owners"]:
                 a["owners"].append(patch["add_owner"])
         if "revoke_owner" in patch:
@@ -337,7 +337,7 @@ class Mesh:
             owner = next((m for m in members if m in owners), None)
             if owner is None:   # cannot happen after _missing_owners, but be safe
                 raise MeshError("An agent-created chat must include one of "
-                                "its responsible humans")
+                                "its responsible members")
         else:
             owner = creator
         chat_id = f"{slugify(name)}-{secrets.token_hex(3)}"
@@ -386,7 +386,7 @@ class Mesh:
                 o_dn = (users.get(o) or {}).get("display", o)
                 a_dn = ou["display"] if ou["kind"] == "agent" else cu["display"]
                 self.post_event(chat_id, creator,
-                                f"{o_dn} joined as {a_dn}'s responsible human",
+                                f"{o_dn} joined as {a_dn}'s responsible member",
                                 "add_member", target=o)
             return meta
         for cid in self.cx.listdir("chats"):
@@ -451,7 +451,7 @@ class Mesh:
             raise MeshError("No such chat")
         u = self.get_user(by_human)
         if not u or u.get("kind") != "human":
-            raise MeshError("Only humans can archive chats")
+            raise MeshError("Only members can archive chats")
         if meta.get("owner") != by_human:
             raise MeshError("Only the chat's owner can archive it")
         meta["archived"] = bool(archived)
@@ -499,7 +499,7 @@ class Mesh:
                 o_dn = (users.get(o) or {}).get("display", o)
                 self.post_event(chat_id, by,
                                 f"{o_dn} joined as {u.get('display', username)}'s "
-                                f"responsible human",
+                                f"responsible member",
                                 "add_member", target=o)
         return meta
 
@@ -544,7 +544,7 @@ class Mesh:
                 a_dn = (users.get(a) or {}).get("display", a)
                 self.post_event(chat_id, by,
                                 f"{a_dn} left with {u_dn} — no responsible "
-                                f"human remains for it here",
+                                f"member remains for it here",
                                 "remove_member", target=a)
         return meta
 
