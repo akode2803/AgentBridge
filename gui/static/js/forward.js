@@ -26,8 +26,12 @@ async function openForwardPicker(srcChatId, ids) {
   // already arrive sorted by last activity (mesh.chats_for).
   const chats = (ms.chats || []).filter((c) =>
     !c.archived && (c.members || []).includes(me) && c.id !== srcChatId);
-  // a DM already shown as a recent chat must not also appear as a contact
-  const dmPartners = new Set(chats.filter((c) => c.kind === "dm")
+  // a person you already DM must not also appear under "Other contacts". Span
+  // ALL your DMs (incl. the source) so forwarding FROM a DM drops that partner
+  // from contacts too — the source DM itself is already gone from recents, so
+  // it appears in neither list (you can't forward into the chat you're in).
+  const dmPartners = new Set((ms.chats || [])
+    .filter((c) => c.kind === "dm" && (c.members || []).includes(me))
     .map((c) => (c.members || []).find((u) => u !== me)));
 
   const chatRow = (c) => {

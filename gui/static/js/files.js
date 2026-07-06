@@ -1,6 +1,7 @@
 /* File-type helpers shared by the details pane and the media browser. */
 
-import { esc, extIcon } from "./util.js";
+import { esc } from "./util.js";
+import { extIcon } from "./icons.js";
 
 export const IMG_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
 export const isImg = (name) => IMG_EXTS.has((name || "").split(".").pop().toLowerCase());

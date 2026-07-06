@@ -28,6 +28,9 @@ export const Mesh = {
   chatKey: "",
   drafts: {},         // per-chat composer drafts {body, atts}
   newChat: { open: false, name: "" },
+  // in-sidebar new-group builder (WhatsApp): step "members" picks people into
+  // `members`, step "name" sets the subject. Client-only, so a Set is fine.
+  newGroup: { active: false, step: "members", members: new Set(), name: "" },
   auth: { mode: "login" },
   // select-messages mode: on = pane shown; ids = the checked message ids;
   // mode = "select" (full action pane) or "forward" (forward-only pane).
@@ -55,7 +58,13 @@ export function dmOther(meta, viewer) {
   return (meta.members || []).find((u) => u !== viewer) ||
     (meta.members || [])[0] || "";
 }
+// a "self" chat (message yourself) renders like a DM — no avatars, no sender
+// names, "Chat info" — so most code treats the two together
+export function isDmLike(meta) {
+  return !!meta && (meta.kind === "dm" || meta.kind === "self");
+}
 export function chatDisplay(meta, viewer) {
+  if (meta.kind === "self") return meshDn(viewer) + " (You)";
   return meta.kind === "dm" ? meshDn(dmOther(meta, viewer)) : meta.name;
 }
 

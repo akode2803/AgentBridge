@@ -12,9 +12,15 @@ import { V } from "./views.js";
 async function renderSettings() {
   const s = App.state;
   if (!s.configured) { location.hash = "#/setup"; return; }
-  Mesh.state = await api("/api/mesh/state");
-  const ms = Mesh.state;
+  // render from the cached mesh state so the swap is synchronous with the
+  // route change — awaiting a fresh fetch here left the previous chat on
+  // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
+  // background refresh keeps a long-lived settings page current.
+  const ms = Mesh.state || (Mesh.state = await api("/api/mesh/state"));
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
+  api("/api/mesh/state").then((fresh) => {
+    if (fresh && !fresh.error && App.page === "settings") Mesh.state = fresh;
+  }).catch(() => {});
   renderSidebar();
   $("#details-pane").hidden = true;
   const section = Settings.section || "profile";

@@ -64,36 +64,8 @@ async function showAddMembers(chatId) {
 }
 V.showAddMembers = showAddMembers;
 
-// New group now uses the same dialog surface as add-members (user request):
-// name on top, then the segregated Agents / Members picker.
-async function showCreateGroup() {
-  const ms = Mesh.state = await api("/api/mesh/state");
-  const picker = pickerSections(ms.users, ms.user, []);
-  const box = openModal(`
-    <div class="pane-head" style="margin:0 0 10px">
-      <button class="icon-btn" id="ng-close">${ICONS.close}</button>
-      <span class="pane-title">New group</span>
-    </div>
-    <input type="text" id="ng-name" placeholder="Group name" maxlength="60"
-           style="width:100%;margin-bottom:10px" autocomplete="off">
-    <div class="search-box" style="margin-bottom:10px">${ICONS.search}
-      <input type="text" class="modal-q" placeholder="Search" autocomplete="off"></div>
-    <div class="modal-list">${picker.html}</div>
-    <button class="primary modal-cta" id="ng-go">Create group</button>`);
-  box.querySelector("#ng-close").addEventListener("click", closeModal);
-  bindModalFilter(box);
-  const name = box.querySelector("#ng-name");
-  name.focus();
-  box.querySelector("#ng-go").addEventListener("click", async () => {
-    const members = [...box.querySelectorAll(".am-check:checked")].map((c) => c.value);
-    const r = await api("/api/mesh/create_chat",
-      { name: name.value, members });
-    if (r.error) { toast(r.error, true); return; }
-    closeModal();
-    location.hash = `#/chats/${r.chat.id}`;
-  });
-}
-V.showCreateGroup = showCreateGroup;
+// (New group moved to an in-sidebar builder — see sidebar.js. The old modal
+// here was retired to avoid two code paths for the same flow.)
 
 // Search members: same surface, view-only
 async function showSearchMembers(chatId) {

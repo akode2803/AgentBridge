@@ -1,12 +1,13 @@
 /* The chats page: auth gate, empty state, and the open-chat transcript
    with its header menu. The composer lives in composer.js. */
 
-import { $, esc, extIcon, fmtSize, timeOnly, dayLabel, toast, clampLong,
-         paneCoversChat } from "./util.js";
-import { ICONS, BIRD } from "./icons.js";
+import { $, esc, fmtSize, timeOnly, dayLabel, toast, clampLong,
+         paneCoversChat, closeMenus } from "./util.js";
+import { ICONS, BIRD, extIcon } from "./icons.js";
+import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, chatDisplay, renderChrome } from "./state.js";
+import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -16,6 +17,9 @@ async function renderChats(force) {
   const s = App.state;
   if (!s?.configured) { location.hash = "#/setup"; return; }
   Mesh.state = await api("/api/mesh/state");
+  // navigated away while the state was in flight (e.g. quick chat→settings):
+  // don't let this stale render paint the empty chat state over the new page
+  if (App.page !== "chats") return;
   const ms = Mesh.state;
   renderSidebar();
 
@@ -41,8 +45,16 @@ async function renderChats(force) {
 
   if (!ms.user) { renderMeshAuth(); return; }
   if (Mesh.chatId) {
-    await renderMeshChat(force);
     const pane = $("#details-pane");
+    // closing the pane: hide it NOW (before the async chat re-render) so the
+    // chat reclaims the freed width in the same frame as the route change.
+    // Deferring this until after `await renderMeshChat` left the emptied pane
+    // occupying its column, then snapped the chat wider ~50ms later (stutter
+    // on medium widths where the pane covers the chat).
+    if (!Mesh.detailsView && !pane.hidden) {
+      pane.hidden = true; pane.innerHTML = ""; Mesh.detailsKey = "";
+    }
+    await renderMeshChat(force);
     if (Mesh.detailsView) {
       const opening = pane.hidden;
       pane.hidden = false;
@@ -150,7 +162,7 @@ async function renderMeshChat(force) {
   const starredSet = new Set(data.starred || []);
 
   const parts = [];
-  const isDm = meta.kind === "dm";
+  const isDm = isDmLike(meta);   // a self-chat renders exactly like a DM
   let prevFrom = null, prevDay = null;
   // we have the chat's beginning (tail didn't truncate): open with its
   // birth — a date pill plus a "created by" pill, like Telegram
@@ -172,14 +184,19 @@ async function renderMeshChat(force) {
       prevFrom = null;
       continue;
     }
-    const files = (msg.files || []).map((f) => `
-      <button class="att-btn mesh-att" data-path="${esc(f.path)}">
-        <span class="att-icon">${extIcon(f.name)}</span>
-        <span style="min-width:0">
-          <div class="att-name">${esc(f.name)}</div>
-          <div class="att-size">${fmtSize(f.bytes)}</div>
-        </span>
-      </button>`).join("");
+    // image attachments show an inline thumbnail (WhatsApp); everything else
+    // keeps the file chip. Both open the file on click (.mesh-att).
+    const files = (msg.files || []).map((f) => isImg(f.name)
+      ? `<button class="msg-img mesh-att" data-path="${esc(f.path)}"
+             title="${esc(f.name)}">
+           <img src="${fileUrl(chatId, f.path)}" alt="${esc(f.name)}" loading="lazy"></button>`
+      : `<button class="att-btn mesh-att" data-path="${esc(f.path)}">
+           <span class="att-icon">${extIcon(f.name)}</span>
+           <span style="min-width:0">
+             <div class="att-name">${esc(f.name)}</div>
+             <div class="att-size">${fmtSize(f.bytes)}</div>
+           </span>
+         </button>`).join("");
     // name + avatar only on the first message of a consecutive block, and
     // never in a DM (both parties are obvious); the name sits INSIDE the
     // bubble, Telegram-style
@@ -319,10 +336,11 @@ async function renderMeshChat(force) {
         <button data-act="mute">${ICONS.bell} Mute notifications</button>
         ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
-        <div class="menu-sep"></div>
         <button data-act="close">${ICONS.close} Close chat</button>
-        <button data-act="clear">${ICONS.trash} Clear chat</button>
-        ${isMember && !isOwner && !isDm ? `<button data-act="exit">${ICONS.exit} Exit group</button>` : ""}
+        <div class="menu-sep"></div>
+        <button data-act="clear">${ICONS.eraser} Clear chat</button>
+        ${isDm ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
+          : (isMember && !isOwner ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : "")}
       </div>
     </div>
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
@@ -361,6 +379,7 @@ async function renderMeshChat(force) {
   // the ⋮ button drops the menu under itself; a right-click on the chat area
   // (bindTranscript) floats the SAME menu at the cursor via menu._openAt
   menu._openAt = (x, y) => {
+    closeMenus();   // opening this closes any other floating menu
     if (x == null) {   // button open: restore the CSS dropdown position
       menu.style.position = ""; menu.style.left = ""; menu.style.top = "";
       menu.hidden = false;
@@ -400,7 +419,8 @@ async function renderMeshChat(force) {
       }
       else if (act === "select") enterSelect(chatId);
       else if (act === "mute") toast("Muting arrives with notification support (PWA / LAN)");
-      else if (act === "clear") toast("Clear chat lands with the delete feature");
+      else if (act === "clear") toast("Clear chat lands in the next round");
+      else if (act === "delete") toast("Delete chat lands in the next round");
       else if (act === "exit") V.exitGroup(chatId, title);
       else if (act === "close") location.hash = "#/chats";
       else if (act === "archive") {
@@ -516,7 +536,7 @@ function bindTranscript(tr, chatId, data, ctx) {
 // the message context menu. Reply / Message X / Copy / Pin / Star work;
 // Forward / Edit / Delete are placeholders for the coming rounds.
 function openMsgMenu(rect, msg, chatId, ctx) {
-  document.querySelectorAll(".msg-menu").forEach((m) => m.remove());
+  closeMenus();
   const menu = document.createElement("div");
   menu.className = "menu msg-menu";
   const isPinned = !!(ctx.pins || []).some((p) => p.id === msg.id);
@@ -654,7 +674,7 @@ function syncPinBanner(chatId, pins) {
 }
 
 function openPinMenu(rect, chatId, pin) {
-  document.querySelectorAll(".msg-menu").forEach((m) => m.remove());
+  closeMenus();
   const menu = document.createElement("div");
   menu.className = "menu msg-menu";
   menu.innerHTML = `

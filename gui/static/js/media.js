@@ -1,8 +1,8 @@
 /* Dedicated media browser (tabs: Media / Docs / Links, grouped by month).
    Renders into the details pane; renderChatDetails dispatches here. */
 
-import { $, esc, extIcon, fmtSize, fmtTime } from "./util.js";
-import { ICONS } from "./icons.js";
+import { $, esc, fmtSize, fmtTime } from "./util.js";
+import { ICONS, extIcon } from "./icons.js";
 import { bindOpenFile } from "./api.js";
 import { Mesh, meshDn } from "./state.js";
 import { isImg, fileUrl, monthLabel } from "./files.js";

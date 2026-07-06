@@ -1,13 +1,13 @@
 /* Chat info pane (WhatsApp "Group info" pattern) and the per-chat agents
    page. Subviews (search / media / agents) render into the same pane. */
 
-import { $, esc, fmtTime, toast, clampLong, paneCoversChat } from "./util.js";
+import { $, esc, fmtTime, toast, clampLong, paneCoversChat, closeMenus } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
 import { mountCsels } from "./csel.js";
 import { confirmModal } from "./modal.js";
-import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay } from "./state.js";
+import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike } from "./state.js";
 import { mediaThumb } from "./files.js";
 import { V } from "./views.js";
 
@@ -75,7 +75,8 @@ async function renderChatDetails() {
       </div>`;
   };
 
-  const isDm = meta.kind === "dm";
+  const isDm = isDmLike(meta);   // self-chat uses the DM info layout
+  const isSelf = meta.kind === "self";
   const title = chatDisplay(meta, ms.user);
   const noun = isDm ? "chat" : "group";
   // me first, then the owner, then everyone else
@@ -83,10 +84,12 @@ async function renderChatDetails() {
     const rank = (u) => (u === ms.user ? 0 : u === meta.owner ? 1 : 2);
     return rank(a) - rank(b);
   });
+  const nMembers = (meta.members || []).length;
+  const memberCount = `${nMembers} member${nMembers === 1 ? "" : "s"}`;
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <span class="pane-title">${isDm ? "Chat info" : "Group info"}</span>
       <button class="icon-btn" id="cd-close">${ICONS.close}</button>
+      <span class="pane-title">${isDm ? "Chat info" : "Group info"}</span>
     </div>
     <div class="ci-identity">
       <div class="ci-avatar">${esc((title[0] || "#").toUpperCase())}</div>
@@ -95,8 +98,9 @@ async function renderChatDetails() {
           ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</span>
         ${!isDm && isOwner ? `<button class="icon-btn ci-pencil" id="ci-rename">${ICONS.pencil}</button>` : ""}
       </div>
-      <div class="ci-sub">${isDm ? "@" + esc(dmOther(meta, ms.user))
-        : `Group · ${(meta.members || []).length} members`}</div>
+      <div class="ci-sub">${isSelf ? "Message yourself"
+        : isDm ? "@" + esc(dmOther(meta, ms.user))
+        : `Group · ${memberCount}`}</div>
       <div class="ci-actions">
         ${isDm ? "" : `<button class="ci-act" id="ci-add">
           <span class="ci-act-circle">${ICONS.addUser}</span>Add</button>`}
@@ -140,7 +144,7 @@ async function renderChatDetails() {
     ${isDm ? "" : `
     <div class="card">
       <div class="mem-head">
-        <span>${(meta.members || []).length} members</span>
+        <span>${memberCount}</span>
         <button class="icon-btn" id="mem-search">${ICONS.search}</button>
       </div>
       ${isMember ? `<button class="mem-add" id="ci-add2">
@@ -257,7 +261,7 @@ async function renderChatDetails() {
   document.querySelectorAll(".mem-chevron").forEach((b) => {
     b.addEventListener("click", (e) => {
       e.stopPropagation();
-      document.querySelectorAll(".mem-menu").forEach((m) => m.remove());
+      closeMenus();
       const row = b.closest(".mem-row");
       const menu = document.createElement("div");
       menu.className = "menu mem-menu";
@@ -291,7 +295,8 @@ async function renderChatDetails() {
   const dgDel = $("#dg-delete");
   if (dgDel) dgDel.addEventListener("click", async () => {
     if (!await confirmModal({
-      title: `Delete ${isDm ? "chat with" : ""} ${esc(title)}?`,
+      title: isSelf ? "Delete this chat?"
+        : `Delete ${isDm ? "chat with" : ""} ${esc(title)}?`,
       body: "Messages and files will be removed for everyone. " +
             "Archiving keeps them instead.",
       action: "Delete",
@@ -328,7 +333,7 @@ async function renderChatStarred(info) {
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
   const meta = info.meta || {};
-  const isDm = meta.kind === "dm";
+  const isDm = isDmLike(meta);
   const canReply = (meta.members || []).includes(ms.user) && !meta.archived;
   const data = await api(`/api/mesh/starred?id=${encodeURIComponent(chatId)}`);
   if (data.error) { toast(data.error, true); return; }
@@ -429,7 +434,7 @@ async function renderChatStarred(info) {
 // overhaul comes later)
 function renderChatAgents(agents, meta) {
   const chatId = Mesh.chatId;
-  const isDm = (meta || {}).kind === "dm";
+  const isDm = isDmLike(meta || {});
   $("#details-pane").innerHTML = `
     <div class="pane-head">
       <button class="icon-btn" id="ca-back">${ICONS.back}</button>

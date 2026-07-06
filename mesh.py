@@ -400,6 +400,27 @@ class Mesh:
         self.cx.mkdir(f"chats/{chat_id}/msgs")
         return meta
 
+    def create_self_chat(self, user):
+        """The 'message yourself' chat (WhatsApp): a private room with a
+        single member. One per user, deduped; private to that user (see
+        chats_for), so it never surfaces in anyone else's list."""
+        users = self.users()
+        if user not in users:
+            raise MeshError(f"Unknown user @{user}")
+        for cid in self.cx.listdir("chats"):
+            meta = self.cx.read_json(f"chats/{cid}/meta.json")
+            if meta and meta.get("kind") == "self" \
+                    and (meta.get("members") or []) == [user]:
+                return meta
+        chat_id = f"self-{secrets.token_hex(4)}"
+        meta = {"id": chat_id, "kind": "self",
+                "name": (users[user] or {}).get("display", user),
+                "created": utcnow(), "created_by": user, "owner": user,
+                "members": [user], "archived": False}
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        self.cx.mkdir(f"chats/{chat_id}/msgs")
+        return meta
+
     def rename_chat(self, chat_id, by, name):
         meta = self.get_chat(chat_id)
         if not meta:
@@ -692,6 +713,10 @@ class Mesh:
             if not meta:
                 continue
             if meta.get("archived") and not include_archived:
+                continue
+            # a "message yourself" chat is private to its single member
+            if meta.get("kind") == "self" \
+                    and username not in (meta.get("members") or []):
                 continue
             # humans see every chat; agents only their own
             if u["kind"] == "agent" and username not in (meta.get("members") or []):

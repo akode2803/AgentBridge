@@ -88,6 +88,9 @@ body { display: flex; flex-direction: column; }
   background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
   display: grid; place-items: center;
 }
+/* the circular glow is the hover affordance — kill the square button:hover
+   fill (global + dark variant) that otherwise paints a box behind the avatar */
+.rail-avatar-wrap:hover, [data-theme="dark"] .rail-avatar-wrap:hover { background: none; }
 .rail-avatar-wrap:hover .rail-avatar { box-shadow: 0 0 0 4px var(--selected); }
 .rail-avatar-wrap.active .rail-avatar {
   outline: 2px solid var(--accent); outline-offset: 2px;
@@ -404,7 +407,7 @@ input[type=text], select, textarea {
 
 .msg .bubble {
   border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); padding: 9px 13px;
+  background: var(--surface); padding: 6px 11px 5px;
   word-break: break-word;
   box-shadow: var(--shadow);
   font-size: 13.5px; line-height: 1.5;
@@ -708,7 +711,7 @@ input[type=text], select, textarea {
 .bubble .meta {
   display: flex; align-items: center; justify-content: flex-end; gap: 4px;
   font-size: 10.5px; line-height: 1; color: var(--text-faint);
-  margin-top: 3px; user-select: none;
+  margin-top: 1px; user-select: none;
 }
 .bubble .meta .ticks { display: inline-flex; margin-left: 1px; }
 .bubble .meta .ticks svg { width: 15px; height: 15px; }
@@ -720,6 +723,22 @@ input[type=text], select, textarea {
   border: 1px solid var(--border); border-radius: 3px;
   padding: 0 5px; margin-right: 5px; vertical-align: 1px;
 }
+
+/* inline image attachment (WhatsApp): a rounded thumbnail inside the bubble */
+.msg-img {
+  display: block; margin-top: 6px; padding: 0; border: none;
+  background: none; cursor: pointer; line-height: 0;
+  border-radius: 9px; overflow: hidden; max-width: 100%;
+}
+.msg-img img {
+  display: block; width: auto; height: auto;
+  max-width: min(260px, 100%); max-height: 300px; border-radius: 9px;
+}
+.msg-img:hover { filter: brightness(.94); }
+/* file-type SVG glyphs, sized per context (were emoji) */
+.att-icon svg { width: 19px; height: 19px; }
+.pending-att svg { width: 14px; height: 14px; }
+.media-tile.file svg { width: 26px; height: 26px; }
 
 .att-btn {
   display: flex; align-items: center; gap: 9px;
@@ -1395,7 +1414,15 @@ pre.configdump {
 @keyframes modal-in {
   from { opacity: 0; transform: translateY(14px) scale(.98); }
 }
-.modal-list { flex: 1; overflow-y: auto; min-height: 120px; }
+/* reserve the scrollbar gutter ALWAYS so the picker rows (and their right-edge
+   checkbox) never shift left when the footer tray shrinks the list into
+   overflow; the bar itself is thin and only paints when there's overflow */
+.modal-list { flex: 1; overflow-y: auto; min-height: 120px; scrollbar-gutter: stable; }
+.modal-list::-webkit-scrollbar { width: 8px; }
+.modal-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 4px;
+}
+.modal-list::-webkit-scrollbar-track { background: transparent; }
 .modal-list .mem-row { padding: 8px 6px; cursor: pointer; }
 .modal-list label.mem-row:hover { background: var(--hover); }
 .modal-list input[type=checkbox] { accent-color: var(--accent); }
@@ -1404,6 +1431,73 @@ pre.configdump {
   letter-spacing: .5px; color: var(--text-dim);
   padding: 10px 6px 4px;
 }
+/* new-chat sidebar: a divider above each section header (AGENTS / MEMBERS),
+   and small letter labels for the alphabetically-grouped members */
+.nc-sec { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 12px; }
+.nc-alpha {
+  font-size: 12px; font-weight: 700; color: var(--text-dim);
+  padding: 7px 8px 2px;
+}
+
+/* in-sidebar new-group builder (WhatsApp): tray of chips + search + list,
+   footer arrow; a second screen names the group */
+#side-chats.ng-host { overflow: hidden; }
+.ng-wrap { display: flex; flex-direction: column; height: 100%; padding: 12px 10px; }
+.ng-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex: none; }
+.ng-head b { font-size: 15px; }
+.ng-sub { font-size: 12px; color: var(--text-dim); }
+.ng-tray {
+  display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start;
+  max-height: 128px; overflow-y: auto; scrollbar-gutter: stable;
+  margin-bottom: 8px; flex: none;
+}
+.ng-preview { max-height: none; flex: 1; min-height: 0; }
+.ng-tray-hint { color: var(--text-faint); font-size: 12.5px; padding: 3px 2px; }
+.ng-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  background: var(--bg-alt); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 8px 3px 3px; font-size: 12.5px;
+}
+.ng-chip.static { padding-right: 11px; }
+.ng-chip-av {
+  width: 22px; height: 22px; border-radius: 50%; flex: none;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 11px;
+  display: grid; place-items: center;
+}
+.ng-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ng-chip-x {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--text-dim); display: grid; place-items: center; flex: none;
+}
+.ng-chip-x svg { width: 14px; height: 14px; }
+.ng-chip-x:hover, [data-theme="dark"] .ng-chip-x:hover { background: none; color: var(--text); }
+.ng-search { border-bottom: 1px solid var(--border); margin-bottom: 4px; flex: none; }
+.ng-search input {
+  width: 100%; border: none; background: none; outline: none;
+  font: inherit; padding: 7px 4px; color: var(--text);
+}
+.ng-list { flex: 1; min-height: 0; overflow-y: auto; }
+.ng-name-row { display: flex; align-items: center; gap: 10px; margin: 10px 2px 4px; flex: none; }
+.ng-name-av {
+  width: 46px; height: 46px; border-radius: 50%; flex: none;
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center;
+}
+.ng-name-av svg { width: 22px; height: 22px; }
+.ng-name-row input {
+  flex: 1; min-width: 0; border: none; border-bottom: 2px solid var(--accent);
+  background: none; outline: none; font: inherit; font-size: 15px;
+  padding: 6px 2px; color: var(--text); border-radius: 0;
+}
+.ng-foot { flex: none; display: flex; justify-content: flex-end; padding: 8px 2px 2px; }
+.ng-go {
+  width: 48px; height: 48px; border-radius: 50%; border: none;
+  background: var(--accent); color: #fff; cursor: pointer;
+  display: grid; place-items: center; box-shadow: 0 3px 10px rgba(0,0,0,.25);
+}
+.ng-go svg { width: 22px; height: 22px; }
+.ng-go:hover:not(:disabled) { background: var(--accent-hover); }
+.ng-go:disabled { opacity: .5; cursor: default; }
 .modal-cta {
   margin-top: 12px; border-radius: 999px; padding: 10px 16px;
   font-weight: 600; flex: none;
@@ -1413,12 +1507,16 @@ pre.configdump {
    WhatsApp send-bar listing the chosen names + a round confirm button */
 .pk-row .pk-text { flex: 1; min-width: 0; }
 .pk-check {
-  flex: none; margin-left: auto; width: 21px; height: 21px;
+  flex: none; margin-left: auto; width: 18px; height: 18px;
   accent-color: var(--accent); cursor: pointer;
 }
+/* the send-bar bleeds to the modal edges and sits a shade darker (the chat
+   header's --bg vs the modal's --surface) so it reads as its own tray */
 .picker-foot {
   flex: none; display: flex; align-items: center; gap: 12px;
-  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  margin: 12px -16px -16px; padding: 12px 16px;
+  background: var(--bg); border-top: 1px solid var(--border);
+  border-radius: 0 0 14px 14px;
 }
 .pf-names {
   flex: 1; min-width: 0; font-size: 13px; color: var(--text-dim);

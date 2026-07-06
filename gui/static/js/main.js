@@ -68,6 +68,15 @@ function route() {
     }
     Mesh.chatId = chatId;
     Mesh.detailsView = details;
+    // hide the info pane synchronously when leaving it, so the chat reclaims
+    // the freed width in the same frame as the route change. renderChats
+    // fetches mesh state before it could hide the pane, which left the emptied
+    // pane holding its column for ~300ms, then snapped the chat wider (stutter
+    // on medium screens where the pane covers the chat).
+    if (!details) {
+      const dp = $("#details-pane");
+      if (dp && !dp.hidden) { dp.hidden = true; dp.innerHTML = ""; Mesh.detailsKey = ""; }
+    }
   } else {
     Mesh.chatId = null;
     Mesh.detailsView = false;

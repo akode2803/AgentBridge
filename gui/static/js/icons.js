@@ -39,9 +39,32 @@ export const ICONS = {
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 6.5 5 7.9 7.6 5.3M3.6 16.5 5 17.9l2.6-2.6M11 6.8h9M11 16.8h9"/></svg>',
   // mute notifications: a bell
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/></svg>',
+  // clear chat: an eraser (distinct from Delete's trash)
+  eraser: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 20.5-4.3-4.3a2 2 0 0 1 0-2.8l9.6-9.6a2 2 0 0 1 2.8 0l5.2 5.2a2 2 0 0 1 0 2.8L12.5 20.5zM21 20.5H7M5.2 11.3l7.5 7.5"/></svg>',
   // read-receipt double-tick (frontend placeholder; real state comes later)
   ticks: '<svg viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L10 4.5"/><path d="M8 8l3.5 3.5L21 3"/></svg>',
 };
+
+// file-type glyphs — modern line icons (was emoji). Keyed by category;
+// extIcon maps a filename's extension to one. Contexts size them in CSS
+// (.att-icon svg / .pending-att svg / .media-tile.file svg).
+const FILE_ICONS = {
+  // spreadsheet / CSV: a table grid
+  sheet: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M4 9.2h16M4 14.5h16M9.7 9.2v11.3M14.3 9.2v11.3"/></svg>',
+  // image: a picture with a peak
+  image: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="8.7" cy="9.7" r="1.6"/><path d="M4.5 16.5 9 12l3.5 3.5L16 12l3.5 4"/></svg>',
+  // document: a folded page with text lines
+  doc: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13.5 3.5V9H19M8.5 13h7M8.5 16.5h7"/></svg>',
+  // anything else: a plain folded page
+  file: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13.5 3.5V9H19"/></svg>',
+};
+export function extIcon(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  if (["csv", "xlsx", "xls"].includes(ext)) return FILE_ICONS.sheet;
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return FILE_ICONS.image;
+  if (["md", "txt", "docx", "doc", "pdf", "rtf"].includes(ext)) return FILE_ICONS.doc;
+  return FILE_ICONS.file;
+}
 
 // the AgentBridge bird mark, used by empty states
 export const BIRD = '<svg viewBox="0 0 32 32" width="76" height="76" style="margin-bottom:8px"><path d="M4 22c3.5-8 20.5-8 24 0M4 22v-4M28 22v-4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>';

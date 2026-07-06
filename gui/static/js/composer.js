@@ -2,8 +2,8 @@
    valid @tags, caret-following tag autofill, attachments, send.
    chat.js renders the composer HTML; initComposer wires it up. */
 
-import { $, esc, extIcon, fmtSize, toast } from "./util.js";
-import { ICONS } from "./icons.js";
+import { $, esc, fmtSize, toast } from "./util.js";
+import { ICONS, extIcon } from "./icons.js";
 import { api } from "./api.js";
 import { stripMd } from "./markdown.js";
 import { Mesh, meshDn, meshDraft } from "./state.js";

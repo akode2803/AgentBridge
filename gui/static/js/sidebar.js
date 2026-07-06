@@ -5,6 +5,7 @@ import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, meshDn, chatDisplay } from "./state.js";
+import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
 
 const SETTINGS_SECTIONS = [
@@ -21,7 +22,9 @@ export function renderSidebar() {
     ms?.user ? (meshDn(ms.user)[0] || "?").toUpperCase() : "?";
   $("#side-new").hidden = App.page !== "chats";
   if (App.page === "settings") return renderSettingsSidebar();
-  if (App.page === "new") return renderNewChatSidebar();
+  if (App.page === "new") {
+    return Mesh.newGroup?.active ? renderNewGroupSidebar() : renderNewChatSidebar();
+  }
   renderChatListSidebar();
 }
 
@@ -29,6 +32,7 @@ export function renderSidebar() {
 // causing visible jitter); slide it in when the rail selection changed
 function setSide(html, padding) {
   const box = $("#side-chats");
+  box.classList.remove("ng-host");   // only the group builder sets this
   if (box.dataset.key === html) return false;
   box.dataset.key = html;
   box.style.padding = padding || "";
@@ -94,8 +98,24 @@ function renderNewChatSidebar() {
       </span>
     </button>`;
   };
-  const section = (label, list) => list.length
-    ? `<div class="modal-sec nc-sec">${label}</div>` + list.map(person).join("") : "";
+  const agentSec = agents.length
+    ? `<div class="modal-sec nc-sec">Agents</div>` + agents.map(person).join("") : "";
+  // humans grouped alphabetically by display name (WhatsApp contacts); any
+  // name not starting with a letter files under "#"
+  const memberGroups = () => {
+    const sorted = [...humans].sort((a, b) =>
+      a.display.localeCompare(b.display, undefined, { sensitivity: "base" }));
+    let out = "", cur = null;
+    for (const u of sorted) {
+      const first = (u.display.trim()[0] || "#").toUpperCase();
+      const letter = /[A-Z]/.test(first) ? first : "#";
+      if (letter !== cur) { out += `<div class="nc-alpha">${letter}</div>`; cur = letter; }
+      out += person(u);
+    }
+    return out;
+  };
+  const memberSec = humans.length
+    ? `<div class="modal-sec nc-sec">Members</div>` + memberGroups() : "";
   const html = `
     <div style="padding:12px 10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
@@ -108,21 +128,48 @@ function renderNewChatSidebar() {
         <span class="mem-avatar">${ICONS.addUser}</span>
         <span style="min-width:0"><div class="mem-name">New group</div></span>
       </button>
-      ${section("Agents", agents) + section("Members", humans) ||
+      <button class="mem-add" id="nc-self">
+        <span class="mem-avatar" style="background:var(--accent)">${esc((meshDn(ms.user)[0] || "?").toUpperCase())}</span>
+        <span style="min-width:0">
+          <div class="mem-name">${esc(meshDn(ms.user))} <span class="kind-tag">You</span></div>
+          <div class="mem-sub">Message yourself</div>
+        </span>
+      </button>
+      ${agentSec + memberSec ||
         `<div class="empty" style="padding:20px 0">No one else yet</div>`}
     </div>`;
   if (!setSide(html)) return;
   $("#nc-close").addEventListener("click", () => { location.hash = "#/chats"; });
-  // New group opens the same dialog surface as add-members (user request)
-  $("#nc-group").addEventListener("click", () => V.showCreateGroup());
+  // New group opens the in-sidebar builder (WhatsApp): a member tray on top,
+  // search, then the tap-to-add list; a second step names the group
+  $("#nc-group").addEventListener("click", () => {
+    Mesh.newGroup = { active: true, step: "members", members: new Set(), name: "" };
+    renderNewGroupSidebar();
+  });
+  // "Message yourself" — a private single-member chat (created on first use)
+  $("#nc-self").addEventListener("click", async () => {
+    const r = await api("/api/mesh/create_self", {});
+    if (r.error) { toast(r.error, true); return; }
+    location.hash = `#/chats/${r.chat.id}`;
+  });
   $("#nc-q").addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
     document.querySelectorAll("#side-chats .nc-dm").forEach((b) => {
       b.hidden = !!q && !b.textContent.toLowerCase().includes(q);
     });
+    // a section header spans until the NEXT section; an alpha label spans
+    // until the next alpha OR section — hide whichever ends up with no rows
     document.querySelectorAll("#side-chats .nc-sec").forEach((s) => {
       let el = s.nextElementSibling, any = false;
       while (el && !el.classList.contains("nc-sec")) {
+        if (el.classList.contains("nc-dm") && !el.hidden) any = true;
+        el = el.nextElementSibling;
+      }
+      s.hidden = !any;
+    });
+    document.querySelectorAll("#side-chats .nc-alpha").forEach((s) => {
+      let el = s.nextElementSibling, any = false;
+      while (el && !el.classList.contains("nc-alpha") && !el.classList.contains("nc-sec")) {
         if (el.classList.contains("nc-dm") && !el.hidden) any = true;
         el = el.nextElementSibling;
       }
@@ -185,4 +232,165 @@ function renderChatListSidebar() {
     $("#side-chats").dataset.key = "";
     renderChatListSidebar();
   });
+}
+
+// ---- in-sidebar new-group builder (retires the old modal) -----------------
+// Step "members": a chip tray on top (grows, then scrolls), a plain-underline
+// search, then the tap-to-add list (Agents, then alpha-grouped Members). The
+// tray + footer button are synced imperatively so toggling a row doesn't
+// re-render (and lose scroll/focus). The footer arrow advances to step "name".
+function renderNewGroupSidebar() {
+  const ms = Mesh.state;
+  if (!ms?.available || !ms.user) { location.hash = "#/chats"; return; }
+  const ng = Mesh.newGroup;
+  if (ng.step === "name") return renderNewGroupName();
+
+  const listed = Object.values(ms.users).filter((u) => u.username !== ms.user);
+  const agents = listed.filter((u) => u.kind === "agent");
+  const humans = listed.filter((u) => u.kind === "human")
+    .sort((a, b) => a.display.localeCompare(b.display, undefined, { sensitivity: "base" }));
+  const row = (u) => pickerRow({ value: u.username, initial: u.display,
+    name: u.display, sub: `@${u.username}`, tag: u.kind === "agent" ? "agent" : "" });
+  let memberRows = "", cur = null;
+  for (const u of humans) {
+    const first = (u.display.trim()[0] || "#").toUpperCase();
+    const letter = /[A-Z]/.test(first) ? first : "#";
+    if (letter !== cur) { memberRows += `<div class="nc-alpha">${letter}</div>`; cur = letter; }
+    memberRows += row(u);
+  }
+  const listHtml = pickerSection("Agents", agents.map(row).join(""))
+    + (memberRows ? `<div class="modal-sec nc-sec">Members</div>${memberRows}` : "");
+
+  const html = `
+    <div class="ng-wrap">
+      <div class="ng-head">
+        <button class="icon-btn" id="ng-back">${ICONS.back}</button>
+        <div style="min-width:0"><b>New group</b>
+          <div class="ng-sub" id="ng-sub">Add members</div></div>
+      </div>
+      <div class="ng-tray" id="ng-tray"></div>
+      <div class="ng-search"><input type="text" id="ng-q" placeholder="Search" autocomplete="off"></div>
+      <div class="modal-list ng-list">${listHtml
+        || '<div class="empty" style="padding:20px 0">No one else yet</div>'}</div>
+      <div class="ng-foot"><button class="ng-go" id="ng-next" title="Next" disabled>${ICONS.arrowR}</button></div>
+    </div>`;
+  if (!setSide(html, "0")) return;
+  $("#side-chats").classList.add("ng-host");
+
+  const list = $("#side-chats .ng-list");
+  const tray = $("#ng-tray");
+  const next = $("#ng-next");
+  const checks = [...list.querySelectorAll(".pk-check")];
+  checks.forEach((c) => { c.checked = ng.members.has(c.value); });
+
+  const syncTray = () => {
+    const arr = [...ng.members];
+    tray.innerHTML = arr.length ? arr.map((un) => {
+      const u = ms.users[un] || { display: un };
+      return `<span class="ng-chip"><span class="ng-chip-av">${
+        esc((u.display[0] || "?").toUpperCase())}</span><span class="ng-chip-name">${
+        esc(u.display)}</span><button class="ng-chip-x" data-user="${esc(un)}">${ICONS.close}</button></span>`;
+    }).join("") : `<span class="ng-tray-hint">No members added yet</span>`;
+    $("#ng-sub").textContent = arr.length
+      ? `${arr.length} of ${listed.length} selected` : "Add members";
+    next.disabled = arr.length === 0;
+    tray.querySelectorAll(".ng-chip-x").forEach((x) => x.addEventListener("click", () => {
+      ng.members.delete(x.dataset.user);
+      const cb = checks.find((c) => c.value === x.dataset.user);
+      if (cb) cb.checked = false;
+      syncTray();
+    }));
+  };
+  syncTray();
+
+  checks.forEach((c) => c.addEventListener("change", () => {
+    if (c.checked) ng.members.add(c.value); else ng.members.delete(c.value);
+    syncTray();
+  }));
+
+  // filter rows + their section/alpha labels (same rules as the new-chat list)
+  $("#ng-q").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    list.querySelectorAll(".pk-row").forEach((r) => {
+      r.hidden = !!q && !r.textContent.toLowerCase().includes(q);
+    });
+    list.querySelectorAll(".modal-sec").forEach((s) => {
+      let el = s.nextElementSibling, any = false;
+      while (el && !el.classList.contains("modal-sec")) {
+        if (el.classList.contains("pk-row") && !el.hidden) any = true;
+        el = el.nextElementSibling;
+      }
+      s.hidden = !any;
+    });
+    list.querySelectorAll(".nc-alpha").forEach((s) => {
+      let el = s.nextElementSibling, any = false;
+      while (el && !el.classList.contains("nc-alpha") && !el.classList.contains("modal-sec")) {
+        if (el.classList.contains("pk-row") && !el.hidden) any = true;
+        el = el.nextElementSibling;
+      }
+      s.hidden = !any;
+    });
+  });
+
+  $("#ng-back").addEventListener("click", () => {
+    Mesh.newGroup.active = false;
+    renderNewChatSidebar();
+  });
+  next.addEventListener("click", () => {
+    if (!ng.members.size) return;
+    ng.step = "name";
+    renderNewGroupName();
+  });
+}
+
+// Step "name": subject input + a read-only preview of the chosen members;
+// the footer button creates the group and opens it.
+function renderNewGroupName() {
+  const ms = Mesh.state;
+  const ng = Mesh.newGroup;
+  const arr = [...ng.members];
+  const chips = arr.map((un) => {
+    const u = ms.users[un] || { display: un };
+    return `<span class="ng-chip static"><span class="ng-chip-av">${
+      esc((u.display[0] || "?").toUpperCase())}</span><span class="ng-chip-name">${
+      esc(u.display)}</span></span>`;
+  }).join("");
+  const html = `
+    <div class="ng-wrap">
+      <div class="ng-head">
+        <button class="icon-btn" id="ngn-back">${ICONS.back}</button>
+        <div style="min-width:0"><b>New group</b>
+          <div class="ng-sub">Name your group</div></div>
+      </div>
+      <div class="ng-name-row">
+        <span class="ng-name-av">${ICONS.addUser}</span>
+        <input type="text" id="ngn-name" placeholder="Group name" maxlength="60"
+               value="${esc(ng.name)}" autocomplete="off">
+      </div>
+      <div class="modal-sec" style="border:none">Members · ${arr.length}</div>
+      <div class="ng-tray ng-preview">${chips}</div>
+      <div class="ng-foot"><button class="ng-go" id="ngn-create" title="Create group" disabled>${ICONS.check}</button></div>
+    </div>`;
+  if (!setSide(html, "0")) return;
+  $("#side-chats").classList.add("ng-host");
+  const name = $("#ngn-name");
+  const create = $("#ngn-create");
+  const sync = () => { ng.name = name.value; create.disabled = !name.value.trim(); };
+  name.addEventListener("input", sync);
+  sync();
+  name.focus();
+  $("#ngn-back").addEventListener("click", () => {
+    ng.step = "members";
+    renderNewGroupSidebar();
+  });
+  const go = async () => {
+    if (!name.value.trim()) return;
+    create.disabled = true;
+    const r = await api("/api/mesh/create_chat", { name: name.value.trim(), members: arr });
+    if (r.error) { toast(r.error, true); create.disabled = false; return; }
+    Mesh.newGroup = { active: false, step: "members", members: new Set(), name: "" };
+    location.hash = `#/chats/${r.chat.id}`;
+  };
+  create.addEventListener("click", go);
+  name.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
 }

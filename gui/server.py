@@ -747,6 +747,15 @@ def api_mesh_create_dm(data):
     return {"ok": True, "chat": meta}
 
 
+def api_mesh_create_self(data):
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.create_self_chat(user)
+    return {"ok": True, "chat": meta}
+
+
 def api_mesh_rename(data):
     m = get_mesh()
     user = session_user(m)
@@ -1076,6 +1085,7 @@ POST_ROUTES = {
     "/api/mesh/delete_chat": api_mesh_delete_chat,
     "/api/mesh/set_description": api_mesh_set_description,
     "/api/mesh/create_dm": api_mesh_create_dm,
+    "/api/mesh/create_self": api_mesh_create_self,
     "/api/mesh/rename": api_mesh_rename,
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,

@@ -50,14 +50,6 @@ export function fmtSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function extIcon(name) {
-  const ext = (name || "").split(".").pop().toLowerCase();
-  if (["csv", "xlsx", "xls"].includes(ext)) return "📊";
-  if (["png", "jpg", "jpeg", "gif", "svg"].includes(ext)) return "🖼️";
-  if (["md", "txt", "docx", "pdf"].includes(ext)) return "📄";
-  return "📎";
-}
-
 let toastTimer = null;
 // toast(msg, true) = error (legacy form). toast(msg, {check, action,
 // onAction, error, duration}) = snackbar with an optional ✓ and an action
@@ -103,6 +95,16 @@ export function toast(msg, opts) {
 // actions that need the chat visible (jump, reply) close the pane first
 export function paneCoversChat() {
   return matchMedia("(max-width: 1100px)").matches;
+}
+
+// dismiss every floating menu so opening one closes the others (WhatsApp):
+// the chat ⋮ dropdown, message + pin context menus, and the member-remove
+// menu. Called at the top of each open path. (csel form popups manage their
+// own open/close state, so they're left alone.)
+export function closeMenus() {
+  const cm = document.getElementById("chat-menu");
+  if (cm) cm.hidden = true;
+  document.querySelectorAll(".msg-menu, .mem-menu").forEach((m) => m.remove());
 }
 
 // "Read more" clamp for long messages. `store[mid]` is the line budget the
