@@ -654,9 +654,9 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       if (ctx.fromPane) V.openForwardPicker(chatId, [msg.id]);
       else enterSelect(chatId, { mode: "forward", preselect: [msg.id] });
     } else if (act === "delete") {
-      // WhatsApp: Delete drops into the familiar selection mode with this
-      // message already ticked; the delete flow fires from the trash action.
-      enterSelect(chatId, { preselect: [msg.id] });
+      // WhatsApp: Delete drops into a delete-ONLY selection with this message
+      // already ticked (like forward mode); the flow fires from the trash.
+      enterSelect(chatId, { mode: "delete", preselect: [msg.id] });
     }
     // edit: coming round
   });
@@ -832,31 +832,37 @@ function buildSelectPane(chatId) {
     pane.id = "select-pane";
     content.appendChild(pane);
   }
-  // forward mode reuses the exact same pane, trimmed to the one action
-  const forwardOnly = Mesh.select.mode === "forward";
+  // forward / delete modes reuse the same pane trimmed to their single action
+  // (like WhatsApp); the full "select" mode carries all four
+  const mode = Mesh.select.mode;
+  const acts = mode === "delete"
+    ? `<button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>`
+    : mode === "forward"
+      ? `<button class="sp-act" id="sp-forward" title="Forward">${ICONS.forward}</button>`
+      : `
+        <button class="sp-act" id="sp-star" title="Star">${ICONS.star}</button>
+        <button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>
+        <button class="sp-act" id="sp-forward" title="Forward">${ICONS.forward}</button>
+        <button class="sp-act" id="sp-save" title="Save to a folder">${ICONS.download}</button>`;
   pane.innerHTML = `
     <button class="sp-act" id="sp-close" title="Cancel">${ICONS.close}</button>
     <span class="sp-count" id="sp-count">0 selected</span>
     <span class="spacer"></span>
-    ${forwardOnly ? "" : `
-    <button class="sp-act" id="sp-star" title="Star">${ICONS.star}</button>
-    <button class="sp-act" id="sp-delete" title="Delete">${ICONS.trash}</button>`}
-    <button class="sp-act" id="sp-forward" title="Forward">${ICONS.forward}</button>
-    ${forwardOnly ? "" : `
-    <button class="sp-act" id="sp-save" title="Save to a folder">${ICONS.download}</button>`}`;
+    ${acts}`;
   // paint the pane at its resting (off-screen) transform, force a reflow, then
   // add .selecting — the state change between the two frames fires the slide
   void pane.offsetWidth;
   content.classList.add("selecting", "sel-enter");
   setTimeout(() => content.classList.remove("sel-enter"), 280);
   $("#sp-close").addEventListener("click", () => exitSelect());
-  $("#sp-forward").addEventListener("click", () =>
-    V.openForwardPicker(chatId, selectedInOrder()));
-  if (!forwardOnly) {
-    $("#sp-star").addEventListener("click", () => bulkStar(chatId));
-    $("#sp-save").addEventListener("click", () => bulkSave(chatId));
-    $("#sp-delete").addEventListener("click", () => bulkDelete(chatId));
-  }
+  const fwd = $("#sp-forward");
+  if (fwd) fwd.addEventListener("click", () => V.openForwardPicker(chatId, selectedInOrder()));
+  const star = $("#sp-star");
+  if (star) star.addEventListener("click", () => bulkStar(chatId));
+  const save = $("#sp-save");
+  if (save) save.addEventListener("click", () => bulkSave(chatId));
+  const del = $("#sp-delete");
+  if (del) del.addEventListener("click", () => bulkDelete(chatId));
 }
 
 // selected ids in transcript (chronological) order, so forwarding several
@@ -884,19 +890,23 @@ function refreshSelectPane() {
   if (cnt) cnt.textContent = `${n} selected`;
   const tr = $("#transcript");
   const msgs = tr?._msgs, starred = tr?._ctx?.starred || new Set();
+  // a tombstone (deleted-for-everyone) is selectable, but only Delete applies
+  // to it (a for-me removal of the trace). A selection containing one
+  // deactivates star/forward/save — just like an empty selection.
+  const hasTomb = !empty && [...ids].some((id) => msgs?.get(id)?.deleted);
   const allStarred = !empty && [...ids].every((id) => starred.has(id));
   const starBtn = $("#sp-star");
   if (starBtn) {
-    starBtn.disabled = empty;
+    starBtn.disabled = empty || hasTomb;
     starBtn.innerHTML = allStarred ? ICONS.starOff : ICONS.star;
     starBtn.title = allStarred ? "Unstar" : "Star";
   }
   const del = $("#sp-delete"); if (del) del.disabled = empty;
-  const fwd = $("#sp-forward"); if (fwd) fwd.disabled = empty;
+  const fwd = $("#sp-forward"); if (fwd) fwd.disabled = empty || hasTomb;
   const save = $("#sp-save");
   if (save) {
     const allFiles = !empty && [...ids].every((id) => (msgs?.get(id)?.files || []).length > 0);
-    save.disabled = !allFiles;
+    save.disabled = !allFiles || hasTomb;
   }
 }
 
@@ -999,8 +1009,8 @@ function deleteDialog(chatId, ids, canEveryone) {
   const box = openModal(`
     <div class="cf-title">Delete message${n === 1 ? "" : "s"}?</div>
     <div class="cf-actions cf-col">
-      ${canEveryone ? `<button class="cf-go" id="del-all">Delete for everyone</button>` : ""}
-      <button class="cf-go alt" id="del-me">Delete for me</button>
+      ${canEveryone ? `<button class="cf-del" id="del-all">Delete for everyone</button>` : ""}
+      <button class="cf-del" id="del-me">Delete for me</button>
       <button class="cf-cancel" id="del-cancel">Cancel</button>
     </div>`);
   box.classList.add("confirm");

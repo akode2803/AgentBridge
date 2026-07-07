@@ -153,9 +153,10 @@ body { display: flex; flex-direction: column; }
   display: flex; align-items: center; gap: 10px;
   height: var(--head-h); padding: 0 14px;
   border-bottom: 1px solid var(--border); flex: none;
-  cursor: pointer;   /* the brand is home (no active chat) */
 }
-#side-head:hover { background: var(--hover); }
+/* the brand is home (no active chat) — link-style pointer, no hover fill. The
+   #navrail prefix outranks the "app chrome" cursor:default rule further down. */
+#navrail #side-head { cursor: pointer; }
 .side-title { font-weight: 700; font-size: 16px; letter-spacing: .2px; }
 
 #side-chats { flex: 1; overflow-y: auto; padding: 6px; }
@@ -507,6 +508,7 @@ input[type=text], select, textarea {
 .msg.deleted .bubble .msg-body.tomb {
   display: flex; align-items: center; gap: 6px;
   color: var(--text-dim); font-style: italic;
+  user-select: none;   /* tombstone is inert — its label isn't selectable text */
 }
 .msg.deleted .bubble .msg-body.tomb svg { flex: none; opacity: 0.8; }
 
@@ -1563,13 +1565,15 @@ pre.configdump {
   background: var(--bad); color: #fff; font-weight: 600;
 }
 .cf-go:hover, [data-theme="dark"] .cf-go:hover { filter: brightness(1.12); background: var(--bad); }
-/* delete dialog: options stack (WhatsApp), full-width pills. "Delete for
-   me" is the safe/alt pill (accent, not red); "everyone" keeps the red .cf-go */
-.cf-actions.cf-col { flex-direction: column; align-items: stretch; gap: 8px; }
-.cf-actions.cf-col .cf-go { padding: 10px 22px; }
-.cf-actions.cf-col .cf-cancel { padding: 9px 14px; align-self: center; }
-.cf-go.alt { background: var(--accent); }
-.cf-go.alt:hover, [data-theme="dark"] .cf-go.alt:hover { background: var(--accent); }
+/* delete dialog: options stack (WhatsApp) as no-fill text buttons — BOTH
+   Delete rows are red (same treatment as Cancel, just red); Cancel stays accent */
+.cf-actions.cf-col { flex-direction: column; align-items: stretch; gap: 2px; }
+.cf-del {
+  border: none; background: none; color: var(--bad);
+  font-weight: 600; padding: 11px 14px; border-radius: 8px; text-align: left;
+}
+.cf-del:hover, [data-theme="dark"] .cf-del:hover { background: var(--hover); }
+.cf-actions.cf-col .cf-cancel { padding: 11px 14px; text-align: left; align-self: stretch; }
 
 /* in-chat search (slides over chat info in the same pane) */
 .search-box {
