@@ -164,15 +164,30 @@ async function renderMeshChat(force) {
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
   if (App.page !== "chats" || Mesh.chatId !== chatId) return;
-  const pinsSig = (data.meta.pins || []).map((p) => p.id + p.until).join(",");
+  const meta = data.meta;
+  const pinsSig = (meta.pins || []).map((p) => p.id + p.until).join(",");
+  // transcript content signature — drives the PARTIAL refresh (transcript only)
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
-    data.meta.archived, (data.meta.members || []).length,
+    meta.archived, (meta.members || []).length,
     pinsSig, (data.starred || []).join(","),
     feeds.map((f) => [f.agent, f.turns, f.activity, (f.draft || "").length])]);
-  if (!force && key === Mesh.chatKey && App.page === "chats") return;
+  // structural signature — drives the FULL rebuild (incl. the header). name
+  // rides here so a rename (local or from another client) repaints the header;
+  // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
+  // survives — the banner is synced imperatively).
+  const structKey = chatId + "|" + !!meta.archived + "|" + (meta.name || "")
+    + "|" + (meta.members || []).join(",");
+  // NEITHER signature moved: skip the rebuild EVEN under force. Opening/closing
+  // the chat-info pane routes here with force=true but nothing changed —
+  // rebuilding would re-clamp read-mores at the pane's new width and flash the
+  // chat (item 6). A pending jump (starred-pane "go to message") still runs.
+  if (key === Mesh.chatKey && structKey === Mesh.structKey
+      && App.page === "chats" && $("#transcript")) {
+    if (Mesh.jumpTo) jumpToMessage();
+    return;
+  }
   const hadNew = key !== Mesh.chatKey;
   Mesh.chatKey = key;
-  const meta = data.meta;
 
   // mentions highlight only actual members — membership is symmetric:
   // humans need adding to a chat just like agents
@@ -316,10 +331,7 @@ async function renderMeshChat(force) {
 
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
-  // pins are NOT part of structKey: pin/unpin must ride the partial path
-  // (scroll position survives) — the banner is synced imperatively
-  const structKey = chatId + "|" + !!meta.archived + "|"
-    + (meta.members || []).join(",");
+  // (structKey computed up top; pins ride the partial path on purpose)
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
   const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;

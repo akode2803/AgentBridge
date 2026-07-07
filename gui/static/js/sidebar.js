@@ -376,7 +376,7 @@ function renderNewGroupName() {
       </div>
       <div class="ng-name-row">
         <span class="ng-name-av">${ICONS.addUser}</span>
-        <input type="text" id="ngn-name" placeholder="Group name" maxlength="60"
+        <input type="text" id="ngn-name" placeholder="Group name (optional)" maxlength="60"
                value="${esc(ng.name)}" autocomplete="off">
       </div>
       <div class="modal-sec" style="border:none">Members · ${arr.length}</div>
@@ -387,7 +387,9 @@ function renderNewGroupName() {
   $("#side-chats").classList.add("ng-host");
   const name = $("#ngn-name");
   const create = $("#ngn-create");
-  const sync = () => { ng.name = name.value; create.disabled = !name.value.trim(); };
+  // the name is OPTIONAL now — members were already chosen, so create is always
+  // live; an empty name defaults to "New Group" on submit
+  const sync = () => { ng.name = name.value; create.disabled = false; };
   name.addEventListener("input", sync);
   sync();
   name.focus();
@@ -396,9 +398,9 @@ function renderNewGroupName() {
     renderNewGroupSidebar();
   });
   const go = async () => {
-    if (!name.value.trim()) return;
     create.disabled = true;
-    const r = await api("/api/mesh/create_chat", { name: name.value.trim(), members: arr });
+    const groupName = name.value.trim() || "New Group";
+    const r = await api("/api/mesh/create_chat", { name: groupName, members: arr });
     if (r.error) { toast(r.error, true); create.disabled = false; return; }
     Mesh.newGroup = { active: false, step: "members", members: new Set(), name: "" };
     location.hash = `#/chats/${r.chat.id}`;
