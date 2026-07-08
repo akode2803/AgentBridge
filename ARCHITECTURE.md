@@ -227,7 +227,10 @@ mesh/
 {"read_ts": "...", "updated": "...",
  "starred": {"<msg_id>": {"from": "...", "body": "...", "ts": "...", "at": "..."}},
  "hidden": {"<msg_id>": "<at>"},              // delete-for-me (v0.24.3)
- "cleared": {"ns": 123, "keep_starred": false, "at": "..."}}  // clear-chat (v0.24.8)
+ "cleared": {"ns": 123, "keep_starred": false, "at": "..."},  // clear-chat (v0.24.8)
+ "pinned": "<at>|null",                       // pin chat to top of my list (v0.24.16)
+ "deleted": "<at>|null",                      // delete-chat = per-user hide (v0.24.16)
+ "forced_unread": true}                       // manual "mark as unread" (v0.24.16)
 ```
 
 One file holds the read cursor and the private per-user overlays for that user
@@ -235,7 +238,12 @@ in that chat — `mark_read()` always **merges**, never overwrites, because an
 earlier version that overwrote this file on every chat-open silently wiped
 stars (a real, fixed bug). Every per-user, per-chat overlay (stars,
 delete-for-me's `hidden` set, and clear-chat's `cleared` cursor) lives in this
-same file for the same reason: it's the one place a single writer already owns. Delete-for-**everyone** is instead
+same file for the same reason: it's the one place a single writer already owns.
+The sidebar chat overlays (`pinned`, `deleted` = per-user delete/hide, and
+`forced_unread` = manual mark-unread; all v0.24.16) live here too; `chats_for`
+reads them to float the pinned group to the top (stable sort, pin beats
+recency), drop a `deleted` chat until a newer message arrives, and expose
+`pinned`/`forced_unread` in the state payload. Delete-for-**everyone** is instead
 a chat-level `chats/<id>/redactions.json` (`{msg_id: {by, at}}`), since it's
 shared, not per-user — see the deletion note below.
 
@@ -346,6 +354,7 @@ Full public surface, grouped as they appear in the file:
 | `messages_for(chat_id, username, tail=200)` | the app-level read choke-point (§2): applies redactions (tombstones) + this user's `hidden` set + their `cleared` cursor. Every human/agent read path uses this, not `messages` |
 | `hide_messages` / `unhide_messages(chat_id, username, ids)` | delete-for-me + its undo (per-user `hidden` overlay) |
 | `clear_chat(chat_id, username, keep_starred=False)` | clear-for-me (per-user `cleared` ns-cursor; optional keep-starred); a read overlay, no other member affected |
+| `pin_chat` / `delete_chat_for` / `mark_unread(chat_id, username)` | sidebar chat overlays (v0.24.16): pin-to-top, delete-chat = per-user hide (reappears on a newer message; undo via `deleted=false`), and force-unread; all private per-user, applied by `chats_for` |
 | `edit_message(chat_id, username, msg_id, new_body)` | author-only in-place edit; chat-level `edits.json` overlay, `messages_for` shows the latest + an `edited` marker (redaction still wins) |
 | `redact_messages(chat_id, username, ids)` | delete-for-everyone (sender-only, validates the whole batch, purges star/pin copies); irreversible |
 | `parse_tags(body)` | regex `@name` extraction, filtered to real usernames |

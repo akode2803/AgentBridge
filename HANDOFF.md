@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.15
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.16
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -82,36 +82,32 @@ machine (see the last section).
 
 ## Next work queue
 
-1. **Round 9B — sidebar chat menu (next).** The left chat-list rows only
-   click-to-open today — add a hover **chevron** + **right-click menu** mirroring
-   the chat-header menu: **Pin/Unpin** (a NEW per-user overlay, toast+undo,
-   pins to top), **Mark-as-unread** (new; `mark_read`/`unread_count` exist),
-   Archive / Clear / Exit-group (reuse existing endpoints), and **Delete chat** —
-   which is NOT actually wired yet ([chat.js:494](gui/static/js/chat.js) is still a
-   placeholder toast even though `api_mesh_delete_chat` exists; 9B must wire it with
-   a danger dialog and DECIDE semantics: our owner-only permanent-for-everyone vs
-   WhatsApp's per-user hide). Mute stays an "arriving" stub (user asked); skip
-   favourites/lists; fold in **edit-marks-unread**. Big worker unread-queue +
-   parallel requests DEFERRED to the context-mgmt overhaul (memory
-   `agentbridge-worker-context`).
-   (**9A layout** shipped v0.24.13: removed the `.chat-last` 190px cap so the
-   preview reflows to the sidebar width; `#navrail` `clamp(300,26vw,420)`,
-   `#details-pane` `clamp(320,24vw,420)`, `#content.chat-mode` min 500px, details
-   pane takes over the transcript below 1200px; resizer bounds raised to 260–560.)
+1. **Read receipts** — a frontend placeholder tick with no delivered/read
+   backend. (**Round 9 sidebar menu + layout shipped**: 9A layout v0.24.13
+   [dynamic preview + clamped transcript-priority panes]; 9B v0.24.16 [hover
+   chevron + right-click row menu — Pin/Unpin, Mark-as-unread, Delete-as-hide,
+   reuse Archive/Clear/Exit, Mute stub]. Three new per-chat/per-user overlays
+   `pinned`/`deleted`/`forced_unread`; `chats_for` does the pin-sort + hide-filter.
+   **Delete chat is now wired** as a per-user hide in both the header and sidebar
+   menus; the owner-only `api_mesh_delete_chat` nuke stays parked. `edit-marks-
+   unread` and the worker unread-queue + parallel requests remain DEFERRED to the
+   context-mgmt overhaul, memory `agentbridge-worker-context`. The single-instance
+   "forking" was also fixed — `serve()` now hands off proactively, v0.24.15.)
    (**8D graceful stand-down/resume** shipped v0.24.12: `atomic_write_json` retries
    on `PermissionError` ~2s then the pause endpoint returns a graceful error;
    GUI shows spinner→result/timeout toast. **Edit** shipped v0.24.10/v0.24.11;
    **clear chat** v0.24.8.)
-2. **Read receipts** — a frontend placeholder with no delivered/read backend.
-3. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
+2. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
    (who may pin, per-chat agent permissions) and an **agent-worker overhaul**
    (uniform capability exposure to agents, context-window management, agent
-   choosing reply-vs-tag), then a **settings overhaul**, then the
-   **setup/account overhaul**.
-4. **WhatsApp-parity gap features** (after the overhauls above): block a user,
+   choosing reply-vs-tag, the unread-queue + parallel requests, edit-marks-unread),
+   then a **settings overhaul**, then the **setup/account overhaul** (also fully
+   retire `legacy/bridge.py` and the app-packaging pass: quit-on-window-close +
+   worker singleton).
+3. **WhatsApp-parity gap features** (after the overhauls above): block a user,
    emoji reactions, history-on-join policy, multi-admin roles, group invite
    links, profile photo.
-5. **True privacy**: deliberate encryption vs. per-user backends, then
+4. **True privacy**: deliberate encryption vs. per-user backends, then
    implement so no one — human or agent — can read a chat they're not in, even
    on disk (today's membership-based visibility, v0.24.0, is app-level only).
 
