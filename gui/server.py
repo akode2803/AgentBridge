@@ -595,6 +595,8 @@ def api_mesh_state():
                 "created_by": meta.get("created_by"),
                 "last": _msg_snippet(meta.get("last")),
                 "unread": m.unread_count(meta["id"], user),
+                "pinned": bool(meta.get("pinned")),
+                "forced_unread": bool(meta.get("forced_unread")),
             })
         out["chats"] = chats
     return out
@@ -1058,6 +1060,56 @@ def api_mesh_edit_message(data):
     return {"ok": True, "edited": res}
 
 
+def api_mesh_pin_chat(data):
+    """Pin/unpin a chat for the caller only (WhatsApp 'Pin chat')."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.get_chat(data.get("chat_id") or "")
+    if not meta:
+        return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
+    pinned = m.pin_chat(meta["id"], user, bool(data.get("pinned", True)))
+    return {"ok": True, "pinned": pinned}
+
+
+def api_mesh_hide_chat(data):
+    """Delete-for-me: hide the whole chat from the caller's list (undo=true to
+    restore). Non-destructive; distinct from the owner-only /delete_chat."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.get_chat(data.get("chat_id") or "")
+    if not meta:
+        return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
+    deleted = m.delete_chat_for(meta["id"], user, deleted=not data.get("undo"))
+    return {"ok": True, "deleted": deleted}
+
+
+def api_mesh_mark_unread(data):
+    """Force the unread indicator on/off for the caller (WhatsApp 'Mark as
+    unread'); cleared automatically when they next open the chat."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    meta = m.get_chat(data.get("chat_id") or "")
+    if not meta:
+        return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
+    m.mark_unread(meta["id"], user, bool(data.get("unread", True)))
+    return {"ok": True}
+
+
 def api_mesh_typing(data):
     """Typing heartbeat: the composer pings while the user writes; other
     members' windows show a dots-only bubble until it goes stale. One file
@@ -1232,6 +1284,9 @@ POST_ROUTES = {
     "/api/mesh/undelete_messages": api_mesh_undelete_messages,
     "/api/mesh/clear_chat": api_mesh_clear_chat,
     "/api/mesh/edit_message": api_mesh_edit_message,
+    "/api/mesh/pin_chat": api_mesh_pin_chat,
+    "/api/mesh/hide_chat": api_mesh_hide_chat,
+    "/api/mesh/mark_unread": api_mesh_mark_unread,
 }
 
 

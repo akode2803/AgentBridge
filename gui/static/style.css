@@ -1125,11 +1125,29 @@ pre.configdump {
 }
 .chat-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .chat-time { font-size: 11px; color: var(--text-faint); }
+.chat-tags { display: flex; align-items: center; gap: 5px; }
 .unread-badge {
   background: var(--accent); color: #fff; font-size: 11px; font-weight: 700;
   border-radius: 999px; min-width: 20px; height: 20px; padding: 0 6px;
   display: grid; place-items: center;
 }
+/* manual "mark as unread" — the dot with no number */
+.unread-badge.dot { min-width: 11px; width: 11px; height: 11px; padding: 0; }
+.pin-ind { display: inline-grid; place-items: center; color: var(--text-faint); }
+.pin-ind svg { width: 14px; height: 14px; }
+/* hover-reveal chevron: slides in on row hover and pushes the pin + preview
+   (the preview reflows now that its width cap is gone, round 9A) */
+.chat-chevron {
+  flex: none; width: 0; height: 30px; padding: 0; border: none; overflow: hidden;
+  background: none; color: var(--text-dim); cursor: pointer;
+  display: grid; place-items: center;
+  opacity: 0; transition: width .15s ease, opacity .15s ease;
+}
+.chat-row:hover .chat-chevron { width: 24px; opacity: 1; }
+.chat-chevron:hover { background: none; color: var(--text); }
+.chat-chevron svg { width: 18px; height: 18px; }
+/* the floating row menu reuses .menu (incl. its danger-item styling) */
+.chat-row-menu { position: fixed; z-index: 60; }
 
 .chat-head {
   display: flex; align-items: center; gap: 12px; flex: none;

@@ -491,7 +491,7 @@ async function renderMeshChat(force) {
       else if (act === "select") enterSelect(chatId);
       else if (act === "mute") toast("Muting arrives with notification support (PWA / LAN)");
       else if (act === "clear") { if (!b.disabled) clearChatDialog(chatId); }
-      else if (act === "delete") toast("Delete chat lands in the next round");
+      else if (act === "delete") deleteChatDialog(chatId, title);
       else if (act === "exit") V.exitGroup(chatId, title);
       else if (act === "close") location.hash = "#/chats";
       else if (act === "archive") {
@@ -610,8 +610,8 @@ function bindTranscript(tr, chatId, data, ctx) {
   });
 }
 
-// the message context menu. Reply / Message X / Copy / Pin / Star work;
-// Forward / Edit / Delete are placeholders for the coming rounds.
+// the message context menu. Reply / Message X / Copy / Forward / Edit / Pin /
+// Star all work; Delete (for-me / for-everyone) is the danger row.
 function openMsgMenu(rect, msg, chatId, ctx) {
   closeMenus();
   const menu = document.createElement("div");
@@ -840,12 +840,10 @@ function jumpToMessage() {
 }
 
 async function renderNewChat() {
-  // the form lives in the sidebar (renderNewChatSidebar); the main pane
-  // keeps the resting state
-  Mesh.state = await api("/api/mesh/state");
-  const ms = Mesh.state;
-  if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
-  renderSidebar();
+  // the form lives in the sidebar (renderNewChatSidebar); the main pane keeps
+  // the resting state. Paint it (and drop the info pane) SYNCHRONOUSLY, before
+  // the state fetch — otherwise the previous chat's transcript lingers through
+  // the await while chat-mode is already off, which reads as a stutter.
   $("#details-pane").hidden = true;
   $("#content").innerHTML = `
     <div class="empty-state">
@@ -854,9 +852,16 @@ async function renderNewChat() {
         <p><b>New chat</b> — name it in the sidebar and pick the agents.</p>
       </div>
     </div>`;
+  Mesh.state = await api("/api/mesh/state");
+  const ms = Mesh.state;
+  if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
+  renderSidebar();
 }
 V.renderNewChat = renderNewChat;
 V.openMsgMenu = openMsgMenu;   // the starred sidebar reuses the menu
+V.clearChatDialog = clearChatDialog;    // reused by the sidebar row menu
+V.deleteChatDialog = deleteChatDialog;  // reused by the sidebar row menu
+V.refreshChatListSidebar = refreshChatListSidebar;
 
 // ---- select-messages mode -------------------------------------------------
 // A UI mode toggled imperatively, never through a re-render: the composer
@@ -1152,6 +1157,44 @@ async function clearChat(chatId, keepStarred) {
   refreshChat();
   const wait = Math.max(0, 520 - (Date.now() - started));
   setTimeout(() => toast("Chat cleared", { check: true, swap: true }), wait);
+}
+
+// Delete chat = a per-user hide (WhatsApp 'Delete chat'): the chat drops out of
+// YOUR list and comes back if a new message arrives. Non-destructive — other
+// members keep it (distinct from the owner-only /delete_chat nuke). Shared by
+// the chat-header menu and the sidebar row menu (via V.deleteChatDialog).
+function deleteChatDialog(chatId, name) {
+  const box = openModal(`
+    <div class="cf-title">Delete this chat?</div>
+    <div class="cf-sub">“${esc(name || "This chat")}” leaves your chat list. It comes
+      back if a new message arrives, and other members aren't affected.</div>
+    <div class="cf-actions cf-col">
+      <button class="cf-del" id="delc-go">Delete chat</button>
+      <button class="cf-cancel" id="delc-cancel">Cancel</button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#delc-cancel").addEventListener("click", closeModal);
+  box.querySelector("#delc-go").addEventListener("click", async () => {
+    closeModal();
+    const r = await api("/api/mesh/hide_chat", { chat_id: chatId });
+    if (r.error) { toast(r.error, true); return; }
+    if (Mesh.chatId === chatId) location.hash = "#/chats";  // leave the open chat
+    else await refreshChatListSidebar();
+    toast("Chat deleted", { check: true, action: "Undo", onAction: async () => {
+      await api("/api/mesh/hide_chat", { chat_id: chatId, undo: true });
+      await refreshChatListSidebar();
+    }});
+  });
+}
+
+// Re-fetch mesh state and repaint the chat-list sidebar (used after a sidebar
+// mutation that isn't tied to opening a chat — pin, mark-unread, delete-for-me).
+async function refreshChatListSidebar() {
+  Mesh.state = await api("/api/mesh/state");
+  const box = $("#side-chats");
+  if (box) box.dataset.key = "";
+  renderSidebar();
 }
 
 // ---- edit message -----------------------------------------------------------

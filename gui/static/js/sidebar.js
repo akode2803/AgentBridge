@@ -201,6 +201,8 @@ function renderChatListSidebar() {
     const peer = c.kind === "dm" ? (c.members || []).find((u) => u !== ms.user) : null;
     const agentTag = peer && ms.users?.[peer]?.kind === "agent"
       ? ' <span class="kind-tag">agent</span>' : "";
+    const hasCount = c.unread && !c.archived;
+    const dot = !hasCount && c.forced_unread && !c.archived;  // manual mark-unread: no number
     return `
     <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
       <div class="chat-avatar ${c.archived ? "arch" : ""}">${esc((chatDisplay(c, ms.user)[0] || "#").toUpperCase())}</div>
@@ -214,8 +216,13 @@ function renderChatListSidebar() {
       </div>
       <div class="chat-side">
         <div class="chat-time">${c.last ? esc(fmtTime(c.last.ts)) : ""}</div>
-        ${c.unread && !c.archived ? `<span class="unread-badge">${c.unread}</span>` : ""}
+        <div class="chat-tags">
+          ${c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : ""}
+          ${hasCount ? `<span class="unread-badge">${c.unread}</span>`
+            : dot ? `<span class="unread-badge dot"></span>` : ""}
+        </div>
       </div>
+      <button class="chat-chevron" data-chat="${esc(c.id)}" title="Chat menu" aria-label="Chat menu">${ICONS.chevD}</button>
     </div>`;
   };
   let html = "";
@@ -232,7 +239,21 @@ function renderChatListSidebar() {
   }
   if (!setSide(html)) return;
   document.querySelectorAll("#side-chats .chat-row").forEach((r) => {
-    r.addEventListener("click", () => { location.hash = `#/chats/${r.dataset.chat}`; });
+    const cid = r.dataset.chat;
+    r.addEventListener("click", (e) => {
+      if (e.target.closest(".chat-chevron")) return;   // chevron opens the menu
+      location.hash = `#/chats/${cid}`;
+    });
+    r.addEventListener("contextmenu", (e) => {         // right-click → menu
+      e.preventDefault();
+      openChatRowMenu(cid, e.clientX, e.clientY);
+    });
+    const chev = r.querySelector(".chat-chevron");
+    if (chev) chev.addEventListener("click", (e) => {  // hover chevron → menu
+      e.stopPropagation();
+      const b = chev.getBoundingClientRect();
+      openChatRowMenu(cid, b.right, b.bottom);
+    });
   });
   const at = $("#arch-toggle");
   if (at) at.addEventListener("click", () => {
@@ -240,6 +261,106 @@ function renderChatListSidebar() {
     $("#side-chats").dataset.key = "";
     renderChatListSidebar();
   });
+}
+
+// ---- sidebar chat-row menu (right-click / hover chevron) ------------------
+// Mirrors the open-chat header menu, plus Pin/Unpin and Mark-as-unread. Danger
+// items (Clear / Delete / Exit) are red. Delete = a per-user hide (WhatsApp
+// 'Delete chat'), wired via V.deleteChatDialog. One floating menu at a time.
+let _rowMenuCleanup = null;
+
+function closeChatRowMenu() {
+  const m = document.getElementById("chat-row-menu");
+  if (m) m.remove();
+  if (_rowMenuCleanup) { _rowMenuCleanup(); _rowMenuCleanup = null; }
+}
+
+function openChatRowMenu(chatId, x, y) {
+  closeChatRowMenu();
+  const ms = Mesh.state;
+  const c = (ms?.chats || []).find((k) => k.id === chatId);
+  if (!c) return;
+  const isDm = c.kind === "dm", isSelf = c.kind === "self", isGroup = c.kind === "group";
+  const isOwner = c.owner === ms.user;
+  const isPinned = !!c.pinned;
+  const isUnread = (c.unread > 0) || !!c.forced_unread;
+  const items = [
+    `<button data-act="pin">${isPinned ? ICONS.pinOff : ICONS.pin} ${isPinned ? "Unpin chat" : "Pin chat"}</button>`,
+    `<button data-act="unread">${ICONS.unread} ${isUnread ? "Mark as read" : "Mark as unread"}</button>`,
+    `<button data-act="mute">${ICONS.bell} Mute notifications</button>`,
+    isOwner ? `<button data-act="archive">${ICONS.archive} ${c.archived ? "Unarchive chat" : "Archive chat"}</button>` : "",
+    `<button data-act="clear" class="danger-item">${ICONS.eraser} Clear chat</button>`,
+    (isDm || isSelf)
+      ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
+      : (isGroup && !isOwner ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : ""),
+  ].filter(Boolean).join("");
+  const menu = document.createElement("div");
+  menu.className = "menu chat-row-menu";
+  menu.id = "chat-row-menu";
+  menu.innerHTML = items;
+  menu.style.visibility = "hidden";
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth || 220, mh = menu.offsetHeight || 300;
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - mw - 8)) + "px";
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - mh - 8)) + "px";
+  menu.style.visibility = "";
+  menu.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    const act = b.dataset.act;
+    closeChatRowMenu();
+    runChatAction(act, c);
+  });
+  const onDown = (e) => { if (!e.target.closest("#chat-row-menu")) closeChatRowMenu(); };
+  const onKey = (e) => { if (e.key === "Escape") closeChatRowMenu(); };
+  setTimeout(() => {
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+  }, 0);
+  _rowMenuCleanup = () => {
+    document.removeEventListener("mousedown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+  };
+}
+
+async function runChatAction(act, c) {
+  const chatId = c.id;
+  const name = chatDisplay(c, Mesh.state.user);
+  if (act === "mute") { toast("Muting arrives with notification support (PWA / LAN)"); return; }
+  if (act === "clear") { V.clearChatDialog(chatId); return; }
+  if (act === "delete") { V.deleteChatDialog(chatId, name); return; }
+  if (act === "exit") { V.exitGroup(chatId, name); return; }
+  if (act === "archive") {
+    const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !c.archived });
+    if (r.error) { toast(r.error, true); return; }
+    toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
+    await refreshList();
+  } else if (act === "unread") {
+    const isUnread = (c.unread > 0) || !!c.forced_unread;
+    const r = isUnread
+      ? await api("/api/mesh/read", { chat_id: chatId })
+      : await api("/api/mesh/mark_unread", { chat_id: chatId, unread: true });
+    if (r.error) { toast(r.error, true); return; }
+    await refreshList();
+  } else if (act === "pin") {
+    const willPin = !c.pinned;
+    const r = await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: willPin });
+    if (r.error) { toast(r.error, true); return; }
+    await refreshList();
+    toast(willPin ? "Chat pinned" : "Chat unpinned", {
+      check: true, action: "Undo", onAction: async () => {
+        await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: !willPin });
+        await refreshList();
+      },
+    });
+  }
+}
+
+async function refreshList() {
+  Mesh.state = await api("/api/mesh/state");
+  const box = $("#side-chats");
+  if (box) box.dataset.key = "";
+  renderChatListSidebar();
 }
 
 // ---- in-sidebar new-group builder (retires the old modal) -----------------

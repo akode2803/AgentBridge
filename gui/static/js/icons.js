@@ -45,6 +45,8 @@ export const ICONS = {
   ticks: '<svg viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L10 4.5"/><path d="M8 8l3.5 3.5L21 3"/></svg>',
   // deleted-message tombstone: a no-entry circle with a slash (WhatsApp 🚫)
   banned: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>',
+  // mark-as-unread: a filled dot inside a ring
+  unread: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>',
 };
 
 // file-type glyphs — modern line icons (was emoji). Keyed by category;

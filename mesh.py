@@ -775,6 +775,59 @@ class Mesh:
         self.cx.write_json(key, cur)
         return {"ns": cut, "keep_starred": bool(keep_starred)}
 
+    # ----------------------------------------- per-user chat overlays (sidebar)
+    # pin / delete-for-me / mark-unread all live in the same per-chat per-user
+    # state file as read_ts/starred/hidden/cleared — private to the caller, no
+    # other member affected. chats_for + unread_count read them back.
+
+    def pin_chat(self, chat_id, username, pinned=True):
+        """Pin-for-me: float the chat to the top of this user's list. Private
+        (WhatsApp 'Pin chat') — the pin time doubles as the pinned-group sort."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if username not in (meta.get("members") or []):
+            raise MeshError("Only members can pin a chat")
+        key = self._cursor_key(chat_id, username)
+        cur = self.cx.read_json(key) or {}
+        cur["pinned"] = utcnow() if pinned else None
+        cur["updated"] = utcnow()
+        self.cx.write_json(key, cur)
+        return bool(pinned)
+
+    def delete_chat_for(self, chat_id, username, deleted=True):
+        """Delete-for-me: hide the whole chat from THIS user's list (WhatsApp
+        'Delete chat'). Non-destructive — the chat reappears when a message
+        newer than the delete arrives (chats_for compares the two). Distinct
+        from the owner-only delete_chat, which removes it for everyone."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if username not in (meta.get("members") or []):
+            raise MeshError("Only members can delete a chat")
+        key = self._cursor_key(chat_id, username)
+        cur = self.cx.read_json(key) or {}
+        cur["deleted"] = utcnow() if deleted else None
+        cur["updated"] = utcnow()
+        self.cx.write_json(key, cur)
+        return bool(deleted)
+
+    def mark_unread(self, chat_id, username, unread=True):
+        """Mark-as-unread: force the unread indicator on even with nothing
+        technically unread (WhatsApp 'Mark as unread'). Cleared by mark_read,
+        i.e. the next time the user opens the chat."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if username not in (meta.get("members") or []):
+            raise MeshError("Only members can mark a chat")
+        key = self._cursor_key(chat_id, username)
+        cur = self.cx.read_json(key) or {}
+        cur["forced_unread"] = bool(unread)
+        cur["updated"] = utcnow()
+        self.cx.write_json(key, cur)
+        return bool(unread)
+
     def edit_message(self, chat_id, username, msg_id, new_body):
         """Edit-in-place, author-only (WhatsApp). The new body lands in a
         chat-level `edits.json` overlay ({id:{body,tags,by,at}}) — the raw
@@ -891,9 +944,19 @@ class Mesh:
             if username not in (meta.get("members") or []):
                 continue
             meta["last"] = self._last_message(meta["id"], viewer=username)
+            cur = self.cx.read_json(self._cursor_key(cid, username)) or {}
+            # delete-for-me: stay hidden until a message newer than the delete
+            deleted = cur.get("deleted")
+            if deleted and ((meta["last"] or {}).get("ts") or "") <= deleted:
+                continue
+            meta["pinned"] = bool(cur.get("pinned"))
+            meta["forced_unread"] = bool(cur.get("forced_unread"))
             out.append(meta)
+        # recency first, then float the pinned group to the top (stable sort
+        # keeps recency order within each group)
         out.sort(key=lambda m: (m.get("last") or {}).get("ts") or m["created"],
                  reverse=True)
+        out.sort(key=lambda m: bool(m.get("pinned")), reverse=True)
         return out
 
     # ------------------------------------------------------------- messages
@@ -1110,6 +1173,7 @@ class Mesh:
         key = self._cursor_key(chat_id, username)
         cur = self.cx.read_json(key) or {}
         cur["read_ts"] = ts or utcnow()
+        cur["forced_unread"] = False   # opening the chat clears a manual mark-unread
         cur["updated"] = utcnow()
         self.cx.write_json(key, cur)
 
