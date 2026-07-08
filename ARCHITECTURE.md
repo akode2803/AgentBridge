@@ -220,11 +220,16 @@ mesh/
   against known usernames.
 - **Forwarded messages carry `fwd` and have `tags: []` unconditionally** —
   forwarding never re-triggers anyone, by design (WhatsApp semantics).
+- **`receipt` (v0.24.18) is server-added, not stored**: `api_mesh_messages`
+  attaches `{state: "sent"|"read", read_by, total}` to each message the viewer
+  sent (`mine` only), derived from the other members' read cursors. It never
+  reaches the `.jsonl`. Editing a message does **not** reset it (WhatsApp/
+  Telegram): the `edited` marker shows but the ticks stand.
 
 ### Cursor / star state (`chats/<id>/state/<username>.json`)
 
 ```jsonc
-{"read_ts": "...", "updated": "...",
+{"read_ts": "...", "read_ns": 1971172930123456789, "updated": "...",
  "starred": {"<msg_id>": {"from": "...", "body": "...", "ts": "...", "at": "..."}},
  "hidden": {"<msg_id>": "<at>"},              // delete-for-me (v0.24.3)
  "cleared": {"ns": 123, "keep_starred": false, "at": "..."},  // clear-chat (v0.24.8)
@@ -232,6 +237,16 @@ mesh/
  "deleted": "<at>|null",                      // delete-chat = per-user hide (v0.24.16)
  "forced_unread": true}                       // manual "mark as unread" (v0.24.16)
 ```
+
+`read_ns` (v0.24.18) is the `ns` high-water mark of what this user had in view
+at their last `mark_read` — the skew-safe partner to `read_ts`. **Read receipts
+compare `ns`-to-`ns`** off this field (§the receipt below), while `unread_count`
+still uses `read_ts` (deliberately left alone). A message from A is "read" by B
+once `B.read_ns >= msg.ns`; `receipts_for()` reads every *other* member's cursor
+once and returns, for each of the viewer's OWN messages, `{state, read_by,
+total}`. A group message is "read" only when EVERY other member has read it.
+There is **no new write path** — the cursors were already being written; receipts
+just read them back.
 
 One file holds the read cursor and the private per-user overlays for that user
 in that chat — `mark_read()` always **merges**, never overwrites, because an
@@ -360,7 +375,9 @@ Full public surface, grouped as they appear in the file:
 | `parse_tags(body)` | regex `@name` extraction, filtered to real usernames |
 | `post(chat_id, sender, body, attachments, reply_to, forward_of)` | the single message-creation path; enforces membership + not-archived, stages attachments into `files/` with collision-safe renaming, stamps `ns`/`id`/`tags` |
 | `forward_message(src_chat, msg_id, targets, by)` | copies body + re-ships attachments into each target via `post()`, `forward_of=` sets `fwd` attribution and blanks tags |
-| `mark_read`, `unread_count` | cursor read/write (merge semantics, §2) |
+| `mark_read`, `unread_count` | cursor read/write (merge semantics, §2); `mark_read` also stamps `read_ns` (v0.24.18) |
+| `read_cursor(chat_id, user)` → `(read_ns, read_ts)` | one member's read high-water mark (v0.24.18) |
+| `receipts_for(chat_id, viewer, msgs)` | read receipts for the viewer's OWN messages: `{id: {state, read_by, total}}` from the other members' cursors; empty for self-chats/non-members. `msgs` is reused from `messages_for` so it costs one cursor read per other member, no extra message read (v0.24.18) |
 | `seed_defaults()` | first-run convenience: creates `aryan`/`claude`/`coco` if absent |
 
 Every mutating method that can be called by an untrusted/user-facing edge
@@ -795,21 +812,29 @@ delete, **message delete** (for-me hide + sender-only for-everyone tombstone,
 §2), **clear chat** (per-user `cleared` ns-cursor + optional keep-starred, §2),
 **edit message** (author-only `edits.json` overlay + "edited" marker + the
 worker re-triggering on a human's edit-into-mention — the Hybrid, §2/§4.2),
-in-chat search, media/docs/links browser (month-grouped), mesh-wide
-stand-down switch, per-agent rate cap, config-driven `--sql-read-only`
+**read receipts** (Sent/Read ticks: single grey = sent, double accent = read;
+group tooltip "Read by n/N"; derived from the per-member read cursors with no
+new write path, v0.24.18 — §2 receipt), the **sidebar chat menu** (hover
+chevron + right-click: pin/unpin, mark-unread, delete-as-hide, archive, clear,
+exit; v0.24.16), in-chat search, media/docs/links browser (month-grouped),
+mesh-wide stand-down switch, per-agent rate cap, config-driven `--sql-read-only`
 opt-out (§6.6).
 
 **In flight / stubbed** (present in their menus, backend-ready or partially
 so, but not wired to a finished flow):
-- **Read receipts**: the double-tick renders (frontend placeholder) but there
-  is no delivered/read backend yet — every message shows as merely "sent."
+- **Delivered receipt** (the grey double-tick middle state) is *not* built —
+  read receipts ship as Sent + Read only. Delivered needs a per-user presence
+  heartbeat, which is bundled with the online/last-seen parity feature; the
+  signal is also fuzzy over OneDrive (a client can poll before its folder syncs).
+- **Mute notifications** is a stub (the row menu shows an "arriving" toast).
 
-  (**Message delete**, **clear chat**, and **edit** — once sketched here —
-  shipped in v0.24.3 / v0.24.8 / v0.24.10–11: delete-for-me is a `hidden` set,
-  delete-for-everyone a chat-level `redactions.json`, clear-chat a per-user
-  `cleared` cursor, and edit a chat-level `edits.json` — all applied by
-  `messages_for()` on every read path (§2). Edit also re-triggers the worker on
-  a human's edit-into-mention, the Hybrid, §4.2.)
+  (**Message delete**, **clear chat**, **edit**, and **read receipts** — once
+  sketched here — shipped in v0.24.3 / v0.24.8 / v0.24.10–11 / v0.24.18:
+  delete-for-me is a `hidden` set, delete-for-everyone a chat-level
+  `redactions.json`, clear-chat a per-user `cleared` cursor, and edit a
+  chat-level `edits.json` — all applied by `messages_for()` on every read path
+  (§2). Edit also re-triggers the worker on a human's edit-into-mention, the
+  Hybrid, §4.2. Read receipts read the per-member cursors back — no new write.)
 
 Deliberately deferred (see the mesh memory's reminder list for the full,
 current backlog — it changes faster than this doc should try to track):

@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.16
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.18
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -29,13 +29,21 @@ conventions that aren't obvious from the code alone.
   can read a deleted body (v0.24.3, §2 of ARCHITECTURE.md); **clear chat** — a
   private per-user "clear for me" (a `cleared` ns-cursor in the same state-file
   overlay family, with an optional keep-starred), the chat stays in the list
-  and no other member is affected (v0.24.8).
-- **In flight / still stubbed:** `Edit` is **fully shipped** (v0.24.10 human
-  side + v0.24.11 agents): a chat-level `edits.json` overlay applied by
-  `messages_for`, an edit window, an "edited" marker, and the worker
-  re-triggering a reply only when a human edits a message into a mention/
-  question for that agent (live-tested). Read-receipt ticks remain a frontend
-  placeholder with no delivered/read backend yet.
+  and no other member is affected (v0.24.8); **edit message** — author-only
+  in-place edit (`edits.json` overlay, "edited" marker) that also re-triggers an
+  agent when a human edits a message into a mention for it (v0.24.10–11); the
+  **sidebar chat menu** — hover chevron + right-click with pin/unpin (per-user
+  pin-to-top), mark-unread, delete-as-hide, archive, clear, exit-group (v0.24.16);
+  **read receipts** — WhatsApp/Telegram Sent/Read ticks (single grey = sent,
+  double accent = read, group tooltip "Read by n/N"), derived from the per-member
+  read cursors with no new write path (v0.24.18, §2 of ARCHITECTURE.md).
+- **In flight / still stubbed:** **Delivered** (the grey double-tick middle
+  state) is deliberately *not* built — read receipts ship as Sent + Read only;
+  Delivered needs a per-user presence heartbeat and rides with the online/
+  last-seen parity feature. **Mute notifications** in the row menu is a stub (an
+  "arriving" toast). `edit-marks-unread` (bumping *other* users' unread count on
+  an edit) stays DEFERRED to the worker/context overhaul — it needs a cross-user
+  write; note that editing does NOT reset the read ticks (WhatsApp/Telegram).
 
 ## What lives outside this repo
 
@@ -50,6 +58,31 @@ machine (see the last section).
 | **Runtime config** | `~/.agentbridge/` | `config.json` (path to the synced shared folder), `worker_<agent>.json` (each agent's CLI command, workdir, tool blocklist, rate cap), plus per-worker state/outbox dirs. |
 | **Skills** | `~/.claude/skills/` | `mesh-chat` (post/read in mesh rooms) and the transition-pipeline skills. |
 | **Live mesh data** | the synced shared folder, `mesh/` subtree | Users, chats, messages, files. This *is* the datastore — never edited by hand. |
+
+## Switching to a new Claude account on this same machine
+
+This is the current handoff path. Everything above under "outside this repo"
+lives under the Windows user's `~/.claude` / `~/.agentbridge`, which are keyed
+to the **OS user and the project directory, not the Claude account** — so a new
+Claude login on this same machine inherits the project memory, the skills, the
+runtime config, and the live mesh automatically. Nothing needs copying.
+
+On the first session under the new account, do these three things before writing
+any code:
+
+1. **Read this file, then `ARCHITECTURE.md` (repo root), then the memory index**
+   `~/.claude/projects/<this-project>/memory/MEMORY.md` and the notes it points
+   to — the memory's reminder list is the authoritative, current backlog and
+   carries the round-by-round history and credentials that are deliberately kept
+   out of git.
+2. **Read `CLAUDE.md` (repo root)** — the always-loaded rules. If the harness
+   didn't auto-load it, read it manually. The "Operating conventions" below are
+   the same rules in prose.
+3. **Confirm the environment is live:** `git status` clean and on `main`;
+   `~/.agentbridge/config.json` points at the synced shared folder;
+   `python check_frontend.py` prints 21/21. If memory somehow did NOT carry over
+   (different OS user, fresh profile), follow "If the project moves to a
+   different machine" at the bottom instead.
 
 ## Operating conventions (follow these)
 
@@ -82,28 +115,27 @@ machine (see the last section).
 
 ## Next work queue
 
-1. **Read receipts** — a frontend placeholder tick with no delivered/read
-   backend. (**Round 9 sidebar menu + layout shipped**: 9A layout v0.24.13
-   [dynamic preview + clamped transcript-priority panes]; 9B v0.24.16 [hover
-   chevron + right-click row menu — Pin/Unpin, Mark-as-unread, Delete-as-hide,
-   reuse Archive/Clear/Exit, Mute stub]. Three new per-chat/per-user overlays
-   `pinned`/`deleted`/`forced_unread`; `chats_for` does the pin-sort + hide-filter.
-   **Delete chat is now wired** as a per-user hide in both the header and sidebar
-   menus; the owner-only `api_mesh_delete_chat` nuke stays parked. `edit-marks-
-   unread` and the worker unread-queue + parallel requests remain DEFERRED to the
-   context-mgmt overhaul, memory `agentbridge-worker-context`. The single-instance
-   "forking" was also fixed — `serve()` now hands off proactively, v0.24.15.)
-   (**8D graceful stand-down/resume** shipped v0.24.12: `atomic_write_json` retries
-   on `PermissionError` ~2s then the pause endpoint returns a graceful error;
-   GUI shows spinner→result/timeout toast. **Edit** shipped v0.24.10/v0.24.11;
-   **clear chat** v0.24.8.)
-2. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
-   (who may pin, per-chat agent permissions) and an **agent-worker overhaul**
-   (uniform capability exposure to agents, context-window management, agent
-   choosing reply-vs-tag, the unread-queue + parallel requests, edit-marks-unread),
-   then a **settings overhaul**, then the **setup/account overhaul** (also fully
-   retire `legacy/bridge.py` and the app-packaging pass: quit-on-window-close +
-   worker singleton).
+1. **Agent-worker / context-management overhaul** is the next big session
+   (scoped in memory `agentbridge-worker-context`): a human-like unread QUEUE so
+   an agent catches up gracefully after downtime, PARALLEL requests from multiple
+   humans, the agent choosing reply-vs-tag, uniform capability exposure (pins/
+   stars/replies to agents), and the two known worker bugs — duplicate-reply (no
+   per-message answered-guard, only ns-cursor + rate-limit) and the need for a
+   worker PID singleton. `edit-marks-unread` (cross-user unread bump) folds in
+   here. (**Read receipts** shipped v0.24.18 — Sent/Read ticks off the per-member
+   cursors; Delivered deferred to a presence heartbeat. **Round 9** shipped: 9A
+   layout v0.24.13 [dynamic preview + clamped transcript-priority panes]; 9B
+   v0.24.16 [sidebar chat menu — three per-user overlays `pinned`/`deleted`/
+   `forced_unread`, delete-as-hide wired in both menus]; row-menu width fix
+   v0.24.17. **8D graceful stand-down** v0.24.12 [`atomic_write_json` retries on
+   `PermissionError`, graceful pause error, spinner toast]. The single-instance
+   "forking" fix — `serve()` hands off proactively — v0.24.15.)
+2. Longer-horizon sessions already scoped in memory, in order: a **permissions
+   overhaul** (who may pin, per-chat agent tool permissions), then a **settings
+   overhaul**, then the **setup/account overhaul** (machine-based agent
+   ownership; also fully retire `legacy/bridge.py` — still load-bearing as the
+   config/util layer — and the app-packaging pass: quit-on-window-close + the
+   worker PID singleton).
 3. **WhatsApp-parity gap features** (after the overhauls above): block a user,
    emoji reactions, history-on-join policy, multi-admin roles, group invite
    links, profile photo.
