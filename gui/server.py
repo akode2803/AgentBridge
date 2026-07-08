@@ -851,7 +851,13 @@ def api_mesh_pause(data):
     ctl["paused"] = bool(data.get("paused"))
     ctl["by"] = user
     ctl["ts"] = bridge.utcnow()
-    bridge.atomic_write_json(m.root / "control.json", ctl)
+    try:
+        bridge.atomic_write_json(m.root / "control.json", ctl)
+    except OSError:
+        # the shared folder is locked (OneDrive syncing) even after retries —
+        # tell the caller gracefully rather than 500; the toggle can be retried
+        return {"error": "Couldn't reach the shared folder — it may be syncing. "
+                         "Try again in a moment."}
     return {"ok": True, "paused": ctl["paused"]}
 
 

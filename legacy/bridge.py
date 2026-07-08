@@ -95,9 +95,20 @@ def atomic_write_json(path, obj):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # OneDrive (or AV) can briefly hold the file open mid-sync, so the write
+    # or the os.replace raises PermissionError. Retry with a short backoff
+    # (~2s worst case) before giving up — used by control.json (the agent
+    # stand-down switch), so a transient lock shouldn't fail the toggle.
+    for attempt in range(6):
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.15 * (attempt + 1))
 
 
 def append_jsonl(path, obj):

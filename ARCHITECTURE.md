@@ -284,7 +284,12 @@ its own):
 from the chat details page (`api_mesh_pause`); every worker's `cycle()` checks
 it first and holds all triggers while paused (cursors don't advance, so
 resuming produces one consolidated reply per chat, not a replay of everything
-missed).
+missed). The toggle's write goes through the shared `atomic_write_json`, which
+**retries on `PermissionError`** (short backoff, ~2s cap) because OneDrive can
+hold the file open mid-sync; if the lock outlasts the retries the endpoint
+returns a graceful "shared folder is syncing, try again" error rather than a
+500, and the GUI shows a spinner toast → result/timeout. Same retry protects
+every mesh state write (posts, stars, cursors), not just the stand-down switch.
 
 ---
 

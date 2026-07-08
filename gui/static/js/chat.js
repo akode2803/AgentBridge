@@ -500,11 +500,17 @@ async function renderMeshChat(force) {
         toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
         location.hash = "#/chats";   // archived chats leave the active list
       } else if (act === "pause") {
-        const r = await api("/api/mesh/pause", { paused: !ms.paused });
-        if (r.error) { toast(r.error, true); return; }
+        const down = !ms.paused;   // clicking to stand down vs. resume
+        // the write can retry through OneDrive latency, so hold a spinner
+        // toast and swap it for the result (or a graceful timeout message)
+        toast(down ? "Standing down all agents…" : "Resuming all agents…", { spinner: true });
+        const r = await api("/api/mesh/pause", { paused: down });
+        if (r.error) { toast(r.error, { error: true, swap: true }); return; }
         Mesh.state.paused = r.paused;
         renderChrome();
         Mesh.structKey = ""; renderChats(true);
+        toast(r.paused ? "All agents standing down" : "All agents resumed",
+              { check: true, swap: true });
       }
     });
   });

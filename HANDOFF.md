@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.11
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.12
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -82,13 +82,19 @@ machine (see the last section).
 
 ## Next work queue
 
-1. **Two deferred corrections** (2026-07-08): a **sidebar right-click chat menu**
-   (the left chat-list rows only click-to-open today — add a WhatsApp-style menu,
-   danger-styled — scope its actions with the user) and **graceful
-   stand-down/resume, round 8D** (`api_mesh_pause`'s `control.json` write throws
-   a raw `PermissionError` when OneDrive locks the file mid-sync — needs
-   retry/backoff + a spinner toast + a timeout message).
-   (**Edit** fully shipped v0.24.10 human side + v0.24.11 agents/Hybrid;
+1. **Sidebar chat menu + layout (Round 9, next).** The left chat-list rows only
+   click-to-open today — add a hover **chevron** + **right-click menu** mirroring
+   the chat-header menu (Pin/Unpin — a NEW per-user overlay, Mark-as-unread — new,
+   Archive/Clear/Delete/Exit — reuse existing endpoints; Mute stays as an
+   "arriving" stub; skip favourites/lists). Split: **9A** = layout (kill the
+   `.chat-last` 190px cap so the preview reflows; widths list `clamp(300,26vw,420)`,
+   details `clamp(300,24vw,400)`, transcript min ~520px else details overlays);
+   **9B** = chevron + menu + pin/unpin + fold in edit-marks-unread. Big worker
+   unread-queue + parallel requests are DEFERRED to the context-mgmt overhaul
+   (see memory `agentbridge-worker-context`).
+   (**8D graceful stand-down/resume** shipped v0.24.12: `atomic_write_json` retries
+   on `PermissionError` ~2s then the pause endpoint returns a graceful error;
+   GUI shows spinner→result/timeout toast. **Edit** shipped v0.24.10/v0.24.11;
    **clear chat** v0.24.8.)
 2. **Read receipts** — a frontend placeholder with no delivered/read backend.
 3. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
