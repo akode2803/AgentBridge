@@ -133,9 +133,11 @@ mesh/
   re-parsed tags, set `edited={at}`) **before** redactions, so a later
   delete-for-everyone still wins over an edit; the raw `.jsonl` is never
   rewritten (audit). Edits show corrected on every read path including the agent
-  worker's context, but an in-place edit does NOT re-trigger an agent on its own
-  (the worker's ns-cursor is unchanged) — the deliberate re-trigger for a
-  corrected mention/question is round 8C.
+  worker's context. An in-place edit leaves the worker's ns-cursor unchanged, so
+  it never re-triggers on its own; the worker's `_edit_trigger` (v0.24.11)
+  re-fires ONE reply only when a **human** edits an already-seen message INTO a
+  mention/question for that agent (baselined once per process so a restart never
+  replays old edits). See §4.2.
 - An agent has one or more `owners` (humans). **An agent must always have at
   least one owner** — `update_agent`'s `revoke_owner` refuses to drop the last
   one. Ownership is what makes the free-chatting invariant enforceable (§6).
@@ -396,9 +398,18 @@ writes auto-denied).
    — `"all"` triggers on anything, `"tagged"` on an explicit `@tag` *or* a
    `reply_to` pointing at this agent, `"humans"` only on human senders. An
    agent never triggers on its own messages.
+   - **Edit re-trigger (`_edit_trigger`, v0.24.11 — the Hybrid):** an in-place
+     edit keeps the same `ns`, so the cursor never re-sees it. This step also
+     fires ONE reply when a *human* edits an already-seen message INTO a
+     `should_reply` trigger (a corrected mention/question). Handled edits are
+     tracked in `state['edits_seen'][chat] = {id: at}`; each chat is baselined
+     once per process (so a restart never replays edits made while it was down).
+     The loop-guard in step 5 is bypassed for an edit-trigger — a corrected
+     question deserves an answer even if the agent spoke last (the edit is
+     marked seen, so it can't loop).
 5. If no trigger, or the newest message in the chat is already this agent's
-   own (loop-guard against agent-vs-agent ping-pong), retire any lingering
-   "running" status feed and stop.
+   own (loop-guard against agent-vs-agent ping-pong — new messages only), retire
+   any lingering "running" status feed and stop.
 6. Rate cap (`max_replies_per_hour`, default 30) — a runaway-conversation
    brake, checked per chat.
 7. Stage inbound attachments into `workdir/inbox_files/` (headless CLI agents
@@ -768,29 +779,23 @@ inline image thumbnails in the transcript, read-more clamping, live
 typing/working presence, archive (never-delete) + owner-only permanent
 delete, **message delete** (for-me hide + sender-only for-everyone tombstone,
 §2), **clear chat** (per-user `cleared` ns-cursor + optional keep-starred, §2),
-**edit message** (author-only, human side — `edits.json` overlay + "edited"
-marker; agent re-trigger is round 8C), in-chat search,
-media/docs/links browser (month-grouped), mesh-wide
+**edit message** (author-only `edits.json` overlay + "edited" marker + the
+worker re-triggering on a human's edit-into-mention — the Hybrid, §2/§4.2),
+in-chat search, media/docs/links browser (month-grouped), mesh-wide
 stand-down switch, per-agent rate cap, config-driven `--sql-read-only`
 opt-out (§6.6).
 
 **In flight / stubbed** (present in their menus, backend-ready or partially
 so, but not wired to a finished flow):
-- **Edit → agents** (round 8C, the only piece left): the human-side edit
-  shipped v0.24.10 (a chat-level `edits.json` overlay; `messages_for` applies
-  the latest + an `edited` marker; edit window in the message menu). What's left
-  is the **Hybrid**: edits already show corrected in any future agent context
-  (free — `messages_for` applies them), so 8C adds the worker **re-triggering** a
-  reply only when a human edits a message into a mention/question for that agent
-  (its ns-cursor won't catch an in-place edit unaided).
-
-  (**Message delete**, **clear chat**, and **edit (human side)** — once sketched
-  here — shipped in v0.24.3 / v0.24.8 / v0.24.10: delete-for-me is a `hidden`
-  set, delete-for-everyone a chat-level `redactions.json`, clear-chat a per-user
-  `cleared` cursor, and edit a chat-level `edits.json`, all applied by
-  `messages_for()` on every read path. See §2.)
 - **Read receipts**: the double-tick renders (frontend placeholder) but there
   is no delivered/read backend yet — every message shows as merely "sent."
+
+  (**Message delete**, **clear chat**, and **edit** — once sketched here —
+  shipped in v0.24.3 / v0.24.8 / v0.24.10–11: delete-for-me is a `hidden` set,
+  delete-for-everyone a chat-level `redactions.json`, clear-chat a per-user
+  `cleared` cursor, and edit a chat-level `edits.json` — all applied by
+  `messages_for()` on every read path (§2). Edit also re-triggers the worker on
+  a human's edit-into-mention, the Hybrid, §4.2.)
 
 Deliberately deferred (see the mesh memory's reminder list for the full,
 current backlog — it changes faster than this doc should try to track):

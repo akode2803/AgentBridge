@@ -469,6 +469,9 @@ class Worker:
         self.outbox = self.workdir / "outbox"
         self.state_path = self.workdir / "worker_state.json"
         self.state = read_json(self.state_path) or {"cursors": {}, "replies": {}}
+        # chats whose edit overlay we've baselined this process (in-memory, so a
+        # restart re-baselines — the point: never replay edits made while down)
+        self._edit_baselined = set()
         # re-probe the full flag set once per process: a persisted fallback
         # otherwise outlives the CLI bug that caused it (CoCo ran flagless —
         # no -w workspace — for a whole day, which auto-denied its writes)
@@ -507,25 +510,69 @@ class Worker:
             cmd += f" --model {model}"
         return cmd
 
+    def _edit_trigger(self, chat_id, msgs, cursor, joined_ns, rule, users):
+        """Hybrid edit→agent (v0.24.11): a human editing an ALREADY-SEEN message
+        INTO a mention/question for this agent re-fires ONE reply. Edits are an
+        in-place overlay (no new `ns`), so the ns-cursor never notices them.
+        Handled edits are tracked per chat in state['edits_seen'][chat_id] =
+        {id: at}. The first time this PROCESS sees a chat it baselines the
+        current edits (records them as handled, no reply) so a restart never
+        replays edits made while the worker was down; edits arriving afterwards
+        fire. Returns (trigger_msg_or_None, state_dirty)."""
+        edits = self.mesh._edits(chat_id)
+        seen_all = self.state.setdefault("edits_seen", {})
+        # baseline once per process — resets on restart (that's intentional)
+        if chat_id not in self._edit_baselined:
+            self._edit_baselined.add(chat_id)
+            snapshot = {mid: e.get("at") for mid, e in edits.items()}
+            dirty = snapshot != seen_all.get(chat_id)
+            seen_all[chat_id] = snapshot
+            return None, dirty
+        if not edits:
+            return None, False
+        seen = seen_all.setdefault(chat_id, {})
+        by_id = {m.get("id"): m for m in msgs}
+        trigger = None
+        dirty = False
+        for mid, e in edits.items():
+            at = e.get("at")
+            if seen.get(mid) == at:
+                continue                       # this exact edit already handled
+            seen[mid] = at                     # mark handled (even if it won't fire)
+            dirty = True
+            m = by_id.get(mid)
+            if not m or m.get("deleted") or m.get("kind") == "info":
+                continue
+            if m.get("from") == self.agent:    # never self-trigger on my own edit
+                continue
+            if (users.get(e.get("by")) or {}).get("kind") != "human":
+                continue                       # only a human's edit re-triggers
+            if msg_ns(m) > cursor:
+                continue                       # also brand-new → the normal path
+            if msg_ns(m) <= joined_ns:
+                continue                       # from before I joined this chat
+            if should_reply(rule, m, self.agent, users):
+                trigger = m                    # keep the latest qualifying edit
+        return trigger, dirty
+
     def process_chat(self, meta, users, dry_run=False):
         chat_id = meta["id"]
         try:
             cursor = int(self.state["cursors"].get(chat_id) or 0)
         except (ValueError, TypeError):
             cursor = 0  # pre-ns cursor format; rescan from the start
-        # messages_for applies the delete overlays: an agent must never read a
-        # deleted message's body (deleted-for-everyone comes back tombstoned,
-        # body stripped). Agents have no delete-for-me overlay of their own.
+        # messages_for applies the delete + edit overlays: an agent never reads
+        # a deleted body (deleted-for-everyone comes back tombstoned), and reads
+        # an edited message in its LATEST form — so any context build already
+        # reflects edits. Agents have no delete-for-me/clear overlay of their own.
         msgs = self.mesh.messages_for(chat_id, self.agent, tail=0)
         new = [m for m in msgs if msg_ns(m) > cursor]
-        if not new:
-            return False
-        # a message can OUTRUN its attachment through the sync client (big
-        # files especially): the .jsonl line lands before the file body.
-        # Hold the whole batch until new messages' files verify (size match),
-        # with a 10-minute grace so a lost file can't wedge the chat forever.
         chat_local = self.mesh.chat_dir(chat_id)
-        if chat_local:
+        # a NEW message can OUTRUN its attachment through the sync client (big
+        # files especially): the .jsonl line lands before the file body. Hold
+        # the whole batch until new messages' files verify (size match), with a
+        # 10-minute grace so a lost file can't wedge the chat forever.
+        if new and chat_local:
             for m in new:
                 if time.time() - msg_ns(m) / 1e9 > 600:
                     continue
@@ -541,8 +588,6 @@ class Worker:
                                        f"'{f.get('name')}' to finish syncing")
                         fw.write(state="running", force=True)
                         return False   # cursor holds; retry next poll
-        # always advance the cursor — rule says whether we ANSWER, not re-scan
-        self.state["cursors"][chat_id] = msg_ns(new[-1])
         # if this agent was ADDED later (vs founding member), only messages
         # after the latest (re-)add may trigger it — being re-added must not
         # replay mentions from while it was out (seen live 2026-07-05).
@@ -552,16 +597,33 @@ class Worker:
                          and m.get("event") == "add_member"
                          and m.get("target") == self.agent] or [0])
         rule = self.mesh.reply_rule(self.agent, chat_id)
-        # keep the LAST triggering message: the agent's answer posts as a
-        # reply to it, so every agent message carries a quote in the UI
-        trigger_msg = None
+        # Hybrid edit handling — computed AFTER the sync-wait so a held batch
+        # never burns an edit (it stays un-seen until we actually get here)
+        edit_trigger, edits_dirty = self._edit_trigger(
+            chat_id, msgs, cursor, joined_ns, rule, users)
+        if not new and edit_trigger is None:
+            if edits_dirty:
+                self.save_state()   # persist the edit baseline / seen updates
+            return False
+        # always advance the cursor for real new messages — the rule decides
+        # whether we ANSWER, not whether we re-scan
+        if new:
+            self.state["cursors"][chat_id] = msg_ns(new[-1])
+        # keep the LAST triggering NEW message: the agent's answer replies to
+        # it, so every agent message carries a quote in the UI
+        new_trigger = None
         for m in new:
             if m.get("kind") != "info" and not m.get("deleted") \
                     and msg_ns(m) > joined_ns \
                     and should_reply(rule, m, self.agent, users):
-                trigger_msg = m
-        trigger = trigger_msg is not None
-        if not trigger or msgs[-1].get("from") == self.agent:
+                new_trigger = m
+        # "don't answer right after myself" is loop-protection for NEW messages;
+        # a corrected (edited) question still deserves an answer even if I spoke
+        # last — its edit is marked seen, so it can't loop
+        if new_trigger is not None and msgs[-1].get("from") == self.agent:
+            new_trigger = None
+        trigger_msg = new_trigger or edit_trigger
+        if trigger_msg is None:
             # a sync-wait status bubble may be lingering from an earlier
             # poll — this batch resolved without a run, so retire it
             retire_feed(self.mesh.root, self.agent, chat_id)

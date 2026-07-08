@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.10
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.11
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -30,11 +30,12 @@ conventions that aren't obvious from the code alone.
   private per-user "clear for me" (a `cleared` ns-cursor in the same state-file
   overlay family, with an optional keep-starred), the chat stays in the list
   and no other member is affected (v0.24.8).
-- **In flight / still stubbed:** `Edit` works **human-side** (v0.24.10 — a
-  chat-level `edits.json` overlay applied by `messages_for`, an edit window, and
-  an "edited" marker on the bubble); the **agent-handling** of edits (the worker
-  re-triggering on a corrected mention/question) is the next round. Read-receipt
-  ticks are a frontend placeholder with no delivered/read backend yet.
+- **In flight / still stubbed:** `Edit` is **fully shipped** (v0.24.10 human
+  side + v0.24.11 agents): a chat-level `edits.json` overlay applied by
+  `messages_for`, an edit window, an "edited" marker, and the worker
+  re-triggering a reply only when a human edits a message into a mention/
+  question for that agent (live-tested). Read-receipt ticks remain a frontend
+  placeholder with no delivered/read backend yet.
 
 ## What lives outside this repo
 
@@ -81,30 +82,24 @@ machine (see the last section).
 
 ## Next work queue
 
-1. **Edit → agents** (round 8C) — the human-side edit shipped v0.24.10 (a
-   chat-level `edits.json` overlay applied by `messages_for`, an edit window, an
-   "edited" marker). What's left is the **Hybrid** agent behaviour: edits already
-   show corrected in any future agent context (free — `messages_for` applies
-   them), so this round adds the worker **re-triggering** a reply only when a
-   human edits a message into a mention/question aimed at this agent (its
-   ns-cursor won't catch an in-place edit unaided). Needs a worker restart + a
-   live claude-in-chat test, like the delete round.
-   (**Clear chat** shipped v0.24.8; **edit human-side** v0.24.10.)
-2. **Two deferred corrections** (2026-07-08): a **sidebar right-click chat menu**
+1. **Two deferred corrections** (2026-07-08): a **sidebar right-click chat menu**
    (the left chat-list rows only click-to-open today — add a WhatsApp-style menu,
-   danger-styled) and **graceful stand-down/resume** (`api_mesh_pause`'s
-   `control.json` write throws a raw `PermissionError` when OneDrive locks the
-   file mid-sync — needs retry/backoff + a spinner toast + a timeout message).
-3. **Read receipts** — a frontend placeholder with no delivered/read backend.
-4. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
+   danger-styled — scope its actions with the user) and **graceful
+   stand-down/resume, round 8D** (`api_mesh_pause`'s `control.json` write throws
+   a raw `PermissionError` when OneDrive locks the file mid-sync — needs
+   retry/backoff + a spinner toast + a timeout message).
+   (**Edit** fully shipped v0.24.10 human side + v0.24.11 agents/Hybrid;
+   **clear chat** v0.24.8.)
+2. **Read receipts** — a frontend placeholder with no delivered/read backend.
+3. Longer-horizon sessions already scoped in memory: a **permissions overhaul**
    (who may pin, per-chat agent permissions) and an **agent-worker overhaul**
    (uniform capability exposure to agents, context-window management, agent
    choosing reply-vs-tag), then a **settings overhaul**, then the
    **setup/account overhaul**.
-5. **WhatsApp-parity gap features** (after the overhauls above): block a user,
+4. **WhatsApp-parity gap features** (after the overhauls above): block a user,
    emoji reactions, history-on-join policy, multi-admin roles, group invite
    links, profile photo.
-6. **True privacy**: deliberate encryption vs. per-user backends, then
+5. **True privacy**: deliberate encryption vs. per-user backends, then
    implement so no one — human or agent — can read a chat they're not in, even
    on disk (today's membership-based visibility, v0.24.0, is app-level only).
 
