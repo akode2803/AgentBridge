@@ -1396,18 +1396,22 @@ def request_shutdown(port, host="127.0.0.1"):
 
 def serve(port, host="127.0.0.1"):
     global HTTPD
+    # Hand off PROACTIVELY: if another AgentBridge already holds this port, ask
+    # it to quit before we bind. We can't rely on a bind error to detect it —
+    # HTTPServer sets allow_reuse_address, and on Windows that lets a duplicate
+    # bind SUCCEED, so the old server would linger and instances pile up (the
+    # long-standing "forking"). A no-op when nothing (or a foreign program) is
+    # on the port. Newest launch wins → always exactly one, always fresh code.
+    took_over = request_shutdown(port, host)
     httpd = None
-    try:
-        httpd = ThreadingHTTPServer((host, port), Handler)
-    except OSError:
-        if request_shutdown(port, host):
-            for _ in range(20):  # up to ~4s for the old instance to let go
-                time.sleep(0.2)
-                try:
-                    httpd = ThreadingHTTPServer((host, port), Handler)
-                    break
-                except OSError:
-                    continue
+    attempts = 20 if took_over else 1  # only wait around if we displaced someone
+    for i in range(attempts):
+        try:
+            httpd = ThreadingHTTPServer((host, port), Handler)
+            break
+        except OSError:
+            if i < attempts - 1:
+                time.sleep(0.2)  # up to ~4s for the old instance to let go
     if httpd is None:
         httpd = ThreadingHTTPServer((host, 0), Handler)  # last resort: ephemeral
     httpd.daemon_threads = True
