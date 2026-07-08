@@ -1033,6 +1033,25 @@ def api_mesh_clear_chat(data):
     return {"ok": True, "cleared": res}
 
 
+def api_mesh_edit_message(data):
+    """Edit a message in place — author-only, membership-gated. Stored as a
+    chat-level edits.json overlay; messages_for shows the latest edit."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    chat_id = data.get("chat_id") or ""
+    meta = m.get_chat(chat_id)
+    if not meta:
+        return {"error": "No such chat"}
+    denied = _not_member(meta, user)
+    if denied:
+        return denied
+    res = m.edit_message(chat_id, user, str(data.get("msg_id") or ""),
+                         data.get("body") or "")
+    return {"ok": True, "edited": res}
+
+
 def api_mesh_typing(data):
     """Typing heartbeat: the composer pings while the user writes; other
     members' windows show a dots-only bubble until it goes stale. One file
@@ -1206,6 +1225,7 @@ POST_ROUTES = {
     "/api/mesh/delete_messages": api_mesh_delete_messages,
     "/api/mesh/undelete_messages": api_mesh_undelete_messages,
     "/api/mesh/clear_chat": api_mesh_clear_chat,
+    "/api/mesh/edit_message": api_mesh_edit_message,
 }
 
 

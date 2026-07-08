@@ -749,6 +749,8 @@ input[type=text], select, textarea {
 }
 .bubble .meta .ticks { display: inline-flex; margin-left: 1px; }
 .bubble .meta .ticks svg { width: 15px; height: 15px; }
+/* "edited" tag ahead of the time (WhatsApp) — same faint weight as the time */
+.bubble .meta .meta-edited { font-style: italic; opacity: .9; }
 
 .type-tag {
   display: inline-block; font-size: 10px; font-weight: 600;
@@ -1588,6 +1590,15 @@ pre.configdump {
 .modal-box.confirm { width: min(430px, calc(100vw - 44px)); }
 .cf-title { font-size: 16.5px; font-weight: 600; margin: 2px 0 10px; }
 .cf-body { color: var(--text-dim); font-size: 13.5px; }
+/* edit-message window: a prefilled textarea + Save (accent pill) / Cancel */
+.edit-ta {
+  width: 100%; margin: 12px 0 2px; padding: 10px 12px;
+  border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 14px;
+  resize: vertical; min-height: 84px; line-height: 1.4;
+}
+.edit-ta:focus { outline: none; border-color: var(--accent); }
+.cf-actions button:disabled { opacity: .5; cursor: not-allowed; }
 /* sub-text under a confirm title (clear-chat explainer) + opt-in checkbox */
 .cf-sub { color: var(--text-dim); font-size: 13.5px; line-height: 1.45; }
 .cf-check {

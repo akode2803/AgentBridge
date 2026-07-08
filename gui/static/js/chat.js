@@ -263,6 +263,8 @@ async function renderMeshChat(force) {
     // WhatsApp-style — inside the bubble, on every message
     const starred = starredSet.has(msg.id);
     const metaRow = `<span class="meta">${
+      msg.edited ? '<span class="meta-edited">edited</span>' : ""
+    }${
       starred ? '<span class="star-mini">★</span>' : ""
     }<span class="meta-time">${esc(timeOnly(msg.ts))}</span>${
       msg.mine ? `<span class="ticks" aria-label="Sent">${ICONS.ticks}</span>` : ""
@@ -701,8 +703,9 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       // WhatsApp: Delete drops into a delete-ONLY selection with this message
       // already ticked (like forward mode); the flow fires from the trash.
       enterSelect(chatId, { mode: "delete", preselect: [msg.id] });
+    } else if (act === "edit") {
+      editDialog(chatId, msg);
     }
-    // edit: coming round
   });
 }
 
@@ -1143,4 +1146,45 @@ async function clearChat(chatId, keepStarred) {
   refreshChat();
   const wait = Math.max(0, 520 - (Date.now() - started));
   setTimeout(() => toast("Chat cleared", { check: true, swap: true }), wait);
+}
+
+// ---- edit message -----------------------------------------------------------
+// WhatsApp-style edit: a small window with the current text prefilled. Save
+// writes a chat-level edits.json overlay (author-only, server-enforced) and the
+// bubble re-renders with an "edited" marker. Ctrl/Cmd+Enter saves. No time
+// limit for now (WhatsApp caps at 15 min — can add later).
+function editDialog(chatId, msg) {
+  const box = openModal(`
+    <div class="cf-title">Edit message</div>
+    <textarea id="edit-body" class="edit-ta" rows="4"></textarea>
+    <div class="cf-actions">
+      <button class="cf-cancel" id="edit-cancel">Cancel</button>
+      <button class="cf-pill" id="edit-save">Save</button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  const ta = box.querySelector("#edit-body");
+  const save = box.querySelector("#edit-save");
+  ta.value = msg.body || "";
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  const sync = () => { save.disabled = !ta.value.trim(); };
+  ta.addEventListener("input", sync); sync();
+  const doSave = async () => {
+    const body = ta.value.trim();
+    if (!body) return;
+    if (body === (msg.body || "").trim()) { closeModal(); return; }   // no change
+    save.disabled = true;
+    const r = await api("/api/mesh/edit_message",
+                        { chat_id: chatId, msg_id: msg.id, body });
+    if (r.error) { toast(r.error, true); save.disabled = false; return; }
+    closeModal();
+    refreshChat();
+    toast("Message edited", { check: true });
+  };
+  ta.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); doSave(); }
+  });
+  box.querySelector("#edit-cancel").addEventListener("click", closeModal);
+  save.addEventListener("click", doSave);
 }

@@ -128,6 +128,14 @@ mesh/
   **for that user only** — no other member is affected and the chat stays in
   their list. New messages (ns past the cursor) show normally; re-clearing just
   advances the cursor. Being per-user, it never touches an agent's view either.
+- **Edit message = a chat-level `edits.json` overlay** (v0.24.10): author-only,
+  `{msg_id: {body, tags, by, at}}`. `messages_for` applies edits (swap body +
+  re-parsed tags, set `edited={at}`) **before** redactions, so a later
+  delete-for-everyone still wins over an edit; the raw `.jsonl` is never
+  rewritten (audit). Edits show corrected on every read path including the agent
+  worker's context, but an in-place edit does NOT re-trigger an agent on its own
+  (the worker's ns-cursor is unchanged) — the deliberate re-trigger for a
+  corrected mention/question is round 8C.
 - An agent has one or more `owners` (humans). **An agent must always have at
   least one owner** — `update_agent`'s `revoke_owner` refuses to drop the last
   one. Ownership is what makes the free-chatting invariant enforceable (§6).
@@ -331,6 +339,7 @@ Full public surface, grouped as they appear in the file:
 | `messages_for(chat_id, username, tail=200)` | the app-level read choke-point (§2): applies redactions (tombstones) + this user's `hidden` set + their `cleared` cursor. Every human/agent read path uses this, not `messages` |
 | `hide_messages` / `unhide_messages(chat_id, username, ids)` | delete-for-me + its undo (per-user `hidden` overlay) |
 | `clear_chat(chat_id, username, keep_starred=False)` | clear-for-me (per-user `cleared` ns-cursor; optional keep-starred); a read overlay, no other member affected |
+| `edit_message(chat_id, username, msg_id, new_body)` | author-only in-place edit; chat-level `edits.json` overlay, `messages_for` shows the latest + an `edited` marker (redaction still wins) |
 | `redact_messages(chat_id, username, ids)` | delete-for-everyone (sender-only, validates the whole batch, purges star/pin copies); irreversible |
 | `parse_tags(body)` | regex `@name` extraction, filtered to real usernames |
 | `post(chat_id, sender, body, attachments, reply_to, forward_of)` | the single message-creation path; enforces membership + not-archived, stages attachments into `files/` with collision-safe renaming, stamps `ns`/`id`/`tags` |
@@ -759,25 +768,27 @@ inline image thumbnails in the transcript, read-more clamping, live
 typing/working presence, archive (never-delete) + owner-only permanent
 delete, **message delete** (for-me hide + sender-only for-everyone tombstone,
 §2), **clear chat** (per-user `cleared` ns-cursor + optional keep-starred, §2),
-in-chat search, media/docs/links browser (month-grouped), mesh-wide
+**edit message** (author-only, human side — `edits.json` overlay + "edited"
+marker; agent re-trigger is round 8C), in-chat search,
+media/docs/links browser (month-grouped), mesh-wide
 stand-down switch, per-agent rate cap, config-driven `--sql-read-only`
 opt-out (§6.6).
 
 **In flight / stubbed** (present in their menus, backend-ready or partially
 so, but not wired to a finished flow):
-- **Edit**: two rounds (decided 2026-07-08). (B) human-side edit via a
-  chat-level `edits.json` overlay (sender-only; `messages_for` applies the
-  latest + an `edited` marker — same overlay pattern as delete, raw jsonl kept
-  for audit). (C) edit → agents (the **Hybrid**): edits always show corrected
-  in future agent context, plus the worker re-triggers a reply only when a
-  human edits a message into a mention/question for that agent (its ns-cursor
-  won't catch an in-place edit unaided).
+- **Edit → agents** (round 8C, the only piece left): the human-side edit
+  shipped v0.24.10 (a chat-level `edits.json` overlay; `messages_for` applies
+  the latest + an `edited` marker; edit window in the message menu). What's left
+  is the **Hybrid**: edits already show corrected in any future agent context
+  (free — `messages_for` applies them), so 8C adds the worker **re-triggering** a
+  reply only when a human edits a message into a mention/question for that agent
+  (its ns-cursor won't catch an in-place edit unaided).
 
-  (**Message delete** and **clear chat** — once sketched here — shipped in
-  v0.24.3 / v0.24.8: delete-for-me is a `hidden` set, delete-for-everyone a
-  chat-level `redactions.json`, and clear-chat a `cleared` cursor, all in the
-  same per-user state file / overlay family and applied by `messages_for()` on
-  every read path. See §2.)
+  (**Message delete**, **clear chat**, and **edit (human side)** — once sketched
+  here — shipped in v0.24.3 / v0.24.8 / v0.24.10: delete-for-me is a `hidden`
+  set, delete-for-everyone a chat-level `redactions.json`, clear-chat a per-user
+  `cleared` cursor, and edit a chat-level `edits.json`, all applied by
+  `messages_for()` on every read path. See §2.)
 - **Read receipts**: the double-tick renders (frontend placeholder) but there
   is no delivered/read backend yet — every message shows as merely "sent."
 

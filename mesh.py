@@ -764,6 +764,38 @@ class Mesh:
         self.cx.write_json(key, cur)
         return {"ns": cut, "keep_starred": bool(keep_starred)}
 
+    def edit_message(self, chat_id, username, msg_id, new_body):
+        """Edit-in-place, author-only (WhatsApp). The new body lands in a
+        chat-level `edits.json` overlay ({id:{body,tags,by,at}}) — the raw
+        .jsonl is never rewritten (audit), and `messages_for` swaps in the
+        latest edit + sets an `edited` marker. A redacted message can't be
+        edited (delete wins)."""
+        meta = self.get_chat(chat_id)
+        if not meta:
+            raise MeshError("No such chat")
+        if username not in (meta.get("members") or []):
+            raise MeshError("Only members can edit messages")
+        new_body = (new_body or "").strip()
+        if not new_body:
+            raise MeshError("An edited message can't be empty")
+        src = next((m for m in self.messages(chat_id, tail=0)
+                    if m.get("id") == msg_id), None)
+        if not src:
+            raise MeshError("No such message")
+        if src.get("from") != username:
+            raise MeshError("You can only edit your own messages")
+        if src.get("kind") == "info":
+            raise MeshError("System messages can't be edited")
+        if msg_id in self._redactions(chat_id):
+            raise MeshError("A deleted message can't be edited")
+        key = f"chats/{chat_id}/edits.json"
+        ed = self.cx.read_json(key) or {}
+        now = utcnow()
+        ed[msg_id] = {"body": new_body[:8000], "tags": self.parse_tags(new_body),
+                      "by": username, "at": now}
+        self.cx.write_json(key, ed)
+        return {"id": msg_id, "body": new_body, "edited": {"at": now}}
+
     def redact_messages(self, chat_id, username, ids):
         """Delete-for-everyone: mark ids in the chat-level redactions overlay.
         Sender-only (WhatsApp) — you may only redact your OWN, non-info
@@ -892,6 +924,27 @@ class Mesh:
         cur = self.cx.read_json(self._cursor_key(chat_id, username)) or {}
         return cur.get("cleared")
 
+    def _edits(self, chat_id):
+        return self.cx.read_json(f"chats/{chat_id}/edits.json") or {}
+
+    def _apply_edits(self, chat_id, msgs, ed=None):
+        """Apply in-place edits (author-only, v0.24.10): swap body + tags for
+        the edited version and set `edited={at}`. A chat-level `edits.json`
+        overlay, like redactions — the raw .jsonl stays the audit trail. Runs
+        BEFORE redactions so a later delete-for-everyone still wins."""
+        ed = self._edits(chat_id) if ed is None else ed
+        if not ed:
+            return msgs
+        out = []
+        for m in msgs:
+            e = ed.get(m.get("id"))
+            if e:
+                m = {**m, "body": e.get("body") or "",
+                     "tags": e.get("tags") or [],
+                     "edited": {"at": e.get("at")}}
+            out.append(m)
+        return out
+
     def _apply_redactions(self, chat_id, msgs, red=None):
         """Tombstone every deleted-for-everyone message in place: body, files
         and tags stripped, `deleted={by,at}` set — the raw log is untouched.
@@ -915,12 +968,13 @@ class Mesh:
         return out
 
     def messages_for(self, chat_id, username, tail=200):
-        """The app-level view of a chat for `username`: deleted-for-everyone
-        messages tombstoned, this user's deleted-for-me messages removed, and
-        anything before their clear-chat cursor dropped. Overlays are applied
-        before the tail cut so the tombstones occupy their slots and the
-        returned count stays honest."""
-        msgs = self._apply_redactions(chat_id, self.messages(chat_id, tail=0))
+        """The app-level view of a chat for `username`: edited messages shown
+        in their latest form, deleted-for-everyone messages tombstoned, this
+        user's deleted-for-me messages removed, and anything before their
+        clear-chat cursor dropped. Overlays are applied before the tail cut so
+        the tombstones occupy their slots and the returned count stays honest."""
+        raw = self._apply_edits(chat_id, self.messages(chat_id, tail=0))
+        msgs = self._apply_redactions(chat_id, raw)
         hidden = self._hidden_ids(chat_id, username)
         if hidden:
             msgs = [m for m in msgs if m.get("id") not in hidden]
