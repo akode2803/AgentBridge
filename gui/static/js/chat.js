@@ -87,6 +87,15 @@ async function renderChats(force) {
 }
 V.renderChats = renderChats;
 
+// the structural signature that drives renderMeshChat's FULL rebuild (name +
+// archived + members). Extracted so patchChatName can keep it in sync after a
+// rename — otherwise the next poll rebuilds the whole transcript just to
+// repaint one name (round 12).
+function chatStructKey(chatId, m) {
+  return chatId + "|" + !!m.archived + "|" + (m.name || "")
+    + "|" + (m.members || []).join(",");
+}
+
 // the no-active-chat home surface — WhatsApp-style centered pane (the chat
 // list lives in the sidebar). Extracted so renderChats can paint it
 // synchronously when leaving a chat (see the optimistic paint above).
@@ -175,8 +184,7 @@ async function renderMeshChat(force) {
   // rides here so a rename (local or from another client) repaints the header;
   // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
   // survives — the banner is synced imperatively).
-  const structKey = chatId + "|" + !!meta.archived + "|" + (meta.name || "")
-    + "|" + (meta.members || []).join(",");
+  const structKey = chatStructKey(chatId, meta);
   // NEITHER signature moved: skip the rebuild EVEN under force. Opening/closing
   // the chat-info pane routes here with force=true but nothing changed —
   // rebuilding would re-clamp read-mores at the pane's new width and flash the
@@ -637,11 +645,11 @@ function openMsgMenu(rect, msg, chatId, ctx) {
     menu.innerHTML = `<button data-act="del-trace" class="danger-item">${ICONS.trash} Delete</button>`;
   } else {
     menu.innerHTML = [
+      `<button data-act="info">${ICONS.info} Message info</button>`,
       ctx.canReply ? `<button data-act="reply">${ICONS.reply} Reply</button>` : "",
       !msg.mine && !ctx.isDm
         ? `<button data-act="message">${ICONS.msgUser} Message ${esc(meshDn(msg.from))}</button>` : "",
       `<button data-act="copy">${ICONS.copy} Copy</button>`,
-      `<button data-act="info">${ICONS.info} Message info</button>`,
       msg.mine ? `<button data-act="edit">${ICONS.pencil} Edit</button>` : "",
       `<button data-act="forward">${ICONS.forward} Forward</button>`,
       `<button data-act="pin">${ICONS.pin} ${isPinned ? "Unpin" : "Pin"}</button>`,
@@ -780,9 +788,10 @@ async function messageInfoDialog(chatId, msg) {
     }
   }
   const preview = stripMd(r.body || msg.body || "").replace(/\s+/g, " ").trim();
+  const previewCut = preview.length > 400 ? preview.slice(0, 400) + "…" : preview;
   const box = openModal(`
     <div class="cf-title">Message info</div>
-    ${preview ? `<div class="mi-preview"><div class="bubble">${esc(preview.slice(0, 400))}</div></div>` : ""}
+    ${preview ? `<div class="mi-preview"><div class="bubble">${esc(previewCut)}</div></div>` : ""}
     <div class="mi-scroll">${body}</div>
     <div class="cf-actions"><button class="cf-cancel" id="mi-close">Close</button></div>`);
   box.classList.add("confirm");
@@ -1271,6 +1280,28 @@ async function refreshChatListSidebar() {
   if (box) box.dataset.key = "";
   renderSidebar();
 }
+
+// Apply a rename WITHOUT a full renderChats (which rebuilt the transcript +
+// swapped the sidebar + rebuilt the pane — the stutter). Patch the open chat's
+// header + avatar, keep the cached state + structKey in sync so the poll won't
+// rebuild the transcript, and let the granular sidebar update just that row.
+function patchChatName(chatId, name) {
+  const c = (Mesh.state?.chats || []).find((k) => k.id === chatId);
+  if (c) c.name = name;   // cached state feeds the sidebar row + the structKey
+  if (Mesh.chatId === chatId) {
+    const hn = $("#chat-top .chat-head-name");
+    if (hn) {
+      const tag = hn.querySelector(".kind-tag");   // preserve the archived pill
+      hn.textContent = name;
+      if (tag) { hn.appendChild(document.createTextNode(" ")); hn.appendChild(tag); }
+    }
+    const av = $("#chat-top .chat-avatar");
+    if (av) av.textContent = (name[0] || "#").toUpperCase();
+    if (c) Mesh.structKey = chatStructKey(chatId, c);   // poll won't rebuild
+  }
+  renderSidebar();   // granular: only the renamed row's text updates in place
+}
+V.patchChatName = patchChatName;
 
 // ---- edit message -----------------------------------------------------------
 // WhatsApp-style edit: a small window with the current text prefilled. Save

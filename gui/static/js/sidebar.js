@@ -33,6 +33,7 @@ export function renderSidebar() {
 function setSide(html, padding) {
   const box = $("#side-chats");
   box.classList.remove("ng-host");   // only the group builder sets this
+  box.dataset.mode = "";   // any non-list variant drops chat-list granular state
   if (box.dataset.key === html) return false;
   box.dataset.key = html;
   box.style.padding = padding || "";
@@ -196,48 +197,103 @@ function renderChatListSidebar() {
   const chats = ms.chats || [];
   const archived = chats.filter((c) => c.archived);
   const listed = Mesh.showArchived ? archived : chats.filter((c) => !c.archived);
-  const row = (c) => {
+  const box = $("#side-chats");
+
+  // the mutable pieces of a row, shared by the full build AND the in-place
+  // update so both render identically (round 12).
+  const nameHtml = (c) => {
     // a DM with an agent shows the agent tag next to its name, like the header
     const peer = c.kind === "dm" ? (c.members || []).find((u) => u !== ms.user) : null;
     const agentTag = peer && ms.users?.[peer]?.kind === "agent"
       ? ' <span class="kind-tag">agent</span>' : "";
+    return esc(chatDisplay(c, ms.user)) + agentTag;
+  };
+  const lastHtml = (c) => !c.last ? "No messages yet"
+    : c.last.deleted ? (c.last.from === ms.user
+        ? "You deleted this message" : "This message was deleted")
+    : c.last.kind === "info" ? esc(c.last.body || "")
+    : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file");
+  const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
+  const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
-    const dot = !hasCount && c.forced_unread && !c.archived;  // manual mark-unread: no number
-    return `
+    const dot = !hasCount && c.forced_unread && !c.archived;  // mark-unread: no number
+    return (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
+      + (hasCount ? `<span class="unread-badge">${c.unread}</span>`
+        : dot ? `<span class="unread-badge dot"></span>` : "");
+  };
+  const rowSig = (c) => JSON.stringify([c.id === Mesh.chatId, !!c.archived,
+    nameHtml(c), lastHtml(c), timeText(c), tagsHtml(c)]);
+
+  // ---- granular update: same chats in the same order, list already built →
+  // touch only the rows whose content changed. This is the fix for "the sidebar
+  // is refreshed every time" — the poll no longer swaps the whole list (which
+  // reset scroll + flashed every row); scroll, hover and DOM identity survive.
+  const structSig = (Mesh.showArchived ? "A" : "N") + "|" + archived.length
+    + "|" + listed.map((c) => c.id).join(",");
+  if (box.dataset.mode === "list" && box.dataset.struct === structSig) {
+    listed.forEach((c) => {
+      const el = box.querySelector(`.chat-row[data-chat="${CSS.escape(c.id)}"]`);
+      if (!el) return;
+      const sig = rowSig(c);
+      if (el.dataset.sig === sig) return;   // unchanged — leave the DOM alone
+      el.dataset.sig = sig;
+      el.classList.toggle("active", c.id === Mesh.chatId);
+      const av = el.querySelector(".chat-avatar");
+      av.className = "chat-avatar" + (c.archived ? " arch" : "");
+      av.textContent = (chatDisplay(c, ms.user)[0] || "#").toUpperCase();
+      el.querySelector(".chat-name").innerHTML = nameHtml(c);
+      el.querySelector(".chat-last").innerHTML = lastHtml(c);
+      el.querySelector(".chat-time").textContent = timeText(c);
+      el.querySelector(".chat-tags").innerHTML = tagsHtml(c);
+    });
+    return;
+  }
+
+  // ---- full build (first paint, structure change, or arriving from another
+  // sidebar variant). Bindings set here survive across granular updates.
+  const rowHtml = (c) => `
     <div class="chat-row ${c.id === Mesh.chatId ? "active" : ""}" data-chat="${esc(c.id)}">
       <div class="chat-avatar ${c.archived ? "arch" : ""}">${esc((chatDisplay(c, ms.user)[0] || "#").toUpperCase())}</div>
       <div class="chat-mid">
-        <div class="chat-name">${esc(chatDisplay(c, ms.user))}${agentTag}</div>
-        <div class="chat-last">${!c.last ? "No messages yet"
-          : c.last.deleted ? (c.last.from === ms.user
-              ? "You deleted this message" : "This message was deleted")
-          : c.last.kind === "info" ? esc(c.last.body || "")
-          : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file")}</div>
+        <div class="chat-name">${nameHtml(c)}</div>
+        <div class="chat-last">${lastHtml(c)}</div>
       </div>
       <div class="chat-side">
-        <div class="chat-time">${c.last ? esc(fmtTime(c.last.ts)) : ""}</div>
-        <div class="chat-tags">
-          ${c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : ""}
-          ${hasCount ? `<span class="unread-badge">${c.unread}</span>`
-            : dot ? `<span class="unread-badge dot"></span>` : ""}
-        </div>
+        <div class="chat-time">${esc(timeText(c))}</div>
+        <div class="chat-tags">${tagsHtml(c)}</div>
       </div>
       <button class="chat-chevron" data-chat="${esc(c.id)}" title="Chat menu" aria-label="Chat menu">${ICONS.chevD}</button>
     </div>`;
-  };
   let html = "";
   if (Mesh.showArchived) {
     html = `<button class="arch-row" id="arch-toggle">${ICONS.back}
         <b>Archived</b><span class="arch-count">back to chats</span></button>` +
-      (listed.map(row).join("") ||
+      (listed.map(rowHtml).join("") ||
         `<div class="empty" style="padding:24px 10px">Nothing archived</div>`);
   } else {
     html = (archived.length ? `<button class="arch-row" id="arch-toggle">
         ${ICONS.archive} Archived <span class="arch-count">${archived.length}</span></button>` : "") +
-      (listed.map(row).join("") ||
+      (listed.map(rowHtml).join("") ||
         `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`);
   }
-  if (!setSide(html)) return;
+  box.classList.remove("ng-host");
+  box.style.padding = "";
+  box.innerHTML = html;
+  box.dataset.mode = "list";      // granular path owns the list now
+  box.dataset.struct = structSig;
+  box.dataset.key = "";           // not managed by setSide while in list mode
+  if (App._sidePage !== App.page) {   // slide in only when arriving on the page
+    App._sidePage = App.page;
+    box.classList.remove("slide");
+    void box.offsetWidth;
+    box.classList.add("slide");
+  }
+  // stamp each row's content signature so the next poll's granular pass has a
+  // baseline to diff against
+  listed.forEach((c) => {
+    const el = box.querySelector(`.chat-row[data-chat="${CSS.escape(c.id)}"]`);
+    if (el) el.dataset.sig = rowSig(c);
+  });
   document.querySelectorAll("#side-chats .chat-row").forEach((r) => {
     const cid = r.dataset.chat;
     r.addEventListener("click", (e) => {
@@ -258,7 +314,7 @@ function renderChatListSidebar() {
   const at = $("#arch-toggle");
   if (at) at.addEventListener("click", () => {
     Mesh.showArchived = !Mesh.showArchived;
-    $("#side-chats").dataset.key = "";
+    $("#side-chats").dataset.mode = "";   // force a full rebuild for the new list
     renderChatListSidebar();
   });
 }

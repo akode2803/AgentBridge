@@ -72,6 +72,9 @@ async function renderSettings() {
     const mine = Object.values(ms.users)
       .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
     html = `${back}<h1>My agents</h1>
+      <datalist id="ag-rate-presets">
+        ${[10, 20, 30, 50, 100, 200, 500].map((n) => `<option value="${n}"></option>`).join("")}
+      </datalist>
       ${mine.map((a) => {
         const st = a.settings || {};
         return `
@@ -87,7 +90,7 @@ async function renderSettings() {
                 `<option value="${r}" ${(st.default_rule || "tagged") === r ? "selected" : ""}>${label}</option>`).join("")}
             </select></dd>
             <dt>Replies per hour</dt><dd><input type="number" min="1" max="1000" step="1"
-              class="ag-rate" data-agent="${esc(a.username)}"
+              class="ag-rate" data-agent="${esc(a.username)}" list="ag-rate-presets"
               value="${st.max_replies_per_hour != null ? esc(st.max_replies_per_hour) : ""}"
               placeholder="30 (default)"></dd>
             <dt>Owners</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>

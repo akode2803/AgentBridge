@@ -223,7 +223,7 @@ async function renderChatDetails() {
       if (!name || name === meta.name.trim()) {   // unchanged / empty: just close
         inp.remove();
         Mesh.detailsKey = "";
-        V.renderChats(true);
+        renderChatDetails();
         return;
       }
       // keep the NEW name in place and swap the ✓ for a spinner while the
@@ -235,12 +235,13 @@ async function renderChatDetails() {
           <span class="spin-sm"></span></span>`;
       const r = await api("/api/mesh/rename", { chat_id: chatId, name });
       if (r.error) toast(r.error, true);
-      Mesh.structKey = "";
+      // surgical: patch the header + sidebar row + structKey in place instead
+      // of a full renderChats (which rebuilt the transcript + swapped the whole
+      // sidebar = the stutter). Only the info pane repaints, once (round 12).
+      else { meta.name = r.name || name; V.patchChatName(chatId, meta.name); }
       Mesh.detailsKey = "";
-      // drop the committing marker BEFORE re-rendering, or the `.ci-saving`
-      // guard keeps bailing and the spinner sticks in the pane forever
       document.querySelector("#ci-name-row .ci-saving")?.remove();
-      V.renderChats(true);
+      renderChatDetails();
     };
     $("#ci-name-save").addEventListener("click", save);
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });

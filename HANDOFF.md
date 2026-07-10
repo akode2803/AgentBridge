@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.19
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.20
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -43,7 +43,15 @@ conventions that aren't obvious from the code alone.
   produce the reply (v0.24.19); **@all** — the everyone-mention that tags every
   member (leads the composer picker in a group; triggers every agent under the
   "tagged" rule); the **per-agent reply cap** is now user-settable in Settings →
-  My agents (v0.24.19).
+  My agents (v0.24.19). **v0.24.20 polish:** the chat-list sidebar now updates
+  **per-row in place** instead of re-swapping its whole `innerHTML` every poll
+  (no more scroll-reset/flash on a busy mesh); a rename patches the header +
+  sidebar row + `structKey` surgically (no transcript/sidebar rebuild); the
+  active-chat and resize-handle highlights are neutral greys driven by
+  `--chat-active` / `--resizer-hover` (kept in `:root` for the theming pass);
+  Message info sits at the top of the message menu with a truncation ellipsis;
+  the reply-cap field matches the other inputs and offers preset values via a
+  datalist while still taking a custom number.
 - **In flight / still stubbed:** **Delivered** (the grey double-tick middle
   state) is deliberately *not* built — read receipts ship as Sent + Read only;
   Delivered needs a per-user presence heartbeat and rides with the online/
