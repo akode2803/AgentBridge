@@ -143,6 +143,17 @@ def slugify(name):
     return s[:40] or "chat"
 
 
+# Default avatar tints. When an account or group has no photo, its initial
+# letter sits on one of these instead of the lone brand orange. Stored as a
+# plain hex on the record (~7 bytes — no image), picked at creation and
+# re-rolled when a group photo is removed. Mirror of AVATAR_PALETTE in
+# gui/static/js/util.js (the client uses the same set for its deterministic
+# no-color fallback, e.g. accounts/agents that predate a stored color) — keep
+# the two lists in sync.
+AVATAR_COLORS = ["#3B82F6", "#2E9E5B", "#D99A2B", "#E0518D",
+                 "#E8722C", "#8B5CF6", "#6B7280"]
+
+
 class MeshError(Exception):
     """Raised on rule violations; message is safe to show to the user."""
 
@@ -426,7 +437,9 @@ class Mesh:
         chat_id = f"{slugify(name)}-{secrets.token_hex(3)}"
         meta = {"id": chat_id, "kind": "group", "name": name,
                 "created": utcnow(), "created_by": creator, "owner": owner,
-                "members": members, "archived": False}
+                "members": members, "archived": False,
+                # colored initial until (and if) a photo is set — see AVATAR_COLORS
+                "color": secrets.choice(AVATAR_COLORS)}
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         self.cx.mkdir(f"chats/{chat_id}/msgs")
         return meta
@@ -670,6 +683,7 @@ class Mesh:
         tmp.replace(dest)   # atomic — a reader never sees a half-written file
         meta["avatar"] = {"sha256": hashlib.sha256(jpeg_bytes).hexdigest(),
                           "updated": utcnow()}
+        meta.pop("color", None)   # the photo covers it; no need to keep a tint
         self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         return meta["avatar"]
 
@@ -685,8 +699,11 @@ class Mesh:
                 dest.unlink()
             except FileNotFoundError:
                 pass
-        if meta.pop("avatar", None) is not None:
-            self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
+        # dropping the photo re-rolls the default tint (a fresh random color),
+        # then always persists — the color changed even if there was no file
+        meta.pop("avatar", None)
+        meta["color"] = secrets.choice(AVATAR_COLORS)
+        self.cx.write_json(f"chats/{chat_id}/meta.json", meta)
         return True
 
     # ---------------------------------------------------------------- pins

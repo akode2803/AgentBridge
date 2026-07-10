@@ -115,8 +115,13 @@ body { display: flex; flex-direction: column; }
    through while the image loads or if it fails (cross-machine sync gap). */
 .avatar-img {
   position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: cover; border-radius: inherit; display: block;
+  object-fit: cover; border-radius: inherit; display: block; z-index: 2;
 }
+/* default-tint layers: .ava-bg fills the disc behind the .ava-init letter, so
+   the initial reads on its own color rather than the container's --accent. The
+   photo (.avatar-img, z-index 2) overlays both when present. */
+.ava-bg { position: absolute; inset: 0; z-index: 0; }
+.ava-init { position: relative; z-index: 1; }
 .rail-avatar, .acct-big, .chat-avatar, .mem-avatar, .ci-avatar {
   position: relative; overflow: hidden;
 }

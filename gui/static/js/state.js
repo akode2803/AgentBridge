@@ -2,7 +2,7 @@
    reads and writes these objects, never module-local globals, so a render
    can move between modules without orphaning state. */
 
-import { $, dn, avatarInner, avatarUrl } from "./util.js";
+import { $, dn, avatarInner, avatarUrl, fallbackColor } from "./util.js";
 
 export const App = {
   state: null,          // last /api/state payload
@@ -58,18 +58,24 @@ export function meshDn(username) {
 export function meshAvatar(username) {
   return Mesh.state?.users?.[username]?.avatar || null;
 }
-// inner markup for a USER avatar container (photo when set, else the initial)
+// inner markup for a USER avatar container (photo when set, else a colored
+// initial). Accounts carry no stored color yet (account creation is deferred),
+// so the tint is derived stably from the username.
 export function meshAvatarInner(username) {
-  const a = meshAvatar(username);
-  return avatarInner(meshDn(username), a ? avatarUrl(username, a) : null);
+  const u = Mesh.state?.users?.[username];
+  const a = u?.avatar;
+  return avatarInner(meshDn(username), a ? avatarUrl(username, a) : null,
+                     u?.color || fallbackColor(username));
 }
 // inner markup for a CHAT avatar: a DM/self shows the other member's photo; a
-// group shows its own group photo (else the name initial). One helper for the
-// sidebar row, the chat header and the chat-info pane.
+// group shows its own group photo (else the name initial on its stored tint,
+// or a name-derived fallback for pre-color groups). One helper for the sidebar
+// row, the chat header and the chat-info pane.
 export function meshChatAvatarInner(chat) {
   if (!chat) return "#";
   if (isDmLike(chat)) return meshAvatarInner(dmOther(chat, Mesh.state?.user));
-  return avatarInner(chat.name, chat.avatar ? avatarUrl(chat.id, chat.avatar, "chat") : null);
+  return avatarInner(chat.name, chat.avatar ? avatarUrl(chat.id, chat.avatar, "chat") : null,
+                     chat.color || fallbackColor(chat.id));
 }
 
 // DMs display as the OTHER member, groups as their name

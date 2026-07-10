@@ -27,11 +27,43 @@ export function avatarUrl(id, avatar, param = "user") {
   const v = avatar && avatar.sha256 ? avatar.sha256.slice(0, 16) : "";
   return `/api/mesh/avatar?${param}=${encodeURIComponent(id)}&v=${v}`;
 }
-export function avatarInner(name, imgUrl) {
+
+// Default avatar tints — the initial letter sits on one of these instead of the
+// lone brand orange. Groups store their picked hex on the record; accounts/
+// agents (no stored color until account-creation lands) fall back to a stable
+// color derived from the name via fallbackColor(). Mirror of AVATAR_COLORS in
+// mesh.py — keep the two lists in sync.
+export const AVATAR_PALETTE = ["#3B82F6", "#2E9E5B", "#D99A2B", "#E0518D",
+                               "#E8722C", "#8B5CF6", "#6B7280"];
+export function fallbackColor(key) {
+  const s = String(key || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
+}
+// perceived luminance — light tints (e.g. amber) get dark ink so the initial
+// stays legible whatever palette color lands on it
+function isLightColor(hex) {
+  const h = String(hex || "").replace("#", "");
+  if (h.length < 6) return false;
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16),
+        b = parseInt(h.slice(4, 6), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6;
+}
+
+// The initial (or photo) rides on a `color` tint: an absolutely-positioned
+// .ava-bg fill behind a .ava-init letter, so every call site keeps its own
+// size/shape CSS (the container just needs position:relative + overflow:hidden).
+// Omit `color` and it falls back to the container's own background (--accent).
+export function avatarInner(name, imgUrl, color) {
   const initial = esc((String(name || "").trim()[0] || "?").toUpperCase());
-  return imgUrl
-    ? initial + `<img class="avatar-img" alt="" src="${esc(imgUrl)}" onerror="this.remove()">`
-    : initial;
+  const bg = color ? `<span class="ava-bg" style="background:${esc(color)}"></span>` : "";
+  const ink = color && isLightColor(color) ? ' style="color:#1c1c1c"' : "";
+  const init = `<span class="ava-init"${ink}>${initial}</span>`;
+  const img = imgUrl
+    ? `<img class="avatar-img" alt="" src="${esc(imgUrl)}" onerror="this.remove()">`
+    : "";
+  return bg + init + img;
 }
 
 export function fmtTime(tsUtc) {

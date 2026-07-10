@@ -558,6 +558,8 @@ def _public_user(u):
            "display": u.get("display")}
     if u.get("avatar"):   # profile-photo marker ({sha256, updated}); the bytes
         out["avatar"] = u["avatar"]   # ride /api/mesh/avatar, not this payload
+    if u.get("color"):    # default-tint hex (set at account creation; deferred —
+        out["color"] = u["color"]     # today the client derives one from the name)
     if u["kind"] == "agent":
         out["owners"] = u.get("owners") or []
         out["settings"] = u.get("settings") or {}
@@ -596,6 +598,7 @@ def api_mesh_state():
                 "id": meta["id"], "name": meta["name"],
                 "kind": meta.get("kind", "group"),   # DMs display per-viewer
                 "avatar": meta.get("avatar"),        # group-photo marker (§round C)
+                "color": meta.get("color"),          # default-tint hex when no photo
                 "owner": meta.get("owner"), "members": meta.get("members"),
                 "archived": bool(meta.get("archived")),
                 "created_by": meta.get("created_by"),
