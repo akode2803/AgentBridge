@@ -1810,6 +1810,20 @@ pre.configdump {
   resize: vertical; min-height: 84px; line-height: 1.4;
 }
 .edit-ta:focus { outline: none; border-color: var(--accent); }
+/* edit-message expand (task 3): a top-right toggle grows the window + textarea
+   with a size transition; the min-width:0 base lets the width animate. */
+.edit-modal { position: relative; transition: width .24s ease; }
+.edit-modal .edit-ta { transition: min-height .22s ease; }
+.cf-expand {
+  position: absolute; top: 9px; right: 9px; width: 30px; height: 30px;
+  display: grid; place-items: center; padding: 0; border: none;
+  background: none; color: var(--text-dim); border-radius: 8px; cursor: pointer;
+}
+.cf-expand:hover, [data-theme="dark"] .cf-expand:hover { background: var(--hover); }
+.cf-expand svg { width: 16px; height: 16px; }
+.edit-modal .cf-title { padding-right: 34px; }   /* clear of the expand button */
+.modal-box.edit-modal.expanded { width: min(760px, calc(100vw - 44px)); }
+.edit-modal.expanded .edit-ta { min-height: min(58vh, 440px); }
 .cf-actions button:disabled { opacity: .5; cursor: not-allowed; }
 /* sub-text under a confirm title (clear-chat explainer) + opt-in checkbox */
 .cf-sub { color: var(--text-dim); font-size: 13.5px; line-height: 1.45; }
@@ -1856,7 +1870,9 @@ pre.configdump {
    "Read by" + "Delivered to" member list). For others' messages: the sent
    time, plus — for an agent — the list of tasks it ran to produce the reply
    (Delivered stays a wired-but-empty stub until presence lands). */
-.mi-scroll { overflow-y: auto; margin: 4px -2px 0; padding: 0 2px; }
+/* flex:1 + min-height:0 make this the scroll region inside the flex-column
+   modal, so a long task/step history scrolls instead of clipping (task 3). */
+.mi-scroll { overflow-y: auto; flex: 1; min-height: 0; margin: 4px -2px 0; padding: 0 2px; }
 .mi-preview { margin: 8px 0 6px; }
 .mi-preview .bubble {
   display: inline-block; max-width: 100%;

@@ -1319,16 +1319,26 @@ V.patchChatName = patchChatName;
 // limit for now (WhatsApp caps at 15 min — can add later).
 function editDialog(chatId, msg) {
   const box = openModal(`
+    <button class="cf-expand" id="edit-expand" title="Expand" aria-label="Expand">${ICONS.expand}</button>
     <div class="cf-title">Edit message</div>
     <textarea id="edit-body" class="edit-ta" rows="4"></textarea>
     <div class="cf-actions">
       <button class="cf-cancel" id="edit-cancel">Cancel</button>
       <button class="cf-pill" id="edit-save">Save</button>
     </div>`);
-  box.classList.add("confirm");
+  box.classList.add("confirm", "edit-modal");
   box.parentElement.classList.add("confirm-scrim");
   const ta = box.querySelector("#edit-body");
   const save = box.querySelector("#edit-save");
+  // expand toggle (top-right): grow the window for long messages, with a size
+  // transition (task 3). The larger textarea keeps the caret + selection.
+  const expandBtn = box.querySelector("#edit-expand");
+  expandBtn.addEventListener("click", () => {
+    const on = box.classList.toggle("expanded");
+    expandBtn.innerHTML = on ? ICONS.collapse : ICONS.expand;
+    expandBtn.title = on ? "Shrink" : "Expand";
+    ta.focus();
+  });
   ta.value = msg.body || "";
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
