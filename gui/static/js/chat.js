@@ -104,14 +104,48 @@ function renderEmptyChat() {
   $("#details-pane").hidden = true;
   clearSelectMode();   // left the chat while selecting: drop the mode + pane
   Mesh.listKey = "empty";
+  // the AgentBridge home window (reached via the brand header). Beyond the
+  // "select a chat" hero it now carries the app-level Connection details (moved
+  // out of every chat's info, where they didn't belong) and the emergency
+  // Stand-down-all-agents switch (task 12).
+  const s = App.state || {};
+  const ms = Mesh.state || {};
   $("#content").innerHTML = `
     <div class="empty-state">
-      <div>
+      <div class="es-box">
         ${BIRD}
         <p><b>Select a chat</b> — or start a new one.</p>
-        <p class="hint">Humans and Agents, working in the same rooms.</p>
+        <p class="hint" style="margin-bottom:18px">Humans and Agents, working in the same rooms.</p>
+        <div class="card">
+          <h2>Connection</h2>
+          <dl class="kv">
+            <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
+            <dt>Sync client</dt><dd>${s.onedrive_running == null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
+            <dt>Versions</dt><dd>App v${esc(s.gui_version || "")} · Bridge v${esc(s.bridge_version || "")}</dd>
+          </dl>
+        </div>
+        <div class="card">
+          <div class="row" style="align-items:flex-start">
+            <label class="switch"><input type="checkbox" id="home-pause" ${ms.paused ? "checked" : ""}><span class="slider"></span></label>
+            <span><b>Stand down all agents</b> — every agent in every chat holds until resumed</span>
+          </div>
+          <p class="hint" style="margin-bottom:0">Any member can flip this. Pending
+          requests get one consolidated reply per chat after resuming.</p>
+        </div>
       </div>
     </div>`;
+  // stand-down toggle — same round-trip as the chat-header "Stand down all
+  // agents" action (spinner → result, revert the switch on error).
+  const pause = $("#home-pause");
+  if (pause) pause.addEventListener("change", async () => {
+    const down = pause.checked;
+    toast(down ? "Standing down all agents…" : "Resuming all agents…", { spinner: true });
+    const r = await api("/api/mesh/pause", { paused: down });
+    if (r.error) { toast(r.error, { error: true, swap: true }); pause.checked = !down; return; }
+    Mesh.state.paused = r.paused;
+    renderChrome();
+    toast(r.paused ? "All agents standing down" : "All agents resumed", { check: true, swap: true });
+  });
 }
 
 function renderMeshAuth() {

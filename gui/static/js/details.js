@@ -42,7 +42,6 @@ async function renderChatDetails() {
     location.hash = "#/chats"; return;
   }
   const meta = data.meta;
-  const s = App.state;
   const isOwner = meta.owner === ms.user;
   const media = data.files || [];
   const myAgentsHere = Object.values(ms.users).filter((u) =>
@@ -166,14 +165,6 @@ async function renderChatDetails() {
       </button>` : ""}
       ${ordered.map(memberRow).join("")}
     </div>`}
-    <div class="card">
-      <h2>Connection</h2>
-      <dl class="kv">
-        <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
-        <dt>Sync client</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
-        <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
-      </dl>
-    </div>
     <div class="card danger-card">
       ${isOwner ? `<button class="danger-row neutral" id="dg-archive">
         ${ICONS.archive} ${meta.archived ? `Unarchive ${noun}` : `Archive ${noun}`}</button>` : ""}
