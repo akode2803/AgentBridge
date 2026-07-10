@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.20
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.21
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -48,7 +48,10 @@ conventions that aren't obvious from the code alone.
   (no more scroll-reset/flash on a busy mesh); a rename patches the header +
   sidebar row + `structKey` surgically (no transcript/sidebar rebuild); the
   active-chat and resize-handle highlights are neutral greys driven by
-  `--chat-active` / `--resizer-hover` (kept in `:root` for the theming pass);
+  `--chat-active` / `--resizer-hover` (kept in `:root` for the theming pass) —
+  v0.24.21 extends `--chat-active` to ALL selected nav (rail buttons + settings
+  nav, both formerly accent-tinted) and neutralises the rail/icon-button hovers
+  to the standard `--hover`;
   Message info sits at the top of the message menu with a truncation ellipsis;
   the reply-cap field matches the other inputs and offers preset values via a
   datalist while still taking a custom number.
