@@ -5,7 +5,7 @@ import { $, esc, toast, setTheme } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
-import { openModal, closeModal, openPhotoViewer } from "./modal.js";
+import { openModal, closeModal, swapModal, openPhotoViewer } from "./modal.js";
 import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
@@ -403,7 +403,8 @@ function mountCamera(stream, onBlob) {
     cctx.translate(vw, 0); cctx.scale(-1, 1);   // mirror to match the preview
     cctx.drawImage(video, 0, 0, vw, vh);
     stop(); obs.disconnect();
-    closeModal();
+    // reuse the open camera modal (swapModal, inside mountAvatarAdjuster) so
+    // the viewfinder → crop step has no scrim flash and stays the same size
     mountAvatarAdjuster(cap, onBlob);   // a canvas is a valid source
   });
 }
@@ -415,7 +416,7 @@ function mountCamera(stream, onBlob) {
 // downsized entirely client-side (the backend keeps no image library).
 function mountAvatarAdjuster(img, onBlob) {
   const S = 300, D = 260, c = S / 2, cropL = c - D / 2, cropT = c - D / 2;
-  const box = openModal(`
+  const box = swapModal(`
     <div class="ava-adjust">
       <div class="ava-adjust-head">
         <button class="icon-btn" id="ava-cancel" aria-label="Cancel">${ICONS.close}</button>

@@ -19,6 +19,20 @@ export function closeModal() {
   if (m) m.remove();
 }
 
+// Replace the OPEN modal's contents in place — no scrim teardown, so a
+// multi-step flow (camera viewfinder → crop adjuster) transitions seamlessly
+// instead of the scrim flashing out and back in. Falls back to openModal when
+// nothing is open, so the same call opens fresh on the upload path (which has
+// no modal yet) and reuses on the camera path. Returns the .modal-box either
+// way; the className is reset so the caller re-applies its own step classes.
+export function swapModal(html) {
+  const box = document.querySelector(".modal-scrim > .modal-box");
+  if (!box) return openModal(html);
+  box.className = "modal-box";
+  box.innerHTML = html;
+  return box;
+}
+
 // WhatsApp-style confirmation dialog
 export function confirmModal({ title, body, action = "Delete" }) {
   return new Promise((resolve) => {

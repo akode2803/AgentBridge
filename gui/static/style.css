@@ -151,7 +151,9 @@ body { display: flex; flex-direction: column; }
 }
 
 /* --- profile-photo adjust modal (crop + zoom inside an illuminated circle) */
-.modal-box.ava-modal { width: auto; }
+/* fixed width so the camera viewfinder and the crop step are the SAME size (the
+   box no longer shrinks between the two steps — user-reported 2026-07-11) */
+.modal-box.ava-modal { width: min(92vw, 372px); }
 .ava-adjust { display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .ava-adjust-head { display: flex; align-items: center; gap: 8px; align-self: flex-start; font-weight: 600; }
 .ava-stage { position: relative; width: 300px; height: 300px; touch-action: none; }
@@ -172,10 +174,12 @@ body { display: flex; flex-direction: column; }
 /* the camera viewfinder shows the WHOLE frame (no crop circle) so what you see
    is what gets captured; the crop-to-circle happens in the adjuster step next
    (2026-07-11, replaces the round preview that made the shot "move"). */
-.cam-shoot .ava-stage { width: auto; height: auto; touch-action: auto; }
+/* same 300×300 footprint as the crop stage so the two steps match; the full
+   frame sits letterboxed inside it (object-fit:contain) with no crop circle */
+.cam-shoot .ava-stage { width: 300px; height: 300px; touch-action: auto; }
 .cam-shoot .ava-stage video {
   transform: scaleX(-1);   /* mirror the selfie preview */
-  width: min(80vw, 440px); height: auto; max-height: 56vh; object-fit: contain;
+  width: 100%; height: 100%; object-fit: contain;
 }
 .cam-shoot .ava-mask { display: none; }
 
