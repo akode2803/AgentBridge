@@ -11,12 +11,15 @@ import { esc } from "./util.js";
 import { ICONS } from "./icons.js";
 
 // value = the checkbox value the caller reads back; tag = optional badge
-// (e.g. "agent"). Carries both `am-check` (legacy callers) and `pk-check`
-// (footer binding) so existing selectors keep working.
-export function pickerRow({ value, initial, name, sub, tag }) {
+// (e.g. "agent"). `avatar` is optional trusted inner markup (from
+// state.meshAvatarInner / meshChatAvatarInner) — a photo + color tint; without
+// it the row falls back to the plain initial. Carries both `am-check` (legacy
+// callers) and `pk-check` (footer binding) so existing selectors keep working.
+export function pickerRow({ value, initial, name, sub, tag, avatar }) {
+  const inner = avatar || esc(((initial || "?")[0] || "?").toUpperCase());
   return `
     <label class="mem-row modal-row pk-row">
-      <span class="mem-avatar">${esc(((initial || "?")[0] || "?").toUpperCase())}</span>
+      <span class="mem-avatar">${inner}</span>
       <span class="pk-text">
         <div class="mem-name">${esc(name)}${tag ? ` <span class="kind-tag">${esc(tag)}</span>` : ""}</div>
         ${sub ? `<div class="mem-sub">${esc(sub)}</div>` : ""}

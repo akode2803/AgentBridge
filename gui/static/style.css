@@ -1655,6 +1655,7 @@ pre.configdump {
   width: 22px; height: 22px; border-radius: 50%; flex: none;
   background: var(--accent); color: #fff; font-weight: 700; font-size: 11px;
   display: grid; place-items: center;
+  position: relative; overflow: hidden;   /* hold the .ava-bg tint + photo */
 }
 .ng-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ng-chip-x {

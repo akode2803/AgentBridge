@@ -5,7 +5,7 @@ import { esc, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn } from "./state.js";
+import { Mesh, meshDn, meshAvatarInner } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
@@ -18,7 +18,8 @@ function userRow(u, me) {
   const ownerHint = u.kind === "agent" && !(u.owners || []).includes(me)
     ? ` · joins with @${(u.owners || [])[0] || "?"}` : "";
   return pickerRow({ value: u.username, initial: u.display, name: u.display,
-    sub: `@${u.username}${ownerHint}`, tag: u.kind === "agent" ? "agent" : "" });
+    sub: `@${u.username}${ownerHint}`, tag: u.kind === "agent" ? "agent" : "",
+    avatar: meshAvatarInner(u.username) });
 }
 
 function pickerSections(users, me, exclude) {

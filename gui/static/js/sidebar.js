@@ -91,7 +91,7 @@ function renderNewChatSidebar() {
       ? ` · with @${esc((u.owners || [])[0] || "?")}` : "";
     return `
     <button class="mem-add nc-dm" data-user="${esc(u.username)}">
-      <span class="mem-avatar" style="background:var(--accent)">${meshAvatarInner(u.username)}</span>
+      <span class="mem-avatar">${meshAvatarInner(u.username)}</span>
       <span style="min-width:0">
         <div class="mem-name">${esc(u.display)}
           ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
@@ -130,7 +130,7 @@ function renderNewChatSidebar() {
         <span style="min-width:0"><div class="mem-name">New group</div></span>
       </button>
       <button class="mem-add" id="nc-self">
-        <span class="mem-avatar" style="background:var(--accent)">${meshAvatarInner(ms.user)}</span>
+        <span class="mem-avatar">${meshAvatarInner(ms.user)}</span>
         <span style="min-width:0">
           <div class="mem-name">${esc(meshDn(ms.user))} <span class="kind-tag">You</span></div>
           <div class="mem-sub">Message yourself</div>
@@ -438,7 +438,8 @@ function renderNewGroupSidebar() {
   const agents = listed.filter((u) => u.kind === "agent").sort(byName);
   const humans = listed.filter((u) => u.kind === "human").sort(byName);
   const row = (u) => pickerRow({ value: u.username, initial: u.display,
-    name: u.display, sub: `@${u.username}`, tag: u.kind === "agent" ? "agent" : "" });
+    name: u.display, sub: `@${u.username}`, tag: u.kind === "agent" ? "agent" : "",
+    avatar: meshAvatarInner(u.username) });
   // both sections group alphabetically by display name (same as new-chat)
   const alphaRows = (list) => {
     let rows = "", cur = null;
@@ -480,7 +481,7 @@ function renderNewGroupSidebar() {
     tray.innerHTML = arr.length ? arr.map((un) => {
       const u = ms.users[un] || { display: un };
       return `<span class="ng-chip"><span class="ng-chip-av">${
-        esc((u.display[0] || "?").toUpperCase())}</span><span class="ng-chip-name">${
+        meshAvatarInner(un)}</span><span class="ng-chip-name">${
         esc(u.display)}</span><button class="ng-chip-x" data-user="${esc(un)}">${ICONS.close}</button></span>`;
     }).join("") : `<span class="ng-tray-hint">No members added yet</span>`;
     $("#ng-sub").textContent = arr.length
@@ -544,7 +545,7 @@ function renderNewGroupName() {
   const chips = arr.map((un) => {
     const u = ms.users[un] || { display: un };
     return `<span class="ng-chip static"><span class="ng-chip-av">${
-      esc((u.display[0] || "?").toUpperCase())}</span><span class="ng-chip-name">${
+      meshAvatarInner(un)}</span><span class="ng-chip-name">${
       esc(u.display)}</span></span>`;
   }).join("");
   const html = `

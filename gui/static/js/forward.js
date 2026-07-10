@@ -12,7 +12,7 @@ import { toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn } from "./state.js";
+import { Mesh, meshDn, meshAvatarInner, meshChatAvatarInner } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
@@ -40,13 +40,14 @@ async function openForwardPicker(srcChatId, ids) {
     const name = dm ? meshDn(other) : (c.name || "Chat");
     const n = (c.members || []).length;
     const sub = dm ? `@${other}` : `${n} member${n === 1 ? "" : "s"}`;
-    return pickerRow({ value: `chat:${c.id}`, initial: name, name, sub });
+    return pickerRow({ value: `chat:${c.id}`, initial: name, name, sub,
+      avatar: meshChatAvatarInner(c) });
   };
   const contacts = Object.values(ms.users).filter((u) =>
     u.username !== me && !dmPartners.has(u.username));
   const contactRow = (u) => pickerRow({ value: `user:${u.username}`,
     initial: u.display, name: u.display, sub: `@${u.username}`,
-    tag: u.kind === "agent" ? "agent" : "" });
+    tag: u.kind === "agent" ? "agent" : "", avatar: meshAvatarInner(u.username) });
 
   const listHtml = pickerSection("Recent chats", chats.map(chatRow).join(""))
     + pickerSection("Other contacts", contacts.map(contactRow).join(""));
