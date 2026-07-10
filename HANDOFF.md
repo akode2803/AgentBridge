@@ -6,7 +6,7 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.21
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.22
   at handoff), bumped once per shipped round.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
@@ -49,9 +49,12 @@ conventions that aren't obvious from the code alone.
   sidebar row + `structKey` surgically (no transcript/sidebar rebuild); the
   active-chat and resize-handle highlights are neutral greys driven by
   `--chat-active` / `--resizer-hover` (kept in `:root` for the theming pass) —
-  v0.24.21 extends `--chat-active` to ALL selected nav (rail buttons + settings
-  nav, both formerly accent-tinted) and neutralises the rail/icon-button hovers
-  to the standard `--hover`;
+  v0.24.21–22 extends this to ALL selected nav (rail buttons + settings nav):
+  the HIGHLIGHT is the grey `--chat-active` but the ICON stays accent via
+  `--chat-active-fg` (= `--accent` by default; a separate knob so the theming
+  pass can retint the glyph and the highlight independently). The former
+  `--selected` (pale-accent) hovers on the rail/icon buttons are now the
+  standard neutral `--hover`;
   Message info sits at the top of the message menu with a truncation ellipsis;
   the reply-cap field matches the other inputs and offers preset values via a
   datalist while still taking a custom number.

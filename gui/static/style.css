@@ -16,7 +16,11 @@
   --side-hover: #ECEAE8;
   /* sidebar neutral (un-coloured) greys — kept together so the future theming
      pass changes them in one place, never scattered (round 12) */
-  --chat-active: #DDD9D5;      /* selected/active nav — chat row, rail button, settings nav — grey, not accent */
+  /* selected/active nav item = grey BACKGROUND + accent ICON. Two knobs so the
+     theming pass can retint either independently (bg stays neutral, glyph
+     tracks the accent by default). The chat row uses only the bg (no icon). */
+  --chat-active: #DDD9D5;         /* selected/active nav background — grey */
+  --chat-active-fg: var(--accent);/* its icon/glyph — accent by default, themeable */
   --resizer-hover: #C6C4C2;    /* the sidebar drag handle on hover */
   --selection: rgba(216, 59, 1, .28);
   --code-bg: #F1EFED;
@@ -83,10 +87,9 @@ body { display: flex; flex-direction: column; }
   display: grid; place-items: center; cursor: pointer; padding: 0;
 }
 .rail-btn:hover { background: var(--hover); color: var(--text); }
-/* selected rail item = neutral grey, matching the chat-row selection (round 13,
-   was accent-soft + accent) */
+/* selected rail item = neutral grey HIGHLIGHT, accent ICON (round 13) */
 .rail-btn.active, .rail-btn.active:hover {
-  background: var(--chat-active); color: var(--text);
+  background: var(--chat-active); color: var(--chat-active-fg);
 }
 .rail-label { display: none; }   /* icon captions, mobile only */
 
@@ -131,7 +134,7 @@ body { display: flex; flex-direction: column; }
 }
 .icon-btn svg { width: 19px; height: 19px; }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
-.icon-btn.active { color: var(--text); background: var(--chat-active); }
+.icon-btn.active { color: var(--chat-active-fg); background: var(--chat-active); }
 
 #shell { display: flex; flex: 1; min-height: 0; overflow-x: hidden; }
 
@@ -225,7 +228,7 @@ body { display: flex; flex-direction: column; }
 .snav:hover { background: var(--hover); }
 .snav.active, .snav.active:hover { background: var(--chat-active); }
 .snav svg { width: 20px; height: 20px; color: var(--text-dim); flex: none; }
-.snav.active svg { color: var(--text); }
+.snav.active svg { color: var(--chat-active-fg); }
 .snav .snav-label { font-weight: 600; }
 .snav .snav-desc { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
 
@@ -1803,7 +1806,7 @@ body.side-collapsed #side-resizer { display: none; }
   }
   .rail-label { display: block; font-size: 10.5px; font-weight: 600; }
   .rail-avatar-wrap:hover { background: var(--hover); }
-  .rail-avatar-wrap.active { background: var(--chat-active); color: var(--text); }
+  .rail-avatar-wrap.active { background: var(--chat-active); color: var(--chat-active-fg); }
   .rail-avatar-wrap .rail-avatar { width: 26px; height: 26px; font-size: 12px; }
   .rail-avatar-wrap.active .rail-avatar { outline: none; }
   #navrail { width: 100% !important; flex: 1; border-right: none; }
