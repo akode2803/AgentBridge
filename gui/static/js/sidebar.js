@@ -555,7 +555,15 @@ function renderNewGroupName() {
           <div class="ng-sub">Name your group</div></div>
       </div>
       <div class="ng-name-row">
-        <span class="ng-name-av">${ICONS.addUser}</span>
+        <div class="ng-photo-wrap">
+          <button type="button" class="ng-name-av" id="ngn-photo" aria-label="Add group photo">${
+            ng.avatarUrl ? `<img class="avatar-img" alt="" src="${esc(ng.avatarUrl)}">` : ICONS.camera}</button>
+          <div class="menu ng-photo-menu" id="ngn-photo-menu" hidden>
+            <button data-act="camera">${ICONS.camera} Take photo</button>
+            <button data-act="upload">${ICONS.media} Upload photo</button>
+            ${ng.avatarUrl ? `<button class="danger-item" data-act="remove">${ICONS.trash} Remove photo</button>` : ""}
+          </div>
+        </div>
         <input type="text" id="ngn-name" placeholder="Group name (optional)" maxlength="60"
                value="${esc(ng.name)}" autocomplete="off">
       </div>
@@ -573,6 +581,32 @@ function renderNewGroupName() {
   name.addEventListener("input", sync);
   sync();
   name.focus();
+  // group photo picker (optional, pre-creation): Take/Upload stages a blob +
+  // preview into Mesh.newGroup; it's uploaded right after the group is created
+  const photoBtn = $("#ngn-photo");
+  if (photoBtn) {
+    const pmenu = $("#ngn-photo-menu");
+    photoBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const opening = pmenu.hidden;
+      pmenu.hidden = !opening;
+      if (opening) {
+        const closer = (ev) => {
+          if (!pmenu.contains(ev.target) && !photoBtn.contains(ev.target)) {
+            pmenu.hidden = true;
+            document.removeEventListener("mousedown", closer);
+          }
+        };
+        setTimeout(() => document.addEventListener("mousedown", closer), 0);
+      }
+    });
+    pmenu.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+      pmenu.hidden = true;
+      if (b.dataset.act === "camera") V.photoCamera(stageGroupPhoto);
+      else if (b.dataset.act === "upload") V.photoPickFile(stageGroupPhoto);
+      else if (b.dataset.act === "remove") removeStagedPhoto();
+    }));
+  }
   $("#ngn-back").addEventListener("click", () => {
     ng.step = "members";
     renderNewGroupSidebar();
@@ -580,11 +614,41 @@ function renderNewGroupName() {
   const go = async () => {
     create.disabled = true;
     const groupName = name.value.trim() || "New Group";
+    const blob = ng.avatarBlob;   // staged group photo, if the user picked one
     const r = await api("/api/mesh/create_chat", { name: groupName, members: arr });
     if (r.error) { toast(r.error, true); create.disabled = false; return; }
+    const newId = r.chat.id;
+    if (blob) {
+      // the group exists now → attach the staged photo (creator = owner, so the
+      // owner-only endpoint allows it). Non-fatal: if it fails the group still
+      // opens and the photo can be set from Group Info.
+      try {
+        await fetch(`/api/mesh/set_group_avatar?chat=${encodeURIComponent(newId)}`,
+                    { method: "POST", body: blob });
+      } catch (e) { /* set it later in Group Info */ }
+    }
+    if (ng.avatarUrl) URL.revokeObjectURL(ng.avatarUrl);
     Mesh.newGroup = { active: false, step: "members", members: new Set(), name: "" };
-    location.hash = `#/chats/${r.chat.id}`;
+    location.hash = `#/chats/${newId}`;
   };
   create.addEventListener("click", go);
   name.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+}
+
+// stage / clear the pre-creation group photo (a 512px JPEG blob + a preview
+// object URL held on Mesh.newGroup); the name step re-renders to show it
+function stageGroupPhoto(blob) {
+  if (!blob) return;
+  const ng = Mesh.newGroup;
+  if (ng.avatarUrl) URL.revokeObjectURL(ng.avatarUrl);
+  ng.avatarBlob = blob;
+  ng.avatarUrl = URL.createObjectURL(blob);
+  renderNewGroupSidebar();
+}
+function removeStagedPhoto() {
+  const ng = Mesh.newGroup;
+  if (ng.avatarUrl) URL.revokeObjectURL(ng.avatarUrl);
+  ng.avatarBlob = null;
+  ng.avatarUrl = null;
+  renderNewGroupSidebar();
 }

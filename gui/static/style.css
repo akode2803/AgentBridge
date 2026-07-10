@@ -1665,12 +1665,20 @@ pre.configdump {
 }
 .ng-list { flex: 1; min-height: 0; overflow-y: auto; }
 .ng-name-row { display: flex; align-items: center; gap: 10px; margin: 10px 2px 4px; flex: none; }
+.ng-photo-wrap { position: relative; flex: none; }
 .ng-name-av {
   width: 46px; height: 46px; border-radius: 50%; flex: none;
   background: var(--accent-soft); color: var(--accent);
   display: grid; place-items: center;
+  position: relative; overflow: hidden;
+  border: none; padding: 0; cursor: pointer; font: inherit;
 }
+.ng-name-av:hover, [data-theme="dark"] .ng-name-av:hover { background: var(--accent-soft); }
 .ng-name-av svg { width: 22px; height: 22px; }
+.ng-photo-menu {
+  position: absolute; top: 100%; left: 0; right: auto;
+  margin-top: 6px; min-width: 184px;
+}
 .ng-name-row input {
   flex: 1; min-width: 0; border: none; border-bottom: 2px solid var(--accent);
   background: none; outline: none; font: inherit; font-size: 15px;
