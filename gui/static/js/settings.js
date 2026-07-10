@@ -37,6 +37,7 @@ async function renderSettings() {
           <div class="pf-photo">${meshAvatarInner(ms.user)}</div>
           <button class="pf-edit" id="pf-edit">${ICONS.camera} Edit</button>
           <div class="menu pf-menu" id="pf-menu" hidden>
+            <button data-act="camera">${ICONS.camera} Take photo</button>
             <button data-act="upload">${ICONS.media} Upload photo</button>
             ${hasPhoto ? `<button class="danger-item" data-act="remove">${ICONS.trash} Remove photo</button>` : ""}
           </div>
@@ -241,7 +242,8 @@ async function renderSettings() {
     });
     menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
       menu.hidden = true;
-      if (b.dataset.act === "upload") file.click();
+      if (b.dataset.act === "camera") openCamera();
+      else if (b.dataset.act === "upload") file.click();
       else if (b.dataset.act === "remove") removeAvatar();
     }));
     file.addEventListener("change", () => {
@@ -263,10 +265,84 @@ function openAvatarAdjust(file) {
   img.src = url;
 }
 
-// A fixed 300px stage with a centred 260px crop circle. The image pans/zooms
-// but is clamped so the circle is always fully covered; on confirm the
-// circle's bounding square is drawn into a 512×512 export canvas and exported
-// as JPEG — downsized entirely client-side (the backend keeps no image library).
+// ---- profile photo: take a photo with the device camera (Round B) -----------
+// getUserMedia needs a secure context — fine on 127.0.0.1; a LAN-over-http phone
+// won't get camera access until the app serves HTTPS (a later feature).
+async function openCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast("The camera isn't available here", true);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 1280 } },
+      audio: false,
+    });
+  } catch (e) {
+    const name = e && e.name;
+    toast(
+      name === "NotAllowedError" || name === "SecurityError"
+        ? "Camera access was blocked — allow the camera in your browser, then try again."
+      : name === "NotFoundError" || name === "OverconstrainedError" || name === "DevicesNotFoundError"
+        ? "No camera found on this device."
+      : name === "NotReadableError" || name === "TrackStartError"
+        ? "The camera is already in use by another app."
+        : "Couldn't open the camera.",
+      true);
+    return;
+  }
+  mountCamera(stream);
+}
+
+// Live viewfinder in the same illuminated-circle stage; the shutter grabs the
+// current frame (mirrored, to match the selfie preview) and hands it to the
+// SAME crop/zoom adjuster the upload path uses. The camera stream is stopped on
+// every close path so the webcam light never lingers.
+function mountCamera(stream) {
+  const box = openModal(`
+    <div class="ava-adjust cam-shoot">
+      <div class="ava-adjust-head">
+        <button class="icon-btn" id="cam-cancel" aria-label="Cancel">${ICONS.close}</button>
+        <span>Take photo</span>
+      </div>
+      <div class="ava-stage">
+        <video id="cam-video" autoplay playsinline muted></video>
+        <div class="ava-mask"></div>
+      </div>
+      <button class="ava-confirm primary" id="cam-shot" aria-label="Capture photo">${ICONS.camera}</button>
+    </div>`);
+  box.classList.add("ava-modal");
+  const video = box.querySelector("#cam-video");
+  video.srcObject = stream;
+  video.play().catch(() => {});
+  const stop = () => stream.getTracks().forEach((t) => t.stop());
+  // stop the camera on ANY close (cancel, capture, or an outside-click that
+  // removes the modal scrim) — otherwise the stream (and webcam light) lingers
+  const obs = new MutationObserver(() => {
+    if (!document.body.contains(video)) { stop(); obs.disconnect(); }
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+  box.querySelector("#cam-cancel").addEventListener("click", () => { stop(); closeModal(); });
+  box.querySelector("#cam-shot").addEventListener("click", () => {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) { toast("The camera is still starting — try again", true); return; }
+    const cap = document.createElement("canvas");
+    cap.width = vw; cap.height = vh;
+    const cctx = cap.getContext("2d");
+    cctx.translate(vw, 0); cctx.scale(-1, 1);   // mirror to match the preview
+    cctx.drawImage(video, 0, 0, vw, vh);
+    stop(); obs.disconnect();
+    closeModal();
+    mountAvatarAdjuster(cap);   // a canvas is a valid source for the adjuster
+  });
+}
+
+// A fixed 300px stage with a centred 260px crop circle. Accepts an <img> (from
+// an upload) OR a <canvas> (a captured camera frame). The source pans/zooms but
+// is clamped so the circle is always fully covered; on confirm the circle's
+// bounding square is drawn into a 512×512 export canvas and exported as JPEG —
+// downsized entirely client-side (the backend keeps no image library).
 function mountAvatarAdjuster(img) {
   const S = 300, D = 260, c = S / 2, cropL = c - D / 2, cropT = c - D / 2;
   const box = openModal(`
