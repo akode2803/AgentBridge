@@ -1238,7 +1238,8 @@ pre.configdump {
   margin-bottom: 8px;
 }
 .chat-head button { padding: 4px 12px; }
-.chat-head-name { font-weight: 600; font-size: 15px; }
+.chat-head-name { font-weight: 600; font-size: 15px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-head-members { margin-top: 3px; }
 .member-chip {
   display: inline-block; font-size: 11px; color: var(--text-dim);

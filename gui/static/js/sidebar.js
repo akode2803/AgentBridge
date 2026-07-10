@@ -343,12 +343,16 @@ function openChatRowMenu(chatId, x, y) {
   const isOwner = c.owner === ms.user;
   const isPinned = !!c.pinned;
   const isUnread = (c.unread > 0) || !!c.forced_unread;
+  // grey out Clear when there's nothing visible left to clear (empty or already
+  // cleared). c.last is viewer-scoped, so it's null in exactly the cases where
+  // the header menu disables Clear (data.messages empty) — keeps them matched.
+  const canClear = !!c.last;
   const items = [
     `<button data-act="pin">${isPinned ? ICONS.pinOff : ICONS.pin} ${isPinned ? "Unpin chat" : "Pin chat"}</button>`,
     `<button data-act="unread">${ICONS.unread} ${isUnread ? "Mark as read" : "Mark as unread"}</button>`,
     `<button data-act="mute">${ICONS.bell} Mute notifications</button>`,
     isOwner ? `<button data-act="archive">${ICONS.archive} ${c.archived ? "Unarchive chat" : "Archive chat"}</button>` : "",
-    `<button data-act="clear" class="danger-item">${ICONS.eraser} Clear chat</button>`,
+    `<button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>`,
     (isDm || isSelf)
       ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
       : (isGroup && !isOwner ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : ""),
@@ -365,7 +369,7 @@ function openChatRowMenu(chatId, x, y) {
   menu.style.visibility = "";
   menu.addEventListener("click", (e) => {
     const b = e.target.closest("button[data-act]");
-    if (!b) return;
+    if (!b || b.disabled) return;
     const act = b.dataset.act;
     closeChatRowMenu();
     runChatAction(act, c);

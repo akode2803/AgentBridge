@@ -155,20 +155,26 @@ function renderMeshAuth() {
   $("#auth-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
 }
 
-// the Read-more reveal schedule: +10, then +15, then +25, then fully expand.
-// `cur` is the message's current line budget (undefined before the first click).
+// the Read-more reveal schedule: 15 lines, then 30, then fully expand
+// (user-set 2026-07-11). `cur` is the message's current line budget (undefined
+// before the first click); the initial preview clamps at 10 (clampLong default).
 function nextClamp(cur) {
-  if (!cur || cur <= 10) return 20;   // 1st click: +10
-  if (cur <= 20) return 35;           // 2nd click: +15
-  if (cur <= 35) return 60;           // 3rd click: +25
-  return Infinity;                    // 4th click: expand completely
+  if (!cur || cur <= 10) return 15;   // 1st click → 15 lines
+  if (cur <= 15) return 30;           // 2nd click → 30 lines
+  return Infinity;                    // 3rd click → the rest
 }
 
 async function renderMeshChat(force) {
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
+  if (data.error) {
+    // a deleted chat vanishing under an open view is expected, not an error —
+    // slip back to the list quietly (was a scary "No such chat" toast when a
+    // delete raced the ~2.5s poll, 2026-07-11). Other errors still surface.
+    if (data.error !== "No such chat") toast(data.error, true);
+    location.hash = "#/chats"; return;
+  }
   const feeds = (await api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`)).feeds || [];
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare

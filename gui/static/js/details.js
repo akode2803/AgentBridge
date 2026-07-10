@@ -37,7 +37,10 @@ async function renderChatDetails() {
   // chat_info is the LIGHT payload (meta + files + links) — the pane used
   // to pull 1000 full messages on every open and poll
   const data = await api(`/api/mesh/chat_info?id=${encodeURIComponent(chatId)}`);
-  if (data.error) { toast(data.error, true); location.hash = "#/chats"; return; }
+  if (data.error) {
+    if (data.error !== "No such chat") toast(data.error, true);   // deleted → quiet
+    location.hash = "#/chats"; return;
+  }
   const meta = data.meta;
   const s = App.state;
   const isOwner = meta.owner === ms.user;
