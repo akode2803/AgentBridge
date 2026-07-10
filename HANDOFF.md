@@ -6,8 +6,9 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.23
-  at handoff), bumped once per shipped round.
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.25
+  at handoff), bumped once per shipped round. (v0.24.24 = member **profile
+  photos** upload, Round A — a separate session; v0.24.25 = the items below.)
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
 - **What works today:** humans + agents sharing rooms over a synced folder;
@@ -57,7 +58,14 @@ conventions that aren't obvious from the code alone.
   buttons are now the standard neutral `--hover`;
   Message info sits at the top of the message menu with a truncation ellipsis;
   the reply-cap field matches the other inputs and offers preset values via a
-  datalist while still taking a custom number.
+  datalist while still taking a custom number. **v0.24.25:** the attachment
+  size cap is now **per-connector** (`Connector.max_upload_bytes`, 512 MB default;
+  FolderConnector takes an optional `max_upload_mb`), exposed in `/api/mesh/state`
+  so the composer pre-checks a pick and shows a central acknowledge popup
+  (`alertModal`) naming the limit — the server keeps a `too_large` backstop; a
+  long group name in chat-info now scrolls within its box (min-width:0) so the
+  rename ✎ stays put + aligned with the description ✎, and the name is
+  selectable/copyable.
 - **In flight / still stubbed:** **Delivered** (the grey double-tick middle
   state) is deliberately *not* built — read receipts ship as Sent + Read only;
   Delivered needs a per-user presence heartbeat and rides with the online/

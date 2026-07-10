@@ -1,12 +1,12 @@
 """HTTP server for the AgentBridge GUI.
 
 Wraps bridge.py (imported from the repo root) behind a small JSON API and
-serves the static front-end. Binds to 127.0.0.1 only â€” this is a local app,
+serves the static front-end. Binds to 127.0.0.1 only — this is a local app,
 not a network service.
 
 Single-writer discipline is preserved: every shared-folder write goes through
 bridge.py functions (do_send, mark_processed, atomic_write_json on
-control.json â€” the documented any-human kill switch).
+control.json — the documented any-human kill switch).
 
 Unlike the legacy tkinter GUI, this server does NOT auto-ack inbound
 messages: the analyst's Claude session owns `recv --mark`, and the GUI
@@ -62,7 +62,7 @@ HOME = bridge.DEFAULT_HOME  # overridable via --home in __main__
 
 # Without this flag, every subprocess from a pythonw-launched server flashes
 # a console window on screen. And without stdin redirected, subprocess calls
-# under pythonw can fail outright ("the handle is invalid") â€” pythonw has no
+# under pythonw can fail outright ("the handle is invalid") — pythonw has no
 # std handles, and capture_output only covers stdout/stderr.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 SUBPROC = {"stdin": subprocess.DEVNULL, "creationflags": NO_WINDOW}
@@ -71,7 +71,7 @@ SUBPROC = {"stdin": subprocess.DEVNULL, "creationflags": NO_WINDOW}
 def open_path(path):
     """Open a file or folder with the OS default handler."""
     if sys.platform == "win32":
-        os.startfile(str(path))  # noqa: S606 â€” local desktop app by design
+        os.startfile(str(path))  # noqa: S606 — local desktop app by design
     elif sys.platform == "darwin":
         subprocess.Popen(["open", str(path)])
     else:
@@ -104,7 +104,7 @@ _onedrive_cache = {"ts": 0.0, "running": None}
 
 def get_bridge():
     """Fresh Bridge per request (config may change mid-session via the wizard).
-    Returns None when not yet configured â€” callers branch to wizard state."""
+    Returns None when not yet configured — callers branch to wizard state."""
     if bridge.read_json(Path(HOME) / "config.json") is None:
         return None
     return bridge.Bridge(HOME)
@@ -322,7 +322,7 @@ def api_init(data):
     if not shared:
         return {"error": "Choose a shared folder first"}
     # bridge init rewrites config wholesale (production gotcha: a re-init once
-    # silently dropped the handler and watch insta-acked without processing) â€”
+    # silently dropped the handler and watch insta-acked without processing) —
     # carry existing handler settings through.
     old = bridge.read_json(Path(HOME) / "config.json") or {}
     try:
@@ -335,7 +335,7 @@ def api_init(data):
 
 
 def api_install_skills():
-    """Copy the staged skill folders into ~/.claude/skills (Claude Code only â€”
+    """Copy the staged skill folders into ~/.claude/skills (Claude Code only —
     claude.ai chat needs the zips uploaded via Settings > Capabilities)."""
     import shutil
     src_root = REPO_ROOT / "skills"
@@ -353,7 +353,7 @@ def api_install_skills():
 
 def api_open(data):
     """Open a bridge-owned location in Explorer. Deliberately a fixed menu of
-    targets, not a free path â€” the GUI must never become a generic file opener."""
+    targets, not a free path — the GUI must never become a generic file opener."""
     name = data.get("target")
     if name == "remote_md":
         target = REPO_ROOT / "REMOTE_SETUP.md"
@@ -385,7 +385,7 @@ def api_open_attachment(data):
     if files_root != target and files_root not in target.parents:
         return {"error": "That file is outside the shared files folder"}
     if not target.is_file():
-        return {"error": "File not found â€” it may still be syncing"}
+        return {"error": "File not found — it may still be syncing"}
     open_path(target)
     return {"ok": True}
 
@@ -449,7 +449,7 @@ def api_send_remote_kit():
     body = ("Remote setup kit attached: handler_coco.py, disallowed_tools.json "
             "and REMOTE_SETUP.md. A human on the remote machine should follow "
             "REMOTE_SETUP.md step 5 to install them. Do not install these "
-            "yourself â€” handler and blocklist changes are human-only.")
+            "yourself — handler and blocklist changes are human-only.")
     try:
         seq = bridge.do_send(br, body, attachments=[str(p) for p in kit],
                              msg_type="control")
@@ -539,7 +539,7 @@ def session_user(m):
 def _not_member(meta, user):
     """Read gate: you can only read a chat you belong to (mirrors post()'s
     write gate). Returns an error dict to short-circuit, or None if allowed.
-    App-level privacy â€” see the access-model note in mesh.py."""
+    App-level privacy — see the access-model note in mesh.py."""
     if user not in (meta.get("members") or []):
         return {"error": "You don't have access to this chat"}
     return None
@@ -570,7 +570,7 @@ def _msg_snippet(msg):
     snip = {"from": msg.get("from"), "ts": msg.get("ts"),
             "body": (msg.get("body") or "")[:120],
             "files": len(msg.get("files") or [])}
-    if msg.get("deleted"):   # tombstone: the sidebar shows "â€¦deletedâ€¦" instead
+    if msg.get("deleted"):   # tombstone: the sidebar shows "…deleted…" instead
         snip["deleted"] = True
     return snip
 
@@ -585,6 +585,9 @@ def api_mesh_state():
     ctl = bridge.read_json(m.root / "control.json") or {}
     out = {"available": True, "user": user,
            "paused": bool(ctl.get("paused")),
+           # per-connector attachment ceiling — the client pre-checks against
+           # this and names it in the "file too large" dialog (round 14)
+           "max_upload_bytes": getattr(m.cx, "max_upload_bytes", None),
            "users": {k: _public_user(v) for k, v in m.users().items()}}
     if user:
         chats = []
@@ -660,12 +663,12 @@ def api_mesh_chat(params):
         tail = 200
     # messages_for applies the delete overlays (deleted-for-everyone
     # tombstoned, this user's deleted-for-me removed) so no deleted body ever
-    # reaches the client â€” the transcript AND the client-side search read this
+    # reaches the client — the transcript AND the client-side search read this
     msgs = m.messages_for(chat_id, user, tail=tail)
     for msg in msgs:
         msg["mine"] = msg.get("from") == user
     # read receipts ride only on my OWN messages, derived from the other
-    # members' read cursors (no extra message read â€” msgs is reused)
+    # members' read cursors (no extra message read — msgs is reused)
     receipts = m.receipts_for(chat_id, user, msgs)
     for msg in msgs:
         r = receipts.get(msg.get("id"))
@@ -761,7 +764,7 @@ def api_mesh_add_member(data):
 
 def api_mesh_chat_info(params):
     """Light payload for the chat-info pane: meta + files + links, one
-    server-side walk â€” the pane used to pull 1000 full messages on every
+    server-side walk — the pane used to pull 1000 full messages on every
     open and poll just to derive this."""
     m = get_mesh()
     user = session_user(m)
@@ -885,9 +888,9 @@ def api_mesh_pause(data):
     try:
         bridge.atomic_write_json(m.root / "control.json", ctl)
     except OSError:
-        # the shared folder is locked (OneDrive syncing) even after retries â€”
+        # the shared folder is locked (OneDrive syncing) even after retries —
         # tell the caller gracefully rather than 500; the toggle can be retried
-        return {"error": "Couldn't reach the shared folder â€” it may be syncing. "
+        return {"error": "Couldn't reach the shared folder — it may be syncing. "
                          "Try again in a moment."}
     return {"ok": True, "paused": ctl["paused"]}
 
@@ -998,7 +1001,7 @@ def api_mesh_starred(params):
 
 
 def api_mesh_forward(data):
-    """Groundwork endpoint â€” the forward UI lands with the select-messages
+    """Groundwork endpoint — the forward UI lands with the select-messages
     round; kept API-complete so agents/CLI can already use it."""
     m = get_mesh()
     user = session_user(m)
@@ -1053,7 +1056,7 @@ def api_mesh_undelete_messages(data):
 
 def api_mesh_clear_chat(data):
     """Clear-for-me: drop every message currently visible to this user behind
-    a per-user cursor. Purely the caller's own view â€” membership-gated, no
+    a per-user cursor. Purely the caller's own view — membership-gated, no
     other member is affected. keep_starred spares their starred messages."""
     m = get_mesh()
     user = session_user(m)
@@ -1071,7 +1074,7 @@ def api_mesh_clear_chat(data):
 
 
 def api_mesh_edit_message(data):
-    """Edit a message in place â€” author-only, membership-gated. Stored as a
+    """Edit a message in place — author-only, membership-gated. Stored as a
     chat-level edits.json overlay; messages_for shows the latest edit."""
     m = get_mesh()
     user = session_user(m)
@@ -1181,7 +1184,7 @@ def api_mesh_open_file(data):
     if files_root != target and files_root not in target.parents:
         return {"error": "That file is outside the chat's files folder"}
     if not target.is_file():
-        return {"error": "File not found â€” it may still be syncing"}
+        return {"error": "File not found — it may still be syncing"}
     open_path(target)
     return {"ok": True}
 
@@ -1190,7 +1193,7 @@ def api_mesh_save(data):
     """Save selected chat attachments to a user-chosen folder. The files
     already live in the synced folder; this copies them OUT to wherever the
     user picks (WhatsApp's "download"). Native folder picker via the same
-    tkinter subprocess trick as pick_folder â€” blocks until the dialog closes."""
+    tkinter subprocess trick as pick_folder — blocks until the dialog closes."""
     import shutil
     m = get_mesh()
     user = session_user(m)
@@ -1215,7 +1218,7 @@ def api_mesh_save(data):
         if files_root != t and files_root not in t.parents:
             return {"error": "A selected file is outside the chat's files folder"}
         if not t.is_file():
-            return {"error": "A file was not found â€” it may still be syncing"}
+            return {"error": "A file was not found — it may still be syncing"}
         targets.append(t)
     code = ("import tkinter as tk\n"
             "from tkinter import filedialog\n"
@@ -1391,7 +1394,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _chat_file(self, params):
         """Serve a chat attachment inline (image thumbnails in the media
-        pane) â€” same path validation as open_file, read-only."""
+        pane) — same path validation as open_file, read-only."""
         m = get_mesh()
         if m is None or not m.exists() or not session_user(m):
             return self._json({"error": "Sign in first"}, 403)
@@ -1446,12 +1449,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    MAX_UPLOAD = 512 * 1024 * 1024
+    MAX_UPLOAD = 512 * 1024 * 1024   # fallback; the real cap is per-connector
     MAX_AVATAR = 8 * 1024 * 1024   # generous; the client downsizes to ~50KB
 
     def _upload(self):
-        """Attachment staging (POST /api/mesh/upload?name=â€¦, raw file body).
-        A browser file input can't reveal filesystem paths â€” the file itself
+        """Attachment staging (POST /api/mesh/upload?name=…, raw file body).
+        A browser file input can't reveal filesystem paths — the file itself
         travels here (localhost) and the staged copy rides the next post.
         Works from any browser, including phones, unlike a native dialog."""
         _, _, query = self.path.partition("?")
@@ -1467,8 +1470,16 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._json({"error": "Empty upload"}, 400)
-        if length > self.MAX_UPLOAD:
-            return self._json({"error": "File is too large (512 MB max)"}, 400)
+        # per-connector cap (the storage decides its own ceiling); the client
+        # normally pre-checks, so this is the backstop. too_large lets the GUI
+        # show the acknowledge popup instead of a toast (round 14).
+        m = get_mesh()
+        cap = getattr(m.cx, "max_upload_bytes", self.MAX_UPLOAD) if m else self.MAX_UPLOAD
+        if length > cap:
+            mb = cap / (1024 * 1024)
+            label = f"{mb / 1024:g} GB" if mb >= 1024 else f"{mb:g} MB"
+            return self._json({"error": f"File is too large — the limit is {label}.",
+                               "too_large": True}, 400)
         staging = HOME / "gui_uploads"
         staging.mkdir(parents=True, exist_ok=True)
         dest = staging / name
@@ -1543,7 +1554,7 @@ def request_shutdown(port, host="127.0.0.1"):
         with urllib.request.urlopen(f"{base}/api/state", timeout=2) as r:
             info = json.loads(r.read().decode("utf-8"))
         if "gui_version" not in info:
-            return False  # some other program owns the port â€” leave it alone
+            return False  # some other program owns the port — leave it alone
     except Exception:
         return False
     try:
@@ -1558,11 +1569,11 @@ def request_shutdown(port, host="127.0.0.1"):
 def serve(port, host="127.0.0.1"):
     global HTTPD
     # Hand off PROACTIVELY: if another AgentBridge already holds this port, ask
-    # it to quit before we bind. We can't rely on a bind error to detect it â€”
+    # it to quit before we bind. We can't rely on a bind error to detect it —
     # HTTPServer sets allow_reuse_address, and on Windows that lets a duplicate
     # bind SUCCEED, so the old server would linger and instances pile up (the
     # long-standing "forking"). A no-op when nothing (or a foreign program) is
-    # on the port. Newest launch wins â†’ always exactly one, always fresh code.
+    # on the port. Newest launch wins → always exactly one, always fresh code.
     took_over = request_shutdown(port, host)
     httpd = None
     attempts = 20 if took_over else 1  # only wait around if we displaced someone

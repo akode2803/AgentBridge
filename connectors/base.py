@@ -34,6 +34,14 @@ class Connector:
 
     scheme = "abstract"
 
+    # Largest attachment (bytes) an upload may be, PER CONNECTOR — the ceiling
+    # is a property of the transport, not the app: a locally-synced folder must
+    # push every attachment down to each member's machine (a huge file chokes
+    # OneDrive/Drive sync for everyone), while an API-backed store has its own
+    # service limits. The GUI reads this to gate uploads and to name the limit
+    # in the "file too large" dialog. Subclasses override the default.
+    max_upload_bytes = 512 * 1024 * 1024   # 512 MB
+
     # ------------------------------------------------------------ primitives
 
     def read_text(self, rel):

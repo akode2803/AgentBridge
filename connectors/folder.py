@@ -21,8 +21,14 @@ SCHEME = "folder"
 class FolderConnector(Connector):
     scheme = SCHEME
 
-    def __init__(self, root):
+    def __init__(self, root, max_upload_mb=None):
         self.root = Path(root)
+        # OneDrive/SharePoint/Drive sync every attachment to each member's
+        # machine, so the cap guards everyone's sync bandwidth, not just disk.
+        # Overridable per deployment via a dict spec ({"connector":"folder",
+        # "root":…, "max_upload_mb":1024}); defaults to the base 512 MB.
+        if max_upload_mb:
+            self.max_upload_bytes = int(max_upload_mb) * 1024 * 1024
 
     def __repr__(self):
         return f"FolderConnector({self.root})"

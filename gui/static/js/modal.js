@@ -39,6 +39,22 @@ export function confirmModal({ title, body, action = "Delete" }) {
   });
 }
 
+// single-button acknowledgement dialog — same centered box + pill styling as
+// confirmModal, but only an OK (nothing to decide). Resolves when dismissed.
+export function alertModal({ title, body, action = "OK" }) {
+  return new Promise((resolve) => {
+    const box = openModal(`
+      <div class="cf-title">${title}</div>
+      <div class="cf-body">${esc(body)}</div>
+      <div class="cf-actions">
+        <button class="cf-pill" id="al-ok">${esc(action)}</button>
+      </div>`);
+    box.classList.add("confirm");
+    box.parentElement.classList.add("confirm-scrim");
+    box.querySelector("#al-ok").addEventListener("click", () => { closeModal(); resolve(); });
+  });
+}
+
 // live filter for modal lists: hides non-matching .modal-row items and any
 // .modal-sec header whose section went empty
 export function bindModalFilter(box) {

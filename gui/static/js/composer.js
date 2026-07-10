@@ -7,7 +7,15 @@ import { ICONS, extIcon } from "./icons.js";
 import { api } from "./api.js";
 import { stripMd } from "./markdown.js";
 import { Mesh, meshDn, meshDraft } from "./state.js";
+import { alertModal } from "./modal.js";
 import { V } from "./views.js";
+
+// the connector's upload ceiling, human-readable ("512 MB" / "1 GB")
+function fmtLimit(bytes) {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) { const gb = mb / 1024; return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`; }
+  return `${Math.round(mb)} MB`;
+}
 
 // the pending-attachment chips between transcript and composer
 export function renderMeshPending(chatId) {
@@ -227,11 +235,30 @@ export function initComposer(chatId, members) {
   $("#mesh-file").addEventListener("change", async (e) => {
     const files = [...e.target.files];
     e.target.value = "";
-    for (const f of files) {
+    // pre-check against the connector's cap so a too-big file never uploads;
+    // a central acknowledge popup names the limit (round 14)
+    const limit = Mesh.state?.max_upload_bytes;
+    const tooBig = limit ? files.filter((f) => f.size > limit) : [];
+    const okFiles = limit ? files.filter((f) => f.size <= limit) : files;
+    if (tooBig.length) {
+      await alertModal({
+        title: "File too large",
+        body: tooBig.length === 1
+          ? `“${tooBig[0].name}” is larger than the ${fmtLimit(limit)} attachment limit, so it can't be sent.`
+          : `${tooBig.length} files are larger than the ${fmtLimit(limit)} attachment limit, so they can't be sent.`,
+      });
+    }
+    for (const f of okFiles) {
       const r = await fetch(`/api/mesh/upload?name=${encodeURIComponent(f.name)}`,
         { method: "POST", body: f });
       const j = await r.json();
-      if (j.error) { toast(j.error, true); continue; }
+      if (j.error) {
+        // server backstop (e.g. the client's cached limit was stale): the
+        // size case gets the same popup, everything else a toast
+        if (j.too_large) await alertModal({ title: "File too large", body: j.error });
+        else toast(j.error, true);
+        continue;
+      }
       draft.atts.push(j);
     }
     renderMeshPending(chatId);

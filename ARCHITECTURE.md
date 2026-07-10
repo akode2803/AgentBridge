@@ -554,7 +554,11 @@ must run *before* anything is installed.
   disk, so `../../` traversal returns a clean 400/error rather than reading
   outside the chat.
 - **Upload flow** (`_upload`, `POST /api/mesh/upload?name=...`): the raw file
-  body streams straight to `~/.agentbridge/gui_uploads/`, capped at 512MB,
+  body streams straight to `~/.agentbridge/gui_uploads/`, capped at
+  `Connector.max_upload_bytes` (**per-connector**, 512MB default — a folder
+  connector guards everyone's OneDrive sync; `/api/mesh/state` exposes it so the
+  composer pre-checks a pick and shows a central acknowledge popup, with a
+  `too_large` server backstop; v0.24.25),
   filename collision-suffixed. A browser `<input type=file>` can't reveal a
   real filesystem path (needed by the native-file-picker era of this app), so
   this is what makes attach-from-any-browser — including phones — possible.
