@@ -150,6 +150,13 @@ function renderEmptyChat() {
 
 function renderMeshAuth() {
   const mode = Mesh.auth.mode;
+  // the auth screen is an .empty-state too, so give it its OWN listKey — else a
+  // stale "empty" (left by the home window before signing out) made renderChats
+  // take its `listKey === "empty" && $("#content > .empty-state")` early-return
+  // and skip repainting the home window after a successful sign-in (user-reported
+  // 2026-07-11: "on a successful sign in the window does not go to the default
+  // AgentBridge window").
+  Mesh.listKey = "auth";
   $("#content").innerHTML = `
     <div class="empty-state">
       <div class="es-box">

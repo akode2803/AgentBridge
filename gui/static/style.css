@@ -396,7 +396,10 @@ button.primary {
 button.primary:hover { background: var(--accent-hover); }
 button:disabled { opacity: .45; cursor: default; }
 
-input[type=text], input[type=number], select, textarea {
+/* password/email were missing here, so they fell back to the browser default
+   (white box in dark mode — user-reported 2026-07-11) */
+input[type=text], input[type=number], input[type=password], input[type=email],
+select, textarea {
   font: inherit; color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 4px;
   padding: 6px 10px; background: var(--surface);
