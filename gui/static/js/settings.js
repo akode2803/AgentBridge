@@ -1,7 +1,7 @@
 /* Settings pages — profile, account, chats (theme), my agents, connection.
    The section nav lives in the sidebar. */
 
-import { $, esc, toast, setTheme, enterToSend, setEnterToSend } from "./util.js";
+import { $, esc, toast, setThemePref, themePref, enterToSend, setEnterToSend } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
@@ -9,6 +9,17 @@ import { openModal, closeModal, swapModal, openPhotoViewer } from "./modal.js";
 import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
+
+// Theme-picker tile illustrations (task 6): a tiny app mockup per option. The
+// surface colours are fixed to each theme so the tile previews that theme even
+// when the app is currently in another; the accent bubble uses var(--accent) so
+// it also previews the chosen palette colour (task 7). System = a light/dark
+// split. No checkbox — the selected tile gets an accent border (.sel).
+const THEME_ART = {
+  light: `<svg viewBox="0 0 100 64" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="64" fill="#FAF9F8"/><rect width="30" height="64" fill="#EFECEA"/><rect x="6" y="9" width="18" height="4" rx="2" fill="#CFCCC9"/><rect x="6" y="17" width="18" height="4" rx="2" fill="#CFCCC9"/><rect x="6" y="25" width="18" height="4" rx="2" fill="#CFCCC9"/><rect x="38" y="11" width="28" height="8" rx="4" fill="#E8E5E3"/><rect x="50" y="27" width="36" height="8" rx="4" fill="var(--accent)"/><rect x="38" y="43" width="22" height="8" rx="4" fill="#E8E5E3"/></svg>`,
+  dark: `<svg viewBox="0 0 100 64" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="64" fill="#201F1E"/><rect width="30" height="64" fill="#161514"/><rect x="6" y="9" width="18" height="4" rx="2" fill="#3A3937"/><rect x="6" y="17" width="18" height="4" rx="2" fill="#3A3937"/><rect x="6" y="25" width="18" height="4" rx="2" fill="#3A3937"/><rect x="38" y="11" width="28" height="8" rx="4" fill="#2E2D2B"/><rect x="50" y="27" width="36" height="8" rx="4" fill="var(--accent)"/><rect x="38" y="43" width="22" height="8" rx="4" fill="#2E2D2B"/></svg>`,
+  system: `<svg viewBox="0 0 100 64" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="64" fill="#FAF9F8"/><rect x="50" width="50" height="64" fill="#201F1E"/><rect width="16" height="64" fill="#EFECEA"/><rect x="50" width="16" height="64" fill="#161514"/><rect x="22" y="13" width="22" height="7" rx="3.5" fill="#E8E5E3"/><rect x="20" y="27" width="26" height="7" rx="3.5" fill="var(--accent)"/><rect x="72" y="20" width="22" height="7" rx="3.5" fill="#2E2D2B"/><rect x="70" y="34" width="24" height="7" rx="3.5" fill="var(--accent)"/><line x1="50" y1="0" x2="50" y2="64" stroke="#8A8886" stroke-width="1"/></svg>`,
+};
 
 async function renderSettings() {
   const s = App.state;
@@ -27,7 +38,7 @@ async function renderSettings() {
   // Profile is merged into Account (task 2); the old #/settings/profile route
   // (bookmarks, etc.) still lands on the merged Account section.
   const section = Settings.section === "profile" ? "account" : (Settings.section || "account");
-  const dark = document.documentElement.dataset.theme === "dark";
+  const pref = themePref();
   const back = `<button class="mob-back" onclick="location.hash='#/settings'">${ICONS.back} Settings</button>`;
 
   let html = "";
@@ -65,15 +76,15 @@ async function renderSettings() {
     html = `${back}<h1>Chats</h1>
       <div class="card">
         <h2>Appearance</h2>
-        <div class="row">
-          <label class="switch">
-            <input type="checkbox" id="theme-toggle" ${dark ? "checked" : ""}>
-            <span class="slider"></span>
-          </label>
-          <span><b>Dark mode</b></span>
+        <div class="theme-tiles">
+          ${["system", "light", "dark"].map((p) => `
+            <button class="theme-tile ${pref === p ? "sel" : ""}" data-theme-pref="${p}">
+              <span class="tt-art">${THEME_ART[p]}</span>
+              <span class="tt-label">${p[0].toUpperCase() + p.slice(1)}</span>
+            </button>`).join("")}
         </div>
-        <p class="hint" style="margin-bottom:0">Full theming and wallpapers come
-        with the theming pass.</p>
+        <p class="hint" style="margin-bottom:0">System follows your device's
+        light/dark setting.</p>
       </div>
       <div class="card">
         <h2>Messaging</h2>
@@ -177,9 +188,14 @@ async function renderSettings() {
   }
   $("#content").innerHTML = `<div class="settings-body">${html}</div>`;
 
-  const theme = $("#theme-toggle");
-  if (theme) theme.addEventListener("change", (e) => {
-    setTheme(e.target.checked ? "dark" : "light");
+  // theme tiles: click to pick System / Light / Dark; setThemePref applies it
+  // live (data-theme flips → the whole app re-themes) and the accent bubble in
+  // each tile follows suit. No re-render needed — just move the .sel border.
+  document.querySelectorAll(".theme-tile").forEach((t) => {
+    t.addEventListener("click", () => {
+      setThemePref(t.dataset.themePref);
+      document.querySelectorAll(".theme-tile").forEach((x) => x.classList.toggle("sel", x === t));
+    });
   });
   const enterSend = $("#enter-send");
   if (enterSend) enterSend.addEventListener("change", (e) => setEnterToSend(e.target.checked));

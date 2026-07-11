@@ -381,6 +381,27 @@ h1 {
 .acct-name-edit svg { width: 15px; height: 15px; }
 .acct-name-line input { text-align: center; font-weight: 600; font-size: 16px; max-width: 220px; }
 
+/* theme picker tiles (task 6): a mini mockup per option; the selected tile gets
+   an accent border instead of a checkbox. The :hover overrides the global
+   button:hover (both themes) so the tile surface stays put — only the border
+   reacts (the recurring global-hover trap). */
+.theme-tiles { display: flex; gap: 14px; flex-wrap: wrap; }
+.theme-tile {
+  border: 2px solid var(--border); border-radius: 12px; padding: 7px;
+  background: var(--surface); cursor: pointer;
+  display: flex; flex-direction: column; gap: 8px; align-items: center; width: 118px;
+}
+.theme-tile:hover, [data-theme="dark"] .theme-tile:hover {
+  background: var(--surface); border-color: var(--border-strong);
+}
+.theme-tile.sel, .theme-tile.sel:hover { border-color: var(--accent); }
+.tt-art {
+  width: 100%; height: 66px; border-radius: 8px; overflow: hidden;
+  display: block; border: 1px solid var(--border);
+}
+.tt-art svg { display: block; width: 100%; height: 100%; }
+.tt-label { font-size: 12.5px; font-weight: 600; }
+
 .recent-list { list-style: none; margin: 0; padding: 0; }
 .recent-item {
   display: flex; gap: 10px; align-items: baseline;

@@ -250,17 +250,25 @@ function cleanCut(body, budget, lh) {
   return Math.round(cut);
 }
 
-// theme (basic dark mode; persisted, defaults to the OS preference)
-export function initTheme() {
-  const saved = localStorage.getItem("theme");
-  if (saved) document.documentElement.dataset.theme = saved;
-  else if (matchMedia("(prefers-color-scheme: dark)").matches) {
-    document.documentElement.dataset.theme = "dark";
-  }
+// theme: the stored preference is "system" | "dark" | "light". "system" tracks
+// the OS light/dark setting LIVE (applied at boot and whenever the OS flips);
+// older saved "dark"/"light" values still pin, so this is backward-compatible.
+// The accent COLOUR is a separate per-device setting (see initAccent/setAccent).
+const _themeMq = matchMedia("(prefers-color-scheme: dark)");
+function applyTheme(pref) {
+  const dark = pref === "dark" || (pref === "system" && _themeMq.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
-export function setTheme(t) {
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem("theme", t);
+export function themePref() { return localStorage.getItem("theme") || "system"; }
+export function initTheme() {
+  applyTheme(themePref());
+  _themeMq.addEventListener("change", () => {
+    if (themePref() === "system") applyTheme("system");
+  });
+}
+export function setThemePref(pref) {
+  localStorage.setItem("theme", pref);
+  applyTheme(pref);
 }
 
 // per-device composer preference: pressing Enter sends the message (and
