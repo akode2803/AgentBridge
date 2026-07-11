@@ -259,6 +259,25 @@ class Mesh:
         u["auth"] = hash_password(new_password)
         self.cx.write_json(self._user_key(username), u)
 
+    def set_display(self, username, display):
+        """Change a member's display name. SELF-only (enforced by the caller —
+        the GUI session). The username is the identity key across the mesh
+        (record filename, chat membership, message authorship, agent owners,
+        per-user state), so it is NOT changed here — a username rename lands
+        with the account/setup overhaul, where a stable internal id makes it
+        safe. This only touches the account's own record (single-writer)."""
+        u = self.get_user(username)
+        if not u:
+            raise MeshError("No such account")
+        display = (display or "").strip()
+        if not display:
+            raise MeshError("Display name can't be empty")
+        if len(display) > 64:
+            raise MeshError("Display name is too long (64 characters max)")
+        u["display"] = display
+        self.cx.write_json(self._user_key(username), u)
+        return u["display"]
+
     # --------------------------------------------------------- profile photo
     # Stored as a downsized JPEG the identity OWNS (single-writer): the image
     # bytes live in avatars/<username>.jpg, and a tiny marker on the record

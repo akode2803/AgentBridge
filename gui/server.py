@@ -827,6 +827,16 @@ def api_mesh_rename(data):
     return {"ok": True, "name": meta["name"]}
 
 
+def api_mesh_set_display(data):
+    """Change the signed-in member's display name (SELF-only)."""
+    m = get_mesh()
+    user = session_user(m)
+    if not user:
+        return {"error": "Sign in first"}
+    display = m.set_display(user, data.get("display") or "")
+    return {"ok": True, "display": display}
+
+
 def api_mesh_set_description(data):
     m = get_mesh()
     user = session_user(m)
@@ -1337,6 +1347,7 @@ POST_ROUTES = {
     "/api/mesh/create_dm": api_mesh_create_dm,
     "/api/mesh/create_self": api_mesh_create_self,
     "/api/mesh/rename": api_mesh_rename,
+    "/api/mesh/set_display": api_mesh_set_display,
     "/api/mesh/create_agent": api_mesh_create_agent,
     "/api/mesh/agent": api_mesh_agent,
     "/api/mesh/open_file": api_mesh_open_file,

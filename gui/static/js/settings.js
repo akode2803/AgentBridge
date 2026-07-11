@@ -24,14 +24,16 @@ async function renderSettings() {
   }).catch(() => {});
   renderSidebar();
   $("#details-pane").hidden = true;
-  const section = Settings.section || "profile";
+  // Profile is merged into Account (task 2); the old #/settings/profile route
+  // (bookmarks, etc.) still lands on the merged Account section.
+  const section = Settings.section === "profile" ? "account" : (Settings.section || "account");
   const dark = document.documentElement.dataset.theme === "dark";
   const back = `<button class="mob-back" onclick="location.hash='#/settings'">${ICONS.back} Settings</button>`;
 
   let html = "";
-  if (section === "profile") {
+  if (section === "account") {
     const hasPhoto = !!meshAvatar(ms.user);
-    html = `${back}<h1>Profile</h1>
+    html = `${back}<h1>Account</h1>
       <div class="card">
         <div class="pf-photo-wrap">
           <div class="pf-photo">${meshAvatarInner(ms.user)}</div>
@@ -43,27 +45,22 @@ async function renderSettings() {
             ${hasPhoto ? `<button class="danger-item" data-act="remove">${ICONS.trash} Remove photo</button>` : ""}
           </div>
         </div>
-        <div style="text-align:center">
-          <div style="font-weight:600;font-size:16px">${esc(meshDn(ms.user))}</div>
+        <div class="acct-identity">
+          <div class="acct-name-line">
+            <span id="acct-name" class="acct-name">${esc(meshDn(ms.user))}</span>
+            <button class="acct-name-edit" id="acct-name-edit" aria-label="Edit name">${ICONS.pencil}</button>
+          </div>
           <div class="hint">@${esc(ms.user)} · member</div>
         </div>
-        <p class="hint" style="margin:16px 0 0;text-align:center">Display name
-        editing arrives with the account overhaul.</p>
+      </div>
+      <div class="card">
+        <h2>Session</h2>
+        <div class="row"><button id="st-logout">Sign out</button></div>
+        <p class="hint" style="margin-bottom:0">Your account lives in the shared
+        folder — it works from any machine that syncs it, and your photo and name
+        follow you. Password change is coming with the account overhaul.</p>
       </div>
       <input type="file" id="pf-file" accept="image/*" hidden>`;
-  } else if (section === "account") {
-    html = `${back}<h1>Account</h1>
-      <div class="card">
-        <h2>Signed in as</h2>
-        <dl class="kv">
-          <dt>Name</dt><dd><b>${esc(meshDn(ms.user))}</b></dd>
-          <dt>Username</dt><dd>@${esc(ms.user)}</dd>
-        </dl>
-        <div class="row" style="margin-top:12px"><button id="st-logout">Sign out</button></div>
-        <p class="hint" style="margin-bottom:0">Your account lives in the shared
-        folder — it works from any machine that syncs it. Password change is
-        coming with the account overhaul.</p>
-      </div>`;
   } else if (section === "chats") {
     html = `${back}<h1>Chats</h1>
       <div class="card">
@@ -190,6 +187,35 @@ async function renderSettings() {
   if (logout) logout.addEventListener("click", async () => {
     await api("/api/mesh/logout", {});
     location.hash = "#/chats";
+  });
+  // edit display name inline (username is fixed — the identity key). The ✎ swaps
+  // the name line for an input + Save/Cancel; Enter saves, Escape cancels.
+  const nameEdit = $("#acct-name-edit");
+  if (nameEdit) nameEdit.addEventListener("click", () => {
+    const line = $(".acct-name-line");
+    const cur = meshDn(ms.user);
+    line.innerHTML = `<input type="text" id="acct-name-input" maxlength="64" value="${esc(cur)}">
+      <button class="primary" id="acct-name-save">Save</button>
+      <button id="acct-name-cancel">Cancel</button>`;
+    const inp = $("#acct-name-input"); inp.focus(); inp.select();
+    const cancel = () => renderSettings();
+    const save = async () => {
+      const v = inp.value.trim();
+      if (!v) { toast("Name can't be empty", true); return; }
+      if (v === cur) return cancel();
+      const r = await api("/api/mesh/set_display", { display: v });
+      if (r.error) { toast(r.error, true); return; }
+      const u = Mesh.state?.users?.[ms.user];
+      if (u) u.display = r.display;   // show it now, don't wait for the poll
+      toast("Name updated", { check: true });
+      renderSettings(); renderSidebar();
+    };
+    $("#acct-name-save").addEventListener("click", save);
+    $("#acct-name-cancel").addEventListener("click", cancel);
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") cancel();
+    });
   });
   const shared2 = $("#open-shared2");
   if (shared2) shared2.addEventListener("click", (e) => {

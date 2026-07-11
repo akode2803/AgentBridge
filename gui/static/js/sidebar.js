@@ -8,10 +8,10 @@ import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvat
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
 
+// Profile + Account merged into one "Account" section (task 2, 2026-07-11).
 const SETTINGS_SECTIONS = [
-  { id: "profile", label: "Profile", desc: "Name, username", icon: ICONS.user },
-  { id: "account", label: "Account", desc: "Sign out, security", icon: ICONS.key },
-  { id: "chats", label: "Chats", desc: "Theme", icon: ICONS.chat },
+  { id: "account", label: "Account", desc: "Photo, name, sign out", icon: ICONS.user },
+  { id: "chats", label: "Chats", desc: "Theme, sending", icon: ICONS.chat },
   { id: "agents", label: "My agents", desc: "Models, reply rules", icon: ICONS.bot },
   { id: "connection", label: "Connection", desc: "Shared folder, sync", icon: ICONS.plug },
 ];
@@ -53,7 +53,8 @@ function renderSettingsSidebar() {
     setSide(`<div class="empty" style="padding:24px 10px">Sign in first</div>`);
     return;
   }
-  const active = Settings.section || (innerWidth > 760 ? "profile" : null);
+  let active = Settings.section || (innerWidth > 760 ? "account" : null);
+  if (active === "profile") active = "account";   // merged route alias
   const html = `
     <div class="side-account-card">
       <span class="acct-big">${meshAvatarInner(ms.user)}</span>
