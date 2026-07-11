@@ -1,7 +1,8 @@
 /* Settings pages — profile, account, chats (theme), my agents, connection.
    The section nav lives in the sidebar. */
 
-import { $, esc, toast, setThemePref, themePref, enterToSend, setEnterToSend } from "./util.js";
+import { $, esc, toast, setThemePref, themePref, enterToSend, setEnterToSend,
+         ACCENTS, accentPref, setAccent } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
@@ -39,6 +40,7 @@ async function renderSettings() {
   // (bookmarks, etc.) still lands on the merged Account section.
   const section = Settings.section === "profile" ? "account" : (Settings.section || "account");
   const pref = themePref();
+  const curAccent = accentPref();
   const back = `<button class="mob-back" onclick="location.hash='#/settings'">${ICONS.back} Settings</button>`;
 
   let html = "";
@@ -85,6 +87,12 @@ async function renderSettings() {
         </div>
         <p class="hint" style="margin-bottom:0">System follows your device's
         light/dark setting.</p>
+        <div style="margin-top:18px">
+          <div style="font-weight:600;font-size:12.5px;margin-bottom:10px">Accent color</div>
+          <div class="accent-dots">
+            ${ACCENTS.map((a) => `<button class="accent-dot ${curAccent === a.id ? "sel" : ""}" data-accent-id="${a.id}" title="${esc(a.label)}" style="--dot:${a.hex}"></button>`).join("")}
+          </div>
+        </div>
       </div>
       <div class="card">
         <h2>Messaging</h2>
@@ -195,6 +203,14 @@ async function renderSettings() {
     t.addEventListener("click", () => {
       setThemePref(t.dataset.themePref);
       document.querySelectorAll(".theme-tile").forEach((x) => x.classList.toggle("sel", x === t));
+    });
+  });
+  // accent dots: pick a colour → setAccent applies it live everywhere (the theme
+  // tiles' accent bubbles follow too, since they use var(--accent)).
+  document.querySelectorAll(".accent-dot").forEach((d) => {
+    d.addEventListener("click", () => {
+      setAccent(d.dataset.accentId);
+      document.querySelectorAll(".accent-dot").forEach((x) => x.classList.toggle("sel", x === d));
     });
   });
   const enterSend = $("#enter-send");

@@ -1,7 +1,7 @@
 /* Entry point: hash router, poll loop, shell chrome. Importing the view
    modules below registers them on V (see views.js for the layering rules). */
 
-import { $, initTheme, toast } from "./util.js";
+import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, resetSubviews, renderChrome } from "./state.js";
 import { V, EXPECTED } from "./views.js";
@@ -104,6 +104,7 @@ window.addEventListener("hashchange", route);
 
 (async function start() {
   initTheme();
+  initAccent();
   $("#side-new").addEventListener("click", () => { location.hash = "#/new"; });
   // the brand header is home: the default (no active chat) window, which now
   // carries the app-level Connection details + the stand-down switch (round E7).

@@ -402,6 +402,17 @@ h1 {
 .tt-art svg { display: block; width: 100%; height: 100%; }
 .tt-label { font-size: 12.5px; font-weight: 600; }
 
+/* accent-colour dots (task 7): a horizontal row; the selected one gets a ring
+   in its own colour, offset by a gap. The :hover beats the global button:hover
+   (both themes) so the dot keeps its colour. */
+.accent-dots { display: flex; gap: 13px; flex-wrap: wrap; align-items: center; margin-top: 2px; }
+.accent-dot {
+  width: 26px; height: 26px; border-radius: 50%; padding: 0; border: none;
+  background: var(--dot); cursor: pointer; flex: none;
+}
+.accent-dot:hover, [data-theme="dark"] .accent-dot:hover { background: var(--dot); filter: brightness(1.1); }
+.accent-dot.sel { box-shadow: 0 0 0 2px var(--bg-alt), 0 0 0 4px var(--dot); }
+
 .recent-list { list-style: none; margin: 0; padding: 0; }
 .recent-item {
   display: flex; gap: 10px; align-items: baseline;
@@ -1352,6 +1363,27 @@ pre.configdump {
   --danger-fg: #F1707A;
   --danger-hover: rgba(241, 112, 122, .15);
   --shadow: none;
+}
+
+/* custom accent palette (task 7): a picked hue sets --accent inline on :root;
+   these derive its tints from that hue via color-mix, per theme, so
+   soft/border/selection/hover track ANY accent in both light and dark. Default
+   (orange) sets no [data-accent], so it keeps the hand-tuned tokens above. The
+   palette hues are all mid-dark, so white text on the accent and the accent AS
+   text on either background stay legible (validated). The dark block is placed
+   AFTER so it wins over :root[data-accent] at equal specificity. */
+:root[data-accent] {
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #000);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, #fff);
+  --accent-border: color-mix(in srgb, var(--accent) 45%, #fff);
+  --selected: color-mix(in srgb, var(--accent) 17%, #fff);
+  --selection: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+[data-theme="dark"][data-accent] {
+  --accent-hover: color-mix(in srgb, var(--accent) 82%, #fff);
+  --accent-soft: color-mix(in srgb, var(--accent) 24%, #1B1A19);
+  --accent-border: color-mix(in srgb, var(--accent) 50%, #1B1A19);
+  --selected: color-mix(in srgb, var(--accent) 32%, #1B1A19);
 }
 [data-theme="dark"] pre.configdump { background: var(--code-bg); }
 
