@@ -6,12 +6,19 @@ conventions that aren't obvious from the code alone.
 
 ## Current state
 
-- **Version:** `gui/__init__.py` `__version__` is the source of truth (v0.24.27
-  at handoff), bumped once per shipped round. (v0.24.24/26 = member **profile
-  photos** upload + camera capture, a separate session; v0.24.25 = the polish
-  items below; **v0.24.27 = worker resilience** — PID singleton + supervisor +
-  `AgentWorker.pyw` launcher, worker code v0.21.0; see the CoCo-handler
-  retirement plan under "Next work queue".)
+- **Version:** `gui/__init__.py` `__version__` is the source of truth (**v0.24.48
+  at handoff**), bumped once per shipped round. Recent lineage:
+  v0.24.24/26/28/29 = member + **group profile photos** (upload, camera capture,
+  group photo in Group-Info and during creation — a separate session); v0.24.25 =
+  the polish items below; **v0.24.27 = worker resilience** (PID singleton +
+  supervisor + `AgentWorker.pyw` launcher, worker code v0.21.0 — see the
+  CoCo-handler retirement plan under "Next work queue"); v0.24.30–41 = **profile
+  images Round D + polish round E** (default avatar colours, photo viewer, camera,
+  unified Settings dropdowns, home-window connection details + stand-down);
+  v0.24.42–48 = **theming + account Round F** (camera crop-size fix, sign-in
+  redirect, Enter-to-send, card-less Settings, merged Account section + editable
+  display name, System/Light/Dark theme picker, accent-colour palette). Full
+  round-by-round detail lives in the memory topic files, not here.
 - **Everything is committed and pushed.** A clone is a complete copy of the
   source.
 - **What works today:** humans + agents sharing rooms over a synced folder;
@@ -74,6 +81,27 @@ conventions that aren't obvious from the code alone.
   Delivered needs a per-user presence heartbeat and rides with the online/
   last-seen parity feature. In the new Message info dialog it's a wired-but-empty
   stub: pending members list under "Delivered to" with "—" until presence lands.
+  **Planned implementation (design, not yet built):** transport is a shared
+  synced folder, so "Delivered" can't be a network ACK — it's a UX proxy for
+  *"the recipient's client has been online (running + polling) since the message
+  was posted, so it fetched the message."* (1) Add a **presence heartbeat**: each
+  running client writes `mesh/presence/<user>.json` (per-device, merged to ONE
+  logical status per [[agentbridge-account-model]]) on a throttled heartbeat
+  (~10–15 s, write only on change) carrying `online`, `last_seen` ts, and an
+  **online high-water `ns`**. This same file powers online/last-seen and unblocks
+  Mute. (2) Derive Delivered with the SAME ns-compare already in
+  `mesh.receipts_for`/`message_info`, adding a middle tier: for each other member,
+  `read_ns >= m.ns` → **Read** (double accent); else any device
+  `last_seen_ns >= m.ns` → **Delivered** (double grey); else → **Sent** (single
+  grey). No new per-message/per-chat cursor → one write per heartbeat, no sync
+  churn. (3) `receipts_for`/`message_info` return the three states; the tick
+  component gets the middle double-grey; the "Delivered to" list populates from
+  presence. Agents are symmetric (worker heartbeats / its poll cursor). **ns not
+  ts** for the compare (hard rule). A more precise v2 — an explicit `delivered_ns`
+  the client advances as it actually fetches each chat — is possible but adds
+  write amplification on the synced folder; do the presence-derived v1 first.
+  Privacy: Delivered exposes online timing (same surface as read receipts) — gate
+  it with the future "receipts off" setting.
   **Mute notifications** in the row menu is a stub (an "arriving" toast).
   `edit-marks-unread` (bumping *other* users' unread count on an edit) stays
   DEFERRED to the worker/context overhaul — it needs a cross-user write; note
@@ -218,13 +246,24 @@ after setup/account.
      `AgentWorker.pyw` supervises every agent with a `worker_<agent>.json` on
      the machine — the double-click mirror of `AgentBridge.pyw`. `--dry-run`
      skips the lock.
-   - **Phase 1** — stand up `agent_worker.py coco` on the Snowflake box side by
-     side (write `worker_coco.json`; `--dry-run`, then a live throwaway scratch
-     room — never Platform QA 2).
-   - **Phase 2** — cut over: stop `bridge.py watch`, start the worker under the
-     supervisor; watch for the still-open duplicate-reply bug at cutover.
-   - **Phase 3** — delete `legacy/handler_coco.py` + its `bridge.py` watch
-     wiring; update `legacy/REMOTE_SETUP.md`.
+   - **Phase 1 — DONE (dry-run validated 2026-07-11).** `worker_coco.json` staged
+     on the Snowflake box; `agent_worker.py coco --once --dry-run` loaded the
+     config, connected to the mesh, found CoCo's memberships, resolved rule
+     `tagged`, and built a cortex command byte-identical in safety posture to the
+     legacy handler (`--sql-read-only` + all 15 `--disallowed-tools`), posting
+     nothing.
+   - **Phase 2 — DONE (cutover completed by the user 2026-07-11).** Legacy
+     `bridge.py watch` stopped on the Snowflake box; `agent_worker.py coco` now
+     serves CoCo under the supervisor. Full pasteable steps in
+     **`PHASE2_COCO_CUTOVER.md`** (repo root). CoCo replies now record
+     Message-info task steps (the whole point). WATCH the first stretch for the
+     still-open duplicate-reply bug (no per-message answered-guard yet — folds
+     into the agent-worker/context overhaul).
+   - **Phase 3 — remaining** — only after CoCo is stable on the worker for a
+     while: delete `legacy/handler_coco.py` + its `bridge.py` watch wiring and the
+     disabled "AgentBridge Watch" task; update `legacy/REMOTE_SETUP.md`. (Distinct
+     from retiring `bridge.py`'s config/util layer, which waits for the
+     setup/account overhaul.)
 3. **Agent-worker / context-management overhaul** (memory
    `agentbridge-worker-context`): a human-like unread QUEUE for graceful
    catch-up after downtime, PARALLEL requests from multiple humans, the agent
