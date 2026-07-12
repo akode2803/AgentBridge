@@ -226,8 +226,10 @@ def test_group_settings_admins_and_delete(rig):
     assert out["chat"]["permissions"]["send_messages"] == "admins"
 
     out = rig.post("/api/mesh/grant_admin", chat_id=cid, username="fable")
+    assert "error" not in out, out   # surface the message on a CI-only flake
     assert set(out["admins"]) == {"aryan", "fable"}
     out = rig.post("/api/mesh/revoke_admin", chat_id=cid, username="fable")
+    assert "error" not in out, out
     assert out["admins"] == ["aryan"]
 
     info = rig.get("/api/mesh/chat_info", id=cid)
