@@ -28,6 +28,16 @@ _RETRIES = 6
 _BASE_DELAY = 0.15
 
 
+def _unextend(s: str) -> str:
+    """Strip a Windows extended-length prefix so two spellings of one path
+    compare equal (``\\\\?\\C:\\x`` == ``C:\\x``; ``\\\\?\\UNC\\srv`` == ``\\\\srv``)."""
+    if s.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + s[8:]
+    if s.startswith("\\\\?\\"):
+        return s[4:]
+    return s
+
+
 class FolderTransport(Transport):
     scheme = "folder"
 
@@ -39,11 +49,20 @@ class FolderTransport(Transport):
 
     # ------------------------------------------------------------ path guard
     def _abs(self, rel: str) -> Path:
-        """Resolve a relative POSIX path, refusing anything escaping root."""
+        """Resolve a relative POSIX path, refusing anything escaping root.
+
+        The containment check compares NORMALIZED spellings, not Path
+        equality: when another thread/process holds the target mid-write,
+        Windows ``resolve()`` returns the extended-length form
+        (``\\\\?\\C:\\...``) of the SAME path, and a naive comparison read
+        that as an escape (a real flake the R15 parallel tests caught —
+        OneDrive locks trigger the identical misfire live)."""
         p = (self.root / rel).resolve()
-        if p != self.root and self.root not in p.parents:
+        target = os.path.normcase(_unextend(str(p)))
+        root = os.path.normcase(_unextend(str(self.root)))
+        if target != root and not target.startswith(root + os.sep):
             raise TransportError(f"path escapes transport root: {rel!r}")
-        return p
+        return Path(_unextend(str(p)))
 
     @staticmethod
     def _retrying(fn, what: str):

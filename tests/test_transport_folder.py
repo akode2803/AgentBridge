@@ -34,6 +34,20 @@ def test_path_traversal_refused(tx):
         tx.put_doc("users/../../evil.json", {})
 
 
+@pytest.mark.skipif(os.name != "nt", reason="extended-length paths are Windows")
+def test_extended_length_spelling_is_the_same_root(tx):
+    """Windows resolve() returns the \\\\?\\ form of a path while another
+    handle holds it mid-write; the guard must treat that as the SAME root,
+    not an escape (a real flake the R15 parallel harness tests caught)."""
+    tx.put_doc("chats/c1/overlays/state/helper.json", {"read_ns": 1})
+    ext = FolderTransport(f"\\\\?\\{tx.root}")
+    assert ext.get_doc("chats/c1/overlays/state/helper.json") == {"read_ns": 1}
+    ext.put_doc("chats/c1/overlays/state/helper.json", {"read_ns": 2})
+    assert tx.get_doc("chats/c1/overlays/state/helper.json") == {"read_ns": 2}
+    with pytest.raises(TransportError):
+        ext.get_doc("../outside.json")  # the guard itself still guards
+
+
 def test_log_append_read_incremental(tx):
     chat = "c1"
     for i in range(3):
