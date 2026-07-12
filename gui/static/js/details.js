@@ -5,11 +5,45 @@ import { $, esc, fmtTime, toast, clampLong, paneCoversChat, closeMenus } from ".
 import { ICONS } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
-import { mountCsels } from "./csel.js";
+import { csel, mountCsels } from "./csel.js";
 import { confirmModal, openPhotoViewer } from "./modal.js";
 import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins } from "./state.js";
 import { mediaThumb } from "./files.js";
 import { V } from "./views.js";
+
+// group permissions (D12 multi-admin; WhatsApp "Group permissions" minus the
+// invite link). Level rows are All/Admins; the rest are on/off. Visible to
+// everyone — the controls are just disabled for non-admins (per the spec).
+const PERM_LEVELS = [
+  ["edit_settings", "Edit group info"],
+  ["send_messages", "Send messages"],
+  ["add_members", "Add members"],
+];
+const PERM_FLAGS = [
+  ["send_history", "New members see chat history"],
+  ["approve_members", "Approve new members"],
+  ["agents_add_if_owner_admin", "Agents can add members (when their owner is an admin)"],
+  ["agents_add_if_members_can", "Agents can add members (when members can)"],
+];
+
+function permissionsCard(meta, isAdmin) {
+  const p = meta.permissions || {};
+  const dis = isAdmin ? "" : "disabled";
+  return `
+    <div class="card" id="perm-card">
+      <h2>Group permissions</h2>
+      <dl class="kv" style="grid-template-columns:1fr minmax(120px,150px);align-items:center">
+        ${PERM_LEVELS.map(([k, label]) =>
+          `<dt>${label}</dt><dd><span class="csel-slot perm-lvl" data-field="${k}"
+            data-value="${esc(p[k] || "all")}" data-admin="${isAdmin ? 1 : 0}"></span></dd>`).join("")}
+      </dl>
+      ${PERM_FLAGS.map(([k, label]) => `
+        <div class="row" style="margin-top:8px"><label class="switch">
+          <input type="checkbox" class="perm-flag" data-field="${k}" ${p[k] ? "checked" : ""} ${dis}>
+          <span class="slider"></span></label><span>${label}</span></div>`).join("")}
+      ${isAdmin ? "" : '<p class="hint" style="margin-bottom:0">Only admins can change these.</p>'}
+    </div>`;
+}
 
 // agent reply-rule dropdowns (info pane + agents page share this)
 function mountRuleSlots(scope, chatId) {
@@ -67,9 +101,10 @@ async function renderChatDetails() {
   const isMember = (meta.members || []).includes(ms.user);
   const memberRow = (u) => {
     const rec = ms.users[u] || {};
-    // an admin can act on any non-admin; admins never remove each other here
-    // (grant/revoke lands in R13d). Members always have the self-exit path.
-    const removable = isOwner && !admins.includes(u);
+    // an admin gets a per-member menu on everyone but themselves (promote/
+    // demote other humans, remove). The mesh re-checks every action, so the
+    // menu can be permissive; the fold is the real gate.
+    const actionable = isOwner && u !== ms.user;
     return `
       <div class="mem-row">
         <span class="mem-avatar">${meshAvatarInner(u)}</span>
@@ -79,7 +114,9 @@ async function renderChatDetails() {
           <div class="mem-sub">@${esc(u)}</div>
         </span>
         ${admins.includes(u) ? '<span class="owner-chip">Admin</span>' : ""}
-        ${removable ? `<button class="mem-chevron icon-btn" data-user="${esc(u)}">${ICONS.chevD}</button>` : ""}
+        ${actionable ? `<button class="mem-chevron icon-btn" data-user="${esc(u)}"
+          data-admin="${admins.includes(u) ? 1 : 0}"
+          data-agent="${rec.kind === "agent" ? 1 : 0}">${ICONS.chevD}</button>` : ""}
       </div>`;
   };
 
@@ -169,6 +206,7 @@ async function renderChatDetails() {
       </button>` : ""}
       ${ordered.map(memberRow).join("")}
     </div>`}
+    ${isDm ? "" : permissionsCard(meta, isOwner)}
     <div class="card danger-card">
       ${isOwner ? `<button class="danger-row neutral" id="dg-archive">
         ${ICONS.archive} ${meta.archived ? `Unarchive ${noun}` : `Archive ${noun}`}</button>` : ""}
@@ -331,19 +369,34 @@ async function renderChatDetails() {
     b.addEventListener("click", (e) => {
       e.stopPropagation();
       closeMenus();
+      const user = b.dataset.user;
+      const isAdminMember = b.dataset.admin === "1";
+      const isAgent = b.dataset.agent === "1";
       const row = b.closest(".mem-row");
       const menu = document.createElement("div");
       menu.className = "menu mem-menu";
-      menu.innerHTML = `<button class="danger-item">${ICONS.close} Remove @${esc(b.dataset.user)}</button>`;
+      // agents can never be admins (D12) — no promote row for them
+      const adminRow = isAgent ? ""
+        : isAdminMember
+          ? `<button data-act="revoke">${ICONS.close} Dismiss as admin</button>`
+          : `<button data-act="grant">${ICONS.check} Make admin</button>`;
+      menu.innerHTML = `${adminRow}
+        <button class="danger-item" data-act="remove">${ICONS.close} Remove @${esc(user)}</button>`;
       row.appendChild(menu);
-      menu.querySelector("button").addEventListener("click", async () => {
+      const run = async (path) => {
         menu.remove();
-        const r = await api("/api/mesh/remove_member",
-          { chat_id: chatId, username: b.dataset.user });
+        const r = await api(path, { chat_id: chatId, username: user });
         if (r.error) { toast(r.error, true); return; }
-        Mesh.detailsKey = "";
-        Mesh.structKey = "";
-        V.renderChats(true);   // the membership event pill is the feedback
+        Mesh.detailsKey = ""; Mesh.structKey = "";
+        renderChatDetails(); V.renderChats(true);
+      };
+      menu.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const act = btn.dataset.act;
+          run(act === "grant" ? "/api/mesh/grant_admin"
+            : act === "revoke" ? "/api/mesh/revoke_admin"
+            : "/api/mesh/remove_member");
+        });
       });
       document.addEventListener("mousedown", function away(ev) {
         if (!menu.contains(ev.target)) {
@@ -351,6 +404,30 @@ async function renderChatDetails() {
           document.removeEventListener("mousedown", away);
         }
       });
+    });
+  });
+  // group permissions: level selects + flag switches (admins only; the mesh
+  // re-checks). Each change POSTs a single-field set_permissions patch.
+  document.querySelectorAll(".perm-lvl").forEach((slot) => {
+    const isAdmin = slot.dataset.admin === "1";
+    slot.appendChild(csel({
+      options: [{ v: "all", label: "Everyone" }, { v: "admins", label: "Admins only" }],
+      value: slot.dataset.value || "all",
+      disabled: !isAdmin,
+      onChange: async (v) => {
+        const r = await api("/api/mesh/set_permissions",
+          { chat_id: chatId, permissions: { [slot.dataset.field]: v } });
+        if (r.error) { toast(r.error, true); return; }
+        Mesh.detailsKey = "";
+      },
+    }));
+  });
+  document.querySelectorAll(".perm-flag").forEach((cb) => {
+    cb.addEventListener("change", async (e) => {
+      const r = await api("/api/mesh/set_permissions",
+        { chat_id: chatId, permissions: { [cb.dataset.field]: e.target.checked } });
+      if (r.error) { toast(r.error, true); e.target.checked = !e.target.checked; return; }
+      Mesh.detailsKey = "";
     });
   });
   const dgArch = $("#dg-archive");

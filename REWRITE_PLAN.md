@@ -332,10 +332,28 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
         message posts + renders with markdown + Delivered tick; Settings
         renders; zero console errors. check_frontend 22/22. 4 new shape/SSE
         tests (210 total).
-  - [ ] **R13d — new settings surfaces (v2-gated).** Recovery-code modal,
-        password+handle change, status/about, privacy matrix, admins &
-        group permissions (screenshot UI), model picker scaffold,
-        Delivered tick.
+  - [x] **R13d — new settings surfaces (v2-gated). DONE 2026-07-13** — D5
+        recovery-code modal (signup + first-migrated-login; ack-gated
+        Continue); Account page over a new `/api/mesh/me` (owner-only,
+        GUI-only per D19): @handle change (Telegram model), about + status
+        editors, the privacy matrix (7 audience selects + a read-receipts
+        toggle), a change-password modal (re-wraps E2EE keys — proven by
+        logout→re-login); group info gained the D12 multi-admin UI
+        (per-member Make/Dismiss admin + remove, agents never promotable)
+        and the "Group permissions" card (edit_settings/send_messages/
+        add_members levels + send_history/approve_members + the two D18
+        agent-add toggles; visible to all, editable by admins). Model-picker
+        scaffold = the existing agent editor, un-broken by fixing the `agent`
+        endpoint to accept the FLAT patch it sends. Delivered tick already
+        renders. Fixes: static assets now `Cache-Control: no-cache` (stale
+        module after an app update); `mountCsels` scoped to the agents page
+        (was doubling every privacy dropdown); `csel` gained `disabled`.
+        **All verified live** in the browser preview. check_frontend 22/22.
+        ---
+        **R13 COMPLETE.** The v2 GUI connector is a thin, membership-gated,
+        E2EE, SSE-realtime app over the Mesh facade, shape-compatible with the
+        shared frontend. NEXT: **R13.5** (fold genesis integrity — MUST land
+        before R14), then **R14** (live migration + cutover).
 - [ ] **R14 — Migration & live cutover.** Run the R9 migration on the real
       folder; dual-run validation window; GUI + local worker switch to v2;
       coordinated CoCo/AVD update (runbook like PHASE2_COCO_CUTOVER.md);

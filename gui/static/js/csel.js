@@ -4,14 +4,15 @@
 import { esc } from "./util.js";
 import { ICONS } from "./icons.js";
 
-export function csel({ options, value, onChange }) {
+export function csel({ options, value, onChange, disabled = false }) {
   const root = document.createElement("div");
-  root.className = "csel";
+  root.className = "csel" + (disabled ? " csel-disabled" : "");
   root.dataset.value = value ?? "";
   const label = () =>
     (options.find((o) => String(o.v) === String(root.dataset.value)) || options[0]).label;
   const btn = document.createElement("button");
   btn.type = "button";
+  if (disabled) btn.disabled = true;   // read-only display (e.g. non-admin view)
   btn.innerHTML = `<span class="csel-value"></span><span class="csel-caret">${ICONS.chevD}</span>`;
   btn.querySelector(".csel-value").textContent = label();
   root.appendChild(btn);
