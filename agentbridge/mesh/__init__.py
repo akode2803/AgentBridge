@@ -1,12 +1,14 @@
 """Mesh services: messaging, membership, overlays, read model, sync — glued
 by the Mesh facade."""
 
-from . import authz, events
+from . import authz, events, eventbus
 from .accounts import AccountsService
 from .directory import Directory
+from .eventbus import Event, EventBus
 from .keyring import ChatKeyService, KeyStore
 from .membership import MembershipService
 from .messaging import MessagingService
+from .notify import CommandHook, Notification, Notifier
 from .overlays import ChatOverlays, UserState
 from .paths import P
 from .presence import PresenceService
@@ -21,6 +23,7 @@ __all__ = [
     "Mesh", "MessagingService", "MembershipService", "PrivacyService",
     "AccountsService", "PresenceService", "ReceiptsService", "Directory",
     "KeyStore", "ChatKeyService", "SyncEngine", "ChatOverlays", "UserState",
-    "P", "Sealer", "PlainSealer", "E2EESealer", "authz", "events",
+    "P", "Sealer", "PlainSealer", "E2EESealer", "EventBus", "Event",
+    "Notifier", "Notification", "CommandHook", "authz", "events", "eventbus",
     "build_messages", "parse_tags", "unread_info",
 ]

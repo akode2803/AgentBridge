@@ -102,12 +102,13 @@ class Store:
             self._local.conn = None
 
     # -------------------------------------------------------- message cache
-    def upsert_messages(self, chat_id: str, records: Iterable[dict]) -> int:
+    def upsert_messages(self, chat_id: str, records: Iterable[dict]) -> list[dict]:
         """Idempotent by (chat_id, id) — replayed/duplicated transport records
-        (shrunk-file re-reads, at-least-once outbox) collapse here. Returns the
-        number of records that were actually new."""
+        (shrunk-file re-reads, at-least-once outbox, own-message echoes)
+        collapse here. Returns the records that were ACTUALLY NEW — the event
+        pump publishes exactly these, so nothing ever notifies twice."""
         c = self._conn()
-        new = 0
+        inserted: list[dict] = []
         with c:
             for rec in records:
                 rid, ns = rec.get("id"), rec.get("ns")
@@ -119,8 +120,9 @@ class Store:
                     (chat_id, rid, ns, rec.get("from", ""), rec.get("kind", "message"),
                      json.dumps(rec, ensure_ascii=False)),
                 )
-                new += cur.rowcount
-        return new
+                if cur.rowcount:
+                    inserted.append(rec)
+        return inserted
 
     def messages(self, chat_id: str, after_ns: int = 0, limit: int | None = None) -> list[dict]:
         q = "SELECT payload FROM messages WHERE chat_id=? AND ns>? ORDER BY ns"

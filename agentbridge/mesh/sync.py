@@ -27,11 +27,13 @@ class SyncEngine:
         *,
         is_member: Callable[[str], bool] = lambda chat_id: True,
         workers: int = 4,
+        on_records: Callable[[str, list[dict]], None] | None = None,
     ) -> None:
         self.tx = tx
         self.store = store
         self.is_member = is_member
         self.workers = workers
+        self.on_records = on_records  # fed ONLY actually-new records (R10 bus)
         self._stop = threading.Event()
 
     # ------------------------------------------------------------- one chat
@@ -44,7 +46,13 @@ class SyncEngine:
                 continue  # unchanged (size is the cheap change indicator)
             records, new_offset = self.tx.read_log(chat_id, log_name, offset)
             if records:
-                new += self.store.upsert_messages(chat_id, records)
+                inserted = self.store.upsert_messages(chat_id, records)
+                new += len(inserted)
+                if inserted and self.on_records is not None:
+                    try:
+                        self.on_records(chat_id, inserted)
+                    except Exception:  # noqa: BLE001 — pump can't break sync
+                        pass
             if new_offset != offset:
                 self.store.set_offset(chat_id, log_name, new_offset)
         return new

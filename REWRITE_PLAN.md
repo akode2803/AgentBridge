@@ -208,11 +208,18 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       per-device envelopes sealed forward under epoch keys, overlays
       field-for-field. Dry-run + verification pass; runbook. Prereq for R14
       cutover; kept OUT of the live tree until then.
-- [ ] **R10 — Events & notifications.** Event bus over the transport watch;
-      SSE push channel for the GUI (retires poll-only); web notifications
-      (new message, added-to-group); **mute per chat becomes real** (mute =
-      suppress notify, local); CLI notification hooks — an agent connecting
-      via CLI can register a command to run on incoming message.
+- [x] **R10 — Events & notifications. DONE 2026-07-13** — `eventbus.py`
+      (bounded drop-oldest subscriptions: a slow consumer can never stall
+      sync; store stays source of truth) + `notify.py` (Notifier: message
+      pings unless muted — `mute` supports True/forever AND ns-until values;
+      added-to-chat always pings; own/info never; previews decrypted locally
+      + truncated; `CommandHook` = the CLI on-message command, argv+env,
+      never shell) + the pump: `Store.upsert_messages` now returns ONLY
+      actually-new records → sync publishes exactly-once (own echoes and
+      replays never ping) and **info events auto-refold** remote snapshots
+      (meta stays warm without manual refold). SSE endpoint (R13) and MCP
+      notifications (R12) are thin consumers of this bus. **Mute stub
+      closed.** 9 new tests (153 total).
 - [ ] **R11 — App-to-app channel.** Machine-to-machine control lane (rides the
       same transport): **auto-update** (app checks the GitHub repo for a newer
       release, verifies SHA, asks the user, updates itself); **setup-assist**

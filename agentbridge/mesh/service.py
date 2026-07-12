@@ -14,11 +14,14 @@ from ..store.db import Store
 from ..store.outbox import OutboxWorker
 from ..transport.base import Transport
 from ..transport.folder import FolderTransport
+from . import eventbus
 from .accounts import AccountsService
 from .directory import Directory
+from .eventbus import Event, EventBus
 from .keyring import ChatKeyService, KeyStore
 from .membership import MembershipService
 from .messaging import MessagingService
+from .notify import Notifier
 from .presence import PresenceService
 from .privacy import PrivacyService
 from .receipts import ReceiptsService
@@ -87,9 +90,35 @@ class Mesh:
         self.presence = PresenceService(self.tx, self.privacy, user, machine)
         self.receipts = ReceiptsService(self.messaging, self.privacy, self.presence)
         self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
+        self.bus = EventBus()
+        self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
         self.sync = SyncEngine(
             self.tx, self.store, is_member=self._is_member, workers=sync_workers,
+            on_records=self._pump,
         )
+
+    def _pump(self, chat_id: str, records: list[dict]) -> None:
+        """Sync -> bus: publish exactly-once events; info events also refresh
+        the local snapshot (meta stays warm without anyone calling refold)."""
+        saw_info = False
+        for rec in records:
+            ns = int(rec.get("ns", 0))
+            if rec.get("kind") == "info":
+                saw_info = True
+                ev = rec.get("event") or {}
+                if ev.get("type") == "member_added" and ev.get("who") == self.user:
+                    self.bus.publish(Event(
+                        eventbus.ADDED_TO_CHAT, chat_id,
+                        {"by": rec.get("from", "")}, ns,
+                    ))
+                self.bus.publish(Event(eventbus.CHAT_UPDATE, chat_id, {"event": ev}, ns))
+            else:
+                self.bus.publish(Event(eventbus.MESSAGE, chat_id, rec, ns))
+        if saw_info:
+            try:
+                self.membership.refold(chat_id)
+            except Exception:  # noqa: BLE001 — repaint later beats crashing sync
+                pass
 
     def _is_member(self, chat_id: str) -> bool:
         try:
@@ -99,15 +128,17 @@ class Mesh:
 
     # ----------------------------------------------------------- lifecycle
     def start(self, *, heartbeat: bool = True) -> None:
-        """Start the background outbox flusher (+ the presence heartbeat).
-        The sync loop stays the caller's to run — GUI/harness own their
-        cadence via ``sync.run``/``sync_once``."""
+        """Start the background outbox flusher, notifier pump (+ the presence
+        heartbeat). The sync loop stays the caller's to run — GUI/harness own
+        their cadence via ``sync.run``/``sync_once``."""
         self.outbox.start()
+        self.notifier.start()
         if heartbeat:
             self.presence.start()
 
     def close(self) -> None:
         self.sync.stop()
+        self.notifier.stop()
         self.presence.stop()  # writes the clean offline marker
         self.outbox.stop()
         self.store.close()

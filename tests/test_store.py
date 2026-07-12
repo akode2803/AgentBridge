@@ -19,9 +19,10 @@ def test_upsert_idempotent_and_ordered(store):
         {"id": "m2", "ns": 20, "from": "b", "kind": "message"},
         {"id": "m1", "ns": 10, "from": "a", "kind": "message"},
     ]
-    assert store.upsert_messages("c1", recs) == 2
-    # replay (shrunk-file re-read / at-least-once send) adds nothing
-    assert store.upsert_messages("c1", recs) == 0
+    assert len(store.upsert_messages("c1", recs)) == 2
+    # replay (shrunk-file re-read / at-least-once send) adds nothing —
+    # and the returned list is what the event pump publishes, so empty here
+    assert store.upsert_messages("c1", recs) == []
     got = store.messages("c1")
     assert [m["id"] for m in got] == ["m1", "m2"]  # ns order, not insert order
     assert store.messages("c1", after_ns=10) == [recs[0]]
@@ -29,8 +30,8 @@ def test_upsert_idempotent_and_ordered(store):
 
 
 def test_malformed_records_skipped(store):
-    n = store.upsert_messages("c1", [{"id": "ok", "ns": 1}, {"ns": 2}, {"id": "x"}])
-    assert n == 1 and store.message_count("c1") == 1
+    ins = store.upsert_messages("c1", [{"id": "ok", "ns": 1}, {"ns": 2}, {"id": "x"}])
+    assert [r["id"] for r in ins] == ["ok"] and store.message_count("c1") == 1
 
 
 def test_offsets_and_cursors(store):
