@@ -6,4 +6,4 @@ Zero third-party dependencies by design: analyst machines cannot be assumed
 to have pip access, and the setup wizard must run before anything is installed.
 """
 
-__version__ = "0.24.48"
+__version__ = "0.24.49"

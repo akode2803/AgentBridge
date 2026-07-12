@@ -272,35 +272,33 @@ export function setThemePref(pref) {
 }
 
 // accent colour (task 7): a per-device palette choice that replaces the brand
-// orange everywhere. The hues are all mid-dark on purpose, so white text on the
+// colour everywhere. The hues are all mid-dark on purpose, so white text on the
 // accent AND the accent used as text/icons on either the light or dark
-// background stay legible (validated in both themes). Picking one sets --accent
-// inline on :root; the soft/border/selection tints derive from it via color-mix
-// in CSS (:root[data-accent] / dark). Default = "" = no override, so the brand
-// orange keeps its hand-tuned tokens.
+// background stay legible (validated in both themes, incl. blue — the new
+// default, 2026-07-12: "make blue the default... it looks beautiful"). Picking
+// one sets --accent inline on :root; the soft/border/selection tints derive
+// from it via color-mix (:root[data-accent] / dark block). The un-scoped
+// :root/dark hand-tuned tokens (orange) are now only the pre-JS first-paint
+// fallback — initAccent runs before the first render and always sets
+// data-accent, so those tokens are otherwise dead in practice.
 export const ACCENTS = [
-  { id: "",       label: "Default", hex: "#D83B01" },
   { id: "blue",   label: "Blue",    hex: "#2563EB" },
+  { id: "orange", label: "Orange",  hex: "#D83B01" },
   { id: "teal",   label: "Teal",    hex: "#0F766E" },
   { id: "green",  label: "Green",   hex: "#15803D" },
   { id: "amber",  label: "Yellow",  hex: "#A16207" },
   { id: "pink",   label: "Pink",    hex: "#DB2777" },
   { id: "purple", label: "Purple",  hex: "#7C3AED" },
 ];
-export function accentPref() { return localStorage.getItem("accent") || ""; }
+export function accentPref() { return localStorage.getItem("accent") || "blue"; }
 function applyAccent(id) {
   const root = document.documentElement;
-  const found = ACCENTS.find((a) => a.id === id);
-  if (found && found.id) {
-    root.style.setProperty("--accent", found.hex);
-    root.dataset.accent = found.id;
-  } else {
-    root.style.removeProperty("--accent");
-    delete root.dataset.accent;
-  }
+  const found = ACCENTS.find((a) => a.id === id) || ACCENTS[0];
+  root.style.setProperty("--accent", found.hex);
+  root.dataset.accent = found.id;
 }
 export function initAccent() { applyAccent(accentPref()); }
-export function setAccent(id) { localStorage.setItem("accent", id || ""); applyAccent(id); }
+export function setAccent(id) { localStorage.setItem("accent", id); applyAccent(id); }
 
 // per-device composer preference: pressing Enter sends the message (and
 // Shift+Enter inserts a newline). Default ON. Stored like the theme — a device

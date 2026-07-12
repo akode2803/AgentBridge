@@ -1,4 +1,5 @@
-"""Generate the app icons — orange rounded square with the white bridge arc.
+"""Generate the app icons — accent-coloured rounded square with the white
+bridge arc.
 
 Outputs (all committed, consumed by installer shortcuts and the web manifest):
     gui/static/app.ico       256px PNG-in-ICO (Vista+), shortcut icon
@@ -12,7 +13,7 @@ import struct
 import zlib
 from pathlib import Path
 
-ACCENT = (216, 59, 1)        # #D83B01
+ACCENT = (37, 99, 235)       # #2563EB — blue, the new default accent (2026-07-12)
 
 # Bridge glyph in the 32px viewBox of the app's SVG:
 # arc  M4 22 c 3.5 -8, 20.5 -8, 24 0   posts M4 22 v-4  M28 22 v-4
