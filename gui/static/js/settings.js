@@ -22,6 +22,23 @@ const THEME_ART = {
   system: `<svg viewBox="0 0 100 64" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="64" fill="#FAF9F8"/><rect x="50" width="50" height="64" fill="#201F1E"/><rect width="16" height="64" fill="#EFECEA"/><rect x="50" width="16" height="64" fill="#161514"/><rect x="22" y="13" width="22" height="7" rx="3.5" fill="#E8E5E3"/><rect x="20" y="27" width="26" height="7" rx="3.5" fill="var(--accent)"/><rect x="72" y="20" width="22" height="7" rx="3.5" fill="#2E2D2B"/><rect x="70" y="34" width="24" height="7" rx="3.5" fill="var(--accent)"/><line x1="50" y1="0" x2="50" y2="64" stroke="#8A8886" stroke-width="1"/></svg>`,
 };
 
+// privacy-matrix rows (audience selects). read_receipts is a toggle, handled
+// separately. Order matches WhatsApp's Privacy screen roughly.
+const PRIVACY_FIELDS = [
+  ["last_seen", "Last seen"],
+  ["online", "Online"],
+  ["photo", "Profile photo"],
+  ["about", "About"],
+  ["status", "Status"],
+  ["messaging", "Who can message me"],
+  ["add_to_group", "Who can add me to groups"],
+];
+const AUDIENCE_OPTS = [
+  { v: "everyone", label: "Everyone" },
+  { v: "members", label: "My chats" },
+  { v: "nobody", label: "Nobody" },
+];
+
 async function renderSettings() {
   const s = App.state;
   if (!s.configured) { location.hash = "#/setup"; return; }
@@ -43,9 +60,22 @@ async function renderSettings() {
   const curAccent = accentPref();
   const back = `<button class="mob-back" onclick="location.hash='#/settings'">${ICONS.back} Settings</button>`;
 
+  // the Account page needs the unfiltered own-account view (about/status/
+  // handle/privacy/blocks) — one await, only on this page (not the
+  // stutter-sensitive chat switch). v1 has no /api/mesh/me → me stays null and
+  // the v2-only surfaces below are simply skipped.
+  let me = null;
+  if (section === "account") {
+    const r = await api("/api/mesh/me");
+    if (!r.error) me = r;
+  }
+
   let html = "";
   if (section === "account") {
     const hasPhoto = !!meshAvatar(ms.user);
+    const handle = me?.handle || ms.user;
+    const about = me?.about || "";
+    const status = me?.status || { state: "available", text: "" };
     html = `${back}<h1>Account</h1>
       <div class="card">
         <div class="pf-photo-wrap">
@@ -63,15 +93,51 @@ async function renderSettings() {
             <span id="acct-name" class="acct-name">${esc(meshDn(ms.user))}</span>
             <button class="acct-name-edit" id="acct-name-edit" aria-label="Edit name">${ICONS.pencil}</button>
           </div>
-          <div class="hint">@${esc(ms.user)} · member</div>
+          <div class="hint">member</div>
         </div>
       </div>
+      ${me ? `
+      <div class="card">
+        <h2>Profile</h2>
+        <dl class="kv" style="grid-template-columns:minmax(90px,120px) 1fr">
+          <dt>Username</dt>
+          <dd><span class="acct-handle-line"><span id="acct-handle">@${esc(handle)}</span>
+            <button class="icon-btn ci-pencil" id="acct-handle-edit" aria-label="Change username">${ICONS.pencil}</button></span></dd>
+          <dt>About</dt>
+          <dd><span class="acct-about-line"><span id="acct-about">${about ? esc(about) : '<span class="hint">Add a few words about you</span>'}</span>
+            <button class="icon-btn ci-pencil" id="acct-about-edit" aria-label="Edit about">${ICONS.pencil}</button></span></dd>
+          <dt>Status</dt>
+          <dd><span class="csel-slot acct-status-state" data-value="${esc(status.state)}"></span>
+            <input type="text" id="acct-status-text" placeholder="What's happening?" value="${esc(status.text)}" maxlength="80" style="margin-top:6px;width:100%">
+            <button class="primary" id="acct-status-save" style="margin-top:6px">Save status</button></dd>
+        </dl>
+      </div>
+      <div class="card" id="privacy-card">
+        <h2>Privacy</h2>
+        <dl class="kv" style="grid-template-columns:minmax(120px,180px) 1fr">
+          ${PRIVACY_FIELDS.map(([k, label]) =>
+            `<dt>${label}</dt><dd><span class="csel-slot pv-aud" data-field="${k}" data-value="${esc(me.privacy?.[k] || "everyone")}"></span></dd>`).join("")}
+        </dl>
+        <div class="row" style="margin-top:6px"><label class="switch">
+          <input type="checkbox" id="pv-read-receipts" ${me.privacy?.read_receipts !== false ? "checked" : ""}>
+          <span class="slider"></span></label>
+          <span><b>Read receipts</b> — send and see the blue ticks</span></div>
+        <p class="hint" style="margin-bottom:0">"Members" means people you share a
+        chat with. Turning read receipts off hides them both ways.</p>
+      </div>
+      <div class="card">
+        <h2>Security</h2>
+        <div class="row"><button id="acct-password">Change password</button></div>
+        <p class="hint" style="margin-bottom:0">Your messages are end-to-end
+        encrypted. Your password unlocks your keys on each device; changing it
+        re-wraps them and keeps your recovery code working.</p>
+      </div>` : ""}
       <div class="card">
         <h2>Session</h2>
         <div class="row"><button id="st-logout">Sign out</button></div>
         <p class="hint" style="margin-bottom:0">Your account lives in the shared
-        folder — it works from any machine that syncs it, and your photo and name
-        follow you. Password change is coming with the account overhaul.</p>
+        folder — it works from any machine that syncs it, and your photo, name and
+        settings follow you.</p>
       </div>
       <input type="file" id="pf-file" accept="image/*" hidden>`;
   } else if (section === "chats") {
@@ -249,6 +315,7 @@ async function renderSettings() {
       else if (e.key === "Escape") cancel();
     });
   });
+  wireAccountEditors(ms);
   const shared2 = $("#open-shared2");
   if (shared2) shared2.addEventListener("click", (e) => {
     e.preventDefault(); window.openTarget("shared");
@@ -269,19 +336,24 @@ async function renderSettings() {
   // reply-rule (was a native <select>) and replies-per-hour (was a number input
   // whose spinner + datalist arrow read as a doubled dropdown). mountCsels fills
   // each .csel-slot from its data-value and writes the choice back to it.
-  const ruleOpts = Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }));
-  const rateOpts = [
-    { v: "", label: "Default (30 / hour)" },
-    ...[10, 20, 30, 50, 100, 200, 500].map((n) => ({ v: String(n), label: `${n} / hour` })),
-  ];
-  mountCsels($(".settings-body"), (slot) => {
-    if (!slot.classList.contains("ag-rate")) return ruleOpts;
-    // surface a previously-set non-preset value so it labels correctly
-    const cur = slot.dataset.value;
-    return cur && !rateOpts.some((o) => o.v === cur)
-      ? [rateOpts[0], { v: cur, label: `${cur} / hour` }, ...rateOpts.slice(1)]
-      : rateOpts;
-  });
+  // mountCsels fills EVERY .csel-slot with the agent rule/rate options, so it
+  // must run ONLY on the agents page — the account page has its own .csel-slot
+  // elements (privacy audiences, status) mounted by wireAccountEditors.
+  if (section === "agents") {
+    const ruleOpts = Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }));
+    const rateOpts = [
+      { v: "", label: "Default (30 / hour)" },
+      ...[10, 20, 30, 50, 100, 200, 500].map((n) => ({ v: String(n), label: `${n} / hour` })),
+    ];
+    mountCsels($(".settings-body"), (slot) => {
+      if (!slot.classList.contains("ag-rate")) return ruleOpts;
+      // surface a previously-set non-preset value so it labels correctly
+      const cur = slot.dataset.value;
+      return cur && !rateOpts.some((o) => o.v === cur)
+        ? [rateOpts[0], { v: cur, label: `${cur} / hour` }, ...rateOpts.slice(1)]
+        : rateOpts;
+    });
+  }
   document.querySelectorAll(".ag-save").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const agent = btn.dataset.agent;
@@ -392,6 +464,132 @@ async function renderSettings() {
   }
 }
 V.renderSettings = renderSettings;
+
+// ---- account editors (v2): @handle, about, status, privacy, password --------
+function wireAccountEditors(ms) {
+  // @handle change — inline edit, like the display name (name is the immutable
+  // identity; the handle is the mutable @-mention, Telegram model)
+  const hEdit = $("#acct-handle-edit");
+  if (hEdit) hEdit.addEventListener("click", () => {
+    const line = $(".acct-handle-line");
+    const cur = ($("#acct-handle").textContent || "").replace(/^@/, "");
+    line.innerHTML = `<input type="text" id="acct-handle-input" maxlength="32" value="${esc(cur)}">
+      <button class="primary" id="acct-handle-save">Save</button>
+      <button id="acct-handle-cancel">Cancel</button>`;
+    const inp = $("#acct-handle-input"); inp.focus(); inp.select();
+    const save = async () => {
+      const v = inp.value.trim().toLowerCase().replace(/^@/, "");
+      if (!v || v === cur) return renderSettings();
+      const r = await api("/api/mesh/set_handle", { handle: v });
+      if (r.error) { toast(r.error, true); return; }
+      toast("Username updated", { check: true }); renderSettings();
+    };
+    $("#acct-handle-save").addEventListener("click", save);
+    $("#acct-handle-cancel").addEventListener("click", () => renderSettings());
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") renderSettings();
+    });
+  });
+
+  // About — inline edit
+  const aEdit = $("#acct-about-edit");
+  if (aEdit) aEdit.addEventListener("click", () => {
+    const line = $(".acct-about-line");
+    const cur = $("#acct-about").textContent.trim();
+    const seed = cur === "Add a few words about you" ? "" : cur;
+    line.innerHTML = `<input type="text" id="acct-about-input" maxlength="139" value="${esc(seed)}">
+      <button class="primary" id="acct-about-save">Save</button>
+      <button id="acct-about-cancel">Cancel</button>`;
+    const inp = $("#acct-about-input"); inp.focus();
+    const save = async () => {
+      const r = await api("/api/mesh/set_about", { about: inp.value.trim() });
+      if (r.error) { toast(r.error, true); return; }
+      toast("About updated", { check: true }); renderSettings();
+    };
+    $("#acct-about-save").addEventListener("click", save);
+    $("#acct-about-cancel").addEventListener("click", () => renderSettings());
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") renderSettings();
+    });
+  });
+
+  // Status — a state csel + a free-text line, saved together
+  const statusSlot = document.querySelector(".acct-status-state");
+  if (statusSlot) statusSlot.appendChild(csel({
+    options: [
+      { v: "available", label: "🟢 Available" },
+      { v: "busy", label: "🟠 Busy" },
+      { v: "dnd", label: "⛔ Do not disturb" },
+      { v: "away", label: "🌙 Away" },
+    ],
+    value: statusSlot.dataset.value || "available",
+    onChange: (v) => { statusSlot.dataset.value = v; },
+  }));
+  const stSave = $("#acct-status-save");
+  if (stSave) stSave.addEventListener("click", async () => {
+    const r = await api("/api/mesh/set_status", {
+      state: statusSlot.dataset.value || "available",
+      text: ($("#acct-status-text").value || "").trim(),
+    });
+    if (r.error) { toast(r.error, true); return; }
+    toast("Status updated", { check: true });
+  });
+
+  // Privacy matrix — one audience csel per field; change POSTs immediately
+  document.querySelectorAll(".pv-aud").forEach((slot) => {
+    slot.appendChild(csel({
+      options: AUDIENCE_OPTS,
+      value: slot.dataset.value || "everyone",
+      onChange: async (v) => {
+        const r = await api("/api/mesh/set_privacy",
+          { privacy: { [slot.dataset.field]: v } });
+        if (r.error) toast(r.error, true);
+      },
+    }));
+  });
+  const rr = $("#pv-read-receipts");
+  if (rr) rr.addEventListener("change", async (e) => {
+    // one toggle drives both directions (send + view) — WhatsApp semantics
+    const on = e.target.checked;
+    const r = await api("/api/mesh/set_privacy",
+      { privacy: { read_receipts: on, view_read_receipts: on } });
+    if (r.error) toast(r.error, true);
+  });
+
+  // Change password — a small modal (current + new + confirm)
+  const pw = $("#acct-password");
+  if (pw) pw.addEventListener("click", () => openPasswordModal());
+}
+
+function openPasswordModal() {
+  const box = openModal(`
+    <div class="cf-title">Change password</div>
+    <dl class="kv" style="grid-template-columns:120px 1fr;margin:12px 0">
+      <dt>Current</dt><dd><input type="password" id="pw-old" autocomplete="current-password"></dd>
+      <dt>New</dt><dd><input type="password" id="pw-new" autocomplete="new-password"></dd>
+      <dt>Confirm</dt><dd><input type="password" id="pw-new2" autocomplete="new-password"></dd>
+    </dl>
+    <div class="cf-actions">
+      <button class="cf-cancel" id="pw-cancel">Cancel</button>
+      <button class="cf-pill" id="pw-go">Change</button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#pw-cancel").addEventListener("click", closeModal);
+  box.querySelector("#pw-go").addEventListener("click", async () => {
+    const oldp = box.querySelector("#pw-old").value;
+    const newp = box.querySelector("#pw-new").value;
+    const conf = box.querySelector("#pw-new2").value;
+    if (newp.length < 6) { toast("New password must be at least 6 characters", true); return; }
+    if (newp !== conf) { toast("The new passwords don't match", true); return; }
+    const r = await api("/api/mesh/change_password", { old: oldp, new: newp });
+    if (r.error) { toast(r.error, true); return; }
+    closeModal(); toast("Password changed", { check: true });
+  });
+  box.querySelector("#pw-old").focus();
+}
 
 // ---- profile photo: upload → adjust (crop/zoom in a circle) → downsize -------
 
