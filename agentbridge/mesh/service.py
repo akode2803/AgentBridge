@@ -14,6 +14,7 @@ from ..store.db import Store
 from ..store.outbox import OutboxWorker
 from ..transport.base import Transport
 from ..transport.folder import FolderTransport
+from ..applink import AppLink
 from . import eventbus
 from .accounts import AccountsService
 from .directory import Directory
@@ -43,6 +44,8 @@ class Mesh:
         store_path: Path | str | None = None,
         home: Path | None = None,
         sync_workers: int = 4,
+        app_version: str = "",
+        release_info=None,
     ) -> None:
         self.tx = (
             transport
@@ -92,6 +95,10 @@ class Mesh:
         self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
         self.bus = EventBus()
         self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
+        self.applink = AppLink(
+            self.tx, self.store, self.directory, machine,
+            user=user, app_version=app_version, release_info=release_info,
+        )
         self.sync = SyncEngine(
             self.tx, self.store, is_member=self._is_member, workers=sync_workers,
             on_records=self._pump,

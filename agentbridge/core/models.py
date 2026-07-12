@@ -171,10 +171,14 @@ class AgentRules:
 
     messaging: Audience = Audience.EVERYONE
     add_to_group: Audience = Audience.EVERYONE
+    # R11: may this agent help configure ANOTHER machine during setup?
+    # Off by default — a real cross-machine capability the owner opts into.
+    setup_assist: bool = False
 
     def __post_init__(self) -> None:
         for name in ("messaging", "add_to_group"):
             setattr(self, name, _coerce(Audience, getattr(self, name), Audience.NOBODY))
+        self.setup_assist = bool(self.setup_assist)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "AgentRules":

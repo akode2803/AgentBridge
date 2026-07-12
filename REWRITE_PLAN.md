@@ -220,11 +220,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       (meta stays warm without manual refold). SSE endpoint (R13) and MCP
       notifications (R12) are thin consumers of this bus. **Mute stub
       closed.** 9 new tests (153 total).
-- [ ] **R11 — App-to-app channel.** Machine-to-machine control lane (rides the
-      same transport): **auto-update** (app checks the GitHub repo for a newer
-      release, verifies SHA, asks the user, updates itself); **setup-assist**
-      (a permitted agent helps another machine write its agent/harness config
-      during install — gated by that agent's owner permission per R6).
+- [x] **R11 — App-to-app channel. DONE 2026-07-13** — `agentbridge/applink/`:
+      `machines.py` (each machine announces version/platform/capabilities;
+      stale window) + `control.py` (machine-to-machine request/reply RPC:
+      per-machine inboxes, single-writer id-docs, local seen-cursor →
+      idempotent, best-effort gc) + `update.py` (detection + **mandatory
+      SHA-256 verification**; `fetch`/`install` INJECTED so the backend never
+      downloads-or-executes; `apply` refuses without confirm() AND a digest
+      match — a tampered artifact raises loudly; a peer version-advert is only
+      a hint, the trusted digest comes from the GitHub release) +
+      `setup_assist.py` (rides the lane; **owner-gated by new
+      `AgentRules.setup_assist`**, default off; unpermitted/unknown-agent
+      requests auto-decline and leak nothing; reply is a PROPOSAL the
+      requester reviews). Facade: `mesh.applink`. 12 new tests (163 total).
 - [ ] **R12 — mesh-cli v2 (MCP).** MCP server exposing the mesh as tools/
       resources/notifications (per D9) + human CLI (auth = humans only;
       account creation stays GUI-only); **capability parity audit**: agents
