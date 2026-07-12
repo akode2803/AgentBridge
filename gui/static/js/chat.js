@@ -190,10 +190,51 @@ function renderMeshAuth() {
     };
     const r = await api(mode === "signup" ? "/api/mesh/signup" : "/api/mesh/login", payload);
     if (r.error) { toast(r.error, true); return; }
+    // D5: the recovery code is shown ONCE — at signup, and on the first v2
+    // sign-in of a migrated account (when identity keys are freshly minted).
+    // Forgotten password + lost code = history unreadable, so gate on it.
+    if (r.recovery_code) { await showRecoveryCode(r.recovery_code); }
     renderChats(true);
   };
   $("#auth-go").addEventListener("click", go);
   $("#auth-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+}
+
+// D5 recovery code — shown ONCE. Encryption keys are wrapped by the password
+// AND by this code; if the password is ever forgotten, this code is the only
+// way back into the account's history. The Continue button is gated on an
+// explicit "I've saved it" so it can't be dismissed by reflex.
+function showRecoveryCode(code) {
+  return new Promise((resolve) => {
+    const box = openModal(`
+      <div class="cf-title">Save your recovery code</div>
+      <div class="cf-body" style="text-align:left">
+        This is the <b>only</b> way back into your account if you forget your
+        password. It is shown once and never again — store it somewhere safe.
+      </div>
+      <div class="recovery-code" id="rc-code">${esc(code)}</div>
+      <div class="row" style="justify-content:center;margin:10px 0">
+        <button id="rc-copy">Copy code</button>
+      </div>
+      <label class="rc-ack">
+        <input type="checkbox" id="rc-ack"> I have saved my recovery code
+      </label>
+      <div class="cf-actions">
+        <button class="cf-pill" id="rc-go" disabled>Continue</button>
+      </div>`);
+    box.classList.add("confirm");
+    box.parentElement.classList.add("confirm-scrim");
+    box.querySelector("#rc-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(code);
+        toast("Recovery code copied", { check: true });
+      } catch { toast("Could not access the clipboard", true); }
+    });
+    const ack = box.querySelector("#rc-ack");
+    const goBtn = box.querySelector("#rc-go");
+    ack.addEventListener("change", () => { goBtn.disabled = !ack.checked; });
+    goBtn.addEventListener("click", () => { closeModal(); resolve(); });
+  });
 }
 
 // the Read-more reveal schedule: 15 lines, then 30, then fully expand

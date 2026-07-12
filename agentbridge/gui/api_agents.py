@@ -21,25 +21,40 @@ def create_agent(app, req, mesh) -> dict:
     return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name))}
 
 
+# profile fields route to their own setters; agent_rules audiences route to
+# the outbound-rule service; EVERYTHING else is harness config (model,
+# reasoning, and the deferred reply-policy knobs) — a free-form store the
+# frontend reads back as `settings`, until R16 formalizes the schema.
+_PROFILE_KEYS = {"display", "about", "status"}
+_RULE_KEYS = {"messaging", "add_to_group", "setup_assist"}
+
+
 @authed
 def agent(app, req, mesh) -> dict:
-    """One owner-gated patch endpoint for an agent: profile fields, outbound
-    rules, harness config — routed to the right service by key."""
+    """One owner-gated patch endpoint for an agent. Accepts BOTH the flat
+    patch the current editor sends (model/reasoning/default_rule/…) and a
+    structured {harness:{}, rules:{}} — flat non-profile/non-rule keys land in
+    the harness config so the existing model-picker UI works unchanged."""
     d = req.data
     name = (d.get("username") or d.get("agent") or "").strip().lower()
-    patch = d.get("patch") or {}
+    patch = dict(d.get("patch") or {})
     if "display" in patch:
-        mesh.set_display(patch["display"] or "", agent=name)
+        mesh.set_display(patch.pop("display") or "", agent=name)
     if "about" in patch:
-        mesh.set_about(patch["about"] or "", agent=name)
+        mesh.set_about(patch.pop("about") or "", agent=name)
     if "status" in patch:
-        s = patch["status"] or {}
+        s = patch.pop("status") or {}
         mesh.set_status(s.get("state") or "available", s.get("text") or "",
                         agent=name)
-    if "rules" in patch:
-        mesh.set_agent_rules(name, patch["rules"] or {})
-    if "harness" in patch:
-        mesh.set_agent_harness(name, patch["harness"] or {})
+    rules = dict(patch.pop("rules", {}) or {})
+    rules.update({k: patch.pop(k) for k in list(patch) if k in _RULE_KEYS})
+    if rules:
+        mesh.set_agent_rules(name, rules)
+    # remaining keys (incl. an explicit `harness` dict) → harness config
+    harness = dict(patch.pop("harness", {}) or {})
+    harness.update(patch)
+    if harness:
+        mesh.set_agent_harness(name, harness)
     acc = mesh.directory.get(name)
     out = user_json(acc, mesh.visible_profile(name))
     out["harness"] = dict(acc.agent.harness) if acc.agent else {}

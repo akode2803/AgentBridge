@@ -1949,6 +1949,19 @@ pre.configdump {
   background: var(--bad); color: #fff; font-weight: 600;
 }
 .cf-go:hover, [data-theme="dark"] .cf-go:hover { filter: brightness(1.12); background: var(--bad); }
+/* D5 recovery code (shown once at signup / first v2 login) */
+.recovery-code {
+  margin: 14px auto 4px; padding: 12px 16px; max-width: 320px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 18px; letter-spacing: 2px; text-align: center; font-weight: 600;
+  background: var(--hover); border: 1px dashed var(--border-strong);
+  border-radius: 10px; user-select: all; word-break: break-all;
+}
+.rc-ack {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  font-size: 13px; color: var(--text-dim); margin: 6px 0 2px;
+}
+.cf-pill:disabled { opacity: .5; cursor: not-allowed; }
 /* delete / clear dialog: options stack (WhatsApp) as no-fill PILL-outlined
    buttons — destructive rows red-bordered, Cancel neutral (item 6) */
 .cf-actions.cf-col { flex-direction: column; align-items: stretch; gap: 8px; margin-top: 18px; }

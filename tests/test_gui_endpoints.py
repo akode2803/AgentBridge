@@ -301,9 +301,22 @@ def test_agents_create_patch_standdown_delete(rig):
                           "about": "runs the tests"})
     assert out["agent"]["harness"]["model"] == "claude-sonnet-5"
 
+    # the settings editor sends a FLAT patch (model/reasoning/default_rule/
+    # max_replies_per_hour) — those non-profile keys all land in harness so
+    # the existing UI works unchanged; profile keys still route to setters
+    out = rig.post("/api/mesh/agent", username="helper",
+                   patch={"model": "grok-4", "reasoning": "high",
+                          "default_rule": "tagged", "max_replies_per_hour": 50,
+                          "display": "Helper Bot"})
+    h = out["agent"]["harness"]
+    assert h["model"] == "grok-4" and h["reasoning"] == "high"
+    assert h["default_rule"] == "tagged" and h["max_replies_per_hour"] == 50
+    assert out["agent"]["display"] == "Helper Bot"  # profile key routed out
+    assert out["agent"]["settings"] == h  # the frontend reads settings == harness
+
     me = rig.get("/api/mesh/me")
     assert me["my_agents"][0]["name"] == "helper"
-    assert me["my_agents"][0]["harness"]["reasoning"] == "medium"
+    assert me["my_agents"][0]["harness"]["reasoning"] == "high"
 
     down = rig.post("/api/mesh/stand_down", down=True)
     assert down["changed"] == ["helper"]
