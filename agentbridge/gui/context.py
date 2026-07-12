@@ -83,8 +83,15 @@ class GuiApp:
         if acc is None or not acc.active or acc.auth is None:
             self._session_path.unlink(missing_ok=True)
             return
-        if self.encrypt and KeyStore(self.home).load(name) is None:
-            # identity bundle gone (fresh machine / cleared home): re-login
+        if self.encrypt and (
+            KeyStore(self.home).load(name) is None  # local private bundle gone
+            or not acc.keys.sign_pub                 # account not yet key-published
+        ):
+            # A migrated account starts keyless: it must go through the
+            # upgrading LOGIN (which publishes its identity + shows the
+            # recovery code) — never silently restore into a half-state where
+            # it can read plaintext history but can't seal a new message. A
+            # fresh machine (no local bundle) likewise re-logs in.
             self._session_path.unlink(missing_ok=True)
             return
         with self._lock:

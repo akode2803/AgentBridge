@@ -52,6 +52,39 @@ def test_session_restores_across_server_restart(rig):
         app2.close()
 
 
+def test_restore_refused_for_keyless_migrated_account(rig, tmp_path):
+    """A migrated account (auth present, but no PUBLISHED identity key yet)
+    must NOT auto-restore even if a stale local key bundle exists — it has to
+    go through the upgrading login. Otherwise it lands in a half-state that
+    can read plaintext history but can't seal a new message (the R14 cutover
+    catch)."""
+    import hashlib
+    import os
+
+    from agentbridge.mesh.keyring import KeyStore
+
+    # a migrated-style account: pbkdf2 auth, keys NOT published
+    salt = os.urandom(16)
+    rig.app._tx0.put_doc("users/vet.json", {
+        "name": "vet", "kind": "human", "display": "Vet", "active": True,
+        "auth": {"algo": "pbkdf2", "salt": salt.hex(),
+                 "hash": hashlib.pbkdf2_hmac("sha256", b"x", salt, 1000).hex(),
+                 "iterations": 1000},
+    })
+    # a stale local bundle + a session pointing at vet
+    KeyStore(rig.home).save("vet", b"\x01" * 64)
+    (rig.home / "gui_session.json").write_text('{"user": "vet"}')
+
+    app2 = GuiApp(rig.root, home=rig.home, machine="guibox", encrypt=True,
+                  poll_s=0.25)
+    try:
+        app2.restore()
+        assert app2.user is None  # refused — forced to log in + publish keys
+    finally:
+        app2.close()
+    assert not (rig.home / "gui_session.json").exists()  # stale session cleared
+
+
 def test_migrated_login_upgrades_auth_and_keys(rig):
     # seed a v1-migrated record: pbkdf2 auth, no identity keys
     import hashlib
