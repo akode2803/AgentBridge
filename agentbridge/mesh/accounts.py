@@ -174,6 +174,20 @@ class AccountsService:
         target = self._writable_target(agent)
         return self.directory.patch(target, lambda doc: doc.update(about=about or ""))
 
+    def set_status(self, state: str, text: str = "", *, agent: str | None = None) -> Account:
+        """ONE logical status per account across all devices (account-model
+        v2) — it lives on the account file, not in per-device presence.
+        Suggested vocabulary: available / busy / dnd / away; agents read it
+        before deciding whether to disturb someone (matrix-gated, R6)."""
+        target = self._writable_target(agent)
+        state = (state or "").strip().lower()
+        if not state or len(state) > 24:
+            raise ValidationError("status state must be 1-24 characters")
+        return self.directory.patch(
+            target,
+            lambda doc: doc.update(status={"state": state, "text": (text or "")[:140]}),
+        )
+
     # ------------------------------------------------------------- lifecycle
     def set_machine_agents_active(self, active: bool) -> list[str]:
         """Sign-out/in on THIS machine: flip only this machine's agents.

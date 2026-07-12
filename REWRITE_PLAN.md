@@ -176,12 +176,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       names stay resolvable (grey-out); DMs to deleted accounts refused on
       create AND on post into existing DMs without leaking why. 9 new tests
       (120 total).
-- [ ] **R8 — Presence, status & about.** Per-device presence heartbeat files,
-      merged to ONE logical status (account-model v2); online/last-seen;
-      **Delivered tick** lands exactly per the designed ns-compare plan
-      (HANDOFF "planned implementation"); status values (available/busy/dnd/…)
-      that agents read before deciding to message; **about** field, agent
-      default: "<Owner>'s <Agent> on <machine>"; all gated by the R6 matrix.
+- [x] **R8 — Presence, status & about. DONE 2026-07-13** — `presence.py`
+      (per-device heartbeats, throttled write-on-change; merge = any FRESH
+      online device wins, staleness window ~3 missed beats covers crashes;
+      matrix-gated `visible_presence`; close() never stamps presence for a
+      device that never announced — would falsely advance Delivered) +
+      `receipts.py` (**Delivered SHIPPED** exactly per the HANDOFF ns-compare
+      design: read_ns ≥ msg.ns → Read, else presence last_seen_ns ≥ msg.ns →
+      Delivered, else Sent; group tick = lowest tier; BOTH tiers gated by the
+      receipt toggles per HANDOFF's privacy note; message_info payload;
+      deactivated accounts never deliver — no heartbeat). `set_status` = ONE
+      logical account-level status (available/busy/dnd/…), owner-gated for
+      agents, matrix-visible so agents check before disturbing. Closes the
+      v1 Delivered stub. 11 new tests (131 total).
 - [ ] **R9 — E2EE.** Identity keypairs; password-wrapped account key in the
       folder + recovery code (D5); per-chat keys wrapped per member; rotation
       on membership change; envelope encryption of message bodies, edits, and

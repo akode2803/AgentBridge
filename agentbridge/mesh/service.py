@@ -18,7 +18,9 @@ from .accounts import AccountsService
 from .directory import Directory
 from .membership import MembershipService
 from .messaging import MessagingService
+from .presence import PresenceService
 from .privacy import PrivacyService
+from .receipts import ReceiptsService
 from .sealer import PlainSealer, Sealer
 from .sync import SyncEngine
 
@@ -68,6 +70,8 @@ class Mesh:
             self.tx, self.directory, self.messaging, self.membership,
             user, machine,
         )
+        self.presence = PresenceService(self.tx, self.privacy, user, machine)
+        self.receipts = ReceiptsService(self.messaging, self.privacy, self.presence)
         self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
         self.sync = SyncEngine(
             self.tx, self.store, is_member=self._is_member, workers=sync_workers,
@@ -80,13 +84,17 @@ class Mesh:
             return False
 
     # ----------------------------------------------------------- lifecycle
-    def start(self) -> None:
-        """Start the background outbox flusher. (The sync loop is the caller's
-        to run — GUI/harness own their cadence via ``sync.run``/``sync_once``.)"""
+    def start(self, *, heartbeat: bool = True) -> None:
+        """Start the background outbox flusher (+ the presence heartbeat).
+        The sync loop stays the caller's to run — GUI/harness own their
+        cadence via ``sync.run``/``sync_once``."""
         self.outbox.start()
+        if heartbeat:
+            self.presence.start()
 
     def close(self) -> None:
         self.sync.stop()
+        self.presence.stop()  # writes the clean offline marker
         self.outbox.stop()
         self.store.close()
 
@@ -100,12 +108,15 @@ class Mesh:
     # ------------------------------------------------------- delegation API
     # (kept flat so connectors read naturally: mesh.post(...),
     #  mesh.create_dm(...), mesh.block(...) — messaging, membership, privacy)
+    _SERVICES = ("messaging", "membership", "privacy", "accounts",
+                 "presence", "receipts")
+
     def __getattr__(self, name: str):
-        if name in ("messaging", "membership", "privacy", "accounts"):  # init guard
+        if name in Mesh._SERVICES:  # mid-__init__ — never recurse
             raise AttributeError(name)
-        for svc in (self.messaging, self.membership, self.privacy, self.accounts):
+        for svc_name in Mesh._SERVICES:
             try:
-                return getattr(svc, name)
+                return getattr(getattr(self, svc_name), name)
             except AttributeError:
                 continue
         raise AttributeError(name)
