@@ -53,6 +53,29 @@ export function meshDn(username) {
   return u?.display || dn(username);
 }
 
+// server capabilities: the v2 connector sends {v:2, caps:{sse,...}}; the v1
+// server sends neither. One place to branch so the app serves both until the
+// R14 cutover retires v1.
+export function meshCaps() {
+  return Mesh.state?.caps || App.state?.caps || {};
+}
+export function isV2() {
+  return (Mesh.state?.v || App.state?.v) === 2;
+}
+
+// group admins: v2 is multi-admin (an `admins` list + per-member `roles`,
+// D12); v1 had a single `owner`. `chatAdmins` normalizes both, `meshIsAdmin`
+// answers "can I administer this chat" (rename/photo/members/permissions/
+// delete). The mesh re-checks every mutation, so this only gates the UI.
+export function chatAdmins(meta) {
+  if (!meta) return [];
+  if (Array.isArray(meta.admins)) return meta.admins;
+  return meta.owner ? [meta.owner] : [];
+}
+export function meshIsAdmin(meta) {
+  return chatAdmins(meta).includes(Mesh.state?.user);
+}
+
 // avatar meta ({sha256, updated}) for a user, or null — the bytes ride
 // /api/mesh/avatar, not the state payload (see server.py _public_user)
 export function meshAvatar(username) {

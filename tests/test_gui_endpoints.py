@@ -135,9 +135,10 @@ def test_message_ops_star_pin_edit_delete(rig):
     assert rig.get("/api/mesh/starred", id=cid)["starred"] == []
 
     rig.post("/api/mesh/pin", chat_id=cid, msg_id=m2)
-    assert m2 in rig.get("/api/mesh/chat", id=cid)["meta"]["pins"]
+    pins = rig.get("/api/mesh/chat", id=cid)["meta"]["pins"]
+    assert [p["id"] for p in pins] == [m2]   # list of {id, until, body} for the banner
     rig.post("/api/mesh/unpin", chat_id=cid, msg_id=m2)
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["pins"] == {}
+    assert rig.get("/api/mesh/chat", id=cid)["meta"]["pins"] == []
 
     rig.post("/api/mesh/edit_message", chat_id=cid, msg_id=m1, body="one v2")
     got = rig.get("/api/mesh/chat", id=cid)

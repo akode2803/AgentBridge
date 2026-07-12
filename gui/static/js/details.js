@@ -7,7 +7,7 @@ import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
 import { mountCsels } from "./csel.js";
 import { confirmModal, openPhotoViewer } from "./modal.js";
-import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner } from "./state.js";
+import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins } from "./state.js";
 import { mediaThumb } from "./files.js";
 import { V } from "./views.js";
 
@@ -42,7 +42,9 @@ async function renderChatDetails() {
     location.hash = "#/chats"; return;
   }
   const meta = data.meta;
-  const isOwner = meta.owner === ms.user;
+  // "can I administer this group" — v2 multi-admin, v1 single-owner (adapter)
+  const isOwner = meshIsAdmin(meta);
+  const admins = chatAdmins(meta);
   const media = data.files || [];
   const myAgentsHere = Object.values(ms.users).filter((u) =>
     u.kind === "agent" && (u.owners || []).includes(ms.user)
@@ -65,7 +67,9 @@ async function renderChatDetails() {
   const isMember = (meta.members || []).includes(ms.user);
   const memberRow = (u) => {
     const rec = ms.users[u] || {};
-    const removable = isOwner && u !== meta.owner;
+    // an admin can act on any non-admin; admins never remove each other here
+    // (grant/revoke lands in R13d). Members always have the self-exit path.
+    const removable = isOwner && !admins.includes(u);
     return `
       <div class="mem-row">
         <span class="mem-avatar">${meshAvatarInner(u)}</span>
@@ -74,7 +78,7 @@ async function renderChatDetails() {
             ${rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
           <div class="mem-sub">@${esc(u)}</div>
         </span>
-        ${meta.owner === u ? '<span class="owner-chip">Owner</span>' : ""}
+        ${admins.includes(u) ? '<span class="owner-chip">Admin</span>' : ""}
         ${removable ? `<button class="mem-chevron icon-btn" data-user="${esc(u)}">${ICONS.chevD}</button>` : ""}
       </div>`;
   };
@@ -83,9 +87,9 @@ async function renderChatDetails() {
   const isSelf = meta.kind === "self";
   const title = chatDisplay(meta, ms.user);
   const noun = isDm ? "chat" : "group";
-  // me first, then the owner, then everyone else
+  // me first, then admins, then everyone else
   const ordered = [...(meta.members || [])].sort((a, b) => {
-    const rank = (u) => (u === ms.user ? 0 : u === meta.owner ? 1 : 2);
+    const rank = (u) => (u === ms.user ? 0 : admins.includes(u) ? 1 : 2);
     return rank(a) - rank(b);
   });
   const nMembers = (meta.members || []).length;

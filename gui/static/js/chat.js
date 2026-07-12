@@ -7,7 +7,7 @@ import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner } from "./state.js";
+import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -430,7 +430,7 @@ async function renderMeshChat(force) {
   const memberLine = (meta.members || []).filter((u) => u !== ms.user)
     .map(meshDn).concat(isMember ? ["You"] : []).join(", ");
 
-  const isOwner = meta.owner === ms.user;
+  const isOwner = meshIsAdmin(meta);   // v2 multi-admin / v1 owner (adapter)
   // Clear chat greys out once there's nothing visible left to clear (an
   // already-cleared or brand-new chat) — messages_for has applied the
   // per-user clear cursor, so an empty transcript means nothing to clear

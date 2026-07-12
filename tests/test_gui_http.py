@@ -168,6 +168,31 @@ def test_sse_stream_delivers_peer_message(rig):
     assert got["messages"][-1]["mine"] is False
 
 
+def test_bridge_state_compat_shape(rig):
+    """The shared frontend boots + polls /api/state (the v1 bridge status).
+    v2 must answer it with the fields the client reads: configured/v/caps."""
+    st = rig.get("/api/state")
+    assert st["configured"] is True
+    assert st["v"] == 2
+    assert st["caps"]["sse"] is True
+    assert st["paused"] is False
+
+
+def test_chat_pins_are_a_list_with_body(rig):
+    """The pin banner maps meta.pins as an ARRAY of {id, until, body} — a dict
+    here throws in renderMeshChat and blanks the transcript (the R13c live
+    catch). created/created_by must ride too (the genesis pill)."""
+    rig.signup()
+    cid = rig.post("/api/mesh/create_chat", name="Pinned", members=[])["chat"]["id"]
+    mid = rig.post("/api/mesh/post", chat_id=cid, body="pin this one")["id"]
+    rig.post("/api/mesh/pin", chat_id=cid, msg_id=mid)
+    meta = rig.get("/api/mesh/chat", id=cid)["meta"]
+    assert isinstance(meta["pins"], list)
+    assert meta["pins"][0]["id"] == mid
+    assert meta["pins"][0]["body"] == "pin this one"
+    assert meta["created"] and meta["created_by"] == "aryan"
+
+
 def test_sse_requires_session(rig):
     host, port = rig.base.replace("http://", "").split(":")
     conn = http.client.HTTPConnection(host, int(port), timeout=10)

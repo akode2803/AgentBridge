@@ -5,6 +5,7 @@ import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, resetSubviews, renderChrome } from "./state.js";
 import { V, EXPECTED } from "./views.js";
+import { syncRealtime, realtimeActive } from "./realtime.js";
 import "./chat.js";
 import "./details.js";
 import "./media.js";
@@ -20,6 +21,8 @@ async function refresh(rerender) {
   } catch {
     return;  // server unreachable; next poll retries
   }
+  // open/close the SSE stream to match the current server + auth (inert on v1)
+  syncRealtime();
   renderChrome();
   if (rerender && App.page !== "setup") PAGES[App.page]();
   else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
@@ -160,10 +163,13 @@ window.addEventListener("hashchange", route);
     location.hash = App.state.configured ? "#/chats" : "#/setup";
   }
   route();
-  // poll cadence is user-tunable (Settings → Connection); re-read each
-  // tick so a change applies without a reload
+  // poll cadence is user-tunable (Settings → Connection); re-read each tick so
+  // a change applies without a reload. When the SSE stream is live (v2) the
+  // stream carries the news, so the poll drops to a slow safety-net tick that
+  // heals any dropped frame without hammering the server.
   (function poll() {
-    const ms = Math.max(1000, +(localStorage.getItem("pollMs") || 2500) || 2500);
+    const base = Math.max(1000, +(localStorage.getItem("pollMs") || 2500) || 2500);
+    const ms = realtimeActive() ? Math.max(base, 20000) : base;
     setTimeout(async () => {
       try { await refresh(false); } catch { /* next tick retries */ }
       poll();

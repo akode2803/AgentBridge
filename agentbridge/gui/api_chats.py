@@ -15,6 +15,23 @@ from .serialize import chat_json, message_json, user_json
 __all__ = ["GET", "POST"]
 
 
+def bridge_state(app: GuiApp, req) -> dict:
+    """The v1 ``/api/state`` shape the shared frontend boots + polls on. v2 has
+    no bridge/setup wizard, so it always reports configured; the fields the
+    frontend actually reads are configured/v/caps/paused (+ version)."""
+    mesh = app.mesh
+    ctl = (mesh.tx.get_doc("control.json") if mesh else
+           app.directory0.tx.get_doc("control.json")) or {}
+    return {
+        "configured": True,
+        "v": 2,
+        "gui_version": app.app_version,
+        "caps": {"sse": True, "receipts": "delivered", "admins": True},
+        "paused": bool(ctl.get("paused")),
+        "user": app.user,
+    }
+
+
 def state(app: GuiApp, req) -> dict:
     """The boot/sidebar payload. Logged out: enough for the login screen.
     Logged in: the privacy-filtered directory + my chats with unread info."""
@@ -78,14 +95,48 @@ def chat(app: GuiApp, req, mesh) -> dict:
             d["receipt"] = r
         payload.append(d)
     mine = mesh.my_state(chat_id)
+    meta = chat_json(snap, full=True)
+    meta["created"] = _created_iso(msgs)
+    meta["created_by"] = _created_by(msgs)
+    meta["pins"] = _pins_list(mesh.pins(chat_id), msgs)
     return {
-        "meta": {**chat_json(snap, full=True), "pins": mesh.pins(chat_id)},
+        "meta": meta,
         "messages": payload,
         "me": me,
         "starred": mine["starred"],
         "read_ns": mine["read_ns"],
         "total": len(msgs),
     }
+
+
+def _pins_list(pins: dict, msgs) -> list[dict]:
+    """The frontend banner wants an ARRAY of {id, until, body}, latest message
+    first. Resolve bodies from the already-filtered read model (a redacted
+    message reads as its tombstone, never its old body)."""
+    by_id = {m.id: m for m in msgs}
+    out = []
+    for msg_id, doc in pins.items():
+        m = by_id.get(msg_id)
+        if m is None or m.deleted:
+            continue  # pinned message gone/redacted: drop it from the banner
+        out.append({"id": msg_id, "until": doc.get("until_ns", 0),
+                    "body": m.body, "ns": m.ns})
+    out.sort(key=lambda p: p["ns"], reverse=True)
+    return out
+
+
+def _created_iso(msgs) -> str:
+    for m in msgs:  # the genesis info event is first in ns order
+        if m.event and m.event.get("type") == "created":
+            return m.ts
+    return ""
+
+
+def _created_by(msgs) -> str:
+    for m in msgs:
+        if m.event and m.event.get("type") == "created":
+            return m.from_
+    return ""
 
 
 @authed
@@ -143,6 +194,7 @@ def create_self(app: GuiApp, req, mesh) -> dict:
 
 
 GET = {
+    "/api/state": bridge_state,
     "/api/mesh/state": state,
     "/api/mesh/chat": chat,
 }

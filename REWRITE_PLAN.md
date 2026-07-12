@@ -315,9 +315,23 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
         records whose `from` ≠ log-owner (defense-in-depth vs buggy
         clients). Residual (documented in THREAT_MODEL): a member of a
         MIGRATED chat backdating their own signed genesis — revisit R24/25.
-  - [ ] **R13c — frontend wiring.** Caps probe (v1 poll vs v2 SSE+poll
-        fallback), shape adapters; the OLD app must keep working after
-        every frontend edit (it shares the modules).
+  - [x] **R13c — frontend wiring. DONE 2026-07-13** — caps probe
+        (`isV2()`/`meshCaps()` read the v2 `{v:2, caps}`; v1 sends neither so
+        the app serves both until R14) + `realtime.js` (EventSource on
+        `/api/mesh/events`, repaints the sidebar + open transcript per frame,
+        auto-reconnect, bounded manual retry; inert on v1) + poll backs off
+        to a 20s safety-net tick when the stream is live + admin adapter
+        (`chatAdmins`/`meshIsAdmin`: v2 multi-admin `admins` list vs v1 single
+        `owner` — replaces the `meta.owner === me` checks in details/chat/
+        sidebar; the member chip now reads "Admin"). Server got a compat
+        `/api/state` (the shell the frontend boots+polls on) and the `chat`
+        endpoint now emits `pins` as an ARRAY of `{id, until, body}` +
+        `created`/`created_by` (the frontend maps these; a dict blanked the
+        transcript — a LIVE catch). **Verified live in the browser preview
+        against a scratch v2 root:** signup → SSE connected → self-chat →
+        message posts + renders with markdown + Delivered tick; Settings
+        renders; zero console errors. check_frontend 22/22. 4 new shape/SSE
+        tests (210 total).
   - [ ] **R13d — new settings surfaces (v2-gated).** Recovery-code modal,
         password+handle change, status/about, privacy matrix, admins &
         group permissions (screenshot UI), model picker scaffold,

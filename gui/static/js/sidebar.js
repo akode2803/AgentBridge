@@ -4,7 +4,7 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvatarInner } from "./state.js";
+import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin } from "./state.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
 
@@ -341,7 +341,7 @@ function openChatRowMenu(chatId, x, y) {
   const c = (ms?.chats || []).find((k) => k.id === chatId);
   if (!c) return;
   const isDm = c.kind === "dm", isSelf = c.kind === "self", isGroup = c.kind === "group";
-  const isOwner = c.owner === ms.user;
+  const isOwner = meshIsAdmin(c);   // v2 multi-admin / v1 owner (adapter)
   const isPinned = !!c.pinned;
   const isUnread = (c.unread > 0) || !!c.forced_unread;
   // grey out Clear when there's nothing visible left to clear (empty or already
