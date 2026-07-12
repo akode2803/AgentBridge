@@ -90,17 +90,17 @@ def atomic_write_json(
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    # the tmp name must be unique PER WRITE, not per process: two THREADS
-    # writing the same doc (a request handler + the sync thread both
-    # refolding meta.json) would otherwise share one tmp path and collide —
-    # open-while-replacing raises until the retries exhaust (a real CI burn)
-    tmp = p.with_suffix(
-        p.suffix + f".tmp{os.getpid()}-{threading.get_ident()}-{next(_TMP_SEQ)}"
-    )
     payload = json.dumps(data, ensure_ascii=False, indent=1)
 
     last_err: Exception | None = None
     for attempt in range(retries):
+        # the tmp name is unique PER ATTEMPT (pid + thread + counter): two
+        # threads writing the same doc must never share a tmp path, and a
+        # virus scanner that pinned the previous attempt's tmp (a real CI
+        # burn) gets nothing to hold onto for the next one
+        tmp = p.with_suffix(
+            p.suffix + f".tmp{os.getpid()}-{threading.get_ident()}-{next(_TMP_SEQ)}"
+        )
         try:
             with _io_lock(p):
                 with tmp.open("w", encoding="utf-8", newline="\n") as fh:
@@ -109,8 +109,11 @@ def atomic_write_json(
             return
         except (PermissionError, OSError) as e:  # OneDrive mid-sync lock etc.
             last_err = e
+            try:
+                tmp.unlink(missing_ok=True)  # never litter a failed attempt
+            except OSError:
+                pass  # scanner still holds it; orphaned tmps are harmless
             time.sleep(base_delay * (2**attempt))  # outside the lock
-    tmp.unlink(missing_ok=True)
     raise TransportError(f"atomic write failed after {retries} attempts: {p}") from last_err
 
 

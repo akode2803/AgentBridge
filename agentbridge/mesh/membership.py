@@ -14,10 +14,11 @@ ported from v1's verified ``_missing_owners``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 
-from ..core.errors import PermissionDenied, ValidationError
+from ..core.errors import PermissionDenied, TransportError, ValidationError
 from ..core.models import ChatKind, ChatPermissions, ChatSnapshot, Role, UserKind
 from ..store.db import Store
 from ..transport.base import Transport
@@ -28,6 +29,8 @@ from .paths import P
 from .privacy import PrivacyService
 
 __all__ = ["MembershipService"]
+
+log = logging.getLogger("agentbridge.mesh")
 
 
 def _slug(name: str) -> str:
@@ -343,7 +346,14 @@ class MembershipService:
         snap = events.fold(chat_id, self.store.messages(chat_id), self.directory)
         if not snap.members and not snap.deleted:
             return self.messaging.snapshot(chat_id)
-        self.tx.put_doc(P.meta(chat_id), snap.to_dict())
+        try:
+            self.tx.put_doc(P.meta(chat_id), snap.to_dict())
+        except TransportError:
+            # meta is a REBUILDABLE CACHE (tenet 3): a transiently locked
+            # write (scanner/sync holding the file) must never fail the user
+            # action that triggered it — the fold result is still correct and
+            # the next mutation/refold rewrites the snapshot. Windows-CI burn.
+            log.warning("meta write for %s deferred (transient lock)", chat_id)
         return snap
 
     def chats_for(self) -> list[ChatSnapshot]:

@@ -479,3 +479,34 @@ def test_pin_expiry_is_lazy(world):
     assert aryan.pins(snap.id) == {}
     aryan.pin(snap.id, env.id)  # forever
     assert env.id in aryan.pins(snap.id)
+
+
+def test_refold_survives_transient_meta_write_failure(world, monkeypatch):
+    """meta.json is a rebuildable CACHE (tenet 3): if its write is transiently
+    blocked (scanner/sync lock — the Windows-CI burn), the mutation that
+    triggered the refold still succeeds with the correct fold, and the next
+    write heals the snapshot on disk."""
+    from agentbridge.core.errors import TransportError
+
+    aryan = world["aryan"]
+    snap = aryan.create_chat("Cache", members=["fable"])
+
+    real_put = aryan.tx.put_doc
+    blocked = {"n": 0}
+
+    def flaky_put(path, data):
+        if path.endswith("meta.json") and blocked["n"] > 0:
+            blocked["n"] -= 1
+            raise TransportError("atomic write failed after 6 attempts")
+        return real_put(path, data)
+
+    monkeypatch.setattr(aryan.tx, "put_doc", flaky_put)
+    blocked["n"] = 1
+    healed = aryan.grant_admin(snap.id, "fable")   # must NOT raise
+    assert set(healed.admins()) == {"aryan", "fable"}  # fold result correct
+
+    # the cache write was skipped — the next mutation rewrites it
+    aryan.rename(snap.id, "Cache 2")
+    on_disk = aryan.snapshot(snap.id)
+    assert set(on_disk.admins()) == {"aryan", "fable"}
+    assert on_disk.name == "Cache 2"
