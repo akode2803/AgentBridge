@@ -77,7 +77,11 @@ Written only by the account itself (agents: by their owner/harness machine).
 
 ```jsonc
 {
-  "name": "aryan",            // immutable id; RENAME = new record + tombstone alias  OPEN(R7)
+  "name": "aryan",            // IMMUTABLE identity (SETTLED R7): logs, cursors,
+                              // memberships all key on it and never churn
+  "handle": "aryan-kumar",    // the MUTABLE @-username (Telegram split) —
+                              // unique across all names+handles, reserved
+                              // words excluded; empty = same as name
   "kind": "human",            // human | agent
   "display": "Aryan Kumar",
   "about": "…",               // agents default: "<Owner>'s <Agent> on <machine>"

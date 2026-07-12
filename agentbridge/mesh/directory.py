@@ -6,6 +6,7 @@ grows the write side. Satisfies ``events.Resolver``.
 
 from __future__ import annotations
 
+from ..core.errors import ValidationError
 from ..core.models import Account, UserKind
 from ..transport.base import Transport
 from .paths import P
@@ -38,6 +39,41 @@ class Directory:
     def display(self, name: str) -> str:
         acc = self.get(name)
         return (acc.display or name) if acc else name
+
+    def resolve(self, ref: str) -> str | None:
+        """Handle-or-id -> immutable id (R7 Telegram model). Ids win; then a
+        handle scan (small mesh — cache later if it ever matters)."""
+        ref = (ref or "").lower()
+        if not ref:
+            return None
+        if self.exists(ref):
+            return ref
+        for path in self.tx.list_docs("users"):
+            doc = self.tx.get_doc(path)
+            if isinstance(doc, dict) and doc.get("handle", "").lower() == ref:
+                return doc.get("name")
+        return None
+
+    def handle_taken(self, handle: str) -> bool:
+        """True if ``handle`` collides with ANY existing name or handle."""
+        handle = (handle or "").lower()
+        if self.exists(handle):
+            return True
+        for path in self.tx.list_docs("users"):
+            doc = self.tx.get_doc(path)
+            if isinstance(doc, dict) and doc.get("handle", "").lower() == handle:
+                return True
+        return False
+
+    def patch(self, name: str, apply) -> Account:
+        """Read-merge-write on an account doc (single writer in practice:
+        the account's own machine, or its owner's)."""
+        doc = self.tx.get_doc(P.user(name))
+        if not isinstance(doc, dict):
+            raise ValidationError(f"unknown user @{name}")
+        apply(doc)
+        self.tx.put_doc(P.user(name), doc)
+        return Account.from_dict(doc)
 
     def missing_owners(self, members: list[str]) -> dict[str, str]:
         """FREE-CHATTING invariant (ported from v1 ``_missing_owners``): for

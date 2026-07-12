@@ -14,6 +14,7 @@ from ..store.db import Store
 from ..store.outbox import OutboxWorker
 from ..transport.base import Transport
 from ..transport.folder import FolderTransport
+from .accounts import AccountsService
 from .directory import Directory
 from .membership import MembershipService
 from .messaging import MessagingService
@@ -63,6 +64,10 @@ class Mesh:
             self.tx, self.store, self.directory, self.messaging,
             privacy=self.privacy,
         )
+        self.accounts = AccountsService(
+            self.tx, self.directory, self.messaging, self.membership,
+            user, machine,
+        )
         self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
         self.sync = SyncEngine(
             self.tx, self.store, is_member=self._is_member, workers=sync_workers,
@@ -96,9 +101,9 @@ class Mesh:
     # (kept flat so connectors read naturally: mesh.post(...),
     #  mesh.create_dm(...), mesh.block(...) — messaging, membership, privacy)
     def __getattr__(self, name: str):
-        if name in ("messaging", "membership", "privacy"):  # mid-__init__ guard
+        if name in ("messaging", "membership", "privacy", "accounts"):  # init guard
             raise AttributeError(name)
-        for svc in (self.messaging, self.membership, self.privacy):
+        for svc in (self.messaging, self.membership, self.privacy, self.accounts):
             try:
                 return getattr(svc, name)
             except AttributeError:

@@ -183,10 +183,15 @@ class AgentRules:
 
 @dataclass
 class Account:
-    """One record in ``users/<name>.json`` — the user file IS the account."""
+    """One record in ``users/<name>.json`` — the user file IS the account.
+
+    ``name`` is the IMMUTABLE identity (log filenames, membership keys,
+    cursors all hang off it). ``handle`` is the MUTABLE @-mention username
+    (Telegram model, R7): empty means "same as name"."""
 
     name: str = ""
     kind: UserKind = UserKind.HUMAN
+    handle: str = ""
     display: str = ""
     about: str = ""
     created: str = ""
@@ -228,6 +233,9 @@ class Account:
     def rules(self) -> AgentRules:
         """Outbound rules with the everyone-default applied."""
         return self.agent_rules or AgentRules()
+
+    def handle_or_name(self) -> str:
+        return self.handle or self.name
 
 
 @dataclass

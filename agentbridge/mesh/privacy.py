@@ -246,11 +246,4 @@ class PrivacyService:
             )
 
     def _patch(self, name: str, apply) -> Account:
-        """Read-merge-write on the account doc (its writer is the account's
-        own machine / the owner — single-writer holds in practice)."""
-        doc = self.tx.get_doc(P.user(name))
-        if not isinstance(doc, dict):
-            raise ValidationError(f"unknown user @{name}")
-        apply(doc)
-        self.tx.put_doc(P.user(name), doc)
-        return Account.from_dict(doc)
+        return self.directory.patch(name, apply)

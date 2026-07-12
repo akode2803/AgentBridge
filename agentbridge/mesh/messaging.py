@@ -75,12 +75,16 @@ class MessagingService:
         snap = self._require_member(chat_id)
         if not authz.can_send(snap, self.user):
             raise PermissionDenied("sending messages is restricted in this chat")
-        # R6 blocking: a block kills the EXISTING DM too (WhatsApp), while
-        # common groups stay unaffected. The reason never reveals the block.
+        # R6/R7: a block kills the EXISTING DM too (WhatsApp), and so does the
+        # peer's account deletion — common groups stay unaffected either way.
+        # The reason never reveals which it was.
         if snap.kind is ChatKind.DM and self.privacy is not None:
             other = next((m for m in snap.members if m != self.user), None)
-            if other and self.privacy.blocked_between(self.user, other):
-                raise PermissionDenied(f"@{other} is not available")
+            if other:
+                peer = self.privacy.directory.get(other)
+                if (peer is None or not peer.active
+                        or self.privacy.blocked_between(self.user, other)):
+                    raise PermissionDenied(f"@{other} is not available")
         if not (body or "").strip() and not files:
             raise ValidationError("empty message")
         record = BodyRecord(

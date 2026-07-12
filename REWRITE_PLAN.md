@@ -162,13 +162,20 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       KNOCK" only: owners ALWAYS ride along; genesis-admin rule (all humans
       admin in auto_dm/agent-created chats); agents add-but-never-remove;
       two new agent-add toggles. 6 more tests (111 total).
-- [ ] **R7 — Accounts v2.** User-file-is-account; machine-login ownership
-      (1 human → N agents; agent identity = name + machine + owning human);
-      **username change + password change** (password change re-wraps the
-      account key); **account deletion**: soft-deactivate + grey-out (messages
-      remain under name, all else disabled; DM shows "account deleted" info
-      text; sends to it never show Delivered); agents of a deleted account
-      removed everywhere.
+- [x] **R7 — Accounts v2. DONE 2026-07-13** — `agentbridge/mesh/accounts.py`.
+      **Username change = the Telegram split**: `name` is the immutable
+      identity (logs/cursors/memberships never churn), `handle` is the mutable
+      @-username (unique across names+handles, reserved words barred) —
+      renames are free. scrypt auth (humans only; agents never authenticate);
+      password change re-hashes w/ fresh salt (R9 hooks key re-wrap there);
+      machine-login ownership (`create_agent` binds owner+machine; default
+      about "<Owner>'s <Agent> on <machine>"); per-machine sign-out flips only
+      that machine's agents. **Deletion falls out of the invariants**: leave
+      every group → the fold cascades the ex-owner's agents out of every room
+      + auto-promotes; soft `active=false` on account + all owned agents;
+      names stay resolvable (grey-out); DMs to deleted accounts refused on
+      create AND on post into existing DMs without leaking why. 9 new tests
+      (120 total).
 - [ ] **R8 — Presence, status & about.** Per-device presence heartbeat files,
       merged to ONE logical status (account-model v2); online/last-seen;
       **Delivered tick** lands exactly per the designed ns-compare plan
