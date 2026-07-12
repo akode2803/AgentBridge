@@ -44,6 +44,49 @@ def test_atomic_write_retries_transient_lock(tmp_path, monkeypatch):
     assert fails["left"] == 0
 
 
+def test_read_json_retries_transient_lock(tmp_path, monkeypatch):
+    """A transient PermissionError (Windows os.replace window / OneDrive lock)
+    is NOT missing data — retry, don't fall through to the default. This is
+    the read-side twin of the write retry; a spurious default here reads as
+    'no such chat' at the membership layer (the R13 Windows-CI burn)."""
+    p = tmp_path / "meta.json"
+    config.atomic_write_json(p, {"members": {"aryan": {}}})
+    real_open = type(p).open
+    calls = {"n": 0}
+
+    def flaky_open(self, *a, **k):
+        if str(self) == str(p):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PermissionError("locked mid-replace")
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(type(p), "open", flaky_open)
+    monkeypatch.setattr(config, "_READ_DELAY", 0.001)
+    got = config.read_json(p, default=None)
+    assert got == {"members": {"aryan": {}}}   # healed, not defaulted
+    assert calls["n"] == 3
+
+
+def test_read_json_missing_is_immediate(tmp_path, monkeypatch):
+    """A genuinely absent file returns default at once — no retry spin."""
+    monkeypatch.setattr(config, "_READ_DELAY", 10)  # would hang if it retried
+    assert config.read_json(tmp_path / "gone.json", default="x") == "x"
+
+
+def test_read_json_persistent_lock_defaults(tmp_path, monkeypatch):
+    """If the lock never clears, fall back to default (sync tolerance) rather
+    than raise — a slow consumer heals on the next poll."""
+    p = tmp_path / "stuck.json"
+    config.atomic_write_json(p, {"v": 1})
+    monkeypatch.setattr(config, "_READ_DELAY", 0.001)
+    monkeypatch.setattr(
+        type(p), "open",
+        lambda self, *a, **k: (_ for _ in ()).throw(PermissionError()),
+    )
+    assert config.read_json(p, default={"fallback": True}) == {"fallback": True}
+
+
 def test_atomic_write_gives_up_cleanly(tmp_path, monkeypatch):
     p = tmp_path / "never.json"
     monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError()))
@@ -51,6 +94,40 @@ def test_atomic_write_gives_up_cleanly(tmp_path, monkeypatch):
         config.atomic_write_json(p, {"x": 1}, retries=3, base_delay=0.001)
     # no tmp litter left behind
     assert list(tmp_path.iterdir()) == []
+
+
+def test_concurrent_read_never_spuriously_missing(tmp_path):
+    """The live shape: one writer rewriting a doc while readers poll it (the
+    GUI sync thread + request threads). A reader must NEVER see the default
+    for an always-present file — that would read as 'no such chat' upstream."""
+    import threading
+    import time
+
+    p = tmp_path / "meta.json"
+    config.atomic_write_json(p, {"members": {"aryan": {}}, "n": 0})
+    stop = threading.Event()
+    misses = {"n": 0}
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            i += 1
+            config.atomic_write_json(p, {"members": {"aryan": {}}, "n": i})
+
+    def reader():
+        while not stop.is_set():
+            if config.read_json(p, default=None) is None:
+                misses["n"] += 1
+
+    threads = [threading.Thread(target=writer)]
+    threads += [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    time.sleep(1.5)
+    stop.set()
+    for t in threads:
+        t.join()
+    assert misses["n"] == 0
 
 
 def test_app_config_roundtrip(tmp_path):

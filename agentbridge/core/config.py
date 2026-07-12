@@ -33,16 +33,33 @@ DEFAULT_HOME = Path(os.environ.get("AGENTBRIDGE_HOME", "")) if os.environ.get(
 ) else Path.home() / ".agentbridge"
 
 _CONFIG_NAME = "config.json"
+# read-side lock tolerance: short, since a real writer's os.replace window is
+# sub-millisecond — a few backoffs cover it without stalling a poll tick
+_READ_RETRIES = 5
+_READ_DELAY = 0.03
 
 
 def read_json(path: Path | str, default: Any = None) -> Any:
-    """Read a JSON file; missing or corrupt -> ``default`` (sync tolerance)."""
+    """Read a JSON file; missing or corrupt -> ``default`` (sync tolerance).
+
+    A transient lock is NOT missing data: on Windows, opening a file during
+    another thread's ``os.replace`` raises PermissionError, and a synced
+    folder (OneDrive) locks briefly mid-sync. Retry those a few times before
+    giving up — otherwise a concurrent write makes a membership read spuriously
+    look like "no such chat". A genuinely absent or corrupt file still returns
+    ``default`` immediately (no wasted spin)."""
     p = Path(path)
-    try:
-        with p.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return default
+    for attempt in range(_READ_RETRIES):
+        try:
+            with p.open("r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return default
+        except (PermissionError, OSError):  # transient lock (Windows / sync)
+            if attempt == _READ_RETRIES - 1:
+                return default
+            time.sleep(_READ_DELAY * (2**attempt))
+    return default
 
 
 def atomic_write_json(
