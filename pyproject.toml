@@ -1,0 +1,57 @@
+[project]
+name = "agentbridge"
+# NOTE: the APP version source of truth stays gui/__init__.py __version__ until
+# rewrite round R26 (see REWRITE_PLAN.md); this package version moves rarely.
+version = "0.25.0"
+description = "Humans and Agents, working in the same rooms."
+requires-python = ">=3.11"
+# Core stays LIGHT on purpose (packaging round depends on it): the mesh needs
+# only crypto. Everything heavy is an optional extra.
+dependencies = [
+    "cryptography>=44",
+]
+
+[project.optional-dependencies]
+# Vector memory + embeddings (harness memory stack, R20)
+# fastembed is the default embedding backend but onnxruntime DLLs are blocked
+# on some corporate Windows machines (incl. the dev box) -> model2vec is the
+# pure-numpy fallback in the probe chain (see docs/DECISIONS.md).
+memory = [
+    "qdrant-client>=1.18",
+    "fastembed>=0.8",
+    "model2vec>=0.5",
+    "mem0ai>=2.0",
+]
+# Semantic search / retrieval (R21)
+retrieval = [
+    "llama-index-core>=0.12",
+    "llama-index-embeddings-fastembed>=0.3",
+]
+# mesh-cli MCP server (R12)
+mcp = [
+    "mcp>=1.2",
+]
+# Supabase realtime transport driver (R23)
+cloud = [
+    "supabase>=2.11",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentbridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -67,6 +67,9 @@ cryptographically (E2EE), not just at app level.
 | D6 | Provider **sessions are no longer the context mechanism**. Harness invocations are stateless-per-message with our own context assembly; adapters may opt into short "burst resume" purely as a cost/caching optimization. | approved with plan |
 | D7 | Sandboxing = **pluggable levels**: `workspace` (default: per-chat workspace dir, read-only-by-default outside it) → leaning on the inner CLI's own sandbox (claude-code sandbox / codex approvals) → `container` backend possible later without redesign. Docker NOT the default (UX). | approved with plan |
 | D14 | **Emoji reactions are IN, low priority** (Aryan 2026-07-12): data layer rides R4 as one more per-user overlay; frontend surface whenever convenient, never blocking a round. | **APPROVED 2026-07-12** |
+| D15 | Embeddings behind our own interface with a **runtime probe chain**: fastembed → model2vec (pure numpy) → ollama → API. Cause: onnxruntime DLLs blocked on corporate-managed Windows (incl. the dev box). Details in `docs/DECISIONS.md`. | decided R1 |
+| D16 | Graph memory default = **mem0 v2 built-in entity linking** (embedded in local qdrant, zero servers). Graphiti-grade KG = optional, server-backed, later (Kuzu archived; FalkorDB-Lite has no Windows wheels). | decided R1 |
+| D17 | **CPython 3.12** pinned via uv (`llama-index-embeddings-fastembed` needs <3.13; ML wheel lag on newer). `requires-python >=3.11`. | decided R1 |
 | D8 | Nothing model-specific is hardcoded. Adapters + JSON preconfigs for **claude, codex, grok, ollama, deepseek**; a model/CLI is data. API-based adapters later behind the same interface. | agreed (mission) |
 | D9 | mesh-cli v2 speaks **MCP** (official python SDK) instead of a bespoke API; humans get a normal CLI on the same core. | agreed (Aryan's call) |
 | D10 | Local cache + retrieval index = **SQLite** (stdlib, thread-safe enough, powers instant startup, offline reads, and the qdrant/llamaindex ingest). | proposed |
@@ -86,14 +89,13 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
 ### Phase 0 — Groundwork
 
 - [x] **R0 — This plan.** Approved by Aryan; committed.
-- [ ] **R1 — Research & decision spike.** Validate ON WINDOWS: qdrant-client
-      local/embedded mode; fastembed; mem0 OSS (vector-only mode); graphiti
-      with an embedded graph DB (kuzu?) — if neither graphiti nor mem0-graph
-      runs embedded without Docker/neo4j, the FALLBACK is qdrant+mem0-vector
-      now, graph layer deferred; official `mcp` python SDK; `cryptography`;
-      supabase-py realtime; llamaindex-core. Deliverables: `pyproject.toml` +
-      uv lock that imports clean on Windows, tiny smoke scripts,
-      `docs/DECISIONS.md` with every pin + fallback recorded.
+- [x] **R1 — Research & decision spike. DONE 2026-07-12** — all verdicts,
+      pins + fallbacks in `docs/DECISIONS.md`; 7 smoke scripts in `spikes/r1/`
+      all pass. Headlines: crypto D4/D5 flow prototyped end-to-end; qdrant
+      embedded OK (single-process per path!); **onnxruntime blocked on the dev
+      box → D15 probe chain**; **graphiti deferred → D16 mem0-v2 entity
+      linking**; MCP SDK v2 migration budgeted into R12; supabase realtime =
+      async-only (R23 wraps it); Python pinned 3.12 (D17).
 - [ ] **R2 — Skeleton.** `agentbridge/` package; core models + enums; ns/time
       utils (ns-not-ts baked into the types); config layer replacing
       `legacy/bridge.py` utils (atomic_write_json with retry/backoff — the 8D
