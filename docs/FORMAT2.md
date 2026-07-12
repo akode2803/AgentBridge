@@ -52,11 +52,20 @@ mesh2/
                                    readers fold all logs by ns and the envelope
                                    still carries plain `from`)
     overlays/
-      edits.json                   {msg_id: envelope}     (chat-level, author-guarded)
-      redactions.json              {msg_id: {by, at}}     (chat-level, sender-only)
+      edits/<msg_id>.json          latest edit of ONE message (author-only —
+                                   single-writer per message; v1's chat-level
+                                   edits.json could clobber concurrent edits)
+      redactions/<msg_id>.json     {by, at, ns}           (sender-only)
+      pins/<msg_id>.json           {by, at, ns}           (writer = pinner)
       reactions/<user>.json        {msg_id: emoji}        (per-user, single-writer)
-      state/<user>.json            per-user overlay (read cursor, stars, hidden,
-                                   cleared, pinned, deleted, forced_unread)
+      state/<user>.json            per-user overlay (read_ns/read_ts cursor,
+                                   starred ids, hidden, cleared, pinned chats,
+                                   deleted, forced_unread, mute)
+                                   KNOWN LIMIT: one file per user, not per
+                                   device — simultaneous writes from two
+                                   devices can drop one overlay update (v1
+                                   behaviour, accepted; CRDT-style merge is a
+                                   future upgrade, mobile lands next session)
     files/<file_id>                encrypted blobs + <file_id>.meta.json
     tasks/<msg_id>.json            agent task steps (harness-written)
 ```
@@ -153,9 +162,13 @@ Agents can never hold `role:"admin"`. Every chat must retain ≥1 admin; DMs and
 self-chats have no admins (permissions fixed by kind).
 
 ### Per-user chat overlay — `overlays/state/<user>.json`
-Same family as v1 (merge, never overwrite): `read_ts`, `read_ns`, `starred`,
-`hidden`, `cleared`, `pinned`, `deleted`, `forced_unread`. Receipts derive from
-`read_ns` (+ presence high-water for Delivered) exactly as designed in v1.
+Same family as v1 (merge, never overwrite): `read_ts`, `read_ns`, `starred`
+(**ids only, resolved live** — v1's literal snapshots would leak redacted
+content under E2EE), `hidden`, `cleared`, `pinned`, `deleted`, `forced_unread`,
+`mute`. Receipts derive from `read_ns` (+ presence high-water for Delivered)
+exactly as designed in v1. **edit-marks-unread is a pure DERIVATION in v2**:
+each client counts edits with `edit_ns > my read_ns` on already-read messages
+toward its own unread — no cross-user write exists (that was v1's blocker).
 
 ### Presence — `presence/<user>@<machine>.json`
 `{"online": true, "last_seen": "<iso>", "last_seen_ns": …, "app": "<ver>"}`

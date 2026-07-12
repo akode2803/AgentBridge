@@ -371,3 +371,4 @@ class Message:
     edited: dict[str, Any] | None = None
     deleted: bool = False
     event: dict[str, Any] | None = None
+    reactions: dict[str, list[str]] = field(default_factory=dict)  # {emoji: [users]}

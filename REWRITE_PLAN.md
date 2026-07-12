@@ -118,13 +118,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       watcher test green. FORMAT2 updated: **per-device logs**
       `msgs/<sender>@<machine>.jsonl` (multi-device humans can't fork a file)
       + tenet 6 (watch=hint, poll=truth).
-- [ ] **R4 — Messaging service.** Post/fetch; edits, redactions/tombstones,
-      forward, pins, stars as overlays (per-user overlays merge-never-
-      overwrite); the single membership-filtered read choke-point (successor
-      to `messages_for`); receipts data model; **edit-marks-unread**
-      (cross-user, on the new read model); parallel fetch/flush workers
-      (many chats, many agents, startup catch-up); regression tests incl. the
-      ns-tie bug. Emoji reactions data layer (D14 — in, low priority).
+- [x] **R4 — Messaging service. DONE 2026-07-12** — `agentbridge/mesh/`:
+      paths, **Sealer seam** (PlainSealer now; R9 swaps in E2EE without
+      touching callers), overlays (**one file per message** for edits/
+      redactions/pins — concurrent actors can't clobber; per-user reactions =
+      D14 done; UserState merge-never-overwrite), readmodel (THE choke point:
+      dedup→ns-sort→unseal→edits→redactions-win→reply-blank→hidden→cleared;
+      **edit-marks-unread as pure derivation** — v1's cross-user-write blocker
+      dissolved), MessagingService (every endpoint membership-gated,
+      post = optimistic cache + durable outbox), SyncEngine (parallel
+      catch-up, membership gate = fetch-only-what-you-need), Mesh facade.
+      Stars = live-resolved ids (v1 snapshots would leak redacted bodies under
+      E2EE). 24 new tests (68 total). BUG FOUND VIA py-spy: CloseHandle hangs
+      while RDCW blocks on the same handle → CancelIoEx first.
 - [ ] **R5 — Membership & groups.** Chats/DMs/self-chats; owner-pull-in
       invariant (no agent in a room without a responsible member — port the
       verified `_missing_owners` semantics); **multi-admin model replacing

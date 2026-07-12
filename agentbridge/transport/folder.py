@@ -222,6 +222,7 @@ class _WinDirWatcher(Watcher):
         OPEN_EXISTING = 3
         FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
         FILTER = 0x1 | 0x2 | 0x8 | 0x10  # FILE_NAME | DIR_NAME | SIZE | LAST_WRITE
+        THREAD_TERMINATE = 0x0001
         INVALID = ctypes.c_void_p(-1).value
 
         k32 = ctypes.windll.kernel32
@@ -231,9 +232,17 @@ class _WinDirWatcher(Watcher):
             wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
         ]
         k32.ReadDirectoryChangesW.restype = wintypes.BOOL
+        # explicit argtypes on every handle-taking call: default int coercion
+        # can truncate 64-bit HANDLEs
+        k32.OpenThread.restype = wintypes.HANDLE
+        k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.CancelSynchronousIo.restype = wintypes.BOOL
+        k32.CancelSynchronousIo.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
 
         self._event = threading.Event()
         self._k32 = k32
+        self._closed = False
         self._handle = k32.CreateFileW(
             str(root), FILE_LIST_DIRECTORY, FILE_SHARE_ALL, None,
             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None,
@@ -245,16 +254,18 @@ class _WinDirWatcher(Watcher):
         nbytes = wintypes.DWORD()
 
         def loop() -> None:
-            while True:
+            while not self._closed:
                 ok = k32.ReadDirectoryChangesW(
                     self._handle, buf, len(buf), True, FILTER,
                     ctypes.byref(nbytes), None, None,
                 )
-                if not ok:  # handle closed / error — polling carries on
+                if not ok or self._closed:  # cancelled / handle closed
                     break
                 self._event.set()
 
-        threading.Thread(target=loop, daemon=True, name="ab-dirwatch").start()
+        self._thread = threading.Thread(target=loop, daemon=True, name="ab-dirwatch")
+        self._thread.start()
+        self._hthread = k32.OpenThread(THREAD_TERMINATE, False, self._thread.native_id)
 
     def wait(self, timeout: float) -> bool:
         hinted = self._event.wait(timeout)
@@ -262,7 +273,28 @@ class _WinDirWatcher(Watcher):
         return hinted
 
     def close(self) -> None:
+        """Shutting this down safely is subtle (both failure modes were found
+        with py-spy on real hangs):
+        - CloseHandle while the thread is blocked INSIDE ReadDirectoryChangesW
+          hangs; CancelIoEx does NOT abort a synchronous RDCW.
+        - The documented cancel for sync I/O is CancelSynchronousIo(thread) —
+          retried, because it no-ops if the thread isn't in the syscall at
+          that instant (it re-enters and blocks again).
+        If the thread still won't exit, we LEAK the handle (v1 lived like
+        that for its whole life) — close() must never hang."""
+        if self._closed:
+            return
+        self._closed = True
         try:
-            self._k32.CloseHandle(self._handle)
+            for _ in range(40):
+                if self._hthread:
+                    self._k32.CancelSynchronousIo(self._hthread)
+                self._thread.join(0.05)
+                if not self._thread.is_alive():
+                    break
+            if not self._thread.is_alive():
+                self._k32.CloseHandle(self._handle)
+            if self._hthread:
+                self._k32.CloseHandle(self._hthread)
         except Exception:  # noqa: BLE001 — closing is best-effort
             pass
