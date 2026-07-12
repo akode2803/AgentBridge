@@ -14,6 +14,8 @@ from ..store.db import Store
 from ..store.outbox import OutboxWorker
 from ..transport.base import Transport
 from ..transport.folder import FolderTransport
+from .directory import Directory
+from .membership import MembershipService
 from .messaging import MessagingService
 from .sealer import PlainSealer, Sealer
 from .sync import SyncEngine
@@ -49,9 +51,13 @@ class Mesh:
         self.store = Store(store_path)
 
         self.sealer = sealer or PlainSealer()
+        self.directory = Directory(self.tx)
         self.messaging = MessagingService(
             self.tx, self.store, self.sealer, user, machine,
             notify_outbox=lambda: self.outbox.notify(),
+        )
+        self.membership = MembershipService(
+            self.tx, self.store, self.directory, self.messaging
         )
         self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
         self.sync = SyncEngine(
@@ -83,8 +89,12 @@ class Mesh:
         self.close()
 
     # ------------------------------------------------------- delegation API
-    # (kept flat so connectors read naturally: mesh.post(...), mesh.react(...))
+    # (kept flat so connectors read naturally: mesh.post(...),
+    #  mesh.create_dm(...) — messaging first, then membership)
     def __getattr__(self, name: str):
-        if name == "messaging":  # not set yet (mid-__init__) — never recurse
+        if name in ("messaging", "membership"):  # mid-__init__ — never recurse
             raise AttributeError(name)
-        return getattr(self.messaging, name)
+        try:
+            return getattr(self.messaging, name)
+        except AttributeError:
+            return getattr(self.membership, name)

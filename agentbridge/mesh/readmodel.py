@@ -42,6 +42,7 @@ def build_messages(
     redactions: dict[str, dict] | None = None,
     reactions: dict[str, dict[str, list[str]]] | None = None,
     state: dict[str, Any] | None = None,
+    history_from_ns: int = 0,
 ) -> list[Message]:
     edits = edits or {}
     redactions = redactions or {}
@@ -65,6 +66,12 @@ def build_messages(
     out: list[Message] = []
     for rec in ordered:
         env = Envelope.from_dict(rec)
+        if (
+            history_from_ns
+            and env.kind is MsgKind.MESSAGE
+            and env.ns < history_from_ns
+        ):
+            continue  # history-on-join: pre-join messages stay invisible
         msg = Message(
             id=env.id, chat_id=chat_id, from_=env.from_, ns=env.ns, ts=env.ts,
             kind=env.kind, event=env.event,

@@ -59,7 +59,8 @@ def test_chat_snapshot_helpers_and_roundtrip():
     assert snap.is_member("claude") and not snap.is_member("eve")
     back = ChatSnapshot.from_dict(json.loads(json.dumps(snap.to_dict())))
     assert back.members["aryan"].role is Role.ADMIN
-    assert back.permissions.send_history is False
+    # v2 default: history IS shared on join (agents need context; R5 divergence)
+    assert back.permissions.send_history is True
 
 
 def test_envelope_message_vs_info_shapes():

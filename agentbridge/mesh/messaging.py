@@ -13,10 +13,11 @@ OutboxWorker flushes it with retry-forever semantics (R3).
 from __future__ import annotations
 
 from ..core.errors import NotAMember, PermissionDenied, ValidationError
-from ..core.models import BodyRecord, ChatSnapshot, Envelope, Message, MsgKind
+from ..core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Message, MsgKind
 from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
+from . import authz
 from .overlays import ChatOverlays, UserState
 from .paths import P
 from .readmodel import build_messages, parse_tags, unread_info
@@ -69,7 +70,9 @@ class MessagingService:
         files: list[dict] | None = None,
         fwd: dict | None = None,
     ) -> Envelope:
-        self._require_member(chat_id)
+        snap = self._require_member(chat_id)
+        if not authz.can_send(snap, self.user):
+            raise PermissionDenied("sending messages is restricted in this chat")
         if not (body or "").strip() and not files:
             raise ValidationError("empty message")
         record = BodyRecord(
@@ -83,15 +86,31 @@ class MessagingService:
             id=new_id("m"), ns=next_ns(), ts=utcnow_iso(), from_=self.user,
             kind=MsgKind.MESSAGE, **self.sealer.seal(chat_id, record),
         )
+        self.commit_envelope(chat_id, env)
+        return env
+
+    # ------------------------------------------------------------ info events
+    def build_event(self, event: dict) -> Envelope:
+        """An INFO envelope — plaintext, it IS the chat-state log (FORMAT2)."""
+        return Envelope(
+            id=new_id("m"), ns=next_ns(), ts=utcnow_iso(), from_=self.user,
+            kind=MsgKind.INFO, event=event,
+        )
+
+    def post_event(self, chat_id: str, event: dict) -> Envelope:
+        self._require_member(chat_id)
+        env = self.build_event(event)
+        self.commit_envelope(chat_id, env)
+        return env
+
+    def commit_envelope(self, chat_id: str, env: Envelope) -> None:
+        """Optimistic local cache + durable outbox commit (the send guarantee)."""
         payload = env.to_dict()
-        # optimistic local cache first (sender sees it instantly) ...
         self.store.upsert_messages(chat_id, [payload])
-        # ... then the durable outbox commit — this is the send guarantee
         self.store.outbox_add(
             OUTBOX_APPEND, f"{chat_id}|{P.log_name(self.user, self.machine)}", payload
         )
         self._notify_outbox()
-        return env
 
     def edit(self, chat_id: str, msg_id: str, new_body: str) -> None:
         self._require_member(chat_id)
@@ -174,7 +193,12 @@ class MessagingService:
     # ------------------------------------------------------------------- read
     def messages_for(self, chat_id: str) -> list[Message]:
         """THE read choke-point: membership + every overlay applied."""
-        self._require_member(chat_id)
+        snap = self._require_member(chat_id)
+        # history-on-join policy: unless the group shares history, a member
+        # sees only messages from their (latest) join onward; info pills stay
+        history_from = 0
+        if snap.kind is ChatKind.GROUP and not snap.permissions.send_history:
+            history_from = snap.members[self.user].joined_ns
         ov = ChatOverlays(self.tx, chat_id)
         return build_messages(
             chat_id,
@@ -185,6 +209,7 @@ class MessagingService:
             redactions=ov.redactions(),
             reactions=ov.reactions(),
             state=self._state(chat_id).get(),
+            history_from_ns=history_from,
         )
 
     def unread(self, chat_id: str) -> dict:

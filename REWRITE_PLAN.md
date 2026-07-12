@@ -131,16 +131,20 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       Stars = live-resolved ids (v1 snapshots would leak redacted bodies under
       E2EE). 24 new tests (68 total). BUG FOUND VIA py-spy: CloseHandle hangs
       while RDCW blocks on the same handle → CancelIoEx first.
-- [ ] **R5 — Membership & groups.** Chats/DMs/self-chats; owner-pull-in
-      invariant (no agent in a room without a responsible member — port the
-      verified `_missing_owners` semantics); **multi-admin model replacing
-      owner** (per D12); group permission toggles faithful to the WhatsApp
-      screenshot minus invite-link: *Edit group settings* (name, icon,
-      description, disappearing timer placeholder, pin rights), *Send new
-      messages*, *Add other members*, *Send message history* (history-on-join
-      policy — also answers "what a newly-added member's agent sees"),
-      *Approve new members* (admin); toggles config-driven for future
-      channels; group permissions readable by everyone.
+- [x] **R5 — Membership & groups. DONE 2026-07-12** — `events.py` (the fold:
+      info events = source of truth, authority checked DURING replay so forged
+      events die at read time; cascades + auto-promote), `authz.py` (one home
+      for permission predicates, used at write AND fold time), `directory.py`
+      (accounts read-side + ported `missing_owners`), `membership.py`
+      (create chat/DM/self with v1 auto_dm semantics verified symmetric,
+      add/remove/leave, multi-admin grant/revoke — agents never admins,
+      rename/description/set_permissions, `refold` self-heal, `chats_for`).
+      Screenshot toggles live: edit_settings / send_messages / add_members /
+      send_history (**default TRUE — divergence from WhatsApp: agents joining
+      need context**) / approve_members (toggle stored; approval flow rides
+      R6/R13). Marquee tests: meta clobber heals bit-for-bit; forged
+      member_added/admin_granted ignored; fold deterministic across log
+      distributions. 22 new tests (90 total).
 - [ ] **R6 — Privacy & permission layer** (dedicated module, per Aryan's
       suggestion). Privacy matrix, symmetric for members and agents: last
       seen, online, profile photo (everyone/nobody), about, status — each with

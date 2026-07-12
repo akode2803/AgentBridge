@@ -133,11 +133,18 @@ exact AAD layout and canonical signing bytes.
 
 `kind:"info"` lines with a structured `event` field instead of `ct`:
 `{"event": {"type": "member_added", "who": "coco", "by": "aryan"}}` etc.
-Types: `created, member_added, member_removed, member_left, admin_granted,
-admin_revoked, renamed, description, avatar, permissions_changed,
-history_policy, key_rotated`. Folding all info events across all senders in
-`(ns, from)` order yields the chat's canonical state. **OPEN(R5):** the full
-event vocabulary + fold rules (idempotency, concurrent add/remove).
+Types (SETTLED R5 — `agentbridge/mesh/events.py` is normative): `created`
+(genesis: kind/name/members+roles/permissions/auto_dm/pulled), `member_added`
+(+`reason: "responsible_member"` for owner pull-ins), `member_removed`,
+`member_left`, `admin_granted`, `admin_revoked`, `renamed`, `description`,
+`avatar`, `permissions_changed` (partial merge), `key_rotated` (R9). Folding
+all info events across all logs in `(ns, from, id)` order yields the canonical
+state. Fold rules: first `created` wins; adds are idempotent; **authority is
+checked DURING the fold** (forged events from non-members/non-admins are
+ignored — essential under E2EE where writes can't be blocked); agents can
+never hold admin; removals cascade out ownerless agents (free-chatting
+invariant); an admin-less group auto-promotes its longest-standing human
+(WhatsApp semantics); DM/self membership is fixed at genesis.
 
 ### Chat snapshot — `meta.json` (cache, rebuildable)
 

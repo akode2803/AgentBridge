@@ -243,7 +243,10 @@ class ChatPermissions:
     edit_settings: PermLevel = PermLevel.ALL   # name/icon/description/timer/pins
     send_messages: PermLevel = PermLevel.ALL
     add_members: PermLevel = PermLevel.ALL
-    send_history: bool = False                  # history-on-join policy
+    # history-on-join. Default True — deliberate divergence from WhatsApp's
+    # off-default: agents joining a room usually NEED the context (memory
+    # open-reminder #5); admins can switch it off per group.
+    send_history: bool = True
     approve_members: bool = False               # admins approve joins
 
     def __post_init__(self) -> None:
@@ -266,6 +269,7 @@ class ChatSnapshot:
     description: str = ""
     members: dict[str, Member] = field(default_factory=dict)
     permissions: ChatPermissions = field(default_factory=ChatPermissions)
+    auto_dm: bool = False  # agent-DM born as a small group (dedup marker, v1)
     key_epoch: int = 1
     materialized_ns: int = 0
 
