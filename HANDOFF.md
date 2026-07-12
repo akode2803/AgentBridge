@@ -4,6 +4,27 @@ Orientation for a Claude Code session picking this project up fresh. The
 source in this repo is the whole codebase; this file records the state and the
 conventions that aren't obvious from the code alone.
 
+## ⚡ v2 IS LIVE (R14 cutover, 2026-07-13)
+
+The backend rewrite has **cut over**. The live app is now the **v2** stack:
+`AgentBridge.pyw` launches `agentbridge.gui` (the new package) in `.venv`
+against the migrated **`mesh2/`** folder in the synced directory; the mesh
+root is remembered in `~/.agentbridge/config.json` (`mesh_root`). The v1
+`mesh/` tree is frozen and untouched (backup at
+`~/Downloads/mesh.backup-20260713`); the v1 `gui/server.py` + `agent_worker.py`
++ `legacy/` stay in the repo for reference until R26. Migration: 4 users, 12
+chats, 393 messages, verification PASS.
+
+**Agents are OFFLINE until R15** — the v2 agent harness doesn't exist yet
+(Phase 3). First human sign-in on v2 upgrades the migrated pbkdf2 login to
+scrypt + mints E2EE identity keys and shows the one-time recovery code.
+**Remaining manual step: stop the v1 worker on any REMOTE machine (the hosted
+CoCo/AVD box) and re-point it after R15** — it otherwise keeps running v1
+against the now-orphaned `mesh/`.
+
+The sections below describe the **v1** app and are retained as reference;
+treat `REWRITE_PLAN.md` + the memory topic files as authoritative for v2.
+
 ## Current state
 
 - **Version:** `gui/__init__.py` `__version__` is the source of truth (**v0.24.48

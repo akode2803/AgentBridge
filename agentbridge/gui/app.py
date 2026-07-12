@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from ..core.config import load_app_config, save_app_config
+
 from . import (
     api_agents,
     api_auth,
@@ -227,13 +229,17 @@ def make_server(app: GuiApp, port: int = 0, host: str = "127.0.0.1") -> GuiServe
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agentbridge-gui",
                                  description="AgentBridge GUI server (v2)")
-    ap.add_argument("--root", required=True, help="mesh root (the synced folder)")
+    ap.add_argument("--root", default="",
+                    help="mesh root (the synced folder); remembered after the "
+                         "first run, so a bare launch reuses it")
     ap.add_argument("--home", default="", help="local home dir (default: ~/.agentbridge)")
     ap.add_argument("--port", type=int, default=7787)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--machine", default="")
     ap.add_argument("--no-encrypt", action="store_true",
                     help="plaintext sealer (tests/dev only)")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="serve only; don't open the app window")
     ap.add_argument("--static", default="", help="frontend dir override")
     args = ap.parse_args(argv)
 
@@ -242,9 +248,21 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         app_version = "dev"
 
+    home = Path(args.home) if args.home else None
+    # root: CLI wins and is REMEMBERED (merged into config, never clobbering
+    # other keys); a bare launch reuses the saved one — the R14 cutover flip
+    cfg = load_app_config(home)
+    if args.root:
+        root = Path(args.root)
+        save_app_config({**cfg, "mesh_root": str(root)}, home)
+    elif cfg.get("mesh_root"):
+        root = Path(cfg["mesh_root"])
+    else:
+        ap.error("no --root given and none remembered in config.json")
+
     app = GuiApp(
-        Path(args.root),
-        home=Path(args.home) if args.home else None,
+        root,
+        home=home,
         machine=args.machine,
         encrypt=not args.no_encrypt,
         static_dir=Path(args.static) if args.static else None,
@@ -253,7 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     app.restore()
     server = make_server(app, args.port, args.host)
     host, port = server.server_address[:2]
-    print(f"AgentBridge GUI (v2) on http://{host}:{port}/  root={args.root}")
+    url = f"http://{host}:{port}/"
+    print(f"AgentBridge GUI (v2) on {url}  root={root}")
+    if not args.no_browser:
+        from .desktop import launch_window
+
+        launch_window(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

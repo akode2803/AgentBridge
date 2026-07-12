@@ -383,11 +383,26 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
         regression test (incl. multi-writer/multi-reader stress). These are
         LIVE-MESH-relevant fixes (OneDrive locks behave like the scanner),
         found because the GUI tests run the full concurrent stack.
-- [ ] **R14 — Migration & live cutover.** Run the R9 migration on the real
-      folder; dual-run validation window; GUI + local worker switch to v2;
-      coordinated CoCo/AVD update (runbook like PHASE2_COCO_CUTOVER.md);
-      rollback path documented BEFORE flipping. The one deliberately risky
-      round — everything before it must not touch live data.
+- [x] **R14 — Migration & live cutover. DONE 2026-07-13.** Followed
+      `docs/MIGRATION_RUNBOOK.md`: froze agents (control.json paused) → stopped
+      the local v1 worker + GUI → snapshotted `mesh/` to
+      `~/Downloads/mesh.backup-20260713` (verified identical) → dry-run
+      (4 users / 12 chats / 393 msgs / 48 info / 48 overlays / 26 blobs,
+      verification PASS; 55 warnings = empty scratch dirs, confirmed
+      zero-record) → real migrate to `<synced>/mesh2` → validated at the
+      facade (busiest chat folds 127 msgs + a tombstone; receipts sane; live
+      `mesh/` byte-identical to backup). **Aryan chose full cutover now**
+      (accepting agents offline until R15). Cutover: `AgentBridge.pyw`
+      repointed to launch `agentbridge.gui` in `.venv`; `mesh_root=mesh2`
+      persisted in `~/.agentbridge/config.json` (merged, v1 keys preserved);
+      `agentbridge.gui.main()` now defaults `--root` from that config and
+      opens the Edge app window (`desktop.launch_window`); verified live on
+      port 7787 (v2, 4 users, caps). **Open manual step: stop/re-point the
+      REMOTE CoCo/AVD v1 worker (can't reach it from here) — noted in
+      HANDOFF.** Rollback = restart v1 on `mesh/` (untouched) + restore the
+      backup. Findings: (a) migration paths MUST be Windows-form
+      (`C:/…`/`C:\…`), the MSYS `/c/…` form reads empty under Windows Python;
+      (b) the migrator exits 1 on benign empty-scratch warnings — expected.
 
 ### Phase 3 — Agent harness (the rename: worker → harness)
 

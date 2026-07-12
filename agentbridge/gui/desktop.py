@@ -12,10 +12,41 @@ import subprocess
 import sys
 from pathlib import Path
 
-__all__ = ["SUBPROC", "open_path", "pick_folder"]
+__all__ = ["SUBPROC", "open_path", "pick_folder", "launch_window"]
 
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 SUBPROC = {"stdin": subprocess.DEVNULL, "creationflags": NO_WINDOW}
+
+
+def _find_edge() -> Path | None:
+    import os
+
+    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")):
+        if base:
+            p = Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+            if p.is_file():
+                return p
+    return None
+
+
+def launch_window(url: str) -> None:
+    """Chromeless app window: Edge on Windows, Edge/Chrome on macOS, default
+    browser elsewhere (ported from the v1 launcher)."""
+    if sys.platform == "win32":
+        edge = _find_edge()
+        if edge:
+            subprocess.Popen([str(edge), f"--app={url}", "--window-size=1240,860"],
+                             **SUBPROC)
+            return
+    elif sys.platform == "darwin":
+        for app in ("Microsoft Edge", "Google Chrome"):
+            if Path(f"/Applications/{app}.app").exists():
+                subprocess.Popen(["open", "-na", app, "--args",
+                                  f"--app={url}", "--window-size=1240,860"])
+                return
+    import webbrowser
+
+    webbrowser.open(url)
 
 
 def open_path(path: Path | str) -> None:
