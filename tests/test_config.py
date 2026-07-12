@@ -96,10 +96,12 @@ def test_atomic_write_gives_up_cleanly(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_concurrent_read_never_spuriously_missing(tmp_path):
-    """The live shape: one writer rewriting a doc while readers poll it (the
-    GUI sync thread + request threads). A reader must NEVER see the default
-    for an always-present file — that would read as 'no such chat' upstream."""
+def test_concurrent_io_never_fails_or_misreads(tmp_path):
+    """The live shape, hardened: MULTIPLE writers rewriting one doc (a request
+    handler and the sync thread both refold meta.json) while readers poll it.
+    Writers must never exhaust their retries (Windows: os.replace fails while
+    any same-process handle is open — the striped-lock fix) and a reader must
+    never see the default for an always-present file."""
     import threading
     import time
 
@@ -107,19 +109,23 @@ def test_concurrent_read_never_spuriously_missing(tmp_path):
     config.atomic_write_json(p, {"members": {"aryan": {}}, "n": 0})
     stop = threading.Event()
     misses = {"n": 0}
+    write_errors = []
 
     def writer():
         i = 0
         while not stop.is_set():
             i += 1
-            config.atomic_write_json(p, {"members": {"aryan": {}}, "n": i})
+            try:
+                config.atomic_write_json(p, {"members": {"aryan": {}}, "n": i})
+            except Exception as e:  # noqa: BLE001 — collected, asserted below
+                write_errors.append(repr(e))
 
     def reader():
         while not stop.is_set():
             if config.read_json(p, default=None) is None:
                 misses["n"] += 1
 
-    threads = [threading.Thread(target=writer)]
+    threads = [threading.Thread(target=writer) for _ in range(3)]
     threads += [threading.Thread(target=reader) for _ in range(3)]
     for t in threads:
         t.start()
@@ -127,6 +133,7 @@ def test_concurrent_read_never_spuriously_missing(tmp_path):
     stop.set()
     for t in threads:
         t.join()
+    assert write_errors == []
     assert misses["n"] == 0
 
 

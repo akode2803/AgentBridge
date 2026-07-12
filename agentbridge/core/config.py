@@ -12,8 +12,10 @@ read_json, atomic_write_json, ...). Two v1 lessons are baked in as defaults:
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,19 @@ _CONFIG_NAME = "config.json"
 # sub-millisecond — a few backoffs cover it without stalling a poll tick
 _READ_RETRIES = 5
 _READ_DELAY = 0.03
+_TMP_SEQ = itertools.count()  # unique-per-write tmp suffix (thread-safe)
+
+# In-process striped I/O locks: on Windows, os.replace fails ACCESS_DENIED
+# while ANY handle is open on the destination (CPython opens files without
+# FILE_SHARE_DELETE) — and our own threads are those handles (a request
+# handler and the sync thread both touching meta.json). Serializing same-path
+# reads and writes in-process removes that whole collision class; the retry
+# loops still cover the CROSS-process cases (another app instance, OneDrive).
+_IO_LOCKS = [threading.Lock() for _ in range(64)]
+
+
+def _io_lock(p: Path) -> threading.Lock:
+    return _IO_LOCKS[hash(str(p)) % len(_IO_LOCKS)]
 
 
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -51,7 +66,7 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     p = Path(path)
     for attempt in range(_READ_RETRIES):
         try:
-            with p.open("r", encoding="utf-8") as fh:
+            with _io_lock(p), p.open("r", encoding="utf-8") as fh:
                 return json.load(fh)
         except (FileNotFoundError, json.JSONDecodeError):
             return default
@@ -75,19 +90,26 @@ def atomic_write_json(
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + f".tmp{os.getpid()}")
+    # the tmp name must be unique PER WRITE, not per process: two THREADS
+    # writing the same doc (a request handler + the sync thread both
+    # refolding meta.json) would otherwise share one tmp path and collide —
+    # open-while-replacing raises until the retries exhaust (a real CI burn)
+    tmp = p.with_suffix(
+        p.suffix + f".tmp{os.getpid()}-{threading.get_ident()}-{next(_TMP_SEQ)}"
+    )
     payload = json.dumps(data, ensure_ascii=False, indent=1)
 
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            with tmp.open("w", encoding="utf-8", newline="\n") as fh:
-                fh.write(payload)
-            os.replace(tmp, p)
+            with _io_lock(p):
+                with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(payload)
+                os.replace(tmp, p)
             return
         except (PermissionError, OSError) as e:  # OneDrive mid-sync lock etc.
             last_err = e
-            time.sleep(base_delay * (2**attempt))
+            time.sleep(base_delay * (2**attempt))  # outside the lock
     tmp.unlink(missing_ok=True)
     raise TransportError(f"atomic write failed after {retries} attempts: {p}") from last_err
 
