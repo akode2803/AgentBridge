@@ -406,17 +406,45 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
 
 ### Phase 3 — Agent harness (the rename: worker → harness)
 
-- [ ] **R15 — Harness core.** Runner + supervisor + PID singleton (ported);
-      **durable work queue** with owner-set concurrency (parallel replies
-      across chats AND within a chat); **per-message answered-guard** (kills
-      the duplicate-reply bug for good); graceful **unread catch-up queue**
-      after downtime ("how would a human catch up" — triage, batch, don't spam
-      N replies); conversation manager: every message delivered to the agent
-      arrives enriched (sender, their CURRENT status e.g. went-dnd, online/
-      last-seen, reply-to context, edits applied). **Built-in agent TIMERS
-      (Aryan 2026-07-13):** an agent can schedule its own wake-up (e.g.
-      "target is dnd — retry at 15:00"), handled like the notification
-      machinery; both timers AND notifications are visible to the owner.
+- [x] **R15 — Harness core. DONE 2026-07-13** — `agentbridge/harness/`
+      (settings/triggers/queue/conversation/timers/feed/responder/runner):
+      one symmetric `AgentRunner` per agent over the Mesh facade (never the
+      folder); scan = truth, watcher = hint (tenet 6). **Durable WorkQueue**
+      in the agent's store with lease recovery + owner-set `concurrency`
+      (groups dispatch per (chat, sender): a sender's burst = ONE reply,
+      different senders run in parallel, in one chat or across).
+      **Answered-guard is two-legged** — ledger keyed `(msg_id, edit_ns)` +
+      the transcript itself (my reply_to proves it) — total local-state loss
+      can't double-reply (test-proven). Catch-up policy owner-set
+      (`recent`(48h)/`none`/`all`, batched); edit-retrigger rides the same
+      `(id, edit_ns)` key (v1's process-baseline dance gone); rule-`all`
+      own-tail damping kept, scoped. ConversationManager delivers enriched
+      bundles (roster w/ reply behaviour, pins, matrix-gated sender
+      status/presence, edits applied via the read model); plain `render()`
+      until R17. **TIMERS shipped:** `Reply.timers` → durable TimerService →
+      due timers dispatch through the same pipeline; timers + queue mirrored
+      to `status/<agent>_harness.json`, served owner-only at
+      `GET /api/mesh/agent_harness` (frontend surface rides R16/R18). Run
+      feed keeps the v1 `status/<agent>_run.json` shape (draft body dropped
+      — content, not metadata, in an E2EE mesh); task steps recorded to
+      `chats/<id>/tasks/<msg_id>.json` and attached by message_info. Rate
+      cap = ATOMIC slot claim (parallel groups can't both pass cap 1) with
+      refunds on silent runs. Responder = the injected seam (R16 adapters);
+      `--dry-run` CLI works today; NO_REPLY hygiene ported (R17 replaces).
+      Ported: SingleInstance lock, `supervise()`, error notices (capped).
+      **D19 kept structural:** the runner never mutates accounts — new
+      owner-side `accounts.adopt_agent` re-homes a MIGRATED (keyless) agent
+      to the owner's machine + mints its identity (`POST /api/mesh/adopt_agent`);
+      keyed agents are refused a re-key (old event signatures would orphan —
+      machine moves need published key history, later). ALSO SHIPPED
+      (v0.24.77, pre-R15 hardening found designing this): epoch-0 acceptance
+      now keys on "predates the chat's FIRST epoch" in legacy chats — the
+      first sealed post into a migrated room no longer blanks its v1
+      history/files. 24 new tests (243 total) + a real-run-loop smoke
+      (threaded reply, owner-visible timer firing, task steps, read receipt)
+      + CLI dry-run/wrong-machine smokes. **Agents come back ONLINE at R16**
+      (the registry/adapters give the Responder a real model; then adopt
+      @claude/@coco and start harnesses).
 - [ ] **R16 — Model registry & adapters.** Adapter interface (subprocess CLI
       today, API later — same contract per D8); JSON preconfigs: claude,
       codex, grok, ollama, deepseek; **model picker + reasoning effort**

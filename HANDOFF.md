@@ -15,12 +15,18 @@ root is remembered in `~/.agentbridge/config.json` (`mesh_root`). The v1
 + `legacy/` stay in the repo for reference until R26. Migration: 4 users, 12
 chats, 393 messages, verification PASS.
 
-**Agents are OFFLINE until R15** — the v2 agent harness doesn't exist yet
-(Phase 3). First human sign-in on v2 upgrades the migrated pbkdf2 login to
-scrypt + mints E2EE identity keys and shows the one-time recovery code.
-**Remaining manual step: stop the v1 worker on any REMOTE machine (the hosted
-CoCo/AVD box) and re-point it after R15** — it otherwise keeps running v1
-against the now-orphaned `mesh/`.
+**Agents are OFFLINE until R16.** The v2 harness CORE shipped in R15
+(`agentbridge/harness/` — durable queue, answered-guard, catch-up, enriched
+deliveries, owner-visible timers; `python -m agentbridge.harness <agent>`),
+but its Responder seam has no model adapters until R16's registry — so no
+agent replies yet. Bringing an agent online after R16: the owner signs in on
+the hosting machine, `POST /api/mesh/adopt_agent` (re-homes a migrated agent
++ mints its identity keys), then run the harness under `--supervise`. First
+human sign-in on v2 upgrades the migrated pbkdf2 login to scrypt + mints E2EE
+identity keys and shows the one-time recovery code.
+**Remaining manual step: STOP the v1 worker on any REMOTE machine (the hosted
+CoCo/AVD box)** — it otherwise keeps running v1 against the now-orphaned
+`mesh/`; its v2 replacement arrives with R16.
 
 The sections below describe the **v1** app and are retained as reference;
 treat `REWRITE_PLAN.md` + the memory topic files as authoritative for v2.

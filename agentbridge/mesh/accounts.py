@@ -342,6 +342,39 @@ class AccountsService:
 
         return self.directory.patch(target, apply)
 
+    def adopt_agent(self, agent: str) -> Account:
+        """Re-home an agent to the signed-in member's CURRENT machine (owner-
+        gated) — the path that brings a MIGRATED agent (machine="migrated",
+        no identity keys) online under the R15 harness. A keyless agent gets
+        its identity minted here (safe: migrated logs hold no signed events
+        of its authorship to invalidate). A keyed agent whose private bundle
+        lives on another machine is refused: minting a replacement key would
+        orphan the signatures on its past info events — proper machine moves
+        need published key history (later round)."""
+        target = self._writable_target(agent)
+        acc = self.directory.get(target)
+        has_pubs = bool(acc and acc.keys.sign_pub)
+        has_bundle = self.keystore.load(target) is not None
+        if has_pubs and not has_bundle:
+            raise ValidationError(
+                f"@{target}'s identity keys live on its current machine — "
+                f"recreate the agent here instead (key moves come later)"
+            )
+        if not has_pubs:
+            bundle = crypto.generate_identity()
+            sign_pub, agree_pub = crypto.identity_pubs(bundle)
+
+            def mint(doc: dict) -> None:
+                keys = doc.setdefault("keys", {})
+                keys["sign_pub"], keys["agree_pub"] = sign_pub, agree_pub
+
+            self.directory.patch(target, mint)
+            self.keystore.save(target, bundle)
+        return self.directory.patch(
+            target, lambda doc: doc.setdefault("agent", {}).update(
+                machine=self.machine)
+        )
+
     def set_machine_agents_active(self, active: bool) -> list[str]:
         """The EXPLICIT stand-down/resume switch for this machine's agents.
         NOT wired to logout (D19, Aryan 2026-07-13): signing out leaves agents

@@ -348,3 +348,52 @@ def test_typing_and_livefeed(rig):
     })
     feeds = rig.get("/api/mesh/livefeed", id=cid)["feeds"]
     assert feeds and feeds[0]["typing"] and feeds[0]["agent"] == "fable"
+
+
+# ------------------------------------------------- harness surfaces (R15)
+def test_agent_harness_visibility_and_adoption(rig):
+    rig.signup()
+    rig.post("/api/mesh/create_agent", username="helper")
+
+    # owner sees the harness doc (None until the runner writes one)
+    out = rig.get("/api/mesh/agent_harness", agent="helper")
+    assert out["ok"] and out["harness"] is None
+    rig.app.mesh.tx.put_doc("status/helper_harness.json", {
+        "agent": "helper", "updated": utcnow_iso(), "paused": False,
+        "queue": [], "timers": [{"id": "t-1", "chat_id": "c1",
+                                 "at_ns": 5, "note": "follow up"}],
+    })
+    out = rig.get("/api/mesh/agent_harness", agent="helper")
+    assert out["harness"]["timers"][0]["note"] == "follow up"
+
+    # not mine -> refused (fable's agent, owned elsewhere)
+    rig.app.mesh.tx.put_doc("users/fbot.json", {
+        "name": "fbot", "kind": "agent", "active": True,
+        "agent": {"owner": "fable", "machine": "elsewhere", "harness": {}},
+    })
+    assert "error" in rig.get("/api/mesh/agent_harness", agent="fbot")
+
+    # adoption re-homes a migrated-shaped agent to THIS machine
+    rig.app.mesh.tx.put_doc("users/legacybot.json", {
+        "name": "legacybot", "kind": "agent", "display": "Legacybot",
+        "active": True,
+        "agent": {"owner": "aryan", "machine": "migrated", "harness": {}},
+    })
+    out = rig.post("/api/mesh/adopt_agent", username="legacybot")
+    assert out["ok"]
+    acc = rig.app.mesh.directory.get("legacybot")
+    assert acc.agent.machine == "guibox" and acc.keys.sign_pub
+
+
+def test_message_info_carries_harness_task_steps(rig):
+    rig.signup()
+    cid = rig.post("/api/mesh/create_chat", name="Steps")["chat"]["id"]
+    mid = rig.post("/api/mesh/post", chat_id=cid, body="hi")["id"]
+    info = rig.get("/api/mesh/message_info", id=cid, msg=mid)
+    assert "tasks" not in info
+    rig.app.mesh.tx.put_doc(f"chats/{cid}/tasks/{mid}.json", {
+        "agent": "helper", "msg_id": mid, "updated": utcnow_iso(),
+        "tasks": [{"text": "Ran a query", "ts": utcnow_iso()}],
+    })
+    info = rig.get("/api/mesh/message_info", id=cid, msg=mid)
+    assert info["tasks"][0]["text"] == "Ran a query"

@@ -134,7 +134,15 @@ def forward(app, req, mesh) -> dict:
 
 @authed
 def message_info(app, req, mesh) -> dict:
-    return mesh.message_info(req.params.get("id", ""), req.params.get("msg", ""))
+    chat_id = req.params.get("id", "")
+    msg_id = req.params.get("msg", "")
+    out = mesh.message_info(chat_id, msg_id)
+    # agent replies carry the task steps their harness recorded (R15) — the
+    # membership gate already ran inside message_info
+    doc = mesh.tx.get_doc(f"chats/{chat_id}/tasks/{msg_id}.json")
+    if isinstance(doc, dict) and doc.get("tasks"):
+        out["tasks"] = doc["tasks"]
+    return out
 
 
 # ------------------------------------------------------------- chat flags

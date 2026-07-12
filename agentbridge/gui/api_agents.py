@@ -69,6 +69,27 @@ def delete_agent(app, req, mesh) -> dict:
 
 
 @authed
+def adopt_agent(app, req, mesh) -> dict:
+    """Owner re-homes an agent to THIS machine (brings a migrated agent
+    online under the R15 harness)."""
+    acc = mesh.accounts.adopt_agent(
+        (req.data.get("username") or req.data.get("agent") or "")
+        .strip().lower())
+    return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name))}
+
+
+@authed
+def agent_harness_status(app, req, mesh) -> dict:
+    """The owner-visible harness state (pending queue + timers) — nothing an
+    agent schedules is invisible to its responsible member (R15)."""
+    name = (req.params.get("agent") or "").strip().lower()
+    if mesh.directory.owner_of(name) != mesh.user:
+        return {"error": "only the agent's responsible member can view this"}
+    doc = mesh.tx.get_doc(f"status/{name}_harness.json")
+    return {"ok": True, "harness": doc if isinstance(doc, dict) else None}
+
+
+@authed
 def stand_down(app, req, mesh) -> dict:
     """This machine's agents on/off (D19: explicit switch, never logout)."""
     changed = mesh.set_machine_agents_active(not req.data.get("down", True))
@@ -85,11 +106,14 @@ def pause(app, req, mesh) -> dict:
     return {"ok": True, "paused": doc["paused"]}
 
 
-GET: dict = {}
+GET = {
+    "/api/mesh/agent_harness": agent_harness_status,
+}
 POST = {
     "/api/mesh/create_agent": create_agent,
     "/api/mesh/agent": agent,
     "/api/mesh/delete_agent": delete_agent,
+    "/api/mesh/adopt_agent": adopt_agent,
     "/api/mesh/stand_down": stand_down,
     "/api/mesh/pause": pause,
 }
