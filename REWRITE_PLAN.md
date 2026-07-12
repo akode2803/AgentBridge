@@ -68,6 +68,7 @@ cryptographically (E2EE), not just at app level.
 | D7 | Sandboxing = **pluggable levels**: `workspace` (default: per-chat workspace dir, read-only-by-default outside it) → leaning on the inner CLI's own sandbox (claude-code sandbox / codex approvals) → `container` backend possible later without redesign. Docker NOT the default (UX). | approved with plan |
 | D14 | **Emoji reactions are IN, low priority** (Aryan 2026-07-12): data layer rides R4 as one more per-user overlay; frontend surface whenever convenient, never blocking a round. | **APPROVED 2026-07-12** |
 | D15 | Embeddings behind our own interface with a **runtime probe chain**: fastembed → model2vec (pure numpy) → ollama → API. Cause: onnxruntime DLLs blocked on corporate-managed Windows (incl. the dev box). Details in `docs/DECISIONS.md`. | decided R1 |
+| D18 | **Agent oversight model (Aryan's correction 2026-07-12, REVERSES the original "no owner ride-along" line):** owners always ride along when their agent messages anyone; every chat born from messaging an agent (auto_dm, either direction) or created by an agent makes **all humans at genesis admins** (agents never); pull-ins into preexisting groups join as plain members; **agents may add members, never remove**; agent adds governed by two new group toggles — `agents_add_if_owner_admin` (default ON) and `agents_add_if_members_can` (default OFF). "Agents only" messaging audience gates who may KNOCK; the owner comes in regardless. Bottom line: nothing without oversight. | **APPROVED 2026-07-12** |
 | D16 | Graph memory default = **mem0 v2 built-in entity linking** (embedded in local qdrant, zero servers). Graphiti-grade KG = optional, server-backed, later (Kuzu archived; FalkorDB-Lite has no Windows wheels). | decided R1 |
 | D17 | **CPython 3.12** pinned via uv (`llama-index-embeddings-fastembed` needs <3.13; ML wheel lag on newer). `requires-python >=3.11`. | decided R1 |
 | D8 | Nothing model-specific is hardcoded. Adapters + JSON preconfigs for **claude, codex, grok, ollama, deepseek**; a model/CLI is data. API-based adapters later behind the same interface. | agreed (mission) |
@@ -151,14 +152,16 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       add_members (add gate incl. **pulled owners** — if the owner can't be
       added, chatting the agent fails cleanly), post-in-DM (block check).
       Semantics locked: profile `agents` audience admits agent-OWNING humans
-      (relay rationale); the two GATES are strict (`agents` = agents only, no
-      ride-along) and PUBLIC (`public_gates()` — agents check before
-      messaging, reasons are showable); blocks kill DMs both directions
-      without leaking, groups unaffected (WhatsApp); photo = everyone/nobody;
-      agent settings owner-only; receipts need BOTH toggles
+      (relay rationale); the two GATES are PUBLIC (`public_gates()` — agents
+      check before messaging, reasons are showable); blocks kill DMs both
+      directions without leaking, groups unaffected (WhatsApp); photo =
+      everyone/nobody; agent settings owner-only; receipts need BOTH toggles
       (`may_see_receipts_of`, consumed by R8). Delivers backlog: messaging-
-      permission model (HANDOFF #1) + block-a-user (#4). 16 new tests
-      (106 total).
+      permission model (HANDOFF #1) + block-a-user (#4). 16 new tests.
+      **R6.1 correction (D18)** — the `agents` gate audience means "who may
+      KNOCK" only: owners ALWAYS ride along; genesis-admin rule (all humans
+      admin in auto_dm/agent-created chats); agents add-but-never-remove;
+      two new agent-add toggles. 6 more tests (111 total).
 - [ ] **R7 — Accounts v2.** User-file-is-account; machine-login ownership
       (1 human → N agents; agent identity = name + machine + owning human);
       **username change + password change** (password change re-wraps the

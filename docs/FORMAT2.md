@@ -145,6 +145,12 @@ ignored — essential under E2EE where writes can't be blocked); agents can
 never hold admin; removals cascade out ownerless agents (free-chatting
 invariant); an admin-less group auto-promotes its longest-standing human
 (WhatsApp semantics); DM/self membership is fixed at genesis.
+**Agent oversight (D18, corrected 2026-07-12):** owners always ride along
+with their agent; chats born from messaging an agent (`auto_dm`) or created
+by an agent give EVERY human at genesis admin; pull-ins into preexisting
+groups join as plain members; agents may ADD members (gated exclusively by
+`agents_add_if_owner_admin` / `agents_add_if_members_can`) but can NEVER
+remove — enforced at write time and in the fold.
 
 ### Chat snapshot — `meta.json` (cache, rebuildable)
 

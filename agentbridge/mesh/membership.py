@@ -89,20 +89,26 @@ class MembershipService:
                 if m not in _message_gated:
                     self._gate_add(m)
 
-        # first admin: the creator if human, else the creator-agent's owner
-        if self.directory.kind(me) is UserKind.HUMAN:
-            first_admin = me
-        else:
+        # GENESIS ADMIN RULE (Aryan 2026-07-12, "agents tied to their owners"):
+        # a chat born from MESSAGING AN AGENT (auto_dm, either direction) or
+        # CREATED BY an agent makes EVERY human at genesis an admin — equal
+        # rights, full oversight. A deliberate human-created group keeps the
+        # classic creator-is-admin. Agents are never admins anywhere.
+        creator_is_agent = self.directory.kind(me) is UserKind.AGENT
+        if creator_is_agent:
             owner = self.directory.owner_of(me)
             if owner is None or owner not in roster:
                 raise ValidationError("an agent-created chat needs its responsible member")
-            first_admin = owner
 
-        member_roles = {
-            m: (Role.ADMIN.value if m == first_admin and kind is ChatKind.GROUP
-                else Role.MEMBER.value)
-            for m in roster
-        }
+        def genesis_role(m: str) -> str:
+            if kind is not ChatKind.GROUP:
+                return Role.MEMBER.value
+            if auto_dm or creator_is_agent:
+                is_human = self.directory.kind(m) is UserKind.HUMAN
+                return Role.ADMIN.value if is_human else Role.MEMBER.value
+            return Role.ADMIN.value if m == me else Role.MEMBER.value
+
+        member_roles = {m: genesis_role(m) for m in roster}
         chat_id = f"{_slug(name)}-{secrets.token_hex(3)}"
         event = {
             "type": events.EV_CREATED,
@@ -168,8 +174,17 @@ class MembershipService:
     # ------------------------------------------------------------ mutations
     def add_members(self, chat_id: str, names: list[str]) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
-        if not authz.can_add_members(snap, self.user):
-            raise PermissionDenied("you may not add members to this chat")
+        my_owner = (
+            self.directory.owner_of(self.user)
+            if self.directory.kind(self.user) is UserKind.AGENT
+            else None
+        )
+        if not authz.can_add_members(snap, self.user, agent_owner=my_owner):
+            raise PermissionDenied(
+                "this group doesn't allow you (an agent) to add members"
+                if my_owner is not None
+                else "you may not add members to this chat"
+            )
         todo = [n for n in dict.fromkeys(names) if n not in snap.members]
         for n in todo:
             if not self.directory.exists(n):
@@ -195,6 +210,8 @@ class MembershipService:
             raise ValidationError("use leave() to exit a chat yourself")
         if who not in snap.members:
             raise ValidationError(f"@{who} is not a member")
+        if self.directory.kind(self.user) is UserKind.AGENT:
+            raise PermissionDenied("agents can add members but never remove them")
         if not authz.can_remove_member(snap, self.user):
             raise PermissionDenied("only an admin can remove members")
         self.messaging.post_event(
@@ -266,8 +283,14 @@ class MembershipService:
     # -------------------------------------------------------------- snapshots
     def refold(self, chat_id: str) -> ChatSnapshot:
         """Recompute the snapshot from the event log and rewrite meta.json.
-        Heals any clobbered/stale meta (the whole point of tenet 3)."""
+        Heals any clobbered/stale meta (the whole point of tenet 3).
+
+        Guard: a local cache that hasn't synced the chat's GENESIS yet would
+        fold to an empty snapshot — never clobber meta with that; partial-but-
+        genesis-bearing folds converge via every member's next refold."""
         snap = events.fold(chat_id, self.store.messages(chat_id), self.directory)
+        if not snap.members:
+            return self.messaging.snapshot(chat_id)
         self.tx.put_doc(P.meta(chat_id), snap.to_dict())
         return snap
 

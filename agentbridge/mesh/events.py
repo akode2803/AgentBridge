@@ -105,15 +105,22 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> None:
         who = ev.get("who", "")
         if fixed_membership or not who or who in snap.members:
             return
-        if not authz.can_add_members(snap, author):
+        author_owner = (
+            d.owner_of(author) if d.kind(author) is UserKind.AGENT else None
+        )
+        if not authz.can_add_members(snap, author, agent_owner=author_owner):
             return
+        # pull-ins into a PREEXISTING group join as plain members — genesis
+        # is the only moment humans get admin automatically (Aryan 2026-07-12)
         snap.members[who] = Member(role=Role.MEMBER, joined_ns=ns)
 
     elif etype == EV_MEMBER_REMOVED:
         who = ev.get("who", "")
         if fixed_membership or who == author or who not in snap.members:
             return
-        if not authz.can_remove_member(snap, author):
+        if not authz.can_remove_member(
+            snap, author, is_agent=d.kind(author) is UserKind.AGENT
+        ):
             return
         del snap.members[who]
         _heal(snap, d)

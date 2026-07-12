@@ -43,13 +43,28 @@ def can_edit_settings(snap: ChatSnapshot, user: str) -> bool:
     return _member_or_admin(snap, user, snap.permissions.edit_settings)
 
 
-def can_add_members(snap: ChatSnapshot, user: str) -> bool:
+def can_add_members(snap: ChatSnapshot, user: str, agent_owner: str | None = None) -> bool:
+    """``agent_owner``: pass the responsible member's name when ``user`` is an
+    AGENT — agent adds are then governed exclusively by the two agent toggles
+    (Aryan's correction 2026-07-12): allowed iff the owner currently holds
+    admin (toggle 1) or general members may add (toggle 2)."""
     if snap.kind in (ChatKind.DM, ChatKind.SELF):
         return False  # fixed membership
+    if user not in snap.members:
+        return False
+    if agent_owner is not None:  # the agent path
+        p = snap.permissions
+        if p.agents_add_if_owner_admin and is_admin(snap, agent_owner):
+            return True
+        return bool(p.agents_add_if_members_can and p.add_members is PermLevel.ALL)
     return _member_or_admin(snap, user, snap.permissions.add_members)
 
 
-def can_remove_member(snap: ChatSnapshot, user: str) -> bool:
+def can_remove_member(snap: ChatSnapshot, user: str, *, is_agent: bool = False) -> bool:
+    """Admins only — and agents NEVER remove members, even if some future
+    path handed one elevated rights (defense in depth)."""
+    if is_agent:
+        return False
     return snap.kind is ChatKind.GROUP and is_admin(snap, user)
 
 

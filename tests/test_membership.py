@@ -30,7 +30,7 @@ def world(tmp_path):
     def mk(user):
         return Mesh(FolderTransport(root), user, "mach1", home=tmp_path / f"home-{user}")
 
-    meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir")}
+    meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude", "coco")}
     yield meshes
     for m in meshes.values():
         m.close()
@@ -79,13 +79,39 @@ def test_dm_with_foreign_agent_births_auto_group_symmetric(world):
     s1 = world["fable"].create_dm("claude")
     assert s1.kind is ChatKind.GROUP and s1.auto_dm
     assert set(s1.members) == {"fable", "claude", "aryan"}
+    # GENESIS ADMIN RULE: every human at genesis is admin, the agent never
+    assert s1.members["fable"].role is Role.ADMIN
+    assert s1.members["aryan"].role is Role.ADMIN
+    assert s1.members["claude"].role is Role.MEMBER
     # symmetric direction: aryan DMs fable's agent (the v0.24.1 verified case)
     s2 = world["aryan"].create_dm("coco")
     assert set(s2.members) == {"aryan", "coco", "fable"}
+    assert s2.members["fable"].role is Role.ADMIN  # pulled owner = admin too
     # auto-groups dedupe on the same roster
     world["fable"].sync.sync_once([s1.id])
     again = world["fable"].create_dm("claude")
     assert again.id == s1.id
+
+
+def test_agent_initiated_dm_all_humans_admin(world):
+    """claude DMs fable: 'Aryan joined as Claude's responsible member' and
+    both humans hold admin — the agent acts only under oversight."""
+    snap = world["claude"].create_dm("fable")
+    assert snap.auto_dm and set(snap.members) == {"claude", "fable", "aryan"}
+    assert snap.members["aryan"].role is Role.ADMIN
+    assert snap.members["fable"].role is Role.ADMIN
+    assert snap.members["claude"].role is Role.MEMBER
+    genesis = world["claude"].messages_for(snap.id)[0].event
+    assert genesis["pulled"] == {"aryan": "claude"}  # the info-pill data
+
+
+def test_agent_to_agent_dm_both_owners_admin(world):
+    snap = world["claude"].create_dm("coco")
+    assert set(snap.members) == {"claude", "coco", "aryan", "fable"}
+    assert snap.members["aryan"].role is Role.ADMIN
+    assert snap.members["fable"].role is Role.ADMIN
+    assert snap.members["claude"].role is Role.MEMBER
+    assert snap.members["coco"].role is Role.MEMBER
 
 
 def test_plain_dm_and_self_chat_dedupe(world):
@@ -289,6 +315,83 @@ def test_chats_for_lists_only_my_chats(world):
     both = aryan.create_chat("Shared", members=["fable"])
     assert {s.id for s in aryan.membership.chats_for()} == {mine.id, both.id}
     assert {s.id for s in fable.membership.chats_for()} == {both.id}
+
+
+# --------------------------------------------------- agent oversight (R6.1)
+
+def agent_group(world):
+    """aryan's group with coco in it (fable pulled as plain MEMBER — pull-ins
+    into deliberate groups get no auto-admin) — synced to coco's mesh."""
+    aryan, coco = world["aryan"], world["coco"]
+    snap = aryan.create_chat("Team", members=["coco"])
+    assert snap.members["fable"].role is Role.MEMBER  # pulled, not admin
+    aryan.outbox.flush_once()
+    coco.sync.sync_once([snap.id])
+    return snap
+
+
+def test_agent_add_toggle1_needs_owner_admin(world):
+    aryan, coco = world["aryan"], world["coco"]
+    snap = agent_group(world)
+    # default: agents_add_if_owner_admin=True, but fable is NOT admin here
+    with pytest.raises(PermissionDenied) as e:
+        coco.add_members(snap.id, ["sudhir"])
+    assert "agent" in str(e.value)
+
+    aryan.grant_admin(snap.id, "fable")   # owner gains admin -> agent may add
+    aryan.outbox.flush_once()
+    coco.sync.sync_once([snap.id])
+    healed = coco.add_members(snap.id, ["sudhir"])
+    assert "sudhir" in healed.members
+    assert healed.members["sudhir"].role is Role.MEMBER  # never auto-admin
+
+
+def test_agent_add_toggle2_rides_members_can_add(world):
+    aryan, coco = world["aryan"], world["coco"]
+    snap = agent_group(world)
+    aryan.set_permissions(snap.id, {"agents_add_if_owner_admin": False,
+                                    "agents_add_if_members_can": True})
+    aryan.outbox.flush_once()
+    coco.sync.sync_once([snap.id])
+    healed = coco.add_members(snap.id, ["sudhir"])  # add_members=all (default)
+    assert "sudhir" in healed.members
+
+    # but toggle 2 dies when general members lose the add right
+    aryan.remove_member(snap.id, "sudhir")
+    aryan.set_permissions(snap.id, {"add_members": "admins"})
+    aryan.outbox.flush_once()
+    coco.sync.sync_once([snap.id])
+    with pytest.raises(PermissionDenied):
+        coco.add_members(snap.id, ["sudhir"])
+
+
+def test_agent_add_both_toggles_off(world):
+    aryan, coco = world["aryan"], world["coco"]
+    snap = agent_group(world)
+    aryan.grant_admin(snap.id, "fable")  # even WITH the owner as admin
+    aryan.set_permissions(snap.id, {"agents_add_if_owner_admin": False,
+                                    "agents_add_if_members_can": False})
+    aryan.outbox.flush_once()
+    coco.sync.sync_once([snap.id])
+    with pytest.raises(PermissionDenied):
+        coco.add_members(snap.id, ["sudhir"])
+
+
+def test_agents_can_never_remove_members(world):
+    aryan, coco = world["aryan"], world["coco"]
+    snap = agent_group(world)
+    with pytest.raises(PermissionDenied) as e:
+        coco.remove_member(snap.id, "aryan")
+    assert "never remove" in str(e.value)
+
+    # forged agent-authored removal dies in the fold too
+    aryan.tx.append_log(snap.id, "coco@rogue", {
+        "id": "forge1", "ns": 10**18, "ts": "t", "from": "coco", "kind": "info",
+        "event": {"type": "member_removed", "who": "aryan", "by": "coco"},
+    })
+    aryan.sync.sync_once([snap.id])
+    healed = aryan.membership.refold(snap.id)
+    assert "aryan" in healed.members
 
 
 def test_agent_kind_lookup(world):

@@ -109,13 +109,18 @@ def test_messaging_audience_members_only(world):
     assert set(dm.members) == {"aryan", "sudhir"}
 
 
-def test_messaging_audience_agents_only_no_owner_ride_along(world):
+def test_messaging_audience_agents_only_owner_rides_along(world):
+    """'Agents only' controls who may KNOCK; the owner always rides along
+    into the room with admin oversight (Aryan's correction 2026-07-12)."""
     sudhir, fable, coco = world["sudhir"], world["fable"], world["coco"]
     sudhir.set_privacy({"messaging": "agents"})
     with pytest.raises(PermissionDenied):
-        fable.create_dm("sudhir")            # humans out — even agent owners
-    dm = coco.create_dm("sudhir")            # agents in (owner gets pulled)
-    assert "coco" in dm.members
+        fable.create_dm("sudhir")            # humans can't initiate directly
+    dm = coco.create_dm("sudhir")            # the agent can...
+    assert set(dm.members) == {"coco", "sudhir", "fable"}  # ...owner rides in
+    assert dm.members["fable"].role.value == "admin"       # with oversight
+    assert dm.members["sudhir"].role.value == "admin"      # equal rights
+    assert dm.members["coco"].role.value == "member"
 
 
 def test_messaging_audience_nobody(world):

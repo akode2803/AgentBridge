@@ -274,6 +274,10 @@ class ChatPermissions:
     # open-reminder #5); admins can switch it off per group.
     send_history: bool = True
     approve_members: bool = False               # admins approve joins
+    # Agent adds are governed EXCLUSIVELY by these two (Aryan 2026-07-12,
+    # "agents are tied to their owners"); agents can never remove members.
+    agents_add_if_owner_admin: bool = True      # add allowed while owner is admin
+    agents_add_if_members_can: bool = False     # add allowed when add_members=all
 
     def __post_init__(self) -> None:
         for name in ("edit_settings", "send_messages", "add_members"):
