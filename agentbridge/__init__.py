@@ -1,6 +1,8 @@
-"""AgentBridge v2 backend — package skeleton lands in rewrite round R2.
+"""AgentBridge v2 backend.
 
-See REWRITE_PLAN.md for the architecture this package grows into.
+Layout (REWRITE_PLAN.md §1): core -> transport/store/crypto -> mesh services
+-> harness / cli / gui connectors. The APP version source of truth remains
+``gui/__init__.py`` until round R26.
 """
 
 __all__: list[str] = []

@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      # Core-only sync: CI stays fast; heavy extras are validated per-round
+      # on the dev box (spikes) and in the dedicated stress round (R24).
+      - name: Sync (core + dev)
+        run: uv sync --group dev
+      - name: Lint
+        run: uv run ruff check agentbridge tests
+      - name: Tests
+        run: uv run pytest -q
+      - name: Frontend module check
+        run: uv run python check_frontend.py
+        if: matrix.os == 'windows-latest'

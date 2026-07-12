@@ -96,12 +96,14 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       box → D15 probe chain**; **graphiti deferred → D16 mem0-v2 entity
       linking**; MCP SDK v2 migration budgeted into R12; supabase realtime =
       async-only (R23 wraps it); Python pinned 3.12 (D17).
-- [ ] **R2 — Skeleton.** `agentbridge/` package; core models + enums; ns/time
-      utils (ns-not-ts baked into the types); config layer replacing
-      `legacy/bridge.py` utils (atomic_write_json with retry/backoff — the 8D
-      lesson — becomes the default write primitive); error taxonomy; pytest
-      wiring + first tests; GitHub Actions CI (lint + tests on push);
-      `docs/FORMAT2.md` v2 storage spec draft (envelope fields reserved).
+- [x] **R2 — Skeleton. DONE 2026-07-12** — `agentbridge/core/` (models,
+      timekit, config, errors), 14 tests incl. regressions for the ns-tie and
+      OneDrive-lock burns, GitHub Actions CI (ubuntu+windows, core-only sync +
+      frontend check), `docs/FORMAT2.md` drafted. Key v2 design upgrade
+      recorded there: **info events are the source of truth; meta.json demotes
+      to a rebuildable snapshot** (kills the last-writer-wins data-loss class).
+      Tolerance rules: unknown JSON keys ignored, unknown enum values FAIL
+      CLOSED (privacy→nobody, perms→admins, kind→agent).
 
 ### Phase 1 — Mesh core (rounds run against scratch roots; live mesh untouched)
 
