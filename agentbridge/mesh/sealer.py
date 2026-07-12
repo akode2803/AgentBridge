@@ -10,12 +10,14 @@ zero caller changes (the whole point of the seam).
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 
 from .. import crypto
 from ..core.models import BodyRecord, ChatSnapshot, Envelope
 from ..transport.base import Transport
 from .directory import Directory
+from .events import is_legacy_chat_id
 from .keyring import ChatKeyService
 from .paths import P
 
@@ -83,6 +85,15 @@ def _aad(chat_id: str, env_id: str, ns: int, sender: str, epoch: int) -> bytes:
 # sealed-blob layout: magic + 8-byte BE epoch + nonce(12B) + ciphertext
 _BLOB_MAGIC = b"AB2E"
 
+_BLOB_ID_RE = re.compile(r"^[a-z]+-(\d+)-")
+
+
+def _blob_ns(blob_id: str) -> int:
+    """The ns minted into a v2 blob id (``f-<ns>-…``); 0 when the id doesn't
+    carry one (v1/migrated file records — treated as predating every epoch)."""
+    m = _BLOB_ID_RE.match(blob_id or "")
+    return int(m.group(1)) if m else 0
+
 
 def _blob_aad(chat_id: str, blob_id: str, epoch: int) -> bytes:
     return f"{chat_id}|blob|{blob_id}|{epoch}".encode()
@@ -94,10 +105,16 @@ class E2EESealer(Sealer):
     with the sender's identity key. Unseal: verify signature, unwrap my epoch
     copy, decrypt — ANY failure returns None (show nothing rather than lie).
 
-    Epoch-0 plaintext is accepted ONLY while a chat has no epochs at all
-    (pure pre-migration legacy); once a chat has real epochs, unsigned
-    plaintext is refused — otherwise anyone could inject "plaintext from
-    @aryan" into a sealed room.
+    Epoch-0 plaintext is accepted only in LEGACY (migrated, non-gid) chats,
+    and only for records that PREDATE the chat's first epoch (epoch ids are
+    ns ordinals, so "before E2EE started here" is well-defined) — migrated v1
+    history keeps reading after the room's first sealed post. Everything else
+    is refused: plaintext minted after the first epoch, and any plaintext at
+    all in a v2-native chat (which can never legitimately hold epoch-0
+    content) — otherwise anyone could inject "plaintext from @aryan" into a
+    sealed room. (A member back-dating plaintext into a legacy chat's
+    pre-E2EE era can only attribute it to themselves — sync drops records
+    whose ``from`` isn't the log owner — the same power they had in that era.)
     """
 
     def __init__(
@@ -132,9 +149,12 @@ class E2EESealer(Sealer):
 
     def unseal(self, chat_id: str, env: Envelope) -> BodyRecord | None:
         if env.epoch == 0:
-            if self.keys.latest(chat_id) is None:
-                return self._plain.unseal(chat_id, env)  # pure legacy chat
-            return None  # plaintext injected into a sealed room: refused
+            if not is_legacy_chat_id(chat_id):
+                return None  # a v2-native chat never has legitimate plaintext
+            first = self.keys.first_epoch(chat_id)
+            if first is None or env.ns < first:
+                return self._plain.unseal(chat_id, env)  # pre-E2EE history
+            return None  # plaintext minted after the room sealed: refused
         sender = self.directory.get(env.from_)
         if sender is None or not sender.keys.sign_pub:
             return None
@@ -165,9 +185,15 @@ class E2EESealer(Sealer):
 
     def open_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes | None:
         if not data.startswith(_BLOB_MAGIC):
-            # plain bytes are honored ONLY while the chat has no epochs at
-            # all (pure legacy) — same injection rule as plaintext envelopes
-            if self.keys.latest(chat_id) is None:
+            # plain bytes follow the same legacy-only, predates-the-first-
+            # epoch rule as plaintext envelopes. v2 blob ids carry their
+            # mint-ns; a v1/migrated file record has no v2 id (ns reads 0)
+            # and is treated as pre-E2EE — it carries v1-era trust either
+            # way, and the serve path verifies files[].sha256 provenance.
+            if not is_legacy_chat_id(chat_id):
+                return None
+            first = self.keys.first_epoch(chat_id)
+            if first is None or _blob_ns(blob_id) < first:
                 return data
             return None
         epoch = int.from_bytes(data[4:12], "big")

@@ -86,8 +86,12 @@ Attachment blobs are sealed under the chat's epoch keys (format in
 swapped under a different id, and a non-member holds no epoch copy to open
 it. **Provenance rides the signed message** naming the blob (`files[].sha256`
 inside the encrypted, signed body) — connectors verify the sha before
-serving. Plain bytes are honored only in chats with no epochs at all (the
-same legacy-only rule as plaintext envelopes). Profile photos and group
+serving. Plain bytes are honored only in LEGACY (migrated, non-gid) chats
+and only for blobs that predate the chat's first epoch (v2 blob ids carry
+their mint-ns; v1/migrated records without a v2 id read as pre-E2EE) — the
+same rule as plaintext envelopes, so migrated history keeps reading after a
+room's first sealed post, while plaintext minted afterwards, or appearing in
+a v2-native chat at all, is refused. Profile photos and group
 photos are deliberately METADATA (plain at rest, like names): view access is
 matrix-/membership-gated at the connectors, not by crypto.
 

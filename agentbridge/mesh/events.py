@@ -40,6 +40,7 @@ __all__ = [
     "EV_ADMIN_GRANTED", "EV_ADMIN_REVOKED", "EV_RENAMED", "EV_DESCRIPTION",
     "EV_PERMISSIONS", "EV_AVATAR", "EV_DELETED", "EV_KEY_ROTATED",
     "Resolver", "fold", "signing_bytes", "genesis_gid", "GID_LEN",
+    "is_legacy_chat_id",
 ]
 
 # ------------------------------------------------------------- R13.5 integrity
@@ -132,6 +133,13 @@ def _authentic(chat_id: str, env: dict, etype: str, author: str, d: Resolver) ->
         return True  # keyless legacy actor — nothing to verify against
     sig = env.get("sig") or ""
     return bool(sig) and crypto.verify(pub, sig, signing_bytes(chat_id, env))
+
+
+def is_legacy_chat_id(chat_id: str) -> bool:
+    """True for a migrated v1 chat id (no genesis binding). Legacy chats are
+    the only place epoch-0 (pre-E2EE) content can be legitimate — the sealer
+    keys its plaintext-acceptance rule on this."""
+    return _id_gid(chat_id) is None
 
 
 def _id_gid(chat_id: str) -> str | None:
