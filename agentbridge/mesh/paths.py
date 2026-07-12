@@ -72,5 +72,9 @@ class P:
         return f"chats/{chat_id}/files/{file_id}"
 
     @staticmethod
+    def chat_avatar(chat_id: str) -> str:
+        return f"chats/{chat_id}/avatar.jpg"
+
+    @staticmethod
     def keys(chat_id: str, epoch: int) -> str:
         return f"chats/{chat_id}/keys/{epoch}.json"

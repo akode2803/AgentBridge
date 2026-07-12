@@ -34,6 +34,15 @@ class Sealer(ABC):
     def unseal(self, chat_id: str, env: Envelope) -> BodyRecord | None:
         """Decrypt an envelope's body-record; None if it cannot be opened."""
 
+    @abstractmethod
+    def seal_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes:
+        """File bytes -> at-rest bytes. Provenance rides the SIGNED message
+        that names the blob (its ``files[].sha256``) — readers verify there."""
+
+    @abstractmethod
+    def open_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes | None:
+        """At-rest bytes -> file bytes; None if they cannot be opened."""
+
 
 class PlainSealer(Sealer):
     """Format-v2 envelopes without encryption (epoch 0) — pre-R9 and also the
@@ -56,11 +65,27 @@ class PlainSealer(Sealer):
             return None
         return BodyRecord.from_dict(data if isinstance(data, dict) else {})
 
+    def seal_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes:
+        return data
+
+    def open_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes | None:
+        if data.startswith(_BLOB_MAGIC):
+            return None  # sealed blob, and I'm the plain sealer
+        return data
+
 
 def _aad(chat_id: str, env_id: str, ns: int, sender: str, epoch: int) -> bytes:
     """Authenticated routing metadata — swap ANY of these fields on disk and
     the envelope simply refuses to open (no mis-attribution, no replay)."""
     return f"{chat_id}|{env_id}|{ns}|{sender}|{epoch}".encode()
+
+
+# sealed-blob layout: magic + 8-byte BE epoch + nonce(12B) + ciphertext
+_BLOB_MAGIC = b"AB2E"
+
+
+def _blob_aad(chat_id: str, blob_id: str, epoch: int) -> bytes:
+    return f"{chat_id}|blob|{blob_id}|{epoch}".encode()
 
 
 class E2EESealer(Sealer):
@@ -129,3 +154,29 @@ class E2EESealer(Sealer):
         except json.JSONDecodeError:
             return None
         return BodyRecord.from_dict(data if isinstance(data, dict) else {})
+
+    def seal_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes:
+        snap_doc = self.tx.get_doc(P.meta(chat_id))
+        if not isinstance(snap_doc, dict):
+            raise crypto.CryptoFail(f"unknown chat {chat_id}")
+        epoch, key = self.keys.ensure(chat_id, ChatSnapshot.from_dict(snap_doc))
+        sealed = crypto.seal_raw(key, _blob_aad(chat_id, blob_id, epoch), data)
+        return _BLOB_MAGIC + epoch.to_bytes(8, "big") + sealed
+
+    def open_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes | None:
+        if not data.startswith(_BLOB_MAGIC):
+            # plain bytes are honored ONLY while the chat has no epochs at
+            # all (pure legacy) — same injection rule as plaintext envelopes
+            if self.keys.latest(chat_id) is None:
+                return data
+            return None
+        epoch = int.from_bytes(data[4:12], "big")
+        key = self.keys.my_key(chat_id, epoch)
+        if key is None:
+            return None  # not my epoch (removed member / pre-join)
+        try:
+            return crypto.unseal_raw(
+                key, _blob_aad(chat_id, blob_id, epoch), data[12:]
+            )
+        except crypto.CryptoFail:
+            return None

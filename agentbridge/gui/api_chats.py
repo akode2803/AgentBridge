@@ -25,10 +25,13 @@ def state(app: GuiApp, req) -> dict:
         "gui_version": app.app_version,
         "encrypted": app.encrypt,
         "caps": {"sse": True, "receipts": "delivered", "admins": True},
-        "paused": False,  # the stand-down switch returns with the R15 harness
         "max_upload_bytes": None,
     }
     mesh = app.mesh
+    # the any-human stand-down switch (the R15 harness reads the same doc)
+    ctl = app.directory0.tx.get_doc("control.json") if mesh is None else \
+        mesh.tx.get_doc("control.json")
+    out["paused"] = bool((ctl or {}).get("paused"))
     if mesh is None:
         # pre-auth: names only — profile fields need a viewer to filter for
         out["users"] = {
@@ -89,11 +92,18 @@ def chat(app: GuiApp, req, mesh) -> dict:
 def post(app: GuiApp, req, mesh) -> dict:
     data = req.data
     chat_id = data.get("chat_id") or ""
+    files = None
+    if data.get("attachments"):
+        from .api_files import seal_attachments
+
+        files = seal_attachments(app, mesh, chat_id, data["attachments"])
+        if not files and not (data.get("body") or "").strip():
+            return {"error": "attachments were not found — upload them again"}
     env = mesh.post(
         chat_id,
         data.get("body") or "",
         reply_to=data.get("reply_to"),
-        files=data.get("files") or None,
+        files=files,
     )
     mesh.mark_read(chat_id)
     return {"ok": True, "id": env.id, "ns": env.ns}

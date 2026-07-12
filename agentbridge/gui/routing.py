@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 from dataclasses import dataclass, field
 
 from ..core.errors import AgentBridgeError
+
+log = logging.getLogger("agentbridge.gui")
 
 __all__ = ["Request", "Response", "authed", "dispatch"]
 
@@ -37,24 +40,28 @@ class Response:
 
 def authed(fn):
     """Endpoints that need a signed-in session. The handler receives the
-    live Mesh as a third argument so it can't forget the check."""
+    live Mesh as a third argument so it can't forget the check. Raw-body
+    handlers get their extra ``raw`` argument passed through."""
 
     @functools.wraps(fn)
-    def wrapper(app, req):
+    def wrapper(app, req, *args):
         mesh = app.mesh
         if mesh is None:
             return {"error": "Sign in first"}
-        return fn(app, req, mesh)
+        return fn(app, req, mesh, *args)
 
     return wrapper
 
 
-def dispatch(handler, app, req):
+def dispatch(handler, app, req, *args):
     """Run one endpoint with the v1 error contract: domain errors come back
     as ``{"error": ...}`` JSON (HTTP 200), never as an HTML error page."""
     try:
-        return handler(app, req)
+        return handler(app, req, *args)
     except AgentBridgeError as e:
         return {"error": str(e)}
     except json.JSONDecodeError:
         return {"error": "malformed JSON body"}
+    except Exception as e:  # noqa: BLE001 — a bug must never kill the socket
+        log.exception("endpoint %s failed", req.path)
+        return {"error": f"internal error: {e}"}

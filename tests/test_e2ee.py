@@ -221,3 +221,27 @@ _HOME_SEQ = {"n": 0}
 def _new_home(mesh):
     _HOME_SEQ["n"] += 1
     return mesh.home.parent / f"fresh-device-{_HOME_SEQ['n']}"
+
+
+# -------------------------------------------------------------- blobs (R13)
+
+def test_blob_seal_roundtrip_and_injection_rules(world):
+    meshes, mk, recovery, root = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    snap = aryan.create_chat("Files", members=["fable"])
+    ripple(aryan, snap.id, fable)
+
+    data = b"attachment bytes " * 100
+    sealed = aryan.sealer.seal_blob(snap.id, "f-1.bin", data)
+    assert sealed.startswith(b"AB2E") and data not in sealed
+
+    # both members open it; an id swap refuses (AAD binds the blob id)
+    assert aryan.sealer.open_blob(snap.id, "f-1.bin", sealed) == data
+    assert fable.sealer.open_blob(snap.id, "f-1.bin", sealed) == data
+    assert fable.sealer.open_blob(snap.id, "f-2.bin", sealed) is None
+
+    # a PLAIN blob dropped into a sealed room is refused (injection rule)
+    assert aryan.sealer.open_blob(snap.id, "f-3.bin", b"plain bytes") is None
+
+    # a non-member can't open the blob at all (no wrapped epoch copy)
+    assert meshes["sudhir"].sealer.open_blob(snap.id, "f-1.bin", sealed) is None

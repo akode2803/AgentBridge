@@ -64,11 +64,11 @@ class ChatOverlays:
         return out
 
     # ------------------------------------------------------------------- pins
-    def put_pin(self, msg_id: str, by: str) -> None:
-        self.tx.put_doc(
-            P.pin(self.chat_id, msg_id),
-            {"by": by, "at": utcnow_iso(), "ns": next_ns()},
-        )
+    def put_pin(self, msg_id: str, by: str, hours: float | None = None) -> None:
+        doc = {"by": by, "at": utcnow_iso(), "ns": next_ns()}
+        if hours:
+            doc["until_ns"] = doc["ns"] + int(hours * 3600 * 1e9)
+        self.tx.put_doc(P.pin(self.chat_id, msg_id), doc)
 
     def remove_pin(self, msg_id: str) -> None:
         self.tx.delete_doc(P.pin(self.chat_id, msg_id))
@@ -175,7 +175,8 @@ class UserState:
 
     # -------------------------------------------------- chat-list overlays
     def set_flag(self, name: str, value: Any) -> None:
-        """pinned / deleted / forced_unread / mute — the sidebar overlays."""
-        if name not in ("pinned", "deleted", "forced_unread", "mute"):
+        """pinned / archived / deleted / forced_unread / mute — the
+        sidebar overlays (all per-user, all merged)."""
+        if name not in ("pinned", "archived", "deleted", "forced_unread", "mute"):
             raise ValueError(f"unknown state flag {name!r}")
         self._merge(**{name: value})

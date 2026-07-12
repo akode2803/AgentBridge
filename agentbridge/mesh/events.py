@@ -35,7 +35,8 @@ from . import authz
 __all__ = [
     "EV_CREATED", "EV_MEMBER_ADDED", "EV_MEMBER_REMOVED", "EV_MEMBER_LEFT",
     "EV_ADMIN_GRANTED", "EV_ADMIN_REVOKED", "EV_RENAMED", "EV_DESCRIPTION",
-    "EV_PERMISSIONS", "EV_AVATAR", "EV_KEY_ROTATED", "Resolver", "fold",
+    "EV_PERMISSIONS", "EV_AVATAR", "EV_DELETED", "EV_KEY_ROTATED",
+    "Resolver", "fold",
 ]
 
 EV_CREATED = "created"
@@ -48,6 +49,7 @@ EV_RENAMED = "renamed"
 EV_DESCRIPTION = "description"
 EV_PERMISSIONS = "permissions_changed"
 EV_AVATAR = "avatar"
+EV_DELETED = "chat_deleted"     # terminal: admins only, groups only (R13)
 EV_KEY_ROTATED = "key_rotated"  # applied in R9
 
 
@@ -77,6 +79,9 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> None:
     etype = ev.get("type")
     author = env.get("from", "")
     ns = int(env.get("ns", 0))
+
+    if snap.deleted:
+        return  # terminal: nothing folds after deletion (incl. a re-'created')
 
     if etype == EV_CREATED:
         if snap.members:
@@ -156,6 +161,15 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> None:
             snap.name = str(ev.get("name") or snap.name)
         elif etype == EV_DESCRIPTION:
             snap.description = str(ev.get("text") or "")
+        else:
+            snap.avatar = str(ev.get("sha") or "")  # "" clears the photo
+
+    elif etype == EV_DELETED:
+        # groups only, admins only — a DM/self chat is cleared, never deleted
+        if snap.kind is not ChatKind.GROUP or not authz.is_admin(snap, author):
+            return
+        snap.deleted = True
+        snap.members = {}  # nobody is a member of a dead chat (reads all stop)
 
     elif etype == EV_PERMISSIONS:
         if fixed_membership or not authz.can_change_permissions(snap, author):

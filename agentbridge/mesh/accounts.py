@@ -15,6 +15,7 @@ Model (docs/FORMAT2.md + memory `agentbridge-account-model`):
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import secrets
@@ -304,6 +305,43 @@ class AccountsService:
         )
 
     # ------------------------------------------------------------- lifecycle
+    def set_avatar(self, data: bytes, *, agent: str | None = None) -> Account:
+        """Profile photo: blob at ``avatars/<name>.jpg`` + a {sha256, updated}
+        marker on the account doc (cache busting). Owner-gated for agents.
+        Photos are directory metadata — plain at rest like the rest of the
+        account doc; VIEW access is matrix-gated at every connector."""
+        target = self._writable_target(agent)
+        if not data:
+            raise ValidationError("empty image")
+        sha = hashlib.sha256(data).hexdigest()
+        self.tx.put_blob(P.avatar(target), data)
+        return self.directory.patch(
+            target,
+            lambda doc: doc.update(avatar={"sha256": sha, "updated": utcnow_iso()}),
+        )
+
+    def clear_avatar(self, *, agent: str | None = None) -> Account:
+        target = self._writable_target(agent)
+        return self.directory.patch(target, lambda doc: doc.pop("avatar", None))
+
+    def set_agent_harness(self, agent: str, changes: dict) -> Account:
+        """Owner-set harness config for ONE agent (model, reasoning effort,
+        concurrency, …). A shallow merge; a None value drops the key. R16
+        formalizes the schema — until then this is the model-picker's store."""
+        target = self._writable_target(agent)
+        if target == self.user:
+            raise ValidationError("harness settings apply to agents only")
+
+        def apply(doc: dict) -> None:
+            harness = (doc.setdefault("agent", {})).setdefault("harness", {})
+            for k, v in (changes or {}).items():
+                if v is None:
+                    harness.pop(k, None)
+                else:
+                    harness[k] = v
+
+        return self.directory.patch(target, apply)
+
     def set_machine_agents_active(self, active: bool) -> list[str]:
         """The EXPLICIT stand-down/resume switch for this machine's agents.
         NOT wired to logout (D19, Aryan 2026-07-13): signing out leaves agents

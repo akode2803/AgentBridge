@@ -17,7 +17,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import api_auth, api_chats
+from . import (
+    api_agents,
+    api_auth,
+    api_chats,
+    api_files,
+    api_membership,
+    api_messages,
+    api_profile,
+)
 from .context import GuiApp
 from .routing import Request, Response, dispatch
 from .sse import stream
@@ -47,11 +55,14 @@ CONTENT_TYPES = {
 
 GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
-for mod in (api_auth, api_chats):
+RAW_ROUTES: dict = {}
+for mod in (api_auth, api_chats, api_messages, api_membership,
+            api_profile, api_agents, api_files):
     GET_ROUTES.update(mod.GET)
     POST_ROUTES.update(mod.POST)
+    RAW_ROUTES.update(getattr(mod, "RAW_POST", {}))
 
-MAX_BODY = 64 * 1024 * 1024  # uploads ride their own raw route (R13b)
+MAX_BODY = 64 * 1024 * 1024  # JSON bodies and raw uploads alike
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -80,18 +91,35 @@ class Handler(BaseHTTPRequestHandler):
         self._static(path)
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path = parts.path
+        if path == "/api/shutdown":
+            self._json({"ok": True})
+            import threading
+
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
+            raw = self.rfile.read(length) if length else b""
+        except (ValueError, OSError):
+            self._json({"error": "unreadable body"}, status=400)
+            return
+        raw_handler = RAW_ROUTES.get(path)
+        if raw_handler is not None:
+            params = {k: v[0] for k, v in parse_qs(parts.query).items()}
+            req = Request(method="POST", path=path, params=params)
+            self._reply(dispatch(raw_handler, self.app, req, raw))
+            return
         handler = POST_ROUTES.get(path)
         if handler is None:
             self._json({"error": f"unknown endpoint {path}"}, status=404)
             return
         try:
-            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
-            raw = self.rfile.read(length) if length else b""
             data = json.loads(raw) if raw else {}
             if not isinstance(data, dict):
                 data = {}
-        except (ValueError, OSError):
+        except ValueError:
             self._json({"error": "malformed JSON body"}, status=400)
             return
         req = Request(method="POST", path=path, data=data)

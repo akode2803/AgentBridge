@@ -79,12 +79,35 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   the reader tolerates junk, but E2EE is about confidentiality/authenticity,
   not anti-abuse (that's the permission layer + rate limits, R15).
 
-## File-blob encryption — deferred to R13
+## File-blob encryption — SETTLED R13
 
-v2 has no upload path yet (that arrives with the GUI connector). Attachment
-blobs will be sealed under the same chat key with a per-file key; the envelope
-already carries a `files` list inside the encrypted body. Tracked as an
-`OPEN(R13)` item in `docs/FORMAT2.md`.
+Attachment blobs are sealed under the chat's epoch keys (format in
+`docs/FORMAT2.md`): AAD binds `chat|blob|blob-id|epoch`, so a blob can't be
+swapped under a different id, and a non-member holds no epoch copy to open
+it. **Provenance rides the signed message** naming the blob (`files[].sha256`
+inside the encrypted, signed body) — connectors verify the sha before
+serving. Plain bytes are honored only in chats with no epochs at all (the
+same legacy-only rule as plaintext envelopes). Profile photos and group
+photos are deliberately METADATA (plain at rest, like names): view access is
+matrix-/membership-gated at the connectors, not by crypto.
+
+## Known gap — fold genesis integrity (R13.5, must land before R14)
+
+Found by our own R13 tests: info events are plaintext and unsigned, and the
+fold's "first `created` wins" rule trusts `ns` ordering — so a writer can
+BACKDATE a forged genesis (ns earlier than the real one) and the fold
+re-derives the whole chat from the forged state ("genesis theft"); every
+later legitimate event then fails its authority check against the forged
+membership. Post-genesis forgery is already dead (authority checks in the
+fold, now exercised by non-backdated tests). The R13.5 hardening round adds:
+Ed25519 **signatures on info events** (an author with published keys can no
+longer be impersonated), **genesis-digest-bound chat ids** for v2-created
+chats (a chat id commits to its genesis event, so no alternative genesis can
+claim it), and **manifest-anchored epoch-0 acceptance** (plaintext envelopes
+and blobs accepted only for chats listed by the migrator, so a fabricated
+chat can't carry attributed plaintext). Residual after R13.5: a legitimate
+MEMBER of a *migrated* (non-digest-bound) chat backdating their own signed
+genesis — documented, revisited at the R24/R25 review rounds.
 
 ## Migration — R9.5
 

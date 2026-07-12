@@ -13,6 +13,7 @@ ported from v1's verified ``_missing_owners``.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 
@@ -280,6 +281,44 @@ class MembershipService:
         )
         return self.refold(chat_id)
 
+    def set_avatar(self, chat_id: str, data: bytes) -> ChatSnapshot:
+        """Group photo: blob + an EV_AVATAR event carrying its sha (the
+        marker lives in the FOLD, rebuildable — never a LWW meta field)."""
+        snap = self.messaging.snapshot(chat_id)
+        if not authz.can_edit_settings(snap, self.user):
+            raise PermissionDenied("you may not edit this chat's settings")
+        if not data:
+            raise ValidationError("empty image")
+        sha = hashlib.sha256(data).hexdigest()
+        self.tx.put_blob(P.chat_avatar(chat_id), data)
+        self.messaging.post_event(
+            chat_id, {"type": events.EV_AVATAR, "sha": sha, "by": self.user}
+        )
+        return self.refold(chat_id)
+
+    def clear_avatar(self, chat_id: str) -> ChatSnapshot:
+        snap = self.messaging.snapshot(chat_id)
+        if not authz.can_edit_settings(snap, self.user):
+            raise PermissionDenied("you may not edit this chat's settings")
+        self.messaging.post_event(
+            chat_id, {"type": events.EV_AVATAR, "sha": "", "by": self.user}
+        )
+        return self.refold(chat_id)
+
+    def delete_chat(self, chat_id: str) -> ChatSnapshot:
+        """Group deletion for everyone — admin-only, TERMINAL in the fold
+        (members empty afterwards, so every read and write refuses). Bodies
+        stay on disk until a future janitor round reclaims them."""
+        snap = self.messaging.snapshot(chat_id)
+        if snap.kind is not ChatKind.GROUP:
+            raise ValidationError("only groups can be deleted for everyone")
+        if not authz.is_admin(snap, self.user):
+            raise PermissionDenied("only an admin can delete this group")
+        self.messaging.post_event(
+            chat_id, {"type": events.EV_DELETED, "by": self.user}
+        )
+        return self.refold(chat_id)
+
     def set_permissions(self, chat_id: str, changes: dict) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
         if not authz.can_change_permissions(snap, self.user):
@@ -302,7 +341,7 @@ class MembershipService:
         fold to an empty snapshot — never clobber meta with that; partial-but-
         genesis-bearing folds converge via every member's next refold."""
         snap = events.fold(chat_id, self.store.messages(chat_id), self.directory)
-        if not snap.members:
+        if not snap.members and not snap.deleted:
             return self.messaging.snapshot(chat_id)
         self.tx.put_doc(P.meta(chat_id), snap.to_dict())
         return snap

@@ -118,6 +118,10 @@ class GuiApp:
             code = mesh.accounts.upgrade_login(name, password)
             if mesh.keystore.load(name) is None:
                 mesh.accounts.unlock(password)  # new machine: unwrap + cache
+            try:
+                mesh.accounts.claim_machine_agents()  # D19: login claims
+            except Exception:  # noqa: BLE001 — claiming must not block login
+                pass
             self._detach()
             self._adopt(mesh)
         out = {"ok": True, "user": name}

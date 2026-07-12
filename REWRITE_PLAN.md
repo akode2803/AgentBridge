@@ -279,10 +279,42 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
         pytest-timeout added (R3 CI-hang lesson). 8 HTTP-level tests over
         real sockets incl. E2EE peer delivery + SSE + traversal guard
         (187 total).
-  - [ ] **R13b — endpoint parity + sealed file blobs.** Every remaining v1
-        endpoint over the facade + upload staging + `Sealer.seal_blob`/
-        `open_blob` (file bytes under chat keys — closes OPEN(R13)) +
-        `/api/mesh/file` decrypt-serve + avatar audience enforcement.
+  - [x] **R13b — endpoint parity + sealed file blobs. DONE 2026-07-13** —
+        full v1 endpoint surface over the facade (star/pin[+`until_ns` lazy
+        expiry]/edit/delete/undelete/clear/react/forward[re-seals blobs per
+        target]/flags[archive/pin/hide/mark-unread/mute]/chat_info/typing/
+        livefeed; membership+admins+rename/description/permissions;
+        profile/handle/about/status/privacy/blocks/password/delete-account;
+        agents create/patch[harness = model-picker scaffold via NEW
+        `accounts.set_agent_harness`]/delete/stand-down + `control.json`
+        pause; avatars user/agent/group). **Sealed blobs close OPEN(R13):**
+        `Sealer.seal_blob`/`open_blob` (`AB2E`+epoch+nonce+ct, AAD binds
+        chat|blob|id|epoch; plain honored only in epoch-less legacy chats;
+        provenance = `files[].sha256` inside the SIGNED message, verified
+        before serving). NEW fold events: `avatar` (group photo marker in
+        the fold, not LWW meta) + `chat_deleted` (admins, groups, TERMINAL —
+        empty member list, later events incl. forged re-`created` ignored).
+        D19 login-claims wired into GUI login. Docs synced (FORMAT2 blobs
+        SETTLED + THREAT_MODEL). 25 new tests — 204 total. **Two review
+        catches:** the R5-era forged-event fold tests were HOLLOW (backdated
+        ns died on the before-genesis rule, never reaching the authority
+        checks — now post-genesis and genuinely exercising them), and that
+        audit surfaced the **genesis-forgery gap → R13.5.**
+  - [ ] **R13.5 — fold genesis integrity (MUST land before R14).** Found by
+        our own tests: a BACKDATED forged `created` event wins "first
+        created wins" and steals the whole chat (fold re-derives from forged
+        membership; real events then fail authority checks). Fix set:
+        (1) Ed25519 signatures on info events — build_event signs
+        id|ns|from|event, fold verifies whenever the author has published
+        keys (impersonation dies; unsigned accepted only for pre-upgrade
+        legacy authors); (2) v2 chat ids commit to their genesis
+        (digest-bound id suffix; fold refuses a `created` whose digest
+        doesn't match the chat id); (3) epoch-0 (plaintext) envelopes+blobs
+        accepted only for chats the migration manifest lists (kills
+        fabricated-chat attribution); (4) sync-ingestion sanity: drop
+        records whose `from` ≠ log-owner (defense-in-depth vs buggy
+        clients). Residual (documented in THREAT_MODEL): a member of a
+        MIGRATED chat backdating their own signed genesis — revisit R24/25.
   - [ ] **R13c — frontend wiring.** Caps probe (v1 poll vs v2 SSE+poll
         fallback), shape adapters; the OLD app must keep working after
         every frontend edit (it shares the modules).

@@ -40,8 +40,8 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 __all__ = [
     "b64e", "b64d", "generate_identity", "identity_pubs", "wrap_bundle",
     "unwrap_bundle", "new_recovery_code", "new_chat_key", "wrap_key_for",
-    "unwrap_key_with", "seal_bytes", "unseal_bytes", "sign", "verify",
-    "CryptoFail",
+    "unwrap_key_with", "seal_bytes", "unseal_bytes", "seal_raw", "unseal_raw",
+    "sign", "verify", "CryptoFail",
 ]
 
 _KEYWRAP_INFO = b"agentbridge.keywrap.v2"
@@ -165,6 +165,22 @@ def unseal_bytes(chat_key: bytes, aad: bytes, nonce_b64: str, ct_b64: str) -> by
         return ChaCha20Poly1305(chat_key).decrypt(b64d(nonce_b64), b64d(ct_b64), aad)
     except (ValueError, InvalidTag) as e:
         raise CryptoFail("cannot open the envelope") from e
+
+
+# --------------------------------------------------------------------- blobs
+# Raw-binary variant for file attachments (R13): no b64 bloat on disk.
+
+def seal_raw(chat_key: bytes, aad: bytes, plaintext: bytes) -> bytes:
+    """``nonce(12B) + ciphertext`` — same AEAD as envelopes, binary layout."""
+    nonce = os.urandom(12)
+    return nonce + ChaCha20Poly1305(chat_key).encrypt(nonce, plaintext, aad)
+
+
+def unseal_raw(chat_key: bytes, aad: bytes, sealed: bytes) -> bytes:
+    try:
+        return ChaCha20Poly1305(chat_key).decrypt(sealed[:12], sealed[12:], aad)
+    except (ValueError, InvalidTag) as e:
+        raise CryptoFail("cannot open the blob") from e
 
 
 def sign(bundle: bytes, data: bytes) -> str:

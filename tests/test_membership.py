@@ -280,11 +280,13 @@ def test_forged_events_ignored_by_fold(world):
     snap = aryan.create_chat("Fortress", members=["fable"])
     aryan.outbox.flush_once()
 
-    # eve (not a member) writes forged events straight into the transport
+    # eve (not a member) writes forged events straight into the transport;
+    # ns must sort AFTER the real genesis to exercise the authority checks
+    # (a backdated ns would be dropped by the before-genesis rule instead)
     eve_events = [
-        {"id": "f1", "ns": 10**18, "ts": "t", "from": "sudhir", "kind": "info",
+        {"id": "f1", "ns": 2 * 10**18, "ts": "t", "from": "sudhir", "kind": "info",
          "event": {"type": "member_added", "who": "sudhir", "by": "sudhir"}},
-        {"id": "f2", "ns": 10**18 + 1, "ts": "t", "from": "fable", "kind": "info",
+        {"id": "f2", "ns": 2 * 10**18 + 1, "ts": "t", "from": "fable", "kind": "info",
          "event": {"type": "admin_granted", "who": "fable", "by": "fable"}},
     ]
     for ev in eve_events:
@@ -384,9 +386,10 @@ def test_agents_can_never_remove_members(world):
         coco.remove_member(snap.id, "aryan")
     assert "never remove" in str(e.value)
 
-    # forged agent-authored removal dies in the fold too
+    # forged agent-authored removal dies in the fold too (post-genesis ns —
+    # a backdated one would be dropped before the authority check even ran)
     aryan.tx.append_log(snap.id, "coco@rogue", {
-        "id": "forge1", "ns": 10**18, "ts": "t", "from": "coco", "kind": "info",
+        "id": "forge1", "ns": 2 * 10**18, "ts": "t", "from": "coco", "kind": "info",
         "event": {"type": "member_removed", "who": "aryan", "by": "coco"},
     })
     aryan.sync.sync_once([snap.id])
@@ -401,3 +404,78 @@ def test_agent_kind_lookup(world):
     assert d.owner_of("aryan") is None
     assert d.missing_owners(["aryan", "coco"]) == {"fable": "coco"}
     assert d.missing_owners(["aryan", "claude"]) == {}
+
+
+# --------------------------------------------------------- R13: delete + photo
+
+def test_delete_chat_terminal_and_admin_only(world):
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Doomed", members=["fable"])
+    ripple(aryan, snap.id, fable)
+
+    # a plain member may not delete
+    with pytest.raises(PermissionDenied):
+        fable.delete_chat(snap.id)
+
+    dead = aryan.delete_chat(snap.id)
+    assert dead.deleted is True and dead.members == {}
+    ripple(aryan, snap.id, fable)
+    assert all(s.id != snap.id for s in fable.chats_for())
+    with pytest.raises(Exception):
+        fable.post(snap.id, "anyone home?")
+
+    # a forged later 'created' cannot resurrect it (terminal in the fold).
+    # NOTE: a BACKDATED forged genesis is a separate, real gap (it would win
+    # "first created wins") — tracked as the R13.5 fold-integrity round.
+    aryan.tx.append_log(snap.id, "fable@rogue", {
+        "id": "res1", "ns": 2 * 10**18 + 5, "ts": "t", "from": "fable",
+        "kind": "info",
+        "event": {"type": "created", "name": "Zombie",
+                  "members": {"fable": "admin"}},
+    })
+    aryan.sync.sync_once([snap.id])
+    refolded = aryan.membership.refold(snap.id)
+    assert refolded.deleted is True and refolded.members == {}
+
+
+def test_delete_chat_refused_for_dm(world):
+    aryan = world["aryan"]
+    dm = aryan.create_dm("fable")
+    with pytest.raises(ValidationError):
+        aryan.delete_chat(dm.id)
+
+
+def test_group_avatar_folds_and_gates(world):
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Pic", members=["fable"],
+                             permissions={"edit_settings": "admins"})
+    ripple(aryan, snap.id, fable)
+
+    updated = aryan.set_avatar(snap.id, b"jpegbytes")
+    assert len(updated.avatar) == 64  # sha256 marker in the FOLD
+    assert aryan.tx.get_blob(P.chat_avatar(snap.id)) == b"jpegbytes"
+
+    # a non-admin's avatar event is refused at write AND ignored at fold
+    ripple(aryan, snap.id, fable)
+    with pytest.raises(PermissionDenied):
+        fable.set_avatar(snap.id, b"sneaky")
+    aryan.tx.append_log(snap.id, "fable@rogue", {
+        "id": "av1", "ns": 2 * 10**18 + 9, "ts": "t", "from": "fable",
+        "kind": "info", "event": {"type": "avatar", "sha": "f" * 64},
+    })
+    aryan.sync.sync_once([snap.id])
+    refolded = aryan.membership.refold(snap.id)
+    assert refolded.avatar == updated.avatar  # forged change didn't stick
+
+    cleared = aryan.clear_avatar(snap.id)
+    assert cleared.avatar == ""
+
+
+def test_pin_expiry_is_lazy(world):
+    aryan = world["aryan"]
+    snap = aryan.create_chat("Pins")
+    env = aryan.post(snap.id, "pin me")
+    aryan.pin(snap.id, env.id, hours=-1)  # until_ns firmly in the past
+    assert aryan.pins(snap.id) == {}
+    aryan.pin(snap.id, env.id)  # forever
+    assert env.id in aryan.pins(snap.id)

@@ -205,6 +205,7 @@ class Account:
     privacy: Privacy = field(default_factory=Privacy)
     blocked: list[str] = field(default_factory=list)
     status: Status = field(default_factory=Status)
+    avatar: dict[str, Any] | None = None  # photo marker {sha256, updated} (R13)
     agent: AgentInfo | None = None
     agent_rules: AgentRules | None = None  # owner-set outbound rules (agents)
 
@@ -312,6 +313,8 @@ class ChatSnapshot:
     members: dict[str, Member] = field(default_factory=dict)
     permissions: ChatPermissions = field(default_factory=ChatPermissions)
     auto_dm: bool = False  # agent-DM born as a small group (dedup marker, v1)
+    avatar: str = ""       # sha256 of the group photo blob ("" = none) — R13
+    deleted: bool = False  # terminal (chat_deleted event) — R13
     key_epoch: int = 1
     materialized_ns: int = 0
 

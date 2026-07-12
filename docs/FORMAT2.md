@@ -143,7 +143,11 @@ Types (SETTLED R5 — `agentbridge/mesh/events.py` is normative): `created`
 (genesis: kind/name/members+roles/permissions/auto_dm/pulled), `member_added`
 (+`reason: "responsible_member"` for owner pull-ins), `member_removed`,
 `member_left`, `admin_granted`, `admin_revoked`, `renamed`, `description`,
-`avatar`, `permissions_changed` (partial merge), `key_rotated` (R9). Folding
+`avatar` (R13: `{sha}` = group-photo marker, `""` clears; blob at
+`chats/<id>/avatar.jpg`), `permissions_changed` (partial merge),
+`chat_deleted` (R13: groups only, admins only, TERMINAL — the fold empties
+the member list and ignores every later event incl. a forged re-`created`;
+bodies stay on disk until a future janitor), `key_rotated` (R9). Folding
 all info events across all logs in `(ns, from, id)` order yields the canonical
 state. Fold rules: first `created` wins; adds are idempotent; **authority is
 checked DURING the fold** (forged events from non-members/non-admins are
@@ -204,7 +208,18 @@ newest epoch's member set drifted from the snapshot — the race self-heal);
 readers try the epoch named in the envelope. A removed member keeps old epochs
 (history) but never gets a new one (D4). Normative code: `agentbridge/crypto/`
 + `agentbridge/mesh/keyring.py`; rationale in `docs/THREAT_MODEL.md`.
-**Blob files** stay `OPEN(R13)` — no upload path in v2 until the GUI connector.
+
+### File blobs — `chats/<id>/files/<blob-id>`  (SETTLED R13)
+Sealed binary: `b"AB2E" + epoch(8B BE) + nonce(12B) + ChaCha20Poly1305 ct`,
+AAD = `"<chat>|blob|<blob-id>|<epoch>"` under the same chat epoch keys as
+messages (`Sealer.seal_blob`/`open_blob`). No magic prefix = plain bytes,
+honored ONLY while the chat has no epochs (pure legacy) — the same injection
+rule as plaintext envelopes. **Provenance rides the signed message** that
+names the blob: `files: [{id, name, bytes, sha256}]` — readers verify the
+sha before serving. Pins gained optional `until_ns` (lazy expiry, R13).
+Profile photos (`avatars/<name>.jpg` + `{sha256, updated}` marker on the
+account doc) are directory metadata: plain at rest, VIEW-gated by the
+privacy matrix at every connector.
 
 ## Local (per-machine, NOT synced) — `~/.agentbridge/`
 

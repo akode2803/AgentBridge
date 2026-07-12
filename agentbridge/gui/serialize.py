@@ -73,6 +73,8 @@ def chat_json(
         "admins": snap.admins(),
         "auto_dm": snap.auto_dm,
     }
+    if snap.avatar:
+        out["avatar"] = snap.avatar  # sha marker; bytes ride /api/mesh/avatar
     if overview is not None:
         out.update(
             last=snippet_json(overview.get("last")),
@@ -82,6 +84,7 @@ def chat_json(
             archived=bool(overview.get("archived")),
             pinned=bool(overview.get("pinned")),
             mute=overview.get("mute", False),
+            hidden=bool(overview.get("deleted")),  # delete-for-me (chat list)
         )
     if full:
         perms = snap.permissions
@@ -115,6 +118,8 @@ def user_json(acc: Account, profile: dict, presence: dict | None = None) -> dict
                 "messaging", "add_to_group"):
         if key in profile:
             out[key] = profile[key]
+    if profile.get("photo_visible") and acc.avatar:
+        out["avatar"] = acc.avatar  # marker; bytes ride /api/mesh/avatar
     if acc.kind is UserKind.AGENT and acc.agent:
         out["owners"] = [acc.agent.owner]  # v1 spelling (cutover compat)
         out["settings"] = dict(acc.agent.harness)

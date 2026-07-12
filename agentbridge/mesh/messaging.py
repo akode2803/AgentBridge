@@ -12,6 +12,8 @@ OutboxWorker flushes it with retry-forever semantics (R3).
 
 from __future__ import annotations
 
+import time
+
 from ..core.errors import NotAMember, PermissionDenied, ValidationError
 from ..core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Message, MsgKind
 from ..core.timekit import new_id, next_ns, utcnow_iso
@@ -163,9 +165,11 @@ class MessagingService:
         self._require_member(chat_id)
         ChatOverlays(self.tx, chat_id).set_reaction(self.user, msg_id, emoji)
 
-    def pin(self, chat_id: str, msg_id: str) -> None:
+    def pin(self, chat_id: str, msg_id: str, hours: float | None = None) -> None:
+        """Pin, optionally expiring (v1 UX: 24h/7d/forever). Expiry is LAZY —
+        readers just stop seeing it; nobody writes a cleanup."""
         self._require_member(chat_id)
-        ChatOverlays(self.tx, chat_id).put_pin(msg_id, by=self.user)
+        ChatOverlays(self.tx, chat_id).put_pin(msg_id, by=self.user, hours=hours)
 
     def unpin(self, chat_id: str, msg_id: str) -> None:
         self._require_member(chat_id)
@@ -248,6 +252,8 @@ class MessagingService:
             "archived": bool(state.get("archived")),
             "pinned": bool(state.get("pinned")),
             "mute": state.get("mute", False),
+            # delete-for-me of the WHOLE chat (hidden from my list, undoable)
+            "deleted": bool(state.get("deleted")),
         }
 
     def my_state(self, chat_id: str) -> dict:
@@ -266,7 +272,12 @@ class MessagingService:
 
     def pins(self, chat_id: str) -> dict[str, dict]:
         self._require_member(chat_id)
-        return ChatOverlays(self.tx, chat_id).pins()
+        now = time.time_ns()
+        return {
+            mid: doc
+            for mid, doc in ChatOverlays(self.tx, chat_id).pins().items()
+            if not doc.get("until_ns") or int(doc["until_ns"]) > now
+        }
 
     def starred(self, chat_id: str) -> list[Message]:
         """Starred = ids resolved LIVE (v2 change: no snapshots — a redacted
