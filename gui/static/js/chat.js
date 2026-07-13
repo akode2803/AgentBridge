@@ -345,17 +345,22 @@ async function renderMeshChat(force) {
   let prevFrom = null, prevDay = null;
   // the E2EE notice pill (R32, WhatsApp pattern) — SYNTHETIC, client-rendered
   // from state (never a log event: it's derived, and every existing chat must
-  // show it without a migration). In a DM whose peer is unverified it doubles
-  // as the verification nudge; clicking opens chat info, where the R31
-  // Encryption card carries the fingerprint + Mark as verified.
+  // show it without a migration). It's a STATIC notice everywhere EXCEPT a DM
+  // whose peer isn't verified yet: there it becomes a clickable nudge that
+  // opens the verification dialog directly (a group/self-chat/verified DM has
+  // nothing to act on, so the pill stays inert — no pointer, no click).
   if (ms.encrypted) {
     const encPeer = meta.kind === "dm"
       ? (meta.members || []).find((u) => u !== ms.user) : null;
     const encRec = encPeer ? ms.users?.[encPeer] || {} : {};
-    const nudge = !!(encPeer && encRec.key_fp && !encRec.key_verified);
-    parts.push(`<button class="info-pill enc-pill" title="Open chat info">${ICONS.key}<span>Messages are end-to-end encrypted. No one outside this chat can read them.${
-      nudge ? ` <span class="enc-cta">Tap to verify @${esc(encPeer)}'s keys.</span>` : ""
-    }</span></button>`);
+    const notice = "Messages are end-to-end encrypted. No one outside this chat can read them.";
+    if (encPeer && encRec.key_fp && !encRec.key_verified) {
+      parts.push(`<button class="info-pill enc-pill" data-verify="${esc(encPeer)}"
+        title="Verify @${esc(encPeer)}'s keys">${ICONS.key}<span>${notice}
+        <span class="enc-cta">Tap to verify @${esc(encPeer)}'s keys.</span></span></button>`);
+    } else {
+      parts.push(`<div class="info-pill enc-notice">${ICONS.key}<span>${notice}</span></div>`);
+    }
   }
   // we have the chat's beginning (tail didn't truncate): open with its
   // birth — a date pill plus a "created by" pill, like Telegram
@@ -849,9 +854,11 @@ function bindTranscript(tr, chatId, data, ctx) {
       if (row) toggleSelect(row.dataset.mid, row, chatId);
       return;
     }
-    // the E2EE notice pill opens chat info (the Encryption card lives there)
-    if (e.target.closest(".enc-pill")) {
-      location.hash = `#/chats/${chatId}/details`;
+    // the E2EE notice pill's verify nudge opens the verification dialog
+    // straight away (not the info pane, which lands above the fold)
+    const encBtn = e.target.closest(".enc-pill");
+    if (encBtn) {
+      V.openKeyVerify(encBtn.dataset.verify);
       return;
     }
     const rm = e.target.closest(".read-more");

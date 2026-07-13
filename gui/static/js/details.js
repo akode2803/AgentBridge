@@ -6,7 +6,7 @@ import { ICONS } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
 import { csel, mountCsels } from "./csel.js";
-import { confirmModal, openPhotoViewer } from "./modal.js";
+import { confirmModal, openPhotoViewer, openModal, closeModal } from "./modal.js";
 import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins } from "./state.js";
 import { mediaThumb } from "./files.js";
 import { V } from "./views.js";
@@ -253,16 +253,10 @@ async function renderChatDetails() {
   $("#cd-close").addEventListener("click", () => { location.hash = `#/chats/${chatId}`; });
   const encVerify = $("#enc-verify");
   if (encVerify) encVerify.addEventListener("click", async () => {
-    const name = dmOther(meta, ms.user);
-    const r = await api("/api/mesh/key_verify", { name });
-    if (r.error) { toast(r.error, true); return; }
-    // patch the CURRENT state object — `ms` is this render's capture and a
-    // state poll may have replaced Mesh.state since (the chip stayed hidden)
-    const cur = Mesh.state;
-    if (cur?.users?.[name]) cur.users[name].key_verified = r.verified || "now";
-    toast(`@${name}'s keys marked verified`, { check: true });
-    Mesh.detailsKey = "";
-    renderChatDetails();
+    if (await markKeyVerified(dmOther(meta, ms.user))) {
+      Mesh.detailsKey = "";
+      renderChatDetails();
+    }
   });
   $("#ci-search").addEventListener("click", () => {
     Mesh.searchView = true;
@@ -498,6 +492,55 @@ async function renderChatDetails() {
   });
 }
 V.renderChatDetails = renderChatDetails;
+
+// R32: the ONE verify mutation, shared by the info-pane Encryption card and
+// the transcript pill's dialog. Patches the CURRENT state object (a poll may
+// have replaced Mesh.state since the caller's render captured `ms`). Returns
+// whether it took.
+async function markKeyVerified(name) {
+  const r = await api("/api/mesh/key_verify", { name });
+  if (r.error) { toast(r.error, true); return false; }
+  const cur = Mesh.state;
+  if (cur?.users?.[name]) cur.users[name].key_verified = r.verified || "now";
+  toast(`@${name}'s keys marked verified`, { check: true });
+  return true;
+}
+
+// R32: the focused key-verification dialog — the transcript's E2EE pill nudge
+// opens THIS instead of the info pane, so the fingerprint + action are right
+// under the cursor (the card sits below the fold in chat info). Same code,
+// same endpoint as the card; a modal is just the direct surface.
+function openKeyVerify(name) {
+  const rec = Mesh.state?.users?.[name] || {};
+  if (!rec.key_fp) { toast("No key to verify yet", true); return; }
+  const verified = !!rec.key_verified;
+  const box = openModal(`
+    <div class="cf-title">Verify @${esc(name)}'s keys</div>
+    <div class="cf-body">Compare this code with the one @${esc(name)} sees
+      (their chat info, or Settings &rarr; Account) over a call or in person.
+      If it matches on both devices, no one has swapped the keys.</div>
+    <code class="key-fp-code" style="margin:4px 0 2px">${esc(rec.key_fp)}</code>
+    <div class="cf-actions">
+      ${verified
+        ? `<span class="owner-chip">Verified</span>
+           <button class="cf-cancel" id="kv-x">Close</button>`
+        : `<button class="cf-cancel" id="kv-x">Not now</button>
+           <button class="cf-go" id="kv-go">Mark as verified</button>`}
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#kv-x").addEventListener("click", closeModal);
+  const go = box.querySelector("#kv-go");
+  if (go) go.addEventListener("click", async () => {
+    const ok = await markKeyVerified(name);
+    closeModal();
+    if (ok) {   // the pill nudge + info pane both key off key_verified
+      if (Mesh.chatId) { Mesh.structKey = ""; V.renderMeshChat(true); }
+      if (Mesh.detailsView) { Mesh.detailsKey = ""; renderChatDetails(); }
+    }
+  });
+}
+V.openKeyVerify = openKeyVerify;
 
 // group photo (owner-only) — POST the finished 512px JPEG blob, then repaint
 // the pane; the header (if the chat is open) and the sidebar row pick up the

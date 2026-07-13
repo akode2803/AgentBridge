@@ -17,11 +17,15 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.105** (R32: the E2EE notice
-  pill at the top of every encrypted transcript — synthetic/client-rendered,
-  WhatsApp pattern — doubling as the "Tap to verify @name's keys" nudge for
-  unverified DM peers; clicking opens the Encryption card. Signed unpin
-  tombstones considered + skipped: deletion closes transport-side with the
+  `gui/__init__.py` in R26). Currently **v0.24.107** (R32.1 pill polish: the
+  E2EE notice pill is now static/inert everywhere except an unverified DM
+  peer, where the "Tap to verify @name's keys" nudge opens a focused
+  verification dialog — fingerprint + Mark as verified — instead of the info
+  pane). Before that: v0.24.106 (R33: delivered-vs-read receipts as a real
+  per-recipient `delivered_ns` cursor advanced on fetch, three-state bubble
+  ticks, and Message-info Delivered/Read timings); v0.24.105 (R32: the E2EE
+  notice pill — synthetic/client-rendered, WhatsApp pattern; signed unpin
+  tombstones considered + skipped, deletion closes transport-side with the
   queued per-member RLS round). Before that: v0.24.104 (R31.5: per-user state
   docs are owner-signed — forged `hidden`/`cleared`/`read_ns`/`mute` read as
   absent via the verified accessor `messaging.state_of` — and the local

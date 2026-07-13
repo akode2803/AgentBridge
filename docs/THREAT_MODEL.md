@@ -243,9 +243,11 @@ clicking **Mark as verified** records the verification in the pin store
 (machine-local, cleared if the pin ever legitimately advances). R32 adds the
 nudge that makes the flow discoverable: every encrypted chat opens with a
 client-rendered **E2EE notice pill** at the top of the transcript (WhatsApp
-pattern — synthetic, never a log event), and in a DM whose peer is unverified
-it reads "Tap to verify @name's keys" and opens the Encryption card. What
-remains is purely behavioral: a user who never compares codes keeps TOFU
+pattern — synthetic, never a log event). It is a static notice everywhere
+except a DM whose peer is unverified, where it becomes a clickable "Tap to
+verify @name's keys" that opens a focused verification dialog (fingerprint +
+Mark as verified) — the nudge disappears the moment the peer is verified.
+What remains is purely behavioral: a user who never compares codes keeps TOFU
 semantics — the same honest floor as Signal/WhatsApp safety numbers.
 
 ## Overlay authentication + fingerprints — CLOSED R31

@@ -1016,6 +1016,23 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       …". 4 receipt tests updated to the fetch-delivered semantics + 2 new
       (delivered-without-presence, message-info timings).
 
+- [x] **R32.1 — pill polish (v0.24.107).** Two fixes on the shipped R32 pill
+      (rebased on top of R33): (1) it was a button in EVERY encrypted chat, so
+      clicking it opened the info pane even for groups / self-chats /
+      already-verified DMs that have nothing to verify. Now it's a STATIC
+      `.enc-notice` (inert — no pointer, no click) everywhere except an
+      unverified DM peer, where it stays the clickable `.enc-pill` nudge.
+      (2) The nudge no longer routes to the info pane (the Encryption card sits
+      below the fold, needing a scroll); it opens a **focused verification
+      dialog** (`V.openKeyVerify`, a modal via openModal) showing the
+      fingerprint + Mark as verified directly. One shared `markKeyVerified(name)`
+      mutation now backs BOTH the modal and the info-pane card (no duplicated
+      verify/patch logic); on success the transcript rebuilds so the pill drops
+      to static immediately. Frontend-only (chat.js/details.js/views.js/
+      style.css). Live-verified on a scratch rig with all three chat kinds
+      (unverified DM = clickable modal, verified DM + group = inert static
+      notice, static click is a no-op).
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |
