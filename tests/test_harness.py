@@ -485,6 +485,22 @@ def test_clean_reply_sentinel_and_narration():
     assert clean_reply("NO_REPLY") == ("NO_REPLY", False)
 
 
+def test_feed_first_steps_bypass_the_throttle():
+    """The pane opens on the init write; the first steps arrive inside the
+    throttle window and MUST still land in the doc (live @claude feedback:
+    the feed used to jump straight to mid-run)."""
+    from agentbridge.harness.feed import RunFeed
+
+    writes: list[dict] = []
+    tx = SimpleNamespace(put_doc=lambda path, doc: writes.append(dict(doc)))
+    feed = RunFeed(tx, "helper", "c1")          # forced init write
+    for i in range(5):
+        feed.step(f"step {i}")                  # all within the throttle
+    activities = [w["activity"] for w in writes]
+    assert activities[:4] == ["Starting up…", "step 0", "step 1", "step 2"]
+    assert len(writes) == 4                     # step 3/4 throttled as before
+
+
 def test_settings_parse_and_clamp():
     s = HarnessSettings.from_account(None)
     assert (s.default_rule, s.concurrency, s.catchup) == ("tagged", 2, "recent")

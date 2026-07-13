@@ -49,7 +49,10 @@ class RunFeed:
             self.activity = line
             self.recent = (self.recent + [line])[-8:]
             self.tasks.append({"text": line, "ts": utcnow_iso()})
-            self.write("running")
+            # the first steps land inside the throttle window right after the
+            # forced init write — without forcing them too, the pane opens on
+            # "Starting up…" and jumps straight to mid-run (live feedback)
+            self.write("running", force=self.turns <= 3)
         except Exception:  # noqa: BLE001 — the feed must never break a run
             pass
 

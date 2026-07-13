@@ -44,6 +44,7 @@ STUB = textwrap.dedent("""
     if out:
         with open(os.path.join(out, "made.txt"), "w") as fh:
             fh.write("made by the stub")
+        open(os.path.join(out, "scrap.txt"), "w").close()  # empty scratch
     print(json.dumps({"type": "result",
                       "result": f"stub reply model={model} blocked={blocked}"}))
 """)
@@ -246,6 +247,31 @@ def test_usage_error_falls_back_to_minimal_args(arig, tmp_path):
         replies = [m for m in arig.owner.messages_for(snap.id)
                    if m.from_ == "helper"]
         assert len(replies) == 1 and replies[0].body.startswith("stub reply")
+    finally:
+        runner.close()
+
+
+def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
+    """Files a run leaves in its outbox attach to the reply; 0-byte scratch
+    does not (a live model once shipped an empty placeholder.txt)."""
+    monkeypatch.setenv("STUB_OUTBOX",
+                       str(arig.home / "harness" / "helper" / "outbox"))
+    snap = arig.owner.create_chat("Files", members=["helper"])
+    arig.owner.post(snap.id, "@helper make me a file")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        runner.mesh.outbox.flush_once()
+        arig.owner.sync.sync_once([snap.id])
+        reply = [m for m in arig.owner.messages_for(snap.id)
+                 if m.from_ == "helper"][0]
+        names = [f["name"] for f in reply.files]
+        assert names == ["made.txt"]          # scrap.txt (empty) stayed home
     finally:
         runner.close()
 

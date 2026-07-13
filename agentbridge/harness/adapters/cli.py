@@ -174,7 +174,12 @@ class CliResponder:
             raise RuntimeError(
                 f"{inv.preset.id} run failed (rc={rc}): {err[:STDERR_SNIP]}")
 
-        files = sorted(str(p) for p in outbox.iterdir() if p.is_file())
+        # everything the run left in the outbox rides the reply — except
+        # empty files: a model poking at its workdir once shipped a 0-byte
+        # placeholder.txt as an attachment (live @claude, 2026-07-13).
+        # R18's workspace scoping owns the real fix.
+        files = sorted(str(p) for p in outbox.iterdir()
+                       if p.is_file() and p.stat().st_size)
         return Reply(body=text, steps=steps, files=files)
 
     # ------------------------------------------------------------ plumbing
