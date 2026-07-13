@@ -17,10 +17,12 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.97**.
-- **Mesh root:** the **`mesh2/`** folder in the synced directory, remembered in
-  `~/.agentbridge/config.json` (`mesh_root`). A `supabase://…` root selects the
-  cloud transport instead (see the Supabase status below).
+  `gui/__init__.py` in R26). Currently **v0.24.99**.
+- **Mesh root:** **`supabase://mesh2`** — the cloud transport is now PRIMARY
+  (cutover 2026-07-13, R28), remembered in `~/.agentbridge/config.json`
+  (`mesh_root`). `mesh_root_folder_backup` keeps the synced-folder `mesh2/` path
+  as the rollback lever (the folder is left byte-intact). See the Supabase
+  status below.
 - **@claude** runs live on the dev box (adapter `claude`, broker-gated). @coco
   and @claudemcp are also hosted here.
 - **Fleet is clean + cut over (2026-07-13).** All R25/R26/0.24.97 fixes are
@@ -31,24 +33,26 @@ a stress/soak pass with a 40× read-latency fix, and the R25 security review.
   `.venv\Scripts\pythonw.exe -m agentbridge.gui` + `… -m agentbridge.harness --all`.
 - **Everything is committed and pushed.** A clone is a complete copy.
 
-### Supabase status — migrated + verified; perf fix landed; switch is Aryan-gated
+### Supabase status — PRIMARY + LIVE (cutover done 2026-07-13)
 
-The live mesh was migrated to Supabase and proven correct (all messages decrypt;
-E2EE is transport-agnostic), and the GUI cloud-root crash was fixed (v0.24.97).
-It was **rolled back to the folder** because `/api/mesh/state` took ~30 s on the
-cloud (117 ms on the folder): the GUI's hot endpoints re-read chat/account/
-presence metadata **straight from the transport**, the same docs many times per
-request — free on a local folder, ~290 ms/read over cloud RTT.
+Supabase is now the live mesh transport. The switch had been rolled back because
+`/api/mesh/state` took ~30 s on cloud (117 ms on folder): the GUI's hot
+endpoints re-read chat/account/presence metadata **straight from the transport**,
+the same docs many times per request — free on a folder, a network round-trip
+each on cloud. **R28 fixes the cause** with `transport/cache.py`
+`CachingTransport`, a short-TTL read cache (`get_doc`/`list_docs`/
+`list_chat_ids`) that `make_transport` wraps around cloud roots only. Measured
+live: the cloud state sweep dropped **13.5 s → 2.7 s** (steady-state ~3 s/poll
+behind the SSE stream). Parallel/batched metadata reads are the next lever if
+snappier is wanted.
 
-**R28 (v0.24.99) fixes the cause:** `transport/cache.py` `CachingTransport`, a
-short-TTL read cache (`get_doc`/`list_docs`/`list_chat_ids`) that
-`make_transport` wraps around cloud roots only; it collapses the per-request
-re-reads (a synthetic state sweep drops 58 transport reads → 14). What remains
-is **all live and needs Aryan's go-ahead**: time `/api/mesh/state` on the real
-project, re-run `scripts/migrate_folder_to_supabase.py` (idempotent copy; folder
-left intact), repoint `config.json` `mesh_root` → `supabase://mesh2` (keep
-`mesh_root_folder_backup`), and restart the fleet (which also puts R27 live).
-Rollback lever: `config.json` keeps `mesh_root_folder_backup`.
+**Cutover (v0.24.99):** timed cloud state → pre-flight per-log folder-vs-cloud
+count check (all matched — no lost messages; the migrator's log skip is coarse,
+not per-record) → re-ran `scripts/migrate_folder_to_supabase.py` (idempotent;
+folder untouched) → verified E2EE decrypts through cloud (19/19) → repointed
+`config.json` `mesh_root` → `supabase://mesh2` → restarted the fleet.
+**Rollback:** set `mesh_root` back to `mesh_root_folder_backup` (the folder path,
+byte-intact) and restart the fleet.
 
 ## What lives outside this repo
 
@@ -92,28 +96,23 @@ persist and a new session inherits them automatically.
 
 ## Next work queue
 
-The memory reminder list is authoritative; the plan's remaining rounds:
+**The backend rewrite (R0–R28) is complete and live.** R27 (directory root of
+trust) and R28 (Supabase-primary perf + cutover) shipped 2026-07-13; Supabase is
+now primary. What's left is a new session's work:
 
-1. **R27 — Directory root of trust** (from the R25 review): account docs publish
-   the keys every signature + epoch-wrap trusts, but are themselves unsigned and
-   transport-writable — an overwrite is an identity-takeover vector. Options:
-   TOFU key-pinning with a change alarm, signed account docs chained to a
-   recovery/trust root, or published key history. Must not break the legit
-   key-provisioning flows (signup, first-login upgrade, agent adoption).
-2. **Supabase-primary perf (unblocks the cloud switch):** the migration + driver
-   work; the blocker is that hot GUI endpoints read metadata straight from the
-   transport, O(users×chats) — ~30 s/poll on cloud RTT. Add a short-TTL read
-   cache in the transport (or point `PrivacyService.shares_chat`/`visible_profile`
-   and `chats_for` at cached snapshots instead of the transport), re-run the
-   idempotent migration, repoint `config.json`. Then Supabase should beat the
-   folder (realtime vs flaky OneDrive down-sync).
-3. **Setup & packaging** (the next session's headline): a real setup wizard
+1. **Setup & packaging** (the next session's headline): a real setup wizard
    (folder-vs-cloud choice), installers, quit-on-window-close, and the
    mobile/PWA humans-only surface. See packaging notes below + the
    `agentbridge-account-model` memory.
-4. **Deferred features:** agent swarms (multiple instances of one agent, each
-   with its own model — R16 registry is shaped for it), per-member Supabase auth
-   + real RLS policies, and remaining WhatsApp-parity polish.
+2. **Cloud follow-ups now that Supabase is primary:** parallel/batched metadata
+   reads to push `/api/mesh/state` below its current ~3 s (the read cache killed
+   the O(users×fields) blowup; the residual is sequential distinct-doc RTTs),
+   and per-member Supabase auth + real RLS policies (currently secret-key-only,
+   RLS on with no policies).
+3. **Deferred features:** agent swarms (multiple instances of one agent, each
+   with its own model — R16 registry is shaped for it), out-of-band key
+   fingerprint verification (the narrow R27 first-contact residual), and
+   remaining WhatsApp-parity polish.
 
 ## Packaging-prep notes (for the setup & packaging session)
 

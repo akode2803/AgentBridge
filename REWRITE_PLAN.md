@@ -817,9 +817,17 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       scratch rig (doc-rewrite attack → red banner renders → dismiss persists →
       pinned keys keep verifying the victim's real messages; zero console
       errors). frontend 22/22, ruff clean. THREAT_MODEL "CLOSED R27" written.
-- [~] **R28 — Supabase-primary perf (metadata read cache). CODE DONE
-      2026-07-13 (v0.24.99, 347 tests); LIVE cloud verify + migrate + repoint +
-      restart PENDING Aryan's go-ahead.** Unblocks the R14-era Supabase switch
+- [x] **R28 — Supabase-primary perf (metadata read cache). DONE + LIVE
+      2026-07-13 (v0.24.99, 347 tests). Supabase is now PRIMARY.** Cutover
+      (Aryan-approved): timed cloud state (**13.5 s → 2.7 s** uncached→cached,
+      ~3 s/poll live) → pre-flight per-log folder-vs-cloud count check (all 6
+      matched — the migrator's log skip is coarse, not per-record; check before
+      any future cutover) → re-ran the idempotent migration (folder untouched) →
+      verified E2EE decrypts through cloud (19/19) → repointed `config.json`
+      `mesh_root` → `supabase://mesh2` (folder path kept in
+      `mesh_root_folder_backup` = rollback) → restarted the fleet (also put R27
+      live), verified GUI :7787 v0.24.99 cloud-backed + fleet stable + app
+      renders with zero console errors. Unblocks the R14-era Supabase switch
       that was rolled back because `/api/mesh/state` took ~30 s on cloud (117 ms
       on folder): the hot GUI endpoints read metadata STRAIGHT from the
       transport and re-read the same docs many times per request
