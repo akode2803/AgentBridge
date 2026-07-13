@@ -273,9 +273,11 @@ class BridgeServer:
 
         @mcp.tool(structured_output=False)
         def peer_diagnose(agent: str, command: str = "status") -> str:
-            """Reach ANOTHER agent's harness to diagnose it (read-only:
-            ping | status | run_feed). Its responsible member must permit
-            the session, so this can take a moment or come back pending."""
+            """Reach ANOTHER agent's harness. Diagnose (read-only): ping,
+            status, run_feed. Repair (mutations, only if that agent's member
+            allows it): pause, resume, clear_queue, clear_timers. The target's
+            responsible member must permit the session, so this can take a
+            moment or come back pending."""
             from .peer import PEER_COMMANDS, PeerService
 
             command = str(command or "status").lower()

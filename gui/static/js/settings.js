@@ -228,6 +228,10 @@ async function renderSettings() {
             <dt>Owner</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
             <dt>Peer access</dt><dd><span class="csel-slot ag-peer"
               data-agent="${esc(a.username)}" data-value="${esc(st.peer_access || "off")}"></span></dd>
+            <dt>Peer repair</dt><dd><label class="switch">
+              <input type="checkbox" class="ag-repair" data-agent="${esc(a.username)}" ${st.peer_repair ? "checked" : ""}>
+              <span class="slider"></span></label>
+              <span class="hint">Let a permitted peer pause/clear this harness (always asks you)</span></dd>
             <dt>Scheduled</dt><dd class="ag-timers" data-agent="${esc(a.username)}">
               <span class="hint">Loading…</span></dd>
             <dt>Peer activity</dt><dd class="ag-peeraudit" data-agent="${esc(a.username)}">
@@ -523,6 +527,7 @@ async function renderSettings() {
         reasoning: val(".ag-reason") || null,
         default_rule: val(".ag-default"),
         peer_access: val(".ag-peer") || "off",
+        peer_repair: !!document.querySelector(`.ag-repair[data-agent="${agent}"]`)?.checked,
         routing,
         // blank clears back to the default; otherwise clamp to a sane band
         max_replies_per_hour: !rateRaw || isNaN(rateN)

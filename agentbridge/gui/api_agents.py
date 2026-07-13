@@ -161,10 +161,14 @@ def asks(app, req, mesh) -> dict:
                       else None) or []:
                 if not isinstance(a, dict):
                     continue
+                repair = bool(a.get("repair"))
+                cmd = a.get("command")
                 out.append({"id": a.get("id"), "agent": name, "kind": "peer",
-                            "tool": a.get("command"), "chat_id": "",
-                            "detail": f"@{a.get('from')} wants a diagnostic "
-                                      f"session ({a.get('command')})",
+                            "tool": cmd, "chat_id": "", "repair": repair,
+                            "detail": (f"@{a.get('from')} wants to {cmd} "
+                                       f"{name}'s harness" if repair
+                                       else f"@{a.get('from')} wants a "
+                                            f"diagnostic session ({cmd})"),
                             "peer": a.get("from")})
     return {"ok": True, "asks": out, "timers": timers}
 

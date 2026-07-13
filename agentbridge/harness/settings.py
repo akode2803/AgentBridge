@@ -68,8 +68,12 @@ class HarnessSettings:
     global_memory: str = "dm"
     # peer harness access (R22): "off" (default: unreachable) or "ask" (each
     # peer session surfaces an owner popup); peer_auto = agents pre-approved
+    # (DIAGNOSTICS only). peer_repair (R22.5) is a SEPARATE, stricter gate:
+    # repair mutations are refused unless it is on, and ALWAYS pop up per
+    # session — a diagnostics auto-grant never covers a mutation.
     peer_access: str = "off"
     peer_auto: list[str] = field(default_factory=list)
+    peer_repair: bool = False
     # ----- model selection (R16): the owner's picker writes these
     adapter: str = ""               # preset family id; "" = the sole install
     model: str = ""                 # override-all "current model"
@@ -118,6 +122,7 @@ class HarnessSettings:
             peer_access=("ask" if str(h.get("peer_access") or "off").lower()
                          == "ask" else "off"),
             peer_auto=[str(n) for n in (h.get("peer_auto") or []) if n],
+            peer_repair=bool(h.get("peer_repair", False)),
             adapter=str(h.get("adapter") or "").strip().lower(),
             model=_model(h.get("model")),
             reasoning=str(h.get("reasoning") or "").strip().lower(),

@@ -681,14 +681,19 @@ function renderAskBar(chatId, asks, timers) {
   bar.innerHTML = chips + asks.map((a) => {
     const q = a.kind === "question";
     const peer = a.kind === "peer";
+    const repair = peer && a.repair;         // a mutation on another harness
     const head = q
       ? `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> asks you:`
+      : repair
+      ? `<b>@${esc(a.peer)}</b> wants to <b>${esc(a.tool)}</b> ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
       : peer
       ? `<b>@${esc(a.peer)}</b> wants a diagnostic session with ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
       : `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> wants to use <b>${esc(a.tool)}</b>`;
-    const alwaysLabel = peer ? "Always allow this peer" : "Always allow here";
+    // a repair mutation ALWAYS asks — no "always allow" shortcut for it
+    const always = repair ? "" :
+      `<button class="ask-always">${peer ? "Always allow this peer" : "Always allow here"}</button>`;
     return `
-      <div class="ask-card" data-ask="${esc(a.id)}">
+      <div class="ask-card${repair ? " ask-repair" : ""}" data-ask="${esc(a.id)}">
         <span class="chat-avatar ask-avatar">${meshAvatarInner(a.agent)}</span>
         <div class="ask-main">
           <div class="ask-head">${head}</div>
@@ -699,7 +704,7 @@ function renderAskBar(chatId, asks, timers) {
                  </div>`
               : `<div class="ask-actions">
                    <button class="primary ask-allow">Allow</button>
-                   <button class="ask-always">${alwaysLabel}</button>
+                   ${always}
                    <button class="danger-item ask-deny">Deny</button>
                  </div>`}
         </div>

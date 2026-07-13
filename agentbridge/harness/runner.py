@@ -76,7 +76,15 @@ class AgentRunner:
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         self.conversation = ConversationManager(self.mesh)
-        self.peer = PeerService(self.mesh)   # peer harness access (R22)
+        # peer harness access (R22) + repair mutations (R22.5): the runner
+        # injects the repair actions so the peer service can only touch this
+        # harness's OWN runtime state (its hold, queue, timers) — nothing else
+        self.peer = PeerService(self.mesh, repair_ops={
+            "pause": lambda: self._peer_set_hold(True),
+            "resume": lambda: self._peer_set_hold(False),
+            "clear_queue": lambda: f"cleared {self.queue.clear_pending()} pending",
+            "clear_timers": lambda: f"cancelled {self.timers.clear()} timer(s)",
+        })
         self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS,
                                         thread_name_prefix="ab-harness")
         self._inflight: dict[tuple[str, str], Future] = {}
@@ -115,9 +123,26 @@ class AgentRunner:
         return problems
 
     # ----------------------------------------------------------- stand-down
+    HOLD_DOC = "harness/peer_hold"
+
+    def _peer_set_hold(self, held: bool) -> str:
+        """A peer-repair pause: a harness-LOCAL hold, distinct from the owner's
+        active flag and the global control.json. Persisted so it survives a
+        restart — a peer pauses a runaway agent and it STAYS paused until
+        resumed (by the peer or the owner)."""
+        self.mesh.store.cache_doc(self.HOLD_DOC, {"held": bool(held)})
+        self._wake.set()
+        return "harness held" if held else "harness resumed"
+
+    def _peer_held(self) -> bool:
+        doc = self.mesh.store.cached_doc(self.HOLD_DOC, default={})
+        return bool(doc.get("held")) if isinstance(doc, dict) else False
+
     def standing_down(self) -> bool:
         doc = self.mesh.tx.get_doc("control.json")
         if isinstance(doc, dict) and doc.get("paused"):
+            return True
+        if self._peer_held():                # a peer-repair hold (R22.5)
             return True
         acc = self.mesh.directory.get(self.agent)
         return acc is None or not acc.active

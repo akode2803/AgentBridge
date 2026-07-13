@@ -408,6 +408,21 @@ def test_asks_surface_and_answer_roundtrip(rig):
     me = rig.get("/api/mesh/me")
     assert "ops" in me["my_agents"][0]["harness"]["peer_auto"]
 
+    # a REPAIR request surfaces with its repair flag + a mutation-worded
+    # detail; a verdict routes the same way (R22.5)
+    tx.put_doc("status/peer_pending/helper.json", {
+        "agent": "helper", "awaiting": [
+            {"id": "peer2", "from": "ops", "command": "pause",
+             "repair": True}]})
+    rep = [a for a in rig.get("/api/mesh/asks")["asks"]
+           if a.get("id") == "peer2"][0]
+    assert rep["repair"] is True and "pause" in rep["detail"]
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="peer2",
+                   verdict="allow", kind="peer", peer="ops")
+    assert out["ok"]
+    v = tx.get_doc("status/peer_pending/helper_verdicts.json")
+    assert v["verdicts"]["peer2"]["verdict"] == "allow"
+
     # not the owner -> no visibility, no verdicts
     rig.post("/api/mesh/logout")
     rig.post("/api/mesh/signup", username="mallory", password="mallory-pw1",

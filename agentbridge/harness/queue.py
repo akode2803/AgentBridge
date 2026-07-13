@@ -163,6 +163,16 @@ class WorkQueue:
                     self._record(it.chat_id, it.key, 0, result)
             self._save_pending(items)
 
+    def clear_pending(self) -> int:
+        """Drop every pending trigger — the peer-repair escape hatch for a
+        harness stuck on a poisoned item (R22.5). The answered ledger and the
+        scan cursors are untouched, so nothing already handled re-fires and a
+        genuinely-new trigger is still picked up on the next scan."""
+        with self._lock:
+            n = len(self._pending())
+            self._save_pending({})
+            return n
+
     def snapshot(self) -> list[dict]:
         """Metadata-only view for the owner-visible status doc (no bodies)."""
         items = sorted(self._pending().values(), key=lambda d: d.get("ns", 0))

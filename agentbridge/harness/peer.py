@@ -20,9 +20,19 @@ The target gate, owner-controlled (never the agent's own choice):
 awaiting the owner is parked in a pending doc (the GUI raises it) and
 resolved on a later tick when the verdict lands, or denied on timeout.
 
-Commands are READ-ONLY diagnostics (ping / status / run_feed); repair
-mutations are a later, separately-gated surface. Every outcome — served,
-denied, timed out — is appended to an owner-visible audit log.
+Two command classes:
+- READ diagnostics (ping / status / run_feed) — gated by ``peer_access``;
+  a ``peer_auto`` entry may auto-run them.
+- REPAIR mutations (pause / resume / clear_queue / clear_timers, R22.5) —
+  a SECOND, stricter gate: refused entirely unless ``peer_repair`` is on,
+  and ALWAYS surface a per-session owner popup (a diagnostics auto-grant
+  never covers a mutation). They act only on the target harness's OWN
+  runtime state (its pause hold, pending queue, scheduled timers) — never
+  on chats, messages, accounts, or keys — and the actions are injected by
+  the runner, so this module can't reach anything it wasn't handed.
+
+Every outcome — served, denied, timed out — is appended to an owner-
+visible audit log.
 """
 
 from __future__ import annotations
@@ -44,7 +54,9 @@ VERDICT_DOC = "status/peer_pending/{target}_verdicts.json"
 AUDIT_DOC = "status/peer_audit/{target}.json"
 STATE_KEY = "harness/peer_state"          # per-requester resolve cursor + awaiting
 
-PEER_COMMANDS = ("ping", "status", "run_feed")
+READ_COMMANDS = ("ping", "status", "run_feed")
+REPAIR_COMMANDS = ("pause", "resume", "clear_queue", "clear_timers")
+PEER_COMMANDS = READ_COMMANDS + REPAIR_COMMANDS
 AWAIT_TIMEOUT_S = 180.0
 AUDIT_KEEP = 100
 
@@ -64,11 +76,15 @@ class PeerService:
     """One agent's peer surface — target side (serve_once) + requester side
     (request/read_response), bound to that agent's Mesh facade."""
 
-    def __init__(self, mesh) -> None:
+    def __init__(self, mesh, repair_ops: dict | None = None) -> None:
         self.mesh = mesh
         self.tx = mesh.tx
         self.agent = mesh.user
         self.store = getattr(mesh, "store", None)
+        # repair actions the RUNNER injects (pause/resume/clear_queue/
+        # clear_timers -> callables). Absent (e.g. a bare requester) = repair
+        # commands can't run here, only be sent.
+        self.repair_ops = repair_ops or {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------- signing
@@ -177,6 +193,7 @@ class PeerService:
         # 3) new requests
         policy = getattr(settings, "peer_access", "off")
         auto = set(getattr(settings, "peer_auto", []) or [])
+        repair_on = bool(getattr(settings, "peer_repair", False))
         for path in self.tx.list_docs(REQ_DIR.format(target=self.agent)):
             env = self.tx.get_doc(path)
             if not isinstance(env, dict):
@@ -196,13 +213,24 @@ class PeerService:
                 self._audit(env, "bad-command")
                 wrote += 1
                 continue
+            is_repair = command in REPAIR_COMMANDS
             meta = {"id": rid, "from": requester, "command": command,
-                    "payload": env.get("payload") or {}, "at": now}
+                    "payload": env.get("payload") or {}, "at": now,
+                    "repair": is_repair}
             if policy == "off":
                 self._respond(meta, ok=False,
                               error=f"@{self.agent} is not accepting peer access")
                 resolved[requester] = rid
                 self._audit(meta, "denied-off")
+            elif is_repair and not repair_on:
+                self._respond(meta, ok=False,
+                              error=f"@{self.agent} does not allow repair actions")
+                resolved[requester] = rid
+                self._audit(meta, "denied-no-repair")
+            elif is_repair:
+                # a mutation ALWAYS asks — peer_auto covers diagnostics only
+                awaiting[rid] = meta
+                self._audit(meta, "requested-repair")
             elif requester in auto:
                 self._run_and_respond(meta)
                 resolved[requester] = rid
@@ -232,6 +260,11 @@ class PeerService:
             doc = self.tx.get_doc(f"status/{self.agent}_run.json") or {}
             return {"state": doc.get("state"), "activity": doc.get("activity"),
                     "recent": doc.get("recent"), "updated": doc.get("updated")}
+        if command in REPAIR_COMMANDS:
+            op = self.repair_ops.get(command)
+            if op is None:      # no runner wired this in (e.g. a bare service)
+                return {"error": "repair is not available on this harness"}
+            return {"command": command, "result": op()}
         return {"error": "unknown command"}
 
     def _run_and_respond(self, meta: dict) -> None:
@@ -262,7 +295,8 @@ class PeerService:
         self.tx.put_doc(PENDING_DOC.format(target=self.agent), {
             "agent": self.agent, "updated": utcnow_iso(),
             "awaiting": [{"id": m["id"], "from": m["from"],
-                          "command": m["command"]}
+                          "command": m["command"],
+                          "repair": bool(m.get("repair"))}
                          for m in awaiting.values()],
         })
 

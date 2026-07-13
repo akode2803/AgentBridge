@@ -377,6 +377,9 @@ h1 {
 .ask-actions, .ask-answer { display: flex; gap: 8px; }
 .ask-answer input { flex: 1; min-width: 0; }
 .ask-done { opacity: .5; pointer-events: none; }
+/* a peer REPAIR request mutates another harness — flag it louder (R22.5) */
+.ask-repair { border-left-color: var(--bad); }
+.ask-repair .ask-head b { color: var(--bad); }
 
 /* R19.5: agents waiting on the owner (sidebar) + scheduled wake-ups */
 .ask-ind { color: var(--accent); display: inline-flex; }

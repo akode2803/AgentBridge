@@ -75,5 +75,13 @@ class TimerService:
                 self.store.cache_doc(TIMERS_DOC, timers)
             return t
 
+    def clear(self) -> int:
+        """Cancel every scheduled wake-up (the peer-repair path for a runaway
+        scheduler, R22.5). Returns how many were cancelled."""
+        with self._lock:
+            n = len(self._all())
+            self.store.cache_doc(TIMERS_DOC, {})
+            return n
+
     def snapshot(self) -> list[dict]:
         return sorted(self._all().values(), key=lambda t: t.get("at_ns", 0))

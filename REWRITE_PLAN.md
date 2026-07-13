@@ -667,6 +667,25 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       owner-visible. Verified two-agent live (@ops→@claude status, owner
       approved, signed response + audit) and browser-verified the card +
       verdict routing. 296 tests; live harness + GUI restarted.
+- [x] **R22.5 — Peer REPAIR mutations. DONE 2026-07-13** (the surface R22
+      deferred). Four harness-local repair commands — ``pause`` / ``resume``
+      (a persisted, harness-LOCAL hold distinct from the owner active flag
+      and the global control.json; honoured by ``standing_down``, survives a
+      restart), ``clear_queue`` (drop poisoned pending; ledger + cursors
+      untouched), ``clear_timers`` (cancel a runaway scheduler). A SECOND,
+      stricter gate: ``peer_repair`` (default OFF) — repair is refused
+      outright unless on, and ALWAYS surfaces a per-session owner popup even
+      for a ``peer_auto`` peer (a diagnostics auto-grant NEVER covers a
+      mutation). Actions act ONLY on the target harness's own runtime state
+      (never chats, messages, accounts, keys) and are INJECTED by the runner,
+      so peer.py can't reach anything it wasn't handed. GUI: repair requests
+      render a louder (red) ask-card worded as the mutation, with no
+      "always" shortcut; Settings→My agents gets a Peer-repair toggle.
+      Verified two-agent live: @ops pause → owner-approved → @claude
+      standing_down flips True (held, persisted) → resume → False; refused
+      cleanly when peer_repair off. 301 tests; live harness + GUI restarted.
+      Still deferred with reason: config-edit / restart mutations (need
+      process-level control beyond the harness's own state).
 
 ### Phase 4 — Realtime backend + hardening
 

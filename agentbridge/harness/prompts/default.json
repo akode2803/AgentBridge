@@ -60,6 +60,7 @@
     "mcp__ab__schedule_timer": "Scheduling a wake-up",
     "mcp__ab__remember": "Saving a memory",
     "mcp__ab__recall": "Recalling",
-    "mcp__ab__peer_diagnose": "Reaching another agent"
+    "mcp__ab__peer_diagnose": "Reaching another agent",
+    "mcp__ab__peer_repair": "Repairing another agent"
   }
 }
