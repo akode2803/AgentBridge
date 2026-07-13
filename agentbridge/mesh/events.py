@@ -114,31 +114,32 @@ def fold(chat_id: str, envelopes: list[dict], directory: Resolver) -> ChatSnapsh
 
 
 def _authentic(chat_id: str, env: dict, etype: str, author: str, d: Resolver) -> bool:
-    """R13.5 authenticity gate, run BEFORE any event takes effect.
+    """The authenticity gate (R13.5; tightened R16.5), run BEFORE any event
+    takes effect.
 
-    - genesis (`created`): a gid-bearing chat id accepts ONLY the created
-      event that re-hashes to that gid (no forged/backdated alternative can
-      match); legacy ids (no gid) are accepted as-is.
-    - every other event: if the author has a published signing key, it MUST
-      carry that author's valid signature; an unsigned or mis-signed event is
-      ignored. An author with no key (migrated/pre-upgrade) is accepted
-      unsigned — they could not have signed yet."""
+    - genesis (`created`): the chat id MUST be gid-bound and the event must
+      re-hash to that gid — no forged/backdated alternative can match, and a
+      non-gid id folds to nothing (the migrated era ended with R16.5's purge).
+    - every other event: it MUST carry the author's valid signature against
+      their published key. An author without published keys cannot mutate —
+      fail closed (identity keys are minted at signup/login/agent adoption,
+      so every live writer has them)."""
     if etype == EV_CREATED:
         gid = _id_gid(chat_id)
         if gid is None:
-            return True  # legacy / migrated id: no binding to check
+            return False  # v2 accepts only genesis-bound chat ids
         return genesis_gid(env.get("event") or {}) == gid
     pub = d.sign_pub(author)
-    if not pub:
-        return True  # keyless legacy actor — nothing to verify against
     sig = env.get("sig") or ""
-    return bool(sig) and crypto.verify(pub, sig, signing_bytes(chat_id, env))
+    return bool(pub) and bool(sig) and crypto.verify(
+        pub, sig, signing_bytes(chat_id, env))
 
 
 def is_legacy_chat_id(chat_id: str) -> bool:
-    """True for a migrated v1 chat id (no genesis binding). Legacy chats are
-    the only place epoch-0 (pre-E2EE) content can be legitimate — the sealer
-    keys its plaintext-acceptance rule on this."""
+    """True for a migrated v1 chat id (no genesis binding). Since the R16.5
+    purge nothing legacy remains on the mesh and the fold refuses non-gid
+    genesis outright — this predicate stays for TOOLING only (the exporter's
+    ``--legacy-only`` inventory selector)."""
     return _id_gid(chat_id) is None
 
 

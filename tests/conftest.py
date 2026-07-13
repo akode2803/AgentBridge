@@ -12,9 +12,31 @@ import urllib.request
 
 import pytest
 
+from agentbridge import crypto
 from agentbridge.gui.app import make_server
 from agentbridge.gui.context import GuiApp
+from agentbridge.mesh.keyring import KeyStore
+from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
+
+
+def seed_account(tx, name, kind="human", owner=None, machine="m1", **extra):
+    """A directory account with REAL identity keys — since R16.5 the fold
+    accepts only signed info events, so a fixture identity must be able to
+    sign. Returns the private bundle; drop it into each home's keystore the
+    identity will run from (``install_key``)."""
+    bundle = crypto.generate_identity()
+    sign_pub, agree_pub = crypto.identity_pubs(bundle)
+    doc = {"name": name, "kind": kind, "display": name.title(),
+           "keys": {"sign_pub": sign_pub, "agree_pub": agree_pub}, **extra}
+    if owner:
+        doc["agent"] = {"owner": owner, "machine": machine, "harness": {}}
+    tx.put_doc(P.user(name), doc)
+    return bundle
+
+
+def install_key(home, name, bundle) -> None:
+    KeyStore(home).save(name, bundle)
 
 
 class GuiRig:

@@ -10,25 +10,25 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.transport.folder import FolderTransport
 
 
-def put_account(tx, name, kind, owner=None):
-    doc = {"name": name, "kind": kind, "display": name.title()}
-    if owner:
-        doc["agent"] = {"owner": owner, "machine": "m1"}
-    tx.put_doc(P.user(name), doc)
+from conftest import install_key, seed_account
 
 
 @pytest.fixture
 def world(tmp_path):
     root = tmp_path / "mesh2"
     tx = FolderTransport(root)
-    put_account(tx, "aryan", "human")
-    put_account(tx, "fable", "human")
-    put_account(tx, "sudhir", "human")
-    put_account(tx, "claude", "agent", owner="aryan")
-    put_account(tx, "coco", "agent", owner="fable")
+    bundles = {
+        "aryan": seed_account(tx, "aryan"),
+        "fable": seed_account(tx, "fable"),
+        "sudhir": seed_account(tx, "sudhir"),
+        "claude": seed_account(tx, "claude", "agent", owner="aryan"),
+        "coco": seed_account(tx, "coco", "agent", owner="fable"),
+    }
 
     def mk(user):
-        return Mesh(FolderTransport(root), user, "mach1", home=tmp_path / f"home-{user}")
+        home = tmp_path / f"home-{user}"
+        install_key(home, user, bundles[user])
+        return Mesh(FolderTransport(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude", "coco")}
     yield meshes
@@ -543,15 +543,15 @@ def test_genesis_binding_rejects_backdated_forged_created(world):
     assert "sudhir" not in healed.members
 
 
-def test_legacy_id_genesis_folds_unsigned(world):
-    """A migrated chat keeps its v1 id (no `-g<gid>`) and an UNSIGNED genesis;
-    the fold accepts it (legacy branch) so migration isn't broken."""
+def test_non_gid_genesis_folds_to_nothing(world):
+    """Since the R16.5 purge every chat id is genesis-bound: a v1-shape id
+    (no `-g<gid>`) offers nothing to verify a `created` against, so the fold
+    refuses it outright — no unbound room can be conjured."""
     aryan = world["aryan"]
     legacy_id = "old-room-7a3508"   # v1-shape id, not gid-bound
     genesis = _forge(legacy_id, 5, "aryan", {
         "type": events.EV_CREATED, "kind": "group", "name": "Old Room",
         "members": {"aryan": "admin", "fable": "member"}, "auto_dm": False,
-    })  # unsigned, legacy id
+    })
     snap = events.fold(legacy_id, [genesis], aryan.directory)
-    assert set(snap.members) == {"aryan", "fable"}
-    assert snap.members["aryan"].role is Role.ADMIN
+    assert snap.members == {}

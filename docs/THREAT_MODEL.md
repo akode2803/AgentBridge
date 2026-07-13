@@ -86,12 +86,10 @@ Attachment blobs are sealed under the chat's epoch keys (format in
 swapped under a different id, and a non-member holds no epoch copy to open
 it. **Provenance rides the signed message** naming the blob (`files[].sha256`
 inside the encrypted, signed body) — connectors verify the sha before
-serving. Plain bytes are honored only in LEGACY (migrated, non-gid) chats
-and only for blobs that predate the chat's first epoch (v2 blob ids carry
-their mint-ns; v1/migrated records without a v2 id read as pre-E2EE) — the
-same rule as plaintext envelopes, so migrated history keeps reading after a
-room's first sealed post, while plaintext minted afterwards, or appearing in
-a v2-native chat at all, is refused. Profile photos and group
+serving. Plain bytes are never served as chat files, and epoch-0 (plaintext)
+envelopes never open (R16.5: the migrated era ended — its chats were
+exported to plain text and removed, so nothing legitimate is unsealed at
+rest anymore). Profile photos and group
 photos are deliberately METADATA (plain at rest, like names): view access is
 matrix-/membership-gated at the connectors, not by crypto.
 
@@ -111,30 +109,25 @@ effect (`events._authentic`):
   changed) genesis can match an existing id. Preimage resistance means a
   forger can't craft content hashing to someone else's id.
 - **Signed info events.** Every info event is Ed25519-signed over
-  `chat | id | ns | from | canonical(event)`. If the author has a published
-  key, the fold REQUIRES a valid signature — impersonating a real admin
-  (forging `admin_granted from aryan`) fails, and the chat binding stops a
-  signed event being replayed into another room.
+  `chat | id | ns | from | canonical(event)`. The fold REQUIRES a valid
+  signature against the author's published key (R16.5 removed the
+  keyless-author allowance: an account without published keys cannot mutate
+  at all — keys are minted at signup/login/agent adoption). Impersonating a
+  real admin (forging `admin_granted from aryan`) fails, and the chat
+  binding stops a signed event being replayed into another room.
 - **Ingestion sanity.** A per-device log is single-writer, so sync drops any
   record whose `from` ≠ the log's owner — a client can't smuggle records
   attributed to someone else through its own log.
 
-The old spec also proposed a separate *manifest-anchored epoch-0* gate; it
-proved redundant and was folded into the gid/legacy split instead: a
-gid-bound (v2) chat requires signatures and a matching genesis; a
-non-gid-bound id is treated as legacy (migrated, unsigned genesis accepted).
-A fabricated chat can't produce a valid v2 genesis for a chosen id, and any
-chat it *does* create is its own — **visibility = membership** keeps it
-invisible to everyone else, and the E2EE sealer already refuses epoch-0
-plaintext in a room that has real key epochs.
+Since R16.5 the gate is uniform: every chat id must be genesis-bound (a
+non-gid id folds to nothing) and every event must verify. The old
+migrated-chat allowances — unsigned genesis for v1-shape ids, unsigned
+events from keyless authors, epoch-0 plaintext — are gone, and with them the
+previously documented residual (a migrated chat's member back-dating its own
+genesis): no migrated chats remain to carry it.
 
-**Residual (documented, revisited R24/R25):** a legitimate MEMBER of a
-*migrated* chat (v1 id, not gid-bound) could backdate their own genesis for
-that chat. Migrated chats carry the pre-cutover trust model until they age
-out; new v2 chats are fully protected.
+## Migration — R9.5 (retired R16.5)
 
-## Migration — R9.5
-
-The v1→v2 migration tool (decrypt-nothing, re-seal-forward, PBKDF2-fallback
-auth for legacy accounts) is its own round (`R9.5` in `REWRITE_PLAN.md`) — it
-touches live data and deserves isolated review.
+The v1→v2 migration tool ran the one R14 cutover; its legacy chats were
+exported to plain text and removed in R16.5. The tool and its runbook now
+live under `legacy/` for reference and no longer run.

@@ -39,10 +39,13 @@ coco --supervise`. The cortex preset carries v1's exact safety flags
 (--sql-read-only + the 15-tool blocklist) but the v2 engine's first cortex
 run should be watched.
 
-**Legacy chats:** export before the R16.5 purge —
-`uv run python -m agentbridge.export --user aryan --legacy-only`. The
-blanked-history incident is read-time only: restarting the app on ≥v0.24.77
-makes migrated history readable again (nothing was lost).
+**Legacy chats: purged (R16.5, 2026-07-13).** All 12 migrated chats were
+exported to `~/Downloads/agentbridge-legacy-exports-20260713/` (plain text,
+verified complete) and removed from `mesh2/`; a byte backup sits in
+`~/Downloads/mesh2-legacy-chats-backup-20260713/`. The legacy acceptance
+code is gone with them: plaintext never opens, every chat id must be
+genesis-bound, and every info event must be signed — an account signs in
+(or an agent is adopted) before it can write anything.
 
 The sections below describe the **v1** app and are retained as reference;
 treat `REWRITE_PLAN.md` + the memory topic files as authoritative for v2.

@@ -11,24 +11,20 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.transport.folder import FolderTransport
 
 
-def put_account(tx, name, kind, owner=None):
-    doc = {"name": name, "kind": kind, "display": name.title()}
-    if owner:
-        doc["agent"] = {"owner": owner, "machine": "m1"}
-    tx.put_doc(P.user(name), doc)
+from conftest import install_key, seed_account
 
 
 @pytest.fixture
 def world(tmp_path):
     root = tmp_path / "mesh2"
     tx = FolderTransport(root)
-    for n, k in (("aryan", "human"), ("fable", "human"), ("sudhir", "human")):
-        put_account(tx, n, k)
-    put_account(tx, "claude", "agent", owner="aryan")
+    bundles = {n: seed_account(tx, n) for n in ("aryan", "fable", "sudhir")}
+    bundles["claude"] = seed_account(tx, "claude", "agent", owner="aryan")
 
     def mk(user, machine="mach1"):
-        return Mesh(FolderTransport(root), user, machine,
-                    home=tmp_path / f"home-{user}-{machine}")
+        home = tmp_path / f"home-{user}-{machine}"
+        install_key(home, user, bundles[user])
+        return Mesh(FolderTransport(root), user, machine, home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude")}
     yield meshes, mk

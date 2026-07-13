@@ -140,12 +140,13 @@ AAD = `chat_id|id|ns|from|epoch`; the Ed25519 signature covers
 `kind:"info"` lines with a structured `event` field instead of `ct`, plus an
 Ed25519 `sig` (R13.5) over `chat | id | ns | from | canonical(event)`:
 `{"event": {"type": "member_added", "who": "coco", "by": "aryan"}, "sig": …}`.
-The fold verifies `sig` against the author's published key (unsigned accepted
-only from a keyless/migrated author). A v2 chat id ends in `-g<16-hex>` that
-commits to its genesis event (sha256 over the created-event's identity fields
-+ a random nonce); the fold rejects any `created` that doesn't re-hash to it,
-so no backdated/forged genesis can hijack an existing chat. Legacy (migrated)
-ids carry no `-g` suffix and their unsigned genesis is accepted as-is.
+The fold verifies `sig` against the author's published key — REQUIRED for
+every event since R16.5 (an account without published keys cannot mutate;
+keys are minted at signup/login/agent adoption). A chat id ends in
+`-g<16-hex>` that commits to its genesis event (sha256 over the
+created-event's identity fields + a random nonce); the fold rejects any
+`created` that doesn't re-hash to it, and an id WITHOUT the marker folds to
+nothing (the migrated era's non-gid ids were purged in R16.5).
 Types (SETTLED R5 — `agentbridge/mesh/events.py` is normative): `created`
 (genesis: kind/name/members+roles/permissions/auto_dm/pulled), `member_added`
 (+`reason: "responsible_member"` for owner pull-ins), `member_removed`,
@@ -219,9 +220,9 @@ readers try the epoch named in the envelope. A removed member keeps old epochs
 ### File blobs — `chats/<id>/files/<blob-id>`  (SETTLED R13)
 Sealed binary: `b"AB2E" + epoch(8B BE) + nonce(12B) + ChaCha20Poly1305 ct`,
 AAD = `"<chat>|blob|<blob-id>|<epoch>"` under the same chat epoch keys as
-messages (`Sealer.seal_blob`/`open_blob`). No magic prefix = plain bytes,
-honored ONLY while the chat has no epochs (pure legacy) — the same injection
-rule as plaintext envelopes. **Provenance rides the signed message** that
+messages (`Sealer.seal_blob`/`open_blob`). Bytes without the magic prefix
+are never served as chat files (R16.5 — same rule as epoch-0 envelopes,
+which never open). **Provenance rides the signed message** that
 names the blob: `files: [{id, name, bytes, sha256}]` — readers verify the
 sha before serving. Pins gained optional `until_ns` (lazy expiry, R13).
 Profile photos (`avatars/<name>.jpg` + `{sha256, updated}` marker on the

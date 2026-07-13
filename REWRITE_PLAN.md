@@ -478,22 +478,34 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       10+7 new tests (263 total). Presets for CLIs not installed here
       (codex/grok/ollama/deepseek) are best-effort data pending their own
       bring-up (`verified: false` in the preset).
-- [ ] **R16.5 — Legacy purge (Aryan 2026-07-13: "remove the legacy code, do
-      not add junk to keep the legacy items working").** Order matters — the
-      acceptance paths must outlive the export:
-      (1) EXPORT the migrated chats to plain text
-      (`python -m agentbridge.export --user aryan --legacy-only`; other
-      members export their own DMs if wanted) and verify the files;
-      (2) DELETE the legacy (non-gid) chat dirs from `mesh2/` (fresh backup
-      first; the `mesh.backup-20260713` + frozen v1 `mesh/` already hold the
-      originals);
-      (3) STRIP the legacy acceptance code: sealer epoch-0/plain-blob
-      acceptance + `first_epoch` + `is_legacy_chat_id`, the fold's legacy
-      (non-gid) genesis acceptance, the keyless-author unsigned-event
-      acceptance (only after BOTH agents are adopted/keyed), and retire
-      `migrate.py` + the runbook to `legacy/`;
+- [x] **R16.5 — Legacy purge. DONE 2026-07-13** (Aryan: "remove the legacy
+      code, do not add junk to keep the legacy items working"). Executed in
+      the only safe order — export → delete → strip:
+      (1) all 12 migrated chats EXPORTED to plain text (11 as aryan, the
+      Fable↔Fabot DM as fable) to `~/Downloads/agentbridge-legacy-exports-
+      20260713/`; verified zero blank bodies — incl. the two rooms the
+      pre-v0.24.77 bug had blanked (the fix proven on live data);
+      (2) the 12 legacy chat dirs backed up to `~/Downloads/mesh2-legacy-
+      chats-backup-20260713/` (verified file counts) and DELETED from the
+      live `mesh2/` (OneDrive marks dirs ReadOnly+ReparsePoint — deletion
+      needs attrib -R first); only the gid-bound chat remains, directory
+      intact, @claude's stale per-chat rules dropped;
+      (3) STRIPPED: sealer epoch-0/plain-blob acceptance (+`first_epoch`,
+      blob-ns parsing), the fold's non-gid genesis acceptance, AND the
+      keyless-author unsigned-event allowance — every event now requires a
+      valid signature; an account without published keys cannot mutate
+      (keys mint at signup/login/adoption; live-verified: the remaining
+      chat folds, aryan+claude keyed, fable/coco simply can't write until
+      their next login/adoption). Test fixtures moved to a shared KEYED
+      `seed_account` (conftest); `migrate.py` + its runbook retired to
+      `legacy/`, its tests dropped; THREAT_MODEL + FORMAT2 updated — the
+      previously documented migrated-chat genesis residual is gone with
+      the chats that carried it. `is_legacy_chat_id` survives as a pure
+      tooling predicate (the exporter's inventory selector). Safe-by-
+      construction keepers: pbkdf2 login upgrade (accounts that never
+      logged in) and adopt_agent's keyless minting (@coco's bring-up).
       (4) new-code rule, effective NOW: nothing new accommodates v1 shapes.
-      The v1 source tree itself still retires at R26. Prompts live in modifiable JSON, not code;
+      The v1 source tree itself still retires at R26. 248 tests. Prompts live in modifiable JSON, not code;
       prompt assembly is a module (persona, etiquette, capabilities, context
       blocks); **reply-vs-tag becomes the agent's judgment** (prompted, not
       enforced): reply threads by default (safe), tag others who need

@@ -62,7 +62,6 @@ class ChatKeyService:
         self.keystore = keystore
         self.user = user
         self._cache: dict[tuple[str, int], bytes] = {}  # (chat, epoch) -> key
-        self._first_epoch: dict[str, int] = {}          # chat -> oldest epoch id
 
     # ------------------------------------------------------------- reading
     def epochs(self, chat_id: str) -> list[tuple[int, dict]]:
@@ -77,20 +76,6 @@ class ChatKeyService:
     def latest(self, chat_id: str) -> tuple[int, dict] | None:
         eps = self.epochs(chat_id)
         return eps[-1] if eps else None
-
-    def first_epoch(self, chat_id: str) -> int | None:
-        """The chat's OLDEST epoch id (a ns ordinal), or None while the chat
-        has no epochs. Anything minted before this ns predates E2EE in this
-        chat (migrated history). Cached once known: epoch ids come from
-        ``next_ns``, so no later rotation can ever precede the current first."""
-        cached = self._first_epoch.get(chat_id)
-        if cached is not None:
-            return cached
-        eps = self.epochs(chat_id)
-        if not eps:
-            return None
-        self._first_epoch[chat_id] = eps[0][0]
-        return eps[0][0]
 
     def my_key(self, chat_id: str, epoch: int) -> bytes | None:
         cached = self._cache.get((chat_id, epoch))

@@ -247,10 +247,10 @@ def test_blob_seal_roundtrip_and_injection_rules(world):
     assert meshes["sudhir"].sealer.open_blob(snap.id, "f-1.bin", sealed) is None
 
 
-# ------------------------------------------- migrated history after sealing
+# ---------------------------------------------- no plaintext, no legacy ids
 
-def _legacy_line(sender, ns, body):
-    """An epoch-0 message line the way the migrator writes them."""
+def _plain_line(sender, ns, body):
+    """An epoch-0 message line (the retired migration era's shape)."""
     return {
         "id": f"m-{ns}-feedbeef", "ns": ns, "ts": "2026-07-01T00:00:00Z",
         "from": sender, "kind": "message", "epoch": 0, "nonce": "",
@@ -258,59 +258,25 @@ def _legacy_line(sender, ns, body):
     }
 
 
-def test_migrated_history_survives_first_sealed_post(world):
-    """A legacy (migrated) chat keeps its epoch-0 history — messages AND plain
-    v1 file blobs — readable after the room's first sealed post mints an
-    epoch. Plaintext minted AFTER that moment is still refused."""
-    from agentbridge.core.models import MsgKind
+def test_plaintext_and_plain_blobs_never_open(world):
+    """R16.5: the migrated era is over — an epoch-0 envelope reads as
+    nothing everywhere (even in a chat with no epochs yet), and plain bytes
+    are never served as chat files."""
     from agentbridge.core.timekit import next_ns
 
     meshes, _, _, root = world
-    aryan, fable = meshes["aryan"], meshes["fable"]
+    aryan = meshes["aryan"]
     tx = FolderTransport(root)
-    chat_id = "team-room"  # migrated v1 id: no -g genesis marker
+    chat = aryan.create_chat("Sealed room", members=["fable"])
 
-    # migrated shape: meta snapshot + legacy genesis + epoch-0 message lines
-    tx.put_doc(f"chats/{chat_id}/meta.json", {
-        "id": chat_id, "kind": "group", "name": "Team room",
-        "members": {"aryan": {"role": "admin", "joined_ns": 1},
-                    "fable": {"role": "member", "joined_ns": 1}},
-    })
-    genesis = {"id": "m-1-00000001", "ns": 1, "ts": "2026-07-01T00:00:00Z",
-               "from": "aryan", "kind": "info",
-               "event": {"type": "created", "kind": "group",
-                         "name": "Team room", "creator": "aryan",
-                         "members": {"aryan": "admin", "fable": "member"}}}
-    tx.append_log(chat_id, "aryan@migrated", genesis)
-    tx.append_log(chat_id, "aryan@migrated", _legacy_line("aryan", 1000, "hello from v1"))
-    tx.append_log(chat_id, "fable@migrated", _legacy_line("fable", 2000, "old reply"))
-    tx.put_blob(f"chats/{chat_id}/files/report.csv", b"a,b\n1,2\n")  # v1 file
+    line = _plain_line("fable", next_ns(), "plaintext line")
+    tx.append_log(chat.id, "fable@m1", line)
+    aryan.sync.sync_once([chat.id])
+    injected = [m for m in aryan.messages_for(chat.id) if m.id == line["id"]][0]
+    assert injected.body == ""
 
-    for m in (aryan, fable):
-        m.sync.sync_once([chat_id])
-    assert [m.body for m in fable.messages_for(chat_id)
-            if m.kind is MsgKind.MESSAGE] == ["hello from v1", "old reply"]
-
-    # the first sealed post mints the chat's first epoch
-    aryan.post(chat_id, "sealed now")
-    ripple(aryan, chat_id, fable)
-    assert aryan.keys.first_epoch(chat_id) is not None
-    assert [m.body for m in fable.messages_for(chat_id)
-            if m.kind is MsgKind.MESSAGE] == ["hello from v1", "old reply",
-                                              "sealed now"]
-
-    # the plain v1 blob (no v2 id) still opens; a plain blob whose id is
-    # minted after sealing does not
-    assert fable.sealer.open_blob(chat_id, "report.csv", b"a,b\n1,2\n") \
-        == b"a,b\n1,2\n"
-    assert fable.sealer.open_blob(chat_id, f"f-{next_ns()}-abcd.bin", b"x") is None
-
-    # plaintext minted AFTER the room sealed is refused, not displayed
-    late = _legacy_line("fable", next_ns(), "post-seal plaintext")
-    tx.append_log(chat_id, "fable@migrated", late)
-    aryan.sync.sync_once([chat_id])
-    sneaky = [m for m in aryan.messages_for(chat_id) if m.id == late["id"]][0]
-    assert sneaky.body == ""
+    tx.put_blob(f"chats/{chat.id}/files/report.csv", b"a,b\n1,2\n")
+    assert aryan.sealer.open_blob(chat.id, "report.csv", b"a,b\n1,2\n") is None
 
 
 # ----------------------------------------------- R13.5 signed info events

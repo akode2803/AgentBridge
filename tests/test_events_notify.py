@@ -8,27 +8,23 @@ import pytest
 from agentbridge.mesh import eventbus
 from agentbridge.mesh.eventbus import Event, EventBus
 from agentbridge.mesh.notify import CommandHook
-from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.transport.folder import FolderTransport
 
 
-def put_account(tx, name, kind, owner=None):
-    doc = {"name": name, "kind": kind, "display": name.title()}
-    if owner:
-        doc["agent"] = {"owner": owner, "machine": "m1"}
-    tx.put_doc(P.user(name), doc)
+from conftest import install_key, seed_account
 
 
 @pytest.fixture
 def world(tmp_path):
     root = tmp_path / "mesh2"
     tx = FolderTransport(root)
-    for n in ("aryan", "fable"):
-        put_account(tx, n, "human")
+    bundles = {n: seed_account(tx, n) for n in ("aryan", "fable")}
 
     def mk(user):
-        return Mesh(FolderTransport(root), user, "mach1", home=tmp_path / f"home-{user}")
+        home = tmp_path / f"home-{user}"
+        install_key(home, user, bundles[user])
+        return Mesh(FolderTransport(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable")}
     yield meshes

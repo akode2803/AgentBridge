@@ -1,4 +1,9 @@
-"""v1 -> v2 migration (R9.5). READ-ONLY on the source tree, writes only to a
+"""RETIRED (R16.5). This ran the one R14 cutover as ``agentbridge.migrate``;
+the migrated legacy chats were then exported to plain text and removed, and
+v2 no longer reads the epoch-0 plaintext this tool writes. Kept for
+reference only — it does not run from this location.
+
+v1 -> v2 migration (R9.5). READ-ONLY on the source tree, writes only to a
 fresh destination root (plan D3: parallel-root, never in-place), and a
 --dry-run that touches nothing.
 

@@ -13,28 +13,27 @@ from mcp.shared.memory import (  # noqa: E402 — after the importorskip
 )
 
 from agentbridge.cli.server import build_mcp  # noqa: E402
-from agentbridge.mesh.paths import P  # noqa: E402
 from agentbridge.mesh.service import Mesh  # noqa: E402
 from agentbridge.transport.folder import FolderTransport  # noqa: E402
 
 
-def put_account(tx, name, kind, owner=None):
-    doc = {"name": name, "kind": kind, "display": name.title()}
-    if owner:
-        doc["agent"] = {"owner": owner, "machine": "m1"}
-    tx.put_doc(P.user(name), doc)
+from conftest import install_key, seed_account  # noqa: E402
 
 
 @pytest.fixture
 def world(tmp_path):
     root = tmp_path / "mesh2"
     tx = FolderTransport(root)
-    put_account(tx, "aryan", "human")
-    put_account(tx, "fable", "human")
-    put_account(tx, "claude", "agent", owner="aryan")
+    bundles = {
+        "aryan": seed_account(tx, "aryan"),
+        "fable": seed_account(tx, "fable"),
+        "claude": seed_account(tx, "claude", "agent", owner="aryan"),
+    }
 
     def mk(user):
-        return Mesh(FolderTransport(root), user, "mach1", home=tmp_path / f"home-{user}")
+        home = tmp_path / f"home-{user}"
+        install_key(home, user, bundles[user])
+        return Mesh(FolderTransport(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "claude")}
     yield meshes
