@@ -513,6 +513,7 @@ async function renderMeshChat(force) {
     </div>
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
+    <div id="ask-bar"></div>
     <div id="reply-area"></div>
     ${meta.archived || !isMember ? "" : `
     <div id="composer">
@@ -615,6 +616,7 @@ async function renderMeshChat(force) {
   initComposer(chatId, members);
   renderMeshPending(chatId);
   renderReplyArea(chatId);
+  startAskPoll(chatId);
   bindOpenFile(document, chatId, ".mesh-att");
 
   const tr = $("#transcript");
@@ -627,6 +629,85 @@ async function renderMeshChat(force) {
   tr.classList.add("chat-in");
 }
 V.renderMeshChat = renderMeshChat;
+
+// R18: my agents' pending permission asks / questions in THIS chat. The run
+// is BLOCKED on the answer, so this polls on a short leash while the chat is
+// open (the main poll can idle at 20s+ under SSE) and renders Codex-style
+// cards above the composer: Allow / Always allow here / Deny — or a text
+// answer when the agent asked a question.
+function startAskPoll(chatId) {
+  if (Mesh.askPollChat === chatId && Mesh.askPollId) return;
+  clearInterval(Mesh.askPollId);
+  Mesh.askPollChat = chatId;
+  Mesh.askKey = "";
+  const tick = async () => {
+    if (App.page !== "chats" || Mesh.chatId !== chatId) {
+      clearInterval(Mesh.askPollId);         // left the chat: stand down
+      Mesh.askPollId = null; Mesh.askPollChat = "";
+      return;
+    }
+    try {
+      const r = await api(`/api/mesh/asks?chat=${encodeURIComponent(chatId)}`);
+      renderAskBar(chatId, r.asks || []);
+    } catch { /* next tick retries */ }
+  };
+  Mesh.askPollId = setInterval(tick, 2000);
+  tick();
+}
+
+function renderAskBar(chatId, asks) {
+  const bar = $("#ask-bar");
+  if (!bar) return;
+  const key = JSON.stringify(asks.map((a) => a.id));
+  if (key === Mesh.askKey) return;           // nothing moved — don't repaint
+  Mesh.askKey = key;
+  if (!asks.length) { bar.innerHTML = ""; return; }
+  bar.innerHTML = asks.map((a) => {
+    const q = a.kind === "question";
+    const head = q
+      ? `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> asks you:`
+      : `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> wants to use <b>${esc(a.tool)}</b>`;
+    return `
+      <div class="ask-card" data-ask="${esc(a.id)}">
+        <span class="chat-avatar ask-avatar">${meshAvatarInner(a.agent)}</span>
+        <div class="ask-main">
+          <div class="ask-head">${head}</div>
+          <div class="ask-detail">${esc(a.detail || "")}</div>
+          ${q ? `<div class="ask-answer">
+                   <input type="text" placeholder="Your answer…" maxlength="2000">
+                   <button class="primary ask-send">Send</button>
+                 </div>`
+              : `<div class="ask-actions">
+                   <button class="primary ask-allow">Allow</button>
+                   <button class="ask-always">Always allow here</button>
+                   <button class="danger-item ask-deny">Deny</button>
+                 </div>`}
+        </div>
+      </div>`;
+  }).join("");
+  bar.querySelectorAll(".ask-card").forEach((card) => {
+    const a = asks.find((x) => x.id === card.dataset.ask);
+    if (!a) return;
+    const send = async (verdict, text) => {
+      card.classList.add("ask-done");        // grey out while it lands
+      const r = await api("/api/mesh/answer_ask", {
+        agent: a.agent, ask_id: a.id, verdict, text: text || "",
+        tool: a.tool, chat: a.chat_id,
+      });
+      if (r.error) { toast(r.error, true); card.classList.remove("ask-done"); }
+      Mesh.askKey = "";                      // repaint on the next tick
+    };
+    card.querySelector(".ask-allow")?.addEventListener("click", () => send("allow"));
+    card.querySelector(".ask-always")?.addEventListener("click", () => send("always"));
+    card.querySelector(".ask-deny")?.addEventListener("click", () => send("deny"));
+    const inp = card.querySelector(".ask-answer input");
+    const submit = () => { if (inp.value.trim()) send("answer", inp.value.trim()); };
+    card.querySelector(".ask-send")?.addEventListener("click", submit);
+    inp?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+    });
+  });
+}
 
 // quoted original inside a reply bubble (WhatsApp): groups show the
 // sender's name + one preview line, DMs skip the name and get two lines —

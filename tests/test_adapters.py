@@ -254,9 +254,10 @@ def test_usage_error_falls_back_to_minimal_args(arig, tmp_path):
 def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
     """Files a run leaves in its outbox attach to the reply; 0-byte scratch
     does not (a live model once shipped an empty placeholder.txt)."""
-    monkeypatch.setenv("STUB_OUTBOX",
-                       str(arig.home / "harness" / "helper" / "outbox"))
     snap = arig.owner.create_chat("Files", members=["helper"])
+    monkeypatch.setenv("STUB_OUTBOX",           # the per-chat workspace (R18)
+                       str(arig.home / "harness" / "helper" / "workspaces"
+                           / snap.id / "outbox"))
     arig.owner.post(snap.id, "@helper make me a file")
     arig.owner.outbox.flush_once()
     runner = AgentRunner(arig.root, "helper", home=arig.home,
@@ -278,7 +279,8 @@ def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
 
 def test_engine_timeout_kills_the_run(arig, tmp_path):
     reg = ModelRegistry.load(arig.home)
-    responder = CliResponder(reg, SimpleNamespace(user="helper"), arig.home)
+    responder = CliResponder(reg, SimpleNamespace(user="helper", tx=None),
+                             arig.home)
     inv = reg.resolve(settings(adapter="stub"), "humans")
     pack = responder.prompts.for_agent(None)
     stub = tmp_path / "stub_cli.py"

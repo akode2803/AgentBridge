@@ -544,15 +544,36 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       a scratch root: intro reply threaded + clean feed lines, then an FYI
       → sentinel → nothing posted, feed "No reply needed". 260 tests; live
       @claude harness restarted onto it.
-- [ ] **R18 — Permission broker + workspaces.** Per-chat **workspace** for
-      each agent (memory + context live there; loose sandbox per D7);
-      read-only default outside it; intercept the inner CLI's permission asks
-      (claude-code `--permission-prompt-tool` / codex approval hooks / generic
-      adapter config) and surface them to the OWNER as a popup above the
-      composer (approve / deny / always-allow), Codex-style; same surface for
-      agent questions to the user; auxiliary CLI flags allow/deny-able in UI
-      without breaking the permission system; the **2-way harness↔agent
-      channel** that makes all this possible.
+- [x] **R18 — Permission broker + workspaces. DONE 2026-07-13.** Each run
+      gets a per-chat **workspace** (`home/harness/<agent>/workspaces/
+      <chat_id>/` — context, inbox, outbox, cwd; R20 adds memory here). The
+      **broker** (broker.py) decides every tool use, in order: inside the
+      workspace → allow; inside a DENY ROOT (harness home, mesh root — keys,
+      caches, other members' bodies) → refuse outright, no owner can grant
+      it (protects visibility = membership); a preset `auto_allow` read-class
+      tool → allow; an owner standing rule (`harness["approvals"]`
+      [{tool,chat}], chat "*" = all) → allow; else **ASK** the owner and
+      block. No answer in `ask_timeout_s` (default 120) = **deny** (fail
+      closed); a denied intent is cached per-run (inner CLIs retry — the
+      spike saw 3 asks for one Write). The **2-way channel** (bridge.py) is
+      a per-run FastMCP streamable-http server bound to that run's
+      chat/workspace/policy; tools `approve` (permission gate) and
+      `ask_member` (agent → owner question); `structured_output=False` is
+      mandatory (spike: FastMCP's structuredContent wrap reads as invalid).
+      Claude preset drops the interim `--allowedTools Read,Write,Edit,Glob,
+      Grep` for `--permission-prompt-tool mcp__ab__approve` +
+      `--mcp-config`; `permission_args`/`auto_allow` are preset DATA, kept
+      in BOTH full and minimal argv. GUI: Codex-style cards above the
+      composer (Allow / Always allow here / Deny, or a text answer for a
+      question), owner-only, on a 2s poll while the chat is open (the run is
+      blocked). Asks/answers ride two one-writer docs (`status/asks/
+      <agent>.json` harness-written, `_answers.json` GUI-written). Verified
+      with the REAL claude CLI on a scratch root: in-workspace write ran
+      free; an out-of-workspace write paused until the "owner" approved,
+      then wrote + confirmed. Browser-verified both card types round-trip.
+      273 tests; live harness + GUI restarted onto it. Deferred to a later
+      round: auxiliary-flag allow/deny UI (presets carry safety flags as
+      data today); codex/other-family permission wiring (their own bring-up).
 - [ ] **R19 — Data pipeline hardening.** The agent receives messages ONLY
       through the harness (mesh API + the agent's keys — it never touches the
       folder); leak audit: workspace contains no raw mesh data, prompts carry

@@ -19,6 +19,7 @@ the stream (``extract_step``) and runs the process.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -27,6 +28,8 @@ from pathlib import Path
 
 from ...core.config import DEFAULT_HOME
 from ...core.timekit import utcnow_iso
+from ..bridge import BridgeServer
+from ..broker import PermissionBroker
 from ..conversation import Delivery
 from ..prompt import PromptManager, PromptPack
 from ..responder import OnStep, Reply
@@ -111,6 +114,7 @@ class CliResponder:
         self.agent = mesh.user
         self.home = Path(home) if home else DEFAULT_HOME
         self.prompts = PromptManager(self.home)
+        self.broker = PermissionBroker(mesh.tx, self.agent)
         self._minimal: set[str] = set()  # preset ids that needed the fallback
 
     # ------------------------------------------------------------- the run
@@ -122,7 +126,10 @@ class CliResponder:
                                     delivery.chat_id)  # raises with a reason
         pack = self.prompts.for_agent(acc)
 
-        workdir = self.home / "harness" / self.agent
+        # per-chat WORKSPACE (R18): the agent's own desk for this chat —
+        # context, inbox, outbox (R20 adds memory) live here, runs cwd here
+        workdir = (self.home / "harness" / self.agent / "workspaces"
+                   / delivery.chat_id)
         outbox = workdir / "outbox"
         for d in (workdir, outbox):
             d.mkdir(parents=True, exist_ok=True)
@@ -137,8 +144,6 @@ class CliResponder:
         reply_file = workdir / "reply.md"
         reply_file.unlink(missing_ok=True)
 
-        prompt = pack.prompt(delivery, acc, context_file=context_file,
-                             outbox=outbox)
         steps: list[dict] = []
 
         def step(line: str) -> None:
@@ -146,24 +151,44 @@ class CliResponder:
             if on_step:
                 on_step(line)
 
-        argv = inv.preset.build_argv(
-            prompt=prompt, workdir=str(workdir), reply_file=str(reply_file),
-            model=inv.model, effort=inv.effort,
-            minimal=inv.preset.id in self._minimal,
-        )
-        rc, lines, err = self._run(argv, workdir, settings.timeout_s,
-                                   inv, pack, step)
-        if self._usage_error(rc, err) and inv.preset.id not in self._minimal:
-            # a CLI update rejected our flags — drop conveniences, keep safety
-            step("Flags rejected — retrying with the minimal set")
-            self._minimal.add(inv.preset.id)
+        with contextlib.ExitStack() as stack:
+            mcp_config = ""
+            env = None
+            if inv.preset.permission_args:
+                bridge = stack.enter_context(BridgeServer(
+                    self.broker, chat_id=delivery.chat_id,
+                    workspace=workdir, auto_allow=inv.preset.auto_allow,
+                    approvals=settings.approvals,
+                    ask_timeout_s=settings.ask_timeout_s,
+                    deny_roots=self._deny_roots(),
+                ))
+                mcp_config = bridge.mcp_config()
+                # the inner CLI must out-wait the owner-answer window
+                env = dict(os.environ)
+                env["MCP_TOOL_TIMEOUT"] = str(
+                    int((settings.ask_timeout_s + 60) * 1000))
+            prompt = pack.prompt(delivery, acc, context_file=context_file,
+                                 outbox=outbox, bridge=bool(mcp_config))
             argv = inv.preset.build_argv(
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
-                effort=inv.effort, minimal=True,
+                effort=inv.effort, minimal=inv.preset.id in self._minimal,
+                mcp_config=mcp_config,
             )
             rc, lines, err = self._run(argv, workdir, settings.timeout_s,
-                                       inv, pack, step)
+                                       inv, pack, step, env=env)
+            if self._usage_error(rc, err) and inv.preset.id not in self._minimal:
+                # a CLI update rejected our flags — drop conveniences, keep
+                # safety args AND the permission plumbing
+                step("Flags rejected — retrying with the minimal set")
+                self._minimal.add(inv.preset.id)
+                argv = inv.preset.build_argv(
+                    prompt=prompt, workdir=str(workdir),
+                    reply_file=str(reply_file), model=inv.model,
+                    effort=inv.effort, minimal=True, mcp_config=mcp_config,
+                )
+                rc, lines, err = self._run(argv, workdir, settings.timeout_s,
+                                           inv, pack, step, env=env)
 
         text = reply_from_output(lines, inv.preset.format)
         if not text and reply_file.is_file():
@@ -183,6 +208,16 @@ class CliResponder:
         return Reply(body=text, steps=steps, files=files)
 
     # ------------------------------------------------------------ plumbing
+    def _deny_roots(self) -> list[Path]:
+        """Paths no run may touch even with an owner's click: the harness
+        home (keystore, caches, config) and the shared mesh folder — the
+        workspace subtree is exempted by the broker's first rule."""
+        roots = [self.home]
+        mesh_root = getattr(self.mesh.tx, "root", None)
+        if mesh_root:
+            roots.append(Path(mesh_root))
+        return roots
+
     def _category(self, delivery: Delivery, acc) -> str:
         owner = acc.agent.owner if (acc and acc.agent) else None
         if delivery.kind == "timer" or not delivery.triggers:
@@ -191,11 +226,13 @@ class CliResponder:
         return HarnessSettings.category(t.sender_kind, t.sender, owner)
 
     def _run(self, argv: list[str], workdir: Path, timeout_s: float,
-             inv: Invocation, pack: PromptPack,
-             step) -> tuple[int | None, list[str], str]:
+             inv: Invocation, pack: PromptPack, step,
+             env: dict | None = None) -> tuple[int | None, list[str], str]:
         kwargs: dict = {}
         if os.name == "nt":  # no console flash under pythonw (v1 lesson)
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        if env is not None:
+            kwargs["env"] = env
         proc = subprocess.Popen(
             argv, cwd=str(workdir), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,

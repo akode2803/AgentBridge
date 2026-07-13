@@ -122,6 +122,60 @@ def agent_harness_status(app, req, mesh) -> dict:
 
 
 @authed
+def asks(app, req, mesh) -> dict:
+    """Pending permission asks + questions across MY agents (owner-only,
+    R18) — the chat view polls this to raise the approval popup."""
+    chat = (req.params.get("chat") or "").strip()
+    out = []
+    for name in mesh.directory.names():
+        acc = mesh.directory.get(name)
+        if not (acc and acc.agent and acc.agent.owner == mesh.user):
+            continue
+        doc = mesh.tx.get_doc(f"status/asks/{name}.json")
+        pending = doc.get("asks") if isinstance(doc, dict) else None
+        for a in pending or []:
+            if not isinstance(a, dict):
+                continue
+            if chat and a.get("chat_id") != chat:
+                continue
+            out.append({**a, "agent": name})
+    return {"ok": True, "asks": out}
+
+
+@authed
+def answer_ask(app, req, mesh) -> dict:
+    """One owner verdict for one ask. ``always`` also persists a standing
+    approval rule ({tool, chat}) into the agent's harness config."""
+    d = req.data
+    agent = (d.get("agent") or "").strip().lower()
+    if mesh.directory.owner_of(agent) != mesh.user:
+        return {"error": "only the agent's responsible member can answer"}
+    ask_id = str(d.get("ask_id") or "")
+    verdict = str(d.get("verdict") or "").lower()
+    if not ask_id or verdict not in ("allow", "always", "deny", "answer"):
+        return {"error": "unknown ask or verdict"}
+    path = f"status/asks/{agent}_answers.json"
+    doc = mesh.tx.get_doc(path)
+    doc = doc if isinstance(doc, dict) else {}
+    answers = doc.setdefault("answers", {})
+    answers[ask_id] = {"verdict": verdict, "text": str(d.get("text") or "")[:2000],
+                       "by": mesh.user, "ts": utcnow_iso()}
+    for stale in list(answers)[:-100]:      # the doc never grows unbounded
+        answers.pop(stale, None)
+    mesh.tx.put_doc(path, doc)
+    if verdict == "always" and d.get("tool"):
+        acc = mesh.directory.get(agent)
+        cur = list((acc.agent.harness or {}).get("approvals") or []) \
+            if acc and acc.agent else []
+        rule = {"tool": str(d["tool"]),
+                "chat": str(d.get("chat") or "*")}
+        if rule not in cur:
+            cur.append(rule)
+            mesh.set_agent_harness(agent, {"approvals": cur})
+    return {"ok": True}
+
+
+@authed
 def stand_down(app, req, mesh) -> dict:
     """This machine's agents on/off (D19: explicit switch, never logout)."""
     changed = mesh.set_machine_agents_active(not req.data.get("down", True))
@@ -141,12 +195,14 @@ def pause(app, req, mesh) -> dict:
 GET = {
     "/api/mesh/agent_harness": agent_harness_status,
     "/api/mesh/harness_options": harness_options,
+    "/api/mesh/asks": asks,
 }
 POST = {
     "/api/mesh/create_agent": create_agent,
     "/api/mesh/agent": agent,
     "/api/mesh/delete_agent": delete_agent,
     "/api/mesh/adopt_agent": adopt_agent,
+    "/api/mesh/answer_ask": answer_ask,
     "/api/mesh/stand_down": stand_down,
     "/api/mesh/pause": pause,
 }

@@ -11,10 +11,14 @@ Core pieces:
 - ``WorkQueue`` (queue.py): durable trigger queue + the answered-guard.
 - ``ConversationManager`` (conversation.py): enriched delivery bundles.
 - ``PromptManager`` (prompt.py): every word the agent is told, from JSON.
+- ``PermissionBroker`` (broker.py): the owner decides what a run may do.
+- ``BridgeServer`` (bridge.py): the per-run harness↔agent MCP channel.
 - ``TimerService`` (timers.py): agent self-scheduled wake-ups, owner-visible.
 - ``Responder`` (responder.py): the invocation seam R16's adapters implement.
 """
 
+from .bridge import BridgeServer
+from .broker import PermissionBroker
 from .conversation import ConversationManager, Delivery, TriggerContext
 from .prompt import PromptManager, PromptPack
 from .responder import Reply, Responder, SILENCE, clean_reply
@@ -24,8 +28,9 @@ from .queue import WorkItem, WorkQueue
 from .timers import TimerService
 
 __all__ = [
-    "AgentRunner", "ConversationManager", "Delivery", "HarnessSettings",
-    "PromptManager", "PromptPack", "Reply", "Responder", "SILENCE",
-    "SingleInstance", "TimerService", "TriggerContext", "WorkItem",
-    "WorkQueue", "clean_reply", "main", "supervise",
+    "AgentRunner", "BridgeServer", "ConversationManager", "Delivery",
+    "HarnessSettings", "PermissionBroker", "PromptManager", "PromptPack",
+    "Reply", "Responder", "SILENCE", "SingleInstance", "TimerService",
+    "TriggerContext", "WorkItem", "WorkQueue", "clean_reply", "main",
+    "supervise",
 ]

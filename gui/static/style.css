@@ -358,6 +358,26 @@ h1 {
 /* the per-chat agents page: the model row reads as a sub-item of its agent */
 .kv dt.cd-sub { padding-left: 14px; font-size: 12.5px; align-self: center; }
 
+/* R18: agent permission asks — the approval cards above the composer */
+#ask-bar { display: flex; flex-direction: column; gap: 8px; padding: 0 14px; }
+#ask-bar:not(:empty) { padding-bottom: 8px; }
+.ask-card {
+  display: flex; gap: 10px; align-items: flex-start;
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: 12px;
+  padding: 10px 12px; box-shadow: 0 4px 14px rgba(0, 0, 0, .08);
+}
+.ask-avatar { width: 28px; height: 28px; font-size: 12px; flex: none; }
+.ask-main { min-width: 0; flex: 1; }
+.ask-head { font-size: 13.5px; }
+.ask-detail {
+  font-size: 12.5px; color: var(--text-dim);
+  word-break: break-all; margin: 2px 0 8px;
+}
+.ask-actions, .ask-answer { display: flex; gap: 8px; }
+.ask-answer input { flex: 1; min-width: 0; }
+.ask-done { opacity: .5; pointer-events: none; }
+
 /* task 1 (2026-07-11): settings read cleaner WITHOUT the boxed cards — the
    boxes + their mismatched 560/640 widths were the "inconsistent" feeling.
    Inside .settings-body a .card flattens into a labelled group that spans the

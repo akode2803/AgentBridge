@@ -59,6 +59,9 @@ class HarnessSettings:
     catchup_window_h: float = 48.0  # "recent" = triggers younger than this
     error_notices: bool = True      # post a short notice when a run fails
     timeout_s: float = 3300.0       # per-run budget (adapters enforce)
+    ask_timeout_s: float = 120.0    # owner-answer window; silence = deny
+    # owner-granted standing permissions: [{tool, chat}] (chat "*" = all)
+    approvals: list[dict] = field(default_factory=list)
     # ----- model selection (R16): the owner's picker writes these
     adapter: str = ""               # preset family id; "" = the sole install
     model: str = ""                 # override-all "current model"
@@ -94,6 +97,13 @@ class HarnessSettings:
             catchup_window_h=float(_int(h.get("catchup_window_h"), 48, 1, 24 * 30)),
             error_notices=bool(h.get("error_notices", True)),
             timeout_s=float(_int(h.get("timeout_s"), 3300, 30, 6 * 3600)),
+            ask_timeout_s=float(_int(h.get("ask_timeout_s"), 120, 15, 900)),
+            approvals=[
+                {"tool": str(r.get("tool") or ""),
+                 "chat": str(r.get("chat") or "*")}
+                for r in (h.get("approvals") or [])
+                if isinstance(r, dict) and r.get("tool")
+            ],
             adapter=str(h.get("adapter") or "").strip().lower(),
             model=_model(h.get("model")),
             reasoning=str(h.get("reasoning") or "").strip().lower(),

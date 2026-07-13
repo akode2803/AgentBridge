@@ -74,7 +74,8 @@ class PromptPack:
             return template  # a broken template never breaks a run
 
     # ------------------------------------------------------------ the prompt
-    def prompt(self, delivery: Delivery, acc, *, context_file, outbox) -> str:
+    def prompt(self, delivery: Delivery, acc, *, context_file, outbox,
+               bridge: bool = False) -> str:
         roster = "; ".join(
             f"@{r['name']} ({r.get('desc', '')})" for r in delivery.roster)
         parts = [self.text(
@@ -93,6 +94,8 @@ class PromptPack:
         else:
             parts.append(self.text("task_message", context_file=context_file))
         parts.append(self.text("capabilities", outbox=outbox))
+        if bridge:  # only when the run really has the harness channel
+            parts.append(self.text("bridge"))
         parts.append(self.text("etiquette"))
         silence = self.text("silence", sentinel=SILENCE) \
             or _SILENCE_FALLBACK.format(sentinel=SILENCE)

@@ -47,6 +47,10 @@ class Preset:
     blocklist_args: list[str] = field(default_factory=list)  # {tool}, repeated
     blocklist: list[str] = field(default_factory=list)     # default tool blocks
     reply_file_arg: list[str] = field(default_factory=list)  # {reply_file}
+    # R18 broker plumbing — {mcp_config} rides argv when a bridge is active;
+    # safety-class: applied in BOTH full and minimal argv, never dropped
+    permission_args: list[str] = field(default_factory=list)
+    auto_allow: list[str] = field(default_factory=list)    # read-class tools
     format: str = "text"              # claude-stream | codex-jsonl | text
     default_model: str = ""
     models: list[str] = field(default_factory=list)        # picker suggestions
@@ -73,15 +77,20 @@ class Preset:
         effort: str = "",
         blocklist: list[str] | None = None,
         minimal: bool = False,
+        mcp_config: str = "",
     ) -> list[str]:
         """The run's argv — a LIST, never a shell string (v1 quoted prompts
         into a shell; argv removes that whole class). The minimal variant
-        drops conveniences only — safety args and the blocklist are kept."""
-        fill = {"prompt": prompt, "workdir": workdir, "reply_file": reply_file}
+        drops conveniences only — safety args, the blocklist and the
+        permission plumbing are kept."""
+        fill = {"prompt": prompt, "workdir": workdir, "reply_file": reply_file,
+                "mcp_config": mcp_config}
         base = self.args_minimal if (minimal and self.args_minimal) else self.args
         argv = [self.command]
         argv += [a.format(**fill) for a in base]
         argv += [a.format(**fill) for a in self.safety_args]
+        if mcp_config and self.permission_args:
+            argv += [a.format(**fill) for a in self.permission_args]
         if not minimal and reply_file and self.reply_file_arg:
             argv += [a.format(**fill) for a in self.reply_file_arg]
         if model and self.model_args:

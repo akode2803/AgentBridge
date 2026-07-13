@@ -354,6 +354,44 @@ def test_agents_create_patch_standdown_delete(rig):
     assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False
 
 
+def test_asks_surface_and_answer_roundtrip(rig):
+    """R18: the owner sees their agents' pending asks and answers them; an
+    'always' verdict persists a standing approval rule."""
+    from agentbridge.transport.folder import FolderTransport
+
+    rig.signup()
+    rig.post("/api/mesh/create_agent", username="helper", display="Helper")
+    tx = FolderTransport(rig.root)
+    # the harness would write this doc; simulate one pending ask
+    tx.put_doc("status/asks/helper.json", {
+        "agent": "helper", "asks": [
+            {"id": "ask1", "chat_id": "c1", "kind": "permission",
+             "tool": "Write", "detail": "C:/elsewhere/x.txt"}]})
+    out = rig.get("/api/mesh/asks", chat="c1")
+    assert [a["id"] for a in out["asks"]] == ["ask1"]
+    assert out["asks"][0]["agent"] == "helper"
+    assert rig.get("/api/mesh/asks", chat="other")["asks"] == []
+
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="ask1",
+                   verdict="always", tool="Write", chat="c1")
+    assert out["ok"]
+    doc = tx.get_doc("status/asks/helper_answers.json")
+    assert doc["answers"]["ask1"]["verdict"] == "always"
+    assert doc["answers"]["ask1"]["by"] == "aryan"
+    me = rig.get("/api/mesh/me")   # the standing rule persisted
+    assert {"tool": "Write", "chat": "c1"} \
+        in me["my_agents"][0]["harness"]["approvals"]
+
+    # not the owner -> no visibility, no verdicts
+    rig.post("/api/mesh/logout")
+    rig.post("/api/mesh/signup", username="mallory", password="mallory-pw1",
+             display="Mallory")
+    assert rig.get("/api/mesh/asks")["asks"] == []
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="ask1",
+                   verdict="allow")
+    assert "error" in out
+
+
 # ----------------------------------------------------------- typing + feeds
 def test_typing_and_livefeed(rig):
     rig.signup()
