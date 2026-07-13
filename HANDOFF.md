@@ -17,7 +17,10 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.100**.
+  `gui/__init__.py` in R26). Currently **v0.24.101** (transport-aware
+  Connection panel: a cloud root shows "Cloud mesh ✓ Connected" + project host
+  + mirror health instead of the folder/OneDrive checks, which read "✗ No —
+  check OneDrive" on the healthy Supabase root; `/api/open` restored in v2).
 - **Mesh root:** **`supabase://mesh2`** — the cloud transport is now PRIMARY
   (cutover 2026-07-13, R28), remembered in `~/.agentbridge/config.json`
   (`mesh_root`). `mesh_root_folder_backup` keeps the synced-folder `mesh2/` path

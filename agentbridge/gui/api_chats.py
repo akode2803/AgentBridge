@@ -8,6 +8,8 @@ with the Delivered tier, per-user ``archived``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .context import GuiApp
 from .routing import authed
 from .serialize import chat_json, message_json, user_json
@@ -15,10 +17,34 @@ from .serialize import chat_json, message_json, user_json
 __all__ = ["GET", "POST"]
 
 
+def _connection(app: GuiApp) -> dict:
+    """Transport-aware status for the Connection panel (no-chat home +
+    Settings → Connection). A folder root keeps the v1 checks — does the
+    folder exist, is the sync client alive; a cloud root reports the warm
+    mirror's health instead (there is no folder or OneDrive to check, and
+    the folder checks read "✗ No — check OneDrive" on a healthy cloud mesh:
+    wrong and alarming)."""
+    tx = app.transport
+    scheme = getattr(tx, "scheme", "folder")
+    out = {"scheme": scheme, "root": str(app.root)}
+    if scheme == "folder":
+        from .desktop import sync_client_running
+
+        out["shared_ok"] = isinstance(app.root, Path) and app.root.is_dir()
+        out["sync_client"] = sync_client_running()
+        return out
+    out["host"] = str(getattr(tx, "host", "") or "")
+    status = getattr(tx, "mirror_status", None)
+    if callable(status):
+        out["mirror"] = status()
+    return out
+
+
 def bridge_state(app: GuiApp, req) -> dict:
     """The v1 ``/api/state`` shape the shared frontend boots + polls on. v2 has
     no bridge/setup wizard, so it always reports configured; the fields the
-    frontend actually reads are configured/v/caps/paused (+ version)."""
+    frontend actually reads are configured/v/caps/paused/connection
+    (+ version)."""
     mesh = app.mesh
     ctl = (mesh.tx.get_doc("control.json") if mesh else
            app.directory0.tx.get_doc("control.json")) or {}
@@ -29,6 +55,7 @@ def bridge_state(app: GuiApp, req) -> dict:
         "caps": {"sse": True, "receipts": "delivered", "admins": True},
         "paused": bool(ctl.get("paused")),
         "user": app.user,
+        "connection": _connection(app),
     }
 
 

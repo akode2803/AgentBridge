@@ -203,12 +203,31 @@ def test_sse_stream_delivers_peer_message(rig):
 
 def test_bridge_state_compat_shape(rig):
     """The shared frontend boots + polls /api/state (the v1 bridge status).
-    v2 must answer it with the fields the client reads: configured/v/caps."""
+    v2 must answer it with the fields the client reads: configured/v/caps
+    + the transport-aware connection block (folder checks on a supabase://
+    root read "check OneDrive" — wrong and alarming)."""
     st = rig.get("/api/state")
     assert st["configured"] is True
     assert st["v"] == 2
     assert st["caps"]["sse"] is True
     assert st["paused"] is False
+    conn = st["connection"]
+    assert conn["scheme"] == "folder" and conn["root"]
+    assert conn["shared_ok"] is True     # the rig's folder root exists
+    assert "sync_client" in conn         # True/False/None (probe may not know)
+
+
+def test_open_target_fixed_names_only(rig, monkeypatch):
+    """/api/open opens FIXED local folders (v1 parity — the route was missing
+    in v2, leaving the Settings buttons dead). Never a client-supplied path."""
+    from agentbridge.gui import api_files
+
+    opened = []
+    monkeypatch.setattr(api_files.desktop, "open_path", opened.append)
+    assert rig.post("/api/open", target="home")["ok"]
+    assert rig.post("/api/open", target="shared")["ok"]
+    assert opened == [rig.app.home, rig.app.root]
+    assert "error" in rig.post("/api/open", target="C:/Windows")
 
 
 def test_chat_pins_are_a_list_with_body(rig):

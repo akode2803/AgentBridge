@@ -67,6 +67,7 @@ class CachingTransport(Transport):
         self._docs: dict[str, Any] = {}        # the mirror
         self._chat_ids: list[str] = []
         self._warm = False
+        self._last_refresh = 0.0               # wall clock of last good pull
         self._doc_writes: dict[str, float] = {}   # path -> monotonic of write
         self._chat_writes: dict[str, float] = {}  # chat_id -> monotonic
         self._stop = threading.Event()
@@ -89,6 +90,19 @@ class CachingTransport(Transport):
     def refresh(self) -> None:
         """One synchronous snapshot pull (tests; the loop calls this too)."""
         self._refresh_once()
+
+    def mirror_status(self) -> dict:
+        """Mirror health for the GUI Connection panel: ``warm`` = the bulk
+        snapshot is loaded (hot reads are memory-served); ``age_s`` = seconds
+        since the last successful refresh (None before the first). A warm
+        mirror with a large age means the refresher is failing and the app is
+        serving the last good snapshot."""
+        with self._lock:
+            warm = self._warm
+            last = self._last_refresh
+        return {"warm": warm,
+                "age_s": (time.time() - last) if last else None,
+                "refresh_s": self.refresh_s}
 
     def _ensure_warm(self) -> bool:
         """Mirror ready? Warm it on first use; if warming FAILS (offline),
@@ -136,6 +150,7 @@ class CachingTransport(Transport):
             self._docs = docs
             self._chat_ids = sorted(ids)
             self._warm = True
+            self._last_refresh = time.time()
             floor = time.monotonic() - _WRITE_GUARD_S
             self._doc_writes = {p: w for p, w in self._doc_writes.items()
                                 if w > floor}

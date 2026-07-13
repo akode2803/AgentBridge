@@ -187,6 +187,24 @@ def test_failed_refresh_keeps_serving_the_last_snapshot(mirror):
     assert inner.reads["get_doc"] == 0
 
 
+def test_mirror_status_reports_warmth_and_age(mirror):
+    """The GUI Connection panel reads mirror_status(): cold = not warm, no
+    age; after a pull = warm with a fresh age; a failed refresh keeps warm
+    (still serving the last snapshot) while the age keeps growing."""
+    inner, tx = mirror
+    assert tx.mirror_status() == {"warm": False, "age_s": None,
+                                  "refresh_s": 30.0}
+    inner.put_doc("users/a.json", {"v": 1})
+    tx.get_doc("users/a.json")   # first read warms the mirror
+    st = tx.mirror_status()
+    assert st["warm"] is True
+    assert st["age_s"] is not None and st["age_s"] < 5
+    inner.fail = True
+    with pytest.raises(ConnectionError):
+        tx.refresh()
+    assert tx.mirror_status()["warm"] is True   # stale beats vanished
+
+
 def test_cold_start_offline_falls_through_then_recovers():
     inner = BulkTransport()
     inner.put_doc("users/a.json", {"v": 1})

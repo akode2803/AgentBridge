@@ -269,14 +269,20 @@ async function renderSettings() {
         resuming.</p>
       </div>`;
   } else if (section === "connection") {
+    // transport-aware root row (the status rows come from V.connectionRows,
+    // shared with the no-chat home card): a folder root keeps the openable
+    // path; a cloud root shows the spec — there is no folder to open
+    const cloud = s.connection && s.connection.scheme !== "folder";
+    const root = s.connection ? s.connection.root : s.shared_dir;
     html = `${back}<h1>Connection</h1>
       <div class="card">
         <dl class="kv">
-          <dt>Shared folder</dt><dd class="mono">${esc(s.shared_dir)}
-            <a href="#" id="open-shared2">open</a></dd>
-          <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
-          <dt>Sync client</dt><dd>${s.onedrive_running === null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
-          <dt>Versions</dt><dd>App v${esc(s.gui_version)} · Bridge v${esc(s.bridge_version)}</dd>
+          ${cloud
+            ? `<dt>Cloud root</dt><dd class="mono">${esc(root || "")}</dd>`
+            : `<dt>Shared folder</dt><dd class="mono">${esc(root || "")}
+                <a href="#" id="open-shared2">open</a></dd>`}
+          ${V.connectionRows(s)}
+          <dt>Version</dt><dd>${V.versionLine(s)}</dd>
         </dl>
         <div class="row" style="margin-top:10px">
           <button onclick="openTarget('home')">Open config folder</button>
@@ -287,9 +293,9 @@ async function renderSettings() {
         <dl class="kv" style="grid-template-columns:minmax(110px,160px) 1fr">
           <dt>Check for news</dt><dd><span id="poll-slot"></span></dd>
         </dl>
-        <p class="hint" style="margin-bottom:0">How often this window re-reads
-        the shared folder. Faster feels snappier; slower is lighter on OneDrive
-        and disk. Applies from the next tick — no restart needed.</p>
+        <p class="hint" style="margin-bottom:0">How often this window re-checks
+        the mesh for news. Faster feels snappier; slower is lighter on sync
+        traffic and disk. Applies from the next tick — no restart needed.</p>
       </div>`;
   }
   $("#content").innerHTML = `<div class="settings-body">${html}</div>`;

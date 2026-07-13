@@ -239,11 +239,32 @@ def save(app, req, mesh) -> dict:
     return {"ok": True, "saved": saved, "dest": str(dest_dir)}
 
 
+def open_target(app, req) -> dict:
+    """The Settings → Connection 'open' buttons (v1 parity — the route was
+    missing in v2, leaving them dead). Targets are FIXED names, never a
+    client-supplied path: 'home' = the local config dir, 'shared' = a folder
+    mesh root. A cloud root has no folder to open."""
+    target = (req.data.get("target") or "").strip()
+    if target == "home":
+        desktop.open_path(app.home)
+        return {"ok": True}
+    if target == "shared":
+        from pathlib import Path
+
+        if not isinstance(app.root, Path):
+            return {"error": "The mesh lives in a cloud service — there is "
+                             "no folder to open"}
+        desktop.open_path(app.root)
+        return {"ok": True}
+    return {"error": f"unknown open target {target!r}"}
+
+
 GET = {
     "/api/mesh/file": file,
     "/api/mesh/avatar": avatar,
 }
 POST = {
+    "/api/open": open_target,
     "/api/mesh/open_file": open_file,
     "/api/mesh/save": save,
     "/api/mesh/clear_avatar": clear_avatar,

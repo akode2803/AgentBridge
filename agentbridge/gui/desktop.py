@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-__all__ = ["SUBPROC", "open_path", "pick_folder", "launch_window"]
+__all__ = ["SUBPROC", "open_path", "pick_folder", "launch_window",
+           "sync_client_running"]
 
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 SUBPROC = {"stdin": subprocess.DEVNULL, "creationflags": NO_WINDOW}
@@ -59,6 +61,39 @@ def open_path(path: Path | str) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+# the process probe shells out (~1s), so the answer is cached for a minute —
+# /api/state polls every few seconds (ported from the v1 server)
+_sync_cache = {"ts": 0.0, "running": None}
+
+
+def sync_client_running() -> bool | None:
+    """Is the folder-sync client (OneDrive today; anything later) alive?
+    None = unknown. Only meaningful for folder mesh roots."""
+    now = time.time()
+    if now - _sync_cache["ts"] > 60 or _sync_cache["running"] is None:
+        _sync_cache.update(ts=now, running=_probe_sync_client())
+    return _sync_cache["running"]
+
+
+def _probe_sync_client() -> bool | None:
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq OneDrive.exe"],
+                capture_output=True, text=True, timeout=15, **SUBPROC).stdout
+            return "OneDrive.exe" in out
+        except Exception:  # noqa: BLE001 — a broken probe is just "unknown"
+            return None
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["pgrep", "-x", "OneDrive"],
+                               capture_output=True, timeout=15)
+            return r.returncode == 0
+        except Exception:  # noqa: BLE001
+            return None
+    return None
 
 
 def pick_folder(timeout: float = 600) -> str:

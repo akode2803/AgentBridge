@@ -90,6 +90,15 @@ class SupabaseTransport(Transport):
         self._watchers: list[_HintWatcher] = []
         self._bucket_ready = False
 
+    @property
+    def host(self) -> str:
+        """Project host for status displays (``<ref>.supabase.co``) — the
+        URL carries no credentials, but only the netloc is surfaced."""
+        from urllib.parse import urlsplit
+
+        url = self._env.get("SUPABASE_URL", "")
+        return urlsplit(url).netloc or url
+
     # ------------------------------------------------------------- client
     def _sb(self):
         if self._client is None:

@@ -239,6 +239,8 @@ published keys is an identity-takeover vector (→ R27: signed/pinned account do
   mesh's existing eventual-consistency window (meta.json is already a
   rebuildable snapshot). The GUI shares ONE mirrored transport between the
   pre-auth directory and the Mesh (`GuiApp._build` passes `_tx0`).
+  `mirror_status()` reports warmth + seconds since the last good refresh;
+  the GUI Connection panel renders it as Connected / Reconnecting.
 - **`store/db.py`** — a local SQLite **read cache** (messages + per-log
   offsets + a small cached-doc kv), rebuildable from the transport at any time.
 - **`store/outbox.py`** — the durable send guarantee: a sealed envelope is
@@ -314,7 +316,12 @@ already local, so restore never needs the password). `/api/mesh/events` is the
 one SSE stream. Every mutating endpoint is a thin shim over the facade — the
 gates live in the services, never re-implemented here. File serving is
 membership-gated and provenance-checked (sha256 from the signed message) with a
-path-traversal guard; uploads stage under a one-shot token.
+path-traversal guard; uploads stage under a one-shot token. `/api/state`
+carries a transport-aware `connection` block (folder root: `shared_ok` + the
+cached OneDrive-process probe; cloud root: project host + `mirror_status()`)
+that the no-chat home and Settings → Connection render; `/api/open` opens the
+two FIXED local folders (`home` = the config dir, `shared` = a folder mesh
+root — never a client-supplied path).
 
 ### `agentbridge/cli/` — the MCP surface (`server.py`)
 `build_mcp(mesh)` exposes capability-parity tools (list/read/post/react/star/

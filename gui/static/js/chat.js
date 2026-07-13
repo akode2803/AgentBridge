@@ -101,6 +101,41 @@ function chatStructKey(chatId, m) {
     + "|" + (m.avatar ? m.avatar.sha256 : "");   // group photo → repaint header
 }
 
+// Connection rows for the home card AND Settings → Connection (which calls
+// this via V — views never import views). Transport-aware since the Supabase
+// cutover: a cloud root reports the warm mirror's health, not the folder/
+// OneDrive checks (those read "✗ No — check OneDrive" on a healthy cloud
+// mesh). A v1 server has no s.connection — fold its top-level folder fields
+// into the same shape so the old rendering is unchanged there.
+function connectionRows(s) {
+  const c = s.connection ||
+    { scheme: "folder", root: s.shared_dir, shared_ok: s.shared_ok,
+      sync_client: s.onedrive_running };
+  if (c.scheme === "folder") {
+    return `
+      <dt>Folder synced</dt><dd>${c.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
+      <dt>Sync client</dt><dd>${c.sync_client == null ? "Unknown" : c.sync_client ? "✓ Running" : "✗ Not running"}</dd>`;
+  }
+  // cloud: warm mirror = connected; warm but long past the refresh cadence
+  // (4s, backoff caps at 60s) = the refresher is failing, serving cached
+  const m = c.mirror || {};
+  const stale = m.age_s != null && m.age_s > 90;
+  const status = !m.warm ? "Connecting…"
+    : stale ? "⚠ Reconnecting — showing cached data"
+      : "✓ Connected";
+  return `
+    <dt>Cloud mesh</dt><dd>${status}</dd>
+    ${c.host ? `<dt>Project</dt><dd class="mono">${esc(c.host)}</dd>` : ""}`;
+}
+V.connectionRows = connectionRows;
+
+// one version on v2 (canonical since R26); v1 still reports the bridge's too
+function versionLine(s) {
+  return `App v${esc(s.gui_version || "")}` +
+    (s.bridge_version ? ` · Bridge v${esc(s.bridge_version)}` : "");
+}
+V.versionLine = versionLine;
+
 // the no-active-chat home surface — WhatsApp-style centered pane (the chat
 // list lives in the sidebar). Extracted so renderChats can paint it
 // synchronously when leaving a chat (see the optimistic paint above).
@@ -123,9 +158,8 @@ function renderEmptyChat() {
         <div class="card">
           <h2>Connection</h2>
           <dl class="kv">
-            <dt>Folder synced</dt><dd>${s.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
-            <dt>Sync client</dt><dd>${s.onedrive_running == null ? "Unknown" : s.onedrive_running ? "✓ Running" : "✗ Not running"}</dd>
-            <dt>Versions</dt><dd>App v${esc(s.gui_version || "")} · Bridge v${esc(s.bridge_version || "")}</dd>
+            ${connectionRows(s)}
+            <dt>Version</dt><dd>${versionLine(s)}</dd>
           </dl>
         </div>
         <div class="card">

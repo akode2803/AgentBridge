@@ -80,6 +80,12 @@ class GuiApp:
         return self.mesh.user if self.mesh else None
 
     @property
+    def transport(self):
+        """The ONE shared transport — the Mesh rides the pre-auth instance
+        (R29), so this is valid signed in or out."""
+        return self._tx0
+
+    @property
     def _session_path(self) -> Path:
         return self.home / _SESSION_FILE
 

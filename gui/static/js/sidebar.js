@@ -13,7 +13,7 @@ const SETTINGS_SECTIONS = [
   { id: "account", label: "Account", desc: "Photo, name, sign out", icon: ICONS.user },
   { id: "chats", label: "Chats", desc: "Theme, sending", icon: ICONS.chat },
   { id: "agents", label: "My agents", desc: "Models, reply rules", icon: ICONS.bot },
-  { id: "connection", label: "Connection", desc: "Shared folder, sync", icon: ICONS.plug },
+  { id: "connection", label: "Connection", desc: "Status, performance", icon: ICONS.plug },
 ];
 
 // R19.5: the ask poller (chat.js) reports which chats have an agent WAITING
