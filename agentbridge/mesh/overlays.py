@@ -171,23 +171,59 @@ class UserState:
     (read_ns/read_ts, starred, hidden, cleared, pinned, deleted, forced_unread,
     mute) — every mutation is read-MERGE-write on the user's own file, held
     under a per-(chat, user) lock so concurrent in-process writers merge
-    instead of clobbering."""
+    instead of clobbering.
 
-    def __init__(self, tx: Transport, chat_id: str, user: str) -> None:
+    R31.5 signs the doc like the reaction file: with a ``signer`` every write
+    re-signs the full field set, and with a ``verifier`` every read treats an
+    unsigned/mis-signed doc as ABSENT. That closes the forged-state surface
+    (dropped-in ``hidden``/``cleared`` blanking the owner's own view, a fake
+    ``read_ns`` faking read receipts, a fake ``mute`` silencing pings) — and
+    because ``_merge`` starts from the VERIFIED read, a forged field is never
+    laundered into the next genuine write."""
+
+    def __init__(
+        self,
+        tx: Transport,
+        chat_id: str,
+        user: str,
+        *,
+        signer=None,     # (bytes) -> sig_b64, the owner's identity signer
+        verifier=None,   # (doc) -> bool, None on plaintext/dev meshes
+    ) -> None:
         self.tx = tx
         self.chat_id = chat_id
         self.user = user
+        self._signer = signer
+        self._verifier = verifier
         self._path = P.state(chat_id, user)
         self._lock = _state_lock(chat_id, user)
 
+    @staticmethod
+    def signed_fields(doc: dict) -> dict[str, Any]:
+        """The field payload the signature covers — everything but the
+        signature envelope itself."""
+        return {k: v for k, v in doc.items() if k not in ("ns", "sig")}
+
     def get(self) -> dict[str, Any]:
         doc = self.tx.get_doc(self._path, default={})
-        return doc if isinstance(doc, dict) else {}
+        if not isinstance(doc, dict):
+            return {}
+        if self._verifier is not None and not self._verifier(doc):
+            return {}  # fail-safe: a doc this user never signed doesn't exist
+        return doc
 
     def _merge(self, **changes: Any) -> dict[str, Any]:
         with self._lock:
-            state = self.get()
+            state = self.signed_fields(self.get())
             state.update(changes)
+            if self._signer is not None:
+                from .events import state_signing_bytes
+
+                ns = next_ns()
+                state["ns"] = ns
+                state["sig"] = self._signer(
+                    state_signing_bytes(self.chat_id, self.user, ns,
+                                        self.signed_fields(state)))
             self.tx.put_doc(self._path, state)
             return state
 

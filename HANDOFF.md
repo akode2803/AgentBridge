@@ -17,16 +17,19 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.103** (R31: threat-model
-  closeout — signed reaction/pin overlays + key fingerprints with
-  out-of-band verification — plus Aryan's QA list: memory `forget` tool,
-  standalone agent replies via `reply_to.quote=false`, sidebar
+  `gui/__init__.py` in R26). Currently **v0.24.104** (R31.5: per-user state
+  docs are owner-signed — forged `hidden`/`cleared`/`read_ns`/`mute` read as
+  absent via the verified accessor `messaging.state_of` — and the local
+  keystore is DPAPI-wrapped on Windows). Before that: v0.24.103 (R31:
+  threat-model closeout — signed reaction/pin overlays + key fingerprints
+  with out-of-band verification — plus Aryan's QA list: memory `forget`
+  tool, standalone agent replies via `reply_to.quote=false`, sidebar
   repaint-on-send + pinned-then-recency ordering, pin-banner scroll fix,
   and a per-(chat,user) lock fixing R30's mark_read vs star/flag write
-  race). Before that: v0.24.102 (R30: change-feed sync — one query per tick
-  instead of list_logs×chats, post latency off the cloud RTT, per-run agent
-  response profiling, connector contract formalized); v0.24.101 (transport-
-  aware Connection panel).
+  race); v0.24.102 (R30: change-feed sync — one query per tick instead of
+  list_logs×chats, post latency off the cloud RTT, per-run agent response
+  profiling, connector contract formalized); v0.24.101 (transport-aware
+  Connection panel).
 - **Mesh root:** **`supabase://mesh2`** — the cloud transport is now PRIMARY
   (cutover 2026-07-13, R28), remembered in `~/.agentbridge/config.json`
   (`mesh_root`). `mesh_root_folder_backup` keeps the synced-folder `mesh2/` path

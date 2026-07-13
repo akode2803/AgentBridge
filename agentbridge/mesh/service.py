@@ -74,6 +74,7 @@ class Mesh:
         self.key_pins = KeyPinStore(self.home, root_key)
         self.directory = Directory(self.tx, pins=self.key_pins)
         self.keystore = KeyStore(self.home)
+        self._sign_bundle: bytes | None = None  # _sign_event's positive cache
         self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user)
         # sealer resolution: explicit arg wins; else E2EE when asked, else plain
         if sealer is not None:
@@ -116,12 +117,17 @@ class Mesh:
         )
 
     def _sign_event(self, data: bytes) -> str:
-        """Sign an info event with this identity's key (R13.5). Empty when the
-        key is locked / absent (migrated pre-upgrade) — the fold then accepts
-        the event unsigned since it has no key to verify against."""
+        """Sign an info event / overlay with this identity's key (R13.5, R31).
+        Empty when the key is locked / absent (migrated pre-upgrade) — the
+        fold then accepts the event unsigned since it has no key to verify
+        against. The unlocked bundle is cached once found: it never changes
+        after the mint (adopt refuses re-keying), and signing now sits on hot
+        paths (mark_read/react), so a per-call disk read would be waste."""
         from .. import crypto
 
-        bundle = self.keystore.load(self.user)
+        bundle = self._sign_bundle or self.keystore.load(self.user)
+        if bundle and self._sign_bundle is None:
+            self._sign_bundle = bundle
         return crypto.sign(bundle, data) if bundle else ""
 
     def _pump(self, chat_id: str, records: list[dict]) -> None:
@@ -168,9 +174,10 @@ class Mesh:
            signature. A forged/unsigned one whose author isn't local is simply
            left unhonored (fail-safe: the message reappears rather than a
            forgery sticking).
-        3. Same for legacy UNSIGNED pins and reaction files (R31 signs both):
-           re-sign the ones authored by locally-keyed identities so they keep
-           counting; anything else is ignored by readers, not deleted."""
+        3. Same for legacy UNSIGNED pins and reaction files (R31 signs both)
+           and per-user state docs (R31.5): re-sign the ones authored by
+           locally-keyed identities so they keep counting; anything else is
+           ignored by readers, not deleted."""
         from .overlays import ChatOverlays
 
         for chat_id in list(self.tx.list_chat_ids()):
@@ -184,6 +191,7 @@ class Mesh:
                 self._reseal_redactions(chat_id, ov)
                 self._reseal_pins(chat_id, ov)
                 self._reseal_reactions(chat_id, ov)
+                self._reseal_state(chat_id)
             except Exception:  # noqa: BLE001 — one bad chat never blocks startup
                 continue
 
@@ -235,6 +243,24 @@ class Mesh:
             self.tx.put_doc(
                 P.reactions(chat_id, user),
                 {"v": mapping, "ns": ns, "at": utcnow_iso(), "sig": sig})
+
+    def _reseal_state(self, chat_id: str) -> None:
+        from ..core.timekit import next_ns
+        from .events import state_signing_bytes
+        from .overlays import UserState
+
+        for path in self.tx.list_docs(P.state_prefix(chat_id)):
+            user = path.rsplit("/", 1)[-1].removesuffix(".json")
+            doc = self.tx.get_doc(path)
+            if not isinstance(doc, dict) or doc.get("sig"):
+                continue
+            bundle = self.keystore.load(user)
+            if bundle is None:
+                continue  # not ours to sign — verified readers ignore it
+            fields = UserState.signed_fields(doc)
+            ns = next_ns()  # fresh write: the signature binds the new ns
+            sig = crypto.sign(bundle, state_signing_bytes(chat_id, user, ns, fields))
+            self.tx.put_doc(path, {**fields, "ns": ns, "sig": sig})
 
     # ---------------------------------------------------------- key alerts
     def key_alerts(self, *, unacked_only: bool = True) -> list[dict]:

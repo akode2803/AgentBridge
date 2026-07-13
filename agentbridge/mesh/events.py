@@ -40,7 +40,7 @@ __all__ = [
     "EV_ADMIN_GRANTED", "EV_ADMIN_REVOKED", "EV_RENAMED", "EV_DESCRIPTION",
     "EV_PERMISSIONS", "EV_AVATAR", "EV_DELETED", "EV_KEY_ROTATED",
     "Resolver", "fold", "signing_bytes", "redaction_signing_bytes",
-    "reaction_signing_bytes", "pin_signing_bytes",
+    "reaction_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
     "genesis_gid", "GID_LEN", "is_legacy_chat_id",
 ]
 
@@ -105,6 +105,17 @@ def pin_signing_bytes(
     message, the pinner, the ns, and the expiry — so a dropped-in pin doc
     attributed to a member (or a tampered expiry) doesn't verify."""
     return f"{chat_id}|pin|{msg_id}|{by}|{ns}|{until_ns}".encode()
+
+
+def state_signing_bytes(chat_id: str, user: str, ns: int, fields: dict) -> bytes:
+    """Canonical bytes over a user's per-chat state overlay (R31.5 — same
+    recipe as reactions). The doc shapes what its OWNER sees (``hidden``/
+    ``cleared``) and what others derive from it (the ``read_ns`` cursor
+    behind read receipts, ``mute`` behind notifications), so it must be
+    attributable: verified readers treat an unsigned or mis-signed doc as
+    absent. ``fields`` is the doc without its ``ns``/``sig`` envelope."""
+    body = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return f"{chat_id}|state|{user}|{ns}|{body}".encode()
 
 EV_CREATED = "created"
 EV_MEMBER_ADDED = "member_added"

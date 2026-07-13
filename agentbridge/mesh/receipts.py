@@ -17,7 +17,6 @@ from __future__ import annotations
 from ..core.errors import ValidationError
 from ..core.models import ChatKind, MsgKind, ReceiptState
 from .messaging import MessagingService
-from .overlays import UserState
 from .presence import PresenceService
 from .privacy import PrivacyService
 
@@ -54,7 +53,9 @@ class ReceiptsService:
         other member is at (v1: double-accent only when everyone read)."""
         snap = self.messaging._require_member(chat_id)
         others = [m for m in snap.members if m != self.user]
-        cursors = {m: UserState(self.messaging.tx, chat_id, m).read_ns() for m in others}
+        # verified accessors (R31.5): a forged/unsigned cursor doc reads as 0,
+        # so nobody can fabricate a "read by X" tick from raw store access
+        cursors = {m: self.messaging.state_of(chat_id, m).read_ns() for m in others}
 
         out: dict[str, dict] = {}
         for msg in self.messaging.messages_for(chat_id):

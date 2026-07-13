@@ -944,6 +944,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       R30's background `mark_read` raced the user's own star/flag writes —
       per-user state files now mutate under a per-(chat,user) lock.
 
+- [x] **R31.5 — state-doc authentication + keystore wrap. DONE 2026-07-14
+      (v0.24.104, 381 tests).** The delta a parallel session found while
+      running the same threat-model sweep (its overlapping reaction/pin/
+      fingerprint work was dropped in favor of R31's live implementation;
+      this round carries only what R31 didn't cover — see docs/THREAT_MODEL
+      "CLOSED R31.5"): (1) **per-user STATE docs signed** — previously
+      undocumented and sharper than the reaction/pin class: a store writer
+      could drop `hidden`/`cleared` into a victim's doc to blank history
+      from their OWN view, forge `read_ns` to fabricate a read receipt, or
+      set `mute` to silence their pings. Signed by the owner over
+      `chat|state|user|ns|fields` (`events.state_signing_bytes`); every
+      reader goes through the verified accessor `messaging.state_of` (own
+      view, receipts' cursors, the notifier's mute check) and treats
+      anything else as absent; `_merge` starts from the VERIFIED read so a
+      forgery is never laundered into a genuine write; `harden_startup`
+      gains `_reseal_state`. (2) **Keystore DPAPI wrap** (`crypto/dpapi.py`,
+      ctypes, per-OS-user, Windows): `keys/<name>.key` is unreadable off
+      this machine/user; legacy plain files upgrade in place on first load;
+      plain fallback so a wrap failure never costs a key; the write is
+      atomic (load-triggered upgrades race concurrent readers). (3)
+      `Mesh._sign_event` caches the unlocked bundle — signing now sits on
+      hot paths (mark_read/react) and re-reading the key file per call
+      (now + a DPAPI unwrap) was waste. 8 new tests: state/cursor/mute
+      forgeries, harden state re-sign, a star-vs-mark_read race hammer, and
+      the keystore wrap/upgrade/garbage trio.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

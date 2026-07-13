@@ -69,8 +69,12 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
 - **Lost password AND lost recovery code = history unreadable.** No escrow, no
   backdoor. The honest cost of real E2EE (D5); the UI must make the recovery
   code impossible to skip past.
-- **The unlocked key on disk** (`~/.agentbridge/keys`) is only as safe as the
-  OS user account. DPAPI/Keychain wrapping is a listed future hardening.
+- **The unlocked key on disk** (`~/.agentbridge/keys`) — HARDENED R31.5 on
+  Windows: the file is DPAPI-wrapped (per-OS-user scope, `crypto/dpapi.py`),
+  so a copied file is unreadable off this machine/user; legacy plain files
+  upgrade in place on first load, and a wrap failure falls back to the plain
+  format rather than losing a key. On non-Windows platforms the plain format
+  (OS-user boundary) remains; Keychain/keyutils fit behind the same seam.
 - **A malicious *member*** can leak plaintext they legitimately hold (screenshot
   problem — unsolvable by crypto) and, being a member, can post/rotate. The
   fold's authority checks stop a member exceeding their ROLE (e.g. forging an
@@ -89,11 +93,17 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   pins whatever it reads first (documented under R27). On the folder transport
   the write-access itself is inherent to "all members share the folder"; on
   Supabase it rides the same secret-key trust boundary below.
-- **Reaction/pin overlay FABRICATION — CLOSED R31** (see "CLOSED R31" below).
-  What remains accepted: a transport writer can still *remove* an overlay doc
-  (delete someone's reaction file or unpin a message) — absence carries no
-  signature to verify. That is an availability nuisance in the same class as
-  the spam/garbage bullet below, never a false attribution.
+- **Reaction/pin overlay FABRICATION — CLOSED R31**; **per-user STATE doc
+  fabrication — CLOSED R31.5** (see the R31/R31.5 sections below). The state
+  doc was the sharpest of the three — dropped-in `hidden`/`cleared` blanked
+  the owner's own view, a fake `read_ns` faked read receipts, a fake `mute`
+  silenced pings. What remains accepted: a transport writer can still
+  *remove* an overlay doc (delete a reaction file, unpin, wipe someone's
+  stars/cursor) or replay an author's own OLDER signed doc — absence carries
+  no signature and staleness is indistinguishable from sync lag. Both are
+  availability nuisances in the same class as the spam/garbage bullet below,
+  never a false attribution. Ephemeral presence/typing docs stay unsigned
+  (cosmetic, seconds-lived; presence also feeds the Delivered receipt tier).
 - **Availability**: a member can spam or write garbage; the store dedups and
   the reader tolerates junk, but E2EE is about confidentiality/authenticity,
   not anti-abuse (that's the permission layer + rate limits, R15).
@@ -275,6 +285,35 @@ Also closed as **by design** after a live QA pass (Aryan's checklist):
   invocation answering the last of them (queue groups per chat+sender). This
   is the intended anti-flood shape, not a delivery gap — each message is still
   individually present in the agent's context.
+
+## State-doc authentication + keystore wrap — CLOSED R31.5
+
+Two closures on top of R31, same machinery:
+
+- **Per-user state docs are signed** (`overlays/state/<user>.json` — the
+  read cursor, stars, hidden, cleared, chat flags, mute). Previously
+  undocumented and sharper than the reaction/pin class: a store writer could
+  inject `hidden`/`cleared` into a victim's doc to blank history from their
+  OWN view, forge `read_ns` to fabricate a read receipt, or set `mute` to
+  silence their notifications. The doc is now signed by its owner over
+  `chat|state|user|ns|fields` (`events.state_signing_bytes`), and every
+  reader — the owner's own view, receipts' cursors (`receipts_for`), the
+  notifier's mute check — goes through a verified accessor
+  (`messaging.state_of`) that treats anything else as absent. The merge path
+  starts from the VERIFIED read, so a forged field is never laundered into
+  the next genuine write. `harden_startup` re-signs legacy docs owned by
+  locally-keyed identities (same pattern as redactions/pins/reactions).
+  In-process writes to one state doc are additionally serialized by the
+  per-(chat, user) lock from R31's race fix.
+- **Keystore at rest**: `~/.agentbridge/keys/<name>.key` is DPAPI-wrapped on
+  Windows (see the hardened bullet above).
+
+Accepted residuals stay as documented in the overlay bullet: doc deletion and
+replay of an author's own older signed doc (availability/staleness, never
+false attribution), and unsigned ephemeral presence/typing. On a
+version-skewed fleet a pre-R31.5 process writes unsigned state docs that
+newer readers ignore until `harden_startup` re-signs them — upgrade all of an
+account's processes together (the standing restart discipline).
 
 ## Migration — R9.5 (retired R16.5)
 

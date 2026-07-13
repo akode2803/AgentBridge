@@ -132,7 +132,12 @@ Per-message and per-user side-data that would churn the append-only log:
   clobber once wiped stars): `read_ns`/`read_ts`, `starred`, `hidden`,
   `cleared`, `pinned`, `archived`, `deleted`, `forced_unread`, `mute`; plus
   per-user reaction files folded across members (**signed by their owner since
-  R31** over the full mapping — the read fold drops unverified files). Every
+  R31** over the full mapping — the read fold drops unverified files). The
+  state doc itself is **signed by its owner since R31.5** over
+  `chat|state|user|ns|fields`: every verified reader (`messaging.state_of` —
+  the owner's own view, receipts' cursors, the notifier's mute check) treats
+  an unsigned/mis-signed doc as absent, and `_merge` starts from the verified
+  read so a forged field is never laundered into a genuine write. Every
   state mutation holds a per-(chat, user) in-process lock: R30 moved the
   post path's `mark_read` onto a background thread, and an unlocked
   read-modify-write raced the user's own star/flag writes.
@@ -161,8 +166,8 @@ cache.
 
 `harden_startup()` (R25, called by connectors on sign-in) is an idempotent
 migration: it refolds pre-R25 chats to populate `tenure` and re-signs any
-legacy unsigned redaction — and, since R31, any legacy unsigned pin or
-reaction file — whose author is keyed on this machine.
+legacy unsigned redaction — and, since R31/R31.5, any legacy unsigned pin,
+reaction file or per-user state doc — whose author is keyed on this machine.
 
 ---
 
@@ -173,7 +178,8 @@ See **docs/THREAT_MODEL.md** for the full statement; the mechanics:
 - **Identity** (per account): Ed25519 (sign) + X25519 (agree), a 64-byte
   bundle. Public halves in the account doc; the private bundle wrapped twice
   (password + one-time recovery code, D5) at rest, unlocked only in
-  `~/.agentbridge/keys/<name>.key`.
+  `~/.agentbridge/keys/<name>.key` — DPAPI-wrapped on Windows since R31.5
+  (`crypto/dpapi.py`, per-OS-user; legacy plain files upgrade on first load).
 - **Chat keys**: a 32-byte symmetric key per **epoch**, wrapped per member via
   ephemeral-X25519 ECDH → HKDF → ChaCha20Poly1305 (`keyring.ChatKeyService`).
   `ensure()` runs before every seal and **rotates** whenever the epoch's
@@ -211,8 +217,10 @@ signature-verified (see §3 Overlays), and every account has a **key
 fingerprint** (`pins.key_fingerprint`, 8×4 hex groups over the pinned pair)
 surfaced in the DM info Encryption card / Settings → Security / the key-change
 banner, with an out-of-band **Mark as verified** state stored in the pin store
-(`/api/mesh/key_verify`). Remaining accepted risks live in
-docs/THREAT_MODEL.md ("What is NOT protected").
+(`/api/mesh/key_verify`). **R31.5 closed the last overlay:** per-user state
+docs are owner-signed and read through verified accessors (see §3 Overlays),
+and the local keystore is DPAPI-wrapped on Windows (above). Remaining accepted
+risks live in docs/THREAT_MODEL.md ("What is NOT protected").
 
 ---
 
@@ -448,7 +456,8 @@ re-render on every poll would reset scroll / steal focus.
 - **The transport is semi-trusted.** Anyone with folder/secret write can drop
   arbitrary files; integrity comes from signatures + the fold, not from the
   store. New overlay/document types must carry their own authentication (the
-  R25 redaction lesson).
+  R25 redaction lesson; R31/R31.5 brought pins/reactions/state to the same
+  bar — don't add an unsigned one).
 
 ---
 

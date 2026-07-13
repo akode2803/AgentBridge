@@ -339,3 +339,152 @@ def test_harden_startup_resigns_legacy_reactions_and_pins(world):
     got = [m for m in fable.messages_for(chat.id) if m.id == env.id][0]
     assert got.reactions == {"🎉": ["aryan"]}
     assert env.id in fable.pins(chat.id)
+
+
+# ==================== R31.5: per-user state authentication ===================
+
+def test_forged_state_cannot_blank_a_victims_view(world):
+    """The sharpest of the overlay forgeries: dropping ``cleared``/``hidden``
+    into someone's state doc used to silently hide history from THEM. A state
+    doc now counts only when signed by its owner — a forged one reads as
+    absent, and the victim's next genuine write re-signs from the verified
+    (empty) base rather than laundering the forgery."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    chat = aryan.create_chat("State", members=["fable"])
+    env = aryan.post(chat.id, "must stay visible")
+    ripple(aryan, chat.id, fable)
+
+    fable.tx.put_doc(P.state(chat.id, "fable"),
+                     {"cleared": {"ns": next_ns()}, "hidden": [env.id]})
+    assert env.id in [m.id for m in fable.messages_for(chat.id)]
+
+    # fable's own state writes still work end-to-end (signed + verified)
+    fable.star(chat.id, [env.id])
+    assert fable.my_state(chat.id)["starred"] == [env.id]
+
+
+def test_forged_read_cursor_cannot_fake_receipts(world):
+    """Read receipts derive from each member's read_ns cursor. A forged
+    cursor doc (unsigned) is treated as absent, so nobody can fabricate a
+    'read by fable' tick from raw store access."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    chat = aryan.create_dm("fable")
+    env = aryan.post(chat.id, "did you read this?")
+    ripple(aryan, chat.id, fable)
+
+    fable.tx.put_doc(P.state(chat.id, "fable"), {"read_ns": next_ns()})
+    rec = aryan.receipts_for(chat.id)[env.id]
+    assert rec["state"] != "read" and rec["read_by"] == []
+
+    fable.mark_read(chat.id)  # the genuine, signed cursor advances the tick
+    rec = aryan.receipts_for(chat.id)[env.id]
+    assert rec["state"] == "read" and rec["read_by"] == ["fable"]
+
+
+def test_forged_mute_cannot_silence_notifications(world):
+    """A dropped-in ``mute`` in a victim's state doc must not suppress their
+    pings — the notifier reads the state through the verified accessor."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    chat = aryan.create_dm("fable")
+    aryan.post(chat.id, "ping")
+    ripple(aryan, chat.id, fable)
+
+    fable.tx.put_doc(P.state(chat.id, "fable"), {"mute": True})
+    assert fable.notifier._muted(chat.id) is False  # forged mute is inert
+
+    fable.set_chat_flag(chat.id, "mute", True)      # the genuine mute works
+    assert fable.notifier._muted(chat.id) is True
+
+
+def test_star_survives_concurrent_mark_read(world):
+    """R30 moved the post path's mark_read onto a background thread, so a
+    star and a cursor write can interleave their read-merge-writes on the
+    same state doc (the star-wipe class). The per-(chat,user) lock plus the
+    verified-read merge must keep every star; hammer it to prove it."""
+    import threading
+
+    meshes, _ = world
+    aryan = meshes["aryan"]
+    chat = aryan.create_chat("Race", members=["fable"])
+    ids = [aryan.post(chat.id, f"m{i}").id for i in range(5)]
+
+    stop = threading.Event()
+
+    def hammer():
+        while not stop.is_set():
+            aryan.mark_read(chat.id)
+
+    t = threading.Thread(target=hammer)
+    t.start()
+    try:
+        for mid in ids:
+            aryan.star(chat.id, [mid])
+    finally:
+        stop.set()
+        t.join()
+    assert set(aryan.my_state(chat.id)["starred"]) == set(ids)
+    assert aryan.my_state(chat.id)["read_ns"] > 0
+
+
+def test_harden_resigns_legacy_state_for_local_keys(world):
+    """Pre-R31.5 state docs are unsigned. harden_startup re-signs the ones
+    owned by locally-keyed identities so stars/cursors survive the
+    tightening; other users' docs are not ours to sign."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    chat = aryan.create_chat("Legacy state", members=["fable"])
+    env = aryan.post(chat.id, "old world")
+    ripple(aryan, chat.id, fable)
+
+    aryan.tx.put_doc(P.state(chat.id, "aryan"), {"starred": [env.id]})
+    assert aryan.my_state(chat.id)["starred"] == []  # unsigned: ignored...
+    aryan.harden_startup()                           # ...until the re-sign
+    assert aryan.my_state(chat.id)["starred"] == [env.id]
+
+
+# ==================== R31.5: keystore at-rest wrap ===========================
+
+def test_keystore_wraps_bundle_at_rest(tmp_path):
+    from agentbridge.crypto import dpapi
+    from agentbridge.mesh.keyring import KeyStore
+
+    ks = KeyStore(tmp_path)
+    bundle = crypto.generate_identity()
+    ks.save("alice", bundle)
+    assert ks.load("alice") == bundle
+    text = (tmp_path / "keys" / "alice.key").read_text(encoding="utf-8")
+    if dpapi.available():  # Windows: wrapped, and the raw bundle isn't in it
+        assert text.startswith("dpapi1:")
+        assert crypto.b64e(bundle) not in text
+    else:                  # elsewhere: the plain format remains
+        assert text == crypto.b64e(bundle)
+
+
+def test_keystore_upgrades_legacy_plain_file(tmp_path):
+    from agentbridge.crypto import dpapi
+    from agentbridge.mesh.keyring import KeyStore
+
+    ks = KeyStore(tmp_path)
+    bundle = crypto.generate_identity()
+    (tmp_path / "keys").mkdir(parents=True)
+    (tmp_path / "keys" / "bob.key").write_text(crypto.b64e(bundle), encoding="utf-8")
+    assert ks.load("bob") == bundle            # legacy file opens...
+    if dpapi.available():                      # ...and is upgraded in place
+        text = (tmp_path / "keys" / "bob.key").read_text(encoding="utf-8")
+        assert text.startswith("dpapi1:")
+    assert ks.load("bob") == bundle            # and keeps opening
+
+
+def test_keystore_garbage_reads_as_absent(tmp_path):
+    from agentbridge.mesh.keyring import KeyStore
+
+    ks = KeyStore(tmp_path)
+    (tmp_path / "keys").mkdir(parents=True)
+    (tmp_path / "keys" / "eve.key").write_text("dpapi1:!!!not-b64!!!",
+                                               encoding="utf-8")
+    assert ks.load("eve") is None
+    (tmp_path / "keys" / "eve.key").write_text("dpapi1:AAAA", encoding="utf-8")
+    assert ks.load("eve") is None              # a foreign/corrupt blob fails closed

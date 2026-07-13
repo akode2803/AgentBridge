@@ -9,7 +9,8 @@ Key hierarchy:
     ├─ published:   sign_pub + agree_pub (account doc)
     ├─ at rest:     password-wrapped (scrypt→ChaCha20Poly1305) + recovery-code
     │               wrapped copies in the account doc (humans; D5)
-    └─ unlocked:    raw bundle in ~/.agentbridge/keys/ (OS-user boundary)
+    └─ unlocked:    bundle in ~/.agentbridge/keys/ — DPAPI-wrapped on Windows
+                    (R31.5, crypto/dpapi.py); plain (OS-user boundary) elsewhere
   chat epoch key (32B random per epoch)
     └─ wrapped per member: ephemeral X25519 ECDH → HKDF → ChaCha20Poly1305
   message envelope: ChaCha20Poly1305 under the epoch key, AAD binds

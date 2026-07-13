@@ -14,6 +14,7 @@ Epoch model (docs/THREAT_MODEL.md):
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .. import crypto
@@ -21,6 +22,7 @@ from ..core.config import DEFAULT_HOME
 from ..core.errors import CryptoError
 from ..core.models import ChatSnapshot
 from ..core.timekit import next_ns, utcnow_iso
+from ..crypto import dpapi
 from ..transport.base import Transport
 from .directory import Directory
 from .paths import P
@@ -29,8 +31,13 @@ __all__ = ["KeyStore", "ChatKeyService"]
 
 
 class KeyStore:
-    """Unlocked identity bundles on THIS machine (OS-user boundary; DPAPI is
-    a future hardening). One file per identity under ``~/.agentbridge/keys``."""
+    """Unlocked identity bundles on THIS machine. One file per identity under
+    ``~/.agentbridge/keys``. On Windows the file is DPAPI-wrapped (R31.5,
+    per-OS-user scope — a copied file is unreadable off this machine/user);
+    a legacy plain-base64 file is upgraded in place on first load. Elsewhere
+    the plain format remains (the OS-user boundary, as before)."""
+
+    _WRAPPED = "dpapi1:"  # never valid base64 (the ':'), so shapes can't mix
 
     def __init__(self, home: Path | None = None) -> None:
         self.dir = (home or DEFAULT_HOME) / "keys"
@@ -40,14 +47,32 @@ class KeyStore:
 
     def save(self, name: str, bundle: bytes) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._path(name).write_text(crypto.b64e(bundle), encoding="utf-8")
+        wrapped = dpapi.protect(bundle) if dpapi.available() else None
+        text = (
+            self._WRAPPED + crypto.b64e(wrapped) if wrapped is not None
+            else crypto.b64e(bundle)  # plain fallback — never lose a key
+        )
+        # atomic replace: load() upgrades legacy files in place, so a
+        # concurrent reader must never see a half-written key file
+        tmp = self._path(name).with_suffix(".key.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, self._path(name))
 
     def load(self, name: str) -> bytes | None:
-        doc = self._path(name)
         try:
-            return crypto.b64d(doc.read_text(encoding="utf-8").strip())
-        except (FileNotFoundError, ValueError, OSError):
+            text = self._path(name).read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError):
             return None
+        try:
+            if text.startswith(self._WRAPPED):
+                # fail-closed: a wrapped file only opens for this OS user
+                return dpapi.unprotect(crypto.b64d(text[len(self._WRAPPED):]))
+            bundle = crypto.b64d(text)
+        except (ValueError, OSError):
+            return None
+        if bundle and dpapi.available():
+            self.save(name, bundle)  # transparent one-time upgrade to wrapped
+        return bundle
 
     def forget(self, name: str) -> None:
         self._path(name).unlink(missing_ok=True)

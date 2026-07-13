@@ -22,7 +22,7 @@ from ..store.db import Store
 from ..transport.base import Transport
 from . import authz
 from .events import pin_signing_bytes, reaction_signing_bytes, \
-    redaction_signing_bytes, signing_bytes
+    redaction_signing_bytes, signing_bytes, state_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
 from .paths import P
 from .readmodel import build_messages, parse_tags, unread_info
@@ -390,8 +390,38 @@ class MessagingService:
         return [m for m in self.messages_for(chat_id) if m.id in ids]
 
     # ---------------------------------------------------------------- helpers
+    def state_of(self, chat_id: str, user: str) -> UserState:
+        """A per-user state accessor with verification wired (R31.5): reads
+        honor only docs signed by their owner. Only the service's OWN identity
+        gets the signer — nobody writes another user's state through here."""
+        return UserState(
+            self.tx, chat_id, user,
+            signer=self._sign_event if user == self.user else None,
+            verifier=self._state_verifier(chat_id, user),
+        )
+
+    def _state_verifier(self, chat_id: str, user: str):
+        """``(state_doc) -> bool``, or None without a crypto boundary. Every
+        verified reader — the owner's own view, receipts' cursors, the
+        notifier's mute check — treats a doc that fails this as absent."""
+        if not self._crypto_boundary():
+            return None
+
+        def ok(doc: dict) -> bool:
+            if not doc:
+                return True  # absent state is a valid (empty) state
+            pub = self.directory.sign_pub(user)
+            sig = doc.get("sig") or ""
+            fields = UserState.signed_fields(doc)
+            return bool(pub) and bool(sig) and crypto.verify(
+                pub, sig,
+                state_signing_bytes(chat_id, user, int(doc.get("ns", 0)), fields),
+            )
+
+        return ok
+
     def _state(self, chat_id: str) -> UserState:
-        return UserState(self.tx, chat_id, self.user)
+        return self.state_of(chat_id, self.user)
 
     def _cached(self, chat_id: str, msg_id: str) -> dict | None:
         for rec in self.store.messages(chat_id):

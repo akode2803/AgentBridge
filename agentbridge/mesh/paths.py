@@ -68,6 +68,10 @@ class P:
         return f"chats/{chat_id}/overlays/state/{user}.json"
 
     @staticmethod
+    def state_prefix(chat_id: str) -> str:
+        return f"chats/{chat_id}/overlays/state"
+
+    @staticmethod
     def file(chat_id: str, file_id: str) -> str:
         return f"chats/{chat_id}/files/{file_id}"
 

@@ -26,7 +26,6 @@ from ..core.models import Envelope, MsgKind
 from . import eventbus
 from .eventbus import Event, EventBus
 from .messaging import MessagingService
-from .overlays import UserState
 from .sealer import Sealer
 
 __all__ = ["Notification", "Notifier", "CommandHook"]
@@ -65,7 +64,8 @@ class Notifier:
 
     # ------------------------------------------------------------ filtering
     def _muted(self, chat_id: str) -> bool:
-        mute = UserState(self.messaging.tx, chat_id, self.user).get().get("mute")
+        # verified accessor (R31.5): a forged state doc can't silence my pings
+        mute = self.messaging.state_of(chat_id, self.user).get().get("mute")
         if mute is True:
             return True
         if isinstance(mute, (int, float)) and mute > 0:
