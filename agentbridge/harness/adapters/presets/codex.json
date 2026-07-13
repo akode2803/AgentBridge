@@ -1,0 +1,15 @@
+{
+  "id": "codex",
+  "label": "Codex CLI",
+  "command": "codex",
+  "args": ["exec", "--json", "--skip-git-repo-check", "-C", "{workdir}",
+           "{prompt}"],
+  "args_minimal": ["exec", "--json", "{prompt}"],
+  "safety_args": ["--sandbox", "read-only"],
+  "model_args": ["-m", "{model}"],
+  "effort_args": ["-c", "model_reasoning_effort={effort}"],
+  "efforts": ["minimal", "low", "medium", "high"],
+  "format": "codex-jsonl",
+  "models": ["gpt-5.1-codex", "gpt-5.1-codex-mini"],
+  "verified": false
+}

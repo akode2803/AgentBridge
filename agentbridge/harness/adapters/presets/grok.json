@@ -1,0 +1,10 @@
+{
+  "id": "grok",
+  "label": "Grok CLI",
+  "command": "grok",
+  "args": ["-p", "{prompt}"],
+  "model_args": ["--model", "{model}"],
+  "format": "text",
+  "models": ["grok-4", "grok-4-fast"],
+  "verified": false
+}

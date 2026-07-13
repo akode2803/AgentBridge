@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:  # pragma: no cover
     from .conversation import Delivery
 
 __all__ = ["Reply", "Responder", "clean_reply", "NO_REPLY"]
+
+OnStep = Callable[[str], None]  # live activity line -> the run feed
 
 NO_REPLY = "NO_REPLY"
 
@@ -38,7 +40,8 @@ class Reply:
 
 
 class Responder(Protocol):
-    def respond(self, delivery: "Delivery") -> Reply: ...
+    def respond(self, delivery: "Delivery",
+                on_step: OnStep | None = None) -> Reply: ...
 
 
 def clean_reply(text: str) -> tuple[str, bool]:

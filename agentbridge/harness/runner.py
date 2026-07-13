@@ -129,10 +129,11 @@ class AgentRunner:
         how many items were enqueued. ``collect`` (dry-run) gathers what
         WOULD be enqueued without persisting anything."""
         settings = self.settings()
+        owner = self.mesh.directory.owner_of(self.agent)
         added = 0
         for snap in self.mesh.membership.chats_for():
             try:
-                added += self._scan_chat(snap, settings, collect)
+                added += self._scan_chat(snap, settings, owner, collect)
             except Exception:  # noqa: BLE001 — one chat never blocks the rest
                 continue
         for t in self.timers.due():
@@ -148,7 +149,7 @@ class AgentRunner:
                 added += 1
         return added
 
-    def _scan_chat(self, snap, settings: HarnessSettings,
+    def _scan_chat(self, snap, settings: HarnessSettings, owner: str | None,
                    collect: list | None) -> int:
         chat_id = snap.id
         last_ns, last_edit = self.queue.scan_cursor(chat_id)
@@ -175,6 +176,16 @@ class AgentRunner:
                 if collect is None:
                     self.queue.record_skip(chat_id, c.message.id, c.edit_ns,
                                            "own-tail")
+                continue
+            # per-purpose routing (R16): an audience the owner turned off is
+            # resolved here, before it can claim a slot or burn the rate cap
+            kind = kinds.get(c.message.from_)
+            category = HarnessSettings.category(
+                kind.value if kind else "agent", c.message.from_, owner)
+            if not settings.route(category).enabled:
+                if collect is None:
+                    self.queue.record_skip(chat_id, c.message.id, c.edit_ns,
+                                           f"routing-off:{category}")
                 continue
             skip = self._catchup_skip(c, settings)
             if skip:
@@ -268,7 +279,7 @@ class AgentRunner:
             self.mesh.messaging.mark_read(chat_id)  # context read = read
             feed = RunFeed(self.mesh.tx, self.agent, chat_id)
             try:
-                reply = self.responder.respond(delivery)
+                reply = self.responder.respond(delivery, on_step=feed.step)
             except Exception as e:  # noqa: BLE001 — a run dies, the loop lives
                 self._run_failed(group, feed, settings, delivery, e)
                 return
@@ -373,11 +384,18 @@ class AgentRunner:
         self.publish_status()
         return added
 
+    def attach_cli_responder(self) -> None:
+        """The default production responder: the R16 registry + CLI engine."""
+        from .adapters import CliResponder, ModelRegistry
+
+        self.responder = CliResponder(
+            ModelRegistry.load(self.home), self.mesh, self.home)
+
     def run(self, *, once: bool = False) -> None:
         if self.responder is None and not once:
             raise SystemExit(
-                "no responder configured — R16 adapters provide one; "
-                "use --dry-run to inspect what would trigger")
+                "no responder configured — attach_cli_responder() or inject "
+                "one; use --dry-run to inspect what would trigger")
         self.mesh.start()  # outbox flusher + presence heartbeat
         sync_thread = threading.Thread(
             target=self.mesh.sync.run,
@@ -548,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
             for p in problems:
                 print(f"cannot start: {p}")
             return 2
+        if not args.dry_run:
+            runner.attach_cli_responder()
         if args.dry_run:
             runner.mesh.sync.sync_once()
             would: list[WorkItem] = []

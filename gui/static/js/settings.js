@@ -175,6 +175,21 @@ async function renderSettings() {
   } else if (section === "agents") {
     const mine = Object.values(ms.users)
       .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+    // per-purpose routing rows: who the agent replies TO decides the model,
+    // and whether that audience is served at all (the enable switch)
+    const CATS = [["owner", "You"], ["humans", "Other people"], ["agents", "Agents"]];
+    const routeRow = (a, st) => ([cat, label]) => {
+      const r = (st.routing || {})[cat] || {};
+      return `<div class="ag-route">
+          <label class="switch"><input type="checkbox" class="ag-route-on"
+            data-agent="${esc(a.username)}" data-cat="${cat}"
+            ${r.enabled === false ? "" : "checked"}>
+            <span class="slider"></span></label>
+          <span class="ag-route-name">${label}</span>
+          <span class="csel-slot ag-route-model" data-agent="${esc(a.username)}"
+            data-cat="${cat}" data-value="${esc(r.model || "")}"></span>
+        </div>`;
+    };
     html = `${back}<h1>My agents</h1>
       ${mine.map((a) => {
         const st = a.settings || {};
@@ -195,20 +210,26 @@ async function renderSettings() {
             <h2 style="margin:0">${esc(a.display)} <span class="hint" style="text-transform:none">@${esc(a.username)}</span></h2>
           </div>
           <dl class="kv" style="grid-template-columns:minmax(110px,160px) 1fr">
-            <dt>Model</dt><dd><input type="text" class="ag-model" data-agent="${esc(a.username)}"
-              value="${esc(st.model || "")}" placeholder="agent default"></dd>
-            <dt>Reasoning effort</dt><dd><input type="text" class="ag-reason" data-agent="${esc(a.username)}"
-              value="${esc(st.reasoning || "")}" placeholder="agent default"></dd>
+            <dt>Runs with</dt><dd><span class="csel-slot ag-adapter"
+              data-agent="${esc(a.username)}" data-value="${esc(st.adapter || "")}"></span></dd>
+            <dt>Current model</dt><dd><span class="csel-slot ag-model"
+              data-agent="${esc(a.username)}" data-value="${esc(st.model || "")}"></span></dd>
+            <dt>Reasoning effort</dt><dd><span class="csel-slot ag-reason"
+              data-agent="${esc(a.username)}" data-value="${esc(st.reasoning || "")}"></span></dd>
             <dt>Default reply rule</dt><dd><span class="csel-slot ag-default"
               data-agent="${esc(a.username)}" data-value="${esc(st.default_rule || "tagged")}"></span></dd>
             <dt>Replies per hour</dt><dd><span class="csel-slot ag-rate"
               data-agent="${esc(a.username)}"
               data-value="${st.max_replies_per_hour != null ? esc(st.max_replies_per_hour) : ""}"></span></dd>
-            <dt>Owners</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
+            <dt>Replies to</dt><dd class="ag-routes" data-agent="${esc(a.username)}">
+              ${CATS.map(routeRow(a, st)).join("")}</dd>
+            <dt>Runs on</dt><dd class="ag-machine" data-agent="${esc(a.username)}">
+              <span class="mono">${esc(a.machine || "unknown")}</span></dd>
+            <dt>Owner</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
           </dl>
-          <p class="hint">Per-chat rules live in each chat's info page. Replies
-          per hour caps how often this agent answers in a single chat (leave
-          blank for the default 30).</p>
+          <p class="hint">"Current model" applies everywhere; the per-audience
+          models below kick in when it's left on the family default. Per-chat
+          rules live in each chat's info page.</p>
           <div class="row"><button class="primary ag-save" data-agent="${esc(a.username)}">Save</button></div>
         </div>`;
       }).join("") || ""}
@@ -220,7 +241,7 @@ async function renderSettings() {
           <button class="primary" id="new-agent-btn">Create</button>
         </div>
         <p class="hint" style="margin-bottom:0">You become its responsible member;
-        its machine runs <code>agent_worker.py</code>.</p>
+        it runs on this machine's harness.</p>
       </div>
       <div class="card">
         <h2>Emergency stand-down</h2>
@@ -345,24 +366,120 @@ async function renderSettings() {
       { v: "", label: "Default (30 / hour)" },
       ...[10, 20, 30, 50, 100, 200, 500].map((n) => ({ v: String(n), label: `${n} / hour` })),
     ];
-    mountCsels($(".settings-body"), (slot) => {
-      if (!slot.classList.contains("ag-rate")) return ruleOpts;
-      // surface a previously-set non-preset value so it labels correctly
-      const cur = slot.dataset.value;
-      return cur && !rateOpts.some((o) => o.v === cur)
-        ? [rateOpts[0], { v: cur, label: `${cur} / hour` }, ...rateOpts.slice(1)]
-        : rateOpts;
-    });
+    // the picker's options come from THIS machine's installed CLI families
+    // (R16): fetch them, then mount every dropdown in one pass. A family with
+    // no model list degrades to enable/disable only (disabled model selects).
+    (async () => {
+      const ho = await api("/api/mesh/harness_options");
+      const FAMS = ho.families || [];
+      const avail = FAMS.filter((f) => f.available);
+      const famById = (id) => FAMS.find((f) => f.id === id);
+      const famFor = (agent) => {
+        const slot = document.querySelector(`.ag-adapter[data-agent="${agent}"]`);
+        return famById(slot?.dataset.value)
+          || (avail.length === 1 ? avail[0] : null);
+      };
+      const adapterOpts = [
+        { v: "", label: avail.length === 1 ? `Auto — ${avail[0].label}`
+            : avail.length ? "Pick a CLI…" : "No agent CLI installed" },
+        ...FAMS.map((f) => ({
+          v: f.id, label: f.label + (f.available ? "" : " (not installed)") })),
+      ];
+      const modelOpts = (fam, blank) => [
+        { v: "", label: blank },
+        ...((fam && fam.models) || []).map((m) => ({ v: m, label: m })),
+      ];
+      const effortOpts = (fam) => [
+        { v: "", label: "Default" },
+        ...((fam && fam.efforts) || []).map((e) => ({ v: e, label: e })),
+      ];
+      const remount = (slot, options, disabled) => {
+        slot.innerHTML = "";
+        slot.appendChild(csel({ options, value: slot.dataset.value || "",
+          disabled, onChange: (v) => { slot.dataset.value = v; } }));
+      };
+      const refreshModels = (agent) => {
+        const fam = famFor(agent);
+        const noModels = !((fam && fam.models) || []).length;
+        document.querySelectorAll(`.ag-model[data-agent="${agent}"]`)
+          .forEach((s) => remount(s, modelOpts(fam, "Family default"), noModels));
+        document.querySelectorAll(`.ag-reason[data-agent="${agent}"]`)
+          .forEach((s) => remount(s, effortOpts(fam),
+                                  !((fam && fam.efforts) || []).length));
+        document.querySelectorAll(`.ag-route-model[data-agent="${agent}"]`)
+          .forEach((s) => remount(s, modelOpts(fam, "Use current model"), noModels));
+      };
+      mountCsels($(".settings-body"), (slot) => {
+        if (slot.classList.contains("ag-adapter")) return adapterOpts;
+        if (slot.classList.contains("ag-model"))
+          return modelOpts(famFor(slot.dataset.agent), "Family default");
+        if (slot.classList.contains("ag-reason"))
+          return effortOpts(famFor(slot.dataset.agent));
+        if (slot.classList.contains("ag-route-model"))
+          return modelOpts(famFor(slot.dataset.agent), "Use current model");
+        if (!slot.classList.contains("ag-rate")) return ruleOpts;
+        // surface a previously-set non-preset value so it labels correctly
+        const cur = slot.dataset.value;
+        return cur && !rateOpts.some((o) => o.v === cur)
+          ? [rateOpts[0], { v: cur, label: `${cur} / hour` }, ...rateOpts.slice(1)]
+          : rateOpts;
+      }, (slot, v) => {
+        if (slot.classList.contains("ag-adapter")) {
+          // a family switch orphans the old family's model picks — clear them
+          document.querySelectorAll(
+            `.ag-model[data-agent="${slot.dataset.agent}"],
+             .ag-reason[data-agent="${slot.dataset.agent}"],
+             .ag-route-model[data-agent="${slot.dataset.agent}"]`)
+            .forEach((s) => { s.dataset.value = ""; });
+          refreshModels(slot.dataset.agent);
+        }
+      });
+      // apply the degrade rules to the initial mount too
+      document.querySelectorAll(".ag-adapter").forEach(
+        (s) => refreshModels(s.dataset.agent));
+      // an agent homed on another machine gets a one-click adoption (the
+      // owner-side bring-up path for migrated agents)
+      document.querySelectorAll(".ag-machine").forEach((dd) => {
+        const agent = dd.dataset.agent;
+        const rec = (Mesh.state.users || {})[agent] || {};
+        if (!rec.machine || !ho.machine || rec.machine === ho.machine) return;
+        const b = document.createElement("button");
+        b.textContent = "Adopt to this machine";
+        b.style.marginLeft = "10px";
+        b.addEventListener("click", async () => {
+          const r = await api("/api/mesh/adopt_agent", { username: agent });
+          if (r.error) { toast(r.error, true); return; }
+          toast(`@${agent} now runs on this machine`);
+          await V.refreshState?.();
+          renderSettings();
+        });
+        dd.appendChild(b);
+      });
+    })();
   }
   document.querySelectorAll(".ag-save").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const agent = btn.dataset.agent;
-      const rateRaw = document.querySelector(`.ag-rate[data-agent="${agent}"]`).dataset.value;
+      const val = (sel) =>
+        document.querySelector(`${sel}[data-agent="${agent}"]`)?.dataset.value || "";
+      const rateRaw = val(".ag-rate");
       const rateN = parseInt(rateRaw, 10);
+      const routing = {};
+      document.querySelectorAll(`.ag-route-on[data-agent="${agent}"]`)
+        .forEach((sw) => {
+          routing[sw.dataset.cat] = {
+            enabled: sw.checked,
+            model: document.querySelector(
+              `.ag-route-model[data-agent="${agent}"][data-cat="${sw.dataset.cat}"]`
+            )?.dataset.value || "",
+          };
+        });
       const patch = {
-        model: document.querySelector(`.ag-model[data-agent="${agent}"]`).value.trim() || null,
-        reasoning: document.querySelector(`.ag-reason[data-agent="${agent}"]`).value.trim() || null,
-        default_rule: document.querySelector(`.ag-default[data-agent="${agent}"]`).dataset.value,
+        adapter: val(".ag-adapter") || null,
+        model: val(".ag-model") || null,
+        reasoning: val(".ag-reason") || null,
+        default_rule: val(".ag-default"),
+        routing,
         // blank clears back to the default; otherwise clamp to a sane band
         max_replies_per_hour: !rateRaw || isNaN(rateN)
           ? null : Math.max(1, Math.min(1000, rateN)),

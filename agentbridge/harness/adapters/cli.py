@@ -1,0 +1,303 @@
+"""The subprocess adapter — ONE engine drives every CLI family; the family's
+particulars are preset data (registry.py). Successor to v1's run_agent /
+CMD_TEMPLATES, upgraded:
+
+- argv LISTS, never a shell string (v1 quoted prompts into `shell=True`);
+- streamed stdout with a watchdog kill at the owner-set timeout;
+- live activity lines flow to the run feed via ``on_step`` as they happen;
+- a usage error (a CLI update rejecting flags) retries ONCE with the
+  preset's minimal argv — safety args and the tool blocklist are never
+  part of what gets dropped (v1 rule, kept);
+- inbound attachments are unsealed into the run's workdir (headless CLIs
+  can only read inside it), size-verified; files the agent leaves in the
+  outbox ride back on the Reply.
+
+The interim prompt below is the v1-proven wording; R17's prompt manager
+externalizes prompts to editable JSON and replaces it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import threading
+from pathlib import Path
+
+from ...core.config import DEFAULT_HOME
+from ...core.timekit import utcnow_iso
+from ..conversation import Delivery
+from ..responder import OnStep, Reply
+from ..settings import HarnessSettings
+from .registry import Invocation, ModelRegistry
+
+__all__ = ["CliResponder", "summarize_stream_event", "reply_from_output"]
+
+STAGE_TAIL = 30          # messages whose attachments get staged (v1 value)
+STDERR_SNIP = 1200
+
+PROMPT = (
+    "You are {display} (@{agent}), an AI agent in the multi-user chat "
+    "'{chat_name}'. Roster and reply behaviour: {roster}. New message(s) "
+    "arrived; the conversation so far is in the file {context_file} — "
+    "read it first. Rules: your final message is posted to the chat as-is, "
+    "so it must contain ONLY the chat message — no narration or preamble; "
+    "to address or notify someone, tag them like @username (people and "
+    "agents alike); to share files, save them into {outbox} and mention "
+    "them by name; never edit anything in the shared mesh folder by hand. "
+    "If a request is unclear, say so in the chat rather than guessing. "
+    "Tagging etiquette: tagging an agent that replies-only-when-tagged "
+    "FORCES it to run — only tag such agents when you genuinely need "
+    "something from them; never tag them as a courtesy or FYI. Your message "
+    "is posted as a THREADED REPLY to the message you are answering, so do "
+    "NOT tag its author just to address them — they are already notified; "
+    "tag OTHER members only when they specifically need attention. Reply "
+    "etiquette: a reply is OPTIONAL — if the new messages need no "
+    "substantive response from you (courtesy mentions, thanks, "
+    "acknowledgments, FYIs), output exactly NO_REPLY and nothing else, and "
+    "no message will be posted. Decide silence vs reply BEFORE you write — "
+    "never output NO_REPLY and then keep going. Do not keep acknowledgment "
+    "chains going."
+)
+
+TIMER_PROMPT_EXTRA = (
+    " This run is a WAKE-UP you scheduled earlier for this chat — the note "
+    "you left yourself: '{note}'. Act on it (or output NO_REPLY if it no "
+    "longer needs anything)."
+)
+
+
+def summarize_stream_event(obj: dict, fmt: str) -> str | None:
+    """One plain activity line per streamed event (v1's summarize_event,
+    plus a defensive codex-jsonl reading; R17 rewords the surface)."""
+    if fmt == "claude-stream":
+        t = obj.get("type")
+        if t == "system" and obj.get("subtype") == "init":
+            return "Session started"
+        if t == "assistant":
+            for c in (obj.get("message") or {}).get("content") or []:
+                if c.get("type") == "tool_use":
+                    name = c.get("name", "tool")
+                    inp = c.get("input") or {}
+                    detail = (inp.get("query") or inp.get("command")
+                              or inp.get("file_path") or inp.get("description")
+                              or "")
+                    detail = " ".join(str(detail).split())[:90]
+                    return f"Running {name}" + (f": {detail}" if detail else "")
+                if c.get("type") == "text":
+                    txt = " ".join((c.get("text") or "").split())[:90]
+                    if txt:
+                        return txt
+        if t == "result":
+            return "Writing the reply"
+        return None
+    if fmt == "codex-jsonl":
+        item = obj.get("item") or {}
+        itype = item.get("type") or item.get("item_type") or ""
+        if obj.get("type") == "item.completed" and itype:
+            detail = " ".join(str(item.get("text") or item.get("command")
+                                  or "").split())[:90]
+            return f"{itype}" + (f": {detail}" if detail else "")
+        return None
+    return None
+
+
+def reply_from_output(lines: list[str], fmt: str) -> str:
+    """The final reply text out of a finished run's stdout."""
+    if fmt == "text":
+        return "\n".join(lines).strip()
+    result = ""
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if fmt == "claude-stream":
+            if obj.get("type") == "result" and obj.get("result"):
+                result = str(obj["result"])
+        elif fmt == "codex-jsonl":
+            item = obj.get("item") or {}
+            itype = item.get("type") or item.get("item_type") or ""
+            if itype in ("agent_message", "assistant_message") and item.get("text"):
+                result = str(item["text"])
+    return result.strip()
+
+
+class CliResponder:
+    """Resolve (owner config, audience) -> one CLI run -> a Reply."""
+
+    def __init__(self, registry: ModelRegistry, mesh, home: Path | None = None) -> None:
+        self.registry = registry
+        self.mesh = mesh
+        self.agent = mesh.user
+        self.home = Path(home) if home else DEFAULT_HOME
+        self._minimal: set[str] = set()  # preset ids that needed the fallback
+
+    # ------------------------------------------------------------- the run
+    def respond(self, delivery: Delivery, on_step: OnStep | None = None) -> Reply:
+        acc = self.mesh.directory.get(self.agent)
+        settings = HarnessSettings.from_account(acc)
+        category = self._category(delivery, acc)
+        inv = self.registry.resolve(settings, category)  # raises with a reason
+
+        workdir = self.home / "harness" / self.agent
+        outbox = workdir / "outbox"
+        for d in (workdir, outbox):
+            d.mkdir(parents=True, exist_ok=True)
+        for stale in outbox.iterdir():  # a fresh run owns an empty outbox
+            if stale.is_file():
+                stale.unlink(missing_ok=True)
+
+        staged = self._stage_inbox(delivery, workdir)
+        context_file = workdir / "context.md"
+        context_file.write_text(self._context_text(delivery, staged),
+                                encoding="utf-8", newline="\n")
+        reply_file = workdir / "reply.md"
+        reply_file.unlink(missing_ok=True)
+
+        prompt = self._prompt(delivery, acc, context_file, outbox)
+        steps: list[dict] = []
+
+        def step(line: str) -> None:
+            steps.append({"text": line[:200], "ts": utcnow_iso()})
+            if on_step:
+                on_step(line)
+
+        argv = inv.preset.build_argv(
+            prompt=prompt, workdir=str(workdir), reply_file=str(reply_file),
+            model=inv.model, effort=inv.effort,
+            minimal=inv.preset.id in self._minimal,
+        )
+        rc, lines, err = self._run(argv, workdir, settings.timeout_s,
+                                   inv, step)
+        if self._usage_error(rc, err) and inv.preset.id not in self._minimal:
+            # a CLI update rejected our flags — drop conveniences, keep safety
+            step("Flags rejected — retrying with the minimal set")
+            self._minimal.add(inv.preset.id)
+            argv = inv.preset.build_argv(
+                prompt=prompt, workdir=str(workdir),
+                reply_file=str(reply_file), model=inv.model,
+                effort=inv.effort, minimal=True,
+            )
+            rc, lines, err = self._run(argv, workdir, settings.timeout_s,
+                                       inv, step)
+
+        text = reply_from_output(lines, inv.preset.format)
+        if not text and reply_file.is_file():
+            # some CLIs (-o) accumulate ALL assistant text there — fallback
+            # only, never the primary (v1: thinking leaked verbatim once)
+            text = reply_file.read_text(encoding="utf-8-sig").strip()
+        if rc != 0 or not text:
+            raise RuntimeError(
+                f"{inv.preset.id} run failed (rc={rc}): {err[:STDERR_SNIP]}")
+
+        files = sorted(str(p) for p in outbox.iterdir() if p.is_file())
+        return Reply(body=text, steps=steps, files=files)
+
+    # ------------------------------------------------------------ plumbing
+    def _category(self, delivery: Delivery, acc) -> str:
+        owner = acc.agent.owner if (acc and acc.agent) else None
+        if delivery.kind == "timer" or not delivery.triggers:
+            return "owner"
+        t = delivery.triggers[-1]
+        return HarnessSettings.category(t.sender_kind, t.sender, owner)
+
+    def _run(self, argv: list[str], workdir: Path, timeout_s: float,
+             inv: Invocation, step) -> tuple[int | None, list[str], str]:
+        kwargs: dict = {}
+        if os.name == "nt":  # no console flash under pythonw (v1 lesson)
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            argv, cwd=str(workdir), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", **kwargs,
+        )
+        timed_out = threading.Event()
+        watchdog = threading.Timer(
+            timeout_s, lambda: (timed_out.set(), proc.kill()))
+        watchdog.daemon = True
+        watchdog.start()
+        err_chunks: list[str] = []
+        t = threading.Thread(
+            target=lambda: err_chunks.append(proc.stderr.read()), daemon=True)
+        t.start()
+        lines: list[str] = []
+        try:
+            for line in proc.stdout:
+                lines.append(line.rstrip("\n"))
+                s = line.strip()
+                if s.startswith("{"):
+                    try:
+                        note = summarize_stream_event(
+                            json.loads(s), inv.preset.format)
+                    except json.JSONDecodeError:
+                        note = None
+                    if note:
+                        step(note)
+            rc = proc.wait(timeout=60)
+        finally:
+            watchdog.cancel()
+        if timed_out.is_set():
+            return None, lines, "timed out"
+        t.join(timeout=10)
+        return rc, lines, (err_chunks[0] if err_chunks else "")
+
+    @staticmethod
+    def _usage_error(rc, err: str) -> bool:
+        low = (err or "").lower()
+        return rc not in (0, None) and (
+            "usage:" in low or "unknown option" in low
+            or "unrecognized" in low or "unexpected argument" in low)
+
+    def _stage_inbox(self, delivery: Delivery, workdir: Path) -> dict[str, str]:
+        """Unseal recent attachments into the workdir (size-verified) so the
+        CLI can actually read them; failures degrade to the bare name."""
+        staged: dict[str, str] = {}
+        inbox = workdir / "inbox"
+        for m in delivery.transcript[-STAGE_TAIL:]:
+            for f in m.files or []:
+                name, blob_id = f.get("name"), f.get("id")
+                if not name or not blob_id or name in staged:
+                    continue
+                try:
+                    raw = self.mesh.tx.get_blob(
+                        f"chats/{delivery.chat_id}/files/{blob_id}")
+                    if raw is None:
+                        continue
+                    data = self.mesh.sealer.open_blob(
+                        delivery.chat_id, blob_id, raw)
+                    if data is None or (
+                            f.get("bytes") is not None
+                            and len(data) != f["bytes"]):
+                        continue  # unopenable or still syncing
+                    inbox.mkdir(exist_ok=True)
+                    (inbox / name).write_bytes(data)
+                    staged[name] = f"inbox/{name}"
+                except Exception:  # noqa: BLE001 — a bad blob never kills a run
+                    continue
+        return staged
+
+    def _context_text(self, delivery: Delivery, staged: dict[str, str]) -> str:
+        text = delivery.render()
+        if staged:
+            notes = "\n".join(f"- {name} -> read it at {rel}"
+                              for name, rel in sorted(staged.items()))
+            text += f"\n\nAttached files staged for you:\n{notes}"
+        return text
+
+    def _prompt(self, delivery: Delivery, acc, context_file: Path,
+                outbox: Path) -> str:
+        roster = "; ".join(
+            f"@{r['name']} ({r['desc']})" for r in delivery.roster)
+        prompt = PROMPT.format(
+            display=(acc.display if acc else self.agent), agent=self.agent,
+            chat_name=delivery.chat_name, roster=roster,
+            context_file=context_file, outbox=outbox,
+        )
+        if delivery.kind == "timer":
+            prompt += TIMER_PROMPT_EXTRA.format(
+                note=delivery.note.replace("'", ""))
+        return prompt

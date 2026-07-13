@@ -29,7 +29,7 @@ class Scripted:
             body=f"answering @{d.triggers[-1].sender}" if d.triggers
             else "timer follow-up"))
 
-    def respond(self, delivery):
+    def respond(self, delivery, on_step=None):
         self.calls.append(delivery)
         return self.fn(delivery)
 

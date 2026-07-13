@@ -79,6 +79,28 @@ def adopt_agent(app, req, mesh) -> dict:
 
 
 @authed
+def harness_options(app, req, mesh) -> dict:
+    """What the model picker can offer on THIS machine: the preset catalog
+    with per-family availability, model suggestions and effort support. The
+    GUI runs on the machine that hosts the owner's agents (account model),
+    so probing locally is probing the right box."""
+    from ..harness.adapters import ModelRegistry
+
+    reg = ModelRegistry.load(app.home)
+    families = [{
+        "id": p.id,
+        "label": p.label or p.id,
+        "available": reg.available(p),
+        "models": p.models,
+        "default_model": p.default_model,
+        "efforts": p.efforts,
+        "requires_model": p.requires_model,
+    } for p in reg.presets.values()]
+    families.sort(key=lambda f: (not f["available"], f["id"]))
+    return {"ok": True, "machine": mesh.machine, "families": families}
+
+
+@authed
 def agent_harness_status(app, req, mesh) -> dict:
     """The owner-visible harness state (pending queue + timers) — nothing an
     agent schedules is invisible to its responsible member (R15)."""
@@ -108,6 +130,7 @@ def pause(app, req, mesh) -> dict:
 
 GET = {
     "/api/mesh/agent_harness": agent_harness_status,
+    "/api/mesh/harness_options": harness_options,
 }
 POST = {
     "/api/mesh/create_agent": create_agent,

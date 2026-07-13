@@ -1,0 +1,19 @@
+{
+  "id": "cortex",
+  "label": "Cortex Code (Snowflake)",
+  "command": "cortex",
+  "args": ["-w", "{workdir}", "--auto-accept-plans", "--max-turns", "60",
+           "--output-format", "stream-json", "-p", "{prompt}"],
+  "args_minimal": ["--max-turns", "60", "--output-format", "stream-json",
+                   "-p", "{prompt}"],
+  "safety_args": ["--sql-read-only"],
+  "model_args": ["--model", "{model}"],
+  "blocklist_args": ["--disallowed-tools", "{tool}"],
+  "blocklist": ["Bash", "bash", "bash_output", "kill_shell", "python_repl",
+                "web_fetch", "web_search", "cron_create", "cron_delete",
+                "cron_list", "notebook_actions", "team_create", "team_delete",
+                "send_message", "ask_user_question"],
+  "reply_file_arg": ["-o", "{reply_file}"],
+  "format": "claude-stream",
+  "verified": false
+}

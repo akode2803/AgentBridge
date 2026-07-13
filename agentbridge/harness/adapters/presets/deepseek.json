@@ -1,0 +1,11 @@
+{
+  "id": "deepseek",
+  "label": "DeepSeek (via Ollama)",
+  "command": "ollama",
+  "args": ["run", "{model}", "{prompt}"],
+  "format": "text",
+  "requires_model": true,
+  "default_model": "deepseek-r1",
+  "models": ["deepseek-r1", "deepseek-v3"],
+  "verified": false
+}

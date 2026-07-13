@@ -1611,6 +1611,12 @@ pre.configdump {
 }
 .ag-cam { right: -3px; bottom: -3px; width: 24px; height: 24px; }
 .ag-cam svg { width: 12px; height: 12px; }
+/* per-audience routing rows (R16): enable switch + model select per row */
+.ag-routes { display: flex; flex-direction: column; gap: 8px; }
+.ag-route { display: flex; align-items: center; gap: 10px; }
+.ag-route-name { min-width: 110px; font-size: 13px; }
+.ag-route .csel { min-width: 170px; }
+.ag-machine button { font-size: 12.5px; }
 .ag-photo-menu { left: 0; transform: none; animation: menu-drop-l .14s ease; }   /* left-aligned, straight drop */
 .ci-name { font-weight: 600; font-size: 17px; }
 .ci-sub { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; }

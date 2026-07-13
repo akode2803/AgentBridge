@@ -1,0 +1,10 @@
+{
+  "id": "ollama",
+  "label": "Ollama (local models)",
+  "command": "ollama",
+  "args": ["run", "{model}", "{prompt}"],
+  "format": "text",
+  "requires_model": true,
+  "models": ["llama3.3", "qwen3", "mistral"],
+  "verified": false
+}
