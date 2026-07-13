@@ -527,11 +527,56 @@ def supervise(agent: str, argv: list[str]) -> None:
             return
 
 
+def hosted_agents(root: Path, machine: str) -> list[str]:
+    """Agents whose accounts name THIS machine as home (active or not — the
+    active flag is a runtime hold, and a held agent still syncs)."""
+    from ..mesh.directory import Directory
+    from ..transport.folder import FolderTransport
+
+    directory = Directory(FolderTransport(root))
+    out = []
+    for name in directory.names():
+        acc = directory.get(name)
+        if acc and acc.kind is UserKind.AGENT and acc.agent \
+                and acc.agent.machine == machine:
+            out.append(name)
+    return out
+
+
+def supervise_all(root: Path, machine: str, argv: list[str]) -> int:
+    """One supervised runner per hosted agent (AgentHarness.pyw's engine).
+    Each child holds its own single-instance lock; a second launcher's
+    children simply stand aside (rc 3)."""
+    agents = hosted_agents(root, machine)
+    if not agents:
+        print(f"no agents are hosted on this machine ({machine}) — "
+              f"adopt or create one in Settings, then relaunch")
+        return 0
+    passthru = [a for a in argv if a not in ("--all",)]
+    children = [
+        subprocess.Popen([sys.executable, "-m", "agentbridge.harness",
+                          name, "--supervise", *passthru])
+        for name in agents
+    ]
+    print(f"[harness] supervising {len(children)} agent(s): "
+          + ", ".join(f"@{a}" for a in agents))
+    try:
+        for c in children:
+            c.wait()
+    except KeyboardInterrupt:
+        for c in children:
+            c.terminate()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="agentbridge-harness",
         description="AgentBridge agent harness (v2) — one process per agent")
-    ap.add_argument("agent", help="agent account name")
+    ap.add_argument("agent", nargs="?", default="",
+                    help="agent account name (omit with --all)")
+    ap.add_argument("--all", action="store_true",
+                    help="supervise every agent hosted on this machine")
     ap.add_argument("--root", default="", help="mesh root (default: remembered)")
     ap.add_argument("--home", default="", help="local home (default: ~/.agentbridge)")
     ap.add_argument("--machine", default="", help="machine name override")
@@ -542,15 +587,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--supervise", action="store_true")
     args = ap.parse_args(argv)
 
-    if args.supervise:
-        supervise(args.agent, [a for a in (argv or sys.argv[1:])])
-        return 0
-
     home = Path(args.home) if args.home else None
     cfg = load_app_config(home)
     root = args.root or cfg.get("mesh_root")
     if not root:
         ap.error("no --root given and none remembered in config.json")
+
+    if args.all:
+        machine = args.machine or platform.node() or "harness"
+        return supervise_all(Path(root), machine,
+                             [a for a in (argv or sys.argv[1:])])
+    if not args.agent:
+        ap.error("an agent name is required (or use --all)")
+    if args.supervise:
+        supervise(args.agent, [a for a in (argv or sys.argv[1:])])
+        return 0
 
     lock = None
     if not args.dry_run:

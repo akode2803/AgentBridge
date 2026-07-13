@@ -3,9 +3,9 @@
   "label": "Claude Code",
   "command": "claude",
   "args": ["-p", "{prompt}", "--output-format", "stream-json", "--verbose",
-           "--max-turns", "60"],
+           "--max-turns", "60", "--allowedTools", "Read,Write,Edit,Glob,Grep"],
   "args_minimal": ["-p", "{prompt}", "--output-format", "stream-json",
-                   "--verbose"],
+                   "--verbose", "--allowedTools", "Read,Write,Edit,Glob,Grep"],
   "model_args": ["--model", "{model}"],
   "blocklist_args": ["--disallowedTools", "{tool}"],
   "blocklist": ["Bash", "WebFetch", "WebSearch", "Task", "Agent",
@@ -13,5 +13,5 @@
   "format": "claude-stream",
   "models": ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
              "claude-haiku-4-5-20251001"],
-  "verified": false
+  "verified": true
 }

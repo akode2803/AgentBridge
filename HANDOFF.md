@@ -15,18 +15,34 @@ root is remembered in `~/.agentbridge/config.json` (`mesh_root`). The v1
 + `legacy/` stay in the repo for reference until R26. Migration: 4 users, 12
 chats, 393 messages, verification PASS.
 
-**Agents are OFFLINE until R16.** The v2 harness CORE shipped in R15
-(`agentbridge/harness/` — durable queue, answered-guard, catch-up, enriched
-deliveries, owner-visible timers; `python -m agentbridge.harness <agent>`),
-but its Responder seam has no model adapters until R16's registry — so no
-agent replies yet. Bringing an agent online after R16: the owner signs in on
-the hosting machine, `POST /api/mesh/adopt_agent` (re-homes a migrated agent
-+ mints its identity keys), then run the harness under `--supervise`. First
-human sign-in on v2 upgrades the migrated pbkdf2 login to scrypt + mints E2EE
-identity keys and shows the one-time recovery code.
-**Remaining manual step: STOP the v1 worker on any REMOTE machine (the hosted
-CoCo/AVD box)** — it otherwise keeps running v1 against the now-orphaned
-`mesh/`; its v2 replacement arrives with R16.
+**Agents: the v2 harness is READY — @claude is one command from online.**
+R15 shipped the harness core (durable queue, answered-guard, catch-up,
+enriched deliveries, owner-visible timers); R16 shipped the model registry +
+CLI adapters + the model picker, verified end-to-end with the real claude
+CLI on a scratch root. Live **@claude is already adopted to the dev box,
+keyed, and configured** (`adapter: claude`, `catchup: none` so its first
+start answers nothing from the past; model = family default until picked in
+Settings → My agents). **To start it (Aryan's switch):**
+
+    uv run python -m agentbridge.harness claude --supervise
+
+(or double-click `AgentHarness.pyw`, which supervises every agent hosted on
+this machine). Watch the first exchanges; the per-chat rate cap and the
+Settings stand-down switch are the brakes.
+
+**@coco needs the same on the AVD:** (1) STOP the v1 worker there (still
+open — it runs v1 against the orphaned `mesh/`); (2) pull this repo + `uv
+sync`; (3) sign in as its owner in the v2 GUI on that box and click "Adopt
+to this machine" on @coco (Settings → My agents), or call
+`accounts.adopt_agent("coco")`; (4) `uv run python -m agentbridge.harness
+coco --supervise`. The cortex preset carries v1's exact safety flags
+(--sql-read-only + the 15-tool blocklist) but the v2 engine's first cortex
+run should be watched.
+
+**Legacy chats:** export before the R16.5 purge —
+`uv run python -m agentbridge.export --user aryan --legacy-only`. The
+blanked-history incident is read-time only: restarting the app on ≥v0.24.77
+makes migrated history readable again (nothing was lost).
 
 The sections below describe the **v1** app and are retained as reference;
 treat `REWRITE_PLAN.md` + the memory topic files as authoritative for v2.

@@ -445,15 +445,55 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       + CLI dry-run/wrong-machine smokes. **Agents come back ONLINE at R16**
       (the registry/adapters give the Responder a real model; then adopt
       @claude/@coco and start harnesses).
-- [ ] **R16 — Model registry & adapters.** Adapter interface (subprocess CLI
-      today, API later — same contract per D8); JSON preconfigs: claude,
-      codex, grok, ollama, deepseek; **model picker + reasoning effort**
-      replaces the raw CLI-arg field; **per-purpose model routing** replaces
-      the reply policy: model for replying to (a) my owner (b) other humans
-      (c) agents + an override-all "current model"; each category
-      enable/disable-able; single-model installs degrade to enable/disable
-      only. (Registry shaped so agent swarms/clones can build on it later.)
-- [ ] **R17 — Prompt manager.** Prompts live in modifiable JSON, not code;
+- [x] **R16 — Model registry & adapters. DONE 2026-07-13** —
+      `agentbridge/harness/adapters/`: preset JSONs (claude/cortex/codex/
+      grok/ollama/deepseek — a model/CLI is DATA, D8; owners can overlay or
+      add presets in `<home>/adapters/` with zero code) + `ModelRegistry`
+      (loads catalog, probes THIS machine's installs, resolves owner config →
+      one invocation per audience; model order: override-all → per-audience →
+      preset default; single-install machines resolve without picking) +
+      `CliResponder` (ONE subprocess engine for every family: argv lists
+      never shell, streamed stdout + watchdog, live steps → run feed,
+      claude-stream/codex-jsonl/text parsers, staged-in attachments +
+      outbox-out files, usage-error minimal retry that never drops safety
+      args/blocklists). **Per-purpose routing** joined HarnessSettings
+      (owner/people/agents: enable + model; disabled audiences resolve at
+      scan, before slots/rate). GUI: the raw model/reasoning fields became
+      the real picker (family via `GET /api/mesh/harness_options` probe,
+      current model, effort when supported, 3 routing rows; no-model
+      families degrade to enable-only; off-machine agents get one-click
+      Adopt) — verified live in the preview (options populate, save
+      round-trips, reload re-hydrates). Export tool shipped
+      (`python -m agentbridge.export`, `--legacy-only` = the purge set) +
+      `--all` supervise mode + `AgentHarness.pyw` (AgentWorker.pyw's
+      successor). **VERIFIED WITH THE REAL claude CLI on a scratch root**
+      ("I'm Claude Haiku 4.5." — full stack: preset → registry → engine →
+      runner → threaded E2EE reply + task steps); finding: modern claude
+      headless denies file reads by default → the preset allows
+      Read/Write/Edit/Glob/Grep (R18's broker scopes this properly).
+      **Live @claude is PREPPED, not started:** adopted to the dev box
+      (identity minted+published), harness = {adapter: claude, catchup:
+      none}, live dry-run = 0 triggers; Aryan flips it on (runbook in
+      HANDOFF). CoCo needs the same on the AVD (v1 worker stop still open).
+      10+7 new tests (263 total). Presets for CLIs not installed here
+      (codex/grok/ollama/deepseek) are best-effort data pending their own
+      bring-up (`verified: false` in the preset).
+- [ ] **R16.5 — Legacy purge (Aryan 2026-07-13: "remove the legacy code, do
+      not add junk to keep the legacy items working").** Order matters — the
+      acceptance paths must outlive the export:
+      (1) EXPORT the migrated chats to plain text
+      (`python -m agentbridge.export --user aryan --legacy-only`; other
+      members export their own DMs if wanted) and verify the files;
+      (2) DELETE the legacy (non-gid) chat dirs from `mesh2/` (fresh backup
+      first; the `mesh.backup-20260713` + frozen v1 `mesh/` already hold the
+      originals);
+      (3) STRIP the legacy acceptance code: sealer epoch-0/plain-blob
+      acceptance + `first_epoch` + `is_legacy_chat_id`, the fold's legacy
+      (non-gid) genesis acceptance, the keyless-author unsigned-event
+      acceptance (only after BOTH agents are adopted/keyed), and retire
+      `migrate.py` + the runbook to `legacy/`;
+      (4) new-code rule, effective NOW: nothing new accommodates v1 shapes.
+      The v1 source tree itself still retires at R26. Prompts live in modifiable JSON, not code;
       prompt assembly is a module (persona, etiquette, capabilities, context
       blocks); **reply-vs-tag becomes the agent's judgment** (prompted, not
       enforced): reply threads by default (safe), tag others who need
