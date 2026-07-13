@@ -257,8 +257,8 @@ class PeerService:
     # ------------------------------------------------------------ commands
     def _run(self, command: str) -> dict:
         if command == "ping":
-            try:  # canonical version lives in the ROOT gui package (app.py)
-                from gui import __version__ as ver
+            try:  # canonical app version (agentbridge package, R26)
+                from agentbridge import __version__ as ver
             except ImportError:
                 ver = "unknown"
             return {"agent": self.agent, "machine": self.mesh.machine,

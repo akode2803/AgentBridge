@@ -1,9 +1,9 @@
-"""AgentBridge GUI — local web app (stdlib only) rendered in an Edge app window.
+"""AgentBridge GUI static frontend package (native ES modules under
+``static/js/``, served by the v2 stdlib server in ``agentbridge/gui/``).
 
-Serves the analyst-facing interface for the bridge: setup wizard, channel
-dashboard, transcript/composer, and (later) the CoCo livestream pane.
 Zero third-party dependencies by design: analyst machines cannot be assumed
-to have pip access, and the setup wizard must run before anything is installed.
-"""
+to have pip access, and the frontend must run in a bare Edge app window.
 
-__version__ = "0.24.95"
+The app ``__version__`` moved to ``agentbridge/__init__.py`` in R26 — this
+package no longer carries it (nothing should import a version from here).
+"""

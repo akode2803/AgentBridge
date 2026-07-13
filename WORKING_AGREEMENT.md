@@ -92,7 +92,7 @@ package, `agent_worker.py` → `agent_harness`). When docs and code disagree, th
 code wins — then I fix the doc.
 
 - **Per-round loop:** re-read this file → reconstruct context → design+critique →
-  implement → verify live → bump `gui/__init__.py` `__version__` → commit + push
+  implement → verify live → bump `agentbridge/__init__.py` `__version__` → commit + push
   → update memory (+ sync `HANDOFF.md`/`ARCHITECTURE.md` when the shape changed).
 - **The one invariant — Visibility = membership.** Everyone, human or agent, sees
   and reads only the chats they're a member of. Every read path goes through the

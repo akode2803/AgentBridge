@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        from gui import __version__ as app_version  # canonical until R26
+        from agentbridge import __version__ as app_version  # canonical (R26)
     except ImportError:
         app_version = "dev"
 

@@ -25,12 +25,13 @@ endpoint**, not just the read paths.
 ## Hard rules (breaking these has burned us before)
 - **PowerShell corrupts source.** `Get-Content`/`Set-Content` re-encode to
   UTF-16+BOM and mangle em-dashes. Edit source **only** with the Edit/Write
-  tools. Bump `gui/__init__.py` `__version__` with Edit, never PowerShell.
-- **Frontend = 21 native ES modules** (`gui/static/js/`) with strict one-way
+  tools. Bump `agentbridge/__init__.py` `__version__` with Edit, never
+  PowerShell (moved there from `gui/__init__.py` in R26).
+- **Frontend = 22 native ES modules** (`gui/static/js/`) with strict one-way
   layering: util/icons/api/markdown → state → csel/modal/composer/picker →
   sidebar → views → main. **Views never import views** — they register on the
   `V` registry (`views.js`) and call sideways through it. Run
-  **`python check_frontend.py` after every frontend edit** (must print 21/21).
+  **`python check_frontend.py` after every frontend edit** (must print 22/22).
 - **After editing `server.py` or `mesh.py`, restart BOTH the GUI server and the
   agent worker.** A running process predates your edit and silently serves stale
   behaviour.

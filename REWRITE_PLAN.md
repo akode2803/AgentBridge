@@ -770,11 +770,23 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       account docs + key history — the biggest open item, → **R27**) and the
       non-destructive reaction/pin overlays. Live-verified on a scratch mesh
       (boots clean, renders, tenure written); live @claude + GUI restarted.
-- [ ] **R26 — Docs & retirement.** ARCHITECTURE.md rewritten for v2; HANDOFF
-      updated; `mesh.py`, `agent_worker.py`, `legacy/bridge.py`,
-      `handler_coco.py` moved to `legacy/`; version source moves to
-      `agentbridge/__init__.py`; packaging-prep notes for the next session
-      (setup wizard, installers, PWA).
+- [x] **R26 — Docs & retirement. DONE 2026-07-13 (v0.24.96, 323 tests).**
+      Retired the v1 app to `legacy/` (`git mv` mesh.py, agent_worker.py,
+      mesh_cli.py, AgentWorker.pyw — bridge.py/handler_coco.py were already
+      there; all confirmed unreferenced by v2/tests). Root now holds only the v2
+      launchers (AgentBridge.pyw, AgentHarness.pyw) + check_frontend.py. Version
+      source moved `gui/__init__.py` → **`agentbridge/__init__.py`** (updated
+      app.py + peer.py refs, dropped it from gui/__init__.py, fixed
+      CLAUDE.md/WORKING_AGREEMENT bump target + the stale 21→22 module count).
+      **ARCHITECTURE.md fully rewritten for v2** (it was still a v1 doc — mesh.py
+      monolith/connectors/agent_worker; now: package layers, mesh facade, E2EE +
+      R25 security model, transports, the harness stack, 22-module frontend,
+      invariants, sharp edges). **HANDOFF.md rewritten** as a tight v2
+      orientation + packaging-prep notes (entry points, config discovery, deps,
+      single-instance, PWA). Process-fleet diagnosis recorded: the "many
+      processes" are one clean v2 fleet shown doubled by the uv-managed-venv
+      launcher-stub+base pairing (ARCHITECTURE §11) PLUS stale v1 AgentWorker
+      processes to stop. 323 tests, ruff clean, frontend 22/22.
 - [ ] **R27 — Directory root of trust (from the R25 review).** Close the last
       big residual: `users/<name>.json` publishes the very keys every signature
       + epoch-wrap trusts, but is itself unsigned and transport-writable, so a
