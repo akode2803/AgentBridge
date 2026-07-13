@@ -221,6 +221,16 @@ published keys is an identity-takeover vector (→ R27: signed/pinned account do
   daemon thread (degrade → poll). Trust model v1: **only the secret key** talks
   to the project (RLS on, no policies, so the publishable key can do nothing);
   bodies arrive pre-sealed, so the server only ever stores ciphertext.
+- **`transport/cache.py`** (R28) — `CachingTransport`, a short-TTL read cache
+  (`get_doc`/`list_docs`/`list_chat_ids`; NOT logs or blobs) that `make_transport`
+  wraps around a **cloud** transport only (a folder read is already free). It
+  exists because the hot GUI endpoints re-read the same metadata many times per
+  request — `visible_profile` fetches an account doc ~8× per user,
+  `presence_of` re-scans every presence doc per user — which over cloud RTT made
+  `/api/mesh/state` ~30 s. Writes through the transport write-through/invalidate
+  so a writer always sees its own writes; the short TTL keeps cross-process
+  staleness within the mesh's existing eventual-consistency window (meta.json is
+  already a rebuildable snapshot).
 - **`store/db.py`** — a local SQLite **read cache** (messages + per-log
   offsets + a small cached-doc kv), rebuildable from the transport at any time.
 - **`store/outbox.py`** — the durable send guarantee: a sealed envelope is

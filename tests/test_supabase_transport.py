@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from agentbridge.core.errors import ValidationError
-from agentbridge.transport import FolderTransport, make_transport
+from agentbridge.transport import CachingTransport, FolderTransport, make_transport
 from agentbridge.transport.supabase import SupabaseTransport
 
 
@@ -262,10 +262,14 @@ def test_blob_roundtrip_and_size(tx):
 # ----------------------------------------------------------------- factory
 
 def test_factory_picks_the_driver(tmp_path):
+    # a cloud root is wrapped in the R28 read cache; the SupabaseTransport is
+    # underneath, and .root/.scheme still resolve through the wrapper
     t = make_transport("supabase://team-a", home=tmp_path)
-    assert isinstance(t, SupabaseTransport) and t.root == "team-a"
+    assert isinstance(t, CachingTransport)
+    assert isinstance(t.inner, SupabaseTransport)
+    assert t.root == "team-a" and t.scheme == "supabase"
     f = make_transport(tmp_path / "mesh2")
-    assert isinstance(f, FolderTransport)
+    assert isinstance(f, FolderTransport)   # a local folder stays bare
 
 
 def test_cache_key_unique_per_project():

@@ -817,6 +817,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       scratch rig (doc-rewrite attack → red banner renders → dismiss persists →
       pinned keys keep verifying the victim's real messages; zero console
       errors). frontend 22/22, ruff clean. THREAT_MODEL "CLOSED R27" written.
+- [~] **R28 — Supabase-primary perf (metadata read cache). CODE DONE
+      2026-07-13 (v0.24.99, 347 tests); LIVE cloud verify + migrate + repoint +
+      restart PENDING Aryan's go-ahead.** Unblocks the R14-era Supabase switch
+      that was rolled back because `/api/mesh/state` took ~30 s on cloud (117 ms
+      on folder): the hot GUI endpoints read metadata STRAIGHT from the
+      transport and re-read the same docs many times per request
+      (`PrivacyService.visible_profile` fetches an account doc ~8× per user;
+      `presence_of` re-scans every presence doc per user; `chats_for` re-reads
+      every meta) — O(users×fields[×chats]) network round-trips. **Chose the
+      short-TTL transport read cache** (over threading cached snapshots through
+      privacy/presence): one place, covers every hot path, no service rewrites.
+      `transport/cache.py` `CachingTransport` wraps `get_doc`/`list_docs`/
+      `list_chat_ids` (NOT logs/blobs — message latency must not lag) with a
+      ~2 s TTL; writes through it write-through + invalidate so a writer always
+      sees its own writes; `make_transport` wraps ONLY cloud roots (a folder
+      read is already free, and the well-tested folder path stays untouched).
+      Correctness rides the mesh's existing eventual consistency (meta.json is a
+      rebuildable last-writer-wins snapshot; cross-process staleness ≤ TTL, far
+      under cloud sync latency). 13 new tests incl. a representative state-sweep
+      collapse (58 transport reads → 14 for 4 users/3 chats; scales with
+      DISTINCT docs, not users×fields). frontend 22/22, ruff clean. **REMAINING
+      (all live, Aryan-gated):** time `/api/mesh/state` on the real Supabase
+      project; re-run `scripts/migrate_folder_to_supabase.py` (idempotent copy,
+      folder untouched); repoint `config.json` `mesh_root` → `supabase://mesh2`
+      (keep `mesh_root_folder_backup`); restart the fleet (this also puts R27
+      live).
 
 ---
 

@@ -31,16 +31,23 @@ a stress/soak pass with a 40× read-latency fix, and the R25 security review.
   `.venv\Scripts\pythonw.exe -m agentbridge.gui` + `… -m agentbridge.harness --all`.
 - **Everything is committed and pushed.** A clone is a complete copy.
 
-### Supabase status — migrated, verified, NOT primary yet (perf)
+### Supabase status — migrated + verified; perf fix landed; switch is Aryan-gated
 
 The live mesh was migrated to Supabase and proven correct (all messages decrypt;
 E2EE is transport-agnostic), and the GUI cloud-root crash was fixed (v0.24.97).
-But it was **rolled back to the folder** because `/api/mesh/state` took ~30 s on
-the cloud (117 ms on the folder): the GUI's hot endpoints read chat/account
-metadata **straight from the transport**, O(users×chats) — free on a local
-folder, ~290 ms/read over cloud RTT. The Supabase copy is intact; a
-metadata-caching round (below) unblocks the switch. Migration tool:
-`scripts/migrate_folder_to_supabase.py` (idempotent copy; folder left intact).
+It was **rolled back to the folder** because `/api/mesh/state` took ~30 s on the
+cloud (117 ms on the folder): the GUI's hot endpoints re-read chat/account/
+presence metadata **straight from the transport**, the same docs many times per
+request — free on a local folder, ~290 ms/read over cloud RTT.
+
+**R28 (v0.24.99) fixes the cause:** `transport/cache.py` `CachingTransport`, a
+short-TTL read cache (`get_doc`/`list_docs`/`list_chat_ids`) that
+`make_transport` wraps around cloud roots only; it collapses the per-request
+re-reads (a synthetic state sweep drops 58 transport reads → 14). What remains
+is **all live and needs Aryan's go-ahead**: time `/api/mesh/state` on the real
+project, re-run `scripts/migrate_folder_to_supabase.py` (idempotent copy; folder
+left intact), repoint `config.json` `mesh_root` → `supabase://mesh2` (keep
+`mesh_root_folder_backup`), and restart the fleet (which also puts R27 live).
 Rollback lever: `config.json` keeps `mesh_root_folder_backup`.
 
 ## What lives outside this repo
