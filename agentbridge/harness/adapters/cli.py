@@ -151,6 +151,7 @@ class CliResponder:
             if on_step:
                 on_step(line)
 
+        timers: list[dict] = []          # the bridge's schedule_timer fills it
         with contextlib.ExitStack() as stack:
             mcp_config = ""
             env = None
@@ -161,6 +162,7 @@ class CliResponder:
                     approvals=settings.approvals,
                     ask_timeout_s=settings.ask_timeout_s,
                     deny_roots=self._deny_roots(),
+                    mesh=self.mesh, timers_out=timers,
                 ))
                 mcp_config = bridge.mcp_config()
                 # the inner CLI must out-wait the owner-answer window
@@ -205,7 +207,7 @@ class CliResponder:
         # R18's workspace scoping owns the real fix.
         files = sorted(str(p) for p in outbox.iterdir()
                        if p.is_file() and p.stat().st_size)
-        return Reply(body=text, steps=steps, files=files)
+        return Reply(body=text, steps=steps, files=files, timers=timers)
 
     # ------------------------------------------------------------ plumbing
     def _deny_roots(self) -> list[Path]:

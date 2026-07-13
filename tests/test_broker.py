@@ -19,6 +19,7 @@ from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
 from agentbridge.harness import BridgeServer, PermissionBroker  # noqa: E402
 from agentbridge.harness import broker as broker_mod  # noqa: E402
 from agentbridge.harness.adapters.registry import Preset  # noqa: E402
+from agentbridge.mesh.service import Mesh  # noqa: E402
 
 
 class FakeTx:
@@ -212,6 +213,102 @@ def test_bridge_approve_and_ask_member_over_http(tmp_path):
     # the context manager tore the server down
     with pytest.raises(Exception):
         call_tool(bridge.url, "approve", {"tool_name": "Read", "input": {}})
+
+
+# -------------------------------------------------- capability tools (R19)
+
+def test_capability_tools_ride_the_agents_own_gates(tmp_path):
+    """pin/star/react/forward/create/timer over real http, as the agent's
+    own identity — membership and the owner's R6 rules gate every call."""
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    home = tmp_path / "home"
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    try:
+        chat = owner.create_chat("Main", members=["helper"])
+        other = owner.create_chat("Side", members=["helper"])
+        m = owner.post(chat.id, "important note")
+        owner.outbox.flush_once()
+        agent.sync.sync_once([chat.id, other.id])
+
+        b = PermissionBroker(agent.tx, "helper")
+        timers: list[dict] = []
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
+                          approvals=[], ask_timeout_s=0.3, mesh=agent,
+                          timers_out=timers) as bridge:
+            url = bridge.url
+            chats = json.loads(call_tool(url, "list_chats", {}))
+            assert {c["id"] for c in chats} == {chat.id, other.id}
+
+            assert call_tool(url, "pin_message", {"message_id": m.id}) == "pinned"
+            assert call_tool(url, "star_messages",
+                             {"message_ids": [m.id]}) == "starred"
+            assert call_tool(url, "react",
+                             {"message_id": m.id, "emoji": "👍"}) == "ok"
+            assert call_tool(url, "forward_message", {
+                "message_id": m.id, "to_chat_id": other.id}) == "forwarded"
+
+            out = json.loads(call_tool(url, "create_dm", {
+                "user": "aryan", "message": "opening line"}))
+            assert set(out["members"]) == {"helper", "aryan"}
+            dm_id = out["chat_id"]
+
+            note = call_tool(url, "schedule_timer",
+                             {"minutes": 5, "note": "check back"})
+            assert "5 min" in note
+            assert timers == [{"in_s": 300.0, "note": "check back"}]
+
+        owner.sync.sync_once()
+        assert m.id in owner.pins(chat.id)                 # pin landed
+        fwd = [x for x in owner.messages_for(other.id) if x.fwd]
+        assert fwd and fwd[0].body == "important note"
+        assert fwd[0].fwd["from"] == "aryan"               # provenance kept
+        opening = [x for x in owner.messages_for(dm_id)
+                   if x.from_ == "helper" and x.kind.value == "message"]
+        assert [x.body for x in opening] == ["opening line"]
+    finally:
+        agent.close()
+        owner.close()
+
+
+def test_capability_creates_are_gated_and_capped(tmp_path):
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    home = tmp_path / "home"
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    owner.accounts.create_human("sudhir", "sudhir-pw-1")
+    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    try:
+        chat = owner.create_chat("Main", members=["helper"])
+        agent.sync.sync_once()
+        b = PermissionBroker(agent.tx, "helper")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
+                          approvals=[], ask_timeout_s=0.3,
+                          mesh=agent) as bridge:
+            url = bridge.url
+            # the owner's R6 rule refuses politely — and burns no slot
+            owner.set_agent_rules("helper", {"messaging": "nobody"})
+            out = call_tool(url, "create_dm", {"user": "sudhir"})
+            assert out.startswith("could not do that:")
+            owner.set_agent_rules("helper", {"messaging": "everyone"})
+            for i in range(2):                             # the cap is 2/run
+                out = json.loads(call_tool(url, "create_group", {
+                    "name": f"Made {i}", "members": ["aryan"]}))
+                assert out["chat_id"]
+            out = call_tool(url, "create_dm", {"user": "sudhir"})
+            assert "limit" in out
+    finally:
+        agent.close()
+        owner.close()
 
 
 # ------------------------------------------------------------- argv plumbing

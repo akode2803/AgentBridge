@@ -574,12 +574,28 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       273 tests; live harness + GUI restarted onto it. Deferred to a later
       round: auxiliary-flag allow/deny UI (presets carry safety flags as
       data today); codex/other-family permission wiring (their own bring-up).
-- [ ] **R19 — Data pipeline hardening.** The agent receives messages ONLY
-      through the harness (mesh API + the agent's keys — it never touches the
-      folder); leak audit: workspace contains no raw mesh data, prompts carry
-      only membership-filtered content; uniform capability exposure through
-      harness tools (pin, star, forward, **create chat/DM — agent-initiated,
-      gated by R6**, group creation, etc.).
+- [x] **R19 — Data pipeline hardening. DONE 2026-07-13.** The
+      messages-only-through-the-harness property held by construction since
+      R18 (mesh folder is a deny root; context comes from `messages_for`) —
+      now PINNED by a leak-audit test: a run's workspace tree never contains
+      another chat's bodies. **Capability tools** ride the R18 bridge, bound
+      to the agent's OWN Mesh facade so membership/privacy/R6 gates apply
+      exactly as for any member: `pin_message`/`unpin_message`,
+      `star_messages`, `react`, `forward_message` (attachments re-sealed for
+      the target), `list_chats`, `create_dm`/`create_group` (R6-gated, owner
+      rides along per D18, optional opening message, capped 2 creates/run —
+      a refusal never burns the slot), and `schedule_timer` → Reply.timers →
+      the R15 TimerService (owner-visible; the R17-deferred timer directive
+      ships here). ``send``/``read`` tools DELIBERATELY absent — the reply
+      pipeline owns posting (threading, rate caps, answered-guard) and the
+      context file owns reading. Claude preset allows the whole `mcp__ab`
+      server. Live probe found a real gap: the transcript carried no message
+      ids, so the model INVENTED one and got an opaque backend error —
+      transcript lines now carry `(id m-...)` and the tools validate ids
+      with a plain refusal. Feed words the bridge tools ("Pinning a
+      message", "Scheduling a wake-up"). Verified with the real claude CLI:
+      pin landed on the correct message + timer scheduled and owner-visible.
+      276 tests; live harness restarted onto it.
 - [ ] **R20 — Memory.** qdrant (embedded/local per R1) + fastembed; **chat
       memory lives in that chat's workspace; global memory is separate**;
       default policy: agents read/write GLOBAL memory only in DMs (owner can

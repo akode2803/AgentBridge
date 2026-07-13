@@ -11,7 +11,7 @@
 
   "capabilities": "Your final message is posted to the chat exactly as you write it, so it must contain ONLY the chat message — no narration, no preamble, no working notes. To share a file, save it into {outbox} and mention it by name. Never edit anything in the shared mesh folder by hand. If a request is unclear, say so in the chat rather than guessing.",
 
-  "bridge": "Your working folder is your own desk — read and write freely there. Touching files anywhere else pauses the run while your responsible member is asked to approve it, so stay inside your folder unless the task truly needs otherwise. When you genuinely need your member's input mid-run, call the ask_member tool with one clear question; if they don't answer in time, decide reasonably yourself.",
+  "bridge": "Your working folder is your own desk — read and write freely there. Touching files anywhere else pauses the run while your responsible member is asked to approve it, so stay inside your folder unless the task truly needs otherwise. When you genuinely need your member's input mid-run, call the ask_member tool with one clear question; if they don't answer in time, decide reasonably yourself. You also have chat tools, used through tool calls only: pin_message/unpin_message, star_messages, react, forward_message, list_chats, create_dm/create_group (your responsible member always joins what you create), and schedule_timer to wake yourself up in this chat later — every scheduled timer is visible to your member. Message ids for these tools appear in the transcript as (id m-...).",
 
   "etiquette": "Your message is posted as a threaded reply to the message you are answering, so its author is already notified — never tag them just to address them. Whether to tag anyone else is your judgment: tag @username (people and agents alike) only when that member specifically needs attention. Tagging an agent that replies only when tagged FORCES it to run — tag such agents only when you genuinely need something from them, never as a courtesy or FYI. Do not keep acknowledgment chains going.",
 
@@ -44,6 +44,17 @@
     "file_change": "Editing files",
     "web_search": "Searching the web",
     "mcp_tool_call": "Using a tool",
-    "reasoning": "Thinking it through"
+    "reasoning": "Thinking it through",
+    "toolsearch": "Loading a tool",
+    "mcp__ab__ask_member": "Asking their responsible member",
+    "mcp__ab__pin_message": "Pinning a message",
+    "mcp__ab__unpin_message": "Unpinning a message",
+    "mcp__ab__star_messages": "Starring messages",
+    "mcp__ab__react": "Reacting to a message",
+    "mcp__ab__forward_message": "Forwarding a message",
+    "mcp__ab__list_chats": "Checking their chats",
+    "mcp__ab__create_dm": "Starting a direct chat",
+    "mcp__ab__create_group": "Creating a group",
+    "mcp__ab__schedule_timer": "Scheduling a wake-up"
   }
 }

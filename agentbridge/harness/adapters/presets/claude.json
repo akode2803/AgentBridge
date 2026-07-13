@@ -8,7 +8,7 @@
                    "--verbose"],
   "permission_args": ["--mcp-config", "{mcp_config}",
                       "--permission-prompt-tool", "mcp__ab__approve",
-                      "--allowedTools", "mcp__ab__ask_member"],
+                      "--allowedTools", "mcp__ab"],
   "auto_allow": ["Read", "Glob", "Grep", "TodoWrite"],
   "model_args": ["--model", "{model}"],
   "blocklist_args": ["--disallowedTools", "{tool}"],

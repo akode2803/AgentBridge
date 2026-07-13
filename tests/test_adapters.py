@@ -277,6 +277,37 @@ def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
         runner.close()
 
 
+def test_workspace_leaks_nothing_from_other_chats(arig):
+    """R19 leak audit: a run's workspace holds ONLY this chat's material —
+    another room's bodies must never appear in any file the run can read."""
+    secret = "TOPSECRET-marker-9c41"
+    private = arig.owner.create_chat("Private")           # helper NOT a member
+    arig.owner.post(private.id, f"the launch code is {secret}")
+    snap = arig.owner.create_chat("Open", members=["helper"])
+    arig.owner.post(snap.id, "@helper hello there")
+    arig.owner.outbox.flush_once()
+
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once()
+        runner.tick()
+        runner.drain(timeout=60)
+        ws_root = arig.home / "harness" / "helper"
+        found = []
+        for p in ws_root.rglob("*"):
+            if p.is_file() and secret in p.read_text(encoding="utf-8",
+                                                     errors="replace"):
+                found.append(str(p))
+        assert found == []                                # nothing leaked
+        ctx = (ws_root / "workspaces" / snap.id / "context.md").read_text(
+            encoding="utf-8")
+        assert "hello there" in ctx                       # its own chat is in
+    finally:
+        runner.close()
+
+
 def test_engine_timeout_kills_the_run(arig, tmp_path):
     reg = ModelRegistry.load(arig.home)
     responder = CliResponder(reg, SimpleNamespace(user="helper", tx=None),

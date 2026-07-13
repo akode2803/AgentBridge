@@ -167,13 +167,17 @@ def _short_detail(detail: str) -> str:
 
 
 def render_message(m: Message, agent: str) -> str:
-    """One transcript line — factual, code-owned (moved from conversation.py)."""
+    """One transcript line — factual, code-owned (moved from conversation.py).
+    The message id rides every line: the chat tools (pin/star/react/forward)
+    take ids, and a model can only pass what it can see (R19 — a live probe
+    invented an id and got an opaque backend error)."""
     if m.kind is MsgKind.INFO:
         ev = m.event or {}
         return f"[{m.ts}] · {ev.get('type', 'event')}"
     if m.deleted:
         return f"[{m.ts}] · a message was deleted"
     who = f"@{m.from_}" + (" (you)" if m.from_ == agent else "")
+    who = f"(id {m.id}) {who}" if m.id else who
     rt = m.reply_to or {}
     rline = ""
     if rt.get("from"):
