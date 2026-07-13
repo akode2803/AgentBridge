@@ -8,7 +8,7 @@ import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
 import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin } from "./state.js";
-import { renderSidebar } from "./sidebar.js";
+import { renderSidebar, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
 import { V } from "./views.js";
@@ -30,6 +30,7 @@ async function renderChats(force) {
   if (App.page !== "chats") return;
   const ms = Mesh.state;
   renderSidebar();
+  startAskPoll();   // asks/timers surface on the whole chats page (R19.5)
 
   if (!ms.available) {
     $("#content").innerHTML = `
@@ -616,7 +617,8 @@ async function renderMeshChat(force) {
   initComposer(chatId, members);
   renderMeshPending(chatId);
   renderReplyArea(chatId);
-  startAskPoll(chatId);
+  Mesh.askKey = "";        // fresh chat surface: let the next tick repaint
+  startAskPoll();
   bindOpenFile(document, chatId, ".mesh-att");
 
   const tr = $("#transcript");
@@ -630,39 +632,50 @@ async function renderMeshChat(force) {
 }
 V.renderMeshChat = renderMeshChat;
 
-// R18: my agents' pending permission asks / questions in THIS chat. The run
-// is BLOCKED on the answer, so this polls on a short leash while the chat is
-// open (the main poll can idle at 20s+ under SSE) and renders Codex-style
-// cards above the composer: Allow / Always allow here / Deny — or a text
-// answer when the agent asked a question.
-function startAskPoll(chatId) {
-  if (Mesh.askPollChat === chatId && Mesh.askPollId) return;
-  clearInterval(Mesh.askPollId);
-  Mesh.askPollChat = chatId;
-  Mesh.askKey = "";
+// R18/R19.5: my agents' pending asks + scheduled wake-ups, everywhere on the
+// chats page. A run is BLOCKED on an answer, so this polls on a short leash
+// (the main poll can idle at 20s+ under SSE): the open chat gets Codex-style
+// cards above the composer (Allow / Always allow here / Deny — or a text
+// answer to an agent's question) plus timer chips; every OTHER chat with a
+// pending ask gets a sidebar dot, so nothing waits invisibly.
+function startAskPoll() {
+  if (Mesh.askPollId) return;                // one global poller
   const tick = async () => {
-    if (App.page !== "chats" || Mesh.chatId !== chatId) {
-      clearInterval(Mesh.askPollId);         // left the chat: stand down
-      Mesh.askPollId = null; Mesh.askPollChat = "";
+    if (App.page !== "chats") {
+      clearInterval(Mesh.askPollId);         // left the page: stand down
+      Mesh.askPollId = null;
+      syncAskDots([]);
       return;
     }
     try {
-      const r = await api(`/api/mesh/asks?chat=${encodeURIComponent(chatId)}`);
-      renderAskBar(chatId, r.asks || []);
+      const r = await api("/api/mesh/asks");
+      const asks = r.asks || [], timers = r.timers || [];
+      syncAskDots(asks);
+      const cid = Mesh.chatId;
+      if (cid) renderAskBar(cid,
+        asks.filter((a) => a.chat_id === cid),
+        timers.filter((t) => t.chat_id === cid));
     } catch { /* next tick retries */ }
   };
   Mesh.askPollId = setInterval(tick, 2000);
   tick();
 }
 
-function renderAskBar(chatId, asks) {
+function renderAskBar(chatId, asks, timers) {
   const bar = $("#ask-bar");
   if (!bar) return;
-  const key = JSON.stringify(asks.map((a) => a.id));
+  const key = JSON.stringify([chatId, asks.map((a) => a.id),
+    (timers || []).map((t) => t.id)]);
   if (key === Mesh.askKey) return;           // nothing moved — don't repaint
   Mesh.askKey = key;
-  if (!asks.length) { bar.innerHTML = ""; return; }
-  bar.innerHTML = asks.map((a) => {
+  if (!asks.length && !(timers || []).length) { bar.innerHTML = ""; return; }
+  // scheduled wake-ups render as calm chips — informational, not actionable
+  const chips = (timers || []).map((t) => {
+    const at = t.at_ns ? timeOnly(new Date(t.at_ns / 1e6).toISOString()) : "";
+    return `<div class="timer-chip">⏰ ${esc(meshDn(t.agent))} checks back
+      ${at ? "at " + esc(at) : "soon"}${t.note ? " — " + esc(t.note) : ""}</div>`;
+  }).join("");
+  bar.innerHTML = chips + asks.map((a) => {
     const q = a.kind === "question";
     const head = q
       ? `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> asks you:`

@@ -12,14 +12,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Vector memory + embeddings (harness memory stack, R20)
-# fastembed is the default embedding backend but onnxruntime DLLs are blocked
-# on some corporate Windows machines (incl. the dev box) -> model2vec is the
-# pure-numpy fallback in the probe chain (see docs/DECISIONS.md).
+# Vector memory + embeddings (harness memory stack, R20).
+# The CORE is what every box can run: qdrant local + model2vec (pure numpy).
+# fastembed is the preferred backend where onnxruntime loads (its DLLs are
+# blocked on some corporate Windows machines, incl. the dev box) and mem0's
+# entity linking needs an extraction LLM — both live in memory-full for the
+# boxes/rounds that can use them (see docs/DECISIONS.md, D15/D16).
 memory = [
     "qdrant-client>=1.18",
-    "fastembed>=0.8",
     "model2vec>=0.5",
+]
+memory-full = [
+    "fastembed>=0.8",
     "mem0ai>=2.0",
 ]
 # Semantic search / retrieval (R21)

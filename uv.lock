@@ -28,10 +28,12 @@ mcp = [
     { name = "mcp" },
 ]
 memory = [
-    { name = "fastembed" },
-    { name = "mem0ai" },
     { name = "model2vec" },
     { name = "qdrant-client" },
+]
+memory-full = [
+    { name = "fastembed" },
+    { name = "mem0ai" },
 ]
 retrieval = [
     { name = "llama-index-core" },
@@ -48,16 +50,16 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=44" },
-    { name = "fastembed", marker = "extra == 'memory'", specifier = ">=0.8" },
+    { name = "fastembed", marker = "extra == 'memory-full'", specifier = ">=0.8" },
     { name = "llama-index-core", marker = "extra == 'retrieval'", specifier = ">=0.12" },
     { name = "llama-index-embeddings-fastembed", marker = "extra == 'retrieval'", specifier = ">=0.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
-    { name = "mem0ai", marker = "extra == 'memory'", specifier = ">=2.0" },
+    { name = "mem0ai", marker = "extra == 'memory-full'", specifier = ">=2.0" },
     { name = "model2vec", marker = "extra == 'memory'", specifier = ">=0.5" },
     { name = "qdrant-client", marker = "extra == 'memory'", specifier = ">=1.18" },
     { name = "supabase", marker = "extra == 'cloud'", specifier = ">=2.11" },
 ]
-provides-extras = ["memory", "retrieval", "mcp", "cloud"]
+provides-extras = ["memory", "memory-full", "retrieval", "mcp", "cloud"]
 
 [package.metadata.requires-dev]
 dev = [

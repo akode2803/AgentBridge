@@ -372,6 +372,16 @@ def test_asks_surface_and_answer_roundtrip(rig):
     assert out["asks"][0]["agent"] == "helper"
     assert rig.get("/api/mesh/asks", chat="other")["asks"] == []
 
+    # scheduled wake-ups surface through the same endpoint (R19.5)
+    tx.put_doc("status/helper_harness.json", {
+        "agent": "helper", "paused": False, "queue": [],
+        "timers": [{"id": "t1", "chat_id": "c1", "at_ns": 1,
+                    "note": "check back"}]})
+    out = rig.get("/api/mesh/asks")
+    assert out["timers"] == [{"agent": "helper", "id": "t1", "chat_id": "c1",
+                              "at_ns": 1, "note": "check back"}]
+    assert rig.get("/api/mesh/asks", chat="other")["timers"] == []
+
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="ask1",
                    verdict="always", tool="Write", chat="c1")
     assert out["ok"]

@@ -123,10 +123,12 @@ def agent_harness_status(app, req, mesh) -> dict:
 
 @authed
 def asks(app, req, mesh) -> dict:
-    """Pending permission asks + questions across MY agents (owner-only,
-    R18) — the chat view polls this to raise the approval popup."""
+    """Pending permission asks + questions AND scheduled wake-up timers
+    across MY agents (owner-only, R18/R19.5) — the chat view polls this to
+    raise the approval popup, chip the chat's timers, and dot the sidebar."""
     chat = (req.params.get("chat") or "").strip()
     out = []
+    timers = []
     for name in mesh.directory.names():
         acc = mesh.directory.get(name)
         if not (acc and acc.agent and acc.agent.owner == mesh.user):
@@ -139,7 +141,16 @@ def asks(app, req, mesh) -> dict:
             if chat and a.get("chat_id") != chat:
                 continue
             out.append({**a, "agent": name})
-    return {"ok": True, "asks": out}
+        hdoc = mesh.tx.get_doc(f"status/{name}_harness.json")
+        for t in (hdoc.get("timers") if isinstance(hdoc, dict) else None) or []:
+            if not isinstance(t, dict):
+                continue
+            if chat and t.get("chat_id") != chat:
+                continue
+            timers.append({"agent": name, "id": t.get("id"),
+                           "chat_id": t.get("chat_id"),
+                           "at_ns": t.get("at_ns"), "note": t.get("note")})
+    return {"ok": True, "asks": out, "timers": timers}
 
 
 @authed

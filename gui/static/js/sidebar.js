@@ -16,6 +16,30 @@ const SETTINGS_SECTIONS = [
   { id: "connection", label: "Connection", desc: "Shared folder, sync", icon: ICONS.plug },
 ];
 
+// R19.5: the ask poller (chat.js) reports which chats have an agent WAITING
+// on the owner. Store the counts (renderSidebar's tagsHtml reads them) and
+// patch the visible rows now — an approval must not wait for the state poll.
+export function syncAskDots(asks) {
+  const counts = {};
+  (asks || []).forEach((a) => {
+    counts[a.chat_id] = (counts[a.chat_id] || 0) + 1;
+  });
+  Mesh.askCounts = counts;
+  document.querySelectorAll("#side-chats .chat-row").forEach((row) => {
+    const has = !!counts[row.dataset.chat];
+    const tags = row.querySelector(".chat-tags");
+    const ind = tags && tags.querySelector(".ask-ind");
+    if (!tags || has === !!ind) return;
+    if (has) {
+      tags.insertAdjacentHTML("afterbegin",
+        `<span class="ask-ind" title="An agent needs your answer">${ICONS.hand}</span>`);
+    } else {
+      ind.remove();
+    }
+    delete row.dataset.sig;   // let the next granular pass restamp the row
+  });
+}
+
 export function renderSidebar() {
   const ms = Mesh.state;
   $("#rail-avatar").innerHTML =
@@ -218,7 +242,12 @@ function renderChatListSidebar() {
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
     const dot = !hasCount && c.forced_unread && !c.archived;  // mark-unread: no number
-    return (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
+    // an agent is WAITING on the owner in this chat (R19.5) — the ask poller
+    // keeps Mesh.askCounts current and patches rows live between state polls
+    const ask = (Mesh.askCounts || {})[c.id]
+      ? `<span class="ask-ind" title="An agent needs your answer">${ICONS.hand}</span>` : "";
+    return ask
+      + (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
       + (hasCount ? `<span class="unread-badge">${c.unread}</span>`
         : dot ? `<span class="unread-badge dot"></span>` : "");
   };

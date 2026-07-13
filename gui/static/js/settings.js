@@ -7,7 +7,7 @@ import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
 import { openModal, closeModal, swapModal, openPhotoViewer } from "./modal.js";
-import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, renderChrome } from "./state.js";
+import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, chatDisplay, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
 
@@ -226,6 +226,8 @@ async function renderSettings() {
             <dt>Runs on</dt><dd class="ag-machine" data-agent="${esc(a.username)}">
               <span class="mono">${esc(a.machine || "unknown")}</span></dd>
             <dt>Owner</dt><dd>${(a.owners || []).map((o) => esc("@" + o)).join(", ")}</dd>
+            <dt>Scheduled</dt><dd class="ag-timers" data-agent="${esc(a.username)}">
+              <span class="hint">Loading…</span></dd>
           </dl>
           <p class="hint">"Current model" applies everywhere; the per-audience
           models below kick in when it's left on the family default. Per-chat
@@ -438,6 +440,27 @@ async function renderSettings() {
       // apply the degrade rules to the initial mount too
       document.querySelectorAll(".ag-adapter").forEach(
         (s) => refreshModels(s.dataset.agent));
+      // R19.5: each agent's scheduled wake-ups + pending queue — the owner
+      // sees everything the harness intends to do, right where the agent is
+      // configured (the in-chat timer chips cover the per-chat view)
+      document.querySelectorAll(".ag-timers").forEach(async (dd) => {
+        const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(dd.dataset.agent)}`);
+        const h = r.harness || {};
+        const chatName = (id) => {
+          const c = (Mesh.state.chats || []).find((x) => x.id === id);
+          return c ? chatDisplay(c, Mesh.state.user) : (id || "");
+        };
+        const timers = (h.timers || []).map((t) => {
+          const at = t.at_ns
+            ? new Date(t.at_ns / 1e6).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+            : "soon";
+          return `<div class="ag-timer">⏰ ${esc(at)} in ${esc(chatName(t.chat_id))}${
+            t.note ? " — " + esc(t.note) : ""}</div>`;
+        }).join("");
+        const queued = (h.queue || []).length;
+        dd.innerHTML = (timers || `<span class="hint">No wake-ups scheduled</span>`)
+          + (queued ? `<div class="hint">${queued} queued trigger(s)</div>` : "");
+      });
       // an agent homed on another machine gets a one-click adoption (the
       // owner-side bring-up path for migrated agents)
       document.querySelectorAll(".ag-machine").forEach((dd) => {
