@@ -134,6 +134,7 @@ class Mesh:
         """Sync -> bus: publish exactly-once events; info events also refresh
         the local snapshot (meta stays warm without anyone calling refold)."""
         saw_info = False
+        max_msg_ns = 0
         for rec in records:
             ns = int(rec.get("ns", 0))
             if rec.get("kind") == "info":
@@ -146,11 +147,22 @@ class Mesh:
                     ))
                 self.bus.publish(Event(eventbus.CHAT_UPDATE, chat_id, {"event": ev}, ns))
             else:
+                max_msg_ns = max(max_msg_ns, ns)
                 self.bus.publish(Event(eventbus.MESSAGE, chat_id, rec, ns))
         if saw_info:
             try:
                 self.membership.refold(chat_id)
             except Exception:  # noqa: BLE001 — repaint later beats crashing sync
+                pass
+        # R33: fetching a message IS delivery. Advance my delivered cursor to
+        # what just synced in — this is the "worker receives message =
+        # Delivered" receipt, for humans and agents alike. Guarded (only writes
+        # when it actually moves) and on the background sync thread, never a
+        # user-facing hot path.
+        if max_msg_ns:
+            try:
+                self.messaging.mark_delivered(chat_id, up_to_ns=max_msg_ns)
+            except Exception:  # noqa: BLE001 — a receipt write never breaks sync
                 pass
 
     def _is_member(self, chat_id: str) -> bool:

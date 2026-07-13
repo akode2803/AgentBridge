@@ -303,9 +303,15 @@ async function renderMeshChat(force) {
   const meta = data.meta;
   const pinsSig = (meta.pins || []).map((p) => p.id + p.until).join(",");
   // transcript content signature — drives the PARTIAL refresh (transcript only)
+  // receipt tiers on my own messages advance over time (delivered → read)
+  // without any new message, so fold them into the signature or the ticks
+  // would freeze until the next structural change (R33)
+  const receiptSig = data.messages
+    .filter((m) => m.mine && m.receipt)
+    .map((m) => m.id + m.receipt.state).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
-    pinsSig, (data.starred || []).join(","),
+    pinsSig, (data.starred || []).join(","), receiptSig,
     feeds.map((f) => [f.agent, f.turns, f.activity, (f.draft || "").length])]);
   // structural signature — drives the FULL rebuild (incl. the header). name
   // rides here so a rename (local or from another client) repaints the header;
@@ -802,20 +808,27 @@ function replyQuote(rt, isDm, ms) {
     </button>`;
 }
 
-// read receipt on my own live messages: single grey tick = sent, double blue
-// = read. In a group the double tick means EVERY other member has read; the
-// tooltip carries the running count. Deleted/system messages carry no receipt.
-// State comes from msg.receipt (server, from the other members' read cursors).
+// read receipt on my own live messages (WhatsApp three-state, R33): grey
+// single tick = sent, grey double tick = delivered, accent double = read. In a
+// group each tier means the LOWEST any other member is at (double-accent only
+// when everyone read); the tooltip carries the running count. Deleted/system
+// messages carry no receipt. State comes from msg.receipt (server).
 function receiptTicks(msg, isDm) {
   if (!msg.mine || msg.deleted || msg.kind === "info") return "";
   const r = msg.receipt;
-  const read = !!(r && r.state === "read");
-  let label = read ? "Read" : "Sent";
+  const state = (r && r.state) || "sent";
+  const read = state === "read";
+  const delivered = state === "delivered";
+  const double = read || delivered;   // both delivered + read draw two ticks
+  let label = read ? "Read" : delivered ? "Delivered" : "Sent";
   if (r && !isDm && r.total > 1) {
-    label = read ? `Read by all ${r.total}` : `Read by ${r.read_by}/${r.total}`;
+    const readN = (r.read_by || []).length;
+    label = read ? `Read by all ${r.total}`
+      : delivered ? `Delivered · read by ${readN}/${r.total}`
+      : `Read by ${readN}/${r.total}`;
   }
   return `<span class="ticks${read ? " read" : ""}" title="${esc(label)}" `
-       + `aria-label="${esc(label)}">${read ? ICONS.ticks : ICONS.tick}</span>`;
+       + `aria-label="${esc(label)}">${double ? ICONS.ticks : ICONS.tick}</span>`;
 }
 
 // one delegated listener per transcript element (full renders create a new
@@ -997,44 +1010,51 @@ function openMsgMenu(rect, msg, chatId, ctx) {
   });
 }
 
-// Message info (WhatsApp/Telegram). For my OWN messages: per-member read
-// receipts — a DM collapses to Read / Delivered rows, a group lists "Read by"
-// and "Delivered to". For OTHERS' messages: the sent time, plus (for an agent)
-// the list of tasks it ran to produce the reply. Delivered is a wired-but-empty
-// stub (needs the presence heartbeat); a human author shows no task history.
+// Message info (WhatsApp/Telegram). For my OWN messages: per-member receipts
+// with real Delivered/Read TIMINGS (R33) — a DM collapses to two rows, a group
+// lists Read by / Delivered to / Pending. For OTHERS' messages: the sent time,
+// plus (for an agent) the tasks it ran to produce the reply.
 async function messageInfoDialog(chatId, msg) {
   const r = await api(`/api/mesh/message_info?id=${encodeURIComponent(chatId)}`
                       + `&msg=${encodeURIComponent(msg.id || "")}`);
   if (r.error) { toast(r.error, true); return; }
-  const memRow = (m) => `
+  const members = r.members || [];
+  const memRow = (m, tsField) => `
     <div class="mi-mem">
       <span class="mem-avatar">${meshAvatarInner(m.user)}</span>
       <span class="mi-mem-name">${esc(meshDn(m.user))}</span>
-      <span class="mi-time">${m.ts ? esc(fmtTime(m.ts)) : "—"}</span>
+      <span class="mi-time">${m[tsField] ? esc(fmtTime(m[tsField])) : "—"}</span>
     </div>`;
   let body = "";
-  if (r.mine) {
+  if (r.mine && r.kind === "message") {
     if (r.dm) {
-      const readT = r.read && r.read[0] && r.read[0].ts ? fmtTime(r.read[0].ts) : "—";
+      const peer = members[0] || {};
+      const deliveredT = peer.delivered_ts ? fmtTime(peer.delivered_ts) : "—";
+      const readT = peer.read_ts ? fmtTime(peer.read_ts) : "—";
       body = `
         <div class="mi-row"><span class="mi-ic read">${ICONS.ticks}</span>
           <span class="mi-label">Read</span><span class="mi-time">${esc(readT)}</span></div>
         <div class="mi-row"><span class="mi-ic">${ICONS.ticks}</span>
-          <span class="mi-label">Delivered</span><span class="mi-time">—</span></div>`;
+          <span class="mi-label">Delivered</span><span class="mi-time">${esc(deliveredT)}</span></div>`;
     } else {
-      const read = r.read || [], pending = r.pending || [];
+      const read = members.filter((m) => m.tier === "read");
+      const delivered = members.filter((m) => m.tier === "delivered");
+      const pending = members.filter((m) => m.tier === "sent");
       body = `
         <div class="mi-sec read"><span class="mi-sec-ic">${ICONS.ticks}</span>Read by ${read.length}</div>
-        ${read.length ? read.map(memRow).join("")
+        ${read.length ? read.map((m) => memRow(m, "read_ts")).join("")
           : '<div class="mi-empty">No one has read this yet</div>'}
-        <div class="mi-sec"><span class="mi-sec-ic">${ICONS.ticks}</span>Delivered to</div>
-        ${pending.length ? pending.map(memRow).join("")
-          : '<div class="mi-empty">Everyone in this chat has read it</div>'}`;
+        <div class="mi-sec"><span class="mi-sec-ic">${ICONS.ticks}</span>Delivered to ${delivered.length}</div>
+        ${delivered.length ? delivered.map((m) => memRow(m, "delivered_ts")).join("")
+          : '<div class="mi-empty">—</div>'}
+        ${pending.length ? `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.tick}</span>Pending</div>
+          ${pending.map((m) => memRow(m, "x")).join("")}` : ""}`;
     }
   } else {
     body = `<div class="mi-row"><span class="mi-label">Sent</span>
       <span class="mi-time">${esc(fmtTime(r.ts))}</span></div>`;
-    if (r.kind === "agent") {
+    const isAgent = Mesh.state?.users?.[r.from]?.kind === "agent";
+    if (isAgent) {
       const tasks = r.tasks || [];
       body += `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.bot}</span>Tasks run</div>`;
       body += tasks.length

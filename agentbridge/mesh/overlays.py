@@ -242,6 +242,28 @@ class UserState:
     def read_ns(self) -> int:
         return int(self.get().get("read_ns", 0))
 
+    def read_ts(self) -> str:
+        return str(self.get().get("read_ts", ""))
+
+    # -------------------------------------------------------- delivered cursor
+    def mark_delivered(self, up_to_ns: int) -> bool:
+        """Advance the delivered high-water — "my client/harness has fetched
+        messages up to this ns" (R33). The Delivered receipt tier reads it, so
+        it's a real per-recipient receipt (not just presence). Returns whether
+        the cursor actually moved (callers skip the write otherwise)."""
+        with self._lock:
+            cur = int(self.get().get("delivered_ns", 0))
+            if up_to_ns <= cur:
+                return False
+            self._merge(delivered_ns=up_to_ns, delivered_ts=utcnow_iso())
+            return True
+
+    def delivered_ns(self) -> int:
+        return int(self.get().get("delivered_ns", 0))
+
+    def delivered_ts(self) -> str:
+        return str(self.get().get("delivered_ts", ""))
+
     # ------------------------------------------------------------------ stars
     def star(self, msg_ids: list[str]) -> None:
         with self._lock:

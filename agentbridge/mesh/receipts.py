@@ -38,12 +38,28 @@ class ReceiptsService:
         self.user = messaging.user
 
     # ----------------------------------------------------------------- core
-    def _member_tier(self, member: str, msg_ns: int, read_ns: int) -> ReceiptState:
+    def _cursors_of(self, chat_id: str, members: list[str]) -> dict[str, dict]:
+        """Each other member's verified receipt cursors (R31.5): a forged or
+        unsigned state doc reads as absent, so nobody fabricates a tick from
+        raw store access. Delivered is a real per-recipient cursor now (R33),
+        with presence as the floor for a member who hasn't written one yet."""
+        out: dict[str, dict] = {}
+        for m in members:
+            st = self.messaging.state_of(chat_id, m)
+            out[m] = {
+                "read_ns": st.read_ns(), "read_ts": st.read_ts(),
+                "delivered_ns": st.delivered_ns(),
+                "delivered_ts": st.delivered_ts(),
+                "last_seen_ns": self.presence.presence_of(m)["last_seen_ns"],
+            }
+        return out
+
+    def _member_tier(self, member: str, msg_ns: int, cur: dict) -> ReceiptState:
         if not self.privacy.may_see_receipts_of(member, viewer=self.user):
             return ReceiptState.SENT  # receipt-gated: both tiers hidden
-        if read_ns >= msg_ns:
+        if cur["read_ns"] >= msg_ns:
             return ReceiptState.READ
-        if self.presence.presence_of(member)["last_seen_ns"] >= msg_ns:
+        if cur["delivered_ns"] >= msg_ns or cur["last_seen_ns"] >= msg_ns:
             return ReceiptState.DELIVERED
         return ReceiptState.SENT
 
@@ -53,9 +69,7 @@ class ReceiptsService:
         other member is at (v1: double-accent only when everyone read)."""
         snap = self.messaging._require_member(chat_id)
         others = [m for m in snap.members if m != self.user]
-        # verified accessors (R31.5): a forged/unsigned cursor doc reads as 0,
-        # so nobody can fabricate a "read by X" tick from raw store access
-        cursors = {m: self.messaging.state_of(chat_id, m).read_ns() for m in others}
+        cursors = self._cursors_of(chat_id, others)
 
         out: dict[str, dict] = {}
         for msg in self.messaging.messages_for(chat_id):
@@ -84,19 +98,39 @@ class ReceiptsService:
         return out
 
     def message_info(self, chat_id: str, msg_id: str) -> dict:
-        """The Message-info dialog payload. Mine -> per-member receipt lists
-        (DM = two rows, group = read-by / delivered-to / pending); someone
-        else's -> just the sent time (agent task steps ride the harness, R15)."""
+        """The Message-info dialog payload. Mine -> per-member rows carrying
+        the Delivered/Read TIMINGS (Q17: the dialog used to show only "Sent");
+        someone else's -> just the sent time (agent task steps ride the
+        harness, R15). ``mine``/``kind`` let the client branch without guessing."""
         snap = self.messaging._require_member(chat_id)
         msg = next(
             (m for m in self.messaging.messages_for(chat_id) if m.id == msg_id), None
         )
         if msg is None:
             raise ValidationError(f"unknown message {msg_id}")
-        base = {"id": msg.id, "from": msg.from_, "ts": msg.ts, "ns": msg.ns}
-        if msg.from_ != self.user:
+        mine = msg.from_ == self.user
+        base = {"id": msg.id, "from": msg.from_, "ts": msg.ts, "ns": msg.ns,
+                "mine": mine, "kind": msg.kind.value,
+                "dm": snap.kind is ChatKind.DM}
+        if not mine or msg.kind is not MsgKind.MESSAGE or msg.deleted:
             return base
-        rec = self.receipts_for(chat_id).get(msg.id)
-        if rec is None:  # deleted / info — nothing to report
-            return base
-        return {**base, **rec, "dm": snap.kind is ChatKind.DM}
+        others = [m for m in snap.members if m != self.user]
+        cursors = self._cursors_of(chat_id, others)
+        rows = []
+        worst = ReceiptState.READ if others else ReceiptState.READ
+        for m in others:
+            cur = cursors[m]
+            tier = self._member_tier(m, msg.ns, cur)
+            if _TIER[tier] < _TIER[worst]:
+                worst = tier
+            rows.append({
+                "user": m,
+                "tier": tier.value,
+                # a timing only shows once the member has actually reached it
+                "delivered_ts": cur["delivered_ts"]
+                if _TIER[tier] >= _TIER[ReceiptState.DELIVERED] else "",
+                "read_ts": cur["read_ts"]
+                if tier is ReceiptState.READ else "",
+            })
+        return {**base, "state": worst.value, "total": len(others),
+                "members": rows}

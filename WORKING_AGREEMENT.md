@@ -124,5 +124,10 @@ code wins — then I fix the doc.
 
 - **Every 5 rounds:** remind each other to clean up working memory — prune it to
   the task at hand so focus stays sharp. (Round counter lives in memory.)
-- **Authoritative backlog:** the memory reminder list, not this file. Read it
-  each round; `HANDOFF.md` "Next work queue" is the human-readable summary.
+- **Authoritative backlog: `BACKLOG.md` in the repo** (added 2026-07-14 after
+  half the original brief was found dropped — a coarse checklist + broad scope
+  + compaction loses items). Every ask lands there source-tagged the moment it
+  arrives; boxes tick only after live verification; read + update it every
+  round. It's in-repo so parallel sessions share one ledger. Memory keeps
+  round history + credentials; `HANDOFF.md` "Next work queue" stays the
+  human-readable summary.

@@ -233,6 +233,21 @@ class MessagingService:
         if latest:
             self._state(chat_id).mark_read(latest)
 
+    def mark_delivered(self, chat_id: str, up_to_ns: int | None = None) -> bool:
+        """Advance MY delivered cursor — "my client fetched these" (R33). The
+        sync pump calls this when records land, so Delivered is a real receipt
+        for humans and agents alike ("worker receives message = Delivered").
+        Returns whether it moved, so the caller can skip a no-op cloud write."""
+        try:
+            if not self.snapshot(chat_id).is_member(self.user):
+                return False
+        except NotAMember:
+            return False
+        if up_to_ns is None:
+            up_to_ns = max(
+                (m.get("ns", 0) for m in self.store.messages(chat_id)), default=0)
+        return bool(up_to_ns) and self._state(chat_id).mark_delivered(up_to_ns)
+
     def set_chat_flag(self, chat_id: str, name: str, value) -> None:
         self._require_member(chat_id)
         self._state(chat_id).set_flag(name, value)

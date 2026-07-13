@@ -129,7 +129,9 @@ Per-message and per-user side-data that would churn the append-only log:
   `chat|pin|msg-id|by|ns|until_ns` — a dropped-in pin or a stretched expiry
   doesn't verify).
 - **Per-user** (`state/<user>.json`, read-**merge**-write — never overwrite, a
-  clobber once wiped stars): `read_ns`/`read_ts`, `starred`, `hidden`,
+  clobber once wiped stars): `read_ns`/`read_ts`, `delivered_ns`/`delivered_ts`
+  (R33 — advanced by the sync pump when this client fetches a message, so
+  Delivered is a real receipt, not just presence), `starred`, `hidden`,
   `cleared`, `pinned`, `archived`, `deleted`, `forced_unread`, `mute`; plus
   per-user reaction files folded across members (**signed by their owner since
   R31** over the full mapping — the read fold drops unverified files). The
@@ -160,7 +162,7 @@ cache.
 | `MembershipService` | chats/DMs/self-chats, the multi-admin model, create/add/remove/leave/rename/permissions/delete — emits signed info events then refolds; `authz` gate before every mutation |
 | `AccountsService` | account lifecycle (scrypt auth for humans; agents never authenticate — machine identity), profile/status, agent create/adopt/delete; all agent edits owner-gated via `_writable_target` |
 | `PrivacyService` | the R6 matrix (who may see/reach whom), blocks, agent outbound rules; `visible_profile` is the projection every connector serves instead of raw account docs |
-| `PresenceService` / `ReceiptsService` | online/last-seen heartbeat + read receipts derived from per-member cursors (no new write path) |
+| `PresenceService` / `ReceiptsService` | online/last-seen heartbeat + the Sent/Delivered/Read ladder from per-member cursors: Read = `read_ns`, Delivered = the R33 `delivered_ns` fetch cursor (presence as the floor); `message_info` carries per-member Delivered/Read timestamps |
 | `Notifier` / `EventBus` | in-process pub/sub feeding the GUI SSE + the CLI long-poll |
 | `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor); the run loop survives a failing pass (a cloud transport can throw after retries — next tick heals) |
 

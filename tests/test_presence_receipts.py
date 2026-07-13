@@ -113,13 +113,15 @@ def test_receipt_ladder_sent_delivered_read(world):
     aryan, fable = meshes["aryan"], meshes["fable"]
     dm = aryan.create_dm("fable")
     env = aryan.post(dm.id, "climb the ladder")
-    ripple(aryan, dm.id, fable)
+    aryan.outbox.flush_once()
+    aryan.sync.sync_once([dm.id])   # only aryan has it; fable hasn't fetched
 
-    # fable has no presence and no read cursor yet -> Sent
+    # fable's client has not fetched the message yet -> Sent
     assert aryan.receipts_for(dm.id)[env.id]["state"] == "sent"
 
-    # fable's client comes online AFTER the message -> Delivered
-    fable.presence.heartbeat(online=True)
+    # fable's client fetches it (sync) -> Delivered — a real receipt now (R33),
+    # "worker receives message = Delivered", not just presence
+    fable.sync.sync_once([dm.id])
     rec = aryan.receipts_for(dm.id)[env.id]
     assert rec["state"] == "delivered" and rec["delivered_to"] == ["fable"]
 
@@ -127,6 +129,19 @@ def test_receipt_ladder_sent_delivered_read(world):
     fable.mark_read(dm.id)
     rec = aryan.receipts_for(dm.id)[env.id]
     assert rec["state"] == "read" and rec["read_by"] == ["fable"]
+
+
+def test_delivered_is_a_real_receipt_without_presence(world):
+    """R33: Delivered no longer needs a presence heartbeat — fetching the
+    message advances the recipient's delivered cursor, which the sender reads."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    dm = aryan.create_dm("fable")
+    env = aryan.post(dm.id, "no heartbeat needed")
+    ripple(aryan, dm.id, fable)  # fable syncs it in; NEVER heartbeats
+    assert fable.presence.presence_of("fable")["last_seen_ns"] == 0
+    rec = aryan.receipts_for(dm.id)[env.id]
+    assert rec["state"] == "delivered" and rec["delivered_to"] == ["fable"]
 
 
 def test_group_receipts_lowest_tier_wins(world):
@@ -175,11 +190,37 @@ def test_message_info_shapes(world):
     ripple(aryan, dm.id, fable)
 
     mine = aryan.message_info(dm.id, env.id)
-    assert mine["dm"] is True and mine["state"] == "sent"
+    # ripple delivered it to fable -> delivered tier, mine/kind/dm present
+    assert mine["dm"] is True and mine["mine"] is True and mine["kind"] == "message"
+    assert mine["state"] == "delivered"
     theirs = fable.message_info(dm.id, env.id)   # someone else's message
-    assert theirs["from"] == "aryan" and "state" not in theirs
+    assert theirs["from"] == "aryan" and theirs["mine"] is False
+    assert "state" not in theirs and "members" not in theirs
     with pytest.raises(ValidationError):
         aryan.message_info(dm.id, "m-nope")
+
+
+def test_message_info_carries_delivered_and_read_timings(world):
+    """Q17: the Message-info dialog was showing only 'Sent'. It now carries a
+    per-member row with the Delivered and Read timestamps."""
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    dm = aryan.create_dm("fable")
+    env = aryan.post(dm.id, "when did you see this?")
+    aryan.outbox.flush_once()
+    aryan.sync.sync_once([dm.id])
+
+    row = aryan.message_info(dm.id, env.id)["members"][0]
+    assert row["user"] == "fable" and row["tier"] == "sent"
+    assert row["delivered_ts"] == "" and row["read_ts"] == ""
+
+    fable.sync.sync_once([dm.id])                     # delivered
+    row = aryan.message_info(dm.id, env.id)["members"][0]
+    assert row["tier"] == "delivered" and row["delivered_ts"] and not row["read_ts"]
+
+    fable.mark_read(dm.id)                             # read
+    row = aryan.message_info(dm.id, env.id)["members"][0]
+    assert row["tier"] == "read" and row["read_ts"] and row["delivered_ts"]
 
 
 def test_self_chat_reads_trivially(world):
@@ -200,7 +241,9 @@ def test_deactivated_account_never_delivers(world):
     })
     dm = aryan.create_dm("sudhir")
     env = aryan.post(dm.id, "into the void")
-    ripple(aryan, dm.id, sudhir)
-    # no heartbeat ever, then account deactivated directly (no password set)
+    # sudhir's client never runs (deactivated): it never fetches the message,
+    # so no delivered cursor is ever written and no heartbeat lands
+    aryan.outbox.flush_once()
+    aryan.sync.sync_once([dm.id])
     sudhir.directory.patch("sudhir", lambda d: d.update(active=False))
     assert aryan.receipts_for(dm.id)[env.id]["state"] == "sent"  # forever

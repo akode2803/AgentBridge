@@ -992,6 +992,30 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       v3-scope non-goal (Signal-zkgroup-class project); signing ephemeral
       presence/typing not worth it.
 
+- [x] **R33 — delivered-vs-read receipts + Message-info timings. DONE
+      2026-07-14 (v0.24.106, 385 tests).** First round of the reopened
+      backlog (see `BACKLOG.md`, created this session after Aryan flagged that
+      most of the live-QA asks were already in the original brief and had been
+      dropped by a too-coarse checklist). (1) **Delivered is now a real
+      per-recipient receipt** — a `delivered_ns`/`delivered_ts` cursor in the
+      per-user state doc (signed, rides R31.5), advanced by the sync pump
+      (`service._pump` → `messaging.mark_delivered`) the moment a client OR
+      harness FETCHES a message: "worker receives message = Delivered", for
+      humans and agents alike. Presence stays the floor (an online member with
+      no cursor yet still shows Delivered), so nothing regresses; `_member_tier`
+      = read_ns≥ns → Read, delivered_ns≥ns OR last_seen≥ns → Delivered. (2)
+      **Message info shows the timings** (Q17): the dialog rendered only "Sent"
+      because the client gated on a `mine` field the backend never emitted;
+      `message_info` now returns `mine`/`kind` + per-member Delivered/Read
+      timestamps, and the dialog renders them (DM = two rows, group =
+      read-by/delivered-to/pending). (3) **Bubble ticks are three-state**: grey
+      single (sent) / grey double (delivered) / accent double (read); the
+      transcript refresh signature folds in the receipt tier so ticks advance
+      live. Verified live on the two-machine scratch rig: full Sent→Delivered
+      (on fetch, no heartbeat)→Read ladder, dialog showed "Read … / Delivered
+      …". 4 receipt tests updated to the fetch-delivered semantics + 2 new
+      (delivered-without-presence, message-info timings).
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

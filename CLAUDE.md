@@ -6,13 +6,15 @@ per-agent worker processes; no third-party runtime deps by design.
 
 **Read these before writing code** (in order): `WORKING_AGREEMENT.md` (how we
 work together — the seven rules + this session's rewrite mission; read FIRST,
-every round) → `REWRITE_PLAN.md` (the backend-rewrite master checklist — tick
-rounds there as they land) → this file → `ARCHITECTURE.md` (deep reference,
-kept in sync with the code) → `HANDOFF.md` (current state + the transfer path)
-→ the memory index at `~/.claude/projects/<this-project>/memory/MEMORY.md`
-(the authoritative, up-to-date backlog + round history + credentials,
-deliberately out of git). When any of these disagree with the code, the code
-wins — then fix the doc.
+every round) → `BACKLOG.md` (**the fine-grained item ledger** — every ask,
+source-tagged; tick only after live verification; new asks land there the
+moment they arrive — this file exists because a coarse checklist once dropped
+half the brief) → `REWRITE_PLAN.md` (the round-by-round history — tick rounds
+there as they land) → this file → `ARCHITECTURE.md` (deep reference, kept in
+sync with the code) → `HANDOFF.md` (current state + the transfer path) → the
+memory index at `~/.claude/projects/<this-project>/memory/MEMORY.md` (round
+history + credentials, deliberately out of git). When any of these disagree
+with the code, the code wins — then fix the doc.
 
 ## The one invariant
 **Visibility = membership.** Everyone, human or agent, sees and reads only the
