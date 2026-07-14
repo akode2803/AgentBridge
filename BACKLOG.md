@@ -422,25 +422,49 @@ Ticked = shipped + verified. Rounds named for open items.
   state only — never synced folders —, clone + uv sync, places files,
   owner login → adopt over the local API, harness launch + logon task).
   **Ticks when Aryan's AVD run verifies live (@coco replies from the AVD).**
-- [ ] **V12 Empty info pill after every "X created this chat"** — find the
-  event that renders blank right after genesis and fix emit or phrasing.
-  → round "group-management polish".
-- [ ] **V13 Archive chat → "Unarchive chat"** on already-archived rows.
-  → round "group-management polish".
-- [ ] **V14 Admin can exit a group when other admins remain** (sole-admin
-  guard is too broad). → round "group-management polish".
-- [ ] **V15 "Group created by" in the sidebar doesn't work** — fix the
-  created-by display in chat details/sidebar. → round "group-management
-  polish".
+- [x] **V12 Empty info pill after every "X created this chat"** (R46) —
+  info-event bodies are ALWAYS empty (readmodel decodes only MESSAGE
+  bodies), and chat.js rendered `esc(msg.body)` for every info event: the
+  genesis event was a blank pill right under the SYNTHETIC "created this
+  chat" pill built from meta. Fix: `meshInfoText` in state.js — one phrasing
+  map from `msg.event` for ALL info kinds (added/removed/left/renamed/
+  photo/permissions/…), the synthetic pill dropped (the real event is
+  phrased instead), "" renders nothing. Live-verified both viewers on a
+  rig: exactly one "You created this chat"/"Scrat A created this chat",
+  zero empty pills.
+- [x] **V13 Archive chat → "Unarchive chat"** (R46) — the labels always
+  flipped on `meta.archived`, but `/api/mesh/chat` and `/api/mesh/chat_info`
+  never SENT the per-user flag, so the header ⋮ and info-pane buttons read
+  "Archive chat" forever. Both endpoints now carry `archived` (from
+  my_state). Un-gated on the way: archive was admin-only in all three menus
+  (a per-user flag — DMs had NO archive in the header at all) → any member;
+  and the newly-live `meta.archived` composer-hide was removed (archive is
+  personal, the chat stays writable, WhatsApp). Live-verified: archive →
+  header tag + "Unarchive chat" + composer intact.
+- [x] **V14 Admin can exit a group when other admins remain** (R46) — the
+  guard was frontend-only (`!isOwner` hid Exit from every admin; the
+  backend leave() has no guard and even self-heals an admin-less group).
+  All three Exit sites now allow `!isOwner || admins.length > 1`.
+  Live-verified: co-admin sees + exits (fold correct), sole admin doesn't.
+- [x] **V15 "Group created by" broken** (R46) — the info-pane footer read
+  `meta.created_by`/`meta.created`, which only `/api/mesh/chat` provided —
+  chat_info rendered "Group created by , never". chat_info now derives both
+  from the genesis event. Live-verified: "Group created by Scrat A,
+  Today 11:39 AM".
 - [ ] **V16 Group permissions get their own dedicated page** (out of the
   details scroll). → round "roster + member info".
 - [ ] **V17 Roster alignment + truncation** — admin tag misaligns because
   the dropdown-arrow presence pushes it (sidebar has the same pattern);
   member names must truncate gracefully; same alignment fix in the agent
   permissions block of the details sidebar. → round "roster + member info".
-- [ ] **V18 Admin-change info events render only for the affected member**
-  (WhatsApp: "You're now an admin" — others see nothing). → round
-  "group-management polish".
+- [x] **V18 Admin-change info events render only for the affected member**
+  (R46) — `meshInfoText` phrases admin_granted/revoked as "You're now an
+  admin"/"You're no longer an admin" ONLY when `event.who === me`; every
+  other viewer gets "" (no pill; sidebar preview likewise). Live-verified
+  both sides on a rig. Bonus: the sidebar preview now includes info events
+  (`chat_overview` last + snippet kind/event) so a fresh group reads "You
+  created this chat" instead of "No messages yet"; info events deliberately
+  don't resurrect a deleted-for-me chat.
 - [ ] **V19 Member/Agent info page** — new roster-dropdown item ("Member
   info"/"Agent info") opening the member's profile as seen by me: reuse the
   DM-details identity pieces (avatar, status, about, public gates, last
@@ -481,7 +505,7 @@ Ticked = shipped + verified. Rounds named for open items.
 | notifications (R42, done) | Q26, M3-remainder |
 | docs tool + ask cards (R43, done) | Q7, Q28, Q11-remainder (H2 close) |
 | guard + AVD kit (R45, done) | V10, V11-kit |
-| group-management polish | V12, V13, V14, V15, V18 |
+| group-management polish (R46, done) | V12, V13, V14, V15, V18 |
 | roster + member info | V16, V17, V19 |
 | boot experience | V20, V21 |
 | parity sweep + stress | Q34, M10/M11 verifies, full-app regression |

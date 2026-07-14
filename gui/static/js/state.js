@@ -53,6 +53,38 @@ export function meshDn(username) {
   return u?.display || dn(username);
 }
 
+// info-event phrasing (R46): THE map from a chat-log event to the pill text a
+// given viewer sees — the transcript and the sidebar preview share it. The
+// backend keeps info-event bodies empty (readmodel only decodes MESSAGE
+// bodies), so text derives here from msg.event. "" = render nothing for this
+// viewer, never an empty pill: admin changes speak only to the affected
+// member (WhatsApp voice) and key rotations are internal plumbing.
+export function meshInfoText(msg, me) {
+  const ev = msg.event;
+  if (!ev) return msg.body || "";
+  const name = (u) => (u === me ? "You" : meshDn(u));
+  const obj = (u) => (u === me ? "you" : meshDn(u));
+  const by = ev.by || msg.from;
+  switch (ev.type) {
+    case "created": return `${name(by)} created this chat`;
+    case "member_added": return ev.reason === "responsible_member"
+      ? `${name(by)} added ${obj(ev.who)} (responsible for ${meshDn(ev.agent)})`
+      : `${name(by)} added ${obj(ev.who)}`;
+    case "member_removed": return `${name(by)} removed ${obj(ev.who)}`;
+    case "member_left": return `${name(msg.from)} left`;
+    case "admin_granted": return ev.who === me ? "You're now an admin" : "";
+    case "admin_revoked": return ev.who === me ? "You're no longer an admin" : "";
+    case "renamed": return `${name(by)} changed the name to “${ev.name || ""}”`;
+    case "description": return `${name(by)} changed the description`;
+    case "permissions_changed": return `${name(by)} changed the group permissions`;
+    case "avatar": return ev.sha ? `${name(by)} changed the group photo`
+                                 : `${name(by)} removed the group photo`;
+    case "chat_deleted": return `${name(by)} deleted this group`;
+    case "key_rotated": return "";
+    default: return msg.body || "";
+  }
+}
+
 // server capabilities: the v2 connector sends {v:2, caps:{sse,...}}; the v1
 // server sends neither. One place to branch so the app serves both until the
 // R14 cutover retires v1.

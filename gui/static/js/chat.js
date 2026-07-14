@@ -7,7 +7,7 @@ import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
+import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -376,13 +376,6 @@ async function renderMeshChat(force) {
       parts.push(`<div class="info-pill enc-notice">${ICONS.key}<span>${notice}</span></div>`);
     }
   }
-  // we have the chat's beginning (tail didn't truncate): open with its
-  // birth — a date pill plus a "created by" pill, like Telegram
-  if (data.messages.length < 200 && meta.created) {
-    parts.push(`<div class="day-sep">${esc(dayLabel(meta.created))}</div>`);
-    parts.push(`<div class="info-pill">${esc(meshDn(meta.created_by))} created this chat</div>`);
-    prevDay = new Date(meta.created).toDateString();
-  }
   for (let i = 0; i < data.messages.length; i++) {
     const msg = data.messages[i];
     const day = new Date(msg.ts).toDateString();
@@ -390,9 +383,12 @@ async function renderMeshChat(force) {
       parts.push(`<div class="day-sep">${esc(dayLabel(msg.ts))}</div>`);
       prevDay = day; prevFrom = null;
     }
-    // event messages (member added, left, …) render as centered pills
+    // event messages render as centered pills, phrased from msg.event (R46 —
+    // the genesis "created this chat" pill is the real event now, no
+    // synthetic duplicate); "" means this event says nothing to this viewer
     if (msg.kind === "info") {
-      parts.push(`<div class="info-pill">${esc(msg.body || "")}</div>`);
+      const txt = meshInfoText(msg, ms.user);
+      if (txt) parts.push(`<div class="info-pill">${esc(txt)}</div>`);
       prevFrom = null;
       continue;
     }
@@ -621,20 +617,20 @@ async function renderMeshChat(force) {
         <button data-act="search">${ICONS.search} Search</button>
         <button data-act="select">${ICONS.select} Select messages</button>
         <button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>
-        ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
+        ${isMember ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
         <button data-act="close">${ICONS.close} Close chat</button>
         <div class="menu-sep"></div>
         <button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>
         ${isDm ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
-          : (isMember && !isOwner ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : "")}
+          : (isMember && (!isOwner || chatAdmins(meta).length > 1) ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : "")}
       </div>
     </div>
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
     <div id="ask-bar"></div>
     <div id="reply-area"></div>
-    ${meta.archived || !isMember ? "" : `
+    ${!isMember ? "" : `
     <div id="composer">
       <div id="composer-pill">
         ${Object.values(ms.users).some((u) => u.kind === "agent"

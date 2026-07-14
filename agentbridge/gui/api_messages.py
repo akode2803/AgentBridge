@@ -211,6 +211,8 @@ def mute(app, req, mesh) -> dict:
 @authed
 def chat_info(app, req, mesh) -> dict:
     """The info pane: meta + media/links walk in one pass (v1 shape)."""
+    from .api_chats import _created_by, _created_iso
+
     chat_id = req.params.get("id", "")
     snap = mesh.snapshot(chat_id)
     msgs = mesh.messages_for(chat_id)  # gate + overlays
@@ -222,12 +224,18 @@ def chat_info(app, req, mesh) -> dict:
             files.append({**f, "from": m.from_, "ts": m.ts, "msg_id": m.id})
         for url in _LINK_RE.findall(m.body or ""):
             links.append({"url": url, "from": m.from_, "ts": m.ts})
+    mine = mesh.my_state(chat_id)
     return {
-        "meta": {**chat_json(snap, full=True), "pins": mesh.pins(chat_id)},
+        # the info pane's footer + danger card need what the transcript meta
+        # has: the chat's birth (R46 — the footer rendered "created by ,
+        # never" without them) and the viewer's archived flag
+        "meta": {**chat_json(snap, full=True), "pins": mesh.pins(chat_id),
+                 "created": _created_iso(msgs), "created_by": _created_by(msgs),
+                 "archived": mine["archived"]},
         "files": files,
         "links": links,
         "count": len(msgs),
-        "starred": mesh.my_state(chat_id)["starred"],
+        "starred": mine["starred"],
     }
 
 

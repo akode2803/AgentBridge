@@ -4,7 +4,7 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
+import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
 import { updateTitleBadge } from "./notify.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
@@ -258,7 +258,7 @@ function renderChatListSidebar() {
   const lastHtml = (c) => !c.last ? "No messages yet"
     : c.last.deleted ? (c.last.from === ms.user
         ? "You deleted this message" : "This message was deleted")
-    : c.last.kind === "info" ? esc(c.last.body || "")
+    : c.last.kind === "info" ? esc(meshInfoText(c.last, ms.user))
     : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file");
   const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
   const tagsHtml = (c) => {
@@ -453,11 +453,11 @@ function openChatRowMenu(chatId, x, y) {
     `<button data-act="pin">${isPinned ? ICONS.pinOff : ICONS.pin} ${isPinned ? "Unpin chat" : "Pin chat"}</button>`,
     `<button data-act="unread">${ICONS.unread} ${isUnread ? "Mark as read" : "Mark as unread"}</button>`,
     `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`,
-    isOwner ? `<button data-act="archive">${ICONS.archive} ${c.archived ? "Unarchive chat" : "Archive chat"}</button>` : "",
+    `<button data-act="archive">${ICONS.archive} ${c.archived ? "Unarchive chat" : "Archive chat"}</button>`,
     `<button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>`,
     (isDm || isSelf)
       ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
-      : (isGroup && !isOwner ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : ""),
+      : (isGroup && (!isOwner || chatAdmins(c).length > 1) ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : ""),
   ].filter(Boolean).join("");
   const menu = document.createElement("div");
   menu.className = "menu chat-row-menu";

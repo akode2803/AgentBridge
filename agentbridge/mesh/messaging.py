@@ -418,7 +418,10 @@ class MessagingService:
         per-chat flags. Folds the chat once (vs unread()+tail separately)."""
         msgs = self.messages_for(chat_id)
         state = self._state(chat_id).get()
-        last = next(
+        # the preview includes info events (R46 — a fresh group reads "You
+        # created this chat", WhatsApp-style; the client phrases the event)
+        last = msgs[-1] if msgs else None
+        last_real = next(
             (m for m in reversed(msgs) if m.kind is MsgKind.MESSAGE), None
         )
         return {
@@ -428,9 +431,10 @@ class MessagingService:
             "pinned": bool(state.get("pinned")),
             "mute": state.get("mute", False),
             # delete-for-me of the WHOLE chat (undoable). The row hides only
-            # while nothing survives the cut — a new message (msgs is already
-            # cut-filtered) brings the chat back, WhatsApp-style.
-            "deleted": bool(state.get("deleted")) and last is None,
+            # while no real MESSAGE survives the cut — a new message brings
+            # the chat back, WhatsApp-style, but an info event (a rename
+            # somewhere) deliberately doesn't resurrect it.
+            "deleted": bool(state.get("deleted")) and last_real is None,
         }
 
     def my_state(self, chat_id: str) -> dict:

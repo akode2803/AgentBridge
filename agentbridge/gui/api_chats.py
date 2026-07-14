@@ -147,6 +147,7 @@ def chat(app: GuiApp, req, mesh) -> dict:
     meta = chat_json(snap, full=True)
     meta["created"] = _created_iso(msgs)
     meta["created_by"] = _created_by(msgs)
+    meta["archived"] = mine["archived"]  # per-user flag; the header menu flips on it
     meta["pins"] = _pins_list(mesh.pins(chat_id), msgs)
     return {
         "meta": meta,

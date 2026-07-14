@@ -1266,6 +1266,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       harness launched + optional logon task, pack deletion prompted (it
       holds secrets). V11 ticks when the AVD run verifies live.
 
+- [x] **R46 — group-management polish. DONE 2026-07-14 (v0.24.120).**
+      BACKLOG V12–V15 + V18 (Aryan's GUI-polish brief). **The empty pill
+      (V12):** info-event bodies are empty by design (readmodel decodes
+      only MESSAGE bodies) and chat.js rendered `esc(msg.body)` — the
+      genesis event was a blank pill under the synthetic meta-built
+      "created this chat" pill. Now `meshInfoText` (state.js) phrases
+      EVERY info kind from `msg.event` for the transcript AND the sidebar
+      preview; the synthetic pill is gone (the real event is phrased);
+      "" renders nothing. **V18 rides it:** admin_granted/revoked speak
+      only to the affected member ("You're now an admin"), everyone else
+      sees nothing. **V13:** the Archive/Unarchive labels always flipped on
+      `meta.archived` — but /api/mesh/chat + chat_info never sent the flag;
+      both now do. Un-gated from admin-only (per-user flag; DMs had no
+      archive at all) and the newly-live composer-hide on archived chats
+      removed (archive is personal; the chat stays writable). **V14:** the
+      sole-admin exit guard was frontend-only and hid Exit from EVERY
+      admin; all three sites now allow exit when other admins remain (the
+      backend leave() already self-heals). **V15:** chat_info now carries
+      created/created_by (the footer rendered "created by , never").
+      Sidebar previews include info events (`chat_overview` last +
+      snippet kind/event: fresh group = "You created this chat"), and info
+      events deliberately don't resurrect a deleted-for-me chat
+      (`last_real` gate). Live-verified end-to-end on a rig, both viewers.
+      Renumber note: R45 was pushed as R44/v0.24.118 and renumbered after
+      the parallel session's R44 landed first.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

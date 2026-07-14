@@ -340,9 +340,9 @@ async function renderChatDetails() {
     </div>`}
     ${isDm ? "" : permissionsCard(meta, isOwner)}
     <div class="card danger-card">
-      ${isOwner ? `<button class="danger-row neutral" id="dg-archive">
+      ${isMember ? `<button class="danger-row neutral" id="dg-archive">
         ${ICONS.archive} ${meta.archived ? `Unarchive ${noun}` : `Archive ${noun}`}</button>` : ""}
-      ${isMember && !isOwner && !isDm ? `<button class="danger-row" id="dg-exit">
+      ${isMember && !isDm && (!isOwner || admins.length > 1) ? `<button class="danger-row" id="dg-exit">
         ${ICONS.exit} Exit group</button>` : ""}
       ${isDm && !isSelf ? `<button class="danger-row" id="dg-block"
         data-peer="${esc(dmOther(meta, ms.user))}">

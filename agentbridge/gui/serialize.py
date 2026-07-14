@@ -48,9 +48,12 @@ def snippet_json(m: Message | None) -> dict | None:
         "from": m.from_,
         "ts": m.ts,
         "ns": m.ns,
+        "kind": m.kind.value,
         "body": (m.body or "")[:120],
         "files": len(m.files or []),
     }
+    if m.event is not None:
+        snip["event"] = m.event  # info previews phrase client-side (R46)
     if m.deleted:
         snip["deleted"] = True
     return snip
