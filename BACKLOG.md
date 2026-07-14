@@ -608,8 +608,14 @@ keep the code organized and extensible (packaging comes later).
   pair pops its badge post-swap — reacts and switches animate, removals
   just shrink. Live-verified: quick-react add popped, arriving cross-user
   switch popped, popup remove didn't.
-- [~] **V30 Verify: edited messages raise agent attention** (R54 code; live
-  leg after the fleet restart) — VERIFIED IN CODE: a human edit whose
+- [x] **V30 Verify: edited messages raise agent attention** (R54) —
+  **LIVE-VERIFIED on the restarted fleet** (scratch room with @claude,
+  deleted after): post → "Reply posted · 14.2s"; EDIT the same message →
+  a second run fired within a scan and finished "No reply needed" — the
+  edit raised attention and the agent DECIDED (its earlier reply already
+  answered the edited ask). Exactly the requested semantics; pre-R54 no
+  run fired at all for an already-answered message. In code: a human edit
+  whose
   revision advances the `hedit` cursor re-triggers (`triggers.extract`
   reason="edit"), `should_reply` re-checks the NEW text, and the ledger
   keys `msg_id@edit_ns` so each revision fires at most once. ONE real gap
@@ -617,8 +623,7 @@ keep the code organized and extensible (packaging comes later).
   alone, so editing a message the agent had ALREADY replied to could never
   re-fire — an edit item (edit_ns > 0) now skips that leg (the ledger leg
   still dedupes per revision; the transcript leg keeps covering plain
-  messages after a lost ledger). **Ticks after the live @claude check on
-  the restarted fleet.**
+  messages after a lost ledger).
 - [x] **V31 Own agents' fingerprints auto-verify** (R54) — a pin whose
   PRIVATE bundle lives on this machine verifies itself: the ceremony
   guards against a substituted directory record, and a box that minted
@@ -701,4 +706,4 @@ keep the code organized and extensible (packaging comes later).
 | live updates everywhere (R51, done) | V32, V23, V25-pages |
 | hot transcript (R52, done) | V25-transcript (keyed row reuse, struct-rebuild scroll/caret keep) |
 | sign-in page (R53, done) | V34, V24 |
-| agent lifecycle + trust (R54, done) | V26, V31, V30 (live leg post-restart) |
+| agent lifecycle + trust (R54, done) | V26, V31, V30 |

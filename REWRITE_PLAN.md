@@ -1475,8 +1475,12 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       messages; edit items now skip that leg. Rig-verified: agent born
       key_verified; Stopped→Start→Running in 6.9s; scratbot2 supervised
       within one scan of creation; cooldown retried at ~5min. 406 tests
-      green. BACKEND + HARNESS change → full fleet restart at merge; the
-      live V30 @claude check runs after it.
+      green. Full fleet restarted onto v0.24.129; VERIFIED LIVE there:
+      V31 backfill flipped claude/claudemcp/coco to Verified at sign-in
+      restore (zero key alerts), and the V30 @claude scratch-room check
+      showed the exact requested semantics — post → "Reply posted ·
+      14.2s", edit the same message → a second run "No reply needed"
+      (attention raised, agent decided; pre-R54 no run fired at all).
 
 | Backlog item (source) | Covered in |
 |---|---|
