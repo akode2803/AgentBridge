@@ -24,8 +24,10 @@ export const notifyPrefs = Object.defineProperties({}, {
              set(v) { localStorage.setItem("notifyPreview", v ? "1" : "0"); } },
   dmOn: flag("notifyDm", true),
   dmSound: flag("notifyDmSound", true),
+  dmReact: flag("notifyDmReact", true),   // V50: reaction pings, per category
   grpOn: flag("notifyGrp", true),
   grpSound: flag("notifyGrpSound", true),
+  grpReact: flag("notifyGrpReact", true),
   outSound: flag("notifyOutSound", false),
 });
 
@@ -78,11 +80,17 @@ export function handleNotifyFrame(frame) {
   // being ADDED to a chat always pings (you had no say in its category yet)
   const grp = n.chat_kind === "group";
   if (n.kind !== "added_to_chat" && !(grp ? notifyPrefs.grpOn : notifyPrefs.dmOn)) return;
+  // V50: reactions ride the category's Show gate above AND their own toggle
+  if (n.kind === "reaction" && !(grp ? notifyPrefs.grpReact : notifyPrefs.dmReact)) return;
   const count = (counts[frame.chat_id] = (counts[frame.chat_id] || 0) + 1);
   // a DM's server-side chat name can be empty — fall back to the sender
   const title = (n.chat_name || meshDn(n.from) || "AgentBridge")
     + (count > 1 ? ` (${count} new)` : "");
   const body = n.kind === "added_to_chat" ? n.preview
+    : n.kind === "reaction"
+      ? (notifyPrefs.preview
+          ? `${meshDn(n.from)} reacted ${n.emoji || ""} to your message`
+          : "New reaction")
     : notifyPrefs.preview ? `${meshDn(n.from)}: ${n.preview}` : "New message";
   try {
     const toast = new Notification(title, {

@@ -138,8 +138,17 @@ class Mesh:
         for rec in records:
             ns = int(rec.get("ns", 0))
             if rec.get("kind") == "info":
-                saw_info = True
                 ev = rec.get("event") or {}
+                if ev.get("type") == "reaction":
+                    # V50: a reaction breadcrumb is bus fuel, not chat state —
+                    # no refold, no chat_update repaint (the transcript paints
+                    # the overlay); the notifier decides if it deserves a ping
+                    self.bus.publish(Event(
+                        eventbus.REACTION, chat_id,
+                        {"by": rec.get("from", ""), **ev}, ns,
+                    ))
+                    continue
+                saw_info = True
                 # added later, OR a founding member of someone else's GROUP —
                 # genesis bakes the roster into one `created` event, so there
                 # is no member_added for founders (R42). DMs stay quiet: the

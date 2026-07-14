@@ -7,6 +7,8 @@ Rules (WhatsApp-shaped):
   restart re-pumps messages that were read elsewhere; they're not news, R42);
 - being ADDED to a chat always notifies (mute is per-chat and you weren't in
   it yet);
+- a REACTION pings only the reacted message's author (V50 — WhatsApp rule),
+  under the same mute + read-state gates;
 - info events never notify by themselves (they repaint, not ping).
 
 Sinks are callables; two ship here: any Python callback (the GUI connector's
@@ -37,13 +39,14 @@ PREVIEW_CHARS = 120
 
 @dataclass
 class Notification:
-    kind: str          # "message" | "added_to_chat"
+    kind: str          # "message" | "added_to_chat" | "reaction"
     chat_id: str
     chat_name: str
     from_: str
     preview: str
     ns: int
     chat_kind: str = ""   # "dm" | "group" | "self" — per-category client prefs (V44)
+    emoji: str = ""       # reaction pings only (V50)
 
 
 class Notifier:
@@ -85,6 +88,27 @@ class Notifier:
                 from_=event.data.get("by", ""),
                 preview="You were added to this chat", ns=event.ns,
                 chat_kind=snap.kind.value if snap else "",
+            )
+        if event.type == eventbus.REACTION:
+            # V50, WhatsApp rule: ping ONLY the reacted message's author.
+            # `to` is baked into the breadcrumb at write time — no fold here.
+            data = event.data
+            if data.get("by") == self.user or data.get("to") != self.user:
+                return None
+            snap = self._snap(event.chat_id)
+            if snap is None or not snap.is_member(self.user):
+                return None
+            state = self.messaging.state_of(event.chat_id, self.user).get()
+            if self._muted(state):
+                return None
+            if event.ns <= int(state.get("read_ns") or 0):
+                return None  # my cursor already passed it — catch-up, not news
+            emoji = str(data.get("emoji") or "")
+            return Notification(
+                kind="reaction", chat_id=event.chat_id, chat_name=snap.name,
+                from_=data.get("by", ""),
+                preview=f"Reacted {emoji} to your message".strip(),
+                ns=event.ns, chat_kind=snap.kind.value, emoji=emoji,
             )
         if event.type != eventbus.MESSAGE:
             return None
@@ -172,6 +196,7 @@ class CommandHook:
             "AB_FROM": note.from_,
             "AB_PREVIEW": note.preview,
             "AB_NS": str(note.ns),
+            "AB_EMOJI": note.emoji,
         }
         try:
             subprocess.run(

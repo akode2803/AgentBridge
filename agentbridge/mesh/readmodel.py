@@ -86,6 +86,10 @@ def build_messages(
     honored: set[str] = set()   # redactions that verified — reply-quotes follow
     for rec in ordered:
         env = Envelope.from_dict(rec)
+        if env.kind is MsgKind.INFO and (env.event or {}).get("type") == "reaction":
+            # V50 breadcrumbs are notification fuel (sync bus → notifier),
+            # never viewer content — the reaction OVERLAY is what renders
+            continue
         if (
             history_from_ns
             and env.kind is MsgKind.MESSAGE

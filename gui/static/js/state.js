@@ -75,9 +75,13 @@ export function meshInfoText(msg, me) {
                                  : `${name(by)} removed the group photo`;
     case "chat_deleted": return `${name(by)} deleted this group`;
     case "key_rotated": return "";
+    case "reaction": return "";  // V50 breadcrumb — the bubble badge is the UI
     default: return msg.body || "";
   }
 }
+// NOTE: the server mirrors this map's ""-cases in chat_overview's
+// previewable set (messaging.py, V59) so the sidebar preview never picks an
+// item that phrases empty here — keep the two in sync.
 
 // server capabilities: the v2 connector sends {v:2, caps:{sse,...}}; the v1
 // server sends neither. One place to branch so the app serves both until the

@@ -34,7 +34,9 @@ def frame(ev: Event, notifier: Notifier | None = None) -> dict:
         out["event"] = (ev.data.get("event") or {}).get("type", "")
     elif ev.type == eventbus.ADDED_TO_CHAT:
         out["by"] = ev.data.get("by", "")
-    if notifier is not None and ev.type in (eventbus.MESSAGE, eventbus.ADDED_TO_CHAT):
+    if notifier is not None and ev.type in (
+        eventbus.MESSAGE, eventbus.ADDED_TO_CHAT, eventbus.REACTION,
+    ):
         try:
             note = notifier.consider(ev)
         except Exception:  # noqa: BLE001 — a notify hiccup never drops the frame
@@ -44,6 +46,7 @@ def frame(ev: Event, notifier: Notifier | None = None) -> dict:
                 "kind": note.kind, "chat_name": note.chat_name,
                 "chat_kind": note.chat_kind,
                 "from": note.from_, "preview": note.preview, "ns": note.ns,
+                "emoji": note.emoji,
             }
     return out
 

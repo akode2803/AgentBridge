@@ -39,6 +39,7 @@ __all__ = [
     "EV_CREATED", "EV_MEMBER_ADDED", "EV_MEMBER_REMOVED", "EV_MEMBER_LEFT",
     "EV_ADMIN_GRANTED", "EV_ADMIN_REVOKED", "EV_RENAMED", "EV_DESCRIPTION",
     "EV_PERMISSIONS", "EV_AVATAR", "EV_DELETED", "EV_KEY_ROTATED",
+    "EV_REACTION",
     "Resolver", "fold", "signing_bytes", "redaction_signing_bytes",
     "unredaction_signing_bytes",
     "reaction_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
@@ -144,6 +145,11 @@ EV_PERMISSIONS = "permissions_changed"
 EV_AVATAR = "avatar"
 EV_DELETED = "chat_deleted"     # terminal: admins only, groups only (R13)
 EV_KEY_ROTATED = "key_rotated"  # applied in R9
+# V50: a notification BREADCRUMB, not chat state — the fold ignores it (the
+# unknown-type rule already made that safe on old clients). The per-user
+# reaction OVERLAY doc stays the authoritative store; this event exists only
+# so the sync bus can see a reaction happen (overlay docs never ride the log).
+EV_REACTION = "reaction"
 
 
 class Resolver(Protocol):

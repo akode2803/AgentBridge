@@ -331,6 +331,13 @@ async function renderSettings() {
           </label>
           <span><b>Play sound</b></span>
         </div>
+        <div class="row" style="margin-top:6px">
+          <label class="switch">
+            <input type="checkbox" id="nt-dm-react" ${notifyPrefs.dmReact ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show reaction notifications</b> — when someone reacts to your message</span>
+        </div>
       </div>
       <div class="card">
         <h2>Groups</h2>
@@ -347,6 +354,13 @@ async function renderSettings() {
             <span class="slider"></span>
           </label>
           <span><b>Play sound</b></span>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="switch">
+            <input type="checkbox" id="nt-grp-react" ${notifyPrefs.grpReact ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show reaction notifications</b> — when someone reacts to your message</span>
         </div>
         <p class="hint" style="margin-bottom:0">Being added to a chat always
         notifies — you weren't in it to mute it yet.</p>
@@ -654,8 +668,9 @@ async function renderSettings() {
     notifyPrefs.preview = e.target.checked;
   });
   // V44: the per-category + outgoing-sound switches, one wiring shape
-  [["nt-dm", "dmOn"], ["nt-dm-sound", "dmSound"], ["nt-grp", "grpOn"],
-   ["nt-grp-sound", "grpSound"], ["nt-out-sound", "outSound"]]
+  [["nt-dm", "dmOn"], ["nt-dm-sound", "dmSound"], ["nt-dm-react", "dmReact"],
+   ["nt-grp", "grpOn"], ["nt-grp-sound", "grpSound"],
+   ["nt-grp-react", "grpReact"], ["nt-out-sound", "outSound"]]
     .forEach(([id, key]) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener("change", (e) => {

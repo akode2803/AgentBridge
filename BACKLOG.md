@@ -840,13 +840,28 @@ extensively as always") → proactive timers → polish list → janitor → **t
 the security round starts**. He updates the AVD + brings coco online once
 the update channel works. Atlan plugin: no action (he removes it himself).
 
-- [ ] **V50 Reaction notifications** (promoted from §C, was the V44
-  remainder) — reactions are overlay docs that never touch the event bus,
-  so nothing can notify on them today. Build: overlay diffing at the sync
-  layer → a REACTION bus event (chat, msg_id, by, emoji) → Notifier rule
-  (reaction to MY message, not from me, unmuted, read-state) → SSE notify
-  lane → the per-category "Show reaction notifications" toggles from the
-  WhatsApp screenshots. → R60.
+- [x] **V50 Reaction notifications** (R60) — the mechanism is a
+  notification BREADCRUMB, not overlay diffing: `react()` posts a
+  plaintext `reaction` info event ({msg_id, emoji, to=author}) into the
+  reactor's own log alongside the authoritative overlay write, so it
+  rides the existing sync→bus pipeline cross-machine at zero polling
+  cost (the §C overlay-diff sketch would have re-read every overlay doc
+  per tick). Backward-SAFE by construction: the fold's unknown-type
+  rule, ""-phrasing, and the INFO unread-skip mean old clients ignore
+  it end to end (a new record `kind` would have coerced to MESSAGE and
+  rendered garbage on every not-yet-restarted machine — deliberately
+  avoided). Breadcrumbs are dropped in `build_messages` (never viewer
+  content); `_pump` raises a REACTION bus event (no refold); the
+  Notifier pings ONLY the reacted message's author (WhatsApp rule),
+  under mute + read-state; SSE carries kind/emoji; CommandHook gains
+  AB_EMOJI; notify.js phrases "X reacted 👍 to your message"; both
+  category cards gain "Show reaction notifications" (default ON).
+  Live-verified on a two-rig folder mesh: berry's 👍 from rig 2 toasted
+  on rig 1 (right title/tag/body), transcript shows the badge and NO
+  stray pill, no unread/badge pollution, grpReact-off suppressed a
+  fresh breadcrumb, both toggles render with live state, zero
+  rejections. +3 tests (author-only + bystander, mute + read-state,
+  reader invisibility).
 - [x] **V51 "Check for updates seems broken"** (R59) — root cause: the
   repo is PRIVATE with NO releases, so R58's tokenless GitHub probe 404s
   and the About card reported "Couldn't reach the update service"
@@ -898,10 +913,16 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 - [ ] **V58 Polish: the owner-added-for-its-agent info event should read
   "X was added as a responsible member of agent A"** — the "You added
   X…" framing is confusing (the removal wording already reads well).
-- [ ] **V59 Polish: the sidebar preview sometimes goes BLANK** when the
-  latest event is an info event with no message after it (e.g. one that
-  phrases as "" for this viewer). It must always show the latest
-  phraseable message or info event — never blank.
+- [x] **V59 Polish: the sidebar preview sometimes goes BLANK** (landed
+  early, in R60 — reaction breadcrumbs would have added a new source of
+  the same bug) — root cause: `chat_overview` picked `msgs[-1]`
+  unconditionally, but some info events phrase "" for this viewer
+  (someone else's admin grant/revoke, key rotations). The server now
+  walks back to the newest PHRASEABLE item (`_previewable` mirrors
+  meshInfoText's ""-cases, viewer-aware for admin events; sync comments
+  at both ends). Tested (admin event: actor's preview falls back to the
+  message, the subject's shows the event) + live on the rig (preview
+  stayed "Rigger: react to this one" through two reaction events).
 - [ ] **V60 Polish: Settings→Agents abruptly scroll-jumps** (scrolling
   or even idle) — suspect the R51 4s poller repaint resetting scroll.
 - [ ] **V61 Polish: drop the "member" tag in Settings→Account** —
@@ -983,9 +1004,9 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 | GUI polish (R57, done) | V38, V42, V43, V47, V48 |
 | notifications + about/updates (R58, done) | V44, V45 |
 | deliverables (delivered) | V41 (answer), V46 (parity list) |
-| update channel that works (R59) | V51 (+ V52 answer, early merge for the AVD) |
-| reaction notifications (R60) | V50 |
-| polish batch (R61) | V56, V57, V58, V59, V60, V61, V62 |
+| update channel that works (R59, done) | V51 (+ V52 answer; merged to main early for the AVD) |
+| reaction notifications (R60, done) | V50 (+ V59 landed early — same preview surface) |
+| polish batch (R61) | V56, V57, V58, V60, V61, V62 |
 | parity (b) — agent chat-level tools (R62) | V53 b2/b3/b4/b6/b7 |
 | parity (b) — group management + receipts (R63) | V53 b1/b5 |
 | parity (c) — agent context closes (R64) | V54 |

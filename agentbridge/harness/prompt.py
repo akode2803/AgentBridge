@@ -217,6 +217,8 @@ def render_message(m: Message, agent: str) -> str:
     invented an id and got an opaque backend error)."""
     if m.kind is MsgKind.INFO:
         ev = m.event or {}
+        if ev.get("type") == "reaction":
+            return ""  # V50 breadcrumb — pure notification fuel, not context
         return f"[{m.ts}] · {ev.get('type', 'event')}"
     if m.deleted:
         return f"[{m.ts}] · a message was deleted"

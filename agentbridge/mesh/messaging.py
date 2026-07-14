@@ -21,7 +21,7 @@ from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
 from . import authz
-from .events import pin_signing_bytes, reaction_signing_bytes, \
+from .events import EV_REACTION, pin_signing_bytes, reaction_signing_bytes, \
     redaction_signing_bytes, signing_bytes, state_signing_bytes, \
     unredaction_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
@@ -224,6 +224,23 @@ class MessagingService:
         self._require_member(chat_id)
         ChatOverlays(self.tx, chat_id).set_reaction(
             self.user, msg_id, emoji, signer=self._sign_event)
+        # V50: a notification breadcrumb — the overlay doc above stays the
+        # authoritative store, but overlay docs never ride the log, so
+        # nothing downstream (sync bus → notifier → SSE/CLI hook) could see
+        # a reaction happen. The event is plaintext like every info event
+        # (the overlay mapping already is), old clients ignore the unknown
+        # type end to end (fold/phrasing/unread), and removals stay silent
+        # (nothing to ping). `to` names the reacted message's author so the
+        # notifier can apply the WhatsApp rule without a fold.
+        if emoji:
+            try:
+                target = self._cached(chat_id, msg_id) or {}
+                self.post_event(chat_id, {
+                    "type": EV_REACTION, "msg_id": msg_id, "emoji": emoji,
+                    "to": target.get("from", ""),
+                })
+            except Exception:  # noqa: BLE001 — a lost ping never blocks a react
+                pass
 
     def pin(self, chat_id: str, msg_id: str, hours: float | None = None) -> None:
         """Pin, optionally expiring (v1 UX: 24h/7d/forever). Expiry is LAZY —
@@ -413,6 +430,27 @@ class MessagingService:
             self.messages_for(chat_id), self.user, self._state(chat_id).get()
         )
 
+    # info-event types the CLIENT phrases non-empty in the sidebar preview,
+    # mirroring meshInfoText (state.js) — keep the two in sync (V59). Types
+    # that phrase "" for this viewer (someone else's admin change, key
+    # rotations, reaction breadcrumbs) must never be picked as the preview,
+    # or the row goes blank.
+    _PREVIEWABLE_EVENTS = frozenset((
+        "created", "member_added", "member_removed", "member_left",
+        "renamed", "description", "permissions_changed", "avatar",
+        "chat_deleted",
+    ))
+
+    def _previewable(self, m: Message) -> bool:
+        """Would the sidebar phrase this item non-empty for THIS viewer?"""
+        if m.kind is MsgKind.MESSAGE:
+            return True
+        ev = m.event or {}
+        etype = str(ev.get("type") or "")
+        if etype in ("admin_granted", "admin_revoked"):
+            return ev.get("who") == self.user   # phrased for the subject only
+        return etype in self._PREVIEWABLE_EVENTS
+
     def chat_overview(self, chat_id: str) -> dict:
         """One-pass sidebar payload: last visible message + unread info + my
         per-chat flags. Folds the chat once (vs unread()+tail separately)."""
@@ -420,7 +458,9 @@ class MessagingService:
         state = self._state(chat_id).get()
         # the preview includes info events (R46 — a fresh group reads "You
         # created this chat", WhatsApp-style; the client phrases the event)
-        last = msgs[-1] if msgs else None
+        # but only PHRASEABLE ones (V59): the preview must never go blank
+        # because the newest event phrases "" for this viewer.
+        last = next((m for m in reversed(msgs) if self._previewable(m)), None)
         last_real = next(
             (m for m in reversed(msgs) if m.kind is MsgKind.MESSAGE), None
         )

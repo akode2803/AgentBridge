@@ -318,3 +318,115 @@ def test_notification_carries_chat_kind(world):
 
 
 # The V45/V51 update-channel tests live in tests/test_updates.py.
+
+
+# ---------------------------------------------------- reactions (V50 / R60)
+
+def test_reaction_breadcrumb_notifies_author_only(world):
+    """V50: react() posts a breadcrumb info event; the pump raises a REACTION
+    bus event; the notifier pings ONLY the reacted message's author."""
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("Rx", members=["fable"])
+    env = aryan.post(chat.id, "react to this")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+
+    sub_a = aryan.bus.subscribe()
+    fable.react(chat.id, env.id, "👍")
+    fable.outbox.flush_once()
+    aryan.sync.sync_once([chat.id])
+
+    rx = [e for e in sub_a.drain() if e.type == eventbus.REACTION]
+    assert len(rx) == 1
+    ev = rx[0]
+    assert ev.data["by"] == "fable" and ev.data["emoji"] == "👍"
+    assert ev.data["to"] == "aryan" and ev.data["msg_id"] == env.id
+
+    note = aryan.notifier.consider(ev)
+    assert note is not None and note.kind == "reaction"
+    assert note.emoji == "👍" and note.from_ == "fable"
+    assert note.chat_kind == "group" and "👍" in note.preview
+    # the reactor themselves never pings on their own reaction
+    assert fable.notifier.consider(ev) is None
+    # a reaction to someone ELSE's message doesn't ping a bystander: aryan
+    # reacting to his own message names to=aryan — fable stays silent
+    own = aryan.post(chat.id, "self target")
+    sub_f = fable.bus.subscribe()
+    aryan.react(chat.id, own.id, "🎉")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    rx_f = [e for e in sub_f.drain() if e.type == eventbus.REACTION]
+    assert len(rx_f) == 1
+    assert fable.notifier.consider(rx_f[0]) is None
+
+
+def test_reaction_notify_respects_mute_and_read_state(world):
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("RxRules", members=["fable"])
+    env = aryan.post(chat.id, "target")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    sub_a = aryan.bus.subscribe()
+
+    def rx_event():
+        fable.outbox.flush_once()
+        aryan.sync.sync_once([chat.id])
+        evs = [e for e in sub_a.drain() if e.type == eventbus.REACTION]
+        assert len(evs) == 1
+        return evs[0]
+
+    # muted chat: no ping
+    aryan.set_chat_flag(chat.id, "mute", True)
+    fable.react(chat.id, env.id, "👍")
+    ev = rx_event()
+    assert aryan.notifier.consider(ev) is None
+    aryan.set_chat_flag(chat.id, "mute", False)
+
+    # read-state: a cursor already past the breadcrumb = catch-up, not news
+    fable.react(chat.id, env.id, "🎉")   # switch = a fresh breadcrumb
+    ev = rx_event()
+    aryan.messaging.mark_read(chat.id)   # cursor moves past everything
+    assert aryan.notifier.consider(ev) is None
+
+
+def test_reaction_breadcrumbs_invisible_to_readers(world):
+    """The breadcrumb is bus fuel only: transcripts, unread counts and the
+    sidebar preview never see it (the overlay badge is the reaction UI)."""
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("RxHidden", members=["fable"])
+    env = aryan.post(chat.id, "the last real message")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    aryan.messaging.mark_read(chat.id)
+    before = aryan.unread(chat.id)["unread"]
+
+    fable.react(chat.id, env.id, "👍")
+    fable.outbox.flush_once()
+    aryan.sync.sync_once([chat.id])
+
+    msgs = aryan.messages_for(chat.id)
+    assert not any((m.event or {}).get("type") == "reaction" for m in msgs)
+    assert aryan.unread(chat.id)["unread"] == before
+    over = aryan.chat_overview(chat.id)
+    assert over["last"] is not None and over["last"].id == env.id
+    # ... while the reaction itself still renders through the overlay fold
+    assert msgs[-1].reactions == {"👍": ["fable"]}
+
+
+def test_sidebar_preview_never_blank_on_unphraseable_event(world):
+    """V59: an info event that phrases "" for this viewer (someone else's
+    admin change) must not become the sidebar preview — the newest
+    PHRASEABLE item is."""
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("Prev", members=["fable"])
+    env = aryan.post(chat.id, "hello there")
+    aryan.grant_admin(chat.id, "fable")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+
+    # for aryan (not the subject) the admin event phrases "" — preview
+    # falls back to the message; for fable (the subject) it IS the preview
+    a_last = aryan.chat_overview(chat.id)["last"]
+    assert a_last.id == env.id
+    f_last = fable.chat_overview(chat.id)["last"]
+    assert (f_last.event or {}).get("type") == "admin_granted"

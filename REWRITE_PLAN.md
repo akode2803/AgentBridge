@@ -1584,6 +1584,28 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       real network in 2.6s, honest up-to-date, apply's honest no-op,
       advert doc, zero rejections).
 
+- [x] **R60 — reaction notifications. DONE 2026-07-15 (v0.24.135).**
+      BACKLOG V50 (+ V59 landed early). Mechanism: `react()` posts a
+      plaintext `reaction` BREADCRUMB info event ({msg_id, emoji,
+      to=author}) beside the authoritative overlay write — it rides the
+      existing sync→bus pipeline cross-machine at zero polling cost,
+      and old clients ignore it end to end (the fold's unknown-type
+      rule; a new record `kind` would have coerced to MESSAGE on old
+      clients and rendered garbage). Breadcrumbs never become viewer
+      content (dropped in build_messages; belt-and-braces "" in
+      meshInfoText + the agent-context renderer). `_pump` →
+      eventbus.REACTION (no refold) → Notifier pings ONLY the reacted
+      message's author under mute + read-state → SSE (kind/emoji) →
+      notify.js "X reacted 👍 to your message" behind per-category
+      "Show reaction notifications" toggles (default ON, WhatsApp);
+      CommandHook gains AB_EMOJI; MCP's wait-for-events sees reaction
+      events for free. V59 fixed at the same surface: chat_overview
+      walks back to the newest PHRASEABLE item (viewer-aware
+      `_previewable` mirroring meshInfoText) so the sidebar preview can
+      never go blank. 427 tests, 24/24 modules; live-verified on a
+      two-rig folder mesh (cross-process toast, badge-not-pill, no
+      unread pollution, toggle gates, zero rejections).
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |
