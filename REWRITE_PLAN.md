@@ -1606,6 +1606,26 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       two-rig folder mesh (cross-process toast, badge-not-pill, no
       unread pollution, toggle gates, zero rejections).
 
+- [x] **R61 — polish batch + per-chat stand-down. DONE 2026-07-15
+      (v0.24.136).** BACKLOG V52, V56, V57, V58, V60, V61, V62.
+      **V62:** the home pane slimmed to the hero (Connection lives in
+      About; the global switch keeps ONE surface — Settings→Agents
+      "Emergency stand-down"); the chat menu option became "Stand down
+      agents in this chat" → new membership-gated `/api/mesh/chat_pause`
+      writes `chats/<id>/control.json`; the harness holds that chat's
+      triggers + timers at scan AND claims slot-free at dispatch (20s
+      cache; cursors keep their place so resume answers the backlog);
+      "agents paused" header tag. **V52:** blocks are strictly
+      per-account in BOTH directions (answered); the owner-managed
+      per-agent block list got its first GUI (agent card: list + ✕ +
+      add; live-verified the block actually bites via create_dm).
+      **V56** settings shell paints same-frame; **V57** in-button
+      sign-in spinner, sign-out toasts, auth page ease-in/fade-out;
+      **V58** "X was added as a responsible member of Y"; **V60**
+      poll-vs-scroll fixed (mid-scroll skip + settle re-pins across the
+      async panel fills); **V61** member tag dropped. 429 tests, 24/24
+      modules; every item live-verified on a two-rig mesh.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

@@ -60,7 +60,11 @@ export function meshInfoText(msg, me) {
   switch (ev.type) {
     case "created": return `${name(by)} created this chat`;
     case "member_added": return ev.reason === "responsible_member"
-      ? `${name(by)} added ${obj(ev.who)} (responsible for ${meshDn(ev.agent)})`
+      // V58: lead with the person and WHY — "You added X (responsible for
+      // Y)" read as a confusing accusation
+      ? (ev.who === me
+          ? `You were added as a responsible member of ${meshDn(ev.agent)}`
+          : `${meshDn(ev.who)} was added as a responsible member of ${meshDn(ev.agent)}`)
       : `${name(by)} added ${obj(ev.who)}`;
     case "member_removed": return ev.reason === "with_owner"
       ? `${meshDn(ev.who)} left with ${obj(ev.owner || by)}`

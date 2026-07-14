@@ -882,9 +882,20 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   no-op, the machine doc carries app_version, zero rejections. Apply/
   dirty-tree/wrong-branch/peer-hint/release/miss all unit-tested against
   a REAL scratch origin+clone pair (tests/test_updates.py, +5 tests).
-- [ ] **V52 Question: does blocking a member extend to my agents — and
-  vice versa?** — answer from code; close whatever gap the answer
-  reveals (at minimum document the semantics where users see them).
+- [x] **V52 Question: does blocking a member extend to my agents — and
+  vice versa?** (answered + gap closed, R61) — **NO, in both
+  directions.** Blocks are strictly per-account (`blocked_between`
+  checks only the two parties' own lists): blocking @bob kills YOUR
+  DMs with him but your agents still talk to him, and vice versa; an
+  agent being blocked says nothing about its owner. By design
+  (WhatsApp-shaped, blocks never leak) — but the owner-managed
+  per-AGENT block list (`block(name, agent=)`, R6) had NO GUI. Closed:
+  each agent card (Settings → My agents) now carries a Blocked section
+  — list with ✕ unblock, an @username + Block input, and the
+  semantics spelled out in the hint. Live-verified the full loop:
+  block berry for rigbot → account doc carries it AND berry's
+  create_dm refuses with the non-leaking "@rigbot is not available";
+  unblock → DM works again.
 - [ ] **V53 Parity (b) closes** — "a member could do these, an agent
   cannot", one by one: b1 group management as a member (add/remove/
   rename/description/leave — admin-gated ops stay admin-gated; agents
@@ -905,14 +916,27 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   delay or an absolute time; firing re-triggers the agent with that
   description as the work item, and it may post proactively. Extend
   `schedule_timer` + the trigger pipeline accordingly.
-- [ ] **V56 Polish: opening Settings flashes the default chat pane
-  first**, then switches — not smooth.
-- [ ] **V57 Polish: sign-in wants a spinner near the button, sign-out a
-  toast** (both take time); their transitions are janky — fix the
-  animations too.
-- [ ] **V58 Polish: the owner-added-for-its-agent info event should read
-  "X was added as a responsible member of agent A"** — the "You added
-  X…" framing is confusing (the removal wording already reads well).
+- [x] **V56 Polish: opening Settings flashed the previous page first**
+  (R61) — renderSettings awaits `/api/mesh/me` for account/agents/
+  privacy BEFORE painting, so the old chat (restyled, chat-mode class
+  gone) lingered a beat. Now the empty settings shell paints in the
+  SAME frame as the route change. Live-verified: 10ms after the route
+  flip the transcript is gone and the shell is up.
+- [x] **V57 Polish: sign-in spinner + sign-out toast + auth animation
+  jank** (R61) — the Sign in/Create account button carries an in-place
+  spinner while the submit is in flight (key-wrap + first sync take a
+  beat); Sign out shows "Signing out…" → "Signed out" toasts (toast
+  z-400 rides above the auth page); #auth now eases in (`auth-in`)
+  and fades out on dismiss (`.auth-closing` + delayed remove — one
+  shared closeAuthPage, external sign-ins included) instead of hard
+  cuts. Live-verified: both toasts, animation applied, spinner
+  hidden→shown→hidden around a refused submit, in-card error intact.
+- [x] **V58 Polish: responsible-member add wording** (R61) — now
+  phrased from the ADDED person's side: "You were added as a
+  responsible member of Rigbot" / "X was added as a responsible member
+  of Y" (was "You added X (responsible for Y)" — read as an
+  accusation). Live-verified on a rig: berry added rigbot to an
+  existing group → rigger's pill reads the new phrasing.
 - [x] **V59 Polish: the sidebar preview sometimes goes BLANK** (landed
   early, in R60 — reaction breadcrumbs would have added a new source of
   the same bug) — root cause: `chat_overview` picked `msgs[-1]`
@@ -923,13 +947,34 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   at both ends). Tested (admin event: actor's preview falls back to the
   message, the subject's shows the event) + live on the rig (preview
   stayed "Rigger: react to this one" through two reaction events).
-- [ ] **V60 Polish: Settings→Agents abruptly scroll-jumps** (scrolling
-  or even idle) — suspect the R51 4s poller repaint resetting scroll.
-- [ ] **V61 Polish: drop the "member" tag in Settings→Account** —
-  self-explanatory there.
-- [ ] **V62 Polish: the default (no-chat) pane loses the Connection card
-  and the "Stand down all agents" card**; stand-down becomes PER-CHAT
-  and the existing sidebar right-click option rewires to it.
+- [x] **V60 Polish: Settings→Agents scroll jumps** (R61) — two real
+  causes: the 4s poll repaint captured/restored scrollTop once, but
+  the agents panels fill in ASYNC after the swap and grow the page
+  (the restore landed, then the layout shifted under it); and a
+  repaint firing mid-scroll yanked the user back to the captured
+  position. Fixed: the poll SKIPS while the user scrolled within 2.5s
+  (capture-phase listener; a pin window keeps programmatic scrolls
+  from counting as the user's), and the restore re-pins at 0/250/700ms
+  until the async fills settle. Live-verified: scrollTop 400 held
+  through a real status-change repaint (probe survived the settle
+  window). Rig gotcha for the record: the embedded browser pane
+  reports `document.hidden=true`, so the settings poll never fires
+  there — override it before testing live-update behavior.
+- [x] **V61 Polish: "member" tag dropped from Settings→Account** (R61)
+  — live-verified gone.
+- [x] **V62 Per-chat agent stand-down** (R61) — the home pane lost the
+  Connection card (lives in Settings→About since V45) and the global
+  stand-down switch; the chat menu's "Stand down all agents" is now
+  **"Stand down agents in this chat"**: any member writes
+  `chats/<id>/control.json` (the global doc's shape, chat-scoped) via
+  the new membership-gated `/api/mesh/chat_pause`; the harness honors
+  it at scan (triggers + timers held, cursor keeps its place — resume
+  answers the backlog) AND at claim (a group queued before the pause
+  waits slot-free), cached 20s per chat. The header shows an "agents
+  paused" tag; the GLOBAL switch keeps exactly one deliberate surface
+  (Settings→Agents "Emergency stand-down"). 2 tests (hold+resume with
+  another chat unaffected; claim-time gate). Live-verified: menu →
+  toast → tag → doc on disk → resume clears all three.
 - [ ] **V63 Storage janitor** (promoted from §C; Aryan: real concern —
   Supabase free-tier storage, and a tombstoned blob is unreadable to
   everyone anyway): redaction → blob removal; delete-chat/delete-account
@@ -1006,7 +1051,7 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 | deliverables (delivered) | V41 (answer), V46 (parity list) |
 | update channel that works (R59, done) | V51 (+ V52 answer; merged to main early for the AVD) |
 | reaction notifications (R60, done) | V50 (+ V59 landed early — same preview surface) |
-| polish batch (R61) | V56, V57, V58, V60, V61, V62 |
+| polish batch (R61, done) | V56, V57, V58, V60, V61, V62 (+ V52 answer & GUI close) |
 | parity (b) — agent chat-level tools (R62) | V53 b2/b3/b4/b6/b7 |
 | parity (b) — group management + receipts (R63) | V53 b1/b5 |
 | parity (c) — agent context closes (R64) | V54 |

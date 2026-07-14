@@ -77,6 +77,18 @@ function liveSlice(ms, me) {
 const harnessSlice = (r) =>
   ({ h: r.harness || {}, runs: r.runs || [], audit: r.peer_audit || [] });
 
+// V60: the poll repaint must never fight the wheel — remember when the user
+// last scrolled the page (capture phase: element scrolls don't bubble).
+// Scroll events inside the pin window are the repaint's own doing (the
+// innerHTML swap resets to 0, the settles pin it back) — not the user's.
+let lastUserScroll = 0;
+let pinUntil = 0;
+document.addEventListener("scroll", () => {
+  if (App.page === "settings" && Date.now() > pinUntil) {
+    lastUserScroll = Date.now();
+  }
+}, true);
+
 function startSettingsPoll() {
   if (settingsPollId) return;
   settingsPollId = setInterval(async () => {
@@ -87,6 +99,7 @@ function startSettingsPoll() {
       return;
     }
     if (document.hidden || !liveData) return;
+    if (Date.now() - lastUserScroll < 2500) return;   // mid-scroll: skip (V60)
     const ae = document.activeElement;
     if (document.querySelector(".csel-pop, .modal-scrim")
         || [...document.querySelectorAll("#content .menu")].some((m) => !m.hidden)
@@ -114,8 +127,17 @@ function startSettingsPoll() {
       const box = $("#content");
       const top = box ? box.scrollTop : 0;
       await renderSettings();           // re-baselines liveData itself
-      const box2 = $("#content");
-      if (box2) box2.scrollTop = top;
+      // V60: the agents panels fill in ASYNC after the swap and grow the
+      // page above the fold — re-pin the position until they settle (the
+      // mid-scroll guard above means no user is scrolling right now)
+      pinUntil = Date.now() + 900;
+      const settle = () => {
+        const box2 = $("#content");
+        if (box2) box2.scrollTop = top;
+      };
+      settle();
+      setTimeout(settle, 250);
+      setTimeout(settle, 700);
     } catch { /* transient — the next tick retries */ }
   }, 4000);
 }
@@ -123,6 +145,12 @@ function startSettingsPoll() {
 
 async function renderSettings() {
   const s = App.state;   // the About section renders connection/version from it
+  // V56: arriving from another page paints the EMPTY settings shell in the
+  // same frame as the route change — the /api/mesh/me await below otherwise
+  // left the previous page (an old chat, restyled) on screen for a beat
+  if (!document.querySelector("#content .settings-body")) {
+    $("#content").innerHTML = '<div class="settings-body"></div>';
+  }
   // render from the cached mesh state so the swap is synchronous with the
   // route change — awaiting a fresh fetch here left the previous chat on
   // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
@@ -176,7 +204,6 @@ async function renderSettings() {
             <span id="acct-name" class="acct-name">${esc(meshDn(ms.user))}</span>
             <button class="acct-name-edit" id="acct-name-edit" aria-label="Edit name">${ICONS.pencil}</button>
           </div>
-          <div class="hint">member</div>
         </div>
       </div>
       ${me ? `
@@ -492,6 +519,21 @@ async function renderSettings() {
               ${raw.privacy?.read_receipts !== false ? "checked" : ""}>
             <span class="slider"></span></label>
             <span><b>Read receipts</b> — this agent sends and sees them</span></div>
+          <h2 style="margin-top:14px">Blocked</h2>
+          ${(raw.blocked || []).length ? (raw.blocked || []).map((b) => `
+            <div class="row" style="justify-content:space-between">
+              <span>${esc(meshDn(b))} <span class="hint">@${esc(b)}</span></span>
+              <button class="ag-unblock" data-agent="${esc(a.username)}"
+                data-user="${esc(b)}" title="Unblock">✕</button>
+            </div>`).join("")
+          : '<p class="hint">No one is blocked for this agent.</p>'}
+          <div class="row">
+            <input type="text" class="ag-block-name" data-agent="${esc(a.username)}"
+              placeholder="@username">
+            <button class="ag-block-btn" data-agent="${esc(a.username)}">Block</button>
+          </div>
+          <p class="hint">Blocks are per account (V52): yours don't extend to
+          this agent, and its don't extend to you — manage its list here.</p>
           <h2 style="margin-top:14px">Standing approvals</h2>
           <div class="ag-approvals" data-agent="${esc(a.username)}">
             ${(st.approvals || []).length ? (st.approvals || []).map((ap, i) => `
@@ -679,6 +721,8 @@ async function renderSettings() {
     });
   const logout = $("#st-logout");
   if (logout) logout.addEventListener("click", async () => {
+    // V57: signing out takes a beat (session teardown + sync stop) — say so
+    toast("Signing out…", { spinner: true });
     await api("/api/mesh/logout", {});
     // R56 (V40): drop the signed-in state BEFORE navigating — the chats
     // route used to paint the old session's home from stale Mesh.state and
@@ -688,11 +732,35 @@ async function renderSettings() {
     Mesh.listKey = "auth";
     V.renderAuthPage();
     location.hash = "#/chats";
+    toast("Signed out", { check: true, swap: true });
   });
   // delete account (Q20/M11): password-confirmed soft delete — leaves every
   // chat, deactivates you and your agents, then signs out
   const acctDelete = $("#acct-delete");
   if (acctDelete) acctDelete.addEventListener("click", () => openDeleteAccountModal());
+  // an agent's block list, owner-managed (V52 — the backend took agent=
+  // since R6; this is its first GUI surface)
+  document.querySelectorAll(".ag-unblock").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const r = await api("/api/mesh/unblock",
+                          { username: btn.dataset.user, agent: btn.dataset.agent });
+      if (r.error) { toast(r.error, true); return; }
+      renderSettings();
+    });
+  });
+  document.querySelectorAll(".ag-block-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const input = document.querySelector(
+        `.ag-block-name[data-agent="${btn.dataset.agent}"]`);
+      const name = (input?.value || "").trim().replace(/^@/, "");
+      if (!name) return;
+      const r = await api("/api/mesh/block",
+                          { username: name, agent: btn.dataset.agent });
+      if (r.error) { toast(r.error, true); return; }
+      toast(`@${name} blocked for ${meshDn(btn.dataset.agent)}`);
+      renderSettings();
+    });
+  });
   // unblock from the Privacy section's blocked list (R40)
   document.querySelectorAll(".pv-unblock").forEach((btn) => {
     btn.addEventListener("click", async () => {

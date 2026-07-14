@@ -172,47 +172,18 @@ function renderEmptyChat() {
   $("#details-pane").hidden = true;
   clearSelectMode();   // left the chat while selecting: drop the mode + pane
   Mesh.listKey = "empty";
-  // the AgentBridge home window (reached via the brand header). Beyond the
-  // "select a chat" hero it now carries the app-level Connection details (moved
-  // out of every chat's info, where they didn't belong) and the emergency
-  // Stand-down-all-agents switch (task 12).
-  const s = App.state || {};
-  const ms = Mesh.state || {};
+  // the AgentBridge home window (reached via the brand header) — just the
+  // hero (V62): the Connection card moved to Settings → About (V45) and the
+  // global stand-down switch was replaced by the per-chat one in every
+  // chat's menu (a chat-scoped hold is what people actually reach for).
   $("#content").innerHTML = `
     <div class="empty-state">
       <div class="es-box">
         ${BIRD}
         <p><b>Select a chat</b> — or start a new one.</p>
-        <p class="hint" style="margin-bottom:18px">Humans and Agents, working in the same rooms.</p>
-        <div class="card">
-          <h2>Connection</h2>
-          <dl class="kv">
-            ${connectionRows(s)}
-            <dt>Version</dt><dd>${versionLine(s)}</dd>
-          </dl>
-        </div>
-        <div class="card">
-          <div class="row" style="align-items:flex-start">
-            <label class="switch"><input type="checkbox" id="home-pause" ${ms.paused ? "checked" : ""}><span class="slider"></span></label>
-            <span><b>Stand down all agents</b> — every agent in every chat holds until resumed</span>
-          </div>
-          <p class="hint" style="margin-bottom:0">Any member can flip this. Pending
-          requests get one consolidated reply per chat after resuming.</p>
-        </div>
+        <p class="hint">Humans and Agents, working in the same rooms.</p>
       </div>
     </div>`;
-  // stand-down toggle — same round-trip as the chat-header "Stand down all
-  // agents" action (spinner → result, revert the switch on error).
-  const pause = $("#home-pause");
-  if (pause) pause.addEventListener("change", async () => {
-    const down = pause.checked;
-    toast(down ? "Standing down all agents…" : "Resuming all agents…", { spinner: true });
-    const r = await api("/api/mesh/pause", { paused: down });
-    if (r.error) { toast(r.error, { error: true, swap: true }); pause.checked = !down; return; }
-    Mesh.state.paused = r.paused;
-    renderChrome();
-    toast(r.paused ? "All agents standing down" : "All agents resumed", { check: true, swap: true });
-  });
 }
 
 // The sign-in/create-account surface moved to auth.js (R53/V34) — a
@@ -576,7 +547,8 @@ async function renderMeshChat(force) {
       <span class="chat-avatar" style="width:36px;height:36px;font-size:15px;flex:none">${headAva}</span>
       <div class="chat-title-btn${(isDm && dmSub) ? " has-sub" : ""}" style="min-width:0" title="Open chat info">
         <div class="chat-head-name">${esc(title)}${headAgentTag}
-          ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}</div>
+          ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}
+          ${meta.agents_paused ? '<span class="kind-tag">agents paused</span>' : ""}</div>
         ${isDm ? (dmSub ? `<div class="chat-head-sub">${dmSub}</div>` : "")
                : `<div class="chat-head-sub">${esc(memberLine)}</div>`}
       </div>
@@ -589,7 +561,7 @@ async function renderMeshChat(force) {
         <button data-act="select">${ICONS.select} Select messages</button>
         <button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>
         ${isMember ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive" : "Archive"} ${isDm ? "chat" : "group"}</button>` : ""}
-        <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
+        <button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>
         <button data-act="close">${ICONS.close} Close chat</button>
         <div class="menu-sep"></div>
         <button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>
@@ -698,18 +670,21 @@ async function renderMeshChat(force) {
         toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
         location.hash = "#/chats";   // archived chats leave the active list
       } else if (act === "pause") {
-        const down = !ms.paused;   // clicking to stand down vs. resume
-        // the write can retry through OneDrive latency, so hold a spinner
-        // toast and swap it for the result (or a graceful timeout message)
-        toast(down ? "Standing down all agents…" : "Resuming all agents…", { spinner: true });
-        const r = await api("/api/mesh/pause", { paused: down });
+        // V62: chat-scoped — the harness holds THIS chat's triggers/timers
+        const down = !meta.agents_paused;
+        toast(down ? "Standing down agents in this chat…"
+                   : "Resuming agents in this chat…", { spinner: true });
+        const r = await api("/api/mesh/chat_pause",
+                            { chat_id: chatId, paused: down });
         if (r.error) { toast(r.error, { error: true, swap: true }); return; }
-        Mesh.state.paused = r.paused;
-        renderChrome();
-        Mesh.structKey = ""; renderChats(true);
-        toast(r.paused ? "All agents standing down" : "All agents resumed",
+        Mesh.structKey = ""; renderMeshChat(true);
+        toast(r.paused ? "Agents standing down in this chat"
+                       : "Agents resumed in this chat",
               { check: true, swap: true });
       }
+      // the GLOBAL stand-down keeps exactly one deliberate surface: the
+      // "Emergency stand-down" card in Settings → Agents (V62 moved the
+      // chat menu + home card to the chat-scoped hold above)
     });
   });
 

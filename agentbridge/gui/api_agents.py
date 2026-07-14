@@ -306,6 +306,21 @@ def pause(app, req, mesh) -> dict:
     return {"ok": True, "paused": doc["paused"]}
 
 
+@authed
+def chat_pause(app, req, mesh) -> dict:
+    """Per-chat stand-down (V62): any MEMBER holds every agent in THIS chat
+    (``chats/<id>/control.json``, the global doc's shape chat-scoped). The
+    harness skips the chat's triggers + timers while it's set; cursors keep
+    their place, so resuming answers the backlog under the catch-up policy."""
+    chat_id = (req.data.get("chat_id") or "").strip()
+    if not chat_id or not mesh.snapshot(chat_id).is_member(mesh.user):
+        return {"error": "not a member of this chat"}
+    doc = {"paused": bool(req.data.get("paused")),
+           "by": mesh.user, "ts": utcnow_iso()}
+    mesh.tx.put_doc(f"chats/{chat_id}/control.json", doc)
+    return {"ok": True, "paused": doc["paused"]}
+
+
 GET = {
     "/api/mesh/agent_harness": agent_harness_status,
     "/api/mesh/harness_options": harness_options,
@@ -321,4 +336,5 @@ POST = {
     "/api/mesh/agent_start": agent_start,
     "/api/mesh/stand_down": stand_down,
     "/api/mesh/pause": pause,
+    "/api/mesh/chat_pause": chat_pause,
 }

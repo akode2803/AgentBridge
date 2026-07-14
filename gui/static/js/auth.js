@@ -63,7 +63,10 @@ function renderAuthPage(force = false) {
           <input type="password" id="auth-pass"
             autocomplete="${mode === "signup" ? "new-password" : "current-password"}"></label>
         <div class="auth-err" id="auth-sub-err" role="alert"><div><span></span></div></div>
-        <button class="primary auth-go" id="auth-go">${mode === "signup" ? "Create account" : "Sign in"}</button>
+        <button class="primary auth-go" id="auth-go">
+          <span class="spin-sm" id="auth-spin" hidden></span>
+          <span id="auth-go-label">${mode === "signup" ? "Create account" : "Sign in"}</span>
+        </button>
         <p class="hint">Accounts live in the shared mesh — one account works
         from any machine that syncs it.</p>
       </div>
@@ -141,6 +144,9 @@ function renderAuthPage(force = false) {
     const btn = $("#auth-go");
     if (btn.disabled) return;
     btn.disabled = true;
+    // V57: key-wrap + first sync take a beat — show it working, in place
+    const spin = $("#auth-spin");
+    if (spin) spin.hidden = false;
     try {
       const payload = {
         username: userIn.value.trim(),
@@ -156,6 +162,7 @@ function renderAuthPage(force = false) {
       V.renderChats(true);
     } finally {
       btn.disabled = false;
+      if (spin) spin.hidden = true;
     }
   };
   $("#auth-go").addEventListener("click", go);
@@ -165,7 +172,11 @@ function renderAuthPage(force = false) {
 }
 
 function closeAuthPage() {
-  $("#auth")?.remove();
+  // V57: fade out instead of vanishing (the CSS transition owns the timing)
+  const el = $("#auth");
+  if (!el) return;
+  el.classList.add("auth-closing");
+  setTimeout(() => el.remove(), 240);
 }
 
 // D5 recovery code — shown ONCE. Encryption keys are wrapped by the password

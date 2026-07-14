@@ -102,6 +102,9 @@ class AgentRunner:
         self._started_ns = time.time_ns()
         self._last_doc: tuple | None = None
         self._blobs_ok: set[str] = set()  # sync-barrier verified blob ids
+        # V62 per-chat stand-down reads, cached a few ticks (scan hits every
+        # chat every poll): {chat_id: (paused, monotonic_read_at)}
+        self._chat_pause: dict[str, tuple[bool, float]] = {}
 
     # ------------------------------------------------------------ identity
     def verify_identity(self) -> list[str]:
@@ -145,6 +148,27 @@ class AgentRunner:
         doc = self.mesh.store.cached_doc(self.HOLD_DOC, default={})
         return bool(doc.get("held")) if isinstance(doc, dict) else False
 
+    CHAT_PAUSE_TTL_S = 20.0
+
+    def chat_standing_down(self, chat_id: str) -> bool:
+        """The per-chat stand-down (V62): any member can hold ALL agents in
+        one chat (``chats/<id>/control.json``, the global doc's shape).
+        Scan + claim both honor it; cursors and the queue keep their place so
+        resume answers the backlog under the catch-up policy — exactly the
+        global switch's semantics, chat-scoped."""
+        now = time.monotonic()
+        hit = self._chat_pause.get(chat_id)
+        if hit is not None and now - hit[1] < self.CHAT_PAUSE_TTL_S:
+            return hit[0]
+        paused = False
+        try:
+            doc = self.mesh.tx.get_doc(f"chats/{chat_id}/control.json")
+            paused = bool(isinstance(doc, dict) and doc.get("paused"))
+        except Exception:  # noqa: BLE001 — unreadable control = not paused
+            paused = False
+        self._chat_pause[chat_id] = (paused, now)
+        return paused
+
     def standing_down(self) -> bool:
         doc = self.mesh.tx.get_doc("control.json")
         if isinstance(doc, dict) and doc.get("paused"):
@@ -171,6 +195,8 @@ class AgentRunner:
             except Exception:  # noqa: BLE001 — one chat never blocks the rest
                 continue
         for t in self.timers.due():
+            if self.chat_standing_down(t["chat_id"]):
+                continue  # V62: held, stays due — fires on resume
             item = WorkItem(
                 key=f"{t['chat_id']}|timer:{t['id']}",
                 chat_id=t["chat_id"], kind="timer", msg_id=f"timer:{t['id']}",
@@ -186,6 +212,8 @@ class AgentRunner:
     def _scan_chat(self, snap, settings: HarnessSettings, owner: str | None,
                    collect: list | None) -> int:
         chat_id = snap.id
+        if self.chat_standing_down(chat_id):
+            return 0  # V62: cursor keeps its place — resume answers the backlog
         last_ns, last_edit = self.queue.scan_cursor(chat_id)
         msgs = self.mesh.messages_for(chat_id)
         senders = {m.from_ for m in msgs}
@@ -290,6 +318,11 @@ class AgentRunner:
         try:
             if self.standing_down():
                 self.queue.release(group, retry_in_s=self.poll_s * 2)
+                return
+            if self.chat_standing_down(chat_id):
+                # V62: the chat's agents are held — a group queued before the
+                # pause waits too (slot-free), and runs when it's lifted
+                self.queue.release(group, retry_in_s=self.poll_s * 4)
                 return
             if self._owner_stop_requested(chat_id):
                 # R55 (V35): a Stop pressed while nothing was running used to

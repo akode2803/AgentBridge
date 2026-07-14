@@ -86,6 +86,9 @@ def me(app, req, mesh) -> dict:
             entry["privacy"] = {
                 k: getattr(v, "value", v) for k, v in a.privacy.__dict__.items()
             }
+            # the agent's block list, owner-managed (V52 — /api/mesh/block
+            # already took agent=; the list just had no GUI surface)
+            entry["blocked"] = list(a.blocked)
             if a.agent_rules:
                 entry["rules"] = {
                     k: getattr(v, "value", v)

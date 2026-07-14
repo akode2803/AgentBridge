@@ -149,6 +149,9 @@ def chat(app: GuiApp, req, mesh) -> dict:
     meta["created_by"] = _created_by(msgs)
     meta["archived"] = mine["archived"]  # per-user flag; the header menu flips on it
     meta["pins"] = _pins_list(mesh.pins(chat_id), msgs)
+    # V62: the per-chat agents stand-down flag (shared, any member flips it)
+    ctl = mesh.tx.get_doc(f"chats/{chat_id}/control.json")
+    meta["agents_paused"] = bool(isinstance(ctl, dict) and ctl.get("paused"))
     return {
         "meta": meta,
         "messages": payload,

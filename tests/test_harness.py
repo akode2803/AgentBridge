@@ -740,3 +740,58 @@ def test_deleted_agent_runner_stands_down(hrig):
     with pytest.raises(SystemExit) as e:
         runner.tick()
     assert e.value.code == 0
+
+
+def test_chat_stand_down_holds_and_resumes(hrig):
+    """V62: any member's per-chat control doc holds THIS chat's triggers +
+    timers (cursor keeps its place); other chats keep answering; lifting the
+    pause answers the held backlog."""
+    snap = hrig.owner.create_chat("Held", members=["helper"])
+    other = hrig.owner.create_chat("Live", members=["helper"])
+    responder = Scripted()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    ripple(hrig, runner, other.id)
+
+    # the pause doc lands (what /api/mesh/chat_pause writes)
+    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
+                          {"paused": True, "by": "aryan"})
+    hrig.owner.post(snap.id, "hey @helper, held ask")
+    hrig.owner.post(other.id, "hey @helper, live ask")
+    ripple(hrig, runner, snap.id)
+    ripple(hrig, runner, other.id)
+
+    turn(hrig, runner, snap.id)
+    turn(hrig, runner, other.id)
+    assert agent_msgs(hrig.owner, snap.id) == []      # held chat: silence
+    assert len(agent_msgs(hrig.owner, other.id)) == 1  # other chat unaffected
+
+    # resume: the cursor never moved, so the backlog answers now
+    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
+                          {"paused": False, "by": "aryan"})
+    runner._chat_pause.clear()   # tests skip the 20s TTL wait
+    turn(hrig, runner, snap.id)
+    assert len(agent_msgs(hrig.owner, snap.id)) == 1
+
+
+def test_chat_stand_down_gates_claimed_groups(hrig):
+    """V62 claim-time leg: a group already queued BEFORE the pause waits
+    slot-free instead of running."""
+    snap = hrig.owner.create_chat("Race", members=["helper"])
+    responder = Scripted()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    hrig.owner.post(snap.id, "hey @helper, quick one")
+    ripple(hrig, runner, snap.id)
+
+    runner.mesh.sync.sync_once([snap.id])
+    runner.scan_all()             # trigger is IN the queue now
+    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
+                          {"paused": True, "by": "aryan"})
+    hrig.owner.outbox.flush_once()
+    runner._chat_pause.clear()
+    runner.dispatch_fill()
+    runner.drain()
+    assert responder.calls == [] and agent_msgs(hrig.owner, snap.id) == []
+    # the item is still pending — released, not resolved
+    assert runner.queue.snapshot()
