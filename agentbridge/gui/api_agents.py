@@ -104,6 +104,7 @@ def harness_options(app, req, mesh) -> dict:
         "models": p.models,
         "default_model": p.default_model,
         "efforts": p.efforts,
+        "model_efforts": p.model_efforts,  # per-model narrowing (Q13)
         "requires_model": p.requires_model,
     } for p in reg.presets.values()]
     families.sort(key=lambda f: (not f["available"], f["id"]))

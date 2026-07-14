@@ -148,6 +148,52 @@ def test_resolution_order_and_degrades(tmp_path):
         reg2.resolve(settings(adapter="stub2"), "humans")
 
 
+def test_effort_reaches_argv_with_per_model_sets(tmp_path):
+    """Q13: the effort knob rides argv, and a model's own entry in
+    model_efforts narrows what it accepts (others use the family list)."""
+    reg = registry_with(tmp_path, stub_preset(
+        tmp_path, models=["m1", "m2"], model_efforts={"m1": ["high"]}))
+    inv = reg.resolve(settings(model="m2", reasoning="low"), "humans")
+    assert inv.effort == "low"
+    argv = inv.preset.build_argv(prompt="p", workdir="w", reply_file="r",
+                                 model=inv.model, effort=inv.effort)
+    assert argv[argv.index("--effort") + 1] == "low"
+    # m1 accepts only "high": "low" is dropped, "high" passes
+    assert reg.resolve(settings(model="m1", reasoning="low"), "humans").effort == ""
+    assert reg.resolve(settings(model="m1", reasoning="high"), "humans").effort == "high"
+
+
+def test_claude_preset_declares_the_real_effort_levels():
+    """The live family's picker was dead because the preset declared no
+    efforts — these five come straight from `claude --help`."""
+    reg = ModelRegistry.load()
+    p = reg.presets["claude"]
+    assert p.efforts == ["low", "medium", "high", "xhigh", "max"]
+    argv = p.build_argv(prompt="x", workdir="w", reply_file="r",
+                        model="claude-fable-5", effort="max")
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_mcp_only_adapter_runs_no_cli(tmp_path):
+    """Q21: adapter "none" = the agent connects via mesh-cli (MCP) itself —
+    resolution refuses and --all spawns no runner for it."""
+    reg = registry_with(tmp_path, stub_preset(tmp_path))
+    with pytest.raises(ValidationError):
+        reg.resolve(settings(adapter="none"), "humans")
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=tmp_path / "home2")
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    owner.accounts.create_agent("mcponly")
+    owner.set_agent_harness("mcponly", {"adapter": "none"})
+    try:
+        from agentbridge.harness.runner import hosted_agents
+        assert hosted_agents(root, "devbox") == ["helper"]
+    finally:
+        owner.close()
+
+
 def test_reply_from_output_formats():
     stream = [json.dumps({"type": "result", "result": "final"})]
     assert reply_from_output(stream, "claude-stream") == "final"

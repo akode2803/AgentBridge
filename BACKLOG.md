@@ -84,14 +84,18 @@ by-design (documented where).
 - [x] **H7 Harness decomposition + JSON prompt pack + prompt manager** —
   R15–R17.
 - [~] **H8 Split config files + user-modifiable + model picker with reasoning
-  effort** — registry + per-chat config split shipped (R16). **OPEN:
-  reasoning-effort picker (broken; needs per-model option sets);
-  agent-assisted config writing (packaging).** → round "settings + model
-  config".
-- [~] **H9 Per-audience models replace reply policy** — rules + models per
-  audience shipped (R16). **OPEN: per-audience model takes precedence over
-  the default model; per-chat page shows the full per-audience model card.**
-  → round "settings + model config".
+  effort** — registry + per-chat config split shipped (R16); reasoning-effort
+  picker fixed with per-model option sets (R39, see Q13). **OPEN:
+  agent-assisted config writing** → packaging session.
+- [x] **H9 Per-audience models replace reply policy** (R39 close) — the
+  per-chat agents page now carries the FULL per-audience card (enable +
+  model per You/Other people/Agents; partial routing patches read the DOM
+  pair so a model change never drops the enable bit). Precedence CONFIRMED
+  as the brief specifies ("a one above all rule"): chat's own model →
+  Current model → audience model → preset default
+  (settings.model_for + registry.resolve, covered by
+  test_resolution_order_and_degrades). Live-verified: route-model change
+  persisted into harness.routing without touching other categories.
 - [x] **H10 Reply-vs-tag is the agent's prompted choice** — R17 etiquette;
   R31 standalone-display flag.
 - [~] **H11 Capability parity ("agents do everything humans do via cli except
@@ -150,8 +154,16 @@ Ticked = shipped + verified. Rounds named for open items.
   notice, slot refunded, trigger never re-fires — integration-tested).
   One-line progress + right-click "tasks so far, with timestamps" shipped
   with it. Live-verified end-to-end on the rig.
-- [ ] **Q13 Reasoning-effort picker broken; per-model effort sets** → round
-  "settings + model config".
+- [x] **Q13 Reasoning-effort picker** (R39) — the knob was plumbed end-to-end
+  but NO live preset declared efforts, so the picker was permanently dead.
+  claude.json now declares `--effort` + low/medium/high/xhigh/max (verified
+  against `claude --help` on this machine; codex already had its
+  `-c model_reasoning_effort` form; cortex has no effort flag → stays
+  degraded honestly). Per-MODEL sets: preset `model_efforts` map narrows a
+  model's choices (data, overlayable via <home>/adapters); registry resolve
+  + build_argv + the GUI picker are all model-aware (options refresh on a
+  model switch; an invalid pick falls back to Default). Live-verified: the
+  picker offers the 5 levels, `reasoning: high` persists.
 - [ ] **Q14 User-facing permissions list** (safe toggles per chat + settings;
   setup-assist compatible) → round "settings + model config".
 - [~] **Q15 Agents can delete messages** — the AGENT can now delete its own
@@ -178,9 +190,14 @@ Ticked = shipped + verified. Rounds named for open items.
   identical dialog: title, keep-starred checkbox, same endpoint).
 - [ ] **Q20 Account deletion options missing in GUI (member + agent)** →
   round "settings + model config".
-- [ ] **Q21 MCP-only agents** — "no runs" option (agent connects via mesh-cli
-  MCP only), replacing "auto" if that just defaults to claude code → round
-  "settings + model config".
+- [x] **Q21 MCP-only agents** (R39) — "Runs with" gains "No runs — MCP only":
+  the harness spawns no runner for such agents (`hosted_agents` filter), a
+  live runner stands down cleanly on the next tick (rc 0 → the supervisor
+  stops), and resolution refuses defensively. "Auto" kept — it resolves to
+  the SOLE installed family and asks the owner to pick when several are
+  installed (it never silently defaults to claude). Live-verified:
+  adapter "none" persists + pickers degrade; tested (resolve refusal +
+  hosted_agents skip).
 - [D] **Q22 Adopt-agent transports memories too** — deferred by Aryan
   ("will need some planning").
 - [ ] **Q23 Move privacy settings to their own Settings group** → round

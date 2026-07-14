@@ -53,7 +53,31 @@ function permissionsCard(meta, isAdmin) {
 // writes immediately; picking "Default" writes null, which clears the per-chat
 // entry (rules/models merge server-side — other chats' picks survive).
 function mountAgentSlots(scope, chatId, fams) {
+  // one audience route = {enabled, model} read fresh from the DOM pair —
+  // set_agent_harness merges routing one level deep, so a partial route
+  // object would drop the other half
+  const routePatch = (agent, cat) => {
+    const on = scope.querySelector(
+      `.cd-route-on[data-agent="${agent}"][data-cat="${cat}"]`);
+    const slot = scope.querySelector(
+      `.cd-route-model[data-agent="${agent}"][data-cat="${cat}"]`);
+    return { enabled: on ? on.checked : true,
+             model: slot ? slot.dataset.value || "" : "" };
+  };
+  const postRoute = async (agent, cat) => {
+    const r = await api("/api/mesh/agent", {
+      username: agent, patch: { routing: { [cat]: routePatch(agent, cat) } },
+    });
+    if (r.error) toast(r.error, true);
+  };
   mountCsels(scope, (slot) => {
+    if (slot.classList.contains("cd-route-model")) {
+      const fam = fams.find((f) => f.id === slot.dataset.fam);
+      return [
+        { v: "", label: "Use current model" },
+        ...((fam && fam.models) || []).map((m) => ({ v: m, label: m })),
+      ];
+    }
     if (slot.classList.contains("cd-model")) {
       const fam = fams.find((f) => f.id === slot.dataset.fam);
       return [
@@ -65,11 +89,19 @@ function mountAgentSlots(scope, chatId, fams) {
     return [{ v: "", label: `Default — ${def.toLowerCase()}` },
       ...Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }))];
   }, async (slot, v) => {
+    if (slot.classList.contains("cd-route-model")) {
+      postRoute(slot.dataset.agent, slot.dataset.cat);
+      return;
+    }
     const key = slot.classList.contains("cd-model") ? "models" : "rules";
     const r = await api("/api/mesh/agent", {
       username: slot.dataset.agent, patch: { [key]: { [chatId]: v || null } },
     });
     if (r.error) toast(r.error, true);
+  });
+  scope.querySelectorAll(".cd-route-on").forEach((sw) => {
+    sw.addEventListener("change", () =>
+      postRoute(sw.dataset.agent, sw.dataset.cat));
   });
 }
 
@@ -781,12 +813,31 @@ async function renderChatAgents(agents, meta) {
                        data-def="${esc(st.model || fam.default_model
                          || "family default")}"></div></dd>`);
           }
+          // H9: the FULL per-audience card, right where the owner tunes the
+          // chat — enable + model per audience (the models apply across all
+          // chats; this chat's own pick above wins over everything)
+          rows.push(`<dt class="cd-sub">By audience</dt>
+            <dd class="cd-routes">${[["owner", "You"], ["humans", "Other people"],
+                ["agents", "Agents"]].map(([cat, label]) => {
+              const rt = (st.routing || {})[cat] || {};
+              return `<div class="ag-route">
+                <label class="switch"><input type="checkbox" class="cd-route-on"
+                  data-agent="${esc(a.username)}" data-cat="${cat}"
+                  ${rt.enabled === false ? "" : "checked"}>
+                  <span class="slider"></span></label>
+                <span class="ag-route-name">${label}</span>
+                ${fam && (fam.models || []).length
+                  ? `<span class="csel-slot cd-route-model" data-agent="${esc(a.username)}"
+                       data-cat="${cat}" data-fam="${esc(fam.id)}"
+                       data-value="${esc(rt.model || "")}"></span>` : ""}
+              </div>`;
+            }).join("")}</dd>`);
           return rows.join("");
         }).join("")}
       </dl>
-      <p class="hint" style="margin-bottom:0">Rules and models apply from the
-      agent's next check and only in this chat. Defaults live in Settings →
-      My agents.</p>
+      <p class="hint" style="margin-bottom:0">Rule and "Model here" apply only
+      in this chat and win over everything. The audience rows apply across all
+      chats: this chat's model → Current model → the audience's model.</p>
     </div>`;
   $("#ca-back").addEventListener("click", () => {
     Mesh.agentsView = false;

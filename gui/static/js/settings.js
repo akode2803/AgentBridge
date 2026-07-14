@@ -461,22 +461,31 @@ async function renderSettings() {
       const famById = (id) => FAMS.find((f) => f.id === id);
       const famFor = (agent) => {
         const slot = document.querySelector(`.ag-adapter[data-agent="${agent}"]`);
+        if (slot?.dataset.value === "none") return null;   // MCP-only: no CLI
         return famById(slot?.dataset.value)
           || (avail.length === 1 ? avail[0] : null);
       };
+      const modelOf = (agent) =>
+        document.querySelector(`.ag-model[data-agent="${agent}"]`)?.dataset.value || "";
       const adapterOpts = [
         { v: "", label: avail.length === 1 ? `Auto — ${avail[0].label}`
             : avail.length ? "Pick a CLI…" : "No agent CLI installed" },
         ...FAMS.map((f) => ({
           v: f.id, label: f.label + (f.available ? "" : " (not installed)") })),
+        // Q21: the agent connects through mesh-cli (MCP) itself — the
+        // harness spawns no runs for it
+        { v: "none", label: "No runs — MCP only" },
       ];
       const modelOpts = (fam, blank) => [
         { v: "", label: blank },
         ...((fam && fam.models) || []).map((m) => ({ v: m, label: m })),
       ];
-      const effortOpts = (fam) => [
+      // efforts can be narrowed per MODEL (Q13): a model with its own entry
+      // in model_efforts uses that; anything else uses the family list
+      const effortOpts = (fam, model) => [
         { v: "", label: "Default" },
-        ...((fam && fam.efforts) || []).map((e) => ({ v: e, label: e })),
+        ...((fam && (((fam.model_efforts || {})[model || ""]) || fam.efforts)) || [])
+          .map((e) => ({ v: e, label: e })),
       ];
       const remount = (slot, options, disabled) => {
         slot.innerHTML = "";
@@ -488,11 +497,22 @@ async function renderSettings() {
         const noModels = !((fam && fam.models) || []).length;
         document.querySelectorAll(`.ag-model[data-agent="${agent}"]`)
           .forEach((s) => remount(s, modelOpts(fam, "Family default"), noModels));
-        document.querySelectorAll(`.ag-reason[data-agent="${agent}"]`)
-          .forEach((s) => remount(s, effortOpts(fam),
-                                  !((fam && fam.efforts) || []).length));
+        refreshEfforts(agent, fam);
         document.querySelectorAll(`.ag-route-model[data-agent="${agent}"]`)
           .forEach((s) => remount(s, modelOpts(fam, "Use current model"), noModels));
+      };
+      // the effort list follows the MODEL pick (Q13): remounted whenever the
+      // family or the current model changes
+      const refreshEfforts = (agent, fam = famFor(agent)) => {
+        const opts = effortOpts(fam, modelOf(agent));
+        document.querySelectorAll(`.ag-reason[data-agent="${agent}"]`)
+          .forEach((s) => {
+            // an effort the new model doesn't support falls back to Default
+            if (s.dataset.value && !opts.some((o) => o.v === s.dataset.value)) {
+              s.dataset.value = "";
+            }
+            remount(s, opts, opts.length <= 1);
+          });
       };
       const peerOpts = [
         { v: "off", label: "Off — unreachable by other agents" },
@@ -511,7 +531,7 @@ async function renderSettings() {
         if (slot.classList.contains("ag-model"))
           return modelOpts(famFor(slot.dataset.agent), "Family default");
         if (slot.classList.contains("ag-reason"))
-          return effortOpts(famFor(slot.dataset.agent));
+          return effortOpts(famFor(slot.dataset.agent), modelOf(slot.dataset.agent));
         if (slot.classList.contains("ag-route-model"))
           return modelOpts(famFor(slot.dataset.agent), "Use current model");
         if (slot.classList.contains("ag-peer")) return peerOpts;
@@ -538,6 +558,9 @@ async function renderSettings() {
              .ag-route-model[data-agent="${slot.dataset.agent}"]`)
             .forEach((s) => { s.dataset.value = ""; });
           refreshModels(slot.dataset.agent);
+        } else if (slot.classList.contains("ag-model")) {
+          // a model switch can change which efforts are valid (Q13)
+          refreshEfforts(slot.dataset.agent);
         }
       });
       // apply the degrade rules to the initial mount too

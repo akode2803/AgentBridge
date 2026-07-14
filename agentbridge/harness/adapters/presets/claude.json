@@ -11,6 +11,8 @@
                       "--allowedTools", "mcp__ab"],
   "auto_allow": ["Read", "Glob", "Grep", "TodoWrite"],
   "model_args": ["--model", "{model}"],
+  "effort_args": ["--effort", "{effort}"],
+  "efforts": ["low", "medium", "high", "xhigh", "max"],
   "blocklist_args": ["--disallowedTools", "{tool}"],
   "blocklist": ["Bash", "WebFetch", "WebSearch", "Task", "Agent",
                 "NotebookEdit", "KillShell"],

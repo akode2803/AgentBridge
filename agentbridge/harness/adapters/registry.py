@@ -44,6 +44,10 @@ class Preset:
     model_args: list[str] = field(default_factory=list)    # {model}
     effort_args: list[str] = field(default_factory=list)   # {effort}
     efforts: list[str] = field(default_factory=list)       # allowed values
+    # per-MODEL effort sets (Q13): a model listed here narrows (or widens)
+    # the family's efforts; absent models use the family list. Data, not
+    # code — an owner can refine it via a <home>/adapters overlay preset.
+    model_efforts: dict[str, list[str]] = field(default_factory=dict)
     blocklist_args: list[str] = field(default_factory=list)  # {tool}, repeated
     blocklist: list[str] = field(default_factory=list)     # default tool blocks
     reply_file_arg: list[str] = field(default_factory=list)  # {reply_file}
@@ -66,6 +70,11 @@ class Preset:
         if p.format not in FORMATS:
             raise ValidationError(f"unknown preset format {p.format!r}")
         return p
+
+    def efforts_for(self, model: str) -> list[str]:
+        """The effort levels THIS model accepts (family list when the model
+        has no entry of its own)."""
+        return self.model_efforts.get(model or "", None) or self.efforts
 
     def build_argv(
         self,
@@ -95,7 +104,7 @@ class Preset:
             argv += [a.format(**fill) for a in self.reply_file_arg]
         if model and self.model_args:
             argv += [a.format(model=model) for a in self.model_args]
-        if effort and self.effort_args and effort in self.efforts:
+        if effort and self.effort_args and effort in self.efforts_for(model):
             argv += [a.format(effort=effort) for a in self.effort_args]
         for tool in blocklist if blocklist is not None else self.blocklist:
             argv += [a.format(tool=tool) for a in self.blocklist_args]
@@ -153,6 +162,11 @@ class ModelRegistry:
         invocation. Raises ValidationError with a showable reason."""
         if not settings.route(category).enabled:
             raise ValidationError(f"replies to {category} are turned off")
+        if settings.adapter == "none":
+            # MCP-only (Q21): the runner stands down for these agents; this
+            # guard catches a stale runner mid-transition
+            raise ValidationError(
+                "this agent is MCP-only — it runs no local CLI")
         if settings.adapter:
             preset = self.presets.get(settings.adapter)
             if preset is None:
@@ -175,5 +189,6 @@ class ModelRegistry:
             raise ValidationError(
                 f"{preset.label or preset.id} needs a model picked in the "
                 f"agent's settings")
-        effort = settings.reasoning if settings.reasoning in preset.efforts else ""
+        effort = (settings.reasoning
+                  if settings.reasoning in preset.efforts_for(model) else "")
         return Invocation(preset=preset, model=model, effort=effort)

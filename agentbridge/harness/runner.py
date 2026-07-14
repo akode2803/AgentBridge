@@ -455,6 +455,13 @@ class AgentRunner:
     def tick(self) -> int:
         """One scan+dispatch pass (the run loop's body; tests call it too)."""
         settings = self.settings()
+        # MCP-only (Q21): adapter "none" means this agent runs no local CLI —
+        # it connects through mesh-cli itself. Stand the runner down cleanly
+        # (rc 0, so the supervisor stops too) instead of erroring per trigger.
+        if settings.adapter == "none":
+            print(f"[harness] @{self.agent} is MCP-only (adapter 'none') — "
+                  f"no local runs; standing down")
+            raise SystemExit(0)
         # peer access runs even while standing down — diagnosing a paused or
         # stuck agent is exactly when a peer needs in (read-only, R22)
         self.peer.serve_once(settings)
@@ -619,7 +626,9 @@ def supervise(agent: str, argv: list[str]) -> None:
 
 def hosted_agents(root, machine: str) -> list[str]:
     """Agents whose accounts name THIS machine as home (active or not — the
-    active flag is a runtime hold, and a held agent still syncs)."""
+    active flag is a runtime hold, and a held agent still syncs). An agent
+    set to adapter "none" (MCP-only, Q21) runs no local CLI — it connects
+    through mesh-cli on its own, so no runner is spawned for it."""
     from ..mesh.directory import Directory
     from ..transport import make_transport
 
@@ -628,7 +637,8 @@ def hosted_agents(root, machine: str) -> list[str]:
     for name in directory.names():
         acc = directory.get(name)
         if acc and acc.kind is UserKind.AGENT and acc.agent \
-                and acc.agent.machine == machine:
+                and acc.agent.machine == machine \
+                and str(acc.agent.harness.get("adapter") or "") != "none":
             out.append(name)
     return out
 
