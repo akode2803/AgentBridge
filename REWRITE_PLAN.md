@@ -1481,6 +1481,27 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       showed the exact requested semantics — post → "Reply posted ·
       14.2s", edit the same message → a second run "No reply needed"
       (attention raised, agent decided; pre-R54 no run fired at all).
+- [x] **R55 — harness bug bash. DONE 2026-07-14 (v0.24.130).** BACKLOG
+      V35 + V36 (Aryan's post-R54 live QA). **V35 (the forever loop),
+      proven from live data:** the new group's `send_messages` flipped to
+      admins-only while the agents stayed members → every mention ran the
+      model and died at post (PermissionDenied) → the blanket
+      `except: release(retry 20s)` re-ran it forever (27 leaked rate
+      slots vs 3 ledger entries in claude's SQLite; Stop worked only
+      mid-model). Fixed in layers: claim-time `can_send` pre-flight
+      (ledger-resolved, zero model burn, runs-list note); post-phase
+      failures TERMINAL via `_run_failed`; blanket catch refunds the held
+      slot + bounded `retry_or_fail` (3 → error:gave-up); stop docs
+      honored at claim time (consumed once, stale ignored). **V36 (coco
+      "cannot produce a response"):** v2 had dropped v1's attachment sync
+      barrier — line syncs ahead of blob, the CLI saw a transcript
+      advertising a file not on disk; `_blob_syncing` now defers
+      slot-free until the blob is fetchable (600s grace, verified-id
+      cache). 412 tests. Fleet (harness + GUI) restarted onto v0.24.130;
+      LIVE: scratch admins-only group + @claude → one run, turns=0,
+      "Can't reply — sending is restricted in this chat", no repeats in
+      45s, zero posts; normal-room reply unaffected. ⚠ coco = AVD: Aryan
+      pulls v0.24.130 there. Rider: docs/GUI_AGENT_PARITY.md (V46).
 
 | Backlog item (source) | Covered in |
 |---|---|

@@ -663,17 +663,40 @@ keep the code organized and extensible (packaging comes later).
   Live-verified: signed-out boot lands on the page (focused username),
   wrong-credentials submit surfaces the server refusal, external sign-in
   dismisses to the app.
-- [ ] **V35 Claude harness loops forever in a new group** (Aryan live QA,
-  2026-07-14 post-R54) — a simple test ask in a fresh group made claude
-  run "forever": looping over and over WITHOUT producing a response, never
-  stopping, the completed-runs list growing continuously. Same for
-  claudemcp. Root-cause + fix (prime suspect: the R54 edit-attention
-  done-filter change in runner._process_group, or new-group trigger
-  extraction with no ledger dedupe).
-- [ ] **V36 Coco harness "cannot produce a response" on an available file**
-  (Aryan) — coco's harness logs a file as unavailable and reports coco
-  cannot produce a response, yet coco DOES respond after reading that same
-  file. Root-cause the adapter's file handoff (AVD machine).
+- [x] **V35 Claude harness loops forever in a new group** (R55) — PROVEN
+  from live data (27 leaked rate slots vs 3 ledger entries in the group's
+  SQLite): the group's `send_messages` was flipped to admins-only while
+  the agents stayed plain members, so every mention ran the model and died
+  at `mesh.post` (PermissionDenied) — which fell into the blanket
+  `except: release(retry 20s)`: no ledger, no feed finish, a leaked rate
+  slot per lap, model re-run forever; Stop only worked mid-model (the
+  in-run poller is its only consumer and it drops docs older than 30s).
+  The R54 edit-attention change was a red herring (loop items had
+  edit_ns=0). Fixed in layers: claim-time `can_send` pre-flight (resolves
+  through the ledger, zero model burn, runs-list note "Can't reply —
+  sending is restricted in this chat"); post-phase failures are TERMINAL
+  via `_run_failed`; the blanket catch refunds any held slot and retries
+  on a bounded budget (`WorkItem.attempts`, `queue.retry_or_fail`, 3 =
+  error:gave-up); a fresh stop doc is honored at CLAIM time (consumed
+  once, stale ignored). Live-verified on the fleet (v0.24.130): scratch
+  admins-only group + @claude → ONE run entry, turns=0, restricted note,
+  no new entries over a 45s hold (pre-fix: one per ~35s), zero claude
+  posts; normal-room reply still works (77-char reply, then scratch
+  deleted). 6 new tests.
+- [x] **V36 Coco harness "cannot produce a response" on an available file**
+  (R55) — root cause: v2 dropped v1's attachment SYNC BARRIER. A message
+  line syncs ahead of its blob (worse cross-machine to the AVD), so
+  `_stage_inbox` silently skipped the unsynced blob while the transcript
+  still advertised the filename — cortex was told a file exists that
+  isn't on disk, failed, and the harness posted the "could not produce a
+  reply" notice; the NEXT trigger found the blob synced and answered
+  (exactly Aryan's observation). Restored: `_blob_syncing` defers the
+  group slot-free while a RECENT attachment's blob is unfetchable
+  (checked via get_blob + open_blob + size, verified ids cached), with
+  the v1 600s grace so a lost blob can't wedge the chat. Verified by
+  tests over the real folder transport (blob withheld → deferred; blob
+  lands → answers; grace expiry → proceeds). ⚠ coco's harness runs on
+  the AVD — Aryan pulls v0.24.130 there for the fix to reach coco.
 - [ ] **V37 Agent departures missing from info events** (Aryan) — when an
   agent's owner leaves a group the owned agents leave too, but their
   leaving is never recorded in the chat's info events. Record them like
@@ -766,7 +789,7 @@ keep the code organized and extensible (packaging comes later).
 | hot transcript (R52, done) | V25-transcript (keyed row reuse, struct-rebuild scroll/caret keep) |
 | sign-in page (R53, done) | V34, V24 |
 | agent lifecycle + trust (R54, done) | V26, V31, V30 |
-| harness bug bash (R55) | V35 (claude/claudemcp loop), V36 (coco file) |
+| harness bug bash (R55, done) | V35 (claude/claudemcp loop), V36 (coco file) |
 | account + agent lifecycle fixes (R56) | V49, V39, V40, V37 |
 | GUI polish (R57) | V38, V42, V43, V47, V48 |
 | notifications + about/updates (R58) | V44, V45 |
