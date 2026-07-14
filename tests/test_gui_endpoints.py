@@ -469,9 +469,20 @@ def test_agent_harness_visibility_and_adoption(rig):
     # not mine -> refused (fable's agent, owned elsewhere)
     rig.app.mesh.tx.put_doc("users/fbot.json", {
         "name": "fbot", "kind": "agent", "active": True,
-        "agent": {"owner": "fable", "machine": "elsewhere", "harness": {}},
+        "agent": {"owner": "fable", "machine": "elsewhere",
+                  "harness": {"model": "secret-model",
+                              "approvals": [{"tool": "Bash", "chat": "*"}]}},
     })
     assert "error" in rig.get("/api/mesh/agent_harness", agent="fbot")
+
+    # the state directory serves fbot to everyone, but its harness config
+    # (`settings` — model, standing approvals, aux flags) is the OWNER's
+    # private view: absent for non-owners, while the responsible member
+    # stays public (accountability, not config)
+    users = rig.get("/api/mesh/state")["users"]
+    assert users["fbot"]["owners"] == ["fable"]
+    assert "settings" not in users["fbot"]
+    assert "settings" in users["helper"]  # my own agent: still served
 
     # adoption re-homes a migrated-shaped agent to THIS machine
     rig.app.mesh.tx.put_doc("users/legacybot.json", {

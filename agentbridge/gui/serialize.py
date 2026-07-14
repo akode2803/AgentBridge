@@ -106,9 +106,19 @@ def chat_json(
     return out
 
 
-def user_json(acc: Account, profile: dict, presence: dict | None = None) -> dict:
+def user_json(
+    acc: Account,
+    profile: dict,
+    presence: dict | None = None,
+    *,
+    me: str | None = None,
+) -> dict:
     """One directory entry, privacy-filtered: ``profile`` comes from
-    PrivacyService.visible_profile (it already dropped hidden fields)."""
+    PrivacyService.visible_profile (it already dropped hidden fields).
+    ``me`` is the requesting user: an agent's harness config (``settings`` —
+    model, routing, standing approvals, aux flags) is the OWNER's private
+    view and is only emitted when ``me`` owns the agent. ``owners`` stays
+    public — the responsible member is accountability, not config."""
     out: dict = {
         "name": acc.name,
         "username": acc.name,  # v1 spelling (cutover compat)
@@ -125,7 +135,8 @@ def user_json(acc: Account, profile: dict, presence: dict | None = None) -> dict
         out["avatar"] = acc.avatar  # marker; bytes ride /api/mesh/avatar
     if acc.kind is UserKind.AGENT and acc.agent:
         out["owners"] = [acc.agent.owner]  # v1 spelling (cutover compat)
-        out["settings"] = dict(acc.agent.harness)
+        if me is not None and acc.agent.owner == me:
+            out["settings"] = dict(acc.agent.harness)
     if presence:
         out["presence"] = presence
     return out

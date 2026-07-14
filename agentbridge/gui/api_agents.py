@@ -18,7 +18,8 @@ def create_agent(app, req, mesh) -> dict:
     acc = mesh.create_agent((d.get("username") or d.get("name") or "").strip().lower(),
                             display=(d.get("display") or "").strip(),
                             harness=d.get("harness") or None)
-    return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name))}
+    return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name),
+                                           me=mesh.user)}
 
 
 # profile fields route to their own setters; agent_rules audiences route to
@@ -66,7 +67,7 @@ def agent(app, req, mesh) -> dict:
     if harness:
         mesh.set_agent_harness(name, harness)
     acc = mesh.directory.get(name)
-    out = user_json(acc, mesh.visible_profile(name))
+    out = user_json(acc, mesh.visible_profile(name), me=mesh.user)
     out["harness"] = dict(acc.agent.harness) if acc.agent else {}
     return {"ok": True, "agent": out}
 
@@ -85,7 +86,8 @@ def adopt_agent(app, req, mesh) -> dict:
     acc = mesh.accounts.adopt_agent(
         (req.data.get("username") or req.data.get("agent") or "")
         .strip().lower())
-    return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name))}
+    return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name),
+                                           me=mesh.user)}
 
 
 @authed

@@ -63,7 +63,7 @@ def me(app, req, mesh) -> dict:
     acc = mesh.directory.get(mesh.user)
     if acc is None:
         return {"error": "account missing"}
-    out = user_json(acc, mesh.visible_profile(mesh.user))
+    out = user_json(acc, mesh.visible_profile(mesh.user), me=mesh.user)
     out["about"] = acc.about
     out["status"] = {"state": acc.status.state, "text": acc.status.text}
     out["privacy"] = {
@@ -77,7 +77,7 @@ def me(app, req, mesh) -> dict:
     for name in mesh.directory.names():
         a = mesh.directory.get(name)
         if a and a.agent and a.agent.owner == mesh.user:
-            entry = user_json(a, mesh.visible_profile(name))
+            entry = user_json(a, mesh.visible_profile(name), me=mesh.user)
             entry["harness"] = dict(a.agent.harness)
             entry["active"] = a.active
             # the agent's RAW privacy matrix — owner-editable (R36 / M6:

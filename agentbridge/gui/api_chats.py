@@ -96,7 +96,7 @@ def state(app: GuiApp, req) -> dict:
         presence = {
             k: v for k, v in mesh.visible_presence(name).items() if v is not None
         }
-        entry = user_json(acc, profile, presence or None)
+        entry = user_json(acc, profile, presence or None, me=mesh.user)
         if app.encrypt:
             # R31: the trusted-key fingerprint + out-of-band verified state,
             # for the DM info Encryption card (compare over another channel)
