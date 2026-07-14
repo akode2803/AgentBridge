@@ -9,14 +9,45 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta
 
 from ..core.timekit import new_id, utcnow_iso
 from ..store.db import Store
 
-__all__ = ["TimerService"]
+__all__ = ["TimerService", "parse_at"]
 
 TIMERS_DOC = "harness/timers"
 MAX_TIMERS = 50  # per agent — a runaway scheduler can't amass an army
+# V55: the note is the agent's brief to its future self — room for a real
+# task description, not just a nudge (was 280)
+NOTE_CHARS = 2000
+
+
+def parse_at(spec: str, *, now_s: float | None = None) -> int | None:
+    """A human-shaped absolute time -> at_ns, or None when unparseable.
+    'HH:MM' = the NEXT occurrence of that local wall-clock time;
+    'YYYY-MM-DD HH:MM' = that local datetime; full ISO (with an offset)
+    is honored as given. The harness runs on the owner's machine, so
+    local time IS the owner's time (V55)."""
+    s = str(spec or "").strip()
+    if not s:
+        return None
+    base = datetime.fromtimestamp(
+        now_s if now_s is not None else time.time()).astimezone()
+    try:
+        if len(s) <= 5 and ":" in s and "-" not in s:      # HH:MM
+            hh, mm = s.split(":", 1)
+            t = base.replace(hour=int(hh), minute=int(mm),
+                             second=0, microsecond=0)
+            if t <= base:
+                t += timedelta(days=1)                      # rolls to tomorrow
+            return int(t.timestamp() * 1e9)
+        t = datetime.fromisoformat(s)                       # date-time / ISO
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=base.tzinfo)
+        return int(t.timestamp() * 1e9)
+    except (ValueError, OverflowError):
+        return None
 
 
 class TimerService:
@@ -36,7 +67,7 @@ class TimerService:
             tid = new_id("t")
             timers[tid] = {
                 "id": tid, "chat_id": chat_id, "at_ns": int(at_ns),
-                "note": (note or "")[:280], "created": utcnow_iso(),
+                "note": (note or "")[:NOTE_CHARS], "created": utcnow_iso(),
             }
             self.store.cache_doc(TIMERS_DOC, timers)
             return tid

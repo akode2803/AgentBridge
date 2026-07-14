@@ -1031,11 +1031,20 @@ async function renderSettings() {
           return c ? chatDisplay(c, Mesh.state.user) : (id || "");
         };
         const timers = (h.timers || []).map((t) => {
-          const at = t.at_ns
-            ? new Date(t.at_ns / 1e6).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-            : "soon";
-          return `<div class="ag-timer">⏰ ${esc(at)} in ${esc(chatName(t.chat_id))}${
-            t.note ? " — " + esc(t.note) : ""}</div>`;
+          // V55: notes are full briefs — clamp here, full text on hover; a
+          // wake-up beyond today shows its date
+          let at = "soon";
+          if (t.at_ns) {
+            const d = new Date(t.at_ns / 1e6);
+            at = d.toDateString() === new Date().toDateString()
+              ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              : d.toLocaleString([], { month: "short", day: "numeric",
+                                       hour: "2-digit", minute: "2-digit" });
+          }
+          const note = (t.note || "").replace(/\s+/g, " ");
+          const shown = note.length > 140 ? note.slice(0, 140) + "…" : note;
+          return `<div class="ag-timer" title="${esc(note)}">⏰ ${esc(at)} in ${esc(chatName(t.chat_id))}${
+            shown ? " — " + esc(shown) : ""}</div>`;
         }).join("");
         const queued = (h.queue || []).length;
         dd.innerHTML = (timers || `<span class="hint">No wake-ups scheduled</span>`)

@@ -1658,6 +1658,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       433 tests, 24/24 modules; real-HTTP + real-PromptManager
       assertions over a real E2EE mesh.
 
+- [x] **R64 — proactive timers. DONE 2026-07-15 (v0.24.139).**
+      BACKLOG V55 (Aryan's structural-symmetry framing: a human
+      messages on a notification OR on remembering a task — timers are
+      the agent's second half). `schedule_timer(minutes | at, note)`:
+      absolute LOCAL times via `timers.parse_at` ('HH:MM' next
+      occurrence / 'YYYY-MM-DD HH:MM' / ISO); the note is a full brief
+      (280→2000 chars, lines kept) coached as "what to do, for whom,
+      what done looks like" — the wake-up run starts fresh from it and
+      may post proactively (normal pipeline: rate caps, feed, owner
+      chips). GUI chips/panel clamp long briefs (hover = full) and
+      date beyond-today wake-ups. 435 tests, 24/24 modules; end-to-end
+      brief-fidelity test + parse_at unit shapes.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

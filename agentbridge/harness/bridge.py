@@ -567,17 +567,43 @@ class BridgeServer:
             return guarded(do)
 
         @mcp.tool(structured_output=False)
-        def schedule_timer(minutes: float, note: str) -> str:
-            """Wake yourself up in this chat after ``minutes`` with ``note``
-            — your responsible member sees every scheduled timer."""
+        def schedule_timer(minutes: float = 0, note: str = "",
+                           at: str = "") -> str:
+            """Wake yourself up in this chat later — a human 'remembers a
+            task'; this is yours (V55). Give ``minutes`` (relative) OR
+            ``at`` (absolute local time: 'HH:MM' = its next occurrence,
+            'YYYY-MM-DD HH:MM', or ISO). Write ``note`` as a FULL brief for
+            your future self — it starts fresh and sees only this note plus
+            the chat, so include what to do, for whom, and what done looks
+            like. Every timer is visible to your responsible member."""
+            from .timers import parse_at
+
             if len(self.timers) >= MAX_TIMERS_PER_RUN:
                 return "timer limit for this run reached"
+            # keep the brief's line structure; drop blank runs; cap
+            text = "\n".join(
+                " ".join(ln.split())
+                for ln in str(note or "").splitlines() if ln.strip())[:2000]
+            if not text:
+                return ("write the note — your future run starts from it "
+                        "(what to do, for whom, what done looks like)")
+            if str(at or "").strip():
+                at_ns = parse_at(at)
+                if at_ns is None:
+                    return ("couldn't read that time — use 'HH:MM', "
+                            "'YYYY-MM-DD HH:MM', or ISO")
+                if at_ns <= time.time_ns() + int(30 * 1e9):
+                    return "that time is already past — pick a future one"
+                self.timers.append({"at_ns": at_ns, "note": text})
+                return f"scheduled: a wake-up at {at}"
             try:
-                in_s = max(30.0, float(minutes) * 60.0)
+                mins = float(minutes)
             except (TypeError, ValueError):
-                return "minutes must be a number"
-            self.timers.append(
-                {"in_s": in_s, "note": " ".join(str(note or "").split())[:300]})
+                return "give minutes (a number) or at (a time)"
+            if mins <= 0:
+                return "give minutes (a number) or at (a time)"
+            in_s = max(30.0, mins * 60.0)
+            self.timers.append({"in_s": in_s, "note": text})
             return f"scheduled: a wake-up in {in_s / 60:.0f} min"
 
         @mcp.tool(structured_output=False)

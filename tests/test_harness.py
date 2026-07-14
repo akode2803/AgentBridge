@@ -816,3 +816,60 @@ def test_deferred_leave_posts_goodbye_first(hrig):
     # the departure pill is in the log (fold-visible to the owner)
     assert any((m.event or {}).get("type") == "member_left"
                for m in hrig.owner.messages_for(snap.id))
+
+
+def test_parse_at_local_shapes():
+    """V55: the absolute-time shapes an agent (or human) reaches for."""
+    import datetime as dt
+    from agentbridge.harness.timers import parse_at
+
+    # a fixed base: 2026-07-15 10:00 local
+    base = dt.datetime(2026, 7, 15, 10, 0).timestamp()
+    # HH:MM later today
+    ns = parse_at("15:30", now_s=base)
+    assert dt.datetime.fromtimestamp(ns / 1e9).strftime("%Y-%m-%d %H:%M") \
+        == "2026-07-15 15:30"
+    # HH:MM already past -> tomorrow
+    ns = parse_at("09:00", now_s=base)
+    assert dt.datetime.fromtimestamp(ns / 1e9).strftime("%Y-%m-%d %H:%M") \
+        == "2026-07-16 09:00"
+    # explicit local date-time
+    ns = parse_at("2026-07-20 08:15", now_s=base)
+    assert dt.datetime.fromtimestamp(ns / 1e9).strftime("%Y-%m-%d %H:%M") \
+        == "2026-07-20 08:15"
+    # junk -> None, never a crash
+    assert parse_at("noonish", now_s=base) is None
+    assert parse_at("", now_s=base) is None
+    assert parse_at("25:99", now_s=base) is None
+
+
+def test_timer_brief_survives_to_the_wakeup_run(hrig):
+    """V55: a long multi-line brief rides Reply.timers (at_ns) into the
+    store uncut and reaches the wake-up run's delivery note."""
+    snap = hrig.owner.create_chat("Reminders", members=["helper"])
+    brief = "\n".join(["Remind @aryan about the quarterly export.",
+                       "1. check the dashboard refreshed",
+                       "2. if it failed, say WHO to ping",
+                       "Done looks like: a one-line status in this chat."]
+                      + [f"context line {i}" for i in range(20)])
+    hrig.owner.post(snap.id, "hey @helper, remind me in a bit")
+    fire_at = time.time_ns() + int(0.05 * 1e9)
+    responder = Scripted(lambda d: Reply(
+        body="will do" if d.kind == "message" else f"reminder: {d.note[:40]}",
+        timers=[{"at_ns": fire_at, "note": brief}] if d.kind == "message"
+        else []))
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+
+    turn(hrig, runner, snap.id)              # the ask -> schedules the timer
+    stored = runner.timers.snapshot()
+    assert len(stored) == 1 and stored[0]["note"] == brief  # uncut (2000 cap)
+
+    time.sleep(0.1)                          # the timer comes due
+    turn(hrig, runner, snap.id)              # fires -> wake-up run
+    deliveries = [d for d in responder.calls if d.kind == "timer"]
+    assert len(deliveries) == 1 and deliveries[0].note == brief
+    replies = [m for m in agent_msgs(hrig.owner, snap.id)
+               if m.kind.value == "message"]
+    assert any(m.body.startswith("reminder:") for m in replies)
+    assert runner.timers.snapshot() == []    # consumed, not re-firing

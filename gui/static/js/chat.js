@@ -764,11 +764,22 @@ function renderAskBar(chatId, asks, timers) {
   if (key === Mesh.askKey) return;           // nothing moved — don't repaint
   Mesh.askKey = key;
   if (!asks.length && !(timers || []).length) { bar.innerHTML = ""; return; }
-  // scheduled wake-ups render as calm chips — informational, not actionable
+  // scheduled wake-ups render as calm chips — informational, not actionable.
+  // V55: notes are full briefs now — clamp the chip, full text on hover;
+  // a wake-up beyond today shows its date, not a bare time.
   const chips = (timers || []).map((t) => {
-    const at = t.at_ns ? timeOnly(new Date(t.at_ns / 1e6).toISOString()) : "";
-    return `<div class="timer-chip">⏰ ${esc(meshDn(t.agent))} checks back
-      ${at ? "at " + esc(at) : "soon"}${t.note ? " — " + esc(t.note) : ""}</div>`;
+    let at = "";
+    if (t.at_ns) {
+      const d = new Date(t.at_ns / 1e6);
+      at = d.toDateString() === new Date().toDateString()
+        ? timeOnly(d.toISOString())
+        : d.toLocaleString([], { month: "short", day: "numeric",
+                                 hour: "2-digit", minute: "2-digit" });
+    }
+    const note = (t.note || "").replace(/\s+/g, " ");
+    const shown = note.length > 140 ? note.slice(0, 140) + "…" : note;
+    return `<div class="timer-chip" title="${esc(note)}">⏰ ${esc(meshDn(t.agent))} checks back
+      ${at ? "at " + esc(at) : "soon"}${shown ? " — " + esc(shown) : ""}</div>`;
   }).join("");
   bar.innerHTML = chips + asks.map((a) => {
     const q = a.kind === "question";

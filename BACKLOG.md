@@ -938,13 +938,23 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   standard: a real-HTTP test over a real E2EE mesh asserts the REAL
   PromptManager context output (reactions/genesis/roles/permissions)
   and the full fetch_file round-trip incl. the honest miss.
-- [ ] **V55 Proactive agents via timers (structural symmetry)** —
-  Aryan's framing: a human messages when a notification arrives (agents
-  have that = triggers) or when he REMEMBERS a task. So: the agent
-  writes an in-depth description of what to do/remind, at a relative
-  delay or an absolute time; firing re-triggers the agent with that
-  description as the work item, and it may post proactively. Extend
-  `schedule_timer` + the trigger pipeline accordingly.
+- [x] **V55 Proactive agents via timers (structural symmetry)** (R64) —
+  `schedule_timer` now takes `minutes` (relative) OR **`at`** (absolute
+  LOCAL time: 'HH:MM' = its next occurrence, 'YYYY-MM-DD HH:MM', or
+  ISO with offset — `timers.parse_at`, the harness machine's clock IS
+  the owner's), and the note became a **full brief for the future
+  self** (cap 280→2000, line structure preserved; the tool coaches
+  "what to do, for whom, what done looks like" — the wake-up run
+  starts fresh from exactly this note + the chat, and may post
+  proactively through the normal pipeline: rate caps, feed, owner
+  visibility all apply). The GUI timer chips + the Scheduled panel
+  clamp long briefs at 140 chars (full text on hover) and show the
+  DATE for wake-ups beyond today. Timer plumbing already carried
+  at_ns end-to-end (Reply.timers → TimerService) — verified by a new
+  end-to-end test: a 24-line brief rides uncut into the store, fires,
+  and arrives verbatim as the wake-up delivery's note; parse_at's
+  shapes unit-tested (later-today, past-rolls-tomorrow, explicit
+  date, junk→None).
 - [x] **V56 Polish: opening Settings flashed the previous page first**
   (R61) — renderSettings awaits `/api/mesh/me` for account/agents/
   privacy BEFORE painting, so the old chat (restyled, chat-mode class
@@ -1083,6 +1093,6 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 | polish batch (R61, done) | V56, V57, V58, V60, V61, V62 (+ V52 answer & GUI close) |
 | parity (b) — ALL of V53 in one round (R62, done) | V53 b1–b7 (shipped or BD-documented) |
 | parity (c) — agent context closes (R63, done) | V54 |
-| proactive timers (R64) | V55 (+ V64 assessment lands with it) |
+| proactive timers (R64, done) | V55 (V64 assessed in the session wrap-up) |
 | storage janitor (R65) | V63 |
 | security round (NEXT, per Aryan — after janitor) | §C key-rotation-on-leave, per-member RLS, threat-model residuals |
