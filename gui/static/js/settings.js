@@ -190,8 +190,10 @@ async function renderSettings() {
             <button class="icon-btn ci-pencil" id="acct-about-edit" aria-label="Edit about">${ICONS.pencil}</button></span></dd>
           <dt>Status</dt>
           <dd><span class="csel-slot acct-status-state" data-value="${esc(status.state)}"></span>
-            <input type="text" id="acct-status-text" placeholder="What's happening?" value="${esc(status.text)}" maxlength="80" style="margin-top:6px;width:100%">
-            <button class="primary" id="acct-status-save" style="margin-top:6px">Save status</button></dd>
+            <span class="acct-status-line">
+              <input type="text" id="acct-status-text" placeholder="What's happening?" value="${esc(status.text)}" maxlength="80">
+              <button class="icon-btn ci-ok" id="acct-status-save" aria-label="Save status">${ICONS.check}</button>
+            </span></dd>
         </dl>
       </div>
       <div class="card">
@@ -478,8 +480,7 @@ async function renderSettings() {
           models below kick in when it's left on the family default. Per-chat
           rules and models live in each chat's info page — a chat's own pick
           wins over everything here.</p>
-          <div class="row" style="justify-content:space-between">
-            <button class="primary ag-save" data-agent="${esc(a.username)}">Save</button>
+          <div class="row" style="justify-content:flex-end">
             <button class="danger ag-delete" data-agent="${esc(a.username)}">Delete agent</button>
           </div>
         </div>`;
@@ -618,9 +619,10 @@ async function renderSettings() {
   if (nameEdit) nameEdit.addEventListener("click", () => {
     const line = $(".acct-name-line");
     const cur = meshDn(ms.user);
+    // V47: the trailing pencil becomes a tick in the SAME slot; cross after
     line.innerHTML = `<input type="text" id="acct-name-input" maxlength="64" value="${esc(cur)}">
-      <button class="primary" id="acct-name-save">Save</button>
-      <button id="acct-name-cancel">Cancel</button>`;
+      <button class="acct-name-edit ci-ok" id="acct-name-save" aria-label="Save">${ICONS.check}</button>
+      <button class="acct-name-edit ci-cancel" id="acct-name-cancel" aria-label="Cancel">${ICONS.close}</button>`;
     const inp = $("#acct-name-input"); inp.focus(); inp.select();
     const cancel = () => renderSettings();
     const save = async () => {
@@ -798,6 +800,10 @@ async function renderSettings() {
           // a model switch can change which efforts are valid (Q13)
           refreshEfforts(slot.dataset.agent);
         }
+        // V48: every config pick autosaves (status has its own endpoint)
+        if (!slot.classList.contains("ag-status-state")) {
+          agConfigSave(slot.dataset.agent);
+        }
       });
       // apply the degrade rules to the initial mount too
       document.querySelectorAll(".ag-adapter").forEach(
@@ -884,40 +890,9 @@ async function renderSettings() {
       });
     })();
   }
-  document.querySelectorAll(".ag-save").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const agent = btn.dataset.agent;
-      const val = (sel) =>
-        document.querySelector(`${sel}[data-agent="${agent}"]`)?.dataset.value || "";
-      const rateRaw = val(".ag-rate");
-      const rateN = parseInt(rateRaw, 10);
-      const routing = {};
-      document.querySelectorAll(`.ag-route-on[data-agent="${agent}"]`)
-        .forEach((sw) => {
-          routing[sw.dataset.cat] = {
-            enabled: sw.checked,
-            model: document.querySelector(
-              `.ag-route-model[data-agent="${agent}"][data-cat="${sw.dataset.cat}"]`
-            )?.dataset.value || "",
-          };
-        });
-      const patch = {
-        adapter: val(".ag-adapter") || null,
-        model: val(".ag-model") || null,
-        reasoning: val(".ag-reason") || null,
-        default_rule: val(".ag-default"),
-        global_memory: val(".ag-gmem") || "dm",
-        peer_access: val(".ag-peer") || "off",
-        peer_repair: !!document.querySelector(`.ag-repair[data-agent="${agent}"]`)?.checked,
-        routing,
-        // blank clears back to the default; otherwise clamp to a sane band
-        max_replies_per_hour: !rateRaw || isNaN(rateN)
-          ? null : Math.max(1, Math.min(1000, rateN)),
-      };
-      const r = await api("/api/mesh/agent", { username: agent, patch });
-      if (r.error) toast(r.error, true);
-      else toast(`Saved @${agent}`);
-    });
+  // V48: the Save button is gone — the switches autosave like the csels do
+  document.querySelectorAll(".ag-repair, .ag-route-on").forEach((sw) => {
+    sw.addEventListener("change", () => agConfigSave(sw.dataset.agent));
   });
   // owner sets the agent's availability (Q32) — a separate account field, so
   // its own Set-status button (not the harness-settings Save above)
@@ -1111,6 +1086,45 @@ async function renderSettings() {
 }
 V.renderSettings = renderSettings;
 
+// V48 (R57): the agent config AUTOSAVES — every change POSTs the full patch
+// on a short per-agent debounce (a family switch's cascading resets collapse
+// into one write). Success is silent (WhatsApp settings); errors toast.
+const agSaveTimers = {};
+function agConfigSave(agent) {
+  clearTimeout(agSaveTimers[agent]);
+  agSaveTimers[agent] = setTimeout(async () => {
+    const val = (sel) =>
+      document.querySelector(`${sel}[data-agent="${agent}"]`)?.dataset.value || "";
+    const rateRaw = val(".ag-rate");
+    const rateN = parseInt(rateRaw, 10);
+    const routing = {};
+    document.querySelectorAll(`.ag-route-on[data-agent="${agent}"]`)
+      .forEach((sw) => {
+        routing[sw.dataset.cat] = {
+          enabled: sw.checked,
+          model: document.querySelector(
+            `.ag-route-model[data-agent="${agent}"][data-cat="${sw.dataset.cat}"]`
+          )?.dataset.value || "",
+        };
+      });
+    const patch = {
+      adapter: val(".ag-adapter") || null,
+      model: val(".ag-model") || null,
+      reasoning: val(".ag-reason") || null,
+      default_rule: val(".ag-default"),
+      global_memory: val(".ag-gmem") || "dm",
+      peer_access: val(".ag-peer") || "off",
+      peer_repair: !!document.querySelector(`.ag-repair[data-agent="${agent}"]`)?.checked,
+      routing,
+      // blank clears back to the default; otherwise clamp to a sane band
+      max_replies_per_hour: !rateRaw || isNaN(rateN)
+        ? null : Math.max(1, Math.min(1000, rateN)),
+    };
+    const r = await api("/api/mesh/agent", { username: agent, patch });
+    if (r.error) toast(r.error, true);
+  }, 450);
+}
+
 // ---- account editors (v2): @handle, about, status, privacy, password --------
 function wireAccountEditors(ms) {
   // @handle change — inline edit, like the display name (name is the immutable
@@ -1120,8 +1134,8 @@ function wireAccountEditors(ms) {
     const line = $(".acct-handle-line");
     const cur = ($("#acct-handle").textContent || "").replace(/^@/, "");
     line.innerHTML = `<input type="text" id="acct-handle-input" maxlength="32" value="${esc(cur)}">
-      <button class="primary" id="acct-handle-save">Save</button>
-      <button id="acct-handle-cancel">Cancel</button>`;
+      <button class="icon-btn ci-ok" id="acct-handle-save" aria-label="Save">${ICONS.check}</button>
+      <button class="icon-btn ci-cancel" id="acct-handle-cancel" aria-label="Cancel">${ICONS.close}</button>`;
     const inp = $("#acct-handle-input"); inp.focus(); inp.select();
     const save = async () => {
       const v = inp.value.trim().toLowerCase().replace(/^@/, "");
@@ -1145,8 +1159,8 @@ function wireAccountEditors(ms) {
     const cur = $("#acct-about").textContent.trim();
     const seed = cur === "Add a few words about you" ? "" : cur;
     line.innerHTML = `<input type="text" id="acct-about-input" maxlength="139" value="${esc(seed)}">
-      <button class="primary" id="acct-about-save">Save</button>
-      <button id="acct-about-cancel">Cancel</button>`;
+      <button class="icon-btn ci-ok" id="acct-about-save" aria-label="Save">${ICONS.check}</button>
+      <button class="icon-btn ci-cancel" id="acct-about-cancel" aria-label="Cancel">${ICONS.close}</button>`;
     const inp = $("#acct-about-input"); inp.focus();
     const save = async () => {
       const r = await api("/api/mesh/set_about", { about: inp.value.trim() });

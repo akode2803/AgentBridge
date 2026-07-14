@@ -578,11 +578,47 @@ async function renderChatDetails() {
         ${adminRow}
         ${isOwner ? `<button class="danger-item" data-act="remove">${ICONS.close} Remove @${esc(user)}</button>` : ""}`;
       row.appendChild(menu);
-      const run = async (path) => {
+      const run = async (path, hot) => {
         menu.remove();
         const r = await api(path, { chat_id: chatId, username: user });
         if (r.error) { toast(r.error, true); return; }
         Mesh.detailsKey = ""; Mesh.structKey = "";
+        if (hot) {
+          // V38 (R57): removing a member hot-updates the roster — the row
+          // slides out and the count line adjusts in place; the membership
+          // pill arrives via the normal poll reconcile. A full pane+chat
+          // rebuild here read as a reload. Cascaded agents (owned by the
+          // removed member) leave with them — drop their rows too.
+          const gone = new Set([user]);
+          Object.values(Mesh.state?.users || {}).forEach((u) => {
+            if (u.kind === "agent" && (u.owners || []).includes(user)) {
+              gone.add(u.username);
+            }
+          });
+          const rows = [...document.querySelectorAll(".mem-row")]
+            .filter((el) => gone.has(
+              el.querySelector(".mem-chevron")?.dataset.user));
+          rows.forEach((el) => {
+            el.style.overflow = "hidden";
+            el.style.transition = "opacity .18s ease, max-height .22s ease .05s";
+            el.style.maxHeight = el.offsetHeight + "px";
+            requestAnimationFrame(() => {
+              el.style.opacity = "0"; el.style.maxHeight = "0";
+            });
+            setTimeout(() => el.remove(), 320);
+          });
+          // both count surfaces: the roster card head + the "Group · N
+          // members" subtitle
+          document.querySelectorAll(".mem-head > span, .ci-sub")
+            .forEach((el) => {
+              if (!/\d+ member/.test(el.textContent)) return;
+              const n = Math.max(0,
+                (el.textContent.match(/\d+/) || [0])[0] - rows.length);
+              el.textContent = el.textContent.replace(
+                /\d+ members?/, `${n} member${n === 1 ? "" : "s"}`);
+            });
+          return;
+        }
         renderChatDetails(); V.renderChats(true);
       };
       menu.querySelectorAll("button").forEach((btn) => {
@@ -596,7 +632,7 @@ async function renderChatDetails() {
           }
           run(act === "grant" ? "/api/mesh/grant_admin"
             : act === "revoke" ? "/api/mesh/revoke_admin"
-            : "/api/mesh/remove_member");
+            : "/api/mesh/remove_member", act === "remove");
         });
       });
       document.addEventListener("mousedown", function away(ev) {

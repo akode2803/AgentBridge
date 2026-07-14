@@ -579,6 +579,18 @@ h1 {
 .acct-name-edit:hover, [data-theme="dark"] .acct-name-edit:hover { background: var(--hover); color: var(--text); }
 .acct-name-edit svg { width: 15px; height: 15px; }
 .acct-name-line input { text-align: center; font-weight: 600; font-size: 16px; max-width: 220px; }
+/* V47: the pencil rides the value's OWN line (flex), and the edit state swaps
+   it for a tick in the same slot + a cross after; the input takes the width */
+.acct-handle-line, .acct-about-line {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.acct-handle-line > span:first-child, .acct-about-line > span:first-child {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acct-handle-line input, .acct-about-line input { flex: 1; min-width: 0; }
+.acct-status-line { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.acct-status-line input { flex: 1; min-width: 0; }
+.ci-cancel { flex: none; color: var(--text-dim); }
 
 /* theme picker tiles (task 6): a mini mockup per option; the selected tile gets
    an accent border instead of a checkbox. The :hover overrides the global
@@ -1215,15 +1227,19 @@ button.enc-pill { cursor: pointer; font: inherit; font-size: 11.5px; }
    honest indeterminate ring while the call is in flight */
 .att-loading { pointer-events: none; position: relative; }
 .att-btn.att-loading .att-icon svg { visibility: hidden; }
+/* V42: the ring is absolutely centred (inset+margin auto, border-box) — as
+   flow content the grid auto-placed it into a second row (below the hidden
+   svg), and the old calc(50% - 11px) ignored the border width */
+.att-btn.att-loading .att-icon { position: relative; }
 .att-btn.att-loading .att-icon::after {
-  content: ""; width: 16px; height: 16px;
+  content: ""; position: absolute; inset: 0; margin: auto;
+  width: 16px; height: 16px; box-sizing: border-box;
   border: 2px solid var(--accent-soft); border-top-color: var(--accent);
   border-radius: 50%; animation: att-spin .7s linear infinite;
 }
 .msg-img.att-loading::after, .media-tile-btn.att-loading::after {
-  content: ""; position: absolute;
-  left: calc(50% - 11px); top: calc(50% - 11px);
-  width: 22px; height: 22px;
+  content: ""; position: absolute; inset: 0; margin: auto;
+  width: 22px; height: 22px; box-sizing: border-box;
   border: 3px solid rgba(255,255,255,.45); border-top-color: #fff;
   border-radius: 50%; animation: att-spin .7s linear infinite;
   filter: drop-shadow(0 0 2px rgba(0,0,0,.35));

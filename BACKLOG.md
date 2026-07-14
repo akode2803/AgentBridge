@@ -706,9 +706,15 @@ keep the code organized and extensible (packaging comes later).
   "X left with Y". Live-verified on a two-rig scratch mesh: ava leaves →
   bea's transcript shows "Scrapbot left with Ava" then "Ava left" within
   seconds. 2 new tests (leave + admin-removal legs).
-- [ ] **V38 Removing a member is janky + forces a reload** (Aryan) — the
-  roster remove flow must hot-update the details pane (R52 discipline),
-  no full reload.
+- [x] **V38 Removing a member is janky + forces a reload** (R57) — the
+  remove action used to blow away detailsKey AND structKey and rebuild
+  both panes. Now it hot-updates: the removed member's row (plus their
+  cascading agents' rows — V37 pairing) slides out in place, both count
+  surfaces ("Group · N members" + the roster head) adjust, and the
+  membership pill arrives via the normal poll reconcile. Admin
+  grant/revoke keeps the rebuild (different, chip-level change).
+  Live-verified: remove bea → bea + beabot rows animated out at ~640ms,
+  counts 3 → 1, no pane rebuild.
 - [x] **V39 Signup with a taken username fails silently at submit** (R56)
   — root cause: the submit error WAS toasted, but `#toast` (z-index 50)
   rendered UNDER the full-page `#auth` overlay (z-index 150) — an
@@ -736,11 +742,20 @@ keep the code organized and extensible (packaging comes later).
   space?** (Aryan) — answer honestly from the code (attachment blob
   lifecycle vs redaction tombstones); deliverable = a definitive answer
   (+ doc note / follow-up item if the answer is no).
-- [ ] **V42 File-open spinner misaligned** (Aryan) — the R51 att-loading
-  ring is off-center at least on Aryan's screen. Fix the centering.
-- [ ] **V43 Composer focused by default** (Aryan) — with a chat open,
-  typing a printable key anywhere should land in the composer (WhatsApp
-  behaviour) unless a real input/modal/menu has focus.
+- [x] **V42 File-open spinner misaligned** (R57) — two real bugs: the
+  chip ring was FLOW content in the icon's grid (auto-placed into a
+  second implicit row, below the hidden svg), and the image/tile ring's
+  `calc(50% - 11px)` ignored its own 3px border. Both rings are now
+  `position:absolute; inset:0; margin:auto; box-sizing:border-box` —
+  dead-center at any element size. Live-verified via computed geometry:
+  equal margins in both the 32px icon and a 180×120 image.
+- [x] **V43 Composer focused by default** (R57) — two legs: the composer
+  focuses the moment a chat OPENS (the `!sameChat` branch), and a global
+  keydown routes any printable key to it (focus-during-keydown lets the
+  browser deliver the character natively) — never hijacking real inputs,
+  contenteditable, modals, menus, or Ctrl/Alt/Meta shortcuts.
+  Live-verified with real keystrokes: focus on `<body>`, typed "hola" →
+  all four characters landed in the composer.
 - [ ] **V44 Notification options parity (WhatsApp screenshots)** (Aryan) —
   add the relevant options: per-category Messages / Groups settings
   (show notifications, show reaction notifications, play sound), global
@@ -753,12 +768,21 @@ keep the code organized and extensible (packaging comes later).
 - [ ] **V46 Deliverable: GUI-only surface list** (Aryan) — a complete list
   of every info/option available via the GUI but NOT to an agent; should
   ideally be very few. Produce + hand over the inventory.
-- [ ] **V47 Inline edit pencils + tick/cross** (Aryan) — the username and
-  about edit pencils sit on the same line as the value; Save/Cancel become
-  tick/cross with the tick at the pencil's exact position. Same for the
-  status save.
-- [ ] **V48 Agents page autosaves** (Aryan) — remove the Save button from
-  the agents settings page; every change autosaves.
+- [x] **V47 Inline edit pencils + tick/cross** (R57) — the handle/about
+  value lines are flex now (pencil rides the value's own line, text
+  ellipsizes), and all three editors (display name, username, about)
+  swap the pencil for a TICK icon in the same trailing slot + a cross
+  after it (`.ci-ok`/`.ci-cancel` icon buttons) instead of full-text
+  Save/Cancel. The status "Save status" button became an inline tick on
+  the text input's line. Live-verified on a rig (all four editors).
+- [x] **V48 Agents page autosaves** (R57) — the Save button is gone;
+  every config change (adapter/model/effort/default-rule/global-memory/
+  peer/rate csels + the repair and routing switches) autosaves through a
+  per-agent 450ms debounce (`agConfigSave` — a family switch's cascading
+  resets collapse into one write). Success is silent, errors toast;
+  reach rules/aux/privacy already autosaved. Live-verified: picked
+  "Reply to every message" + flipped peer-repair → both persisted
+  server-side within a second, no button.
 - [x] **V49 Delete agent doesn't delete** (R56) — the soft delete WORKED
   (active=False + `deactivated`); the GUI just never filtered. Subtlety:
   `active=False` alone is ALSO the owner's pause switch, so the fix
@@ -831,6 +855,6 @@ keep the code organized and extensible (packaging comes later).
 | agent lifecycle + trust (R54, done) | V26, V31, V30 |
 | harness bug bash (R55, done) | V35 (claude/claudemcp loop), V36 (coco file) |
 | account + agent lifecycle fixes (R56, done) | V49, V39, V40, V37 |
-| GUI polish (R57) | V38, V42, V43, V47, V48 |
+| GUI polish (R57, done) | V38, V42, V43, V47, V48 |
 | notifications + about/updates (R58) | V44, V45 |
 | deliverables (with the rounds) | V41 (answer), V46 (parity list) |

@@ -741,7 +741,10 @@ async function renderMeshChat(force) {
   }
   // opening a chat animates the transcript in — an in-place structural
   // update (rename etc.) must not re-play the entrance (R52)
-  if (!sameChat) tr.classList.add("chat-in");
+  if (!sameChat) {
+    tr.classList.add("chat-in");
+    $("#mesh-body")?.focus();   // V43: the composer is live the moment a chat opens
+  }
   Mesh.renderedChat = chatId;
 }
 V.renderMeshChat = renderMeshChat;

@@ -180,6 +180,22 @@ window.addEventListener("hashchange", route);
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
   });
+  // V43 (R57): type-to-compose — with a chat open, a printable key pressed
+  // anywhere lands in the composer (WhatsApp). Focusing during keydown lets
+  // the browser deliver the character to the textarea natively; real inputs,
+  // modals, menus and shortcuts are never hijacked.
+  document.addEventListener("keydown", (e) => {
+    if (App.page !== "chats" || !Mesh.chatId) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length !== 1) return;             // printable characters only
+    const box = document.getElementById("mesh-body");
+    if (!box || document.activeElement === box) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA"
+        || ae.isContentEditable)) return;
+    if (document.querySelector(".modal-scrim, .csel-pop, .menu")) return;
+    box.focus();
+  });
   // while the user is selecting text inside a message, suppress the hover
   // reply-arrow — otherwise the chevron pops up over the selection
   document.addEventListener("selectionchange", () => {

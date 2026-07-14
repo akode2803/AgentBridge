@@ -1524,6 +1524,23 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       mesh (all four items; pills arrived in the second rig within
       seconds). Riders: leave()-key-rotation gap + storage-janitor items
       logged in BACKLOG §C.
+- [x] **R57 — GUI polish. DONE 2026-07-14 (v0.24.132, frontend-only).**
+      BACKLOG V38 + V42 + V43 + V47 + V48. **V38:** member removal
+      hot-updates (row + cascading-agent rows slide out, both count
+      surfaces adjust; no pane/transcript rebuild). **V42:** both
+      spinner rings absolutely centred (the chip ring was grid FLOW
+      content auto-placed into a second row; the image ring's calc
+      ignored its border) — inset:0 + margin:auto + border-box.
+      **V43:** composer focuses on chat open + a global keydown routes
+      printable keys to it (inputs/modals/menus/shortcuts exempt).
+      **V47:** pencils ride the value line; edit state = tick in the
+      pencil's slot + cross (icon buttons); status save = inline tick.
+      **V48:** agent config autosaves (450ms per-agent debounce, silent
+      success), Save button removed. All five live-verified on a rig
+      (real keystrokes for V43; computed geometry for V42; server-side
+      persistence for V48). Browser-pane module cache bit a 4th time —
+      the first V38 pass tested STALE code; hard reload before every
+      pass stays the law.
 
 | Backlog item (source) | Covered in |
 |---|---|
