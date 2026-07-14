@@ -7,6 +7,7 @@ import { App, Mesh, Settings, resetSubviews, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
+import "./auth.js";
 import "./chat.js";
 import "./details.js";
 import "./media.js";
@@ -27,6 +28,17 @@ async function refresh(rerender) {
   renderChrome();
   if (rerender && App.page !== "setup") PAGES[App.page]();
   else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
+  // signed out (R53): watch for a session appearing OUTSIDE the auth page —
+  // another window, setup assist, the CLI. Never re-render the auth page
+  // from the poll (it would clobber half-typed fields); flip only when a
+  // user actually shows up.
+  else if (App.page === "chats" && Mesh.state && !Mesh.state.user) {
+    const fresh = await api("/api/mesh/state");
+    if (!fresh.error && fresh.user) {
+      Mesh.state = fresh;
+      V.renderChats(true);
+    }
+  }
   // R51 (V25): the "new" page's directory pickers were frozen while open —
   // refresh + repaint them per tick too (setSide no-ops on identical html).
   // The picker's search box can sit FOCUSED while empty, so the guard keys

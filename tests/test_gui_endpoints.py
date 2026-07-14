@@ -22,6 +22,24 @@ PNG = bytes.fromhex(
 )
 
 
+# -------------------------------------------------------- check_name (R53)
+def test_check_name_preauth_facts(rig):
+    # pre-auth: works with NO session at all (the sign-in page's live check)
+    r = rig.post("/api/mesh/check_name", username="Bad Name!")
+    assert r["ok"] and not r["valid"] and "2-32" in r["hint"]
+    r = rig.post("/api/mesh/check_name", username="admin")
+    assert r["ok"] and not r["valid"]          # reserved word
+    r = rig.post("/api/mesh/check_name", username="fresh-name")
+    assert r["ok"] and r["valid"] and not r["taken"]
+    # after an account exists, the same probe reports it taken —
+    # case-insensitively, like signup itself
+    rig.signup()
+    r = rig.post("/api/mesh/check_name", username="ARYAN")
+    assert r["ok"] and r["valid"] and r["taken"]
+    r = rig.post("/api/mesh/check_name", username="")
+    assert r["ok"] and not r["valid"] and r["hint"] == ""
+
+
 # ------------------------------------------------------------- attachments
 def test_sealed_attachment_roundtrip(rig):
     rig.signup()

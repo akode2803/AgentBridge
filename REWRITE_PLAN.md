@@ -1436,6 +1436,26 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       modules after a plain navigate — `location.reload(true)` before
       ANY verification pass.
 
+- [x] **R53 — sign-in page. DONE 2026-07-14 (v0.24.128).** BACKLOG V34 +
+      V24 — the first brick of the setup pages. **V34:** the in-shell
+      auth card left chat.js for `auth.js` (25th module, views layer): a
+      dedicated FULL-PAGE overlay riding the R48 boot identity, so the
+      boot cover fades onto it seamlessly; tabs preserve half-typed
+      values; the D5 recovery-code modal moved with it; renderChats
+      routes signed-out → V.renderAuthPage and drops the overlay when a
+      user exists. A new signed-out poll watcher flips the page when a
+      session appears EXTERNALLY (another window, setup assist, CLI) —
+      without ever re-rendering the page itself (typing survives); the
+      old card had the same blind spot. **V24:** live username checking —
+      instant client mirror of accounts.valid_name (format + reserved),
+      debounced stale-guarded existence via the NEW pre-auth
+      `/api/mesh/check_name` (finally exposing `directory0`, built for
+      this in context.py). Mode-aware phrasing; the error line is a 0fr
+      grid row so the password field eases down and back. Live-verified
+      on a rig (all six phrasings, the 397→411→397px slide, wrong-creds
+      submit refusal, external-login dismissal); check_name unit-tested;
+      405 tests green. BACKEND change → the fleet GUI restarts at merge.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

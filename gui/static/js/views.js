@@ -7,7 +7,7 @@
        → state                      (stores)
          → csel / modal / composer / picker  (UI primitives)
            → sidebar                (below the page views)
-             → chat / details / media / search / members / forward / settings / wizard
+             → chat / details / media / search / members / forward / settings / wizard / auth
                → main               (router + boot; imports every view once)
 
    A module may import anything strictly below it; sideways or upward calls
@@ -21,4 +21,5 @@ export const EXPECTED = [
   "showAddMembers", "showSearchMembers",
   "renderSettings", "renderSetup", "refresh", "openMsgMenu",
   "exitGroup", "openForwardPicker", "exitSelect", "openKeyVerify",
+  "renderAuthPage", "closeAuthPage",
 ];

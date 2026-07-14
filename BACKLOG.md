@@ -539,10 +539,17 @@ keep the code organized and extensible (packaging comes later).
   ring; image thumbs/media tiles get a centered overlay ring;
   pointer-events off = double-click debounce; the "Opening…" toast
   retired). Live-verified: ring during flight, cleared at ~1s completion.
-- [ ] **V24 Real-time username checking at sign-in/create-account** — errors
-  render live below the username field as the user types; when an error
-  appears the password field animates DOWN to make room for the description.
-  → sign-in page round (with V34).
+- [x] **V24 Real-time username checking at sign-in/create-account** (R53) —
+  a client mirror of the accounts rules gives instant format/reserved
+  feedback; existence rides a debounced (300ms, stale-guarded) POST to the
+  NEW pre-auth `/api/mesh/check_name` (wraps `directory0.handle_taken` +
+  `valid_name` — the sessionless reader context.py built for exactly this
+  but never exposed). Phrasing is mode-aware: signup → "@x is already
+  taken"/format hint/"@x is reserved"; sign-in → "No account named @x on
+  this mesh yet" (an existing name stays silent). The error line is a 0fr
+  grid row that expands — the password field animates down and back.
+  Live-verified all six phrasings + the slide (field top 397→411→397px);
+  endpoint unit-tested (pre-auth, reserved, taken case-insensitive).
 - [x] **V25 Hot reload = the default for every page** (R51 pages + R52
   transcript) — Settings was
   mount-once (the poll loop repainted ONLY the chats page): it now runs a
@@ -613,10 +620,18 @@ keep the code organized and extensible (packaging comes later).
   DM/self → "chat"); details already did. Live-verified: group row
   "Archive group" → archived → header "Unarchive group"; DM row stays
   "Archive chat".
-- [ ] **V34 Sign-in/create-account = a dedicated full page** — remove the
-  sign-in card from the main app layout; a dedicated page (taking over the
-  R48 boot page) opens whenever signed out. First brick of the setup pages
-  (the same page serves setup later). → sign-in page round.
+- [x] **V34 Sign-in/create-account = a dedicated full page** (R53) — the
+  in-shell card left chat.js for `auth.js` (the 25th module): a full-page
+  overlay riding the R48 boot identity (glyph/title/E2EE note — the boot
+  cover fades onto it seamlessly), tabs for Sign in / Create account
+  (half-typed values survive the toggle), the D5 recovery-code modal moved
+  with it. Opens whenever signed out; dismissed by the page's own submit
+  AND by a session appearing externally (a new signed-out poll watcher —
+  it never re-renders the page itself, so typing is never clobbered; the
+  gap existed in the old card too). First brick of the setup pages.
+  Live-verified: signed-out boot lands on the page (focused username),
+  wrong-credentials submit surfaces the server refusal, external sign-in
+  dismisses to the app.
 
 ---
 
@@ -659,5 +674,5 @@ keep the code organized and extensible (packaging comes later).
 | reactions overhaul (R50, done) | V27, V28, V29 (+ rider V33) |
 | live updates everywhere (R51, done) | V32, V23, V25-pages |
 | hot transcript (R52, done) | V25-transcript (keyed row reuse, struct-rebuild scroll/caret keep) |
-| sign-in page (R53) | V34, V24 |
+| sign-in page (R53, done) | V34, V24 |
 | agent lifecycle + trust (R54) | V26, V31, V30 |

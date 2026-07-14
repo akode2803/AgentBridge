@@ -308,6 +308,62 @@ body { display: flex; flex-direction: column; }
   display: flex; gap: 6px; align-items: center;
 }
 
+/* ---- the signed-out page (R53/V34) ----------------------------------------
+   Sign-in / create-account as a dedicated full page riding the boot identity
+   (glyph/title/note classes above) — the boot cover fades onto it
+   seamlessly. The username error line (V24) is a 0fr grid row that expands,
+   easing the password field below it down. */
+#auth {
+  position: fixed; inset: 0; z-index: 150;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); overflow-y: auto;
+}
+.auth-inner {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 12px; padding: 30px 16px;
+}
+.auth-card {
+  width: min(360px, calc(100vw - 40px));
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow);
+  padding: 18px 20px 16px; margin-top: 10px;
+  display: flex; flex-direction: column;
+}
+.auth-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.auth-tabs button {
+  flex: 1; border: 1px solid var(--border); border-radius: 999px;
+  background: none; padding: 6px 0; font: inherit; font-size: 13px;
+  cursor: pointer; color: var(--text);
+}
+.auth-tabs button:hover { background: var(--hover); }
+.auth-tabs button.sel {
+  background: var(--accent-soft); border-color: var(--accent); font-weight: 600;
+}
+.auth-fld { display: block; margin-bottom: 12px; }
+.auth-fld span {
+  display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px;
+}
+.auth-fld input {
+  width: 100%; box-sizing: border-box; font: inherit; color: var(--text);
+  background: var(--bg-alt); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
+.auth-fld input:focus { outline: none; border-color: var(--accent); }
+/* the live error: grid row 0fr → 1fr, so the fields below animate down as
+   the description expands (and back up when it clears) */
+.auth-err {
+  display: grid; grid-template-rows: 0fr; opacity: 0; margin-top: -6px;
+  transition: grid-template-rows .22s ease, opacity .22s ease;
+}
+.auth-err.show { grid-template-rows: 1fr; opacity: 1; }
+.auth-err > div { overflow: hidden; min-height: 0; }
+.auth-err span {
+  display: block; font-size: 12px; color: #c0392b; padding: 2px 1px 10px;
+}
+[data-theme="dark"] .auth-err span { color: #e07b6d; }
+.auth-go { width: 100%; margin-top: 4px; }
+#auth .hint { margin: 12px 0 0; font-size: 11.5px; }
+
 /* first-boot sidebar skeleton: slim indeterminate bar + shimmer rows while
    the very first mesh state loads (cloud roots warm their mirror ~a second) */
 .side-skel { padding: 2px 4px; }
