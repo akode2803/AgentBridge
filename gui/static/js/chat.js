@@ -396,18 +396,18 @@ async function renderMeshChat(force) {
     const encRec = encPeer ? ms.users?.[encPeer] || {} : {};
     const notice = "Messages are end-to-end encrypted. No one outside this chat can read them.";
     if (encPeer && encRec.key_fp && !encRec.key_verified) {
-      parts.push(`<button class="info-pill enc-pill" data-verify="${esc(encPeer)}"
+      parts.push(["enc", `<button class="info-pill enc-pill" data-verify="${esc(encPeer)}"
         title="Verify @${esc(encPeer)}'s keys">${ICONS.key}<span>${notice}
-        <span class="enc-cta">Tap to verify @${esc(encPeer)}'s keys.</span></span></button>`);
+        <span class="enc-cta">Tap to verify @${esc(encPeer)}'s keys.</span></span></button>`]);
     } else {
-      parts.push(`<div class="info-pill enc-notice">${ICONS.key}<span>${notice}</span></div>`);
+      parts.push(["enc", `<div class="info-pill enc-notice">${ICONS.key}<span>${notice}</span></div>`]);
     }
   }
   for (let i = 0; i < data.messages.length; i++) {
     const msg = data.messages[i];
     const day = new Date(msg.ts).toDateString();
     if (day !== prevDay) {
-      parts.push(`<div class="day-sep">${esc(dayLabel(msg.ts))}</div>`);
+      parts.push(["d:" + day, `<div class="day-sep">${esc(dayLabel(msg.ts))}</div>`]);
       prevDay = day; prevFrom = null;
     }
     // event messages render as centered pills, phrased from msg.event (R46 —
@@ -415,7 +415,8 @@ async function renderMeshChat(force) {
     // synthetic duplicate); "" means this event says nothing to this viewer
     if (msg.kind === "info") {
       const txt = meshInfoText(msg, ms.user);
-      if (txt) parts.push(`<div class="info-pill">${esc(txt)}</div>`);
+      if (txt) parts.push(["m:" + (msg.id || "i" + i),
+        `<div class="info-pill">${esc(txt)}</div>`]);
       prevFrom = null;
       continue;
     }
@@ -431,7 +432,7 @@ async function renderMeshChat(force) {
         ? ' <span class="kind-tag">agent</span>' : "";
       const tombSender = !isDm && !msg.mine
         ? `<div class="sender">${esc(meshDn(msg.from))}${tombKindTag}</div>` : "";
-      parts.push(`
+      parts.push(["m:" + (msg.id || "i" + i), `
         <div class="msg ${msg.mine ? "mine" : ""} deleted" data-mid="${esc(msg.id || "")}">
           <span class="msg-check" aria-hidden="true">${ICONS.check}</span>
           <div class="bubble">
@@ -440,7 +441,7 @@ async function renderMeshChat(force) {
             <div class="msg-body tomb">${ICONS.banned}<span>${label}</span></div>
             <span class="meta"><span class="meta-time">${esc(timeOnly(msg.ts))}</span></span>
           </div>
-        </div>`);
+        </div>`]);
       prevFrom = null;
       continue;
     }
@@ -480,7 +481,7 @@ async function renderMeshChat(force) {
     // quick-react bar + the popup). has-rx pads the row so the overlay
     // never sits on the next bubble.
     const rxRow = rxBadge(msg, ms.user);
-    parts.push(`
+    parts.push(["m:" + (msg.id || "i" + i), `
       <div class="msg ${msg.mine ? "mine" : ""}${departed}${rxRow ? " has-rx" : ""}" data-mid="${esc(msg.id || "")}">
         <span class="msg-check" aria-hidden="true">${ICONS.check}</span>
         ${showSender ? `<span class="msg-avatar">${meshAvatarInner(msg.from)}</span>` : ""}
@@ -490,14 +491,14 @@ async function renderMeshChat(force) {
           ${msg.fwd ? `<div class="fwd-tag">${ICONS.forward} Forwarded from ${esc(meshDn(msg.fwd.from))}</div>` : ""}
           ${msg.reply_to && msg.reply_to.quote !== false ? replyQuote(msg.reply_to, isDm, ms) : ""}
           <div class="msg-body">${md(msg.body || "")}</div>${files}${rxRow}${metaRow}</div>
-      </div>`);
+      </div>`]);
   }
   // M11: DMing a deleted account — say so in the transcript (info text, at
   // the end); sends still post but will never show Delivered (no one fetches)
   if (isDm && meta.kind === "dm") {
     const dmPeer = (meta.members || []).find((u) => u !== ms.user);
     if (dmPeer && ms.users?.[dmPeer]?.active === false) {
-      parts.push('<div class="info-pill">This account was deleted</div>');
+      parts.push(["gone", '<div class="info-pill">This account was deleted</div>']);
     }
   }
   // live presence: agents working (dots + label + forming draft) and
@@ -511,7 +512,7 @@ async function renderMeshChat(force) {
     if (f.human) {
       // a human mid-composition: just the dots, nothing else
       if (f.age_s != null && f.age_s > 12) continue;
-      parts.push(`
+      parts.push(["feed:" + f.agent, `
         <div class="msg">
           ${feedHead(f.agent)}
           <div class="bubble typing">
@@ -519,7 +520,7 @@ async function renderMeshChat(force) {
             <div class="typing-row"><span class="tdot"></span><span class="tdot"></span>
               <span class="tdot"></span></div>
           </div>
-        </div>`);
+        </div>`]);
       continue;
     }
     // a feed silent for 10+ minutes is a ghost (worker crashed or ended
@@ -535,7 +536,7 @@ async function renderMeshChat(force) {
     let line = f.activity || (draft ? "Writing the reply" : "Working");
     if (stale) line += ` (no updates for ${Math.round(f.age_s / 60)} min)`;
     const isOwner = (ms.users?.[f.agent]?.owners || []).includes(ms.user);
-    parts.push(`
+    parts.push(["feed:" + f.agent, `
       <div class="msg feed-msg" data-feed-agent="${esc(f.agent)}"
            data-feed-steps="${esc(JSON.stringify(f.steps || []))}">
         ${feedHead(f.agent)}
@@ -547,11 +548,13 @@ async function renderMeshChat(force) {
             <span class="tdot"></span><span class="typing-label">${esc(line)}</span></div>
           ${draft ? `<div class="typing-draft">${md(draft)}<span class="caret">▍</span></div>` : ""}
         </div>
-      </div>`);
+      </div>`]);
   }
 
-  const bubbles = parts.join("") ||
-    `<div class="empty">No messages yet — say hello.</div>`;
+  // parts is (key, html) pairs since R52 — the key feeds the reconciler,
+  // the joined html still feeds the full rebuild path
+  const bubbles = parts.length ? parts.map((p) => p[1]).join("")
+    : `<div class="empty">No messages yet — say hello.</div>`;
 
   // partial path: same chat, composer already alive — refresh only the
   // transcript so the text box (draft, caret, focus) is never disturbed
@@ -574,14 +577,19 @@ async function renderMeshChat(force) {
     // pre-swap: old reaction signatures (tr._msgs is still the previous
     // render's map) so a freshly landed reaction pops in (R50)
     const oldRx = captureRxSigs(tr);
-    tr.innerHTML = bubbles;
+    // R52: keyed reconcile instead of an innerHTML rebuild — unchanged rows
+    // keep their DOM nodes (no image re-decode, clamp state persists);
+    // only the fresh rows need binding + clamping below
+    const freshEls = reconcileRows(tr,
+      parts.length ? parts : [["empty", bubbles]]);
     bindTranscript(tr, chatId, data, menuCtx);
     animateRxChanges(tr, data.messages, oldRx);
-    bindOpenFile(tr, chatId, ".mesh-att");
+    freshEls.forEach((el) => bindOpenFile(el, chatId, ".mesh-att"));
     // select mode survives the poll swap: .selecting rides on #content, so
     // only the per-row checkmarks (and stale ids) need reconciling
     if (Mesh.select.on) applySelectAfterRender(chatId);
-    clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
+    Mesh.msgExpand = Mesh.msgExpand || {};
+    freshEls.forEach((el) => clampLong(el, Mesh.msgExpand));
     // keep the ⋮-menu's Clear item current without a full rebuild: it greys out
     // the moment the transcript empties and re-enables the moment the first
     // message lands (was stale until the chat was reopened)
@@ -601,6 +609,21 @@ async function renderMeshChat(force) {
     return;
   }
   Mesh.structKey = structKey;
+  // R52: a structural change on the SAME open chat (rename, membership,
+  // archive flip) still takes the full rebuild — but it must not read as a
+  // reload: keep the reading position and the composer's focus/caret
+  // instead of snapping to the bottom (the draft itself rides Mesh.drafts)
+  const prevTr = $("#transcript");
+  const sameChat = !!prevTr && Mesh.renderedChat === chatId;
+  const keep = sameChat ? (() => {
+    const box = $("#mesh-body");
+    const typing = box && document.activeElement === box;
+    return {
+      top: prevTr.scrollTop,
+      nearBottom: prevTr.scrollHeight - prevTr.scrollTop - prevTr.clientHeight < 120,
+      caret: typing ? [box.selectionStart, box.selectionEnd] : null,
+    };
+  })() : null;
   // a full rebuild throws away the composer/pane — any select mode goes with
   // it (structural change or a chat switch, both rare mid-selection)
   clearSelectMode();
@@ -782,15 +805,27 @@ async function renderMeshChat(force) {
 
   const tr = $("#transcript");
   bindTranscript(tr, chatId, data, menuCtx);
+  // seed the reconciler: a fresh paint's children correspond 1:1 to the
+  // rows, so the NEXT partial pass can already reuse them (R52)
+  if (parts.length && tr.children.length === parts.length) {
+    tr._rows = new Map(parts.map(([k, h], i) => [k, { html: h, el: tr.children[i] }]));
+  }
   clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
+  else if (keep && !keep.nearBottom) tr.scrollTop = keep.top;
   else tr.scrollTop = tr.scrollHeight;
+  if (keep?.caret) {
+    const box = $("#mesh-body");
+    if (box) { box.focus(); box.setSelectionRange(keep.caret[0], keep.caret[1]); }
+  }
   if (hadNew) {
     if (document.hasFocus()) markReadNow(chatId);
     else Mesh.pendingRead = chatId;     // settle on the focus listener
   }
-  // opening a chat animates the transcript in
-  tr.classList.add("chat-in");
+  // opening a chat animates the transcript in — an in-place structural
+  // update (rename etc.) must not re-play the entrance (R52)
+  if (!sameChat) tr.classList.add("chat-in");
+  Mesh.renderedChat = chatId;
 }
 V.renderMeshChat = renderMeshChat;
 
@@ -1016,6 +1051,44 @@ function syncDmHeaderPresence() {
 }
 
 // one delegated listener per transcript element (full renders create a new
+// R52: keyed transcript reconcile. The partial path used to rebuild
+// #transcript.innerHTML wholesale — every repaint re-created every node
+// (image re-decode flash, full re-clamp, re-binds). Rows are keyed
+// (message id / day / pill / feed agent) and carry their html as the
+// change signature: unchanged rows KEEP their DOM nodes, changed/new rows
+// are rebuilt, order is enforced with a cursor walk (moves, never clones),
+// leftovers drop. Returns the freshly created elements so the caller
+// binds/clamps only those.
+function reconcileRows(tr, rows) {
+  const old = tr._rows instanceof Map ? tr._rows : new Map();
+  const next = new Map();
+  const freshEls = [];
+  for (const [key, html] of rows) {
+    const prev = old.get(key);
+    if (prev && prev.html === html && prev.el.parentElement === tr) {
+      next.set(key, prev);
+    } else {
+      const t = document.createElement("template");
+      t.innerHTML = html;
+      const el = t.content.firstElementChild;
+      if (!el) continue;
+      next.set(key, { html, el });
+      freshEls.push(el);
+    }
+  }
+  const keep = new Set([...next.values()].map((v) => v.el));
+  for (const el of [...tr.children]) if (!keep.has(el)) el.remove();
+  let cursor = tr.firstElementChild;
+  for (const [key] of rows) {
+    const el = next.get(key)?.el;
+    if (!el) continue;
+    if (el === cursor) { cursor = cursor.nextElementSibling; continue; }
+    tr.insertBefore(el, cursor);
+  }
+  tr._rows = next;
+  return freshEls;
+}
+
 // element; partial renders only swap innerHTML, so per-bubble listeners
 // would either vanish or stack — delegation dodges both)
 function bindTranscript(tr, chatId, data, ctx) {

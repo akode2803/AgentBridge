@@ -1410,6 +1410,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       the two guard freezes and the pre-fix behaviour reproduced on the
       stale module cache first (badge stuck + cursor advanced unfocused).
 
+- [x] **R52 — hot transcript. DONE 2026-07-14 (v0.24.127).** V25's
+      transcript leg. The partial path rebuilt `#transcript.innerHTML`
+      wholesale on every content change — every node re-created (image
+      re-decode flash, full re-clamp, re-binds). Now `parts` carries
+      (key, html) pairs (message id / day / enc/gone pill / feed agent)
+      and `reconcileRows` diffs them against the previous render: an
+      unchanged row KEEPS its DOM node, a changed row rebuilds from its
+      html (the string doubles as the change signature — receipts, edits,
+      reactions, sender grouping are all IN it), order rides a cursor
+      walk (insertBefore moves, never clones), leftovers drop, and the
+      full paint seeds the map 1:1 so the first repaint already reuses.
+      bindOpenFile gained a per-element bound-guard (reused chips must
+      not stack listeners); clamp runs only on fresh rows (a reused row
+      keeps its clamp — cheaper AND steadier than the old re-clamp-all).
+      Structural rebuilds on the SAME chat (rename/membership) keep the
+      reading position + composer focus/caret (`Mesh.renderedChat` gates
+      it; drafts already rode Mesh.drafts) and skip the chat-in entrance
+      replay. Live-verified on a rig: 7/7 rows reused on a new post
+      (stamped node identity, image survived), a reaction rebuilt exactly
+      its row + popped + re-clamped, read-more worked + survived, rename
+      held scroll flat at 30px with draft/caret intact, tombstone swapped
+      in place. Zero console errors; 404 tests green. GOTCHA (3rd time
+      this session): the browser pane's ES-module cache serves PRE-EDIT
+      modules after a plain navigate — `location.reload(true)` before
+      ANY verification pass.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

@@ -543,8 +543,8 @@ keep the code organized and extensible (packaging comes later).
   render live below the username field as the user types; when an error
   appears the password field animates DOWN to make room for the description.
   → sign-in page round (with V34).
-- [~] **V25 Hot reload = the default for every page** (R51 shipped the page
-  legs; the transcript leg = the "hot transcript" round) — Settings was
+- [x] **V25 Hot reload = the default for every page** (R51 pages + R52
+  transcript) — Settings was
   mount-once (the poll loop repainted ONLY the chats page): it now runs a
   dedicated 4s poller (askPoll pattern) that re-renders WHEN the slices it
   displays changed (me + my agents + per-agent harness docs; presence
@@ -555,10 +555,20 @@ keep the code organized and extensible (packaging comes later).
   Live-verified: external status flip repainted the agents card in ≤4s,
   focused-input freeze held 10s with the draft intact, blur caught up in
   2.4s, no repaint loop; picker rename flowed in live, typed query froze
-  it, clearing caught up. **OPEN: the transcript's partial path still
-  rebuilds #transcript.innerHTML wholesale (image flash) and a structural
-  change (rename/members) rebuilds all of #content resetting scroll —
-  keyed per-row reuse + patch-in-place header = the hot-transcript round.**
+  it, clearing caught up. **The transcript leg closed in R52:** the
+  partial path now RECONCILES keyed rows (message id / day / pill / feed)
+  with the html string as the change signature — unchanged rows keep
+  their DOM nodes (image nodes survive untouched, clamp state persists,
+  binds don't stack), changed rows rebuild surgically, order enforced by
+  a cursor walk; the full paint seeds the map so the very first repaint
+  already reuses. A structural change on the SAME chat (rename etc.)
+  still takes the full rebuild but no longer reads as a reload: reading
+  position, composer focus + caret survive, and the entrance animation
+  doesn't re-play. Live-verified on a rig: new post = 7/7 rows reused +
+  only the new bubble animates; a reaction rebuilt exactly its row (badge
+  popped, re-clamped correctly); read-more works and survives; rename
+  kept scroll flat with draft/caret intact; delete-for-everyone swapped
+  just the tombstone. Zero console errors.
 - [ ] **V26 Start a stopped agent** — GUI option to start an agent that is
   stopped (runner not running). → agent lifecycle round.
 - [x] **V27 Reaction popup, tabbed by reaction** (R50) — clicking the badge
@@ -648,6 +658,6 @@ keep the code organized and extensible (packaging comes later).
 | parity sweep + stress (R49, done) | Q34, M10 verify→fix, V22, settings-exposure fix, full-app regression |
 | reactions overhaul (R50, done) | V27, V28, V29 (+ rider V33) |
 | live updates everywhere (R51, done) | V32, V23, V25-pages |
-| hot transcript (R52) | V25-transcript (keyed row reuse, header patch-in-place) |
+| hot transcript (R52, done) | V25-transcript (keyed row reuse, struct-rebuild scroll/caret keep) |
 | sign-in page (R53) | V34, V24 |
 | agent lifecycle + trust (R54) | V26, V31, V30 |

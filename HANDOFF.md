@@ -17,8 +17,12 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.126**. Recent rounds (full
+  `gui/__init__.py` in R26). Currently **v0.24.127**. Recent rounds (full
   detail per round in REWRITE_PLAN.md; item-level status in BACKLOG.md):
+  R52 hot transcript (the partial path reconciles KEYED rows instead of
+  rebuilding innerHTML — unchanged bubbles keep their DOM nodes, images
+  never re-decode, clamps persist; structural rebuilds keep scroll +
+  composer caret);
   R51 live updates (focus-gated mark-read + instant badge settle — no more
   unread counter mid-conversation; Settings runs a guarded 4s live-sync
   poller instead of mount-once; the directory pickers repaint per tick;

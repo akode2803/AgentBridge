@@ -22,6 +22,10 @@ window.openTarget = openTarget;  // inline onclick= handlers in templates
 // shared binder: any element carrying data-id (blob id) opens its chat file
 export function bindOpenFile(scope, chatId, selector) {
   scope.querySelectorAll(selector).forEach((b) => {
+    // R52: the transcript now REUSES row nodes across repaints — a second
+    // bind on a surviving chip must not stack a second listener
+    if (b._openBound) return;
+    b._openBound = true;
     b.addEventListener("click", async () => {
       // fetch + decrypt + OS handoff all happen server-side, so no byte
       // stream reaches this window to meter — an indeterminate ring on the
