@@ -738,10 +738,15 @@ keep the code organized and extensible (packaging comes later).
   no-ops when already up; only its own tab toggle forces). Live-verified:
   sign-out → no stale flash, auth page focused; `#/setup` → chats, no
   wizard DOM; external curl sign-in still dismisses the page.
-- [ ] **V41 Question: does delete-for-everyone free a file's server
-  space?** (Aryan) — answer honestly from the code (attachment blob
-  lifecycle vs redaction tombstones); deliverable = a definitive answer
-  (+ doc note / follow-up item if the answer is no).
+- [x] **V41 Question: does delete-for-everyone free a file's server
+  space?** (answered 2026-07-14) — **NO.** A redaction is a signed
+  tombstone (`chats/<id>/overlays/redactions/<msg_id>.json`): readers
+  can never see the file again and the server refuses to serve it, but
+  the sealed blob stays at `chats/<id>/files/<id>` (Supabase `ab-mesh`
+  Storage / the synced folder) and the sealed envelope stays in the
+  append-only log. Even delete-chat and delete-account are soft — the
+  transport-level purge (`tx.delete_chat`) exists but nothing calls it.
+  Space is reclaimed only by the future storage janitor (item in §C).
 - [x] **V42 File-open spinner misaligned** (R57) — two real bugs: the
   chip ring was FLOW content in the icon's grid (auto-placed into a
   second implicit row, below the hidden svg), and the image/tile ring's
@@ -756,18 +761,46 @@ keep the code organized and extensible (packaging comes later).
   contenteditable, modals, menus, or Ctrl/Alt/Meta shortcuts.
   Live-verified with real keystrokes: focus on `<body>`, typed "hola" →
   all four characters landed in the composer.
-- [ ] **V44 Notification options parity (WhatsApp screenshots)** (Aryan) —
-  add the relevant options: per-category Messages / Groups settings
-  (show notifications, show reaction notifications, play sound), global
-  Show previews. Ship only what actually works (standing rule: an
-  unavailable feature never surfaces).
-- [ ] **V45 Connections settings page → "About" + updates** (Aryan) —
-  rename the connections settings page to About; add an auto-update
-  checkbox + a "Check for updates" button that converts to "Download now"
-  when an update exists (GitHub releases or app-to-app communication).
-- [ ] **V46 Deliverable: GUI-only surface list** (Aryan) — a complete list
-  of every info/option available via the GUI but NOT to an agent; should
-  ideally be very few. Produce + hand over the inventory.
+- [x] **V44 Notification options parity (WhatsApp screenshots)** (R58) —
+  shipped everything REAL: per-category cards (Direct messages / Groups,
+  each with Show notifications + Play sound — `silent:` on the
+  Notification suppresses the OS chime), the existing global Show
+  previews, and "Play sound for outgoing messages" (a soft WebAudio
+  two-tone chirp, zero assets/deps, default OFF). The server now stamps
+  `chat_kind` on every notification (Notifier → SSE lane → notify.js;
+  CommandHook gains AB_CHAT_KIND). Being added to a chat always pings.
+  ⚠ "Show reaction notifications" from the screenshot is deliberately
+  NOT shipped: reactions are overlay docs that never touch the event
+  bus, so the notification doesn't exist yet — surfacing a dead toggle
+  would break the standing rule. Logged as its own item (§C).
+  Live-verified: four cards render, toggles persist per-device, DM-off
+  gates correctly, send path clean with the blip pref on.
+- [x] **V45 Connections settings page → "About" + updates** (R58) — the
+  Connection page is now **About** (sidebar + h1; connection rows,
+  version and Performance stay on it) with an Updates card: "Check for
+  updates" → three honest states (up to date / "Version X is available"
+  with the button converted to **Download now** / "Couldn't reach the
+  update service"), plus a "Check automatically" toggle (default on;
+  once a day at boot, toast on a hit — checking never installs). Source
+  = GitHub releases via a new stdlib endpoint `/api/update_check`
+  (api_updates.py; numeric version compare, 6s timeout, tokenless).
+  Until the packaging session publishes releases the check honestly
+  reports unreachable (repo private, no releases). Live-verified on a
+  rig incl. the offline state; the newer→Download path is unit-tested.
+  RIDER FIX: R56's guard removal had dropped renderSettings' `const s =
+  App.state` — the whole Connection/About section had been throwing
+  `s is not defined` (silent async rejection, stale page stays) since
+  v0.24.131. Caught by an unhandledrejection hook during live verify
+  (the R49 lesson paying rent); restored.
+- [x] **V46 Deliverable: GUI-only surface list** (delivered 2026-07-14) —
+  the full inventory lives at **docs/GUI_AGENT_PARITY.md**: (a) the
+  deliberately human-only set (account/agent governance, key ceremony,
+  privacy matrix, notification prefs), (b) the REAL parity gaps (group
+  management as a member, mute/archive/pin chat, read receipts on own
+  messages, delete-for-me/undelete), (c) informational gaps (agents can
+  react but can't SEE reactions; no unread counts — tooldocs even
+  promises them, a doc/impl mismatch; no admins/permissions in the
+  roster context). Highest-value closes queued at the doc's end.
 - [x] **V47 Inline edit pencils + tick/cross** (R57) — the handle/about
   value lines are flex now (pencil rides the value's own line, text
   ellipsizes), and all three editors (display name, username, about)
@@ -819,6 +852,12 @@ keep the code organized and extensible (packaging comes later).
   still fetch at the transport layer. App-level reads are membership-
   gated, but E2EE should not lean on that. Rotate on leave too (+ the
   delete_account loop). Hardening-round item.
+- **Reaction notifications** (V44 remainder, 2026-07-14): the WhatsApp
+  "Show reaction notifications" toggle needs a mechanism first —
+  reactions are overlay docs and never touch the event bus, so nothing
+  can notify on them. Build: sync-layer overlay diffing → a REACTION bus
+  event (chat, msg_id, by, emoji) → Notifier rule (reaction to MY
+  message, not from me, unmuted) → SSE lane → the per-category toggles.
 - **Storage janitor** (V41 finding, 2026-07-14): delete-for-everyone,
   delete-chat and delete-account are all tombstone-only — blobs + sealed
   envelopes stay on the server forever (`tx.delete_chat` exists but
@@ -856,5 +895,5 @@ keep the code organized and extensible (packaging comes later).
 | harness bug bash (R55, done) | V35 (claude/claudemcp loop), V36 (coco file) |
 | account + agent lifecycle fixes (R56, done) | V49, V39, V40, V37 |
 | GUI polish (R57, done) | V38, V42, V43, V47, V48 |
-| notifications + about/updates (R58) | V44, V45 |
-| deliverables (with the rounds) | V41 (answer), V46 (parity list) |
+| notifications + about/updates (R58, done) | V44, V45 |
+| deliverables (delivered) | V41 (answer), V46 (parity list) |

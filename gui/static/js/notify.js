@@ -9,12 +9,49 @@
 
 import { Mesh, meshDn, meshMuteActive } from "./state.js";
 
-export const notifyPrefs = {
-  get enabled() { return localStorage.getItem("notifyOn") === "1"; },
-  set enabled(v) { localStorage.setItem("notifyOn", v ? "1" : "0"); },
-  get preview() { return localStorage.getItem("notifyPreview") !== "0"; },
-  set preview(v) { localStorage.setItem("notifyPreview", v ? "1" : "0"); },
-};
+// V44 (R58): WhatsApp-style per-category prefs — Direct messages and Groups
+// each get show + sound; previews stay global; the outgoing-send blip is
+// opt-in. All per-device (localStorage), defaults chosen so behaviour is
+// unchanged until someone flips a switch.
+const flag = (key, dflt) => ({
+  get() { const v = localStorage.getItem(key); return v === null ? dflt : v === "1"; },
+  set(x) { localStorage.setItem(key, x ? "1" : "0"); },
+});
+export const notifyPrefs = Object.defineProperties({}, {
+  enabled: { get() { return localStorage.getItem("notifyOn") === "1"; },
+             set(v) { localStorage.setItem("notifyOn", v ? "1" : "0"); } },
+  preview: { get() { return localStorage.getItem("notifyPreview") !== "0"; },
+             set(v) { localStorage.setItem("notifyPreview", v ? "1" : "0"); } },
+  dmOn: flag("notifyDm", true),
+  dmSound: flag("notifyDmSound", true),
+  grpOn: flag("notifyGrp", true),
+  grpSound: flag("notifyGrpSound", true),
+  outSound: flag("notifyOutSound", false),
+});
+
+// the outgoing blip (V44): a soft two-tone WebAudio chirp — no asset, no dep.
+// Called by the composer on a successful send; pref-gated here so callers
+// stay dumb. The context is created lazily (autoplay policy needs a gesture,
+// and a send IS one).
+let audioCtx = null;
+export function playSendBlip() {
+  if (!notifyPrefs.outSound) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.setValueAtTime(1175, t + 0.06);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+  } catch { /* no audio device / policy refusal — a blip is never critical */ }
+}
 
 // per-chat "new since I last looked" — the Notification `tag` makes the OS
 // REPLACE a chat's toast instead of stacking fifty of them, so the running
@@ -37,6 +74,10 @@ export function handleNotifyFrame(frame) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   // looking right at it = read, not news (the server can't see focus)
   if (document.hasFocus() && frame.chat_id === Mesh.chatId) return;
+  // V44: per-category gates — groups vs everything 1:1 (DMs, self);
+  // being ADDED to a chat always pings (you had no say in its category yet)
+  const grp = n.chat_kind === "group";
+  if (n.kind !== "added_to_chat" && !(grp ? notifyPrefs.grpOn : notifyPrefs.dmOn)) return;
   const count = (counts[frame.chat_id] = (counts[frame.chat_id] || 0) + 1);
   // a DM's server-side chat name can be empty — fall back to the sender
   const title = (n.chat_name || meshDn(n.from) || "AgentBridge")
@@ -44,7 +85,11 @@ export function handleNotifyFrame(frame) {
   const body = n.kind === "added_to_chat" ? n.preview
     : notifyPrefs.preview ? `${meshDn(n.from)}: ${n.preview}` : "New message";
   try {
-    const toast = new Notification(title, { body, tag: `ab-${frame.chat_id}` });
+    const toast = new Notification(title, {
+      body, tag: `ab-${frame.chat_id}`,
+      // V44: per-category sound — silent:true suppresses the OS chime
+      silent: !(grp ? notifyPrefs.grpSound : notifyPrefs.dmSound),
+    });
     toast.onclick = () => {
       window.focus();
       location.hash = `#/chats/${frame.chat_id}`;

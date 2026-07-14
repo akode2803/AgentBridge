@@ -27,6 +27,7 @@ from . import (
     api_membership,
     api_messages,
     api_profile,
+    api_updates,
 )
 from .context import GuiApp
 from .routing import Request, Response, dispatch
@@ -59,7 +60,7 @@ GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
 RAW_ROUTES: dict = {}
 for mod in (api_auth, api_chats, api_messages, api_membership,
-            api_profile, api_agents, api_files):
+            api_profile, api_agents, api_files, api_updates):
     GET_ROUTES.update(mod.GET)
     POST_ROUTES.update(mod.POST)
     RAW_ROUTES.update(getattr(mod, "RAW_POST", {}))

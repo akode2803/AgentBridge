@@ -209,6 +209,17 @@ window.addEventListener("hashchange", route);
   App.state = await api("/api/state");
   if (!location.hash) location.hash = "#/chats";
   route();
+  // V45: the daily auto update check (About page pref, default on). Signed
+  // out or offline it fails silently; a hit points at Settings → About.
+  if (localStorage.getItem("updAuto") !== "0"
+      && Date.now() - (+localStorage.getItem("updLastCheck") || 0) > 86400e3) {
+    localStorage.setItem("updLastCheck", String(Date.now()));
+    api("/api/update_check").then((r) => {
+      if (r && r.ok && r.newer) {
+        toast(`AgentBridge ${r.latest} is available — Settings → About`);
+      }
+    }).catch(() => {});
+  }
   // R48: drop the full-page boot cover once the FIRST real view painted —
   // Mesh.state present (sidebar + chat/auth rendered) or a non-chats page
   // routed. Safety cap: an error view is better shown than hidden.

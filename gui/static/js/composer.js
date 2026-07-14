@@ -8,6 +8,7 @@ import { api } from "./api.js";
 import { stripMd } from "./markdown.js";
 import { Mesh, meshDn, meshDraft, saveDraft } from "./state.js";
 import { alertModal } from "./modal.js";
+import { playSendBlip } from "./notify.js";
 import { V } from "./views.js";
 
 // the connector's upload ceiling, human-readable ("512 MB" / "1 GB")
@@ -301,6 +302,7 @@ export function initComposer(chatId, members) {
     });
     $("#mesh-send-btn").disabled = false;
     if (r.error) { toast(r.error, true); return; }
+    playSendBlip();   // V44: the outgoing chirp (pref-gated, default off)
     // MUTATE the draft — replacing the object orphans this closure's
     // reference, so later attaches update a ghost while sends keep
     // posting the already-consumed staged path (the "attach errors

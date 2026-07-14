@@ -43,6 +43,7 @@ class Notification:
     from_: str
     preview: str
     ns: int
+    chat_kind: str = ""   # "dm" | "group" | "self" — per-category client prefs (V44)
 
 
 class Notifier:
@@ -83,6 +84,7 @@ class Notifier:
                 chat_name=snap.name if snap else "",
                 from_=event.data.get("by", ""),
                 preview="You were added to this chat", ns=event.ns,
+                chat_kind=snap.kind.value if snap else "",
             )
         if event.type != eventbus.MESSAGE:
             return None
@@ -103,6 +105,7 @@ class Notifier:
         return Notification(
             kind="message", chat_id=event.chat_id,
             chat_name=snap.name, from_=env.from_, preview=preview, ns=env.ns,
+            chat_kind=snap.kind.value,
         )
 
     def _snap(self, chat_id: str):
@@ -165,6 +168,7 @@ class CommandHook:
             "AB_KIND": note.kind,
             "AB_CHAT": note.chat_id,
             "AB_CHAT_NAME": note.chat_name,
+            "AB_CHAT_KIND": note.chat_kind,
             "AB_FROM": note.from_,
             "AB_PREVIEW": note.preview,
             "AB_NS": str(note.ns),

@@ -122,6 +122,7 @@ function startSettingsPoll() {
 // ----------------------------------------------------------------------------
 
 async function renderSettings() {
+  const s = App.state;   // the About section renders connection/version from it
   // render from the cached mesh state so the swap is synchronous with the
   // route change — awaiting a fresh fetch here left the previous chat on
   // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
@@ -313,6 +314,52 @@ async function renderSettings() {
         <p class="hint" style="margin-bottom:0">This device only. Muted chats
         stay silent — mute any chat from its ⋮ menu — and anything you've
         already read never pings. Clicking an alert jumps to the chat.</p>
+      </div>
+      <div class="card">
+        <h2>Direct messages</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="nt-dm" ${notifyPrefs.dmOn ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show notifications</b></span>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="switch">
+            <input type="checkbox" id="nt-dm-sound" ${notifyPrefs.dmSound ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Play sound</b></span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Groups</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="nt-grp" ${notifyPrefs.grpOn ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show notifications</b></span>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="switch">
+            <input type="checkbox" id="nt-grp-sound" ${notifyPrefs.grpSound ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Play sound</b></span>
+        </div>
+        <p class="hint" style="margin-bottom:0">Being added to a chat always
+        notifies — you weren't in it to mute it yet.</p>
+      </div>
+      <div class="card">
+        <h2>Sending</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="nt-out-sound" ${notifyPrefs.outSound ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Play sound for outgoing messages</b> — a soft chirp when a message sends</span>
+        </div>
       </div>`;
   } else if (section === "agents") {
     const mine = Object.values(ms.users)
@@ -515,7 +562,7 @@ async function renderSettings() {
     // path; a cloud root shows the spec — there is no folder to open
     const cloud = s.connection && s.connection.scheme !== "folder";
     const root = s.connection ? s.connection.root : s.shared_dir;
-    html = `${back}<h1>Connection</h1>
+    html = `${back}<h1>About</h1>
       <div class="card">
         <dl class="kv">
           ${cloud
@@ -528,6 +575,23 @@ async function renderSettings() {
         <div class="row" style="margin-top:10px">
           <button onclick="openTarget('home')">Open config folder</button>
         </div>
+      </div>
+      <div class="card">
+        <h2>Updates</h2>
+        <div class="row">
+          <button class="primary" id="upd-check">Check for updates</button>
+          <span class="hint" id="upd-note" style="margin:0"></span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="switch">
+            <input type="checkbox" id="upd-auto" ${localStorage.getItem("updAuto") !== "0" ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Check automatically</b> — once a day, when the app opens</span>
+        </div>
+        <p class="hint" style="margin-bottom:0">Updates come from the project's
+        GitHub releases. Checking never installs anything — a found update
+        turns the button into a download.</p>
       </div>
       <div class="card">
         <h2>Performance</h2>
@@ -588,6 +652,15 @@ async function renderSettings() {
   if (ntPreview) ntPreview.addEventListener("change", (e) => {
     notifyPrefs.preview = e.target.checked;
   });
+  // V44: the per-category + outgoing-sound switches, one wiring shape
+  [["nt-dm", "dmOn"], ["nt-dm-sound", "dmSound"], ["nt-grp", "grpOn"],
+   ["nt-grp-sound", "grpSound"], ["nt-out-sound", "outSound"]]
+    .forEach(([id, key]) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("change", (e) => {
+        notifyPrefs[key] = e.target.checked;
+      });
+    });
   const logout = $("#st-logout");
   if (logout) logout.addEventListener("click", async () => {
     await api("/api/mesh/logout", {});
@@ -648,6 +721,35 @@ async function renderSettings() {
   if (shared2) shared2.addEventListener("click", (e) => {
     e.preventDefault(); window.openTarget("shared");
   });
+  // V45: the update check — one button, three honest states (up to date /
+  // update available -> Download now / couldn't check). Never installs.
+  const updBtn = $("#upd-check");
+  if (updBtn) {
+    const note = $("#upd-note");
+    let dlUrl = "";
+    updBtn.addEventListener("click", async () => {
+      if (dlUrl) { window.open(dlUrl, "_blank"); return; }
+      updBtn.disabled = true;
+      note.textContent = "Checking…";
+      const r = await api("/api/update_check");
+      updBtn.disabled = false;
+      if (!r || r.error || !r.ok) {
+        note.textContent = (r && r.note) || "Couldn't check right now";
+        return;
+      }
+      if (r.newer && r.url) {
+        dlUrl = r.url;
+        updBtn.textContent = "Download now";
+        note.textContent = `Version ${r.latest} is available — you're on v${r.current}`;
+      } else {
+        note.textContent = `You're on the latest version (v${r.current})`;
+      }
+    });
+    const auto = $("#upd-auto");
+    if (auto) auto.addEventListener("change", (e) => {
+      localStorage.setItem("updAuto", e.target.checked ? "1" : "0");
+    });
+  }
   const pollSlot = $("#poll-slot");
   if (pollSlot) pollSlot.appendChild(csel({
     options: [

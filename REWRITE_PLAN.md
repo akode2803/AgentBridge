@@ -1541,6 +1541,25 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       persistence for V48). Browser-pane module cache bit a 4th time —
       the first V38 pass tested STALE code; hard reload before every
       pass stays the law.
+- [x] **R58 — notifications + About/updates. DONE 2026-07-14
+      (v0.24.133).** BACKLOG V44 + V45. **V44:** per-category
+      notification cards (Direct messages / Groups × show + sound via
+      Notification `silent:`), previews stay global, outgoing-send
+      chirp (WebAudio, zero deps, default off); the server stamps
+      `chat_kind` on every notification (Notifier → SSE → notify.js;
+      CommandHook AB_CHAT_KIND). Reaction notifications deliberately
+      deferred (reactions never touch the bus — mechanism logged in
+      BACKLOG §C; no dead toggles). **V45:** Connection → **About**;
+      Updates card ("Check for updates" → up-to-date / Download-now /
+      couldn't-check, auto-check daily toggle, toast on a hit) backed by
+      the new stdlib `/api/update_check` (GitHub releases, numeric
+      compare, tokenless — honest unreachable until packaging publishes
+      releases). RIDER FIX: R56 had dropped renderSettings'
+      `const s = App.state` — the whole Connection/About section threw
+      `s is not defined` (silent async rejection) since v0.24.131;
+      caught live by an unhandledrejection hook, restored. 418 tests,
+      24/24 modules; rig-verified (cards, per-device persistence,
+      About states, clean send with the blip pref on).
 
 | Backlog item (source) | Covered in |
 |---|---|

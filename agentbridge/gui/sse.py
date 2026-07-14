@@ -42,6 +42,7 @@ def frame(ev: Event, notifier: Notifier | None = None) -> dict:
         if note is not None:
             out["notify"] = {
                 "kind": note.kind, "chat_name": note.chat_name,
+                "chat_kind": note.chat_kind,
                 "from": note.from_, "preview": note.preview, "ns": note.ns,
             }
     return out
