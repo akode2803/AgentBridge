@@ -639,7 +639,8 @@ async function renderSettings() {
         const el = document.querySelector(`.ag-aux-web[data-agent="${agent}"]`);
         if (el) el.disabled = !(fam && fam.aux_web);
       };
-      mine.forEach((a) => syncAuxWeb(a.username));
+      document.querySelectorAll(".ag-aux-web").forEach(
+        (el) => syncAuxWeb(el.dataset.agent));
       // the effort list follows the MODEL pick (Q13): remounted whenever the
       // family or the current model changes
       const refreshEfforts = (agent, fam = famFor(agent)) => {
