@@ -531,18 +531,34 @@ list, plan and then start"). Standing theme for this arc: UI polish + verify
 the frontend↔backend connectors after the heavy backend work; never hurry;
 keep the code organized and extensible (packaging comes later).
 
-- [ ] **V23 File-open progress indicator** — a progress circle while an
-  attachment opens. Aryan: "if checking download status is not possible, let
-  this remain as it is" — determinate if the transport exposes progress,
-  else an indeterminate spinner on the chip, else drop. → file/uX riders.
+- [x] **V23 File-open progress indicator** (R51) — determinate progress is
+  INFEASIBLE by design: open_file fetches + decrypts + caches server-side
+  and hands the file to the OS — no byte stream ever reaches the browser
+  to meter (Aryan pre-approved degrading). The chip now shows an honest
+  indeterminate ring while the call is in flight (ext icon swaps for the
+  ring; image thumbs/media tiles get a centered overlay ring;
+  pointer-events off = double-click debounce; the "Opening…" toast
+  retired). Live-verified: ring during flight, cleared at ~1s completion.
 - [ ] **V24 Real-time username checking at sign-in/create-account** — errors
   render live below the username field as the user types; when an error
   appears the password field animates DOWN to make room for the description.
   → sign-in page round (with V34).
-- [ ] **V25 Hot reload = the default for every page** — the agents page (and
-  others) only update when something forces a repaint; every view should
-  patch itself live from arriving state, chat windows included — partial
-  in-place patches, never a full reload. → live-updates round.
+- [~] **V25 Hot reload = the default for every page** (R51 shipped the page
+  legs; the transcript leg = the "hot transcript" round) — Settings was
+  mount-once (the poll loop repainted ONLY the chats page): it now runs a
+  dedicated 4s poller (askPoll pattern) that re-renders WHEN the slices it
+  displays changed (me + my agents + per-agent harness docs; presence
+  excluded on purpose) and NEVER mid-interaction — open dropdown/menu/
+  modal or a focused text field skips the pass, scroll survives. The
+  new-chat/new-group pickers repaint per poll tick too (guard = a query
+  in progress, not focus — the box sits auto-focused; focus restored).
+  Live-verified: external status flip repainted the agents card in ≤4s,
+  focused-input freeze held 10s with the draft intact, blur caught up in
+  2.4s, no repaint loop; picker rename flowed in live, typed query froze
+  it, clearing caught up. **OPEN: the transcript's partial path still
+  rebuilds #transcript.innerHTML wholesale (image flash) and a structural
+  change (rename/members) rebuilds all of #content resetting scroll —
+  keyed per-row reuse + patch-in-place header = the hot-transcript round.**
 - [ ] **V26 Start a stopped agent** — GUI option to start an agent that is
   stopped (runner not running). → agent lifecycle round.
 - [x] **V27 Reaction popup, tabbed by reaction** (R50) — clicking the badge
@@ -571,10 +587,17 @@ keep the code organized and extensible (packaging comes later).
   signed-in user the two fingerprints are locally comparable; compare them
   automatically instead of asking the owner to mark-verify by hand.
   → agent lifecycle round.
-- [ ] **V32 Unread badge while the chat is open + active** — when an agent
-  posts into the currently open, actively-used chat, an unread counter still
-  appears; arriving messages should mark read while the chat is open +
-  focused (+ scrolled to bottom), WhatsApp-style. → live-updates round.
+- [x] **V32 Unread badge while the chat is open + active** (R51) — the
+  cursor DID advance on every hadNew render, but the badge painted from
+  the stale state fetch and lingered until the next one (≥20s under SSE);
+  worse, it advanced with NO focus check (an unfocused window silently
+  read everything). Now: mark-read is focus-gated (`document.hasFocus()`,
+  the notify.js rule), `markReadNow` zeroes the chat's unread locally +
+  repaints the sidebar the moment it fires (no stale-badge window), an
+  unfocused window arms `Mesh.pendingRead` and the focus listener settles
+  it on return — WhatsApp semantics. Live-verified both legs on a rig:
+  unfocused → badge + server unread=1 held; focus → badge cleared
+  instantly, server cursor advanced.
 - [x] **V33 "Archive group" wording** (R50 rider) — the sidebar right-click
   and header ⋮ menus now use the details-pane noun rule (group → "group",
   DM/self → "chat"); details already did. Live-verified: group row
@@ -624,6 +647,7 @@ keep the code organized and extensible (packaging comes later).
 | boot experience (R48, done) | V20, V21 |
 | parity sweep + stress (R49, done) | Q34, M10 verify→fix, V22, settings-exposure fix, full-app regression |
 | reactions overhaul (R50, done) | V27, V28, V29 (+ rider V33) |
-| live updates everywhere (R51) | V25, V32 (+ rider V23 if feasible) |
-| sign-in page (R52) | V34, V24 |
-| agent lifecycle + trust (R53) | V26, V31, V30 |
+| live updates everywhere (R51, done) | V32, V23, V25-pages |
+| hot transcript (R52) | V25-transcript (keyed row reuse, header patch-in-place) |
+| sign-in page (R53) | V34, V24 |
+| agent lifecycle + trust (R54) | V26, V31, V30 |

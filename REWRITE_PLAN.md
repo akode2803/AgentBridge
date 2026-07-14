@@ -1384,6 +1384,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       switch popped (👍→😂), quick-react add popped, remove didn't, labels
       all three ways. Frontend-only round — no fleet restart needed.
 
+- [x] **R51 — live updates everywhere. DONE 2026-07-14 (v0.24.126).**
+      BACKLOG V32 + V23 + V25's page legs (the transcript leg = R52).
+      **V32 (the open-chat unread badge):** mark-read fired on every hadNew
+      render with NO focus check, and the badge painted from the stale
+      state fetch until the next one (≥20s under SSE). Now focus-gated
+      (`document.hasFocus()`, notify.js's rule), `markReadNow` zeroes the
+      chat locally + repaints the sidebar the instant it fires, and an
+      unfocused window arms `Mesh.pendingRead` for the focus listener —
+      WhatsApp semantics: unfocused windows accumulate unread honestly.
+      **V25 (mount-once pages):** the poll loop repainted ONLY the chats
+      page; Settings never re-rendered on data changes. It now runs a
+      dedicated 4s poller (the askPoll pattern) that re-renders when the
+      displayed slices changed — me + my agents + per-agent harness docs,
+      presence deliberately excluded — and never mid-interaction (open
+      csel/menu/modal or focused text field skips the pass; scroll
+      restored). The new-chat/new-group pickers repaint per poll tick
+      (guard = a query in progress, NOT focus — the search box sits
+      auto-focused; focus restored after a real repaint). **V23 (file
+      progress):** determinate is infeasible by design (open_file fetches
+      + decrypts + caches server-side and hands to the OS — no bytes reach
+      the browser); the chip now shows an indeterminate ring in flight
+      (icon swaps out, overlay ring on thumbs/tiles, double-click
+      debounced, "Opening…" toast retired). Live-verified on a rig, incl.
+      the two guard freezes and the pre-fix behaviour reproduced on the
+      stale module cache first (badge stuck + cursor advanced unfocused).
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

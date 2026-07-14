@@ -4,6 +4,7 @@
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, resetSubviews, renderChrome } from "./state.js";
+import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
 import "./chat.js";
@@ -26,7 +27,26 @@ async function refresh(rerender) {
   renderChrome();
   if (rerender && App.page !== "setup") PAGES[App.page]();
   else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
+  // R51 (V25): the "new" page's directory pickers were frozen while open —
+  // refresh + repaint them per tick too (setSide no-ops on identical html).
+  // The picker's search box can sit FOCUSED while empty, so the guard keys
+  // on an actual query in progress, not focus; when a changed list does
+  // repaint, the (empty) box gets its focus back.
+  else if (App.page === "new" && Mesh.state?.user) {
+    const ae = document.activeElement;
+    const inSide = ae && $("#side-chats")?.contains(ae);
+    if (inSide && ae.tagName === "INPUT" && ae.value) return;
+    const hadFocus = inSide && ae.id ? ae.id : null;
+    const fresh = await api("/api/mesh/state");
+    if (!fresh.error && App.page === "new") {
+      Mesh.state = fresh;
+      renderSidebar();
+      if (hadFocus) document.getElementById(hadFocus)?.focus();
+    }
+  }
 }
+// the settings page runs its own leash (settings.js startSettingsPoll) —
+// its data lives outside /api/state, and repaints need interaction guards
 V.refresh = refresh;
 
 // a missing registration is a wiring bug — fail loudly at boot, not with

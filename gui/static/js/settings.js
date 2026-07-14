@@ -51,6 +51,74 @@ const audienceOptsFor = (field) =>
     : field === "messaging" || field === "add_to_group" ? GATE_OPTS
     : AUDIENCE_OPTS;
 
+// ---- live sync (R51/V25) ---------------------------------------------------
+// The settings page was mount-once: a run finishing or an availability change
+// never reached the DOM until the user navigated away and back. A dedicated
+// poller (the askPoll pattern — own leash, stands down off-page) re-renders
+// WHEN the slices this page displays actually changed, and NEVER
+// mid-interaction: an open dropdown/menu/modal or a focused text field skips
+// the pass (the next one catches up), and scroll survives the swap.
+let liveData = null;        // sliced view of what the current render shows
+let settingsPollId = null;
+
+// what the page can display, sliced for change detection: me + my agents
+// only. presence is deliberately excluded — heartbeats would repaint the
+// page every ~30s for a line it doesn't even show.
+function liveSlice(ms, me) {
+  const mine = Object.entries(ms?.users || {})
+    .filter(([n, u]) => n === ms.user
+      || (u.kind === "agent" && (u.owners || []).includes(ms.user)))
+    .map(([n, u]) => [n, u.display, u.status, u.active,
+                      u.avatar && u.avatar.sha256, u.settings]);
+  return { mine, me: me ?? null, harness: {} };
+}
+const harnessSlice = (r) =>
+  ({ h: r.harness || {}, runs: r.runs || [], audit: r.peer_audit || [] });
+
+function startSettingsPoll() {
+  if (settingsPollId) return;
+  settingsPollId = setInterval(async () => {
+    if (App.page !== "settings") {      // left the page: stand down
+      clearInterval(settingsPollId);
+      settingsPollId = null;
+      liveData = null;
+      return;
+    }
+    if (document.hidden || !liveData) return;
+    const ae = document.activeElement;
+    if (document.querySelector(".csel-pop, .modal-scrim")
+        || [...document.querySelectorAll("#content .menu")].some((m) => !m.hidden)
+        || (ae && $("#content")?.contains(ae)
+            && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA"))) return;
+    try {
+      const ms = await api("/api/mesh/state");
+      if (ms.error || App.page !== "settings" || !liveData) return;
+      const section = Settings.section === "profile" ? "account"
+        : (Settings.section || "account");
+      let me = null;
+      if (section === "account" || section === "agents" || section === "privacy") {
+        const r = await api("/api/mesh/me");
+        if (!r.error) me = r;
+      }
+      const fresh = liveSlice(ms, me);
+      // harness docs only for agents the mount actually loaded — a mount-time
+      // fetch error must not become a 4s re-render loop
+      for (const agent of Object.keys(liveData.harness)) {
+        const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(agent)}`);
+        fresh.harness[agent] = r.error ? liveData.harness[agent] : harnessSlice(r);
+      }
+      Mesh.state = ms;                  // keep the cache warm either way
+      if (JSON.stringify(fresh) === JSON.stringify(liveData)) return;
+      const box = $("#content");
+      const top = box ? box.scrollTop : 0;
+      await renderSettings();           // re-baselines liveData itself
+      const box2 = $("#content");
+      if (box2) box2.scrollTop = top;
+    } catch { /* transient — the next tick retries */ }
+  }, 4000);
+}
+// ----------------------------------------------------------------------------
+
 async function renderSettings() {
   const s = App.state;
   if (!s.configured) { location.hash = "#/setup"; return; }
@@ -462,6 +530,11 @@ async function renderSettings() {
       </div>`;
   }
   $("#content").innerHTML = `<div class="settings-body">${html}</div>`;
+  // R51 (V25): baseline what this render shows; the poller re-renders only
+  // when a fresh fetch of the same slices differs (the async harness fills
+  // below extend the baseline as they land)
+  liveData = liveSlice(ms, me);
+  startSettingsPoll();
 
   // theme tiles: click to pick System / Light / Dark; setThemePref applies it
   // live (data-theme flips → the whole app re-themes) and the accent bubble in
@@ -719,6 +792,7 @@ async function renderSettings() {
       document.querySelectorAll(".ag-timers").forEach(async (dd) => {
         const agent = dd.dataset.agent;
         const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(agent)}`);
+        if (!r.error && liveData) liveData.harness[agent] = harnessSlice(r);
         const h = r.harness || {};
         const chatName = (id) => {
           const c = (Mesh.state.chats || []).find((x) => x.id === id);

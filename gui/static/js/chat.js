@@ -14,6 +14,32 @@ import { openModal, closeModal } from "./modal.js";
 import { rxBadge, openReactionsPopup, captureRxSigs, animateRxChanges } from "./reactions.js";
 import { V } from "./views.js";
 
+// V32 (R51): advance the read cursor AND settle the badge NOW. The server
+// recomputes unread on the next state fetch — up to 20s away under SSE —
+// which was exactly the "unread counter while I'm using the chat" report.
+// Mirrors the server: mark_read also clears forced_unread (overlays.py).
+function markReadNow(chatId) {
+  Mesh.pendingRead = null;
+  api("/api/mesh/read", { chat_id: chatId });
+  const c = Mesh.state?.chats?.find((x) => x.id === chatId);
+  if (c && (c.unread || c.forced_unread)) {
+    c.unread = 0;
+    c.forced_unread = false;
+    renderSidebar();
+  }
+}
+
+// reading needs eyes: the transcript keeps painting while the window is
+// unfocused, but the cursor waits — coming back settles it (WhatsApp).
+// pendingRead covers "arrived while unfocused, still between polls" (the
+// local unread count may not have caught up yet).
+window.addEventListener("focus", () => {
+  if (App.page !== "chats" || !Mesh.chatId || !Mesh.state?.user) return;
+  const c = Mesh.state.chats?.find((x) => x.id === Mesh.chatId);
+  if (Mesh.pendingRead === Mesh.chatId || (c && (c.unread || c.forced_unread)))
+    markReadNow(Mesh.chatId);
+});
+
 async function renderChats(force) {
   const s = App.state;
   if (!s?.configured) { location.hash = "#/setup"; return; }
@@ -568,7 +594,10 @@ async function renderMeshChat(force) {
     if (Mesh.jumpTo) jumpToMessage();
     else if (nearBottom) tr.scrollTop = tr.scrollHeight;
     else tr.scrollTop = prevTop;
-    if (hadNew) api("/api/mesh/read", { chat_id: chatId });
+    if (hadNew) {
+      if (document.hasFocus()) markReadNow(chatId);
+      else Mesh.pendingRead = chatId;   // settle on the focus listener
+    }
     return;
   }
   Mesh.structKey = structKey;
@@ -756,7 +785,10 @@ async function renderMeshChat(force) {
   clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
   else tr.scrollTop = tr.scrollHeight;
-  if (hadNew) api("/api/mesh/read", { chat_id: chatId });
+  if (hadNew) {
+    if (document.hasFocus()) markReadNow(chatId);
+    else Mesh.pendingRead = chatId;     // settle on the focus listener
+  }
   // opening a chat animates the transcript in
   tr.classList.add("chat-in");
 }

@@ -23,11 +23,18 @@ window.openTarget = openTarget;  // inline onclick= handlers in templates
 export function bindOpenFile(scope, chatId, selector) {
   scope.querySelectorAll(selector).forEach((b) => {
     b.addEventListener("click", async () => {
-      // the OS handoff can lag on a synced folder — a brief toast confirms
-      // the click landed and the file is opening in its default app
-      toast(`Opening ${b.dataset.name || "file"}…`);
-      const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id });
-      if (r.error) toast(r.error, true);
+      // fetch + decrypt + OS handoff all happen server-side, so no byte
+      // stream reaches this window to meter — an indeterminate ring on the
+      // chip is the honest signal (V23); the class also debounces a
+      // double-click while the open is in flight
+      if (b.classList.contains("att-loading")) return;
+      b.classList.add("att-loading");
+      try {
+        const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id });
+        if (r.error) toast(r.error, true);
+      } finally {
+        b.classList.remove("att-loading");
+      }
     });
   });
 }
