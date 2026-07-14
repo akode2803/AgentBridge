@@ -697,22 +697,41 @@ keep the code organized and extensible (packaging comes later).
   tests over the real folder transport (blob withheld → deferred; blob
   lands → answers; grace expiry → proceeds). ⚠ coco's harness runs on
   the AVD — Aryan pulls v0.24.130 there for the fix to reach coco.
-- [ ] **V37 Agent departures missing from info events** (Aryan) — when an
-  agent's owner leaves a group the owned agents leave too, but their
-  leaving is never recorded in the chat's info events. Record them like
-  any other departure.
+- [x] **V37 Agent departures missing from info events** (R56) — the
+  cascade lives in the fold's `_heal` (pure, can't emit); the MUTATION
+  sites now record it: `leave()` posts a `member_removed` per owned agent
+  (reason `with_owner`, owner named) BEFORE the owner's own departure;
+  `remove_member()` posts them after the removal (fold no-ops — heal
+  already dropped them; pills render from the log). Renderer branch:
+  "X left with Y". Live-verified on a two-rig scratch mesh: ava leaves →
+  bea's transcript shows "Scrapbot left with Ava" then "Ava left" within
+  seconds. 2 new tests (leave + admin-removal legs).
 - [ ] **V38 Removing a member is janky + forces a reload** (Aryan) — the
   roster remove flow must hot-update the details pane (R52 discipline),
   no full reload.
-- [ ] **V39 Signup with a taken username fails silently at submit**
-  (Aryan) — the live checker works but the actual create-account submit
-  swallows the server refusal; nothing surfaces in the GUI. Surface it.
-- [ ] **V40 Sign-out→sign-in jank + stray "setup page"** (Aryan) — the
-  sign-out/sign-in transition is janky, and Aryan landed on a
-  setup-looking page of unknown origin. If it's a pre-rewrite artifact,
-  REMOVE it — setup gets its own dedicated session written from scratch
-  (many of its options would simply fail today), and it must be a
-  dedicated page, not inside the main app.
+- [x] **V39 Signup with a taken username fails silently at submit** (R56)
+  — root cause: the submit error WAS toasted, but `#toast` (z-index 50)
+  rendered UNDER the full-page `#auth` overlay (z-index 150) — an
+  invisible toast. Fixed twice over: submit refusals now surface IN the
+  card (`#auth-sub-err`, same animated grid-row as the live checker;
+  clears on any edit), and `#toast` moved to z-index 400 so no overlay
+  can ever swallow a toast again. Live-verified: signup as a taken name →
+  live "@bea is already taken" while typing + in-card "@bea is taken" on
+  submit + clears on edit.
+- [x] **V40 Sign-out→sign-in jank + stray "setup page"** (R56) — the
+  "setup page" was the BRIDGE-ERA wizard (`wizard.js`, 9 steps of retired
+  endpoints), reachable whenever a transient `/api/state` hiccup made
+  `configured` read undefined — and deterministically after
+  delete-account. RETIRED per Aryan's call: file deleted (24 modules
+  now), `#/setup` route + all `!configured` redirects gone (v2 hardcodes
+  configured), delete-account boots to `#/chats` → auth page. The jank:
+  logout never cleared `Mesh.state`, so the chats route painted the OLD
+  session's home from stale state, then slammed the auth page over it —
+  logout now drops state and renders the auth page directly; external
+  callers can no longer clobber half-typed credentials (renderAuthPage
+  no-ops when already up; only its own tab toggle forces). Live-verified:
+  sign-out → no stale flash, auth page focused; `#/setup` → chats, no
+  wizard DOM; external curl sign-in still dismisses the page.
 - [ ] **V41 Question: does delete-for-everyone free a file's server
   space?** (Aryan) — answer honestly from the code (attachment blob
   lifecycle vs redaction tombstones); deliverable = a definitive answer
@@ -740,11 +759,21 @@ keep the code organized and extensible (packaging comes later).
   status save.
 - [ ] **V48 Agents page autosaves** (Aryan) — remove the Save button from
   the agents settings page; every change autosaves.
-- [ ] **V49 Delete agent doesn't delete** (Aryan) — the toast claims
-  success but the agent stays in the agents list AND still appears in
-  create-group / add-members / new-chat pickers, failing only when
-  chatting. Fix the deletion end-to-end + validate every picker filters
-  departed users.
+- [x] **V49 Delete agent doesn't delete** (R56) — the soft delete WORKED
+  (active=False + `deactivated`); the GUI just never filtered. Subtlety:
+  `active=False` alone is ALSO the owner's pause switch, so the fix
+  keys on `deactivated`: Account gained the field, `user_json` emits
+  `departed: true`, and the My-agents list + every picker (new-chat,
+  new-group, add-members, add-agent, forward) filters `!u.departed`;
+  M11 transcript/roster greying re-keyed onto it too (paused agents no
+  longer grey as deleted). Server side: `_require_alive` refuses departed
+  targets at create_chat/add_members ("@x has left the mesh" — paused
+  stays the R6 "not available"), `agent_start` refuses, `hosted_agents`
+  skips (no supervisor for a deleted agent), and a RUNNING runner exits
+  rc 0 on its next tick (the live coco2 zombie class). Live-verified on
+  a rig: delete → card gone instantly + honest toast; new-chat/new-group/
+  add-members list the living agent only; create_chat refused with the
+  clear reason. 2 new tests.
 
 ---
 
@@ -760,6 +789,17 @@ keep the code organized and extensible (packaging comes later).
   brick.
 - **Per-member Supabase auth + real RLS policies** (closes transport-side
   deletion residuals; today secret-key-only).
+- **Key rotation on `leave()`** (spotted in R56): `remove_member` rotates
+  the chat key (`keys.on_members_removed`) but a voluntary `leave` does
+  NOT — a departed member's device keeps decrypting future epochs it can
+  still fetch at the transport layer. App-level reads are membership-
+  gated, but E2EE should not lean on that. Rotate on leave too (+ the
+  delete_account loop). Hardening-round item.
+- **Storage janitor** (V41 finding, 2026-07-14): delete-for-everyone,
+  delete-chat and delete-account are all tombstone-only — blobs + sealed
+  envelopes stay on the server forever (`tx.delete_chat` exists but
+  nothing calls it). A GC/compaction round: redaction → blob removal,
+  EV_DELETED → transport purge after a grace window.
 - **Agent swarms** (own round; R16 registry shaped for it).
 - **Channels** (v3; permission model already configurable).
 - **mem0/graphiti + summarization + LLM planner** (needs a local-LLM box).
@@ -790,7 +830,7 @@ keep the code organized and extensible (packaging comes later).
 | sign-in page (R53, done) | V34, V24 |
 | agent lifecycle + trust (R54, done) | V26, V31, V30 |
 | harness bug bash (R55, done) | V35 (claude/claudemcp loop), V36 (coco file) |
-| account + agent lifecycle fixes (R56) | V49, V39, V40, V37 |
+| account + agent lifecycle fixes (R56, done) | V49, V39, V40, V37 |
 | GUI polish (R57) | V38, V42, V43, V47, V48 |
 | notifications + about/updates (R58) | V44, V45 |
 | deliverables (with the rounds) | V41 (answer), V46 (parity list) |

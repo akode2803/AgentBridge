@@ -127,6 +127,10 @@ def user_json(
         "display": profile.get("display") or acc.display or acc.name,
         "active": acc.active,
     }
+    if acc.deactivated:
+        # deleted (soft), not merely paused — pickers and rosters filter on
+        # this; active=False alone is also the owner's runtime pause switch
+        out["departed"] = True
     for key in ("about", "status", "photo_visible", "owner", "machine",
                 "messaging", "add_to_group"):
         if key in profile:

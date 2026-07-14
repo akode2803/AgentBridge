@@ -555,3 +555,68 @@ def test_non_gid_genesis_folds_to_nothing(world):
     })
     snap = events.fold(legacy_id, [genesis], aryan.directory)
     assert snap.members == {}
+
+
+# ------------------------------------------- R56: cascade pills + departed
+
+def test_owner_leave_records_agent_departures(world):
+    """V37: the fold's heal silently cascades an owner's agents out when the
+    owner leaves — the departure is now RECORDED as a member_removed info
+    event (reason with_owner), posted before the owner's own leave."""
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Leavers", members=["fable", "claude"])
+    ripple(aryan, snap.id, fable)
+
+    aryan.membership.leave(snap.id)
+    ripple(aryan, snap.id, fable)
+
+    evs = [m.event for m in fable.messages_for(snap.id) if m.event]
+    cascade = [e for e in evs
+               if e["type"] == "member_removed" and e.get("reason") == "with_owner"]
+    assert len(cascade) == 1
+    assert cascade[0]["who"] == "claude" and cascade[0]["owner"] == "aryan"
+    # posted BEFORE the owner's own departure (a member may still write)
+    left_at = next(i for i, e in enumerate(evs) if e["type"] == "member_left")
+    assert evs.index(cascade[0]) < left_at
+    healed = fable.membership.refold(snap.id)
+    assert "aryan" not in healed.members and "claude" not in healed.members
+    assert "fable" in healed.members
+
+
+def test_admin_removing_owner_records_agent_departures(world):
+    """V37, the removal leg: an admin removing a member cascades that
+    member's agents out — recorded with the owner named."""
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Removals", members=["fable", "coco"])
+    ripple(aryan, snap.id, fable)
+
+    aryan.membership.remove_member(snap.id, "fable")
+    ripple(aryan, snap.id, fable)
+
+    evs = [m.event for m in aryan.messages_for(snap.id) if m.event]
+    cascade = [e for e in evs
+               if e["type"] == "member_removed" and e.get("reason") == "with_owner"]
+    assert len(cascade) == 1
+    assert cascade[0]["who"] == "coco" and cascade[0]["owner"] == "fable"
+    assert cascade[0]["by"] == "aryan"
+    healed = aryan.membership.refold(snap.id)
+    assert "fable" not in healed.members and "coco" not in healed.members
+
+
+def test_departed_accounts_are_not_chat_targets(world):
+    """V49: a DELETED (deactivated) account can't be put in a new chat or
+    added to an existing one — the failure is at the mutation, with a clear
+    reason, not downstream at the first message."""
+    aryan = world["aryan"]
+    keep = aryan.create_chat("Existing", members=["fable"])
+    aryan.delete_agent("claude")
+
+    with pytest.raises(ValidationError, match="left the mesh"):
+        aryan.create_chat("Nope", members=["claude"])
+    with pytest.raises(ValidationError, match="left the mesh"):
+        aryan.membership.add_members(keep.id, ["claude"])
+    # merely PAUSED (active=False, no deactivated) is a DIFFERENT refusal:
+    # the R6 gate's "not available" (temporary), never "left the mesh"
+    aryan.directory.patch("coco", lambda d: d.update(active=False))
+    with pytest.raises(PermissionDenied, match="not available"):
+        aryan.create_chat("Paused", members=["coco"])

@@ -723,3 +723,20 @@ def test_claim_time_stop_doc_consumed(hrig):
     assert runner.mesh.tx.get_doc("status/helper_stop.json") is None
     runs = runner.mesh.tx.get_doc("status/helper_runs.json")
     assert runs["runs"][-1]["state"] == "stopped"
+
+
+def test_deleted_agent_runner_stands_down(hrig):
+    """R56 (V49): a soft-deleted agent gets no supervisor (hosted_agents
+    skips it) and a RUNNING runner exits cleanly on its next tick instead
+    of idling forever."""
+    from agentbridge.harness.runner import hosted_agents
+
+    assert hosted_agents(hrig.root, "devbox") == ["helper"]
+    hrig.owner.delete_agent("helper")
+    assert hosted_agents(hrig.root, "devbox") == []
+
+    runner = hrig.make_runner(Scripted())
+    runner.mesh.sync.sync_once()
+    with pytest.raises(SystemExit) as e:
+        runner.tick()
+    assert e.value.code == 0

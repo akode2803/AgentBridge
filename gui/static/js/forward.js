@@ -44,7 +44,7 @@ async function openForwardPicker(srcChatId, ids) {
       avatar: meshChatAvatarInner(c) });
   };
   const contacts = Object.values(ms.users).filter((u) =>
-    u.username !== me && !dmPartners.has(u.username));
+    u.username !== me && !u.departed && !dmPartners.has(u.username));
   const contactRow = (u) => pickerRow({ value: `user:${u.username}`,
     initial: u.display, name: u.display, sub: `@${u.username}`,
     tag: u.kind === "agent" ? "agent" : "", avatar: meshAvatarInner(u.username) });

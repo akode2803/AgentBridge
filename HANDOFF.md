@@ -128,14 +128,16 @@ persist and a new session inherits them automatically.
    `~/.claude/projects/<this-project>/memory/MEMORY.md` and the notes it points
    to (the authoritative backlog + credentials).
 2. Confirm live: `git status` clean on `main`; `~/.agentbridge/config.json`
-   points at the synced folder; `python check_frontend.py` prints **25/25**;
+   points at the synced folder; `python check_frontend.py` prints **24/24**;
    `uv run pytest -q` is green.
 
 ## Operating conventions
 
-- **Frontend = 25 native ES modules** (`gui/static/js/`), strict one-way
+- **Frontend = 24 native ES modules** (`gui/static/js/`), strict one-way
   layering, views register on the `V` registry and never import each other. Run
-  `python check_frontend.py` after every frontend edit (must print 25/25).
+  `python check_frontend.py` after every frontend edit (must print 24/24;
+  the bridge-era wizard.js was retired in R56 — setup pages are the
+  packaging session's, seeded by auth.js).
 - **After editing `mesh/*` or `harness/*`, restart the affected process(es)** —
   a running process reloads no code.
 - **Never round-trip source through PowerShell `Get-Content`/`Set-Content`**

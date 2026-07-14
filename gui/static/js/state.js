@@ -10,16 +10,8 @@ export const App = {
   logKey: "",           // change detector so the transcript only re-renders on news
   draft: { body: "", type: "chat" },   // composer survives re-renders
   pendingAtt: null,     // attachment picked but not yet sent
-  wizard: null,
 };
 window.App = App;  // console/debug access
-
-export function freshWizard() {
-  return { step: 0, mode: "install", dest: "", installed: null,
-           shared: "", validated: null, role: "claude", peer: "coco",
-           relation: "drive", initDone: false, skills: null, kitSent: false };
-}
-App.wizard = freshWizard();
 
 export const Mesh = {
   state: null,        // /api/mesh/state payload
@@ -70,7 +62,9 @@ export function meshInfoText(msg, me) {
     case "member_added": return ev.reason === "responsible_member"
       ? `${name(by)} added ${obj(ev.who)} (responsible for ${meshDn(ev.agent)})`
       : `${name(by)} added ${obj(ev.who)}`;
-    case "member_removed": return `${name(by)} removed ${obj(ev.who)}`;
+    case "member_removed": return ev.reason === "with_owner"
+      ? `${meshDn(ev.who)} left with ${obj(ev.owner || by)}`
+      : `${name(by)} removed ${obj(ev.who)}`;
     case "member_left": return `${name(msg.from)} left`;
     case "admin_granted": return ev.who === me ? "You're now an admin" : "";
     case "admin_revoked": return ev.who === me ? "You're no longer an admin" : "";

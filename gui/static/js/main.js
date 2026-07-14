@@ -15,7 +15,6 @@ import "./search.js";
 import "./members.js";
 import "./forward.js";
 import "./settings.js";
-import "./wizard.js";
 
 async function refresh(rerender) {
   try {
@@ -26,7 +25,7 @@ async function refresh(rerender) {
   // open/close the SSE stream to match the current server + auth (inert on v1)
   syncRealtime();
   renderChrome();
-  if (rerender && App.page !== "setup") PAGES[App.page]();
+  if (rerender) PAGES[App.page]();
   else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
   // another window, setup assist, the CLI. Never re-render the auth page
@@ -74,7 +73,8 @@ const PAGES = {
   chats: () => V.renderChats(true),
   new: () => V.renderNewChat(),
   settings: () => V.renderSettings(),
-  setup: () => V.renderSetup(),   // hidden from the UI; reachable while unconfigured
+  // the bridge-era setup wizard is RETIRED (R56/V40) — the real setup pages
+  // are the packaging session's; the auth page (auth.js) is their first brick
 };
 
 function route() {
@@ -191,9 +191,7 @@ window.addEventListener("hashchange", route);
     content.classList.toggle("sel-text", active);
   });
   App.state = await api("/api/state");
-  if (!location.hash) {
-    location.hash = App.state.configured ? "#/chats" : "#/setup";
-  }
+  if (!location.hash) location.hash = "#/chats";
   route();
   // R48: drop the full-page boot cover once the FIRST real view painted —
   // Mesh.state present (sidebar + chat/auth rendered) or a non-chats page

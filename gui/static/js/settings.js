@@ -122,8 +122,6 @@ function startSettingsPoll() {
 // ----------------------------------------------------------------------------
 
 async function renderSettings() {
-  const s = App.state;
-  if (!s.configured) { location.hash = "#/setup"; return; }
   // render from the cached mesh state so the swap is synchronous with the
   // route change — awaiting a fresh fetch here left the previous chat on
   // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
@@ -316,7 +314,8 @@ async function renderSettings() {
       </div>`;
   } else if (section === "agents") {
     const mine = Object.values(ms.users)
-      .filter((u) => u.kind === "agent" && (u.owners || []).includes(ms.user));
+      .filter((u) => u.kind === "agent" && !u.departed
+        && (u.owners || []).includes(ms.user));
     // per-purpose routing rows: who the agent replies TO decides the model,
     // and whether that audience is served at all (the enable switch)
     const CATS = [["owner", "You"], ["humans", "Other people"], ["agents", "Agents"]];
@@ -591,6 +590,13 @@ async function renderSettings() {
   const logout = $("#st-logout");
   if (logout) logout.addEventListener("click", async () => {
     await api("/api/mesh/logout", {});
+    // R56 (V40): drop the signed-in state BEFORE navigating — the chats
+    // route used to paint the old session's home from stale Mesh.state and
+    // then slam the auth page over it once the fetch returned (the jank).
+    Mesh.state = null;
+    Mesh.chatId = null;
+    Mesh.listKey = "auth";
+    V.renderAuthPage();
     location.hash = "#/chats";
   });
   // delete account (Q20/M11): password-confirmed soft delete — leaves every
@@ -1229,7 +1235,9 @@ function openDeleteAccountModal() {
     const r = await api("/api/mesh/delete_account", { password: pw });
     if (r.error) { toast(r.error, true); return; }
     closeModal();
-    location.hash = "#/setup";
+    // a deleted account boots to the signed-out auth page (the wizard that
+    // used to live at #/setup is retired, R56/V40)
+    location.hash = "#/chats";
     location.reload();
   });
   box.querySelector("#del-pw").focus();

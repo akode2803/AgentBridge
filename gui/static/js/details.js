@@ -40,8 +40,10 @@ const GATE_LABEL = { everyone: "everyone", members: "members they chat with",
 // status+presence one-liner, About, the public gates — each only when shared
 // (privacy-gated server-side; an absent field means hidden, never empty).
 function identityLines(rec) {
-  // M11: a deleted account keeps its name/username; everything else is gone
-  if (rec.active === false) {
+  // M11: a deleted account keeps its name/username; everything else is gone.
+  // Keyed on `departed` (deactivated), NOT active=false — that alone is also
+  // the owner's runtime pause switch (R56).
+  if (rec.departed) {
     return '<div class="ci-status" style="color:var(--text-dim)">Account deleted</div>';
   }
   const st = rec.status || {};
@@ -177,7 +179,7 @@ async function renderChatDetails() {
   const admins = chatAdmins(meta);
   const media = data.files || [];
   const myAgentsHere = Object.values(ms.users).filter((u) =>
-    u.kind === "agent" && (u.owners || []).includes(ms.user)
+    u.kind === "agent" && !u.departed && (u.owners || []).includes(ms.user)
     && (meta.members || []).includes(u.username));
   // only re-render when something actually changed — a poll redraw would
   // knock dropdowns and toggles out from under the user. The DM peer's
@@ -802,7 +804,7 @@ function renderMemberInfo(u) {
       ${identityLines(rec)}
       ${ownerRec ? `<div class="ci-gates">Responsible member: ${
         esc(ownerRec.display || rec.owner)}</div>` : ""}
-      ${u !== ms.user && rec.active !== false ? `
+      ${u !== ms.user && !rec.departed ? `
       <div class="ci-actions">
         <button class="ci-act" id="mi-message">
           <span class="ci-act-circle">${ICONS.msgUser}</span>Message</button>

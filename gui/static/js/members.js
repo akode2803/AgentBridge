@@ -24,7 +24,8 @@ function userRow(u, me) {
 
 function pickerSections(users, me, exclude) {
   const listed = Object.values(users)
-    .filter((u) => u.username !== me && !exclude.includes(u.username));
+    .filter((u) => u.username !== me && !u.departed
+      && !exclude.includes(u.username));
   const agents = listed.filter((u) => u.kind === "agent");
   const humans = listed.filter((u) => u.kind === "human");
   return { html: pickerSection("Agents", agents.map((u) => userRow(u, me)).join(""))

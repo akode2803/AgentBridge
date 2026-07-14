@@ -7,7 +7,7 @@
        → state                      (stores)
          → csel / modal / composer / picker  (UI primitives)
            → sidebar                (below the page views)
-             → chat / details / media / search / members / forward / settings / wizard / auth
+             → chat / details / media / search / members / forward / settings / auth
                → main               (router + boot; imports every view once)
 
    A module may import anything strictly below it; sideways or upward calls
@@ -19,7 +19,7 @@ export const EXPECTED = [
   "renderChats", "renderMeshChat", "renderNewChat",
   "renderChatDetails", "renderChatMedia", "renderChatSearch",
   "showAddMembers", "showSearchMembers",
-  "renderSettings", "renderSetup", "refresh", "openMsgMenu",
+  "renderSettings", "refresh", "openMsgMenu",
   "exitGroup", "openForwardPicker", "exitSelect", "openKeyVerify",
   "renderAuthPage", "closeAuthPage",
 ];

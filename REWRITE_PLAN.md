@@ -1502,6 +1502,28 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       "Can't reply — sending is restricted in this chat", no repeats in
       45s, zero posts; normal-room reply unaffected. ⚠ coco = AVD: Aryan
       pulls v0.24.130 there. Rider: docs/GUI_AGENT_PARITY.md (V46).
+- [x] **R56 — account + agent lifecycle fixes. DONE 2026-07-14
+      (v0.24.131).** BACKLOG V49 + V39 + V40 + V37. **V49:** the soft
+      delete worked; the GUI never filtered — and `active=False` alone is
+      ALSO the pause switch, so everything keys on the new
+      `Account.deactivated` → `user_json` `departed` flag: My-agents +
+      all five pickers filter it, M11 greying re-keyed (paused ≠ deleted),
+      `_require_alive` refuses departed targets server-side,
+      `hosted_agents` skips them, a running runner exits rc 0 (the coco2
+      zombie class), `agent_start` refuses. **V39:** the submit error was
+      a toast rendered UNDER the #auth overlay (z-50 vs z-150) — now an
+      in-card animated error line + toast raised to z-400. **V40:** the
+      stray "setup page" = the bridge-era wizard.js (dead endpoints),
+      reachable via transient `!configured` reads + delete-account —
+      RETIRED (24 modules); logout now drops Mesh.state and renders the
+      auth page directly (no stale-home flash), renderAuthPage no-ops
+      when already up. **V37:** owned-agent departures are recorded as
+      `member_removed` (reason `with_owner`) at the mutation sites
+      (fold's `_heal` stays pure); renderer says "X left with Y".
+      416 tests + 24/24 modules. Live-verified on a two-rig scratch
+      mesh (all four items; pills arrived in the second rig within
+      seconds). Riders: leave()-key-rotation gap + storage-janitor items
+      logged in BACKLOG §C.
 
 | Backlog item (source) | Covered in |
 |---|---|

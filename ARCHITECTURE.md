@@ -430,9 +430,9 @@ outside the message log.
 
 ## 9. Frontend (`gui/static/js/`)
 
-**25 native ES modules, zero build step** — the browser imports them directly,
+**24 native ES modules, zero build step** — the browser imports them directly,
 so "run the app" and "see the current source" are the same action. Run
-`python check_frontend.py` after every frontend edit (must print **25/25**; it
+`python check_frontend.py` after every frontend edit (must print **24/24**; it
 `node --check`s each module and verifies imports resolve — the only automated
 frontend check).
 
@@ -442,13 +442,14 @@ util / icons / api / markdown / files      (leaf helpers)
   → state                                  (App / Mesh / Settings stores)
     → csel / modal / notify / composer / picker / reactions   (UI primitives)
       → sidebar                            (below page views)
-        → chat / details / media / search / members / forward / settings / wizard / auth   (page views)
+        → chat / details / media / search / members / forward / settings / auth   (page views)
           → main                           (router + boot)
 ```
 `auth.js` (R53) owns the signed-out surface: the full-page sign-in /
 create-account (it rides the boot identity, and packaging extends it into
-the setup wizard), the live username check against `/api/mesh/check_name`,
-and the D5 recovery-code modal.
+the setup pages — the bridge-era wizard.js was retired in R56), the live
+username check against `/api/mesh/check_name`, submit refusals in-card
+(V39), and the D5 recovery-code modal.
 `reactions.js` (R50) owns the WhatsApp reaction surface: the overlay badge a
 message renders, the who-reacted popup (tabbed per emoji; own row removes)
 and the pop-in delta (new (emoji, user) pairs animate after the transcript

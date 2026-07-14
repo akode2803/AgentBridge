@@ -2561,7 +2561,9 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 8px;
   padding: 9px 18px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.3);
-  z-index: 50;
+  /* above every full-page surface (#auth 150, #boot 200) — a toast that
+     renders UNDER an overlay is a silent failure (V39's root cause) */
+  z-index: 400;
   display: flex; align-items: center; gap: 10px; max-width: min(92vw, 420px);
   animation: reply-in .15s ease;
 }

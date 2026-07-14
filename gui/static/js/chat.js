@@ -41,8 +41,6 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
-  const s = App.state;
-  if (!s?.configured) { location.hash = "#/setup"; return; }
   // leaving a chat for the no-chat home: paint the empty state NOW (from the
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
@@ -264,7 +262,7 @@ async function renderMeshChat(force) {
   // M11: a DM peer's deactivation shows an info pill + grey styling — fold
   // the flag in so the repaint rides the partial path
   const goneSig = Object.values(ms.users || {})
-    .filter((u) => u.active === false).map((u) => u.username).join(",");
+    .filter((u) => u.departed).map((u) => u.username).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
     pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig,
@@ -384,8 +382,9 @@ async function renderMeshChat(force) {
     prevFrom = msg.from;
     const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
     // M11: a departed (deleted) member's messages grey out — name and
-    // words remain, nothing else of them does
-    const departed = ms.users?.[msg.from]?.active === false ? " departed" : "";
+    // words remain, nothing else of them does. Keyed on `departed`
+    // (deactivated), not active=false — that alone is also the pause switch.
+    const departed = ms.users?.[msg.from]?.departed ? " departed" : "";
     // time + star (+ read receipt for my own) ride at the bubble's bottom-right,
     // WhatsApp-style — inside the bubble, on every message
     const starred = starredSet.has(msg.id);
@@ -415,7 +414,7 @@ async function renderMeshChat(force) {
   // the end); sends still post but will never show Delivered (no one fetches)
   if (isDm && meta.kind === "dm") {
     const dmPeer = (meta.members || []).find((u) => u !== ms.user);
-    if (dmPeer && ms.users?.[dmPeer]?.active === false) {
+    if (dmPeer && ms.users?.[dmPeer]?.departed) {
       parts.push(["gone", '<div class="info-pill">This account was deleted</div>']);
     }
   }

@@ -166,6 +166,8 @@ def agent_start(app, req, mesh) -> dict:
     acc = mesh.directory.get(name)
     if not (acc and acc.agent):
         return {"error": f"@{name} is not an agent"}
+    if acc.deactivated:
+        return {"error": f"@{name} was deleted"}
     if acc.agent.owner != mesh.user:
         return {"error": "only the agent's responsible member can start it"}
     if acc.agent.machine != app.machine:

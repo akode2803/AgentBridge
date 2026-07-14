@@ -123,9 +123,10 @@ function renderNewChatSidebar() {
   // listed; the mesh pulls the agent's owner in (converting the DM to a
   // small group) when needed. Agents and humans list in their own
   // sections, like the add-members dialog.
-  const agents = Object.values(ms.users).filter((u) => u.kind === "agent");
+  const agents = Object.values(ms.users)
+    .filter((u) => u.kind === "agent" && !u.departed);
   const humans = Object.values(ms.users)
-    .filter((u) => u.kind === "human" && u.username !== ms.user);
+    .filter((u) => u.kind === "human" && !u.departed && u.username !== ms.user);
   const person = (u) => {
     const ownerHint = u.kind === "agent" && !(u.owners || []).includes(ms.user)
       ? ` · with @${esc((u.owners || [])[0] || "?")}` : "";
@@ -549,7 +550,8 @@ function renderNewGroupSidebar() {
   const ng = Mesh.newGroup;
   if (ng.step === "name") return renderNewGroupName();
 
-  const listed = Object.values(ms.users).filter((u) => u.username !== ms.user);
+  const listed = Object.values(ms.users)
+    .filter((u) => u.username !== ms.user && !u.departed);
   const byName = (a, b) => a.display.localeCompare(b.display, undefined, { sensitivity: "base" });
   const agents = listed.filter((u) => u.kind === "agent").sort(byName);
   const humans = listed.filter((u) => u.kind === "human").sort(byName);

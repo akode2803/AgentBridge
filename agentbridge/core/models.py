@@ -200,6 +200,10 @@ class Account:
     about: str = ""
     created: str = ""
     active: bool = True
+    # non-empty = the account was DELETED (soft) at this iso time. Distinct
+    # from active=False alone, which is also the owner's runtime pause switch
+    # (set_machine_agents_active) — pickers/rosters key "departed" off THIS.
+    deactivated: str = ""
     keys: AccountKeys = field(default_factory=AccountKeys)
     auth: dict[str, Any] | None = None  # humans only (scrypt record, R7)
     privacy: Privacy = field(default_factory=Privacy)

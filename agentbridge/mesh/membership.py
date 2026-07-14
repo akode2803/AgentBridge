@@ -64,6 +64,28 @@ class MembershipService:
         if not ok:
             raise PermissionDenied(why)
 
+    def _require_alive(self, name: str) -> None:
+        """R56 (V49): a DELETED account (soft — ``deactivated`` set) is not a
+        valid chat target; its name stays resolvable only so old transcripts
+        keep their sender. Distinct from active=False alone (a paused agent
+        is still a member)."""
+        acc = self.directory.get(name)
+        if acc is None:
+            raise ValidationError(f"unknown user @{name}")
+        if acc.deactivated:
+            raise ValidationError(f"@{name} has left the mesh")
+
+    def _cascading_agents(self, snap: ChatSnapshot, owner: str) -> list[str]:
+        """The agents that will silently leave WITH ``owner`` (the fold's
+        heal drops any agent whose responsible member is gone)."""
+        if snap.kind is not ChatKind.GROUP:
+            return []
+        return [
+            m for m in snap.members
+            if self.directory.kind(m) is UserKind.AGENT
+            and self.directory.owner_of(m) == owner
+        ]
+
     # ------------------------------------------------------------- creation
     def create_chat(
         self,
@@ -78,8 +100,7 @@ class MembershipService:
         me = self.user
         roster = list(dict.fromkeys([me, *(members or [])]))
         for m in roster:
-            if not self.directory.exists(m):
-                raise ValidationError(f"unknown user @{m}")
+            self._require_alive(m)  # unknown OR deleted (V49)
         if kind is ChatKind.GROUP and not (name or "").strip() and not auto_dm:
             name = "New Group"  # v1 UX: empty name falls back, never errors
 
@@ -203,8 +224,7 @@ class MembershipService:
             )
         todo = [n for n in dict.fromkeys(names) if n not in snap.members]
         for n in todo:
-            if not self.directory.exists(n):
-                raise ValidationError(f"unknown user @{n}")
+            self._require_alive(n)  # unknown OR deleted (V49)
         pulled = self.directory.missing_owners(list(snap.members) + todo)
         for n in [*todo, *pulled]:  # R6 gate — pulled owners included
             self._gate_add(n)
@@ -241,12 +261,30 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_MEMBER_REMOVED, "who": who, "by": self.user}
         )
+        # R56 (V37): the fold's heal silently cascades the removed member's
+        # agents out — RECORD those departures so the transcript tells the
+        # story. The events are fold no-ops (heal already dropped them); the
+        # pills render from the log.
+        for agent in self._cascading_agents(snap, who):
+            self.messaging.post_event(
+                chat_id, {"type": events.EV_MEMBER_REMOVED, "who": agent,
+                          "by": self.user, "reason": "with_owner", "owner": who}
+            )
         healed = self.refold(chat_id)
         if self.keys is not None:  # rotate away from the removed member now
             self.keys.on_members_removed(chat_id, healed)
         return healed
 
     def leave(self, chat_id: str) -> ChatSnapshot:
+        # R56 (V37): record the owned agents the heal will cascade out with
+        # me — posted BEFORE my own departure (a member may still write).
+        snap = self.messaging.snapshot(chat_id)
+        for agent in self._cascading_agents(snap, self.user):
+            self.messaging.post_event(
+                chat_id, {"type": events.EV_MEMBER_REMOVED, "who": agent,
+                          "by": self.user, "reason": "with_owner",
+                          "owner": self.user}
+            )
         self.messaging.post_event(chat_id, {"type": events.EV_MEMBER_LEFT})
         return self.refold(chat_id)
 

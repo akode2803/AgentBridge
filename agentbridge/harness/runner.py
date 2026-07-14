@@ -566,6 +566,13 @@ class AgentRunner:
 
     def tick(self) -> int:
         """One scan+dispatch pass (the run loop's body; tests call it too)."""
+        acc = self.mesh.directory.get(self.agent)
+        if acc is not None and acc.deactivated:
+            # R56 (V49): the agent was DELETED (soft) — exit cleanly (rc 0,
+            # so the supervisor stops too) instead of idling forever. Distinct
+            # from active=False alone, which is the owner's pause switch.
+            print(f"[harness] @{self.agent} was deleted — standing down")
+            raise SystemExit(0)
         settings = self.settings()
         # MCP-only (Q21): adapter "none" means this agent runs no local CLI —
         # it connects through mesh-cli itself. Stand the runner down cleanly
@@ -738,9 +745,10 @@ def supervise(agent: str, argv: list[str]) -> None:
 
 def hosted_agents(root, machine: str) -> list[str]:
     """Agents whose accounts name THIS machine as home (active or not — the
-    active flag is a runtime hold, and a held agent still syncs). An agent
-    set to adapter "none" (MCP-only, Q21) runs no local CLI — it connects
-    through mesh-cli on its own, so no runner is spawned for it."""
+    active flag is a runtime hold, and a held agent still syncs; a DELETED
+    agent — ``deactivated`` set — gets no runner, R56/V49). An agent set to
+    adapter "none" (MCP-only, Q21) runs no local CLI — it connects through
+    mesh-cli on its own, so no runner is spawned for it."""
     from ..mesh.directory import Directory
     from ..transport import make_transport
 
@@ -749,6 +757,7 @@ def hosted_agents(root, machine: str) -> list[str]:
     for name in directory.names():
         acc = directory.get(name)
         if acc and acc.kind is UserKind.AGENT and acc.agent \
+                and not acc.deactivated \
                 and acc.agent.machine == machine \
                 and str(acc.agent.harness.get("adapter") or "") != "none":
             out.append(name)

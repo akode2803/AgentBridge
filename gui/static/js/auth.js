@@ -25,7 +25,11 @@ const FORMAT_HINT = "2–32 characters: lowercase letters, digits, _ or ‑, "
 
 let checkSeq = 0;   // ignore out-of-order check responses while typing
 
-function renderAuthPage() {
+function renderAuthPage(force = false) {
+  // already showing: an external caller (route change, signed-out poll) must
+  // never clobber half-typed credentials — only the page's own tab toggle
+  // re-renders (force). R56/V40.
+  if ($("#auth") && !force) return;
   const mode = Mesh.auth.mode;
   // half-typed values survive the Sign in / Create account toggle
   const held = {
@@ -58,6 +62,7 @@ function renderAuthPage() {
         <label class="auth-fld"><span>Password</span>
           <input type="password" id="auth-pass"
             autocomplete="${mode === "signup" ? "new-password" : "current-password"}"></label>
+        <div class="auth-err" id="auth-sub-err" role="alert"><div><span></span></div></div>
         <button class="primary auth-go" id="auth-go">${mode === "signup" ? "Create account" : "Sign in"}</button>
         <p class="hint">Accounts live in the shared mesh — one account works
         from any machine that syncs it.</p>
@@ -75,11 +80,21 @@ function renderAuthPage() {
   if (disp && held.display) disp.value = held.display;
 
   $("#auth-login").addEventListener("click", () => {
-    Mesh.auth.mode = "login"; renderAuthPage();
+    Mesh.auth.mode = "login"; renderAuthPage(true);
   });
   $("#auth-signup").addEventListener("click", () => {
-    Mesh.auth.mode = "signup"; renderAuthPage();
+    Mesh.auth.mode = "signup"; renderAuthPage(true);
   });
+
+  // V39: submit refusals surface IN the card (a toast renders under this
+  // full-page overlay — z-index made honest too, but the card is the fix)
+  const subBox = $("#auth-sub-err");
+  const setSubError = (msg) => {
+    subBox.querySelector("span").textContent = msg;
+    subBox.classList.toggle("show", !!msg);
+  };
+  passIn.addEventListener("input", () => setSubError(""));
+  disp?.addEventListener("input", () => setSubError(""));
 
   // ---- live username checking (V24) ----
   const errBox = $("#auth-user-err");
@@ -90,6 +105,7 @@ function renderAuthPage() {
   let debounce = null;
   userIn.addEventListener("input", () => {
     clearTimeout(debounce);
+    setSubError("");                  // editing invalidates the old refusal
     checkSeq++;                       // anything in flight is stale now
     const name = userIn.value.trim().toLowerCase();
     if (!name) { setNameError(""); return; }
@@ -132,7 +148,7 @@ function renderAuthPage() {
         display: $("#auth-display")?.value?.trim(),
       };
       const r = await api(mode === "signup" ? "/api/mesh/signup" : "/api/mesh/login", payload);
-      if (r.error) { toast(r.error, true); return; }
+      if (r.error) { setSubError(r.error); return; }  // V39: in-card, never a hidden toast
       // D5: the recovery code is shown ONCE — at signup, and on the first v2
       // sign-in of a migrated account (identity keys freshly minted)
       if (r.recovery_code) await showRecoveryCode(r.recovery_code);
