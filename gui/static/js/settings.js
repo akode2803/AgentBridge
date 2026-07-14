@@ -368,6 +368,22 @@ async function renderSettings() {
                permission mid-run, answering "Always allow" lands the grant
                here — revoke any of them any time.</p>`}
           </div>
+          <h2 style="margin-top:14px">Safe permissions</h2>
+          <div class="row"><label class="switch">
+            <input type="checkbox" class="ag-aux-read" data-agent="${esc(a.username)}"
+              ${(st.aux && st.aux.read === false) ? "" : "checked"}>
+            <span class="slider"></span></label>
+            <span><b>Reads don't ask</b> — read-only tools may look outside its
+            workspace without a popup</span></div>
+          <div class="row"><label class="switch">
+            <input type="checkbox" class="ag-aux-web" data-agent="${esc(a.username)}"
+              ${(st.aux && st.aux.web) ? "checked" : ""}>
+            <span class="slider"></span></label>
+            <span><b>Web access</b> — its web tools leave the hard block; every
+            use asks you first unless you grant always-allow</span></div>
+          <p class="hint" style="margin:2px 0 0">Neither bypasses the permission
+          system — anything outside its workspace still asks. Shell and subtask
+          tools stay blocked outright.</p>
           <h2 style="margin-top:14px">Reach</h2>
           <dl class="kv" style="grid-template-columns:minmax(120px,180px) 1fr">
             <dt>May message</dt><dd><span class="csel-slot ag-rule"
@@ -615,7 +631,15 @@ async function renderSettings() {
         refreshEfforts(agent, fam);
         document.querySelectorAll(`.ag-route-model[data-agent="${agent}"]`)
           .forEach((s) => remount(s, modelOpts(fam, "Use current model"), noModels));
+        syncAuxWeb(agent, fam);
       };
+      // the web toggle only means something where the family declares its
+      // web tools AND has the ask gate (H2/R43) — else it greys out
+      const syncAuxWeb = (agent, fam = famFor(agent)) => {
+        const el = document.querySelector(`.ag-aux-web[data-agent="${agent}"]`);
+        if (el) el.disabled = !(fam && fam.aux_web);
+      };
+      mine.forEach((a) => syncAuxWeb(a.username));
       // the effort list follows the MODEL pick (Q13): remounted whenever the
       // family or the current model changes
       const refreshEfforts = (agent, fam = famFor(agent)) => {
@@ -827,6 +851,23 @@ async function renderSettings() {
       if (rec.settings) rec.settings.approvals = left;
       btn.closest(".ag-appr-row").remove();
       toast("Approval revoked", { check: true });
+    });
+  });
+  // aux safety flags (H2/R43): instant save — a permission knob shouldn't
+  // wait for the big Save button. Both keys ride together (the harness
+  // merges the dict, but a full pair reads unambiguously in the config).
+  document.querySelectorAll(".ag-aux-read, .ag-aux-web").forEach((el) => {
+    el.addEventListener("change", async () => {
+      const agent = el.dataset.agent;
+      const aux = {
+        read: !!document.querySelector(`.ag-aux-read[data-agent="${agent}"]`)?.checked,
+        web: !!document.querySelector(`.ag-aux-web[data-agent="${agent}"]`)?.checked,
+      };
+      const r = await api("/api/mesh/agent", { username: agent, patch: { aux } });
+      if (r.error) { toast(r.error, true); return; }
+      const rec = (Mesh.state.users || {})[agent];
+      if (rec && rec.settings) rec.settings.aux = aux;
+      toast("Saved", { check: true });
     });
   });
   // owner deletes an agent (Q20/M11): soft — it leaves every room and its

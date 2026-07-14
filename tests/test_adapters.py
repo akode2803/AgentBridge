@@ -210,6 +210,37 @@ def test_per_chat_context_and_memory_overrides():
     assert s.context_days_for("cX") == 0
 
 
+def test_aux_flags_shape_the_gates():
+    """H2/R43: the owner's aux flags resolve into the run's auto_allow +
+    blocklist — and the web relax NEVER applies without the ask gate."""
+    from agentbridge.harness.adapters.registry import effective_gates
+
+    gated = Preset(id="p", command="x",
+                   permission_args=["--mcp-config", "{mcp_config}"],
+                   auto_allow=["Read", "Grep"],
+                   blocklist=["Bash", "WebFetch", "WebSearch"],
+                   aux_web=["WebFetch", "WebSearch"])
+    # defaults: reads free, web hard-blocked
+    auto, block = effective_gates(gated, settings())
+    assert auto == ["Read", "Grep"]
+    assert block == ["Bash", "WebFetch", "WebSearch"]
+    # read off: even reads outside the workspace ask
+    auto, block = effective_gates(gated, settings(aux={"read": False}))
+    assert auto == [] and "Bash" in block
+    # web on: the web tools leave the blocklist (into the ask gate);
+    # Bash stays hard-blocked regardless
+    auto, block = effective_gates(gated, settings(aux={"web": True}))
+    assert block == ["Bash"] and auto == ["Read", "Grep"]
+    # no ask gate (no permission_args): the toggle is inert
+    bare = Preset(id="b", command="x",
+                  blocklist=["web_fetch"], aux_web=["web_fetch"])
+    _, block = effective_gates(bare, settings(aux={"web": True}))
+    assert block == ["web_fetch"]
+    # junk aux parses to the defaults
+    s = settings(aux="nonsense")
+    assert s.aux == {"read": True, "web": False}
+
+
 def test_reply_from_output_formats():
     stream = [json.dumps({"type": "result", "result": "final"})]
     assert reply_from_output(stream, "claude-stream") == "final"

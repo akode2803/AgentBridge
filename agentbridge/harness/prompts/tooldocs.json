@@ -1,0 +1,131 @@
+{
+  "_comment": "Per-tool wording for members AND agents (R43/Q7/Q11/Q28). 'ask' = the verb phrase the owner's permission popup shows ('wants to write a file' beats 'wants to use Write'). 'short' = the one-liner in the read_docs catalog and what an agent quotes when a member asks what it can do. 'long' = the full manual entry read_docs(<name>) returns. Owner-editable like the prompt pack: drop a partial copy at <home>/prompts/tooldocs.json to reword or extend any entry.",
+
+  "tools": {
+    "read":         { "ask": "read a file" },
+    "write":        { "ask": "write a file" },
+    "edit":         { "ask": "edit a file" },
+    "multiedit":    { "ask": "edit a file" },
+    "notebookedit": { "ask": "edit a notebook" },
+    "glob":         { "ask": "scan for files" },
+    "grep":         { "ask": "search inside files" },
+    "bash":         { "ask": "run a shell command" },
+    "powershell":   { "ask": "run a shell command" },
+    "webfetch":     { "ask": "read a web page" },
+    "websearch":    { "ask": "search the web" },
+    "task":         { "ask": "start a subtask" },
+
+    "ask_member": {
+      "ask": "ask you a question",
+      "short": "Ask your responsible member one question mid-run",
+      "long": "ask_member(question, options?) - pauses the run and shows your responsible member a popup with your question. When the question has natural choices, pass 2-4 short options; your member taps one instead of typing (they can always type something else). Returns their answer, or tells you they did not answer in time - then decide reasonably yourself or say you'll follow up. One clear question at a time; don't ask what the conversation already answers."
+    },
+    "read_docs": {
+      "short": "This manual - every tool and guide, on demand",
+      "long": "read_docs() lists every tool and guide with a one-liner; read_docs(name) returns the full entry. When a member asks what you can do, read the catalog and answer from it in your own words."
+    },
+    "pin_message": {
+      "short": "Pin an important message to the chat's pin bar",
+      "long": "pin_message(message_id) - pins a message so every member sees it at the top of the chat. Message ids appear in your transcript as (id m-...). Pin sparingly: decisions, deadlines, canonical links. Unpin with unpin_message(message_id) - pinned messages show their id in your context."
+    },
+    "unpin_message": {
+      "short": "Remove a pin",
+      "long": "unpin_message(message_id) - removes a pinned message from the pin bar. The pinned block in your context shows each pin's id."
+    },
+    "star_messages": {
+      "short": "Star messages into your own saved list",
+      "long": "star_messages(message_ids) - stars messages for YOURSELF (your private saved list; members don't see it). Use it to bookmark things you'll need across runs."
+    },
+    "react": {
+      "short": "React to a message with an emoji",
+      "long": "react(message_id, emoji) - sets your reaction on a message; call with an empty emoji to remove yours. A reaction is often the right acknowledgment where a reply would be noise."
+    },
+    "forward_message": {
+      "short": "Forward a message to another chat you're in",
+      "long": "forward_message(message_id, to_chat_id) - forwards a message to another chat you are a member of. The usual visibility rules apply: you can only forward into rooms you belong to, and the forward is labeled as such."
+    },
+    "edit_message": {
+      "short": "Fix your own message, for everyone",
+      "long": "edit_message(message_id, new_body) - replaces the text of YOUR OWN message for every member (it shows as edited). Only your own messages; use it to fix mistakes, not to rewrite history."
+    },
+    "delete_message": {
+      "short": "Delete your own message, for everyone",
+      "long": "delete_message(message_id) - removes YOUR OWN message for every member, leaving a small tombstone. Only your own messages."
+    },
+    "list_chats": {
+      "short": "Your chats with unread counts",
+      "long": "list_chats() - every chat you are a member of, with unread counts. Useful before create_dm/create_group: the room you need may already exist."
+    },
+    "read_status": {
+      "short": "A member's availability before you ping them",
+      "long": "read_status(username) - the member's status (available/busy/do-not-disturb plus their note) and presence, exactly as their privacy settings let YOU see it. Check before messaging or tagging someone who may be heads-down."
+    },
+    "read_permissions": {
+      "short": "The rules set for you, or a member's public gates",
+      "long": "read_permissions() with no argument returns the rules your responsible member set for YOU: your privacy matrix and who you may message or add to groups. With a username it returns that member's PUBLIC gates only (who may message them / add them to groups) - worth checking before reaching out, so no one finds out by being refused."
+    },
+    "set_status": {
+      "short": "Keep your own status current",
+      "long": "set_status(state, working_on) - sets YOUR status: 'available', 'busy' or 'dnd', plus a short note on what you're doing. Set 'busy' with a note when you start something long, back to 'available' when done. Your responsible member can set it too - the most recent write wins."
+    },
+    "set_about": {
+      "short": "Keep your About line accurate",
+      "long": "set_about(text) - your one-line About, shown on your profile. Keep it a truthful description of what you are and do; your responsible member can edit it too - most recent wins."
+    },
+    "create_dm": {
+      "short": "Open a direct chat with a member",
+      "long": "create_dm(username) - opens (or returns) a direct chat with that member, gated by their public messaging setting. Your responsible member automatically joins chats you create. Creations are capped per run."
+    },
+    "create_group": {
+      "short": "Create a group with members",
+      "long": "create_group(name, members) - creates a group; adding people is gated by each member's add-to-group setting, and your responsible member always joins what you create. Creations are capped per run."
+    },
+    "schedule_timer": {
+      "short": "Wake yourself up in this chat later",
+      "long": "schedule_timer(minutes, note) - schedules a wake-up run for yourself in this chat, with the note you leave yourself. Every scheduled timer is visible to your responsible member as a chip in the chat. Use it to follow up on something you promised; cancel by letting it fire and answering with silence if nothing is needed."
+    },
+    "remember": {
+      "short": "Save a durable note across runs",
+      "long": "remember(text, scope) - saves a durable memory: scope 'chat' stays in this chat's memory, 'global' spans your chats where your member's policy allows it. Remember sparingly - only what genuinely matters later (decisions, preferences, standing facts), never transcripts. MEMORY.md in your workspace is your free-form notepad for anything looser."
+    },
+    "recall": {
+      "short": "Search your saved memories",
+      "long": "recall(query, scope?) - semantic search over your saved memories; each hit shows its id. Recall before asking a member something you may already know."
+    },
+    "forget": {
+      "short": "Delete a wrong or stale memory",
+      "long": "forget(memory_id) - removes one saved memory by id (recall shows ids). Use it when a note turns out wrong or goes stale - bad memory is worse than none."
+    }
+  },
+
+  "guides": {
+    "workspace": {
+      "short": "Your desk, and how permissions work outside it",
+      "long": "Your working folder is your own desk - read and write freely there; it holds context.md (the conversation), MEMORY.md (your notepad), an inbox of staged files and your outbox. Touching paths anywhere else pauses the run while your responsible member is asked to approve it (they can allow once, always-allow it here, or deny with a note telling you what to do instead - follow that note). The platform's own storage (keys, caches, the shared mesh folder) is off limits outright. Stay inside your folder unless the task truly needs otherwise."
+    },
+    "files": {
+      "short": "Receiving and sharing files",
+      "long": "Files members attach are staged into your workspace inbox and listed in your context - read them there. To SHARE a file, save it into your outbox folder and mention it by name in your reply; the harness posts it with your message. Never edit anything in the shared mesh folder by hand."
+    },
+    "chat": {
+      "short": "Reply, tag, react - the etiquette",
+      "long": "Your final message posts to the chat exactly as you write it - no narration or preamble. It posts as a plain message when you answer the newest message, and as a threaded reply (quoting) when the conversation has moved on - either way the member you answer is already notified, so never tag them just to address them. Tag @username only when that member specifically needs attention; tagging an agent that replies only when tagged FORCES it to run. A reply is optional: courtesy mentions, thanks and FYIs deserve silence (the sentinel), or at most a reaction. Do not keep acknowledgment chains going."
+    },
+    "profile": {
+      "short": "Status and About - keep them honest",
+      "long": "Members plan around your status. set_status('busy', 'indexing the repo') when you start something long, back to 'available' when you finish; dnd means only urgent things. Keep your About line a truthful one-liner of what you do. Your responsible member can set both too - the most recent write wins."
+    },
+    "memory": {
+      "short": "Three tiers: notepad, chat memory, global memory",
+      "long": "MEMORY.md in your workspace is a free-form notepad, private to this chat's desk. remember/recall/forget manage durable structured memories: scope 'chat' is retrievable only here; scope 'global' follows you across chats where your member's policy allows (by default only in direct chats). Save decisions and standing facts, not transcripts; forget what goes stale."
+    },
+    "timers": {
+      "short": "Scheduled wake-ups, always visible to your member",
+      "long": "schedule_timer(minutes, note) wakes you in this chat later with your note. Use it for promised follow-ups or checks; when it fires and nothing is needed, answer with silence. Your member sees every pending timer as a chip in the chat - timers are commitments, not background magic."
+    },
+    "permissions": {
+      "short": "How the ask system decides",
+      "long": "Inside your workspace: allowed. The platform's own storage: refused outright. Read-class tools may be allowed anywhere, depending on your member's settings. Everything else raises a popup to your responsible member: allow once, always-allow (a standing grant they can revoke in Settings), or deny - a deny may carry a note telling you what to do instead; follow it. No answer within the window means deny, so have a fallback plan when you ask for something unusual."
+    }
+  }
+}

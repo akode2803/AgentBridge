@@ -27,7 +27,7 @@ from ...core.config import DEFAULT_HOME
 from ...core.errors import ValidationError
 from ..settings import HarnessSettings
 
-__all__ = ["Preset", "Invocation", "ModelRegistry"]
+__all__ = ["Preset", "Invocation", "ModelRegistry", "effective_gates"]
 
 PRESET_DIR = Path(__file__).resolve().parent / "presets"
 FORMATS = ("claude-stream", "codex-jsonl", "text")
@@ -50,6 +50,10 @@ class Preset:
     model_efforts: dict[str, list[str]] = field(default_factory=dict)
     blocklist_args: list[str] = field(default_factory=list)  # {tool}, repeated
     blocklist: list[str] = field(default_factory=list)     # default tool blocks
+    # H2/R43: the blocklist entries the owner's "web access" toggle governs —
+    # flipped on, they leave the blocklist and route through the ask gate
+    # instead. A family without this key simply has no web toggle.
+    aux_web: list[str] = field(default_factory=list)
     reply_file_arg: list[str] = field(default_factory=list)  # {reply_file}
     # R18 broker plumbing — {mcp_config} rides argv when a bridge is active;
     # safety-class: applied in BOTH full and minimal argv, never dropped
@@ -116,6 +120,21 @@ class Invocation:
     preset: Preset
     model: str = ""
     effort: str = ""
+
+
+def effective_gates(preset: Preset,
+                    settings: HarnessSettings) -> tuple[list[str], list[str]]:
+    """The run's (auto_allow, blocklist) after the owner's aux flags (H2/R43).
+    ``read`` off empties auto_allow — even reads outside the workspace ask.
+    ``web`` on releases the preset's aux_web tools from the blocklist INTO
+    the ask gate — and only for presets that HAVE the gate (permission_args);
+    a family without the ask plumbing keeps its full blocklist regardless,
+    so the toggle can never trade a hard block for nothing."""
+    auto = list(preset.auto_allow) if settings.aux.get("read", True) else []
+    block = list(preset.blocklist)
+    if settings.aux.get("web") and preset.permission_args and preset.aux_web:
+        block = [t for t in block if t not in preset.aux_web]
+    return auto, block
 
 
 class ModelRegistry:

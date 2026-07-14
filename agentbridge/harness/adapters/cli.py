@@ -32,12 +32,13 @@ from ...core.timekit import utcnow_iso
 from ..bridge import BridgeServer
 from ..broker import PermissionBroker
 from ..conversation import Delivery
+from ..docs import ToolDocs
 from ..memory import MemoryStore
 from ..prompt import PromptManager, PromptPack, TRANSCRIPT_TAIL
 from ..responder import OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..settings import HarnessSettings
-from .registry import Invocation, ModelRegistry
+from .registry import Invocation, ModelRegistry, effective_gates
 
 __all__ = ["CliResponder", "extract_step", "reply_from_output"]
 
@@ -117,7 +118,8 @@ class CliResponder:
         self.agent = mesh.user
         self.home = Path(home) if home else DEFAULT_HOME
         self.prompts = PromptManager(self.home)
-        self.broker = PermissionBroker(mesh.tx, self.agent)
+        self.docs = ToolDocs.load(self.home)   # R43: manual + popup phrases
+        self.broker = PermissionBroker(mesh.tx, self.agent, docs=self.docs)
         # one store per agent process (qdrant local mode is single-process
         # per path); backends load lazily on the first remember/recall
         self.memory = MemoryStore(self.home / "harness" / self.agent / "memory")
@@ -176,13 +178,18 @@ class CliResponder:
                 on_step(line)
 
         timers: list[dict] = []          # the bridge's schedule_timer fills it
+        # H2/R43: the owner's aux flags shape the run's gates — auto_allow
+        # may empty (reads ask too) and web tools may move from the hard
+        # blocklist into the ask gate (never without the gate; see
+        # effective_gates). Both argv builds below use THIS blocklist.
+        auto_allow, blocklist = effective_gates(inv.preset, settings)
         with contextlib.ExitStack() as stack:
             mcp_config = ""
             env = None
             if inv.preset.permission_args:
                 bridge = stack.enter_context(BridgeServer(
                     self.broker, chat_id=delivery.chat_id,
-                    workspace=workdir, auto_allow=inv.preset.auto_allow,
+                    workspace=workdir, auto_allow=auto_allow,
                     approvals=settings.approvals,
                     ask_timeout_s=settings.ask_timeout_s,
                     deny_roots=self._deny_roots(),
@@ -191,19 +198,23 @@ class CliResponder:
                     # H6/R41: the per-chat override resolves here, so the
                     # bridge's memory gate sees the effective policy
                     global_memory=settings.global_memory_for(delivery.chat_id),
+                    docs=self.docs,
                 ))
                 mcp_config = bridge.mcp_config()
                 # the inner CLI must out-wait the owner-answer window
                 env = dict(os.environ)
                 env["MCP_TOOL_TIMEOUT"] = str(
                     int((settings.ask_timeout_s + 60) * 1000))
+            if not mcp_config:
+                # no live ask gate on this run — the web relax never applies
+                blocklist = list(inv.preset.blocklist)
             prompt = pack.prompt(delivery, acc, context_file=context_file,
                                  outbox=outbox, bridge=bool(mcp_config))
             argv = inv.preset.build_argv(
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
                 effort=inv.effort, minimal=inv.preset.id in self._minimal,
-                mcp_config=mcp_config,
+                mcp_config=mcp_config, blocklist=blocklist,
             )
             rc, lines, err = self._run(argv, workdir, settings.timeout_s,
                                        inv, pack, step, env=env,
@@ -217,6 +228,7 @@ class CliResponder:
                     prompt=prompt, workdir=str(workdir),
                     reply_file=str(reply_file), model=inv.model,
                     effort=inv.effort, minimal=True, mcp_config=mcp_config,
+                    blocklist=blocklist,
                 )
                 rc, lines, err = self._run(argv, workdir, settings.timeout_s,
                                            inv, pack, step, env=env,

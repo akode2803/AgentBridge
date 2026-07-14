@@ -406,6 +406,17 @@ h1 {
 }
 .ask-actions, .ask-answer { display: flex; gap: 8px; }
 .ask-answer input { flex: 1; min-width: 0; }
+/* agent-offered choices (R43/Q28): one-tap pills; Other… reveals free text */
+.ask-opts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.ask-opt {
+  background: none; border: 1.5px solid var(--border-strong);
+  border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 13px;
+  font-weight: 600; cursor: pointer;
+}
+.ask-opt:hover, [data-theme="dark"] .ask-opt:hover { background: var(--hover); }
+.ask-opt.ask-other { color: var(--text-dim); border-style: dashed; }
+/* deny stage 2: the optional tell-it-why note */
+.ask-deny-note { flex: 1; min-width: 0; }
 .ask-done { opacity: .5; pointer-events: none; }
 /* a peer REPAIR request mutates another harness — flag it louder (R22.5) */
 .ask-repair { border-left-color: var(--bad); }
@@ -2191,8 +2202,11 @@ pre.configdump {
 .cf-actions.cf-col > .cf-del:hover,
 [data-theme="dark"] .cf-actions.cf-col > .cf-del:hover { background: var(--danger-hover); }
 .cf-actions.cf-col > .cf-cancel { color: var(--text); }
-.cf-actions.cf-col > .cf-cancel:hover,
-[data-theme="dark"] .cf-actions.cf-col > .cf-cancel:hover { background: var(--hover); }
+/* neutral stacked options (mute horizons, …) share the Cancel hover — only
+   the destructive rows get the red treatment */
+.cf-actions.cf-col > .cf-cancel:hover, .cf-actions.cf-col > .mute-opt:hover,
+[data-theme="dark"] .cf-actions.cf-col > .cf-cancel:hover,
+[data-theme="dark"] .cf-actions.cf-col > .mute-opt:hover { background: var(--hover); }
 
 /* ---- message info dialog (round 11) --------------------------------------
    For my own messages: Read / Delivered receipts (DM = two rows; group = a

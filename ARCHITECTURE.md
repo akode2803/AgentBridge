@@ -323,9 +323,21 @@ live only in an adapter preset.
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →
   allow; else **ASK the owner and block**. Timeout = **deny** (fail-closed),
   denial cached per-run. Deny-roots resolve `..`/symlinks before comparing.
+  Ask docs carry a friendly `label` ("write a file", from tooldocs — raw ids
+  never headline a popup) and a question's `options`; a deny's `text` rides
+  back to the agent as the reason (the GUI's tell-it-what-to-do-instead note,
+  R43).
+- **`docs.py` + `prompts/tooldocs.json`** (R43, Q7/Q11) — per-tool wording in
+  one data file: `ask` (popup verb phrase), `short` (catalog one-liner),
+  `long` (manual entry), plus conceptual `guides`. Owner-overridable at
+  `<home>/prompts/tooldocs.json`, same chain as the prompt pack. Feeds the
+  broker's labels and the bridge's `read_docs`; the inline `bridge` prompt
+  paragraph keeps behaviour rules + the tool roster and points at the manual
+  for semantics (documentation is a tool, not context).
 - **`bridge.py`** (R18/R19/R20/R22) — a per-run FastMCP streamable-http server on
   an ephemeral `127.0.0.1` port, tools bound to the run's chat/workspace/policy:
-  the `approve` permission gate + `ask_member`; capability tools
+  the `approve` permission gate + `ask_member` (R43: may offer ≤4 one-tap
+  options) + `read_docs`; capability tools
   (pin/star/react/forward/create_dm/create_group[capped]/schedule_timer, all
   chat-bound + id-validated); memory `remember`/`recall`/`forget`;
   `peer_diagnose`. Every tool sets `structured_output=False` (a spike lesson:
@@ -350,10 +362,15 @@ live only in an adapter preset.
   by the runner, touch only harness-local runtime state). Every outcome audited.
 - **`adapters/`** — the ModelRegistry + preset engine. A preset (`presets/*.json`)
   declares the CLI family, model list, effort support, blocklist, `auto_allow`,
-  and `permission_args`. The `claude` preset wires the broker; `codex`/`cortex`
-  rely on their own sandbox (`--sandbox read-only` / `--sql-read-only`); others
-  are pure text generators. Safety flags (blocklist, sandbox) are **never**
-  dropped, even on the minimal-flags fallback retry.
+  `aux_web` and `permission_args`. The `claude` preset wires the broker;
+  `codex`/`cortex` rely on their own sandbox (`--sandbox read-only` /
+  `--sql-read-only`); others are pure text generators. Safety flags (blocklist,
+  sandbox) are **never** dropped, even on the minimal-flags fallback retry.
+  H2/R43: the owner's aux toggles resolve per run via `effective_gates` —
+  "Reads don't ask" empties `auto_allow`; "Web access" moves the preset's
+  `aux_web` tools from the blocklist INTO the ask gate, and only while that
+  gate is live (a family without `permission_args` keeps its full blocklist
+  no matter the toggle, and a run whose bridge fails keeps it too).
 
 ---
 

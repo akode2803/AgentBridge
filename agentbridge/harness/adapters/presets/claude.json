@@ -16,6 +16,7 @@
   "blocklist_args": ["--disallowedTools", "{tool}"],
   "blocklist": ["Bash", "WebFetch", "WebSearch", "Task", "Agent",
                 "NotebookEdit", "KillShell"],
+  "aux_web": ["WebFetch", "WebSearch"],
   "format": "claude-stream",
   "models": ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
              "claude-haiku-4-5-20251001"],

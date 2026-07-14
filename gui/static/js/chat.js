@@ -813,25 +813,36 @@ function renderAskBar(chatId, asks, timers) {
       ? `<b>@${esc(a.peer)}</b> wants to <b>${esc(a.tool)}</b> ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
       : peer
       ? `<b>@${esc(a.peer)}</b> wants a diagnostic session with ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
-      : `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> wants to use <b>${esc(a.tool)}</b>`;
+      // R43: the harness sends a friendly verb phrase ("write a file") —
+      // the raw tool id stays reachable as the hover title
+      : `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> wants to <b title="${esc(a.tool)}">${esc(a.label || "use " + a.tool)}</b>`;
     // a repair mutation ALWAYS asks — no "always allow" shortcut for it
     const always = repair ? "" :
       `<button class="ask-always">${peer ? "Always allow this peer" : "Always allow here"}</button>`;
+    // a question with agent-offered options renders them as one-tap pills
+    // (Claude-Code-style, Q28); "Other…" reveals the free-text escape
+    const opts = q && Array.isArray(a.options) && a.options.length;
+    const answerUi = !q ? `
+      <div class="ask-actions">
+        <button class="primary ask-allow">Allow</button>
+        ${always}
+        <button class="danger-item ask-deny">Deny</button>
+      </div>` : `
+      ${opts ? `<div class="ask-opts">
+        ${a.options.map((o) => `<button class="ask-opt" data-opt="${esc(o)}">${esc(o)}</button>`).join("")}
+        <button class="ask-opt ask-other">Other…</button>
+      </div>` : ""}
+      <div class="ask-answer" ${opts ? "hidden" : ""}>
+        <input type="text" placeholder="Your answer…" maxlength="2000">
+        <button class="primary ask-send">Send</button>
+      </div>`;
     return `
       <div class="ask-card${repair ? " ask-repair" : ""}" data-ask="${esc(a.id)}">
         <span class="chat-avatar ask-avatar">${meshAvatarInner(a.agent)}</span>
         <div class="ask-main">
           <div class="ask-head">${head}</div>
           <div class="ask-detail">${esc(a.detail || "")}</div>
-          ${q ? `<div class="ask-answer">
-                   <input type="text" placeholder="Your answer…" maxlength="2000">
-                   <button class="primary ask-send">Send</button>
-                 </div>`
-              : `<div class="ask-actions">
-                   <button class="primary ask-allow">Allow</button>
-                   ${always}
-                   <button class="danger-item ask-deny">Deny</button>
-                 </div>`}
+          ${answerUi}
         </div>
       </div>`;
   }).join("");
@@ -849,7 +860,34 @@ function renderAskBar(chatId, asks, timers) {
     };
     card.querySelector(".ask-allow")?.addEventListener("click", () => send("allow"));
     card.querySelector(".ask-always")?.addEventListener("click", () => send("always"));
-    card.querySelector(".ask-deny")?.addEventListener("click", () => send("deny"));
+    // deny is two-stage (Claude-Code-style, Q28): the second stage offers an
+    // optional note the agent receives as the reason — Enter (empty is fine)
+    // or the Deny button sends; Escape backs out to the three actions
+    card.querySelector(".ask-deny")?.addEventListener("click", () => {
+      const actions = card.querySelector(".ask-actions");
+      actions.innerHTML = `
+        <input type="text" class="ask-deny-note" maxlength="500"
+          placeholder="Tell ${esc(meshDn(a.agent))} what to do instead (optional)">
+        <button class="danger-item ask-deny-go">Deny</button>`;
+      const note = actions.querySelector(".ask-deny-note");
+      note.focus();
+      const go = () => send("deny", note.value.trim());
+      actions.querySelector(".ask-deny-go").addEventListener("click", go);
+      note.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); go(); }
+        else if (e.key === "Escape") { Mesh.askKey = ""; renderAskBar(chatId, asks, timers); }
+      });
+    });
+    // agent-offered options: one tap answers; "Other…" reveals free text
+    card.querySelectorAll(".ask-opt:not(.ask-other)").forEach((b) => {
+      b.addEventListener("click", () => send("answer", b.dataset.opt));
+    });
+    card.querySelector(".ask-other")?.addEventListener("click", () => {
+      card.querySelector(".ask-opts").hidden = true;
+      const box = card.querySelector(".ask-answer");
+      box.hidden = false;
+      box.querySelector("input").focus();
+    });
     const inp = card.querySelector(".ask-answer input");
     const submit = () => { if (inp.value.trim()) send("answer", inp.value.trim()); };
     card.querySelector(".ask-send")?.addEventListener("click", submit);

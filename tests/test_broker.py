@@ -174,6 +174,90 @@ def test_question_pipe_returns_the_text(tmp_path):
         t.join()
 
 
+def test_ask_doc_carries_label_and_options(tmp_path):
+    """R43/Q28: a permission ask publishes the friendly verb phrase (never
+    the raw tool id alone) and a question publishes its offered choices."""
+    from agentbridge.harness.docs import ToolDocs
+
+    tx = FakeTx()
+    b = PermissionBroker(tx, "helper", docs=ToolDocs.load(tmp_path / "home"))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    seen: dict = {}
+
+    def capture(delay=0.1):
+        def run():
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                asks = (tx.docs.get("status/asks/helper.json") or {}).get("asks") or []
+                if asks:
+                    seen.update(asks[0])
+                    tx.docs["status/asks/helper_answers.json"] = {
+                        "answers": {asks[0]["id"]: {"verdict": "deny",
+                                                    "text": "try the outbox"}}}
+                    return
+                time.sleep(0.02)
+        t = threading.Timer(delay, run)
+        t.start()
+        return t
+
+    t = capture()
+    try:
+        ok, msg = b.decide(chat_id="c1", workspace=ws, tool="Write",
+                           tool_input={"file_path": str(tmp_path / "x.txt")},
+                           auto_allow=[], approvals=[], timeout_s=5)
+        assert not ok and msg == "try the outbox"   # the deny note reaches it
+        assert seen["label"] == "write a file"
+    finally:
+        t.join()
+
+    seen.clear()
+    t = capture()
+    try:
+        verdict, text = b.ask(chat_id="c1", kind="question", tool="question",
+                              detail="which one?", timeout_s=5,
+                              options=["red", "blue"])
+        assert verdict == "answer"
+        assert seen["options"] == ["red", "blue"]
+        assert "label" not in seen                  # questions carry no phrase
+    finally:
+        t.join()
+
+    # an unmapped tool still gets a humanized phrase, never a raw id
+    assert b.docs.ask_phrase("mcp__github__create_issue") \
+        == "use create issue (github)"
+
+
+def test_tooldocs_catalog_topic_and_override(tmp_path):
+    """R43/Q7/Q11: the shipped manual serves a catalog + full entries; a
+    home overlay rewords an entry without touching code."""
+    from agentbridge.harness.docs import ToolDocs
+
+    docs = ToolDocs.load(tmp_path)          # no overlay: shipped data
+    cat = docs.catalog()
+    assert "memory" in cat and "pin_message" in cat
+    # inner-CLI tools carry only an ask phrase — they are not the agent's
+    # manual, so the catalog must not list them
+    listed = [ln[2:].split(":")[0] for ln in cat.splitlines()
+              if ln.startswith("- ")]
+    assert "write" not in listed and "bash" not in listed
+    assert "'global' spans your chats" in docs.topic("remember")
+    assert docs.topic("mcp__ab__remember") == docs.topic("remember")
+    missing = docs.topic("no_such_thing")
+    assert "No entry" in missing
+
+    over = tmp_path / "prompts"
+    over.mkdir(parents=True)
+    (over / "tooldocs.json").write_text(json.dumps({
+        "tools": {"remember": {"ask": "save a note",
+                               "short": "S", "long": "OVERRIDDEN"}}}),
+        encoding="utf-8")
+    docs2 = ToolDocs.load(tmp_path)
+    assert docs2.topic("remember") == "OVERRIDDEN"
+    assert "pin_message" in docs2.catalog()   # the rest of the pack survives
+
+
 # ---------------------------------------------------------- the MCP channel
 
 def call_tool(url: str, tool: str, args: dict) -> str:
@@ -213,6 +297,49 @@ def test_bridge_approve_and_ask_member_over_http(tmp_path):
     # the context manager tore the server down
     with pytest.raises(Exception):
         call_tool(bridge.url, "approve", {"tool_name": "Read", "input": {}})
+
+
+def test_bridge_question_options_and_read_docs_over_http(tmp_path):
+    """R43: ask_member forwards sanitized options into the ask doc, and
+    read_docs serves the manual — both over the real MCP channel."""
+    from agentbridge.harness.docs import ToolDocs
+
+    tx, b, ws = make(tmp_path)
+    with BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=[],
+                      approvals=[], ask_timeout_s=1.0,
+                      docs=ToolDocs.load(tmp_path / "home")) as bridge:
+        seen: dict = {}
+
+        def run():
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                asks = (tx.docs.get("status/asks/helper.json") or {}).get("asks") or []
+                if asks:
+                    seen.update(asks[0])
+                    tx.docs["status/asks/helper_answers.json"] = {
+                        "answers": {asks[0]["id"]: {"verdict": "answer",
+                                                    "text": "blue"}}}
+                    return
+                time.sleep(0.02)
+
+        t = threading.Timer(0.05, run)
+        t.start()
+        try:
+            reply = call_tool(bridge.url, "ask_member", {
+                "question": "which color?",
+                # five options, one junk: sanitizes to the first four strings
+                "options": ["red", "blue", "  green ", "", "gold", "extra"]})
+            assert reply == "blue"
+            assert seen["options"] == ["red", "blue", "green", "gold"]
+        finally:
+            t.join()
+
+        cat = call_tool(bridge.url, "read_docs", {})
+        assert "pin_message" in cat and "Guides:" in cat
+        entry = call_tool(bridge.url, "read_docs", {"topic": "workspace"})
+        assert "your own desk" in entry
+        assert "No entry" in call_tool(bridge.url, "read_docs",
+                                       {"topic": "flying"})
 
 
 # -------------------------------------------------- capability tools (R19)

@@ -77,11 +77,19 @@ by-design (documented where).
 ### Agent harness (§H)
 
 - [x] **H1 Parallel harness + owner-set concurrency + durable queue** — R15.
-- [~] **H2 Two-way comms + Codex/CC-style permission system + per-chat
+- [x] **H2 Two-way comms + Codex/CC-style permission system + per-chat
   workspaces** — broker + ask-cards + workspaces + per-run MCP bridge (R18).
-  **OPEN: ask-card UI overhaul (Claude-Code-style options, not a text field);
-  user-facing safe-permissions toggles (aux flags) per chat + settings.** →
-  rounds "docs tool + ask cards" / "settings + model config".
+  Ask-card overhaul closed as Q28 (R43). Safe-permissions toggles (R43):
+  per-agent "Safe permissions" in Settings — "Reads don't ask" (auto_allow
+  on/off; off = even reads outside the workspace ask) and "Web access"
+  (the preset's `aux_web` tools leave the hard blocklist INTO the ask gate;
+  every use pops up unless always-allowed). The web relax applies ONLY
+  while the ask gate is live (`effective_gates` + a belt-and-braces check
+  in cli.py when the bridge fails to come up) and only for families that
+  declare `aux_web` + permission_args — cortex has web tools blocked but
+  NO gate, so it gets no toggle. Shell/subtask tools have no toggle at all
+  (the workspace-sandbox rail). Live-verified: switches render (read on /
+  web off defaults), web flip persists aux into harness config, restored.
 - [x] **H3 Peer harness access, owner-gated + confirm popup** — R22/R22.5.
 - [x] **H4 Data pipeline through the harness only** — R19 leak audit.
 - [~] **H5 Vector memory / knowledge graphs / semantic search / planner /
@@ -141,8 +149,14 @@ Ticked = shipped + verified. Rounds named for open items.
   broker ask-cards are the only channel (R31 docs).
 - [x] **Q6 Pin + agent reply refreshes the app** → banner-before-scroll fix
   (R31).
-- [ ] **Q7 Agent documentation tool** (dedicated tool, not inline context) →
-  round "docs tool + ask cards".
+- [x] **Q7 Agent documentation tool** (R43) — `read_docs` on the bridge:
+  no argument = the catalog (every guide + tool with a one-liner),
+  `read_docs('memory')` etc. = the full entry. Data =
+  `harness/prompts/tooldocs.json` (owner-overridable at
+  `<home>/prompts/tooldocs.json`, same chain as the prompt pack); the
+  inline `bridge` prompt para shrank to behaviour rules + the tool-name
+  roster + the read_docs pointer — semantics moved into the manual.
+  Real-HTTP tested (catalog, entry, miss-with-suggestions, override).
 - [x] **Q8 Delivered vs read states** — Delivered is now a real per-recipient
   cursor advanced when the client/harness FETCHES the message (`_pump` →
   `mark_delivered`), Read = the read cursor; "worker receives = Delivered,
@@ -154,11 +168,14 @@ Ticked = shipped + verified. Rounds named for open items.
 - [x] **Q10 GUI progress** (R36) — the live bubble now shows the CURRENT
   activity on the dots' line (short tasks were "stuck" because only a bare
   "…working" label showed); the full step list is one right-click away.
-- [~] **Q11 Friendly tool-call labels** (R36) — unmapped tools humanize
+- [x] **Q11 Friendly tool-call labels** (R36 + R43) — unmapped tools humanize
   ("mcp__github__search_issues" → "Using search issues (github)") and the
-  run's context.md reads as "Reading the conversation". **OPEN: short/long
-  tool descriptions agents read out to members** → rides the "docs tool"
-  round (same data).
+  run's context.md reads as "Reading the conversation". R43: short/long
+  descriptions live in `tooldocs.json` — `short` feeds the read_docs
+  catalog (what an agent quotes when a member asks what it can do), `long`
+  is the full entry, and `ask` is the popup verb phrase ("wants to write a
+  file", raw tool id demoted to the hover title; unmapped tools humanize
+  the same way as activity lines).
 - [x] **Q12 Stop an in-progress run** (R36) — stop button top-right of the
   working bubble (this chat) + "Stop current run" in Settings → My agents
   (any chat); owner-gated endpoint drops a stop doc, the adapter's poller
@@ -269,8 +286,17 @@ Ticked = shipped + verified. Rounds named for open items.
   Live-verified BOTH paths: a runner-shaped sealed file record opens + serves
   its decrypted bytes, and a real composer-input upload stages → chip →
   send-by-attachment → renders → serves.
-- [ ] **Q28 Permission popup overhaul** — Claude-Code-style options instead
-  of a text field → round "docs tool + ask cards".
+- [x] **Q28 Permission popup overhaul** (R43) — Claude-Code-style cards:
+  `ask_member` gains agent-offered OPTIONS (≤4, sanitized) rendered as
+  one-tap pills with "Other…" revealing the free-text escape (no options =
+  the plain input as before); permission heads read "wants to write a
+  file" (the `ask` phrase from tooldocs, stamped by the broker into the
+  ask doc; raw tool id on hover); Deny is two-stage — the second stage
+  offers an optional "tell it what to do instead" note that rides the deny
+  verdict and reaches the agent as the reason (the broker already passed
+  text through; it just had no UI). Live-verified all three on the rig:
+  planted asks → phrase head, deny note round-trip ("save it into your
+  outbox instead" landed in the answers doc), option tap answered "Excel".
 - [x] **Q29 Read More clamp + DM padding** (R37) — the clamp sliced
   straddling blocks on the BODY's 20.25px grid: a code block's 17.4px mono
   lines and a list's 2px item margins landed mid-line (the "cut in half").
@@ -394,5 +420,5 @@ Ticked = shipped + verified. Rounds named for open items.
 | agent profile + permissions (R38, done) | V5, V6, V8, V9 |
 | settings + model config (R39–R41, done) | Q13, Q14, Q20, Q21, Q23, Q30, M11-GUI, H6, H8-picker, H9 |
 | notifications (R42, done) | Q26, M3-remainder |
-| docs tool + ask cards | Q7, Q28 (H2 close) |
+| docs tool + ask cards (R43, done) | Q7, Q28, Q11-remainder (H2 close) |
 | parity sweep + stress | Q34, M10/M11 verifies, full-app regression |

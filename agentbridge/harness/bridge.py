@@ -53,7 +53,7 @@ class BridgeServer:
                  deny_roots: list[Path] | None = None,
                  mesh=None, timers_out: list[dict] | None = None,
                  memory=None, chat_kind: str = "",
-                 global_memory: str = "dm") -> None:
+                 global_memory: str = "dm", docs=None) -> None:
         self.broker = broker
         self.chat_id = chat_id
         self.workspace = workspace
@@ -66,6 +66,7 @@ class BridgeServer:
         self.memory = memory             # MemoryStore (R20); None = no tools
         self.chat_kind = chat_kind
         self.global_memory = global_memory
+        self.docs = docs                 # ToolDocs (R43); None = no read_docs
         self._creates = 0
         self.port = 0
         self._server = None
@@ -94,19 +95,36 @@ class BridgeServer:
             return json.dumps({"behavior": "deny", "message": message})
 
         @mcp.tool(structured_output=False)
-        def ask_member(question: str = "") -> str:
+        def ask_member(question: str = "", options: list[str] | None = None) -> str:
             """Ask your responsible member one question; returns their
-            answer (or the fact that they did not answer in time)."""
+            answer (or the fact that they did not answer in time). When the
+            question has natural choices, pass 2-4 short options — they tap
+            one instead of typing (and can still type something else)."""
             q = " ".join((question or "").split())[:500]
             if not q:
                 return "no question given"
+            # R43/Q28: sanitize agent-offered choices — strings only, short,
+            # at most four; anything unusable simply degrades to free text
+            opts = [" ".join(str(o).split())[:80]
+                    for o in (options or []) if str(o).strip()][:4]
             verdict, text = self.broker.ask(
                 chat_id=self.chat_id, kind="question", tool="question",
-                detail=q, timeout_s=self.ask_timeout_s)
+                detail=q, timeout_s=self.ask_timeout_s, options=opts)
             if verdict == "answer" and text:
                 return text
             return ("no answer within the waiting window — decide "
                     "reasonably yourself or say you'll follow up")
+
+        if self.docs is not None:
+            docs = self.docs
+
+            @mcp.tool(structured_output=False)
+            def read_docs(topic: str = "") -> str:
+                """Your AgentBridge manual — no argument lists every tool
+                and guide with a one-liner; pass a name for the full entry.
+                Quote it (in your own words) when a member asks what you
+                can do."""
+                return docs.topic(topic) if topic.strip() else docs.catalog()
 
         if self.mesh is not None:
             self._capability_tools(mcp)

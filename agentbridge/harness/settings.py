@@ -62,6 +62,17 @@ class HarnessSettings:
     ask_timeout_s: float = 120.0    # owner-answer window; silence = deny
     # owner-granted standing permissions: [{tool, chat}] (chat "*" = all)
     approvals: list[dict] = field(default_factory=list)
+    # H2/R43 auxiliary safety flags — the SAFE knobs, owner-toggled in the
+    # GUI, that never bypass the ask gate:
+    #   read: True (default) = read-class tools run anywhere without asking
+    #         (the preset's auto_allow); False = even reads outside the
+    #         workspace raise an ask.
+    #   web:  False (default) = the preset's web tools stay hard-blocked;
+    #         True = they leave the blocklist and route through the ask gate
+    #         (every use pops up unless the owner grants always-allow).
+    #         Applied ONLY while the permission bridge is live — a run
+    #         without the ask gate keeps the full blocklist.
+    aux: dict = field(default_factory=lambda: {"read": True, "web": False})
     # cross-chat memory policy (R20): where may the agent touch its GLOBAL
     # memory — "dm" (default: only one-on-one with a member), "everywhere",
     # or "off" (chat-scoped memory only). R41 (H6/Q30): per-chat overrides —
@@ -121,6 +132,12 @@ class HarnessSettings:
                 for r in (h.get("approvals") or [])
                 if isinstance(r, dict) and r.get("tool")
             ],
+            aux={
+                "read": bool((h.get("aux") or {}).get("read", True))
+                if isinstance(h.get("aux"), dict) else True,
+                "web": bool((h.get("aux") or {}).get("web", False))
+                if isinstance(h.get("aux"), dict) else False,
+            },
             global_memory=(str(h.get("global_memory") or "dm").lower()
                            if str(h.get("global_memory") or "dm").lower()
                            in ("dm", "everywhere", "off") else "dm"),

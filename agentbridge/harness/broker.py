@@ -74,30 +74,39 @@ def _inside(target: str, workspace: Path) -> bool:
 
 class Ask:
     def __init__(self, agent: str, chat_id: str, kind: str, tool: str,
-                 detail: str, input_hash: str, timeout_s: float) -> None:
+                 detail: str, input_hash: str, timeout_s: float,
+                 label: str = "", options: list[str] | None = None) -> None:
         self.id = new_id("ask")
         self.agent = agent
         self.chat_id = chat_id
         self.kind = kind          # "permission" | "question"
         self.tool = tool
         self.detail = detail
+        self.label = label        # friendly verb phrase ("write a file", R43)
+        self.options = options or []  # a question's offered choices (R43/Q28)
         self.input_hash = input_hash
         self.created = utcnow_iso()
         self.expires_at = time.time() + timeout_s
 
     def to_doc(self) -> dict:
-        return {"id": self.id, "chat_id": self.chat_id, "kind": self.kind,
-                "tool": self.tool, "detail": self.detail,
-                "created": self.created,
-                "expires_in_s": max(0, int(self.expires_at - time.time()))}
+        doc = {"id": self.id, "chat_id": self.chat_id, "kind": self.kind,
+               "tool": self.tool, "detail": self.detail,
+               "created": self.created,
+               "expires_in_s": max(0, int(self.expires_at - time.time()))}
+        if self.label:
+            doc["label"] = self.label
+        if self.options:
+            doc["options"] = self.options
+        return doc
 
 
 class PermissionBroker:
     """One broker per runner; runs bind it to their (chat, workspace)."""
 
-    def __init__(self, tx, agent: str) -> None:
+    def __init__(self, tx, agent: str, docs=None) -> None:
         self.tx = tx
         self.agent = agent
+        self.docs = docs   # ToolDocs (R43): friendly popup phrases; optional
         self._lock = threading.Lock()
         self._pending: dict[str, Ask] = {}
         self._denied: dict[str, str] = {}   # input_hash -> deny message (per process)
@@ -139,12 +148,18 @@ class PermissionBroker:
 
     # ----------------------------------------------------------- the pipe
     def ask(self, *, chat_id: str, kind: str, tool: str, detail: str,
-            input_hash: str = "", timeout_s: float = 120.0) -> tuple[str, str]:
+            input_hash: str = "", timeout_s: float = 120.0,
+            options: list[str] | None = None) -> tuple[str, str]:
         """Publish one ask and wait for the owner. Returns
         ``(verdict, text)`` — verdict allow|always|deny|timeout for
         permissions, answer|timeout for questions (text = the reply/reason).
+        ``options``: a question's offered choices — the popup renders them
+        as one-tap buttons with free text as the escape (R43/Q28).
         """
-        a = Ask(self.agent, chat_id, kind, tool, detail, input_hash, timeout_s)
+        label = (self.docs.ask_phrase(tool)
+                 if self.docs is not None and kind == "permission" else "")
+        a = Ask(self.agent, chat_id, kind, tool, detail, input_hash,
+                timeout_s, label=label, options=options)
         with self._lock:
             self._pending[a.id] = a
             self._publish()

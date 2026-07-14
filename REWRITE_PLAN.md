@@ -1193,6 +1193,30 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       catching exactly the one unread historical message before streaming
       the new group's two events through stdout AND the hook file.
 
+- [x] **R43 — docs tool + ask cards. DONE 2026-07-14 (v0.24.117, 401
+      tests).** BACKLOG Q7 + Q28 + Q11's remainder; closes H2. **Data:**
+      `prompts/tooldocs.json` — per tool an `ask` verb phrase, a `short`
+      one-liner and a `long` manual entry, plus conceptual `guides`
+      (workspace/files/chat/profile/memory/timers/permissions);
+      owner-overridable at `<home>/prompts/tooldocs.json` (docs.py, same
+      chain as the prompt pack). **Q7:** the bridge gains `read_docs` —
+      catalog or full entry on demand; the inline `bridge` prompt para
+      shrank to behaviour rules + tool roster + the read_docs pointer.
+      **Q28:** ask-cards went Claude-Code-style — permission heads read
+      "wants to write a file" (broker stamps the phrase into the ask doc;
+      raw id on hover; unmapped tools humanize), `ask_member` offers ≤4
+      one-tap OPTION pills with an "Other…" free-text escape, and Deny is
+      two-stage with an optional tell-it-what-to-do-instead note that
+      reaches the agent as the deny reason. **H2 close:** per-agent "Safe
+      permissions" toggles — "Reads don't ask" (auto_allow on/off) and
+      "Web access" (`aux_web` tools leave the blocklist INTO the ask gate;
+      applies ONLY while the gate is live, only for families declaring
+      both aux_web and permission_args; shell/subtask tools have no
+      toggle). Plus the R42 polish: mute-dialog options now highlight on
+      hover. Live-verified on the rig (planted asks: phrase head, deny-note
+      round trip, option tap; switches persist + restore); read_docs and
+      options tested over real MCP HTTP.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

@@ -106,6 +106,9 @@ def harness_options(app, req, mesh) -> dict:
         "efforts": p.efforts,
         "model_efforts": p.model_efforts,  # per-model narrowing (Q13)
         "requires_model": p.requires_model,
+        # H2/R43: does this family support the "web access, asks first"
+        # toggle? Needs both the governed tools AND the live ask gate.
+        "aux_web": bool(p.aux_web and p.permission_args),
     } for p in reg.presets.values()]
     families.sort(key=lambda f: (not f["available"], f["id"]))
     return {"ok": True, "machine": mesh.machine, "families": families}
