@@ -4,7 +4,8 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin } from "./state.js";
+import { App, Mesh, Settings, meshDn, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
+import { updateTitleBadge } from "./notify.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
 
@@ -14,6 +15,7 @@ const SETTINGS_SECTIONS = [
   { id: "account", label: "Account", desc: "Photo, name, sign out", icon: ICONS.user },
   { id: "privacy", label: "Privacy", desc: "Who sees what, blocked", icon: ICONS.key },
   { id: "chats", label: "Chats", desc: "Theme, sending", icon: ICONS.chat },
+  { id: "notifications", label: "Notifications", desc: "Desktop alerts, previews", icon: ICONS.bell },
   { id: "agents", label: "My agents", desc: "Models, reply rules", icon: ICONS.bot },
   { id: "connection", label: "Connection", desc: "Status, performance", icon: ICONS.plug },
 ];
@@ -227,6 +229,7 @@ function renderNewChatSidebar() {
 
 function renderChatListSidebar() {
   const ms = Mesh.state;
+  updateTitleBadge();   // taskbar "(n)" tracks whatever the list shows
   if (!ms?.available || !ms.user) {
     setSide(`<div class="empty" style="padding:24px 10px">${
       !ms?.available ? "Mesh not started yet" : "Sign in to see your chats"}</div>`);
@@ -261,13 +264,15 @@ function renderChatListSidebar() {
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
     const dot = !hasCount && c.forced_unread && !c.archived;  // mark-unread: no number
+    const muted = meshMuteActive(c);   // R42: slashed bell + a grey count
     // an agent is WAITING on the owner in this chat (R19.5) — the ask poller
     // keeps Mesh.askCounts current and patches rows live between state polls
     const ask = (Mesh.askCounts || {})[c.id]
       ? `<span class="ask-ind" title="An agent needs your answer">${ICONS.hand}</span>` : "";
     return ask
+      + (muted ? `<span class="mute-ind" title="Muted">${ICONS.bellOff}</span>` : "")
       + (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
-      + (hasCount ? `<span class="unread-badge">${c.unread}</span>`
+      + (hasCount ? `<span class="unread-badge${muted ? " muted" : ""}">${c.unread}</span>`
         : dot ? `<span class="unread-badge dot"></span>` : "");
   };
   // DM/self rows show the other member's photo; group rows show the group
@@ -439,6 +444,7 @@ function openChatRowMenu(chatId, x, y) {
   const isOwner = meshIsAdmin(c);   // v2 multi-admin / v1 owner (adapter)
   const isPinned = !!c.pinned;
   const isUnread = (c.unread > 0) || !!c.forced_unread;
+  const isMuted = meshMuteActive(c);
   // grey out Clear when there's nothing visible left to clear (empty or already
   // cleared). c.last is viewer-scoped, so it's null in exactly the cases where
   // the header menu disables Clear (data.messages empty) — keeps them matched.
@@ -446,7 +452,7 @@ function openChatRowMenu(chatId, x, y) {
   const items = [
     `<button data-act="pin">${isPinned ? ICONS.pinOff : ICONS.pin} ${isPinned ? "Unpin chat" : "Pin chat"}</button>`,
     `<button data-act="unread">${ICONS.unread} ${isUnread ? "Mark as read" : "Mark as unread"}</button>`,
-    `<button data-act="mute">${ICONS.bell} Mute notifications</button>`,
+    `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`,
     isOwner ? `<button data-act="archive">${ICONS.archive} ${c.archived ? "Unarchive chat" : "Archive chat"}</button>` : "",
     `<button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>`,
     (isDm || isSelf)
@@ -485,7 +491,17 @@ function openChatRowMenu(chatId, x, y) {
 async function runChatAction(act, c) {
   const chatId = c.id;
   const name = chatDisplay(c, Mesh.state.user);
-  if (act === "mute") { toast("Muting arrives with notification support (PWA / LAN)"); return; }
+  if (act === "mute") {
+    if (meshMuteActive(c)) {
+      const r = await api("/api/mesh/mute", { chat_id: chatId, muted: false });
+      if (r.error) { toast(r.error, true); return; }
+      toast("Notifications back on", { check: true });
+      await refreshList();
+    } else {
+      V.muteDialog(chatId);   // 8 hours / 1 week / Always (chat.js)
+    }
+    return;
+  }
   if (act === "clear") { V.clearChatDialog(chatId); return; }
   if (act === "delete") { V.deleteChatDialog(chatId, name); return; }
   if (act === "exit") { V.exitGroup(chatId, name); return; }

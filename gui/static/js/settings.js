@@ -1,5 +1,5 @@
-/* Settings pages — profile, account, chats (theme), my agents, connection.
-   The section nav lives in the sidebar. */
+/* Settings pages — account, privacy, chats (theme), notifications, my agents,
+   connection. The section nav lives in the sidebar. */
 
 import { $, esc, toast, fmtTime, setThemePref, themePref, enterToSend,
          setEnterToSend, ACCENTS, accentPref, setAccent } from "./util.js";
@@ -8,6 +8,7 @@ import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
 import { openModal, closeModal, swapModal, openPhotoViewer, confirmModal } from "./modal.js";
 import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, chatDisplay, renderChrome } from "./state.js";
+import { notifyPrefs } from "./notify.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
 
@@ -210,6 +211,38 @@ async function renderSettings() {
         </div>
         <p class="hint" style="margin-bottom:0">Turn this off to send with
         Ctrl+Enter and use Enter for new lines. This device only.</p>
+      </div>`;
+  } else if (section === "notifications") {
+    // R42/Q26: desktop alerts. The enable toggle doubles as the permission
+    // request (the browser wants a user gesture); a browser-level block is
+    // surfaced honestly instead of a toggle that silently does nothing.
+    const canNotify = typeof Notification !== "undefined";
+    const blocked = canNotify && Notification.permission === "denied";
+    html = `${back}<h1>Notifications</h1>
+      <div class="card">
+        <h2>Desktop alerts</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="nt-on" ${notifyPrefs.enabled && canNotify && !blocked ? "checked" : ""} ${canNotify ? "" : "disabled"}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show notifications</b> — new messages and group adds, while AgentBridge is open</span>
+        </div>
+        ${!canNotify ? `<p class="hint">This window can't show desktop
+          notifications (no Notification support).</p>` : ""}
+        ${blocked ? `<p class="hint"><b>Blocked by the browser.</b> Allow
+          notifications for this site in the browser's site settings, then come
+          back and flip the switch.</p>` : ""}
+        <div class="row" style="margin-top:6px">
+          <label class="switch">
+            <input type="checkbox" id="nt-preview" ${notifyPrefs.preview ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Show message preview</b> — the sender and first words in the alert</span>
+        </div>
+        <p class="hint" style="margin-bottom:0">This device only. Muted chats
+        stay silent — mute any chat from its ⋮ menu — and anything you've
+        already read never pings. Clicking an alert jumps to the chat.</p>
       </div>`;
   } else if (section === "agents") {
     const mine = Object.values(ms.users)
@@ -433,6 +466,29 @@ async function renderSettings() {
   });
   const enterSend = $("#enter-send");
   if (enterSend) enterSend.addEventListener("change", (e) => setEnterToSend(e.target.checked));
+  // notifications master switch: turning it ON asks the browser for permission
+  // right here (this click IS the required user gesture); a refusal flips the
+  // switch back so the UI never claims what the platform won't deliver
+  const ntOn = $("#nt-on");
+  if (ntOn) ntOn.addEventListener("change", async (e) => {
+    if (e.target.checked && Notification.permission !== "granted") {
+      let perm = "denied";
+      try { perm = await Notification.requestPermission(); } catch { /* stays denied */ }
+      if (perm !== "granted") {
+        e.target.checked = false;
+        notifyPrefs.enabled = false;
+        toast("Notifications are blocked — allow them for this site in the browser first", true);
+        renderSettings();   // surface the blocked hint
+        return;
+      }
+    }
+    notifyPrefs.enabled = e.target.checked;
+    if (e.target.checked) toast("Desktop notifications on", { check: true });
+  });
+  const ntPreview = $("#nt-preview");
+  if (ntPreview) ntPreview.addEventListener("change", (e) => {
+    notifyPrefs.preview = e.target.checked;
+  });
   const logout = $("#st-logout");
   if (logout) logout.addEventListener("click", async () => {
     await api("/api/mesh/logout", {});

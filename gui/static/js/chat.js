@@ -7,7 +7,7 @@ import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin } from "./state.js";
+import { App, Mesh, meshDn, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -593,6 +593,9 @@ async function renderMeshChat(force) {
   const dmSub = dmPeer ? presenceLine(ms.users?.[dmPeer]?.presence) : "";
   // DM/self header shows the peer's photo; a group shows the group photo
   const headAva = meshChatAvatarInner(meta);
+  // mute state comes from the overview row (meta is the shared snapshot;
+  // mute is per-user state) — the menu label + icon flip on it (R42)
+  const isMuted = meshMuteActive((ms.chats || []).find((k) => k.id === chatId) || {});
   $("#content").innerHTML = `
     <div class="chat-top" id="chat-top">
       <button class="chat-back" id="chat-back">${ICONS.back}</button>
@@ -610,7 +613,7 @@ async function renderMeshChat(force) {
         ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
         <button data-act="search">${ICONS.search} Search</button>
         <button data-act="select">${ICONS.select} Select messages</button>
-        <button data-act="mute">${ICONS.bell} Mute notifications</button>
+        <button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>
         ${isOwner ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive chat" : "Archive chat"}</button>` : ""}
         <button data-act="pause">${ICONS.pause} ${ms.paused ? "Resume all agents" : "Stand down all agents"}</button>
         <button data-act="close">${ICONS.close} Close chat</button>
@@ -696,7 +699,21 @@ async function renderMeshChat(force) {
         location.hash = `#/chats/${chatId}/details`;
       }
       else if (act === "select") enterSelect(chatId);
-      else if (act === "mute") toast("Muting arrives with notification support (PWA / LAN)");
+      else if (act === "mute") {
+        // re-check live (the captured isMuted goes stale after a toggle);
+        // flip the button in place — the header isn't rebuilt on a poll
+        const cNow = (Mesh.state?.chats || []).find((k) => k.id === chatId);
+        if (meshMuteActive(cNow || {})) {
+          const r = await api("/api/mesh/mute", { chat_id: chatId, muted: false });
+          if (r.error) { toast(r.error, true); return; }
+          if (cNow) cNow.mute = false;   // show it now, don't wait for the poll
+          toast("Notifications back on", { check: true });
+          b.innerHTML = `${ICONS.bell} Mute notifications`;
+          V.refresh(false);
+        } else {
+          muteDialog(chatId, () => { b.innerHTML = `${ICONS.bellOff} Unmute`; });
+        }
+      }
       else if (act === "clear") { if (!b.disabled) clearChatDialog(chatId); }
       else if (act === "delete") deleteChatDialog(chatId, title);
       else if (act === "exit") V.exitGroup(chatId, title);
@@ -1713,6 +1730,41 @@ function deleteChatDialog(chatId, name) {
     }});
   });
 }
+
+// Mute notifications (R42/Q26): WhatsApp's three horizons. Unmute never lives
+// here — once muted, the menu item itself flips to a one-click Unmute. New
+// messages still arrive and count; the chat just stops pinging and its badge
+// turns grey. Shared by the chat-header menu and the sidebar row menu.
+function muteDialog(chatId, onDone) {
+  const box = openModal(`
+    <div class="cf-title">Mute notifications</div>
+    <div class="cf-sub">No pings from this chat while it's muted. New messages
+      still arrive — the unread count just turns grey.</div>
+    <div class="cf-actions cf-col">
+      <button class="mute-opt" data-h="8">8 hours</button>
+      <button class="mute-opt" data-h="168">1 week</button>
+      <button class="mute-opt" data-h="">Always</button>
+      <button class="cf-cancel" id="mu-cancel">Cancel</button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#mu-cancel").addEventListener("click", closeModal);
+  box.querySelectorAll(".mute-opt").forEach((b) => b.addEventListener("click", async () => {
+    closeModal();
+    const body = b.dataset.h
+      ? { chat_id: chatId, hours: +b.dataset.h }
+      : { chat_id: chatId, muted: true };
+    const r = await api("/api/mesh/mute", body);
+    if (r.error) { toast(r.error, true); return; }
+    const c = (Mesh.state?.chats || []).find((k) => k.id === chatId);
+    if (c) c.mute = r.mute;   // show the slashed bell now, not on the next poll
+    toast(b.dataset.h === "8" ? "Muted for 8 hours"
+      : b.dataset.h ? "Muted for 1 week" : "Muted until you unmute", { check: true });
+    if (onDone) onDone();
+    await refreshChatListSidebar();
+  }));
+}
+V.muteDialog = muteDialog;   // reused by the sidebar row menu
 
 // Re-fetch mesh state and repaint the chat-list sidebar (used after a sidebar
 // mutation that isn't tied to opening a chat — pin, mark-unread, delete-for-me).

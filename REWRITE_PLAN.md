@@ -1168,6 +1168,31 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       picker, and the "Standing approvals" list — every Always-allow grant
       visible + revocable (tool+chat matched). All live-verified on the rig.
 
+- [x] **R42 — notifications (GUI + CLI). DONE 2026-07-14 (v0.24.116, 398
+      tests).** BACKLOG Q26 + the M3 remainder. **Server:** the Notifier
+      gains the read-state rule (`read_ns` ≥ msg → catch-up, not news — one
+      verified state read now covers mute + read); the SSE frame gains a
+      `notify` lane (chat name, sender, 120-char preview) decided by
+      `notifier.consider()` — the ONLY body bytes that ever ride the
+      stream, on the owner's authed session. Genesis fix: founding members
+      of someone else's GROUP now get ADDED_TO_CHAT (the roster is baked
+      into `created`; member_added never fired for them; DMs stay quiet).
+      **GUI:** new `notify.js` (23rd module) — desktop toasts with per-chat
+      `tag` coalescing ("Chat (3 new)"), click-to-jump, open+focused
+      suppression, prefs in localStorage; Settings → Notifications (enable
+      = the permission-request gesture; show-preview; browser-block
+      surfaced); the "(n) AgentBridge" title badge (muted chats excluded);
+      REAL mute controls replacing the R10 stub toasts — 8h/1week/Always
+      modal, Unmute flip in the header + row menus, slashed-bell indicator,
+      grey badge. **CLI:** `watch [--json] [-- CMD…]` — foreground notifier
+      watcher (own sync cadence, heartbeat off), one line per ping + the
+      R10 CommandHook (AB_* env vars); agents bare, humans password-gated;
+      running the process IS the registration (nothing persists auto-run
+      commands). Live-verified on the rig: message/added toasts + coalesce
+      + preview-off + mute/unmute round trip + title badge, and the watcher
+      catching exactly the one unread historical message before streaming
+      the new group's two events through stdout AND the hook file.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

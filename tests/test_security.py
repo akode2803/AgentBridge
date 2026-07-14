@@ -385,18 +385,28 @@ def test_forged_read_cursor_cannot_fake_receipts(world):
 
 def test_forged_mute_cannot_silence_notifications(world):
     """A dropped-in ``mute`` in a victim's state doc must not suppress their
-    pings — the notifier reads the state through the verified accessor."""
+    pings — the notifier reads the state through the verified accessor.
+    (Behavioural since R42: the verified read moved inside consider().)"""
     meshes, _ = world
     aryan, fable = meshes["aryan"], meshes["fable"]
     chat = aryan.create_dm("fable")
-    aryan.post(chat.id, "ping")
-    ripple(aryan, chat.id, fable)
+    received = []
+    fable.notifier.add_sink(received.append)
+    sub = fable.bus.subscribe()
+
+    def ping(text):
+        aryan.post(chat.id, text)
+        ripple(aryan, chat.id, fable)
+        for e in sub.drain():
+            fable.notifier.deliver(e)
 
     fable.tx.put_doc(P.state(chat.id, "fable"), {"mute": True})
-    assert fable.notifier._muted(chat.id) is False  # forged mute is inert
+    ping("forged mute is inert")
+    assert len(received) == 1 and "forged mute" in received[0].preview
 
     fable.set_chat_flag(chat.id, "mute", True)      # the genuine mute works
-    assert fable.notifier._muted(chat.id) is True
+    ping("genuine mute silences")
+    assert len(received) == 1
 
 
 def test_star_survives_concurrent_mark_read(world):

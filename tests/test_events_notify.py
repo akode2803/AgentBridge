@@ -89,8 +89,8 @@ def test_info_events_auto_refold_remote_meta(world):
 def test_notification_rules(world):
     aryan, fable = world["aryan"], world["fable"]
     chat = aryan.create_chat("Pings", members=["fable"])
-    received = []
-    fable.notifier.add_sink(received.append)
+    received = []   # message pings only — genesis also adds an added_to_chat
+    fable.notifier.add_sink(lambda n: received.append(n) if n.kind == "message" else None)
     sub = fable.bus.subscribe()
 
     aryan.post(chat.id, "hello fable, this should ping")
@@ -114,8 +114,8 @@ def test_notification_rules(world):
 def test_mute_suppresses_and_expires(world):
     aryan, fable = world["aryan"], world["fable"]
     chat = aryan.create_chat("Muted", members=["fable"])
-    received = []
-    fable.notifier.add_sink(received.append)
+    received = []   # message pings only — the genesis added_to_chat is R42's
+    fable.notifier.add_sink(lambda n: received.append(n) if n.kind == "message" else None)
     sub = fable.bus.subscribe()
 
     def ping(text):
@@ -138,6 +138,75 @@ def test_mute_suppresses_and_expires(world):
     assert len(received) == 1 and "audible" in received[0].preview
 
 
+def test_read_state_suppresses_pings(world):
+    """Q26/R42: a message my read cursor already covers is catch-up, not news
+    — the restart re-pump and reads-from-elsewhere must not ping."""
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("Caught up", members=["fable"])
+    received = []   # message pings only (genesis adds an added_to_chat)
+    fable.notifier.add_sink(lambda n: received.append(n) if n.kind == "message" else None)
+    sub = fable.bus.subscribe()
+
+    env = aryan.post(chat.id, "you saw this already")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    fable.mark_read(chat.id)          # read_ns moves past env.ns
+    for e in sub.drain():             # ...then the queued event is delivered
+        fable.notifier.deliver(e)
+    assert received == []
+
+    aryan.post(chat.id, "this one is genuinely new")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    for e in sub.drain():
+        fable.notifier.deliver(e)
+    assert len(received) == 1 and "genuinely new" in received[0].preview
+    assert received[0].ns > env.ns
+
+
+def test_sse_frame_carries_notify_lane(world):
+    """R42: the GUI stream frame gains a `notify` lane exactly when the R10
+    rules say ping — and stays minimal (no lane) when they say don't."""
+    from agentbridge.gui.sse import frame
+
+    aryan, fable = world["aryan"], world["fable"]
+    chat = aryan.create_chat("Streamed", members=["fable"])
+    sub = fable.bus.subscribe()
+
+    def next_msg_event(text):
+        aryan.post(chat.id, text)
+        aryan.outbox.flush_once()
+        fable.sync.sync_once([chat.id])
+        return [e for e in sub.drain() if e.type == eventbus.MESSAGE][-1]
+
+    ev = next_msg_event("ping me on stream")
+    out = frame(ev, fable.notifier)
+    assert out["notify"]["from"] == "aryan"
+    assert "ping me" in out["notify"]["preview"]
+    assert out["notify"]["chat_name"] == "Streamed"
+    assert "preview" not in out  # the lane is nested, the frame stays minimal
+
+    # without a notifier (and for muted chats) the frame carries no lane
+    assert "notify" not in frame(ev)
+    fable.set_chat_flag(chat.id, "mute", True)
+    assert "notify" not in frame(next_msg_event("silent on stream"), fable.notifier)
+
+
+def test_watch_line_formats():
+    """The CLI watch stream speaks the CommandHook's field names (M3/R42)."""
+    import json as jsonlib
+
+    from agentbridge.cli.main import _watch_line
+    from agentbridge.mesh.notify import Notification
+
+    note = Notification(kind="message", chat_id="c1", chat_name="Ops",
+                        from_="aryan", preview="hello there", ns=42)
+    assert _watch_line(note, json_mode=False) == "[Ops] @aryan: hello there"
+    j = jsonlib.loads(_watch_line(note, json_mode=True))
+    assert j == {"kind": "message", "chat": "c1", "chat_name": "Ops",
+                 "from": "aryan", "preview": "hello there", "ns": 42}
+
+
 def test_added_to_chat_always_notifies(world):
     aryan, fable = world["aryan"], world["fable"]
     chat = aryan.create_chat("Growing")
@@ -154,6 +223,38 @@ def test_added_to_chat_always_notifies(world):
     assert "added_to_chat" in kinds
     added = [n for n in received if n.kind == "added_to_chat"][0]
     assert added.from_ == "aryan" and added.chat_name == "Growing"
+
+
+def test_founding_member_of_a_group_is_notified(world):
+    """R42: genesis bakes the roster into one `created` event — a founding
+    member must still get the added-to-chat ping (creating a group WITH
+    people IS adding them). The creator's own echo stays silent."""
+    aryan, fable = world["aryan"], world["fable"]
+    received_f, received_a = [], []
+    fable.notifier.add_sink(received_f.append)
+    aryan.notifier.add_sink(received_a.append)
+    sub_f, sub_a = fable.bus.subscribe(), aryan.bus.subscribe()
+
+    chat = aryan.create_chat("Born together", members=["fable"])
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([chat.id])
+    aryan.sync.sync_once([chat.id])
+    for e in sub_f.drain():
+        fable.notifier.deliver(e)
+    for e in sub_a.drain():
+        aryan.notifier.deliver(e)
+    added = [n for n in received_f if n.kind == "added_to_chat"]
+    assert len(added) == 1 and added[0].from_ == "aryan"
+    assert [n for n in received_a if n.kind == "added_to_chat"] == []
+
+    # a DM's genesis stays quiet — the first message is the ping there
+    dm = aryan.create_dm("fable")
+    aryan.outbox.flush_once()
+    fable.sync.sync_once([dm.id])
+    for e in sub_f.drain():
+        fable.notifier.deliver(e)
+    assert [n for n in received_f if n.kind == "added_to_chat"
+            and n.chat_id == dm.id] == []
 
 
 def test_command_hook_runs_with_env(world, tmp_path, monkeypatch):
@@ -182,8 +283,8 @@ def test_notifier_background_pump(world):
     """The start()ed notifier drains the bus on its own thread."""
     aryan, fable = world["aryan"], world["fable"]
     chat = aryan.create_chat("Threaded", members=["fable"])
-    received = []
-    fable.notifier.add_sink(received.append)
+    received = []   # message pings only (genesis adds an added_to_chat)
+    fable.notifier.add_sink(lambda n: received.append(n) if n.kind == "message" else None)
     fable.notifier.start()
     try:
         aryan.post(chat.id, "async ping")

@@ -103,14 +103,14 @@ persist and a new session inherits them automatically.
    `~/.claude/projects/<this-project>/memory/MEMORY.md` and the notes it points
    to (the authoritative backlog + credentials).
 2. Confirm live: `git status` clean on `main`; `~/.agentbridge/config.json`
-   points at the synced folder; `python check_frontend.py` prints **22/22**;
+   points at the synced folder; `python check_frontend.py` prints **23/23**;
    `uv run pytest -q` is green.
 
 ## Operating conventions
 
-- **Frontend = 22 native ES modules** (`gui/static/js/`), strict one-way
+- **Frontend = 23 native ES modules** (`gui/static/js/`), strict one-way
   layering, views register on the `V` registry and never import each other. Run
-  `python check_frontend.py` after every frontend edit (must print 22/22).
+  `python check_frontend.py` after every frontend edit (must print 23/23).
 - **After editing `mesh/*` or `harness/*`, restart the affected process(es)** —
   a running process reloads no code.
 - **Never round-trip source through PowerShell `Get-Content`/`Set-Content`**

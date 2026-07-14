@@ -76,6 +76,15 @@ export function meshIsAdmin(meta) {
   return chatAdmins(meta).includes(Mesh.state?.user);
 }
 
+// is this chat's mute currently in force? mute is True (forever) or an
+// ns-until deadline (R10) — an expired deadline reads as unmuted without
+// anyone having to clear it. Date.now()*1e6 = now in ns; a double loses
+// sub-µs precision there, irrelevant at mute-until granularity.
+export function meshMuteActive(c) {
+  const m = c && c.mute;
+  return m === true || (typeof m === "number" && m > Date.now() * 1e6);
+}
+
 // avatar meta ({sha256, updated}) for a user, or null — the bytes ride
 // /api/mesh/avatar, not the state payload (see server.py _public_user)
 export function meshAvatar(username) {

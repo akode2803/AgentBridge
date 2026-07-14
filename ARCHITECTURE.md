@@ -163,7 +163,7 @@ cache.
 | `AccountsService` | account lifecycle (scrypt auth for humans; agents never authenticate — machine identity), profile/status, agent create/adopt/delete; all agent edits owner-gated via `_writable_target` |
 | `PrivacyService` | the R6 matrix (who may see/reach whom), blocks, agent outbound rules; `visible_profile` is the projection every connector serves instead of raw account docs |
 | `PresenceService` / `ReceiptsService` | online/last-seen heartbeat + the Sent/Delivered/Read ladder from per-member cursors: Read = `read_ns`, Delivered = the R33 `delivered_ns` fetch cursor (presence as the floor); `message_info` carries per-member Delivered/Read timestamps |
-| `Notifier` / `EventBus` | in-process pub/sub feeding the GUI SSE + the CLI long-poll |
+| `Notifier` / `EventBus` | in-process pub/sub feeding the GUI SSE + the CLI long-poll; `consider()` is the one ping decision (membership, not-from-me, mute, read-state — mute + `read_ns` from ONE verified state read, R42) reused by the SSE `notify` lane and the CLI `watch` sinks |
 | `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor); the run loop survives a failing pass (a cloud transport can throw after retries — next tick heals) |
 
 `harden_startup()` (R25, called by connectors on sign-in) is an idempotent
@@ -366,7 +366,12 @@ injects the live Mesh so an endpoint can't forget the check; `dispatch` maps a
 domain error to `{"error": …}` JSON. One GuiApp = at most one signed-in human;
 the session survives restarts via a local `gui_session.json` (the E2EE bundle is
 already local, so restore never needs the password). `/api/mesh/events` is the
-one SSE stream. Every mutating endpoint is a thin shim over the facade — the
+one SSE stream; its frames stay minimal (type + chat + ids — the client
+refetches through the read model) with one exception: a frame that deserves a
+desktop ping carries a `notify` lane (chat name, sender, 120-char preview)
+decided by `notifier.consider()` — membership, not-from-me, mute, read-state —
+and decrypted by the signed-in identity's own sealer (R42). Every mutating
+endpoint is a thin shim over the facade — the
 gates live in the services, never re-implemented here. File serving is
 membership-gated and provenance-checked (sha256 from the signed message) with a
 path-traversal guard; uploads stage under a one-shot token. `/api/state`
@@ -383,6 +388,15 @@ in a room, all gated by the same membership/privacy layers as the GUI. Account
 management is **deliberately absent** (D19: owner-only, GUI-only). This is the
 surface the `mesh-chat` skill and scripted agent actions drive.
 
+`main.py` also carries the M3 notify hook (R42): `agentbridge --root … --user …
+watch [--json] [-- CMD ARGS…]` — a foreground watcher that sinks the R10
+Notifier (its own sync cadence, presence heartbeat off: watching isn't being
+online), prints one line per ping, and runs CMD per ping with the notification
+as `AB_KIND`/`AB_CHAT`/`AB_CHAT_NAME`/`AB_FROM`/`AB_PREVIEW`/`AB_NS` env vars
+(`CommandHook`, argv-list only — never a shell string). Agents run it bare
+(machine identity, mcp-mode policy); a human passes the password check. Nothing
+persists a command to auto-run later — running the process IS the registration.
+
 ### `agentbridge/applink/` — control lane
 Presence/version announcements and the global stand-down (`control.json`),
 outside the message log.
@@ -391,9 +405,9 @@ outside the message log.
 
 ## 9. Frontend (`gui/static/js/`)
 
-**22 native ES modules, zero build step** — the browser imports them directly,
+**23 native ES modules, zero build step** — the browser imports them directly,
 so "run the app" and "see the current source" are the same action. Run
-`python check_frontend.py` after every frontend edit (must print **22/22**; it
+`python check_frontend.py` after every frontend edit (must print **23/23**; it
 `node --check`s each module and verifies imports resolve — the only automated
 frontend check).
 
@@ -401,11 +415,15 @@ Strict one-way layering:
 ```
 util / icons / api / markdown / files      (leaf helpers)
   → state                                  (App / Mesh / Settings stores)
-    → csel / modal / composer / picker      (UI primitives)
+    → csel / modal / notify / composer / picker   (UI primitives)
       → sidebar                            (below page views)
         → chat / details / media / search / members / forward / settings / wizard   (page views)
           → main                           (router + boot)
 ```
+`notify.js` (R42) owns the desktop-notification decision the server can't make
+(window focus, per-device prefs in localStorage, per-chat `tag` coalescing) and
+the "(n) AgentBridge" title badge; `realtime.js` hands it every SSE frame that
+carries a `notify` lane.
 **Page views never import page views** — each registers its entry points on the
 `V` registry (`views.js`) and calls sideways through it; `main.js` asserts the
 `EXPECTED` set at boot, so a missing registration throws a named error instead

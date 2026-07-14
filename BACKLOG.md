@@ -30,11 +30,18 @@ by-design (documented where).
 - [x] **M2 Parallel architecture + send queue + membership-only fetch** —
   parallel SyncEngine, outbox with retry-forever, visibility=membership as THE
   invariant. R2/R3; change-feed fast path R30.
-- [~] **M3 mesh-cli on mesh + MCP spec; notification support GUI + CLI; CLI
+- [x] **M3 mesh-cli on mesh + MCP spec; notification support GUI + CLI; CLI
   "run a command when messaged" hook** — mesh-cli rides the Mesh facade and
-  speaks MCP (cli/server.py). **OPEN: GUI desktop notifications; CLI/MCP
-  notify hook (agent registers a command to run on new message).** → round
-  "notifications".
+  speaks MCP (cli/server.py). GUI desktop notifications closed as Q26 (R42).
+  CLI hook (R42): `agentbridge ... watch [--json] [-- CMD ARGS...]` — a
+  foreground watcher on the R10 notifier (own sync cadence, no presence
+  heartbeat); prints one line per ping and runs CMD with AB_KIND/AB_CHAT/
+  AB_CHAT_NAME/AB_FROM/AB_PREVIEW/AB_NS env vars (CommandHook). Agents run
+  it bare (mcp-mode policy), humans pass the password check; nothing
+  persists a command to auto-run later — running the process IS the
+  registration. Live-verified as scratbot: exactly one catch-up line (the
+  only unread historical message — read-state rule), then added_to_chat +
+  message for a new group, on stdout AND through the hook file.
 - [x] **M4 E2EE over everything; agents never read the mesh directly** —
   sealed envelopes/blobs, harness-only data pipeline, leak audit. R9–R13, R19.
 - [~] **M5 App-to-app communication** — applink presence/peers/control lane
@@ -235,8 +242,21 @@ Ticked = shipped + verified. Rounds named for open items.
   nothing is destroyed). Membership-gated `delete_chat_for_me` + tests.
   Live-verified the full loop: row gone → berry posts → row back with one
   message → undo → all four back.
-- [ ] **Q26 Notification support (GUI)** — new message + added-to-group;
-  respects mute + read state → round "notifications". (CLI hook = M3.)
+- [x] **Q26 Notification support (GUI)** (R42) — the SSE frame gains a
+  `notify` lane decided SERVER-side by the R10 Notifier (membership,
+  not-from-me, mute, and a new read-state rule: anything `read_ns` already
+  covers is catch-up, not news); the new `notify.js` module shows the
+  desktop toast (per-chat `tag` coalescing — "Chat (3 new)", click jumps to
+  the chat), owns the "(n) AgentBridge" title badge (muted chats excluded),
+  and suppresses when the chat is open + focused. Settings → Notifications:
+  enable (doubles as the permission request) + show-preview toggles,
+  browser-block surfaced honestly. Mute finally has real GUI (was a stub
+  toast): 8h/1week/Always modal, one-click Unmute flip in both menus,
+  slashed-bell row indicator, grey badge. Fixed on the way: founding
+  members of someone else's group now get the added-to-chat ping (genesis
+  bakes the roster into `created`, so no member_added ever fired; DMs stay
+  quiet by design). Live-verified all of it on the rig, incl. the
+  preview-off body ("New message" — the secret never rode the toast).
 - [x] **Q27 Files don't open in chat** (R37) — RESOLVED: the whole file
   feature spoke v1 in the frontend while the backend spoke v2. Humans and
   agents were broken DIFFERENTLY, which explains the report: a human's
@@ -373,6 +393,6 @@ Ticked = shipped + verified. Rounds named for open items.
 | composer + transcript bug bash (R37, done) | Q16, Q19, Q24, Q25, Q27, Q29, Q31, V7 |
 | agent profile + permissions (R38, done) | V5, V6, V8, V9 |
 | settings + model config (R39–R41, done) | Q13, Q14, Q20, Q21, Q23, Q30, M11-GUI, H6, H8-picker, H9 |
-| notifications | Q26, M3-remainder |
+| notifications (R42, done) | Q26, M3-remainder |
 | docs tool + ask cards | Q7, Q28 (H2 close) |
 | parity sweep + stress | Q34, M10/M11 verifies, full-app regression |

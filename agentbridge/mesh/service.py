@@ -140,7 +140,18 @@ class Mesh:
             if rec.get("kind") == "info":
                 saw_info = True
                 ev = rec.get("event") or {}
-                if ev.get("type") == "member_added" and ev.get("who") == self.user:
+                # added later, OR a founding member of someone else's GROUP —
+                # genesis bakes the roster into one `created` event, so there
+                # is no member_added for founders (R42). DMs stay quiet: the
+                # first message pings, opening a chat doesn't (WhatsApp).
+                added_me = (
+                    ev.get("type") == "member_added" and ev.get("who") == self.user
+                ) or (
+                    ev.get("type") == "created" and ev.get("kind") == "group"
+                    and self.user in (ev.get("members") or {})
+                    and rec.get("from") != self.user
+                )
+                if added_me:
                     self.bus.publish(Event(
                         eventbus.ADDED_TO_CHAT, chat_id,
                         {"by": rec.get("from", "")}, ns,

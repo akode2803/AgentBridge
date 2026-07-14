@@ -6,6 +6,7 @@
    off to a slow safety-net tick (the stream carries the news). */
 
 import { Mesh, isV2, meshCaps } from "./state.js";
+import { handleNotifyFrame } from "./notify.js";
 import { V } from "./views.js";
 
 let source = null;
@@ -21,6 +22,9 @@ export function realtimeActive() {
 // open transcript when the event is for the chat currently on screen.
 function onEvent(frame) {
   if (!frame || !frame.type) return;
+  // desktop ping (R42): the server attached a notify lane when the R10 rules
+  // said this deserves one; the module applies this window's prefs + focus
+  handleNotifyFrame(frame);
   // refresh the app shell + sidebar (unread counts, last-message, new chats)
   V.refresh(false);
   if (frame.chat_id && frame.chat_id === Mesh.chatId && V.renderMeshChat) {

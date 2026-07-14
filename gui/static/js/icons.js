@@ -39,6 +39,8 @@ export const ICONS = {
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 6.5 5 7.9 7.6 5.3M3.6 16.5 5 17.9l2.6-2.6M11 6.8h9M11 16.8h9"/></svg>',
   // mute notifications: a bell
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/></svg>',
+  // muted: the bell with a slash through it (row indicator + Unmute)
+  bellOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/><path d="M4 4l16 16"/></svg>',
   // clear chat: an eraser (distinct from Delete's trash)
   eraser: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 20.5-4.3-4.3a2 2 0 0 1 0-2.8l9.6-9.6a2 2 0 0 1 2.8 0l5.2 5.2a2 2 0 0 1 0 2.8L12.5 20.5zM21 20.5H7M5.2 11.3l7.5 7.5"/></svg>',
   // read-receipt ticks: single = sent, double = read (accent). State comes from

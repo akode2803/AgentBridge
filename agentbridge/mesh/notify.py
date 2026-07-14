@@ -2,7 +2,9 @@
 
 Rules (WhatsApp-shaped):
 - a new message in my chat, not from me -> notify, UNLESS the chat is muted
-  (UserState ``mute``: True = forever, or an ns-until value — 8h/1week style);
+  (UserState ``mute``: True = forever, or an ns-until value — 8h/1week style)
+  or I've ALREADY READ it (``read_ns`` >= the message — catch-up after a
+  restart re-pumps messages that were read elsewhere; they're not news, R42);
 - being ADDED to a chat always notifies (mute is per-chat and you weren't in
   it yet);
 - info events never notify by themselves (they repaint, not ping).
@@ -63,9 +65,9 @@ class Notifier:
         self._sinks.append(sink)
 
     # ------------------------------------------------------------ filtering
-    def _muted(self, chat_id: str) -> bool:
-        # verified accessor (R31.5): a forged state doc can't silence my pings
-        mute = self.messaging.state_of(chat_id, self.user).get().get("mute")
+    @staticmethod
+    def _muted(state: dict) -> bool:
+        mute = state.get("mute")
         if mute is True:
             return True
         if isinstance(mute, (int, float)) and mute > 0:
@@ -90,8 +92,12 @@ class Notifier:
         snap = self._snap(event.chat_id)
         if snap is None or not snap.is_member(self.user):
             return None
-        if self._muted(event.chat_id):
+        # verified accessor (R31.5): a forged state doc can't silence my pings
+        state = self.messaging.state_of(event.chat_id, self.user).get()
+        if self._muted(state):
             return None
+        if env.ns <= int(state.get("read_ns") or 0):
+            return None  # already read (here or elsewhere) — not news (R42)
         body = self.sealer.unseal(event.chat_id, env)
         preview = (body.body if body else "")[:PREVIEW_CHARS]
         return Notification(

@@ -8,6 +8,6 @@ Layout (REWRITE_PLAN.md §1): core -> transport/store/crypto -> mesh services
 PowerShell (it re-encodes to UTF-16+BOM and mangles em-dashes).
 """
 
-__version__ = "0.24.115"
+__version__ = "0.24.116"
 
 __all__ = ["__version__"]

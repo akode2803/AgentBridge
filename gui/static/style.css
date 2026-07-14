@@ -1490,8 +1490,10 @@ pre.configdump {
 }
 /* manual "mark as unread" — the dot with no number */
 .unread-badge.dot { min-width: 11px; width: 11px; height: 11px; padding: 0; }
-.pin-ind { display: inline-grid; place-items: center; color: var(--text-faint); }
-.pin-ind svg { width: 14px; height: 14px; }
+/* a muted chat still counts, it just stops shouting (R42) */
+.unread-badge.muted { background: var(--text-faint); }
+.pin-ind, .mute-ind { display: inline-grid; place-items: center; color: var(--text-faint); }
+.pin-ind svg, .mute-ind svg { width: 14px; height: 14px; }
 /* hover-reveal chevron: slides in on row hover and pushes the pin + preview
    (the preview reflows now that its width cap is gone, round 9A) */
 .chat-chevron {
