@@ -317,30 +317,4 @@ def test_notification_carries_chat_kind(world):
         assert note.chat_kind == ("group" if chat is grp else "dm")
 
 
-def test_update_check_versions_and_offline(monkeypatch):
-    """V45: version ordering is numeric (not lexicographic), and an
-    unreachable feed degrades to an honest ok:False."""
-    from agentbridge.gui import api_updates
-
-    vt = api_updates.ver_tuple
-    assert vt("v0.24.132") == (0, 24, 132)
-    assert vt("0.25.1-beta") == (0, 25, 1)
-    assert vt("1.2") < vt("1.10")            # numeric, not lexicographic
-    assert vt("") == ()
-
-    class App:
-        mesh = object()   # non-None satisfies @authed
-
-    def boom(*a, **k):
-        raise OSError("offline")
-
-    monkeypatch.setattr(api_updates, "fetch_latest", boom)
-    r = api_updates.update_check(App(), None)
-    assert r["ok"] is False and "current" in r
-
-    monkeypatch.setattr(api_updates, "fetch_latest", lambda *a, **k: {
-        "tag_name": "v99.0.0", "html_url": "https://x/rel",
-        "assets": [{"browser_download_url": "https://x/dl.exe"}]})
-    r = api_updates.update_check(App(), None)
-    assert r["ok"] and r["newer"] and r["url"] == "https://x/dl.exe"
-    assert r["latest"] == "v99.0.0"
+# The V45/V51 update-channel tests live in tests/test_updates.py.

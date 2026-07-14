@@ -695,8 +695,8 @@ keep the code organized and extensible (packaging comes later).
   (checked via get_blob + open_blob + size, verified ids cached), with
   the v1 600s grace so a lost blob can't wedge the chat. Verified by
   tests over the real folder transport (blob withheld → deferred; blob
-  lands → answers; grace expiry → proceeds). ⚠ coco's harness runs on
-  the AVD — Aryan pulls v0.24.130 there for the fix to reach coco.
+  lands → answers; grace expiry → proceeds). ✅ AVD pulled 2026-07-15
+  (Aryan): coco is on ≥.130 — he brings coco back online once V51 lands.
 - [x] **V37 Agent departures missing from info events** (R56) — the
   cascade lives in the fold's `_heal` (pure, can't emit); the MUTATION
   sites now record it: `leave()` posts a `member_removed` per owned agent
@@ -832,6 +832,99 @@ keep the code organized and extensible (packaging comes later).
   add-members list the living agent only; create_chat refused with the
   clear reason. 2 new tests.
 
+### Verbal asks (2026-07-15, parity + proactive-agents arc)
+
+Source: Aryan's reply after the R55–R58 arc. His sequencing: reaction
+notifications → update check → parity (b) then (c) one by one ("validating
+extensively as always") → proactive timers → polish list → janitor → **then
+the security round starts**. He updates the AVD + brings coco online once
+the update channel works. Atlan plugin: no action (he removes it himself).
+
+- [ ] **V50 Reaction notifications** (promoted from §C, was the V44
+  remainder) — reactions are overlay docs that never touch the event bus,
+  so nothing can notify on them today. Build: overlay diffing at the sync
+  layer → a REACTION bus event (chat, msg_id, by, emoji) → Notifier rule
+  (reaction to MY message, not from me, unmuted, read-state) → SSE notify
+  lane → the per-category "Show reaction notifications" toggles from the
+  WhatsApp screenshots. → R60.
+- [x] **V51 "Check for updates seems broken"** (R59) — root cause: the
+  repo is PRIVATE with NO releases, so R58's tokenless GitHub probe 404s
+  and the About card reported "Couldn't reach the update service"
+  forever — designed degradation, useless in practice. Fixed with three
+  channels, first conclusive answer wins: **git** (installs are git
+  checkouts with the machine's own credentials — fetch origin, read the
+  default branch's `__version__`, compare; "Update now" applies under
+  hard rails: default branch only, clean tree, `--ff-only`, restart note
+  — never merges/rebases/discards), **GitHub releases** (the packaged
+  future, unchanged), and the **R11 machine-registry version adverts**
+  as the app-to-app fallback ("Version X is running on <machine>" —
+  detection only, never an install source, applink/update.py's rail).
+  The harness now announces its app_version too (re-announce every
+  30 min; the AVD is harness-only and was invisible to peers), and
+  update_check refreshes this machine's advert. Live-verified on a rig:
+  channel "git" answered in 2.6s over the real network (origin/main
+  0.24.133 read correctly, honest up-to-date), update_apply's honest
+  no-op, the machine doc carries app_version, zero rejections. Apply/
+  dirty-tree/wrong-branch/peer-hint/release/miss all unit-tested against
+  a REAL scratch origin+clone pair (tests/test_updates.py, +5 tests).
+- [ ] **V52 Question: does blocking a member extend to my agents — and
+  vice versa?** — answer from code; close whatever gap the answer
+  reveals (at minimum document the semantics where users see them).
+- [ ] **V53 Parity (b) closes** — "a member could do these, an agent
+  cannot", one by one: b1 group management as a member (add/remove/
+  rename/description/leave — admin-gated ops stay admin-gated; agents
+  are never admins); b2 mute chat; b3 archive/pin chat; b4 hide/
+  delete-for-me/clear chat; b5 read receipts + delivery status on own
+  messages; b6 mark-unread / read-cursor control (borderline — decide
+  with b2); b7 delete-for-me / undelete individual messages.
+- [ ] **V54 Parity (c) closes** — shown in GUI, never in agent context:
+  c1 reactions visible to agents; c2 `list_chats` unread counts (the
+  manual already promises them — doc/impl mismatch); c3 per-chat flags;
+  c4 roles/admins/permissions in roster context; c5 chat genesis; c6
+  media/links gallery access; c7 peers' in-progress runs; c8 roster
+  presence at a glance; c9 stand-down flag surfacing. → after V53.
+- [ ] **V55 Proactive agents via timers (structural symmetry)** —
+  Aryan's framing: a human messages when a notification arrives (agents
+  have that = triggers) or when he REMEMBERS a task. So: the agent
+  writes an in-depth description of what to do/remind, at a relative
+  delay or an absolute time; firing re-triggers the agent with that
+  description as the work item, and it may post proactively. Extend
+  `schedule_timer` + the trigger pipeline accordingly.
+- [ ] **V56 Polish: opening Settings flashes the default chat pane
+  first**, then switches — not smooth.
+- [ ] **V57 Polish: sign-in wants a spinner near the button, sign-out a
+  toast** (both take time); their transitions are janky — fix the
+  animations too.
+- [ ] **V58 Polish: the owner-added-for-its-agent info event should read
+  "X was added as a responsible member of agent A"** — the "You added
+  X…" framing is confusing (the removal wording already reads well).
+- [ ] **V59 Polish: the sidebar preview sometimes goes BLANK** when the
+  latest event is an info event with no message after it (e.g. one that
+  phrases as "" for this viewer). It must always show the latest
+  phraseable message or info event — never blank.
+- [ ] **V60 Polish: Settings→Agents abruptly scroll-jumps** (scrolling
+  or even idle) — suspect the R51 4s poller repaint resetting scroll.
+- [ ] **V61 Polish: drop the "member" tag in Settings→Account** —
+  self-explanatory there.
+- [ ] **V62 Polish: the default (no-chat) pane loses the Connection card
+  and the "Stand down all agents" card**; stand-down becomes PER-CHAT
+  and the existing sidebar right-click option rewires to it.
+- [ ] **V63 Storage janitor** (promoted from §C; Aryan: real concern —
+  Supabase free-tier storage, and a tombstoned blob is unreadable to
+  everyone anyway): redaction → blob removal; delete-chat/delete-account
+  → transport purge after a grace window. Lands BEFORE the security
+  round starts.
+- [ ] **V64 Question: attachment sync barrier — could the agent start
+  immediately and "look the file up later"**, so a large file doesn't
+  read as a frozen agent? — assessment owed (the answered-ledger means
+  nothing re-fires when the blob finally lands, so "later" never comes
+  without a new mechanism); minimum: make the wait VISIBLE (feed/status
+  "waiting for the attachment to sync") + an honest post-grace note in
+  the agent's context.
+- [ ] **V65 Question: does only the "Auto" context option use memories /
+  knowledge graphs to build context intelligently?** — answer from code
+  (Q30 semantics + H5 state).
+
 ---
 
 ## C. Standing deferred / future sessions
@@ -852,17 +945,10 @@ keep the code organized and extensible (packaging comes later).
   still fetch at the transport layer. App-level reads are membership-
   gated, but E2EE should not lean on that. Rotate on leave too (+ the
   delete_account loop). Hardening-round item.
-- **Reaction notifications** (V44 remainder, 2026-07-14): the WhatsApp
-  "Show reaction notifications" toggle needs a mechanism first —
-  reactions are overlay docs and never touch the event bus, so nothing
-  can notify on them. Build: sync-layer overlay diffing → a REACTION bus
-  event (chat, msg_id, by, emoji) → Notifier rule (reaction to MY
-  message, not from me, unmuted) → SSE lane → the per-category toggles.
-- **Storage janitor** (V41 finding, 2026-07-14): delete-for-everyone,
-  delete-chat and delete-account are all tombstone-only — blobs + sealed
-  envelopes stay on the server forever (`tx.delete_chat` exists but
-  nothing calls it). A GC/compaction round: redaction → blob removal,
-  EV_DELETED → transport purge after a grace window.
+- **Reaction notifications** — PROMOTED 2026-07-15 → **V50** (Aryan:
+  "Reactions should show notifications - fix that").
+- **Storage janitor** — PROMOTED 2026-07-15 → **V63** (Aryan: real
+  free-tier concern; lands before the security round).
 - **Agent swarms** (own round; R16 registry shaped for it).
 - **Channels** (v3; permission model already configurable).
 - **mem0/graphiti + summarization + LLM planner** (needs a local-LLM box).
@@ -897,3 +983,12 @@ keep the code organized and extensible (packaging comes later).
 | GUI polish (R57, done) | V38, V42, V43, V47, V48 |
 | notifications + about/updates (R58, done) | V44, V45 |
 | deliverables (delivered) | V41 (answer), V46 (parity list) |
+| update channel that works (R59) | V51 (+ V52 answer, early merge for the AVD) |
+| reaction notifications (R60) | V50 |
+| polish batch (R61) | V56, V57, V58, V59, V60, V61, V62 |
+| parity (b) — agent chat-level tools (R62) | V53 b2/b3/b4/b6/b7 |
+| parity (b) — group management + receipts (R63) | V53 b1/b5 |
+| parity (c) — agent context closes (R64) | V54 |
+| proactive timers (R65) | V55 (+ V64 assessment lands with it) |
+| storage janitor (R66) | V63 |
+| security round (NEXT, per Aryan — after janitor) | §C key-rotation-on-leave, per-member RLS, threat-model residuals |

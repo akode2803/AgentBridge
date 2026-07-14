@@ -1561,6 +1561,29 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       24/24 modules; rig-verified (cards, per-device persistence,
       About states, clean send with the blip pref on).
 
+- [x] **R59 — an update channel that actually works. DONE 2026-07-15
+      (v0.24.134).** BACKLOG V51. The R58 GitHub-releases probe could
+      never succeed (private repo, no releases → permanent "couldn't
+      reach"). Now three channels, first conclusive answer wins:
+      **git** (fetch origin non-interactively, read the default
+      branch's `__version__`, compare; **Update now** applies under
+      hard rails — default branch only, clean tree, `--ff-only` — and
+      reports "Updated to X — restart AgentBridge to finish"; every
+      rail recomputed server-side at apply), **GitHub releases**
+      (packaged future; Download now), **R11 peer version adverts**
+      ("Version X is running on <machine>" — detection only, never an
+      install source). The harness runner now passes `app_version`
+      into its Mesh and announces `["harness"]` at start + every 30 min
+      (machine records age out at 1h; the AVD is harness-only and was
+      invisible); update_check re-announces the GUI's advert. New
+      `POST /api/update_apply`; About-card button walks check → Update
+      now → Restart to finish. tests/test_updates.py runs the git legs
+      against a REAL scratch origin+clone pair (detect, apply,
+      dirty-tree + wrong-branch refusals, peer hint, release, miss).
+      423 tests, 24/24 modules; rig-verified live (git channel over the
+      real network in 2.6s, honest up-to-date, apply's honest no-op,
+      advert doc, zero rejections).
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

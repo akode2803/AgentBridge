@@ -30,6 +30,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from .. import __version__
 from ..core.config import DEFAULT_HOME, load_app_config
 from ..core.models import ChatKind, UserKind
 from ..mesh import authz
@@ -77,7 +78,7 @@ class AgentRunner:
         self.responder = responder
         self.poll_s = poll_s
         self.mesh = Mesh(root, agent, self.machine, encrypt=encrypt,
-                         home=self.home)
+                         home=self.home, app_version=__version__)
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         self.conversation = ConversationManager(self.mesh)
@@ -610,6 +611,12 @@ class AgentRunner:
             self.mesh.harden_startup()
         except Exception:  # noqa: BLE001 — hardening never blocks the harness
             pass
+        # V51: advertise this machine's app version on the R11 registry so
+        # peers' update checks can hint at it (records age out at STALE_S,
+        # so a long-lived harness re-announces below)
+        with contextlib.suppress(Exception):
+            self.mesh.applink.announce(["harness"])
+        announced = time.monotonic()
         sync_thread = threading.Thread(
             target=self.mesh.sync.run,
             kwargs={"poll_s": self.poll_s,
@@ -627,6 +634,10 @@ class AgentRunner:
                 return
             while not self._stop.is_set():
                 self.tick()
+                if time.monotonic() - announced > 1800:
+                    announced = time.monotonic()
+                    with contextlib.suppress(Exception):
+                        self.mesh.applink.announce(["harness"])
                 self._wake.wait(self.poll_s)
                 self._wake.clear()
         finally:

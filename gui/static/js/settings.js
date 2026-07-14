@@ -589,9 +589,10 @@ async function renderSettings() {
           </label>
           <span><b>Check automatically</b> — once a day, when the app opens</span>
         </div>
-        <p class="hint" style="margin-bottom:0">Updates come from the project's
-        GitHub releases. Checking never installs anything — a found update
-        turns the button into a download.</p>
+        <p class="hint" style="margin-bottom:0">Checks this install's own
+        source (git), the project's releases, and other machines on your
+        mesh. Checking never installs anything — a found update turns the
+        button into Update now / Download now.</p>
       </div>
       <div class="card">
         <h2>Performance</h2>
@@ -721,15 +722,31 @@ async function renderSettings() {
   if (shared2) shared2.addEventListener("click", (e) => {
     e.preventDefault(); window.openTarget("shared");
   });
-  // V45: the update check — one button, three honest states (up to date /
-  // update available -> Download now / couldn't check). Never installs.
+  // V45+V51: the update check — git channel (Update now applies a guarded
+  // ff-pull), release channel (Download now opens it), peer hint (another
+  // machine runs newer), up to date, or an honest miss. Never silent.
   const updBtn = $("#upd-check");
   if (updBtn) {
     const note = $("#upd-note");
+    let mode = "check";     // check | apply (git) | dl (release) | done
     let dlUrl = "";
     updBtn.addEventListener("click", async () => {
-      if (dlUrl) { window.open(dlUrl, "_blank"); return; }
+      if (mode === "dl" && dlUrl) { window.open(dlUrl, "_blank"); return; }
+      if (mode === "done") return;
       updBtn.disabled = true;
+      if (mode === "apply") {
+        note.textContent = "Updating…";
+        const r = await api("/api/update_apply", {});
+        if (r && r.ok && r.updated) {
+          mode = "done";
+          updBtn.textContent = "Restart to finish";
+          note.textContent = r.note || `Updated to ${r.version} — restart AgentBridge to finish`;
+          return;                      // button stays disabled on purpose
+        }
+        updBtn.disabled = false;
+        note.textContent = (r && r.note) || "Couldn't update right now";
+        return;
+      }
       note.textContent = "Checking…";
       const r = await api("/api/update_check");
       updBtn.disabled = false;
@@ -737,10 +754,18 @@ async function renderSettings() {
         note.textContent = (r && r.note) || "Couldn't check right now";
         return;
       }
-      if (r.newer && r.url) {
+      if (r.newer && r.can_apply) {
+        mode = "apply";
+        updBtn.textContent = "Update now";
+        note.textContent = `Version ${r.latest} is available — you're on v${r.current}`;
+      } else if (r.newer && r.url) {
+        mode = "dl";
         dlUrl = r.url;
         updBtn.textContent = "Download now";
         note.textContent = `Version ${r.latest} is available — you're on v${r.current}`;
+      } else if (r.newer) {
+        // knowable but not appliable from here (peer hint / guarded checkout)
+        note.textContent = r.note || `Version ${r.latest} is available — you're on v${r.current}`;
       } else {
         note.textContent = `You're on the latest version (v${r.current})`;
       }
