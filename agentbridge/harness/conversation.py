@@ -52,6 +52,10 @@ class Delivery:
     # older messages the retrieval index judged relevant (R21) — filled by
     # the responder when the agent has an index; rendered before the tail
     recalled: list[Message] = field(default_factory=list)
+    # V54 (parity c): the chat facts a human sees in the info pane
+    created_by: str = ""
+    created_at: str = ""
+    permissions: dict = field(default_factory=dict)   # groups only
 
 
 class ConversationManager:
@@ -90,6 +94,10 @@ class ConversationManager:
         except Exception:  # noqa: BLE001 — pins are garnish, never a blocker
             pass
 
+        # V54: chat genesis — the first created event in the fold (a human
+        # reads this in the info-pane footer)
+        genesis = next((m for m in transcript
+                        if (m.event or {}).get("type") == "created"), None)
         return Delivery(
             agent=self.agent,
             chat_id=chat_id,
@@ -102,6 +110,11 @@ class ConversationManager:
             transcript=transcript,
             triggers=triggers,
             note=group.items[0].note if group.kind == "timer" else "",
+            created_by=genesis.from_ if genesis else "",
+            created_at=genesis.ts if genesis else "",
+            permissions=({k: getattr(v, "value", v)
+                          for k, v in snap.permissions.__dict__.items()}
+                         if snap.kind is ChatKind.GROUP else {}),
         )
 
     # ------------------------------------------------------------- helpers
@@ -136,7 +149,11 @@ class ConversationManager:
             if name == self.agent:
                 desc = "you"
             elif acc.kind is UserKind.HUMAN:
-                desc = "member"
+                # V54: admins are visible to every member in the GUI roster —
+                # the agent should know who can act on the group too
+                role = getattr(snap.members.get(name), "role", None)
+                desc = "admin" if getattr(role, "value", role) == "admin" \
+                    else "member"
             else:
                 rule = HarnessSettings.from_account(acc).rule_for(
                     snap.id, dm=snap.kind is ChatKind.DM)

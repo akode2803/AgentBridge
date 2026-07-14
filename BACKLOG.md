@@ -920,12 +920,24 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   admins-only; deny note round-trips; clear empties only the agent's
   view; deferred leave posts the goodbye THEN leaves with the pill in
   the log).
-- [ ] **V54 Parity (c) closes** — shown in GUI, never in agent context:
-  c1 reactions visible to agents; c2 `list_chats` unread counts (the
-  manual already promises them — doc/impl mismatch); c3 per-chat flags;
-  c4 roles/admins/permissions in roster context; c5 chat genesis; c6
-  media/links gallery access; c7 peers' in-progress runs; c8 roster
-  presence at a glance; c9 stand-down flag surfacing. → after V53.
+- [x] **V54 Parity (c) closes** (R63) — c1 every context transcript
+  line now carries `[reactions: 👍 by @a, @b]` (emoji = member input:
+  capped + single-lined against prompt smuggling); c2 `list_chats`
+  returns the unread counts its manual always promised; c3 plus the
+  agent's own archived/muted flags; c4 the roster marks human members
+  admin/member and groups get a "Group permissions: …" facts line; c5
+  "Created by @x on <ts>" rides the context header; c6 NEW tools
+  `list_files` (newest-first inventory with ids) + `fetch_file`
+  (decrypts an older/late-syncing file into the workspace inbox —
+  fold-gated, so a redacted message's file is unreachable; names
+  sanitized to basenames). c7/c8/c9 closed as by-design-on-demand in
+  the parity doc (peer_diagnose/read_status answer when it matters;
+  blanket fleet/presence context per run is noise; a paused agent has
+  no run to inform). tooldocs + roster updated; parity doc's (c) table
+  + header + "highest-value closes" all resolved. Verified at the tool
+  standard: a real-HTTP test over a real E2EE mesh asserts the REAL
+  PromptManager context output (reactions/genesis/roles/permissions)
+  and the full fetch_file round-trip incl. the honest miss.
 - [ ] **V55 Proactive agents via timers (structural symmetry)** —
   Aryan's framing: a human messages when a notification arrives (agents
   have that = triggers) or when he REMEMBERS a task. So: the agent
@@ -1070,7 +1082,7 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 | reaction notifications (R60, done) | V50 (+ V59 landed early — same preview surface) |
 | polish batch (R61, done) | V56, V57, V58, V60, V61, V62 (+ V52 answer & GUI close) |
 | parity (b) — ALL of V53 in one round (R62, done) | V53 b1–b7 (shipped or BD-documented) |
-| parity (c) — agent context closes (R63) | V54 |
-| proactive timers (R65) | V55 (+ V64 assessment lands with it) |
-| storage janitor (R66) | V63 |
+| parity (c) — agent context closes (R63, done) | V54 |
+| proactive timers (R64) | V55 (+ V64 assessment lands with it) |
+| storage janitor (R65) | V63 |
 | security round (NEXT, per Aryan — after janitor) | §C key-rotation-on-leave, per-member RLS, threat-model residuals |

@@ -189,11 +189,74 @@ class BridgeServer:
 
         @mcp.tool(structured_output=False)
         def list_chats() -> str:
-            """Every chat you are a member of (id, kind, name, members)."""
-            return guarded(lambda: [
-                {"id": s.id, "kind": s.kind.value, "name": s.name,
-                 "members": sorted(s.members)}
-                for s in mesh.membership.chats_for()])
+            """Every chat you are a member of — id, kind, name, members,
+            YOUR unread count, and your own flags (archived / muted)."""
+            def do():
+                out = []
+                for s in mesh.membership.chats_for():
+                    info = {"id": s.id, "kind": s.kind.value, "name": s.name,
+                            "members": sorted(s.members)}
+                    try:  # V54 c2/c3: the counts this manual always promised
+                        info["unread"] = mesh.unread(s.id)["unread"]
+                        st = mesh.messaging.state_of(s.id, mesh.user).get()
+                        if st.get("archived"):
+                            info["archived"] = True
+                        mute = st.get("mute")
+                        if mute is True or (isinstance(mute, (int, float))
+                                            and mute > time.time_ns()):
+                            info["muted"] = True
+                    except Exception:  # noqa: BLE001 — listing survives a bad chat
+                        pass
+                    out.append(info)
+                return out
+            return guarded(do)
+
+        @mcp.tool(structured_output=False)
+        def list_files(limit: int = 30) -> str:
+            """The files shared in this chat, newest first — name, size,
+            sender, date, and the file_id that fetch_file takes. Files of
+            deleted messages are gone for good."""
+            def do():
+                out = []
+                cap = max(1, min(int(limit or 30), 100))
+                for m in reversed(mesh.messages_for(chat)):
+                    for f in m.files or []:
+                        out.append({"file_id": f.get("id"),
+                                    "name": f.get("name"),
+                                    "bytes": f.get("bytes"),
+                                    "from": m.from_, "ts": m.ts,
+                                    "message_id": m.id})
+                        if len(out) >= cap:
+                            return out
+                return out or "no files shared in this chat yet"
+            return guarded(do)
+
+        @mcp.tool(structured_output=False)
+        def fetch_file(file_id: str) -> str:
+            """Fetch one of this chat's files into your inbox folder and
+            return its path — for files older than the auto-staged recent
+            ones, or one that was still syncing when your run began."""
+            def do():
+                rec = None
+                for m in mesh.messages_for(chat):
+                    for f in m.files or []:
+                        if f.get("id") == file_id:
+                            rec = f
+                if rec is None:
+                    return "no such file in this chat — list_files shows ids"
+                raw = mesh.tx.get_blob(f"chats/{chat}/files/{file_id}")
+                data = mesh.sealer.open_blob(chat, file_id, raw) \
+                    if raw is not None else None
+                if data is None or (rec.get("bytes") is not None
+                                    and len(data) != rec["bytes"]):
+                    return ("that file hasn't finished syncing to this "
+                            "machine yet — try again in a bit")
+                inbox = self.workspace / "inbox"
+                inbox.mkdir(parents=True, exist_ok=True)
+                name = Path(str(rec.get("name") or file_id)).name  # no paths
+                (inbox / name).write_bytes(data)
+                return f"saved to inbox/{name}"
+            return guarded(do)
 
         @mcp.tool(structured_output=False)
         def read_status(username: str) -> str:

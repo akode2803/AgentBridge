@@ -733,3 +733,80 @@ def test_leave_and_clear_are_owner_gated(tmp_path):
     finally:
         agent.close()
         owner.close()
+
+
+def test_context_and_files_parity_c(tmp_path):
+    """V54 (parity c): list_chats carries unread + own flags; list_files
+    inventories the chat; fetch_file decrypts an older blob into the
+    workspace inbox; reactions/genesis/roles ride the rendered context."""
+    from agentbridge.harness.conversation import ConversationManager
+    from agentbridge.harness.prompt import PromptManager
+    from agentbridge.harness.queue import WorkGroup, WorkItem
+    from agentbridge.harness.settings import HarnessSettings
+
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    home = tmp_path / "home"
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    try:
+        chat = owner.create_chat("Facts", members=["helper"])
+        m = owner.post(chat.id, "hey @helper look at this")
+        owner.react(chat.id, m.id, "🎯")
+        # a real sealed attachment, posted the GUI way
+        blob_id = "f-parityc.txt"
+        data = b"the file body"
+        sealed = owner.sealer.seal_blob(chat.id, blob_id, data)
+        owner.tx.put_blob(f"chats/{chat.id}/files/{blob_id}", sealed)
+        owner.post(chat.id, "with a file", files=[{
+            "id": blob_id, "name": "notes.txt", "bytes": len(data)}])
+        owner.outbox.flush_once()
+        agent.sync.sync_once([chat.id])
+
+        # --- context: reactions, genesis, roles, permissions
+        cm = ConversationManager(agent)
+        group = WorkGroup(chat.id, "aryan", [WorkItem(
+            key=f"{chat.id}|{m.id}", chat_id=chat.id, kind="message",
+            msg_id=m.id, sender="aryan", ns=m.ns, reason="mention")])
+        delivery = cm.build(group, agent.messages_for(chat.id),
+                            HarnessSettings())
+        assert delivery.created_by == "aryan" and delivery.created_at
+        assert delivery.permissions.get("edit_settings") == "all"
+        aryan_row = next(r for r in delivery.roster if r["name"] == "aryan")
+        assert aryan_row["desc"] == "admin"
+        ctx = PromptManager(home).for_agent(
+            agent.directory.get("helper")).context_text(delivery)
+        assert "[reactions: 🎯 by @aryan]" in ctx
+        assert "Created by @aryan" in ctx
+        assert "Group permissions:" in ctx and "send_messages=all" in ctx
+
+        # --- tools over real HTTP
+        b = PermissionBroker(agent.tx, "helper")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
+                          approvals=[], ask_timeout_s=0.3,
+                          mesh=agent) as bridge:
+            url = bridge.url
+            chats = json.loads(call_tool(url, "list_chats", {}))
+            row = next(c for c in chats if c["id"] == chat.id)
+            assert row["unread"] >= 1          # the promised counts (c2)
+            call_tool(url, "archive_chat", {"archived": True})
+            call_tool(url, "mute_chat", {"duration": "forever"})
+            row = next(c for c in json.loads(call_tool(url, "list_chats", {}))
+                       if c["id"] == chat.id)
+            assert row.get("archived") is True and row.get("muted") is True
+
+            files = json.loads(call_tool(url, "list_files", {}))
+            assert files[0]["name"] == "notes.txt"
+            assert files[0]["file_id"] == blob_id
+            out = call_tool(url, "fetch_file", {"file_id": blob_id})
+            assert out == "saved to inbox/notes.txt"
+            assert (ws / "inbox" / "notes.txt").read_bytes() == data
+            miss = call_tool(url, "fetch_file", {"file_id": "f-nope"})
+            assert "no such file" in miss
+    finally:
+        agent.close()
+        owner.close()

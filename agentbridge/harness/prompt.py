@@ -114,6 +114,16 @@ class PromptPack:
                       chat_kind=delivery.chat_kind),
             self.text("context_members", members=members),
         ]
+        # V54 (parity c): the chat facts a human reads in the info pane —
+        # genesis + the group's permission levels (factual, code-built like
+        # the trigger lines)
+        if delivery.created_by:
+            lines.append(f"Created by @{delivery.created_by}"
+                         + (f" on {delivery.created_at}"
+                            if delivery.created_at else ""))
+        if delivery.chat_kind == "group" and delivery.permissions:
+            lines.append("Group permissions: " + ", ".join(
+                f"{k}={v}" for k, v in sorted(delivery.permissions.items())))
         if delivery.kind == "timer":
             lines.append(self.text("context_wakeup", note=delivery.note))
         for t in delivery.triggers:
@@ -233,10 +243,20 @@ def render_message(m: Message, agent: str) -> str:
         rline = f' [replying to {who_r}: "{excerpt}"]'
     fwd = m.fwd or {}
     fline = f" [forwarded from @{fwd['from']}]" if fwd.get("from") else ""
+    # V54 (parity c): reactions become visible to the agent — one bracketed
+    # suffix per message. Emoji strings are member input: cap + single-line
+    # them so a hostile "emoji" can't smuggle transcript lines.
+    rx = ""
+    if m.reactions:
+        parts = []
+        for emoji, users in sorted(m.reactions.items()):
+            e = " ".join(str(emoji).split())[:8]
+            parts.append(f"{e} by {', '.join('@' + u for u in sorted(users))}")
+        rx = f" [reactions: {'; '.join(parts)}]"
     names = ", ".join(f.get("name", "") for f in (m.files or []))
     files = f"  [files: {names}]" if names else ""
     edited = " (edited)" if m.edited else ""
-    return f"[{m.ts}] {who}:{fline}{rline}{edited} {_safe_body(m.body)}{files}"
+    return f"[{m.ts}] {who}:{fline}{rline}{edited} {_safe_body(m.body)}{files}{rx}"
 
 
 class PromptManager:

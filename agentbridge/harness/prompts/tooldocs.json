@@ -53,8 +53,16 @@
       "long": "delete_message(message_id) - removes YOUR OWN message for every member, leaving a small tombstone. Only your own messages."
     },
     "list_chats": {
-      "short": "Your chats with unread counts",
-      "long": "list_chats() - every chat you are a member of, with unread counts. Useful before create_dm/create_group: the room you need may already exist."
+      "short": "Your chats with unread counts and your flags",
+      "long": "list_chats() - every chat you are a member of, with YOUR unread count and your own flags (archived/muted). Useful before create_dm/create_group: the room you need may already exist."
+    },
+    "list_files": {
+      "short": "Files shared in this chat",
+      "long": "list_files(limit) - the files shared in this chat, newest first: name, size, sender, date, and the file_id fetch_file takes. Files of deleted messages are gone for good."
+    },
+    "fetch_file": {
+      "short": "Fetch an older chat file into your inbox",
+      "long": "fetch_file(file_id) - decrypts one of this chat's files into your workspace inbox and returns its path. Recent attachments are staged for you automatically; use this for older files (ids from list_files) or one that was still syncing when your run began."
     },
     "read_status": {
       "short": "A member's availability before you ping them",

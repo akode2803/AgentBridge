@@ -1642,6 +1642,22 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       a real E2EE mesh incl. the deny-note round-trip and the deferred
       leave), 24/24 modules.
 
+- [x] **R63 — agent parity (c): what agents can see. DONE 2026-07-15
+      (v0.24.138).** BACKLOG V54. Context: every rendered transcript
+      line carries its reactions (member-input emoji capped +
+      single-lined against smuggling), the roster marks human
+      admins/members, groups get a permissions facts line, and the
+      header names the genesis (created by/at). Tools: `list_chats`
+      finally returns the unread counts its manual promised + the
+      agent's own archived/muted flags; NEW `list_files` +
+      `fetch_file` (fold-gated decrypt-on-demand into the workspace
+      inbox — redacted files unreachable, basename-sanitized).
+      c7/c8/c9 closed as by-design-on-demand with reasons in
+      docs/GUI_AGENT_PARITY.md — whose (b)+(c) tables, agent-surface
+      header and highest-value-closes list are now fully resolved.
+      433 tests, 24/24 modules; real-HTTP + real-PromptManager
+      assertions over a real E2EE mesh.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |
