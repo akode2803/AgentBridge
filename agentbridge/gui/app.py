@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from ..core.config import load_app_config, save_app_config
+from ..core.config import DEFAULT_HOME, load_app_config, save_app_config
 
 from . import (
     api_agents,
@@ -266,6 +266,26 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ap.error("no --root given and none remembered in config.json")
 
+    # single-instance guard (R45): a double-clicked AgentBridge.pyw beside
+    # the supervised fleet would otherwise co-bind :7787 (Windows SO_REUSEADDR
+    # lets two sockets share a port silently) and run a SECOND GUI — the
+    # chronic "stray GUI pair". The lock is port-scoped, so a dev rig on
+    # another port isn't blocked; an ephemeral port (0) skips it (tests). A
+    # loser opens the app window at the already-running server, then exits 0.
+    lock = None
+    if args.port:
+        from ..core.lock import SingleInstance
+
+        lock = SingleInstance((home or DEFAULT_HOME) / f"gui-{args.port}.lock")
+        if not lock.acquire():
+            running = f"http://{args.host}:{args.port}/"
+            print(f"AgentBridge GUI already running on {running} — focusing it.")
+            if not args.no_browser:
+                from .desktop import launch_window
+
+                launch_window(running)
+            return 0
+
     app = GuiApp(
         root,
         home=home,
@@ -290,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.server_close()
         app.close()
+        if lock is not None:
+            lock.release()
     return 0
 
 

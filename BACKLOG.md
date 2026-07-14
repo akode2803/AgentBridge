@@ -403,6 +403,55 @@ Ticked = shipped + verified. Rounds named for open items.
   Real-HTTP-tested (own rules returned; another member leaks nothing beyond
   the gates) + live on the rig as scratbot's identity.
 
+### Verbal asks (2026-07-14, GUI-polish + AVD round kickoff)
+
+- [x] **V10 GUI single-instance guard** (R45) — a double-clicked
+  `AgentBridge.pyw` beside the fleet co-binds :7787 (Windows SO_REUSEADDR)
+  and runs the chronic stray second GUI. `core/lock.py` SingleInstance
+  (advisory file lock, kernel-freed on death) + a port-scoped
+  `gui-<port>.lock` in app.py: the loser prints the running URL, opens the
+  app window there, exits 0. Ephemeral port (tests) skips it; dev rigs on
+  other ports coexist. Live-verified on a rig (second :7791 refused while
+  the first kept serving; :7792 coexisted); 2 tests.
+- [~] **V11 AVD clean install (coco off the v1 era)** — Aryan: wipe the AVD
+  entirely, fresh v2 install (plain-text chat export exists; nothing major
+  lost). Kit shipped R45: `scripts/avd_move_pack.py` (dev box: exports the
+  DPAPI-wrapped key as plain b64 — verified round-trip + destination
+  auto-wrap — plus supabase.env + installer + README) and
+  `scripts/avd_clean_install.ps1` (AVD: stops v1 tasks/workers, wipes local
+  state only — never synced folders —, clone + uv sync, places files,
+  owner login → adopt over the local API, harness launch + logon task).
+  **Ticks when Aryan's AVD run verifies live (@coco replies from the AVD).**
+- [ ] **V12 Empty info pill after every "X created this chat"** — find the
+  event that renders blank right after genesis and fix emit or phrasing.
+  → round "group-management polish".
+- [ ] **V13 Archive chat → "Unarchive chat"** on already-archived rows.
+  → round "group-management polish".
+- [ ] **V14 Admin can exit a group when other admins remain** (sole-admin
+  guard is too broad). → round "group-management polish".
+- [ ] **V15 "Group created by" in the sidebar doesn't work** — fix the
+  created-by display in chat details/sidebar. → round "group-management
+  polish".
+- [ ] **V16 Group permissions get their own dedicated page** (out of the
+  details scroll). → round "roster + member info".
+- [ ] **V17 Roster alignment + truncation** — admin tag misaligns because
+  the dropdown-arrow presence pushes it (sidebar has the same pattern);
+  member names must truncate gracefully; same alignment fix in the agent
+  permissions block of the details sidebar. → round "roster + member info".
+- [ ] **V18 Admin-change info events render only for the affected member**
+  (WhatsApp: "You're now an admin" — others see nothing). → round
+  "group-management polish".
+- [ ] **V19 Member/Agent info page** — new roster-dropdown item ("Member
+  info"/"Agent info") opening the member's profile as seen by me: reuse the
+  DM-details identity pieces (avatar, status, about, public gates, last
+  seen), drop chat-scoped cards. → round "roster + member info".
+- [ ] **V20 Boot theme flash** — orange (the old default accent) + light
+  mode flash before the saved accent/dark theme applies; theme must apply
+  before first paint. → round "boot experience".
+- [ ] **V21 Full-page boot/loading screen** (WhatsApp style) replacing the
+  in-layout skeleton; shaped so sign-in/create-account can take over the
+  same full page (packaging round). → round "boot experience".
+
 ---
 
 ## C. Standing deferred / future sessions
@@ -431,4 +480,8 @@ Ticked = shipped + verified. Rounds named for open items.
 | settings + model config (R39–R41, done) | Q13, Q14, Q20, Q21, Q23, Q30, M11-GUI, H6, H8-picker, H9 |
 | notifications (R42, done) | Q26, M3-remainder |
 | docs tool + ask cards (R43, done) | Q7, Q28, Q11-remainder (H2 close) |
+| guard + AVD kit (R45, done) | V10, V11-kit |
+| group-management polish | V12, V13, V14, V15, V18 |
+| roster + member info | V16, V17, V19 |
+| boot experience | V20, V21 |
 | parity sweep + stress | Q34, M10/M11 verifies, full-app regression |

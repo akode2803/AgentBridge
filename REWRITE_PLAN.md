@@ -1242,6 +1242,30 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       pushed an overlay doc past MAX_PATH — "atomic write failed" on the
       rig means path length, not a bug; real roots are short.
 
+- [x] **R45 — GUI single-instance guard + AVD clean-install kit. DONE
+      2026-07-14 (v0.24.119).** BACKLOG V10 + V11-kit. **Guard:** the
+      chronic stray double-click GUI pair (SO_REUSEADDR lets two servers
+      co-bind :7787 silently) is closed by `core/lock.py` SingleInstance —
+      an advisory file lock (msvcrt/fcntl, kernel-freed on death) taken on
+      `<home>/gui-<port>.lock` before the server builds; a losing launch
+      prints the running URL, opens the app window there, and exits 0.
+      Ephemeral ports (tests) skip it; rigs on other ports coexist.
+      Live-verified on a rig; 2 tests in test_config.py. **AVD kit:** the
+      coco move off the v1 bridge era is a full clean install (Aryan holds
+      a plain-text chat export; the mesh lives in Supabase, so the AVD
+      loses nothing shared). `scripts/avd_move_pack.py` builds the transfer
+      pack on the dev box — the agent key exported PLAIN (DPAPI-wrapped
+      files don't travel; export → destination auto-re-wrap VERIFIED),
+      supabase.env, the installer, a runbook README. `scripts/
+      avd_clean_install.ps1` runs on the AVD: v1 tasks/workers stopped,
+      LOCAL state wiped (synced folders explicitly refused — deletes
+      propagate), clone + `uv sync` all extras, files placed + fresh
+      config.json (`supabase://mesh2`), owner signs in once → `adopt_agent`
+      over the local API (safe order: nothing is homed on the AVD when the
+      owner logs in, so login's machine-claim is a no-op), GUI shut down,
+      harness launched + optional logon task, pack deletion prompted (it
+      holds secrets). V11 ticks when the AVD run verifies live.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

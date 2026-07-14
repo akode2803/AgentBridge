@@ -141,3 +141,27 @@ def test_app_config_roundtrip(tmp_path):
     config.save_app_config({"mesh_root": "X:/synced/mesh2"}, home=tmp_path)
     assert config.load_app_config(home=tmp_path)["mesh_root"] == "X:/synced/mesh2"
     assert json.loads((tmp_path / "config.json").read_text("utf-8"))
+
+
+# --- single-instance lock (R32.2: the GUI's stray-second-instance guard) ---
+
+def test_single_instance_blocks_a_second_holder(tmp_path):
+    from agentbridge.core.lock import SingleInstance
+
+    a = SingleInstance(tmp_path / "gui-7787.lock")
+    assert a.acquire() is True
+    b = SingleInstance(tmp_path / "gui-7787.lock")
+    assert b.acquire() is False          # a live holder blocks the second
+    a.release()
+    assert b.acquire() is True           # freed on release -> next one gets it
+    b.release()
+
+
+def test_single_instance_distinct_ports_coexist(tmp_path):
+    from agentbridge.core.lock import SingleInstance
+
+    prod = SingleInstance(tmp_path / "gui-7787.lock")
+    dev = SingleInstance(tmp_path / "gui-7790.lock")
+    assert prod.acquire() is True
+    assert dev.acquire() is True         # a different port is a different lock
+    prod.release(); dev.release()
