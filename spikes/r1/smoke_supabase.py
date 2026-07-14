@@ -11,7 +11,7 @@ def main() -> None:
     import supabase
     from supabase import create_client  # noqa: F401
 
-    import realtime  # the realtime-py dependency that powers channels
+    import realtime  # noqa: F401  (import IS the check: realtime-py present)
     ver = getattr(supabase, "__version__", "unknown")
 
     # surface check: the client class exposes channel/realtime plumbing

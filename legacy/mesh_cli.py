@@ -22,7 +22,7 @@ The shared folder is read from %USERPROFILE%\\.agentbridge\\config.json
 """
 
 import argparse
-import json
+import json  # noqa: F401  (frozen v1 file — not refactored)
 import os
 import sys
 from pathlib import Path

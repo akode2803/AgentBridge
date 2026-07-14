@@ -230,10 +230,24 @@ async function renderChatDetails() {
   const isSelf = meta.kind === "self";
   const title = chatDisplay(meta, ms.user);
   const noun = isDm ? "chat" : "group";
-  // me first, then admins, then everyone else
+  // me first, then admins, then everyone else — and each member's agents
+  // grouped directly under their owner (M10): an agent whose owner is in
+  // the room sorts inside the owner's block, not on its own. Anchor =
+  // the member itself, or the owner for an in-room agent; blocks need a
+  // deterministic anchor tiebreak or same-rank blocks would interleave.
+  const anchorOf = (u) => {
+    const rec = ms.users[u] || {};
+    const o = rec.kind === "agent" ? (rec.owners || [])[0] : null;
+    return o && (meta.members || []).includes(o) ? o : u;
+  };
+  const rank = (u) => (u === ms.user ? 0 : admins.includes(u) ? 1 : 2);
   const ordered = [...(meta.members || [])].sort((a, b) => {
-    const rank = (u) => (u === ms.user ? 0 : admins.includes(u) ? 1 : 2);
-    return rank(a) - rank(b);
+    const [aa, ab] = [anchorOf(a), anchorOf(b)];
+    if (aa !== ab) return rank(aa) - rank(ab) || aa.localeCompare(ab);
+    // same block: the anchor leads, its agents follow alphabetically
+    if (a === aa) return -1;
+    if (b === ab) return 1;
+    return a.localeCompare(b);
   });
   const nMembers = (meta.members || []).length;
   const memberCount = `${nMembers} member${nMembers === 1 ? "" : "s"}`;

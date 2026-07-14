@@ -60,11 +60,13 @@ by-design (documented where).
   re-wrap keeping recovery).
 - [x] **M9 Local caching** — per-identity SQLite store (R2) + the R29 cloud
   read mirror.
-- [~] **M10 Group permissions + multi-admin** — owner role removed,
+- [x] **M10 Group permissions + multi-admin** — owner role removed,
   multi-admin, WhatsApp permission card minus invite links, agents never
-  admins, permissions visible to everyone (R5/D12). **Verify: agents grouped
-  under their owner in the frontend roster.** Channels = v3 (config shaped
-  for it).
+  admins, permissions visible to everyone (R5/D12). The roster-grouping
+  verify FAILED and became a fix (R49): the details roster now sorts each
+  agent into its in-room owner's block (me → my agents → admins → others,
+  deterministic block tiebreak); verified live. Channels = v3 (config
+  shaped for it).
 - [x] **M11 Account deletion** (R40 close) — backend deactivation + DM
   refusal shipped R7; the GUI now has both delete buttons (Q20) AND the
   departed-member display the brief specified: a deleted member's messages
@@ -344,8 +346,15 @@ Ticked = shipped + verified. Rounds named for open items.
   the agent's context (`context_pinned` template + prompt.py), so the agent
   can pass it to `unpin_message` even for a pin older than the transcript tail
   (R34).
-- [ ] **Q34 GUI parity sweep** — after everything above: one complete read of
-  the GUI against app state → final round.
+- [x] **Q34 GUI parity sweep** (R49) — route-walk of all 18 pages with
+  error/rejection traps (zero errors, zero undefined/NaN leaks, controls
+  mount everywhere); sidebar rows/unread/mute/pin/title-badge vs
+  /api/mesh/state and transcript folds vs /api/mesh/chat all exact. Flagged
+  fix landed: the state directory no longer serves an agent's harness
+  config (settings — model, routing, standing approvals, aux) to
+  non-owners; `owners` stays public. Plus the stress leg: two writers ×150
+  racing posts + concurrent overlay ops — identical folds on all three
+  members, stars survive, ~250ms fold at 300 messages.
 
 ### Verbal asks (2026-07-14, run-UX round kickoff)
 
@@ -501,6 +510,18 @@ Ticked = shipped + verified. Rounds named for open items.
   bar animating, dismisses to the app signed-in and to the sign-in card
   signed-out.
 
+### Verbal asks (2026-07-14, parity-sweep kickoff)
+
+- [x] **V22 "The GUI in the agents page in settings is broken"** (R49,
+  hotfixed as v0.24.121) — R43's mount-time web-toggle sync read `mine`
+  out of scope inside the wiring IIFE; the ReferenceError killed the whole
+  hydration pass, so every dropdown (Runs with / model / effort / reply
+  rule / rate / memory / peer / Reach / availability) vanished and the
+  Scheduled / Recent runs / Peer activity panels never resolved — broken
+  since v0.24.117. Not the parallel session: settings.js was last touched
+  in R43. Now DOM-driven; verified live (80 csels mount, panels resolve,
+  zero rejections).
+
 ---
 
 ## C. Standing deferred / future sessions
@@ -533,4 +554,4 @@ Ticked = shipped + verified. Rounds named for open items.
 | group-management polish (R46, done) | V12, V13, V14, V15, V18 |
 | roster + member info (R47, done) | V16, V17, V19 |
 | boot experience (R48, done) | V20, V21 |
-| parity sweep + stress | Q34, M10/M11 verifies, full-app regression |
+| parity sweep + stress (R49, done) | Q34, M10 verify→fix, V22, settings-exposure fix, full-app regression |

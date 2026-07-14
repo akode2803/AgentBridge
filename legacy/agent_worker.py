@@ -46,7 +46,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
-from mesh import Mesh, read_json, atomic_write_json, utcnow  # noqa: E402
+from mesh import Mesh, read_json, atomic_write_json, utcnow  # noqa: E402, F401
 
 __version__ = "0.21.0"  # worker code version (printed by the AVD update script)
 

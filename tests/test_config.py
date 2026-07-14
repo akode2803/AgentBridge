@@ -164,4 +164,5 @@ def test_single_instance_distinct_ports_coexist(tmp_path):
     dev = SingleInstance(tmp_path / "gui-7790.lock")
     assert prod.acquire() is True
     assert dev.acquire() is True         # a different port is a different lock
-    prod.release(); dev.release()
+    prod.release()
+    dev.release()

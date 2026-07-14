@@ -1329,6 +1329,35 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       re-proved itself during rig setup (second :7792 launch printed
       "already running — focusing it", exit 0).
 
+- [x] **R49 — parity sweep + stress (the closing round). DONE 2026-07-14
+      (v0.24.124).** BACKLOG Q34 + the M10 roster verify + V22. **The
+      user-reported break (V22, hotfixed early as v0.24.121):** R43's
+      "grey the web toggle at mount" line read `mine` inside the wiring
+      IIFE where only the render function defines it — the ReferenceError
+      killed the whole hydration pass, so the My-agents page lost every
+      dropdown and its runtime panels since v0.24.117 (not the parallel
+      session's doing). Now DOM-driven like the neighbouring passes.
+      **Privacy (the sweep's flagged fix, 92f6783):** /api/mesh/state
+      served every agent's harness config (model, routing, STANDING
+      APPROVALS, aux flags) to every member; user_json now emits
+      `settings` only for the owner — `owners` stays public. Regression
+      test added; no frontend change needed (all reads owner-scoped).
+      **M10 verify → fix:** the details roster now groups each agent
+      under its in-room owner (anchor sort with deterministic block
+      tiebreak); verified live (Aryan → claude/claudemcp/coco → Fable).
+      **Q34 route-walk:** all 18 routes (5 chats + 5 details + 7 settings
+      + list) with error/rejection traps — zero errors, zero
+      undefined/NaN leaks, controls mount everywhere; sidebar rows,
+      unread badges, mute/pin indicators, title badge, hidden/archived
+      exclusion all match /api/mesh/state; transcript folds match
+      /api/mesh/chat exactly (the DM genesis event is quiet by design);
+      E2EE pill present. **Stress (rig, scratch group deleted after):**
+      two writers raced 150 posts each (p50 9ms, p95 16ms, 1.9s total)
+      while a third member star/mark-read'd concurrently — all three
+      folds IDENTICAL (301 records, strict ns order, no dupes/drops),
+      mid-history edit + redact converge, stars survive the R31 race
+      (5/5), 300-message fold ≈ 250ms. Suite 404+1 skipped green.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

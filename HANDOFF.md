@@ -17,9 +17,14 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.123**. Recent rounds (full
+  `gui/__init__.py` in R26). Currently **v0.24.124**. Recent rounds (full
   detail per round in REWRITE_PLAN.md; item-level status in BACKLOG.md):
-  R48 boot experience (theme before first paint via an inline head script —
+  R49 parity sweep + stress — the CLOSING round of the QA map (Q34 route-walk
+  clean; the My-agents settings page hotfixed — an R43 scope bug had killed
+  every dropdown since v0.24.117; the state directory stopped serving agent
+  harness config to non-owners; the details roster now groups agents under
+  their owner (M10); two-writer stress = identical folds, stars survive,
+  ~250ms fold at 300 messages); R48 boot experience (theme before first paint via an inline head script —
   no more orange/light flash — + the full-page WhatsApp-style boot cover,
   shaped for the sign-in takeover in packaging); R47 roster + member info
   (constant chip/chevron alignment, name truncation, the Member/Agent-info
