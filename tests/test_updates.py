@@ -159,3 +159,34 @@ def test_git_apply_refuses_non_default_branch(gitworld):
     assert r["newer"] and r["can_apply"] is False and "branch" in r["note"]
     resp = api_updates.update_apply(_App(), None)
     assert resp["ok"] is False
+
+
+# ------------------------------------------------------- restarter (V113)
+def test_restarter_scope_home_parsing():
+    from agentbridge.gui.restarter import _scope_home
+
+    assert _scope_home([]) == ""
+    assert _scope_home(["--no-browser"]) == ""
+    assert _scope_home(["--home", r"C:\t\ab66\h1", "--port", "7788"]) \
+        == r"C:\t\ab66\h1"
+    assert _scope_home([r"--home=C:\t\ab66\h1"]) == r"C:\t\ab66\h1"
+    assert _scope_home(["--home"]) == ""          # dangling flag: no scope
+
+
+def test_restarter_fleet_scoping(monkeypatch):
+    """The main app never touches a rig (--home in cmdline); a rig restart
+    touches ONLY processes naming its own home."""
+    from agentbridge.gui import restarter
+
+    procs = [
+        (1, r"pythonw.exe -m agentbridge.gui --no-browser"),
+        (2, r"pythonw.exe -m agentbridge.harness --all"),
+        (3, r"python.exe -m agentbridge.gui --home C:\t\ab66\h1 --port 7788"),
+        (4, r"python.exe -m agentbridge.harness scout --home C:\t\ab78\h1"),
+        (5, r"python.exe -m agentbridge.gui.restarter --gui-pid 1"),
+        (6, r"python.exe -m hermes_cli.main gateway run"),
+    ]
+    monkeypatch.setattr(restarter, "_list_python_procs", lambda: procs)
+    assert [p for p, _ in restarter._fleet_procs()] == [1, 2]
+    assert [p for p, _ in restarter._fleet_procs(r"C:\t\ab66\h1")] == [3]
+    assert [p for p, _ in restarter._fleet_procs(r"C:\t\ab78\h1")] == [4]

@@ -649,6 +649,13 @@ async function renderSettings() {
         source (git), the project's releases, and other machines on your
         mesh. Checking never installs anything — a found update turns the
         button into Update now / Download now.</p>
+        <div class="row" style="margin-top:10px">
+          <button id="app-restart">Restart app</button>
+          <span class="hint" id="restart-note" style="margin:0"></span>
+        </div>
+        <p class="hint" style="margin-bottom:0">Relaunches the server and the
+        agent harness (finishes an applied update). Your session is restored;
+        an agent run in flight is stopped and its trigger resumes after.</p>
       </div>
       <div class="card">
         <h2>Storage</h2>
@@ -869,6 +876,34 @@ async function renderSettings() {
         ? `Reclaimed ${r.blobs} file(s) (${mb} MB)`
           + (r.chats ? ` + ${r.chats} deleted group(s)` : "")
         : "Nothing to reclaim — all clean";
+    });
+  }
+  // V113: restart the whole app (server + harness) — the button waits out
+  // the downtime by polling /api/state (never a fixed sleep) and reloads
+  // when the new server answers, so the same window just comes back
+  const restartBtn = $("#app-restart");
+  if (restartBtn) {
+    const note = $("#restart-note");
+    restartBtn.addEventListener("click", async () => {
+      restartBtn.disabled = true;
+      note.textContent = "Restarting…";
+      const r = await api("/api/app_restart", {});
+      if (!r || r.error || !r.ok) {
+        restartBtn.disabled = false;
+        note.textContent = (r && (r.error || r.note)) || "Couldn't restart";
+        return;
+      }
+      const t0 = Date.now();
+      (async function waitBack() {
+        while (Date.now() - t0 < 60000) {
+          await new Promise((res) => setTimeout(res, 1500));
+          try {
+            const s = await fetch("/api/state", { cache: "no-store" });
+            if (s.ok) { location.reload(); return; }
+          } catch { /* still down — keep waiting */ }
+        }
+        note.textContent = "Still starting — reload the window manually";
+      })();
     });
   }
   // My-agents dropdowns use the shared custom select (task 13):

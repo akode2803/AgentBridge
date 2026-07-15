@@ -212,6 +212,7 @@ class GuiServer(ThreadingHTTPServer):
     def __init__(self, addr: tuple[str, int], app: GuiApp) -> None:
         super().__init__(addr, Handler)
         self.gui = app
+        app.server = self   # V113: endpoints can ask the server to shut down
 
     def handle_error(self, request, client_address) -> None:
         # a browser dropping a keep-alive/SSE socket is routine, not an error;

@@ -1502,10 +1502,20 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   exactly what each audience gates. Don't ship V103 without this copy
   pass.
 
-- [ ] **V113 "Restart app" option in Updates** (self chat 2026-07-15
-  20:29, swept 2026-07-16) — the About → Updates card should offer a
-  restart (the update flow already spawns processes; a plain restart
-  reuses that plumbing — GUI + harness, session restores itself).
+- [x] **V113 "Restart app" option in Updates** (self chat 2026-07-15
+  20:29) → **DONE R82 (v0.24.161, rig + live verified)**. About →
+  Updates gains "Restart app": POST /api/app_restart spawns a DETACHED
+  helper (`gui/restarter.py`) then shuts the server down cleanly; the
+  helper waits for the old GUI to exit, clears the rest of the fleet,
+  and relaunches GUI (+ `harness --all` if one was running) with the
+  same interpreter/args (always `--no-browser` — the window reconnects,
+  never doubles). Update flow's "restart to finish" note now has its
+  button. SCOPING: a main-app restart never touches anything with
+  `--home` (rigs); a rig's restart touches ONLY procs naming its own
+  home and skips the harness relaunch. Frontend polls /api/state until
+  the new server answers, then reloads. Session restores password-free
+  (R75); an in-flight agent run is stopped and its trigger resumes from
+  the durable queue. +2 scope tests.
 - [ ] **V114 STANDING: agent-docs clarity pass** (Aryan, chat
   2026-07-16: "keep updating the docs for agents since agents are
   getting confused on rules") — recurring item, not one round: whenever

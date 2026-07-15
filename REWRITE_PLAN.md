@@ -1792,6 +1792,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R82 — Restart app in Updates (V113). DONE 2026-07-16
+      (v0.24.161), rig + live verified.** One button restarts the whole
+      app: `/api/app_restart` spawns a detached helper
+      (`gui/restarter.py`), the server shuts down after the response
+      flushes, the helper waits out the old pid, clears this instance's
+      fleet and relaunches GUI + harness with the same interpreter
+      (window suppressed — the open one reconnects). Instance scoping:
+      no-`--home` = the main app (rigs untouched); a `--home` rig
+      restart touches only its own processes. The frontend polls
+      /api/state and reloads when the new server answers. Rig-proven:
+      relaunched GUI came back detached with fable's session restored
+      while the live fleet's 12 pids stayed identical.
+
 - [x] **R81 — the sidebar typing/step indicator (V66). DONE 2026-07-16
       (v0.24.160), rig-verified.** The chat row now shows life instead of
       the stale preview: "X is typing…" (composer heartbeats, 12s

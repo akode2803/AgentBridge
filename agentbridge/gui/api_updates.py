@@ -211,6 +211,40 @@ def janitor_sweep(app, req, mesh) -> dict:
 
 
 @authed
+def app_restart(app, req, mesh) -> dict:
+    """V113: restart the whole app — this GUI server and the agent harness.
+    A detached helper (gui/restarter.py) outlives us: it waits for this
+    process to exit, clears the rest of the fleet (rigs with --home are
+    never touched), and relaunches both with the same interpreter. The
+    session restores itself (R75: restore is password-free by design);
+    the app window reconnects to the new server on its own."""
+    import json as _json
+    import subprocess
+    import sys
+    import threading
+
+    server = getattr(app, "server", None)
+    if server is None:
+        return {"ok": False, "note": "no live server to restart (test rig?)"}
+    gui_args = [str(a) for a in sys.argv[1:]]
+    cmd = [sys.executable, "-m", "agentbridge.gui.restarter",
+           "--gui-pid", str(os.getpid()),
+           "--exe", sys.executable,
+           "--cwd", os.getcwd(),
+           "--gui-args", _json.dumps(gui_args)]
+    flags = 0
+    if sys.platform == "win32":
+        flags = (subprocess.DETACHED_PROCESS
+                 | subprocess.CREATE_NEW_PROCESS_GROUP)
+    subprocess.Popen(cmd, creationflags=flags, close_fds=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdin=subprocess.DEVNULL)
+    # shut down AFTER this response has flushed to the client
+    threading.Timer(0.8, server.shutdown).start()
+    return {"ok": True, "note": "Restarting — back in a few seconds"}
+
+
+@authed
 def update_apply(app, req, mesh) -> dict:
     """Apply a git-channel update. Every rail is recomputed server-side —
     the client's earlier check result is never trusted."""
@@ -242,4 +276,5 @@ def update_apply(app, req, mesh) -> dict:
 
 GET = {"/api/update_check": update_check}
 POST = {"/api/update_apply": update_apply,
+        "/api/app_restart": app_restart,
         "/api/mesh/janitor": janitor_sweep}
