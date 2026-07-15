@@ -145,13 +145,18 @@ class ChatKeyService:
     def ensure(self, chat_id: str, snap: ChatSnapshot) -> tuple[int, bytes]:
         """The self-heal: called before every seal. Rotates when there is no
         epoch yet, when the newest epoch's member set drifted from the
-        snapshot (someone removed/left/was added-by-a-clobbered-writer), or
-        when I can't unwrap my copy (I'm newer than the wrap)."""
+        snapshot (someone removed/left/was added-by-a-clobbered-writer), when
+        the newest epoch was CREATED BY someone no longer a member (R69: a
+        departed member's key is never trusted as current — a remaining
+        member re-keys on the next post, neutralizing a key a leaver's client
+        may have kept), or when I can't unwrap my copy (I'm newer than the
+        wrap)."""
         current = self.latest(chat_id)
         members = sorted(snap.members)
         if current is not None:
             epoch, doc = current
-            if sorted(doc.get("wrapped", {})) == members:
+            creator_ok = doc.get("by", "") in snap.members
+            if creator_ok and sorted(doc.get("wrapped", {})) == members:
                 key = self.my_key(chat_id, epoch)
                 if key is not None:
                     return epoch, key
@@ -188,3 +193,25 @@ class ChatKeyService:
         """Rotate away from the departed immediately (ensure() would catch it
         at the next seal anyway — this just shrinks the overlay window)."""
         self.rotate(chat_id, sorted(snap.members))
+
+    def on_member_left(self, chat_id: str, snap: ChatSnapshot) -> None:
+        """R69: I am leaving — rotate the epoch away from myself so the chat
+        stops using a key I hold. Unlike ``rotate``/``on_members_removed``
+        the actor (me) is NOT in the new member set, so this mints the epoch
+        directly and deliberately does NOT cache my own copy (I keep no key
+        for a room I've left). The new epoch is created ``by`` me but wrapped
+        only for the remaining members; ensure()'s departed-creator check
+        then has a remaining member re-key on their next post, so even a
+        modified client that kept this key gains nothing lasting. Last one
+        out (no remaining members) has nothing to rotate for."""
+        members = sorted(n for n in snap.members if n != self.user)
+        if not members:
+            return
+        epoch = next_ns()
+        key = crypto.new_chat_key()
+        self.tx.put_doc(
+            P.keys(chat_id, epoch),
+            {"epoch": epoch, "by": self.user, "created": utcnow_iso(),
+             "wrapped": self._wrap_for(members, key)},
+        )
+        # no self._cache write: a left chat leaves no key on this device

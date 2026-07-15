@@ -1722,6 +1722,17 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       allowed/denied outcome in its reply (V80). +1 prompt test. The
       visual requester-facing "asking @owner" chip folds into V66.
 
+- [x] **R69 — key-rotation-on-leave (§C security core). DONE
+      2026-07-15 (v0.24.144).** `leave()` now rotates the chat epoch away
+      from the departing member (wrapped for remaining members only,
+      leaver keeps no copy), and `ensure()` re-keys whenever the newest
+      epoch's CREATOR is no longer a member — so a departed member's
+      planted/kept key is distrusted and superseded on the next
+      remaining-member post. `delete_account` inherits it (leaves every
+      group). +2 E2EE tests, THREAT_MODEL "Forward membership" updated.
+      Also fixed a pre-existing `test_janitor` flake (async store read).
+      447 tests.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

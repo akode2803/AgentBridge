@@ -286,7 +286,10 @@ class MembershipService:
                           "owner": self.user}
             )
         self.messaging.post_event(chat_id, {"type": events.EV_MEMBER_LEFT})
-        return self.refold(chat_id)
+        healed = self.refold(chat_id)
+        if self.keys is not None:  # R69: rotate the epoch away from me on exit
+            self.keys.on_member_left(chat_id, healed)
+        return healed
 
     def grant_admin(self, chat_id: str, who: str) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)

@@ -45,6 +45,20 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   (`test_removed_member_keeps_history_loses_future`). `ensure()` re-checks the
   member set before every seal, so even a **clobbered/raced rotation** self-
   heals on the next message (`test_ensure_heals_after_clobbered_rotation`).
+  **`leave()` now rotates too (R69, V79/§C).** Before R69 only
+  `remove_member` proactively rotated; a voluntary `leave` relied on the
+  next remaining member's post to `ensure()`-rotate away. That was already
+  confidentiality-safe (a new message can only exist if someone posts, and
+  posting re-keys away from the drifted member set), but the security round
+  closed the asymmetry: leaving mints a new epoch wrapped for the remaining
+  members only (the leaver's device keeps NO copy), and — the load-bearing
+  half — `ensure()` now **re-keys whenever the newest epoch was created by
+  someone no longer a member**, not only on a wrapped-set mismatch. So even
+  a modified/kept key a departed member plants as "current" is distrusted
+  and superseded on the next remaining-member post (`test_leave_rotates_the_
+  epoch_away_from_the_leaver`, `test_ensure_distrusts_an_epoch_from_a_
+  departed_creator`). `delete_account` leaves every group, so it inherits
+  this for free.
 - **History-on-join is cryptographic**, not just a filter: joining a group
   with `send_history=OFF` triggers a rotation and the newcomer is wrapped only
   the new epoch — pre-join ciphertext is sealed to them forever

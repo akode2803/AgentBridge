@@ -1203,12 +1203,17 @@ security items below (V79–V82 are part of it per his framing).
   brick.
 - **Per-member Supabase auth + real RLS policies** (closes transport-side
   deletion residuals; today secret-key-only).
-- **Key rotation on `leave()`** (spotted in R56): `remove_member` rotates
-  the chat key (`keys.on_members_removed`) but a voluntary `leave` does
-  NOT — a departed member's device keeps decrypting future epochs it can
-  still fetch at the transport layer. App-level reads are membership-
-  gated, but E2EE should not lean on that. Rotate on leave too (+ the
-  delete_account loop). Hardening-round item.
+- [x] **Key rotation on `leave()`** — DONE R69 (v0.24.144). `leave()`
+  now rotates the epoch away from the leaver (wrapped for the remaining
+  members only; the leaver's device keeps no copy), and — the robust
+  half — `ensure()` re-keys whenever the newest epoch's CREATOR is no
+  longer a member (not just on a wrapped-set mismatch), so a key a
+  departed member planted/kept is distrusted and superseded on the next
+  remaining-member post. `delete_account` leaves every group → inherits
+  it. +2 E2EE tests; THREAT_MODEL "Forward membership" updated. Also
+  fixed a PRE-EXISTING flake in `test_janitor.py` surfaced during the
+  full-suite run (the janitor reads the message envelope from the async
+  local store; the test now syncs before sweeping). 447 tests.
 - **Reaction notifications** — PROMOTED 2026-07-15 → **V50** (Aryan:
   "Reactions should show notifications - fix that").
 - **Storage janitor** — PROMOTED 2026-07-15 → **V63** (Aryan: real

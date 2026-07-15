@@ -131,6 +131,63 @@ def test_removed_member_keeps_history_loses_future(world):
     assert fable.keys.my_key(group.id, new_epoch) is None      # future: opaque
 
 
+def test_leave_rotates_the_epoch_away_from_the_leaver(world):
+    """R69: leaving rotates the chat key away from the departing member, so a
+    message posted after they leave is sealed under an epoch they were never
+    wrapped into — E2EE no longer leans on the app-level membership gate.
+    The leaver's own rotation is created ``by`` them, so ensure() re-keys on
+    a remaining member's next post (departed-creator distrust)."""
+    meshes, _, _, _ = world
+    aryan, fable, sudhir = meshes["aryan"], meshes["fable"], meshes["sudhir"]
+    group = aryan.create_chat("Exit", members=["fable", "sudhir"])
+    aryan.post(group.id, "before fable leaves")
+    ripple(aryan, group.id, fable, sudhir)
+    old_epoch = aryan.keys.latest(group.id)[0]
+    assert fable.keys.my_key(group.id, old_epoch) is not None   # fable held it
+
+    fable.sync.sync_once([group.id])
+    fable.leave(group.id)                        # R69: rotates on the way out
+    ripple(fable, group.id, aryan, sudhir)
+    # the leave-rotation already excludes fable and is stamped by the leaver
+    left_epoch, left_doc = aryan.keys.latest(group.id)
+    assert left_epoch != old_epoch and "fable" not in left_doc["wrapped"]
+    assert left_doc["by"] == "fable"
+
+    env = aryan.post(group.id, "after fable left")  # ensure() re-keys (by gone)
+    ripple(aryan, group.id, sudhir)
+    new_epoch, new_doc = aryan.keys.latest(group.id)
+    assert new_epoch != left_epoch and new_doc["by"] == "aryan"
+    assert "fable" not in new_doc["wrapped"]
+    fable.keys._cache.clear()
+    assert fable.keys.my_key(group.id, env.epoch) is None       # future: opaque
+    assert fable.keys.my_key(group.id, old_epoch) is not None   # history: kept
+    assert sudhir.keys.my_key(group.id, env.epoch) is not None  # remaining reads
+
+
+def test_ensure_distrusts_an_epoch_from_a_departed_creator(world):
+    """R69 defense-in-depth: even when the newest epoch's wrapped set matches
+    the current members, ensure() re-keys if its CREATOR is no longer a
+    member — so a key a leaver minted (and might have kept) is never trusted
+    as the current epoch once a remaining member posts."""
+    meshes, _, _, root = world
+    aryan, fable, sudhir = meshes["aryan"], meshes["fable"], meshes["sudhir"]
+    group = aryan.create_chat("Distrust", members=["fable", "sudhir"])
+    aryan.post(group.id, "seed")
+    ripple(aryan, group.id, fable, sudhir)
+    ep, doc = aryan.keys.latest(group.id)
+    # forge the newest epoch to look member-exact but authored by (soon to be
+    # removed) fable — only the departed-creator check can catch this
+    aryan.remove_member(group.id, "fable")
+    ep2, doc2 = aryan.keys.latest(group.id)      # remove_member rotated
+    forged = dict(doc2); forged["by"] = "fable"  # a departed member's stamp
+    FolderTransport(root).put_doc(P.keys(group.id, ep2), forged)
+    aryan.keys._cache.clear()
+    env = aryan.post(group.id, "after the plant")  # ensure() must re-key
+    latest_epoch, latest_doc = aryan.keys.latest(group.id)
+    assert env.epoch == latest_epoch and latest_epoch != ep2
+    assert latest_doc["by"] == "aryan"
+
+
 def test_ensure_heals_after_clobbered_rotation(world):
     """Two removals could race on the epoch file; ensure() guarantees the
     NEXT message is sealed under a members-only key regardless."""

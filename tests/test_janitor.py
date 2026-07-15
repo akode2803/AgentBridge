@@ -42,6 +42,11 @@ def _post_with_blob(mesh, chat_id, name="doc.txt", body=b"blob bytes"):
     env = mesh.post(chat_id, f"sharing {name}", files=[{
         "id": blob_id, "name": name, "bytes": len(body)}])
     mesh.outbox.flush_once()
+    # the janitor reads the message envelope from the LOCAL STORE (populated by
+    # sync); ingest it now so the sweep is deterministic — in production a
+    # grace-eligible (>=7d old) message is always long since synced (fixes a
+    # pre-existing flake where the author's own post hadn't been cached yet)
+    mesh.sync.sync_once([chat_id])
     return env, f"chats/{chat_id}/files/{blob_id}"
 
 
