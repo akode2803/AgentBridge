@@ -1792,6 +1792,19 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R78 — retire the Performance knob (V110). DONE 2026-07-16
+      (v0.24.157), rig-verified.** Aryan's go-ahead on the V110
+      assessment: the About page's "Performance / Check for news"
+      dropdown tuned the frontend's LOCAL /api/state poll — free
+      localhost traffic; every cadence that costs anything has been
+      profile-driven in the transport layer since R76, so the knob was
+      calm-UI noise. Removed the card + poll-slot csel (settings.js);
+      main.js poll fixed at 2.5s with the unchanged 20s safety-net lane
+      while SSE is live; `pollMs` localStorage key retired. The R76
+      traffic meter in the Connection card remains the honest surface.
+      Also logged V111 (app lock over the machine-trust model) and V112
+      (privacy-copy rename rider on V103) from chat.
+
 - [x] **R77 — the owner-changed pill (V69). DONE 2026-07-16
       (v0.24.156), rig-verified.** The machine claim was the one cascade
       mutation site without V37 pills — agents vanished silently from

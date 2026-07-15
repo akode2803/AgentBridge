@@ -241,13 +241,13 @@ window.addEventListener("hashchange", route);
       setTimeout(() => b.remove(), 350);
     })();
   })();
-  // poll cadence is user-tunable (Settings → Connection); re-read each tick so
-  // a change applies without a reload. When the SSE stream is live (v2) the
-  // stream carries the news, so the poll drops to a slow safety-net tick that
-  // heals any dropped frame without hammering the server.
+  // Local /api/state poll — fixed cadence (the user knob retired in V110:
+  // this only hits our own localhost server's in-memory mirror; every cadence
+  // that costs anything is profile-driven in the transport layer since R76).
+  // When the SSE stream is live (v2) the stream carries the news, so the poll
+  // drops to a slow safety-net tick that heals any dropped frame.
   (function poll() {
-    const base = Math.max(1000, +(localStorage.getItem("pollMs") || 2500) || 2500);
-    const ms = realtimeActive() ? Math.max(base, 20000) : base;
+    const ms = realtimeActive() ? 20000 : 2500;
     setTimeout(async () => {
       try { await refresh(false); } catch { /* next tick retries */ }
       poll();

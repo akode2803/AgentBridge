@@ -1414,7 +1414,8 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   itself — since dm creation is what is intended. block would already work
   for a created dm." Decide + implement: the messaging-privacy gate should
   not block DM creation outright (block covers the hostile case); agents
-  DMing their owner must work.
+  DMing their owner must work. ⚠ Ships together with V112 (rename the
+  audience options / add help text so the copy matches the semantics).
 - [ ] **V104 Agent parity audit: forward / message-info / copy / edit**
   (18:16) — check which of these exist for AGENT-authored messages and
   close the gaps (extends docs/GUI_AGENT_PARITY.md).
@@ -1436,15 +1437,37 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   inferring from mesh messages — "a useful fix for all connectors".
   Merge into the V85 cluster as its architecture; V85's UI fixes ride it.
 
-- [ ] **V110 Retire the "Performance / Check for news" knob in About?**
+- [x] **V110 Retire the "Performance / Check for news" knob in About**
   (Aryan asked 2026-07-16 whether the section still makes sense; Claude's
   assessment: NO — the dropdown tunes the frontend's LOCAL /api/state
   poll, which never touches the cloud; since R76 every metered cadence is
   profile-driven in the transport layer, so a user-facing knob for a free
-  localhost poll is calm-UI noise nobody can reason about. Recommend:
-  remove the section, fix the cadence (or focus-gate it), keep the R76
-  traffic meter in the Connection card as the honest surface.) Await
-  Aryan's go-ahead, then it's a 20-minute frontend round.
+  localhost poll is calm-UI noise nobody can reason about.) Go-ahead
+  given 2026-07-16 → **DONE R78 (v0.24.157)**: Performance card +
+  poll-slot csel removed from settings.js; main.js poll fixed at 2.5s
+  (20s safety-net lane when SSE is live — unchanged); `pollMs`
+  localStorage key retired (stale values ignored). The R76 traffic meter
+  in the Connection card stays as the honest surface. Live-verified on a
+  worktree rig: About = Connection/Updates/Storage only, account page
+  intact, SSE + safety-net poll ticking, zero rejections.
+
+- [ ] **V111 App lock (like WhatsApp)** (Aryan, chat 2026-07-16) — an
+  extra LOCAL lock layer over the machine-trust model: the signed-in GUI
+  is open to anyone with the Windows profile (that's by design — R75's
+  sign-out password is the only backstop). Add an optional app lock:
+  a PIN/passphrase gate when the app window opens (+ auto-lock after
+  idle), purely local, does NOT replace the account password. Design
+  points when the round runs: where the secret lives (DPAPI-wrapped like
+  the keystore), lock scope (GUI window vs the localhost API — the API
+  must be covered or the lock is cosmetic), and agents keep running
+  while locked. Came out of the "how do you access my account" answer.
+- [ ] **V112 Privacy-settings copy must match V103's semantics** (Aryan,
+  chat 2026-07-16, rides [V103]) — if V103 turns the messaging-privacy
+  "nobody" into effectively "nobody NEW" (gating DM *creation*, not
+  messaging in existing DMs), the options must be renamed appropriately
+  or a help text added at the bottom of the privacy section explaining
+  exactly what each audience gates. Don't ship V103 without this copy
+  pass.
 
 - [ ] **V101 Feed the hint watchdog from the LOG side too** (found in the
   R76 post-migration probe, 2026-07-15, during a degraded-realtime spell:

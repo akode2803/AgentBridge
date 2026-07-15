@@ -660,15 +660,6 @@ async function renderSettings() {
         attachments of messages deleted for everyone (after a 7-day undo
         window) and deleted groups' data. Runs automatically once a day;
         nothing readable is ever touched.</p>
-      </div>
-      <div class="card">
-        <h2>Performance</h2>
-        <dl class="kv" style="grid-template-columns:minmax(110px,160px) 1fr">
-          <dt>Check for news</dt><dd><span id="poll-slot"></span></dd>
-        </dl>
-        <p class="hint" style="margin-bottom:0">How often this window re-checks
-        the mesh for news. Faster feels snappier; slower is lighter on sync
-        traffic and disk. Applies from the next tick — no restart needed.</p>
       </div>`;
   }
   $("#content").innerHTML = `<div class="settings-body">${html}</div>`;
@@ -880,19 +871,7 @@ async function renderSettings() {
         : "Nothing to reclaim — all clean";
     });
   }
-  const pollSlot = $("#poll-slot");
-  if (pollSlot) pollSlot.appendChild(csel({
-    options: [
-      { v: "1000", label: "Every second" },
-      { v: "2500", label: "Every 2.5 seconds (default)" },
-      { v: "5000", label: "Every 5 seconds" },
-      { v: "10000", label: "Every 10 seconds" },
-      { v: "30000", label: "Every 30 seconds" },
-    ],
-    value: localStorage.getItem("pollMs") || "2500",
-    onChange: (v) => localStorage.setItem("pollMs", v),
-  }));
-  // My-agents dropdowns use the SAME custom select as Performance (task 13):
+  // My-agents dropdowns use the shared custom select (task 13):
   // reply-rule (was a native <select>) and replies-per-hour (was a number input
   // whose spinner + datalist arrow read as a doubled dropdown). mountCsels fills
   // each .csel-slot from its data-value and writes the choice back to it.
