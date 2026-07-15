@@ -17,8 +17,14 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.148** (fleet live on it).
-  **SECURITY ARC R66–R73 (2026-07-15) DONE + LIVE** — the core of Aryan's
+  `gui/__init__.py` in R26). Currently **v0.24.150** (fleet live on it).
+  **⚠ TOP PRIORITY: the Supabase EGRESS EMERGENCY (BACKLOG V84)** — egress
+  is 6× over the free-tier limit, account deactivation imminent. The
+  mirror pulls a full doc snapshot per realtime hint + every 4s across ~6
+  processes, and avatars re-stream every read. Needs its own careful round
+  (incremental doc sync + adaptive cadence + avatar etag caching); V66
+  typing indicator must land AFTER it (it adds polling). The repo is now
+  PUBLIC (R74). **SECURITY ARC R66–R75 (2026-07-15) DONE + LIVE** — the core of Aryan's
   security round: R67 closed the loose agent sandbox (reads outside the
   per-chat workspace now ask the owner — @claude had been reading the whole
   Downloads tree with no prompt), R69 rotates chat keys on `leave()` and
