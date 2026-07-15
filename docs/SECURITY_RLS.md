@@ -136,16 +136,21 @@ bypasses row security`.
 
 ## 4. The runbook (in this order — nothing breaks at any step)
 
+> All commands run from the repo root **with the project's own venv
+> Python** — `.\.venv\Scripts\python.exe`, never bare `python` (that
+> resolves to the hermes venv, which lacks the `supabase` package; from a
+> subdirectory it also can't import `agentbridge`).
+
 1. **Dashboard, one-time**: Authentication → Sign In/Up → email signup ON,
    email confirmations OFF (synthetic addresses; a signup grants nothing
    until it claims a members row, and RLS decides what a claim can do).
 2. **Paste** `docs/supabase_schema.sql` (idempotent, whole file is fine).
    The fleet keeps running on the service key, which bypasses RLS —
    pasting only *arms* the gate for `authenticated` users.
-3. **Join from each machine**:
-   `python -m agentbridge.transport.supabase_admin join aryan` here,
-   `... join aryanonavd` on the AVD. Each machine mints and installs its
-   own credential locally — nothing to transfer.
+3. **Join from each machine** (from the repo root):
+   `.\.venv\Scripts\python.exe -m agentbridge.transport.supabase_admin join aryan`
+   here, `... join aryanonavd` on the AVD. Each machine mints and installs
+   its own credential locally — nothing to transfer.
 4. **Restart each machine's app** (About → Updates → Restart app) and
    check the Connection panel says `Member (…)`.
 5. **Verify**: `scripts/rls_probe.py` with a scratch `join`ed identity —

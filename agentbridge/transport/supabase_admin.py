@@ -1,4 +1,4 @@
-"""Supabase membership tooling (R84, trust model v2.2 — account creation
+r"""Supabase membership tooling (R84, trust model v2.2 — account creation
 IS membership).
 
 No secret is ever transferred and nobody approves anything. A member's
@@ -10,13 +10,18 @@ app directory's own rule). The mesh is as private as its bootstrap config:
 URL + publishable key + root name — possession of the bootstrap is the
 invite, like a group link.
 
+Run from the repo root with the project's OWN venv Python — bare
+``python`` is the hermes venv, which has no ``supabase`` package (and from
+a subdirectory can't import ``agentbridge`` either):
+
     new member's machine:
-        python -m agentbridge.transport.supabase_admin join <username>
+        .\.venv\Scripts\python.exe -m agentbridge.transport.supabase_admin join <username>
 
     the owner (service key, kept OFFLINE), rarely:
-        seed <username> [--install|--out FILE]   mint a credential for a
-                                                 machine that can't run join
-        revoke <username>                        eviction (row + auth user)
+        ...supabase_admin seed <username> [--install|--out FILE]
+                                          mint a credential for a machine
+                                          that can't run join itself
+        ...supabase_admin revoke <username>   eviction (row + auth user)
 
 ``join`` is also the primitive the app's account-creation flow calls when
 the setup overhaul lands (V-2026-07-16: "create a user key during the

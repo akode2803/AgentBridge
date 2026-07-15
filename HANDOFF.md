@@ -17,12 +17,14 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.164** (fleet live on it).
+  `gui/__init__.py` in R26). Currently **v0.24.165** (fleet live on it).
   **R84 (2026-07-16): per-member Supabase RLS is BUILT (trust model
   v2.2 — account creation IS membership; no owner minting, no admission
   prompts; the mesh is as private as its bootstrap config). ⚠ ARYAN'S
-  STEPS (docs/SECURITY_RLS.md §4): dashboard Auth → email signup ON +
-  confirmations OFF → paste docs/supabase_schema.sql → `python -m
+  STEPS (docs/SECURITY_RLS.md §4 — run everything from the repo root with
+  `.\.venv\Scripts\python.exe`, NOT bare `python` = the hermes venv):
+  dashboard Auth → email signup ON + confirmations OFF → paste
+  docs/supabase_schema.sql → `.\.venv\Scripts\python.exe -m
   agentbridge.transport.supabase_admin join aryan` here + `join
   aryanonavd` on the AVD → restart both apps (About shows "Access ·
   Member (…)") → remove SUPABASE_SECRET_KEY from both machines.** Until
