@@ -17,7 +17,16 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.162** (fleet live on it).
+  `gui/__init__.py` in R26). Currently **v0.24.164** (fleet live on it).
+  **R84 (2026-07-16): per-member Supabase RLS is BUILT — ⚠ ARYAN'S
+  STEPS remain (docs/SECURITY_RLS.md §4): paste schema §R84 → the
+  post-paste probe runs → `python -m agentbridge.transport.supabase_admin
+  provision aryan --install` here + `provision aryanonavd --out` for the
+  AVD → restart both apps (About shows "Access · Member (…)") → remove
+  SUPABASE_SECRET_KEY from both machines.** Until then the fleet runs on
+  the service key exactly as before (it bypasses RLS; pasting only arms
+  the gate). R83's V119 rider fixed the restart button (console flash +
+  dead relaunch; %TEMP%\agentbridge_restart.log has breadcrumbs now).
   **R83 (2026-07-16, V109+V85)**: the permission-prompt overhaul — the
   GUI asks the HARNESS for run state via a local heartbeat
   (`core/runstate.py`); ghost prompts die with their run (boot reset +

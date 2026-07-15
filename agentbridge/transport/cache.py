@@ -135,6 +135,9 @@ class CachingTransport(Transport):
                 "mode": ("delta" if cursor and self.profile.supports_doc_delta
                          else "full"),
                 "hints_suspect": time.monotonic() < self._suspect_until,
+                # R84: how this machine authenticates ("member:<name>" vs
+                # "service") — the Connection panel's honest surface
+                "auth": getattr(self.inner, "auth_mode", "") or None,
                 "transfer": stats() if callable(stats) else None}
 
     def suggest_poll_s(self, default: float) -> float:

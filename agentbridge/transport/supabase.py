@@ -13,10 +13,16 @@ Mapping (schema in ``docs/supabase_schema.sql``, pasted once by the owner):
   note); if the socket is blocked or drops, everything silently degrades to
   pure polling, because the poll stays the source of truth (tenet 6).
 
-Trust model v1: only the SECRET key talks to the project (RLS enabled with
-no policies, so the publishable key can do nothing). Per-member Supabase
-auth + real RLS policies is a later round. E2EE is unchanged — bodies and
-files arrive here already sealed; the server stores ciphertext (D2).
+Trust model v2 (R84, docs/SECURITY_RLS.md): each mesh member holds their
+OWN Supabase auth credential (``SUPABASE_MEMBER_EMAIL``/``_PASSWORD`` +
+the publishable key) and RLS policies scope rows to chat membership — the
+chat's own meta doc is the ACL. When member credentials are present the
+driver signs in as that member; otherwise it falls back to the v1 SECRET
+key (which bypasses RLS), so a mixed fleet keeps working through the
+migration. A member sign-in failure also falls back (with a loud mode
+flag) rather than bricking the fleet. E2EE is unchanged either way —
+bodies and files arrive here already sealed; the server stores
+ciphertext (D2).
 
 Credentials come from ``~/.agentbridge/supabase.env`` (or the process env);
 they are never committed and never live in the mesh root string, which is
@@ -80,10 +86,20 @@ def load_supabase_env(home: Path | None = None) -> dict[str, str]:
                 out[k.strip()] = v.strip()
     except OSError:
         pass
-    for k in ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_PUBLISHABLE_KEY"):
+    for k in ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "SUPABASE_PUBLISHABLE_KEY",
+              "SUPABASE_MEMBER_EMAIL", "SUPABASE_MEMBER_PASSWORD"):
         if os.environ.get(k):
             out[k] = os.environ[k]
     return out
+
+
+# marks of an expired/invalid auth token — the member session heals itself
+_AUTH_EXPIRED_MARKS = ("JWT expired", "PGRST301", "invalid JWT", "jwt expired")
+
+
+def _is_auth_expired(err: Exception) -> bool:
+    s = str(err)
+    return any(m.lower() in s.lower() for m in _AUTH_EXPIRED_MARKS)
 
 
 def _check(path: str) -> str:
@@ -115,6 +131,7 @@ class SupabaseTransport(Transport):
         # sharing a root name must never share a SQLite cache
         self.cache_key = f"supabase:{self._env.get('SUPABASE_URL', '')}:{self.root}"
         self._client = client              # tests inject a fake here
+        self.auth_mode = "injected" if client is not None else ""
         self._client_lock = threading.Lock()
         self._rt = None                    # the realtime hint thread
         self._watchers: list[_HintWatcher] = []
@@ -147,14 +164,56 @@ class SupabaseTransport(Transport):
                     from supabase import create_client
 
                     url = self._env.get("SUPABASE_URL", "")
-                    key = self._env.get("SUPABASE_SECRET_KEY", "")
-                    if not url or not key:
+                    email = self._env.get("SUPABASE_MEMBER_EMAIL", "")
+                    pw = self._env.get("SUPABASE_MEMBER_PASSWORD", "")
+                    pub = self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
+                    secret = self._env.get("SUPABASE_SECRET_KEY", "")
+                    if not url or not (secret or (email and pw and pub)):
                         raise ValidationError(
                             "Supabase credentials missing — put SUPABASE_URL "
-                            "and SUPABASE_SECRET_KEY in ~/.agentbridge/"
+                            "and either a member credential (R84) or "
+                            "SUPABASE_SECRET_KEY in ~/.agentbridge/"
                             "supabase.env")
-                    self._client = create_client(url, key)
+                    # R84: member auth first — the RLS trust model. A failed
+                    # sign-in FALLS BACK to the service key (never brick the
+                    # fleet), and the About panel shows the honest mode.
+                    if email and pw and pub:
+                        try:
+                            client = create_client(url, pub)
+                            client.auth.sign_in_with_password(
+                                {"email": email, "password": pw})
+                            self.auth_mode = ("member:"
+                                              + email.split("@", 1)[0])
+                            self._client = client
+                            return self._client
+                        except Exception:  # noqa: BLE001 — fall back below
+                            self.auth_mode = ("member-signin-FAILED"
+                                              + (":service" if secret else ""))
+                            if not secret:
+                                raise
+                    if self._client is None:
+                        self._client = create_client(url, secret)
+                        if not self.auth_mode.startswith("member-signin"):
+                            self.auth_mode = "service"
         return self._client
+
+    def _refresh_auth(self) -> None:
+        """Best-effort member-session refresh after a JWT-expired error —
+        the library refreshes on its own; this is the belt for long-lived
+        fleet processes whose timer thread died or drifted."""
+        client, mode = self._client, self.auth_mode
+        if client is None or not mode.startswith("member:"):
+            return
+        try:
+            client.auth.refresh_session()
+        except Exception:  # noqa: BLE001 — a fresh sign-in is the last resort
+            try:
+                client.auth.sign_in_with_password({
+                    "email": self._env.get("SUPABASE_MEMBER_EMAIL", ""),
+                    "password": self._env.get("SUPABASE_MEMBER_PASSWORD", ""),
+                })
+            except Exception:  # noqa: BLE001 — the retry loop reports it
+                pass
 
     def _retry(self, fn):
         last = None
@@ -164,6 +223,8 @@ class SupabaseTransport(Transport):
             except Exception as e:  # noqa: BLE001 — transient network faults
                 if _is_missing_column(e):
                     raise            # deterministic: retrying can't help
+                if _is_auth_expired(e):
+                    self._refresh_auth()   # heal, then retry normally
                 last = e
                 time.sleep(_RETRY_WAIT * (i + 1))
         raise last
@@ -692,8 +753,12 @@ class _RealtimeThread:
         from realtime import RealtimeChannelOptions
         from supabase import acreate_client
 
-        sb = await acreate_client(self._env.get("SUPABASE_URL", ""),
-                                  self._env.get("SUPABASE_SECRET_KEY", ""))
+        # R84: the poke channel is a PUBLIC broadcast carrying {"r": 1} —
+        # content-free by design (SCALING.md §3) — so the publishable key
+        # suffices; the secret key only rides here on a pre-R84 machine.
+        key = (self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
+               or self._env.get("SUPABASE_SECRET_KEY", ""))
+        sb = await acreate_client(self._env.get("SUPABASE_URL", ""), key)
         self._channel = sb.channel(
             f"ab-{self._root}",
             RealtimeChannelOptions(config={"broadcast": {"self": False}}))

@@ -169,6 +169,20 @@ function connectionRows(s) {
     syncRow = `<dt>Sync</dt><dd>⚠ Full refresh — run the latest
       docs/supabase_schema.sql to enable incremental sync</dd>`;
   }
+  // R84: how this machine authenticates to the project — per-member RLS
+  // ("Member (aryan)") vs the shared service key that bypasses it
+  let authRow = "";
+  if (m.auth === "service") {
+    authRow = `<dt>Access</dt><dd>Service key — shared, bypasses row
+      security (see docs/SECURITY_RLS.md to switch this machine to a
+      member credential)</dd>`;
+  } else if (m.auth && m.auth.startsWith("member:")) {
+    authRow = `<dt>Access</dt><dd>✓ Member (${esc(m.auth.slice(7))}) —
+      row security applies</dd>`;
+  } else if (m.auth && m.auth.startsWith("member-signin-FAILED")) {
+    authRow = `<dt>Access</dt><dd>⚠ Member sign-in failed${
+      m.auth.endsWith(":service") ? " — running on the service key" : ""}</dd>`;
+  }
   let trafficRow = "";
   const t = m.transfer;
   if (t && t.queries != null) {

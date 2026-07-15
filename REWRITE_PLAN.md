@@ -1792,6 +1792,32 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R84 — per-member Supabase RLS (trust model v2). BUILT
+      2026-07-16 (v0.24.164); cutover awaits the SQL paste (nothing
+      breaks at any step — the R76 pattern).** v1's cliff: every machine
+      held the SERVICE key (bypasses RLS; one shared secret; zero
+      revocation; public repo). v2: one Supabase AUTH user per member
+      (admin-provisioned via `supabase_admin provision`; claims in
+      app_metadata — NEVER user_metadata, which the user can edit
+      themself), and policies scoping `chats/**` docs/logs/blobs to the
+      chat's own meta doc through one SECURITY DEFINER membership
+      helper. Meta-as-ACL works because meta is maintained at every
+      membership change, genesis writes meta FIRST (R25 ordered it for
+      exactly this), and chat ids commit to their genesis hash (R13.5);
+      the fold + E2EE stay the read-truth — RLS is the outer fence.
+      Global lanes stay mesh-wide; foreign roots invisible; tombstoned
+      metas still grant (janitors need the grace window). Transport:
+      member sign-in preferred / service fallback, JWT-expiry healing,
+      publishable-key pokes; About shows the auth mode honestly. Docs:
+      **docs/SECURITY_RLS.md** (design + threat deltas + runbook),
+      schema §R84, scripts/rls_probe.py. LIVE pre-paste proof: rlsprobe
+      provisioned, signs in, sees ZERO rows while the fleet hums.
+      RIDER: V119 hotfix (v0.24.163) — the R82 restart's console flash
+      (powershell without CREATE_NO_WINDOW) + dead relaunch
+      (sys.executable = bare uv python; now the canonical venv pythonw)
+      + a %TEMP% breadcrumb log; verified with two consecutive live
+      endpoint restarts. 487 tests, 24/24 modules.
+
 - [x] **R83 — the permission-prompt overhaul (V109 + V85). DONE
       2026-07-16 (v0.24.162), rig + live verified.** Aryan's architecture
       call shipped: the app asks the HARNESS for run state directly —

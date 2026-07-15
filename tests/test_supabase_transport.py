@@ -555,3 +555,103 @@ def test_transfer_stats_count_queries(tx):
     tx.get_doc("users/a.json")
     s = tx.transfer_stats()
     assert s["queries"] >= 2 and s["mode"] == "delta"
+
+
+# ----------------------------------------------------- R84: member auth (RLS)
+class _AuthStub:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.signins = []
+        self.refreshes = 0
+
+    def sign_in_with_password(self, creds):
+        self.signins.append(creds)
+        if self.fail:
+            raise RuntimeError("invalid login credentials")
+
+    def refresh_session(self):
+        self.refreshes += 1
+
+
+class _ClientStub:
+    def __init__(self, key, fail_signin=False):
+        self.key = key
+        self.auth = _AuthStub(fail=fail_signin)
+
+
+def _member_env(**extra):
+    return {"SUPABASE_URL": "https://x.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "pub-key",
+            "SUPABASE_SECRET_KEY": "secret-key",
+            "SUPABASE_MEMBER_EMAIL": "aryan@mesh2.agentbridge.local",
+            "SUPABASE_MEMBER_PASSWORD": "pw", **extra}
+
+
+def test_member_credentials_are_preferred(monkeypatch):
+    """R84: with a member credential present the client is built on the
+    PUBLISHABLE key and signed in as the member — the service key stays
+    untouched even though it's in the env."""
+    import supabase as sb_mod
+
+    made = []
+    monkeypatch.setattr(sb_mod, "create_client",
+                        lambda url, key: made.append(_ClientStub(key)) or made[-1])
+    tx = SupabaseTransport("mesh2", env=_member_env())
+    client = tx._sb()
+    assert client.key == "pub-key"
+    assert client.auth.signins == [{"email": "aryan@mesh2.agentbridge.local",
+                                    "password": "pw"}]
+    assert tx.auth_mode == "member:aryan"
+
+
+def test_member_signin_failure_falls_back_to_service(monkeypatch):
+    import supabase as sb_mod
+
+    made = []
+
+    def factory(url, key):
+        c = _ClientStub(key, fail_signin=(key == "pub-key"))
+        made.append(c)
+        return c
+
+    monkeypatch.setattr(sb_mod, "create_client", factory)
+    tx = SupabaseTransport("mesh2", env=_member_env())
+    client = tx._sb()
+    assert client.key == "secret-key"          # the fleet never bricks
+    assert tx.auth_mode == "member-signin-FAILED:service"
+
+
+def test_service_key_alone_still_works(monkeypatch):
+    import supabase as sb_mod
+
+    monkeypatch.setattr(sb_mod, "create_client",
+                        lambda url, key: _ClientStub(key))
+    env = {"SUPABASE_URL": "https://x.supabase.co",
+           "SUPABASE_SECRET_KEY": "secret-key"}
+    tx = SupabaseTransport("mesh2", env=env)
+    assert tx._sb().key == "secret-key"
+    assert tx.auth_mode == "service"
+
+
+def test_auth_expiry_heals_in_the_retry_path(monkeypatch):
+    """A JWT-expired error triggers a session refresh before the retry —
+    the belt for long-lived fleet processes."""
+    import supabase as sb_mod
+
+    monkeypatch.setattr(sb_mod, "create_client",
+                        lambda url, key: _ClientStub(key))
+    tx = SupabaseTransport("mesh2", env=_member_env())
+    client = tx._sb()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("PGRST301: JWT expired")
+        return "ok"
+
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0.01)
+    assert tx._retry(flaky) == "ok"
+    assert client.auth.refreshes == 1

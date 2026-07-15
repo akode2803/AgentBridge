@@ -97,3 +97,171 @@ language sql stable as $$
   from public.ab_docs
   where root = p_root and path like 'chats/%' and not deleted
 $$;
+
+-- ---------------------------------------------------------------------------
+-- R84 — per-member RLS (trust model v2). Idempotent; paste and Run.
+-- Design + runbook: docs/SECURITY_RLS.md. Until members hold their own
+-- credentials the fleet keeps using the service key (which BYPASSES RLS),
+-- so pasting this changes nothing for a running mesh — it arms the gate.
+--
+-- Identity: each mesh member is a Supabase AUTH user provisioned by the
+-- mesh owner (python -m agentbridge.transport.supabase_admin provision).
+-- The authorization claims live in app_metadata (ADMIN-set; user_metadata
+-- is self-editable by the user and must never gate anything):
+--   app_metadata: { "ab_member": "<username>", "ab_roots": ["mesh2"] }
+--
+-- The ACL for chat lanes is the chat's own meta doc
+-- (chats/<id>/meta.json -> data.members object): it is maintained on every
+-- membership change, written meta-FIRST at genesis (R25 ordered it so "the
+-- member gate holds from here on"), and rewritten by a current member on
+-- add/remove. RLS here is the coarse ACCESS gate; the authenticated event
+-- fold and E2EE remain the source of truth for what a member can READ.
+
+create or replace function public.ab_member() returns text
+language sql stable as $$
+  select coalesce((auth.jwt()->'app_metadata')->>'ab_member', '')
+$$;
+
+create or replace function public.ab_root_ok(p_root text) returns boolean
+language sql stable as $$
+  select public.ab_member() <> ''
+     and coalesce((auth.jwt()->'app_metadata')->'ab_roots' ? p_root, false)
+$$;
+
+create or replace function public.ab_chat_of(p_path text) returns text
+language sql immutable as $$
+  select case when p_path like 'chats/%'
+              then split_part(p_path, '/', 2) else '' end
+$$;
+
+-- SECURITY DEFINER: the membership lookup itself reads ab_docs — evaluated
+-- inside an ab_docs policy it would recurse through RLS. Deliberately does
+-- NOT filter tombstoned metas: during the deletion grace the members'
+-- janitors still need access to purge the subtree.
+create or replace function public.ab_is_member(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.ab_docs m
+    where m.root = p_root
+      and m.path = 'chats/' || p_chat || '/meta.json'
+      and m.data->'members' ? public.ab_member()
+  )
+$$;
+revoke all on function public.ab_is_member(text, text) from public;
+grant execute on function public.ab_is_member(text, text) to authenticated;
+
+-- ab_docs: global lanes (users/, status/, control/, machines/, presence/…)
+-- are mesh-wide by design — any member of the root reads and writes them
+-- (the app's own rules arbitrate within; E2EE seals what must be sealed).
+-- chats/ lanes are members-only, with ONE insert exception: genesis — a
+-- fresh meta.json for a chat with no meta yet, listing the creator among
+-- its members. Chat ids commit to their genesis hash (R13.5), so squatting
+-- a foreign id is not practical.
+drop policy if exists ab_docs_member_select on public.ab_docs;
+create policy ab_docs_member_select on public.ab_docs
+for select to authenticated using (
+  public.ab_root_ok(root) and (
+    path not like 'chats/%'
+    or public.ab_is_member(root, public.ab_chat_of(path))
+  )
+);
+
+drop policy if exists ab_docs_member_insert on public.ab_docs;
+create policy ab_docs_member_insert on public.ab_docs
+for insert to authenticated with check (
+  public.ab_root_ok(root) and (
+    path not like 'chats/%'
+    or public.ab_is_member(root, public.ab_chat_of(path))
+    or (
+      path = 'chats/' || public.ab_chat_of(path) || '/meta.json'
+      and data->'members' ? public.ab_member()
+    )
+  )
+);
+
+drop policy if exists ab_docs_member_update on public.ab_docs;
+create policy ab_docs_member_update on public.ab_docs
+for update to authenticated using (
+  public.ab_root_ok(root) and (
+    path not like 'chats/%'
+    or public.ab_is_member(root, public.ab_chat_of(path))
+  )
+) with check (public.ab_root_ok(root));
+
+drop policy if exists ab_docs_member_delete on public.ab_docs;
+create policy ab_docs_member_delete on public.ab_docs
+for delete to authenticated using (
+  public.ab_root_ok(root) and (
+    path not like 'chats/%'
+    or public.ab_is_member(root, public.ab_chat_of(path))
+  )
+);
+
+-- ab_logs: members only, both ways; deletes cover the janitor's purge of a
+-- deleted chat's logs. Genesis is safe by ordering: meta.json lands before
+-- the first log record (R25).
+drop policy if exists ab_logs_member_select on public.ab_logs;
+create policy ab_logs_member_select on public.ab_logs
+for select to authenticated using (
+  public.ab_root_ok(root) and public.ab_is_member(root, chat_id)
+);
+
+drop policy if exists ab_logs_member_insert on public.ab_logs;
+create policy ab_logs_member_insert on public.ab_logs
+for insert to authenticated with check (
+  public.ab_root_ok(root) and public.ab_is_member(root, chat_id)
+);
+
+drop policy if exists ab_logs_member_delete on public.ab_logs;
+create policy ab_logs_member_delete on public.ab_logs
+for delete to authenticated using (
+  public.ab_root_ok(root) and public.ab_is_member(root, chat_id)
+);
+
+-- Storage (bucket "ab-mesh", keys "<root>/<path>"): chat blobs are
+-- members-only; everything else under the root (user/group avatars) is
+-- mesh-wide like the global doc lanes.
+drop policy if exists ab_blobs_member_select on storage.objects;
+create policy ab_blobs_member_select on storage.objects
+for select to authenticated using (
+  bucket_id = 'ab-mesh'
+  and public.ab_root_ok(split_part(name, '/', 1))
+  and (
+    split_part(name, '/', 2) <> 'chats'
+    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+  )
+);
+
+drop policy if exists ab_blobs_member_insert on storage.objects;
+create policy ab_blobs_member_insert on storage.objects
+for insert to authenticated with check (
+  bucket_id = 'ab-mesh'
+  and public.ab_root_ok(split_part(name, '/', 1))
+  and (
+    split_part(name, '/', 2) <> 'chats'
+    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+  )
+);
+
+drop policy if exists ab_blobs_member_update on storage.objects;
+create policy ab_blobs_member_update on storage.objects
+for update to authenticated using (
+  bucket_id = 'ab-mesh'
+  and public.ab_root_ok(split_part(name, '/', 1))
+  and (
+    split_part(name, '/', 2) <> 'chats'
+    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+  )
+);
+
+drop policy if exists ab_blobs_member_delete on storage.objects;
+create policy ab_blobs_member_delete on storage.objects
+for delete to authenticated using (
+  bucket_id = 'ab-mesh'
+  and public.ab_root_ok(split_part(name, '/', 1))
+  and (
+    split_part(name, '/', 2) <> 'chats'
+    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+  )
+);

@@ -1334,7 +1334,33 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   (screenshot); "what is 2+2" → ONE message ("4") — the restraint rail
   held. +3 tests (split contract, burst e2e under cap=1, files-on-last).
   475 passed.
-- [ ] **Per-member Supabase auth + RLS** (queued, §C) — large infra.
+- [x] **Per-member Supabase auth + RLS** → **BUILT R84 (v0.24.164);
+  cutover awaits Aryan's paste** (like R76 — nothing breaks at any
+  step). The v1 cliff: every machine held the SERVICE key, which
+  bypasses RLS entirely — one shared secret, no revocation, and the
+  repo is public. v2: each member = one Supabase AUTH user
+  (admin-provisioned: `python -m agentbridge.transport.supabase_admin
+  provision <name>`), claims in **app_metadata** (admin-set;
+  user_metadata is self-editable = spoofable — the key design line),
+  and policies that scope `chats/**` docs/logs/blobs to the chat's own
+  meta doc (`data.members ? member`) via one SECURITY DEFINER helper —
+  meta is maintained on every membership change, genesis is meta-FIRST
+  (R25), chat ids commit to their genesis (R13.5). Global lanes stay
+  mesh-wide (they are, in the product); foreign roots invisible.
+  Transport: member sign-in preferred, service fallback (mixed fleet
+  safe; failed sign-in falls back LOUDLY), JWT-expiry heals in retry,
+  pokes ride the publishable key (content-free `{"r":1}`); Connection
+  panel shows `Access · Member (x)` vs `Service key — bypasses row
+  security`. Full deliberation + runbook = **docs/SECURITY_RLS.md**;
+  SQL = schema §R84; probe = scripts/rls_probe.py. LIVE pre-paste
+  verification: `rlsprobe` provisioned on the real project, signs in on
+  the publishable key, sees ZERO rows (deny-by-default) while the
+  service-key fleet hums. **⚠ ARYAN'S STEPS (runbook §4): paste the
+  SQL → I run the post-paste probe matrix → provision aryan
+  (--install here) + aryanonavd (move to AVD) → restart both → remove
+  SUPABASE_SECRET_KEY from both machines.** Phase 2 later: private
+  poke channel, per-owner status/asks lanes, per-doc write ownership.
+  +4 transport tests.
 ### Aryan's self-notes polish batch (2026-07-15, source: his "message
 ### yourself" chat) — LOGGED, not hurried. Grouped; build in priority order.
 
