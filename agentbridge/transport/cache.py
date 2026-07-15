@@ -206,11 +206,17 @@ class CachingTransport(Transport):
                              if w > floor}
 
     def _refresh_delta(self) -> bool:
-        """One incremental pull (R76). Returns whether anything changed.
-        Raises NotImplementedError when the driver has no live feed (the
-        caller falls back to a full pull) and network errors for backoff."""
+        """One incremental pull (R76). Returns whether anything a poke
+        SHOULD have announced changed — the hint watchdog's signal. Classes
+        whose writers deliberately never poke (profile.silent_prefixes:
+        presence beats) apply to the mirror but don't count, or every
+        heartbeat caught by a safety poll would trip the fallback cadence
+        forever. Raises NotImplementedError when the driver has no live
+        feed (the caller falls back to a full pull) and network errors for
+        backoff."""
         t0 = time.monotonic()
         changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+        silent = self.profile.silent_prefixes
         with self._lock:
             for path, val in changed.items():
                 wrote = self._doc_writes.get(path)
@@ -231,7 +237,9 @@ class CachingTransport(Transport):
             self._cursor = max(self._cursor, cursor)
             self._last_refresh = time.time()
             self._prune_guards_locked()
-        return bool(changed or deleted)
+        return any(not p.startswith(silent)
+                   for p in (*changed, *deleted)) if silent \
+            else bool(changed or deleted)
 
     def _start_thread(self) -> None:
         if not self.auto_refresh or (self._thread and self._thread.is_alive()):

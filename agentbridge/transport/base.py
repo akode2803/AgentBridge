@@ -58,6 +58,10 @@ class TransportProfile:
     reconcile_s: float = 0.0       # full-snapshot healing interval (0 = never)
     presence_beat_s: float = 12.0  # presence heartbeat write cadence
     presence_stale_s: float = 40.0  # >= beat + worst poll + margin
+    # doc classes whose writers DELIBERATELY never poke (heartbeats): the
+    # mirror's hint watchdog must not read their silent arrival as "hints
+    # lost" — without this, presence beats trip the fallback cadence forever
+    silent_prefixes: tuple[str, ...] = ()
 
 
 class Watcher:

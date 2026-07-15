@@ -392,7 +392,8 @@ class DeltaTransport(BulkTransport):
     profile = TransportProfile(
         metered=True, supports_doc_delta=True,
         idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=21600.0,
-        presence_beat_s=30.0, presence_stale_s=120.0)
+        presence_beat_s=30.0, presence_stale_s=120.0,
+        silent_prefixes=("presence/",))
 
     def __init__(self):
         super().__init__()
@@ -518,6 +519,22 @@ def test_legacy_schema_full_pulls_are_floored(delta_mirror):
     tx._refresh_tick()
     assert inner.reads["get_docs"] == 2            # delta serves it now
     assert tx.get_doc("users/a.json")["v"] == 2
+
+
+def test_silent_classes_never_trip_the_watchdog(delta_mirror):
+    """Presence beats deliberately never poke — a safety poll finding ONLY
+    presence rows must not read as 'hints lost' (this bug pinned the live
+    fleet at the fallback cadence forever), while a real silent change
+    still does."""
+    inner, tx = delta_mirror
+    inner.put_doc("presence/a@box.json", {"online": True, "ns": 1})
+    tx.refresh()
+    inner.put_doc("presence/a@box.json", {"online": True, "ns": 2})
+    assert tx._refresh_delta() is False        # applied, but not suspicious
+    assert tx.get_doc("presence/a@box.json")["ns"] == 2
+    inner.put_doc("presence/a@box.json", {"online": True, "ns": 3})
+    inner.put_doc("users/a.json", {"v": 1})    # a poke-class change rides along
+    assert tx._refresh_delta() is True
 
 
 def test_suggest_poll_adapts_to_hint_health(delta_mirror):

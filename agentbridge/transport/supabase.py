@@ -104,6 +104,7 @@ class SupabaseTransport(Transport):
         metered=True, supports_doc_delta=True,
         idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=6 * 3600.0,
         presence_beat_s=30.0, presence_stale_s=120.0,
+        silent_prefixes=("presence/",),   # mirrors _HINT_CLASSES' None entry
     )
 
     def __init__(self, root: str, *, env: dict[str, str] | None = None,
