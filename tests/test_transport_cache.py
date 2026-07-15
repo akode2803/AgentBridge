@@ -537,6 +537,24 @@ def test_silent_classes_never_trip_the_watchdog(delta_mirror):
     assert tx._refresh_delta() is True
 
 
+def test_watchdog_needs_two_consecutive_silent_polls(delta_mirror):
+    """One unannounced change (a cold-socket writer's dropped first poke)
+    must not trip the fallback cadence; two in a row — a real outage — must.
+    Any hinted or quiet tick resets the strikes."""
+    inner, tx = delta_mirror
+    tx._watchdog(changed=True, hinted=False)       # isolated silent poll
+    assert tx.suggest_poll_s(4.0) == 45.0          # not tripped
+    tx._watchdog(changed=False, hinted=False)      # quiet tick resets
+    tx._watchdog(changed=True, hinted=False)
+    assert tx.suggest_poll_s(4.0) == 45.0          # still one strike
+    tx._watchdog(changed=True, hinted=False)       # second in a row
+    assert tx.suggest_poll_s(4.0) == 10.0          # tripped
+    tx._suspect_until = 0.0
+    tx._watchdog(changed=True, hinted=True)        # hinted change resets
+    tx._watchdog(changed=True, hinted=False)
+    assert tx.suggest_poll_s(4.0) == 45.0
+
+
 def test_suggest_poll_adapts_to_hint_health(delta_mirror):
     inner, tx = delta_mirror
     assert tx.suggest_poll_s(4.0) == 45.0          # metered + hints healthy

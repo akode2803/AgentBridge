@@ -106,7 +106,11 @@ Cadences (from the transport profile, §4):
   free.
 - **Hint watchdog:** if a SAFETY poll finds changes that no poke announced,
   hints are marked suspect and polls drop to 10 s for 10 minutes
-  (self-healing when realtime silently dies; restores itself).
+  (self-healing when realtime silently dies; restores itself). Classes
+  whose writers are DELIBERATELY silent (`profile.silent_prefixes` —
+  presence beats) don't count: without that exclusion every heartbeat
+  caught by a safety poll re-trips the watchdog forever (v0.24.153 fix,
+  caught watching the live steady state post-migration).
 - **Presence:** beat 12 s → **30 s**; `STALE_S` 40 s → **120 s** (must
   exceed beat + worst poll + margin, or everyone flickers offline between
   polls). Delivered-tick upgrades ride pokes during active chat; lag only

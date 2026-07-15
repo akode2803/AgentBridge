@@ -89,6 +89,7 @@ class CachingTransport(Transport):
         self._cursor = 0                       # doc delta cursor (R76)
         self._last_full = 0.0                  # monotonic of last full pull
         self._suspect_until = 0.0              # hint watchdog (monotonic)
+        self._silent_strikes = 0               # consecutive unannounced polls
         self._doc_writes: dict[str, float] = {}   # path -> monotonic of write
         self._chat_writes: dict[str, float] = {}  # chat_id -> monotonic
         self._stop = threading.Event()
@@ -273,13 +274,28 @@ class CachingTransport(Transport):
                     backoff = min(max(backoff, self.refresh_s) * 2,
                                   _MAX_BACKOFF_S)
                     continue
-                # hint WATCHDOG (R76): a safety poll that finds silent
-                # changes means pokes are being lost — poll fast for a while
-                if changed and not hinted and prof.metered:
-                    self._suspect_until = time.monotonic() + _SUSPECT_S
+                if prof.metered:
+                    self._watchdog(changed, hinted)
         finally:
             if watcher is not None:
                 watcher.close()
+
+    def _watchdog(self, changed: bool, hinted: bool) -> None:
+        """Hint health (R76): pokes are being LOST when safety polls keep
+        finding changes nobody announced — then polls drop to the fallback
+        rate for a while. It takes TWO consecutive silent polls to trip:
+        a short-lived writer (CLI one-shot, a booting process) legitimately
+        drops its first pokes while its socket subscribes, and one isolated
+        silent poll must not put the whole process on the fast leash
+        (v0.24.154 — the live fleet sat suspect forever on probe writes).
+        A real outage with steady activity still trips within two poll
+        windows; silent classes (presence) never count (see _refresh_delta)."""
+        if changed and not hinted:
+            self._silent_strikes += 1
+            if self._silent_strikes >= 2:
+                self._suspect_until = time.monotonic() + _SUSPECT_S
+        else:
+            self._silent_strikes = 0
 
     def _refresh_tick(self) -> bool:
         """Delta when possible; full when due (reconcile), forced (no feed /
