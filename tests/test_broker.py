@@ -142,35 +142,46 @@ def test_auto_allow_still_runs_workspace_cwd_and_stateless_tools(tmp_path):
     assert ok
 
 
-def test_owner_can_still_grant_an_outside_read_via_standing_approval(tmp_path):
-    """V79 leaves the escape hatch: an owner who wants the agent to read a
-    host path without a prompt each time grants a standing approval (or
-    clicks always-allow) — the fix removes the SILENT default, not the
-    ability."""
+def test_standing_approval_never_covers_an_outside_path(tmp_path):
+    """V83: a tool-wide "always allow Read in this chat" (or even chat "*")
+    must NOT silently grant a read of a path OUTSIDE the workspace — that
+    was the live @claude hole (a sweep-era always-allow left it reading
+    Downloads in a DM). Outside paths are decided per-path, every time."""
     _, b, ws = make(tmp_path)
     ok, _ = b.decide(chat_id="c1", workspace=ws, tool="Read",
                      tool_input={"file_path": str(tmp_path / "downloads" / "ok.txt")},
                      auto_allow=["Read"],
                      approvals=[{"tool": "Read", "chat": "*"}], timeout_s=0.2)
-    assert ok
+    assert not ok                        # gated despite the standing approval
 
 
-def test_owner_approvals_allow_by_tool_and_chat(tmp_path):
+def test_owner_approvals_cover_noninside_paths_and_no_path_tools(tmp_path):
+    """A standing approval still does its job for the calls it should: a
+    tool with NO filesystem target (e.g. a web tool once toggled), and a
+    workspace-scoped write. It just never reaches OUTSIDE the workspace."""
     _, b, ws = make(tmp_path)
-    rules = [{"tool": "Write", "chat": "c1"}]
+    # a no-path tool: the chat-scoped rule grants it, and only in that chat
+    ok, _ = b.decide(chat_id="c1", workspace=ws, tool="WebFetch",
+                     tool_input={"url": "https://example.com"},
+                     auto_allow=[], approvals=[{"tool": "WebFetch", "chat": "c1"}],
+                     timeout_s=0.2)
+    assert ok
+    ok, _ = b.decide(chat_id="OTHER", workspace=ws, tool="WebFetch",
+                     tool_input={"url": "https://example.com"},
+                     auto_allow=[], approvals=[{"tool": "WebFetch", "chat": "c1"}],
+                     timeout_s=0.2)
+    assert not ok                        # scoped rule doesn't leak across chats
+    # a write INSIDE the workspace is allowed by rule 1 regardless
+    ok, _ = b.decide(chat_id="c1", workspace=ws, tool="Write",
+                     tool_input={"file_path": str(ws / "note.txt")},
+                     auto_allow=[], approvals=[], timeout_s=0.2)
+    assert ok
+    # but a write OUTSIDE, even with a matching standing approval, is gated
     ok, _ = b.decide(chat_id="c1", workspace=ws, tool="Write",
                      tool_input={"file_path": str(tmp_path / "x.txt")},
-                     auto_allow=[], approvals=rules, timeout_s=0.2)
-    assert ok
-    ok, _ = b.decide(chat_id="OTHER", workspace=ws, tool="Write",
-                     tool_input={"file_path": str(tmp_path / "x.txt")},
-                     auto_allow=[], approvals=rules, timeout_s=0.2)
-    assert not ok                        # scoped rule doesn't leak across chats
-    ok, _ = b.decide(chat_id="OTHER", workspace=ws, tool="Read",
-                     tool_input={"file_path": str(tmp_path / "y.txt")},
-                     auto_allow=[], approvals=[{"tool": "Read", "chat": "*"}],
+                     auto_allow=[], approvals=[{"tool": "Write", "chat": "*"}],
                      timeout_s=0.2)
-    assert ok                            # "*" = everywhere
+    assert not ok
 
 
 # ------------------------------------------------------------- the ask pipe

@@ -1772,6 +1772,18 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       V70 answered from code (janitor-vs-fetch/undo is graceful by
       construction — no fix). Both were questions in the batch.
 
+- [x] **R74 — repo public + the DM-vs-group sandbox hole. DONE
+      2026-07-15 (v0.24.149).** V73: Aryan rotated `aryan123` (confirmed
+      it no longer unlocks), repo flipped PUBLIC. V83: the "hilarious"
+      DM-vs-group discrepancy was REAL — sweep-era standing approvals
+      (`{DM,Read}` etc. on claude) that the broker honored even for
+      outside paths, so the DM read Downloads silently. Fixed: a standing
+      approval (like auto_allow) no longer covers an outside-workspace
+      path (every outside access is per-path); revoked claude's stale
+      approvals live; prompt tells the agent not to infer "sandbox open"
+      from a success. 2 broker tests reworked + 1 prompt assertion,
+      THREAT_MODEL R67 section extended. 447 tests.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

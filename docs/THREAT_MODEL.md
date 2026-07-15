@@ -368,13 +368,28 @@ agents still fail closed (no answer = deny). Covered by
 `test_broker.py::test_auto_allow_never_greenlights_a_read_outside_the_workspace`
 and the over-the-wire MCP assertion in the bridge test.
 
+**Standing approvals no longer cover host paths (R74, V83).** The original
+R67 note said an owner could re-open host reads with a broad standing
+approval. A live discrepancy proved that too dangerous: a sweep-era "always
+allow Read in this chat" (a tool-wide `{tool, chat}` rule) left @claude
+reading the whole Downloads tree in a DM with no prompt, while an agent
+without that rule gated correctly in a group. A tool-wide grant meant "read
+ANY file on the host in this chat" — far broader than the owner intended
+when they clicked it on one file. So `broker.decide` now treats a standing
+approval exactly like `auto_allow`: it bypasses the ask ONLY for a call with
+no outside-workspace path. Every outside access is a fresh per-path owner
+decision. (A future path-scoped approval — "always allow reads under this
+folder" — is the safe way to grant a recurring host read; a blanket
+tool-wide grant is deliberately no longer that lever.)
+
 **Still accepted:** blocklisted tools (`Bash`, `WebFetch`, …) never reach
-the gate (hard-blocked at the CLI); an owner who grants a broad standing
-approval re-opens host reads by their own choice; the agent's legitimate
-file access (staged inbox attachments, `fetch_file`) is copied INTO the
-workspace, so it never needs a host read. The paired permission-feedback
-work — telling the agent a permission was asked and encouraging it to ask
-rather than refuse (V80–V82) — is a follow-up round.
+the gate (hard-blocked at the CLI); the agent's legitimate file access
+(staged inbox attachments, `fetch_file`) is copied INTO the workspace, so it
+never needs a host read. **The V80 closed-loop residual:** on an ALLOW the
+agent cannot distinguish an owner-approved action from an ungated one
+(Claude Code's permission protocol carries no message on allow), so it is
+told in its prompt never to infer "the sandbox is open" from a successful
+op; a DENY is surfaced to it as the tool result.
 
 ## Migration — R9.5 (retired R16.5)
 

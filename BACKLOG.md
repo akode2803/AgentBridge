@@ -1143,9 +1143,14 @@ security items below (V79–V82 are part of it per his framing).
   (hold+heal end-to-end, deadline skip, doc + listing read-through).
   Live: fleet restarted onto .141, test-group cursors rewound, both
   agents answered Aryan's original @all message.
-- [~] **V73 Make the AgentBridge GitHub repo public** — Aryan
-  2026-07-15: "We can make the agentbridge gh public now." Full-history
-  secret audit DONE (R70): CLEAN of Supabase URL/project-ref/keys/JWTs
+- [x] **V73 Make the AgentBridge GitHub repo public** — **DONE 2026-07-15
+  (R74): Aryan rotated `aryan123` (confirmed — it no longer unlocks his
+  account), so the history value is now worthless; flipped the repo
+  PUBLIC (`gh repo edit --visibility public`, visibility=PUBLIC
+  verified). No history rewrite needed.** Original audit + hold below.
+  Aryan 2026-07-15: "We can make the agentbridge gh public now."
+  Full-history secret audit DONE (R70): CLEAN of Supabase
+  URL/project-ref/keys/JWTs
   (never committed — `.env`/`*.env` gitignored, `supabase.env` lives in
   ~/.agentbridge), no keys/cache/state dirs tracked, no home paths in
   code, `sb_secret_x`/`hunter2` are dummy fixtures. ONE real finding:
@@ -1237,6 +1242,48 @@ security items below (V79–V82 are part of it per his framing).
   asserting all three phrases. (The mechanism already existed — the
   broker asks when a gated tool is USED; the agent just needed telling
   not to refuse first.)
+
+### Verbal asks (2026-07-15, "lets build" — post-security-core batch)
+
+Source: Aryan's reply after R66–R73. Rotated `aryan123`; repo made
+public; build the queued ones; don't hurry. Confirmed V68
+(password-on-signout — "definitely agree, even though it creates a
+hassle"), V69 (add the owner-changed pill), V77 (bounded forms). New:
+the DM-vs-group discrepancy (V83); his personal chat holds polish items
+(logged as they're read).
+
+- [x] **V83 DM-vs-group sandbox discrepancy — FIXED** (R74) — standing
+  approvals from the R67 sweeps (`{DM, Read}`, `{Test Group,
+  Read/Edit/Grep/Monitor}` on `claude`) were honored by the broker even
+  for OUTSIDE-workspace paths, so the DM read Downloads silently while
+  `claudemcp` (no approvals) gated correctly. Fix: broker no longer lets
+  a standing approval (or auto_allow) cover an outside path — every
+  outside access is per-path; revoked claude's stale approvals live;
+  prompt tells the agent not to infer "sandbox open" from a successful
+  op. Supersedes the V79 "standing approval still grants outside reads"
+  escape. **⚠ V80 residual stands: on ALLOW the agent still can't tell
+  owner-approved from ungated (Claude Code gives no allow-side message)
+  — acceptable now that outside reads genuinely ask.**
+- [x] **V73 repo public — DONE** (R74, see §B above).
+- [ ] **V68 Password on sign-out — BUILD** (Aryan confirmed) — require
+  the signed-in member's password to sign out, so a passer-by at an
+  unlocked device can't swap the session and hijack agent ownership via
+  the login-time machine claim. Session RESTORE across restarts stays
+  password-free (keystore).
+- [ ] **V69 "left because its owner changed" pill — BUILD** (Aryan
+  confirmed) — when `_heal` cascades an agent out of a room because its
+  responsible member is no longer there (ownership transfer / owner
+  leave), post/synthesize a member-departure info pill so it isn't a
+  silent membership change.
+- [ ] **V66 Typing / step indicator in the sidebar** (queued) — replaces
+  the message preview while someone types (human) or shows the agent's
+  current step (agent). Data exists (livefeed: typing_* docs + run-feed
+  activity); needs a short sidebar livefeed poll/SSE + `lastHtml` render.
+- [ ] **V78 Multi-message agent turns** (queued) — a run may post 2+
+  messages instead of one monolithic reply.
+- [ ] **Per-member Supabase auth + RLS** (queued, §C) — large infra.
+- [ ] **Vxx polish batch from Aryan's personal chat** (2026-07-15) — to
+  be read + logged; "we will not hurry on anything."
 
 ---
 

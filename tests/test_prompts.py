@@ -97,6 +97,8 @@ def test_bridge_guidance_encourages_asking_not_refusing(tmp_path):
     assert "rather than refusing" in low                 # V82: don't preempt
     assert "asked your responsible member to approve" in low  # V81 relay
     assert "allowed to do or could not do" in low        # V80 outcome report
+    # V83: don't infer the sandbox is open from a successful outside op
+    assert "never conclude from a success" in low
 
 
 def test_prompt_timer_task(tmp_path):
