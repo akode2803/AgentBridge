@@ -104,13 +104,23 @@ Cadences (from the transport profile, §4):
 - **Log sync (`changed_logs`):** on poke + 45 s idle safety poll (was a
   fixed 4–5 s). The runner's own 5 s tick only reads the warm mirror —
   free.
-- **Hint watchdog:** if a SAFETY poll finds changes that no poke announced,
-  hints are marked suspect and polls drop to 10 s for 10 minutes
-  (self-healing when realtime silently dies; restores itself). Classes
-  whose writers are DELIBERATELY silent (`profile.silent_prefixes` —
-  presence beats) don't count: without that exclusion every heartbeat
-  caught by a safety poll re-trips the watchdog forever (v0.24.153 fix,
-  caught watching the live steady state post-migration).
+- **Hint watchdog:** when safety polls keep finding changes no poke
+  announced, hints are marked suspect and polls drop to 10 s for 10
+  minutes (self-healing when realtime silently dies; restores itself).
+  Its "unannounced" signal took three live-soak iterations to get honest
+  (v0.24.153–.155) — each a way a legitimate silence looked like an
+  outage:
+  1. classes whose writers are DELIBERATELY silent don't count
+     (`profile.silent_prefixes` — presence beats re-tripped it forever);
+  2. it takes TWO CONSECUTIVE silent polls to trip — a short-lived
+     writer (CLI one-shot, boot) drops its first pokes while its socket
+     subscribes, and one isolated drop is not an outage;
+  3. this process's OWN write echoes don't count (a writer never receives
+     its own broadcast, so an active user's typing pinned their own GUI
+     suspect).
+  Lesson for connector authors: a health heuristic must be soaked against
+  the real steady state — unit tests only encode the failure modes you
+  already know about.
 - **Presence:** beat 12 s → **30 s**; `STALE_S` 40 s → **120 s** (must
   exceed beat + worst poll + margin, or everyone flickers offline between
   polls). Delivered-tick upgrades ride pokes during active chat; lag only
@@ -250,5 +260,12 @@ One follow-up logged (BACKLOG V101): silent MESSAGES found by a safety
 poll don't feed the watchdog yet, so message latency degrades to ~45 s
 (not ~10 s) during a realtime outage — observed once during a
 Supabase-side incident window.
+
+**Final steady state (v0.24.155, 2026-07-16 ~00:57):** a 15-minute soak
+after the watchdog riders reads 6/6 samples healthy (`suspect=False`,
+45 s polls, delta mode) and the GUI process measures **0.78 MB/h
+including its boot snapshot** — from 21 GB/day fleet-wide at the start of
+the round to well under the free tier's monthly budget, with message
+latency unchanged (pokes) and every feature live-verified.
 
 Still pending: a Supabase usage-page check the next day.
