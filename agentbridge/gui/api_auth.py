@@ -39,7 +39,9 @@ def login(app: GuiApp, req) -> dict:
 
 
 def logout(app: GuiApp, req) -> dict:
-    return app.logout()
+    # V68: sign-out is password-gated (the next sign-in claims this machine's
+    # agents — a passer-by must not be able to swap the session)
+    return app.logout((req.data or {}).get("password") or "")
 
 
 def check_name(app: GuiApp, req) -> dict:

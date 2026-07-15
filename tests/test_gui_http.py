@@ -31,8 +31,14 @@ def test_signup_login_logout(rig):
     assert st["caps"]["sse"] is True
     assert st["users"]["aryan"]["display"] == "Aryan"
 
-    assert rig.post("/api/mesh/logout")["ok"]
-    assert rig.get("/api/mesh/state")["user"] is None
+    # V68: sign-out is password-gated (the next sign-in claims this machine's
+    # agents). Wrong/no password is refused and the session stays.
+    assert "error" in rig.post("/api/mesh/logout")               # no password
+    assert rig.get("/api/mesh/state")["user"] == "aryan"          # still in
+    assert "error" in rig.post("/api/mesh/logout", password="nope")
+    assert rig.get("/api/mesh/state")["user"] == "aryan"
+    assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
+    assert rig.get("/api/mesh/state")["user"] is None            # signed out
 
     bad = rig.post("/api/mesh/login", username="aryan", password="wrong")
     assert "error" in bad

@@ -1784,6 +1784,14 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       from a success. 2 broker tests reworked + 1 prompt assertion,
       THREAT_MODEL R67 section extended. 447 tests.
 
+- [x] **R75 — password on sign-out. DONE 2026-07-15 (v0.24.150).**
+      BACKLOG V68 (Aryan confirmed). `GuiApp.logout(password)` verifies
+      the member's password before teardown; the Settings "Sign out"
+      button opens a password-confirm modal (Enter submits, spinner,
+      wrong-pw keeps you in). Closes the passer-by → machine-claim
+      hijack path; session restore stays password-free. delete_account
+      threads its verified pw through. +3 HTTP assertions; live-verified.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

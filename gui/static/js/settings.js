@@ -731,20 +731,10 @@ async function renderSettings() {
       });
     });
   const logout = $("#st-logout");
-  if (logout) logout.addEventListener("click", async () => {
-    // V57: signing out takes a beat (session teardown + sync stop) — say so
-    toast("Signing out…", { spinner: true });
-    await api("/api/mesh/logout", {});
-    // R56 (V40): drop the signed-in state BEFORE navigating — the chats
-    // route used to paint the old session's home from stale Mesh.state and
-    // then slam the auth page over it once the fetch returned (the jank).
-    Mesh.state = null;
-    Mesh.chatId = null;
-    Mesh.listKey = "auth";
-    V.renderAuthPage();
-    location.hash = "#/chats";
-    toast("Signed out", { check: true, swap: true });
-  });
+  // V68: signing out is password-gated — the next sign-in claims this
+  // machine's agents, so a passer-by at an unlocked device must not be able
+  // to swap the session. Confirm with the password before tearing down.
+  if (logout) logout.addEventListener("click", () => openSignOutModal());
   // delete account (Q20/M11): password-confirmed soft delete — leaves every
   // chat, deactivates you and your agents, then signs out
   const acctDelete = $("#acct-delete");
@@ -1506,6 +1496,53 @@ function openDeleteAccountModal() {
     location.reload();
   });
   box.querySelector("#del-pw").focus();
+}
+
+function openSignOutModal() {
+  const box = openModal(`
+    <div class="cf-title">Sign out?</div>
+    <div class="cf-sub">Signing out here lets the next person who signs in
+      take over this device's agents, so we confirm it's you. Enter your
+      password to sign out.</div>
+    <dl class="kv" style="grid-template-columns:120px 1fr;margin:12px 0">
+      <dt>Password</dt><dd><input type="password" id="so-pw" autocomplete="current-password"></dd>
+    </dl>
+    <div class="cf-actions">
+      <button class="cf-cancel" id="so-cancel">Cancel</button>
+      <button class="cf-pill" id="so-go"><span class="spin-sm" id="so-spin" hidden></span><span>Sign out</span></button>
+    </div>`);
+  box.classList.add("confirm");
+  box.parentElement.classList.add("confirm-scrim");
+  box.querySelector("#so-cancel").addEventListener("click", closeModal);
+  const submit = async () => {
+    const pw = box.querySelector("#so-pw").value;
+    if (!pw) { toast("Enter your password to sign out", true); return; }
+    const go = box.querySelector("#so-go");
+    const spin = box.querySelector("#so-spin");
+    go.disabled = true; spin.hidden = false;   // loading while the decision sends
+    const r = await api("/api/mesh/logout", { password: pw });
+    if (r.error) {                              // wrong password: stay signed in
+      go.disabled = false; spin.hidden = true;
+      toast(r.error, true);
+      box.querySelector("#so-pw").select();
+      return;
+    }
+    closeModal();
+    // R56 (V40): drop the signed-in state BEFORE navigating — the chats route
+    // used to paint the old session's home from stale Mesh.state then slam the
+    // auth page over it once the fetch returned (the jank).
+    Mesh.state = null;
+    Mesh.chatId = null;
+    Mesh.listKey = "auth";
+    V.renderAuthPage();
+    location.hash = "#/chats";
+    toast("Signed out", { check: true, swap: true });
+  };
+  box.querySelector("#so-go").addEventListener("click", submit);
+  box.querySelector("#so-pw").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+  });
+  box.querySelector("#so-pw").focus();
 }
 
 function openPasswordModal() {

@@ -127,8 +127,9 @@ def change_password(app, req, mesh) -> dict:
 def delete_account(app, req, mesh) -> dict:
     """R7 semantics: leave every group, deactivate, cascade own agents.
     Requires the password — deliberate friction for a destructive step."""
-    mesh.delete_account(req.data.get("password") or "")
-    return app.logout()
+    pw = req.data.get("password") or ""
+    mesh.delete_account(pw)
+    return app.logout(pw)   # V68: logout is password-gated; reuse the verified pw
 
 
 GET = {

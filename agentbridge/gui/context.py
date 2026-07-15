@@ -153,8 +153,19 @@ class GuiApp:
             out["recovery_code"] = code
         return out
 
-    def logout(self) -> dict:
+    def logout(self, password: str = "") -> dict:
+        """V68: signing out requires the member's password. The machine-claim
+        on the NEXT sign-in transfers this machine's agents to whoever signs
+        in, so a passer-by at an unlocked device must not be able to swap the
+        session. This gates the only in-app path to switch users (one signed-in
+        human per GuiApp). Session RESTORE across restarts stays password-free
+        — the keystore already holds the unlocked identity, and no user swap
+        happens there."""
         with self._lock:
+            mesh = self.mesh
+            if mesh is not None:
+                if not mesh.accounts.verify_password(mesh.user, password):
+                    raise ValidationError("Password is incorrect")
             self._detach()
             self._session_path.unlink(missing_ok=True)
         return {"ok": True}

@@ -1265,11 +1265,18 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   owner-approved from ungated (Claude Code gives no allow-side message)
   — acceptable now that outside reads genuinely ask.**
 - [x] **V73 repo public — DONE** (R74, see §B above).
-- [ ] **V68 Password on sign-out — BUILD** (Aryan confirmed) — require
-  the signed-in member's password to sign out, so a passer-by at an
-  unlocked device can't swap the session and hijack agent ownership via
-  the login-time machine claim. Session RESTORE across restarts stays
-  password-free (keystore).
+- [x] **V68 Password on sign-out** (R75) — `GuiApp.logout(password)` now
+  verifies the member's password before tearing down; `/api/mesh/logout`
+  takes it; the Settings → Account "Sign out" button opens a
+  password-confirm modal (Enter submits, in-button spinner while it
+  sends, wrong password toasts + keeps you signed in). Closes the
+  passer-by-swaps-the-session → machine-claim-hijack path (the only
+  in-app user swap). Session RESTORE across restarts stays password-free
+  (keystore; no user swap there). `delete_account` threads its
+  already-verified password through the internal logout. +3 HTTP test
+  assertions (no-pw refused, wrong-pw refused + session survives,
+  right-pw signs out); live-verified on the rig (wrong→stays,
+  right→auth page, zero console errors).
 - [ ] **V69 "left because its owner changed" pill — BUILD** (Aryan
   confirmed) — when `_heal` cascades an agent out of a room because its
   responsible member is no longer there (ownership transfer / owner
@@ -1282,8 +1289,85 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 - [ ] **V78 Multi-message agent turns** (queued) — a run may post 2+
   messages instead of one monolithic reply.
 - [ ] **Per-member Supabase auth + RLS** (queued, §C) — large infra.
-- [ ] **Vxx polish batch from Aryan's personal chat** (2026-07-15) — to
-  be read + logged; "we will not hurry on anything."
+### Aryan's self-notes polish batch (2026-07-15, source: his "message
+### yourself" chat) — LOGGED, not hurried. Grouped; build in priority order.
+
+- [ ] **V84 ⚠ EGRESS EMERGENCY (TOP PRIORITY)** — Supabase egress is
+  **6× over the free-tier limit; account deactivation imminent**. Almost
+  certainly the CachingTransport mirror pulling a FULL `get_docs("")`
+  snapshot every `refresh_s=4s` across ~6 logical processes (GUI +
+  harness + each runner) + avatars re-streamed every read. Aryan's
+  design (13:13): make the connector ADAPTIVE — a fast route (~sub-second)
+  only while there's live activity (task streaming, permission prompts),
+  a slow route (~10s) when idle; per-connector config describing the
+  GET/POST poll cadence; avatars cached by date/etag, not re-streamed;
+  connector-level error handling if Supabase errors out. "We might need
+  to change the way the connector works." → its own round, but URGENT.
+- [ ] **V85 Permission-prompt fragility (cluster)** — the prompt is
+  "very fragile": takes 2–3 tries for a decision to record; persists
+  after a fleet restart until another prompt replaces it (closing the
+  app/chat is the only clear); STOPPING an agent should clear its
+  prompt; add a Close button; Enter in the deny-message box sends;
+  loading slider while the decision is sent; "always allow" seems not to
+  work (keeps asking — grants one file at a time? [note: R74 changed
+  outside-path approvals — re-check]); the always-approved list exists
+  but the Monitor ask still fires (respected only next round?);
+  notifications for permission prompts; the prompt must PUSH messages
+  (not overlay the composer) and not fall right back when dismissed.
+- [ ] **V86 CC-tool JSON handling** — when claude uses Monitor / other
+  Claude-Code tools, CC returns a JSON the app shows raw. Handle the
+  common ones via config (friendly rendering), print the JSON for the
+  rest (as now). Take cues from how CC gives explicit timeouts. (This is
+  the "Bash advertised / Monitor tool" confusion.)
+- [ ] **V87 Agent short-term memory + self-awareness (cluster)** — the
+  agent should see the typing indicator, its OWN tasks list, and
+  "remember what it did recently" (short-term memory); access its
+  wakeup/timer list (dismissing a timer notifies the agent; agent holds
+  the timer list); "agents constantly forget the tools they have
+  access to"; follow-ups on its own; fetch context from another chat.
+- [ ] **V88 Timer polish (cluster)** — edit/delete a timer (agent AND
+  human); multiple timers formatted like pins; RECURRING timers
+  (days-of-week / day-of-month / date); a wakeup that fired while the
+  agent was OFFLINE fires LATE with a "this is late, re-check relevance"
+  warning + the agent checks the time; wakeup icon follows theme, no
+  truncation here, bold in preview, a shared FORMATTER refactored out;
+  can't dismiss/stop the alert; wakeup doesn't PUSH messages (appears
+  above the last message).
+- [ ] **V89 Composer (cluster)** — can't paste images; chirp doesn't
+  play on message EDIT; (+ the disabled-send-button hover-highlight from
+  V50-era) = 3 composer fixes.
+- [ ] **V90 Shared FORMATTER + loading-slider convention** — one
+  formatter applied everywhere agents write (sidebar, timer text,
+  permission prompt); a standing frontend method: a loading slider on
+  ANY action taking >~2s (edit button, revoke approvals, permission
+  send, etc.). "Establish a method for how to write the frontend
+  properly."
+- [ ] **V91 Run-feed ("working on…") stability** — for LARGE tasks the
+  activity line "just disappears" so the user can't tell the agent is
+  working; renders inconsistently (only while staying in the chat or on
+  new activity). Also: read-more/read-less for an agent's task message
+  (currently expands all at once; read-more should stick until the task
+  finishes). Add a concurrency LIMIT (agents are concurrent — confirmed).
+- [ ] **V92 Reactions polish** — notify the agent on a reaction (it may
+  ignore it); an agent READING a reaction should surface differently
+  from reading a message.
+- [ ] **V93 Search "searching for" broken** — doesn't display what it's
+  searching for.
+- [ ] **V94 Reasoning effort PER CHAT** (like the per-chat model/context).
+- [ ] **V95 Single tick = same length as double ticks** (receipt glyph).
+- [ ] **V96 Group reply intelligence** — if the default group reply
+  policy becomes "every message", how well can the agent infer the
+  intended recipient without a tag? Aim for a seamless-group system.
+- [ ] **V97 Agent workspace temp files** — encourage agents to use
+  workspace temp files; give a CLEANUP TOOL (preferred over a
+  per-prompt reminder that boggles smaller models).
+- [ ] **V98 Agent config files — powerful but simple** — a lot is
+  model/harness-specific; make the per-agent config approachable.
+- [ ] **V99 Skills & plugins** — LATER, after a thorough app check
+  (Aryan's explicit "later on").
+- [ ] **V100 Question (answer): how does the app handle permission
+  prompts from Claude Code ITSELF** (vs the mesh broker)? — folds into
+  V85/V86; answer from code when that round runs.
 
 ---
 
