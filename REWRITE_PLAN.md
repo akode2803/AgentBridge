@@ -1792,6 +1792,25 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R80 — agent-docs clarity pass (V114, first pass). DONE 2026-07-16
+      (v0.24.159).** Aryan: "agents are getting confused on rules" —
+      evidence from @claude's live DM (the loophole tally): (a) the
+      `permissions` guide still carried PRE-R67 wording ("read-class
+      tools may be allowed anywhere") → rewritten to the R67 truth (any
+      outside path asks, reads included) + gate-layering ("a denial here
+      tells you nothing about what lies beyond — never guess the deeper
+      cause") + the V83 don't-conclude-open rail; (b) `remember`/`memory`
+      wording read as if global scope ASKS → now says the policy is a
+      rule applied instantly, no popup (Aryan: "3 is a doc staleness
+      issue"); (c) NEW `toolset` guide — runtime-advertised tools vs the
+      harness blocklist (the "Bash advertised but blocked / Monitor is my
+      shell" confusion that had two chats disagreeing), with "say it's
+      blocked plainly, never claim capabilities you can't verify"; the
+      bridge prompt points at it before the agent tells anyone what
+      tools it has. V114 stays open as the STANDING item — future
+      confusions land there source-tagged. V113 (restart-in-Updates)
+      swept from self chat.
+
 - [x] **R79 — multi-message agent turns (V78). DONE 2026-07-16
       (v0.24.158), rig-verified with the real claude adapter.** One run
       may now post a short burst instead of one monolithic reply — the

@@ -128,7 +128,7 @@
     },
     "remember": {
       "short": "Save a durable note across runs",
-      "long": "remember(text, scope) - saves a durable memory: scope 'chat' stays in this chat's memory, 'global' spans your chats where your member's policy allows it. Remember sparingly - only what genuinely matters later (decisions, preferences, standing facts), never transcripts. MEMORY.md in your workspace is your free-form notepad for anything looser."
+      "long": "remember(text, scope) - saves a durable memory: scope 'chat' stays in this chat's memory, 'global' spans your chats. Whether 'global' is available follows your member's standing policy (default: allowed in direct chats, refused with a note in groups) - the policy is applied INSTANTLY by rule, no approval popup fires, so a global save that goes through in a DM is normal, not a missed gate. Remember sparingly - only what genuinely matters later (decisions, preferences, standing facts), never transcripts. MEMORY.md in your workspace is your free-form notepad for anything looser."
     },
     "recall": {
       "short": "Search your saved memories",
@@ -159,7 +159,7 @@
     },
     "memory": {
       "short": "Three tiers: notepad, chat memory, global memory",
-      "long": "MEMORY.md in your workspace is a free-form notepad, private to this chat's desk. remember/recall/forget manage durable structured memories: scope 'chat' is retrievable only here; scope 'global' follows you across chats where your member's policy allows (by default only in direct chats). Save decisions and standing facts, not transcripts; forget what goes stale."
+      "long": "MEMORY.md in your workspace is a free-form notepad, private to this chat's desk. remember/recall/forget manage durable structured memories: scope 'chat' is retrievable only here; scope 'global' follows you across chats where your member's standing policy allows (by default only in direct chats; elsewhere the tool refuses with a note - it is a rule applied silently, never an approval popup). Save decisions and standing facts, not transcripts; forget what goes stale."
     },
     "timers": {
       "short": "Scheduled wake-ups, always visible to your member",
@@ -167,7 +167,11 @@
     },
     "permissions": {
       "short": "How the ask system decides",
-      "long": "Inside your workspace: allowed. The platform's own storage: refused outright. Read-class tools may be allowed anywhere, depending on your member's settings. Everything else raises a popup to your responsible member: allow once, always-allow (a standing grant they can revoke in Settings), or deny - a deny may carry a note telling you what to do instead; follow it. No answer within the window means deny, so have a fallback plan when you ask for something unusual."
+      "long": "Inside your workspace: allowed. The platform's own storage: refused outright. ANY path outside your workspace - reads included - raises a popup to your responsible member: allow once, always-allow (a standing grant they can revoke in Settings), or deny - a deny may carry a note telling you what to do instead; follow it. No answer within the window means deny, so have a fallback plan when you ask for something unusual. Know WHERE a decision happened: this gate fires BEFORE your tool runs, so a denial or timeout here tells you nothing about what lies beyond it (a network policy, the runtime's own limits) - report 'my member did not approve it', never guess at the deeper cause. And the reverse: an operation outside your workspace that SUCCEEDS may simply have been approved at that moment - never conclude the sandbox is open."
+    },
+    "toolset": {
+      "short": "Which tools you actually have, and why lists disagree",
+      "long": "Your tools come in two layers: the runtime you run on (its own file/command/web tools) and this harness's bridge tools (the ones in this manual). Your member's harness config BLOCKS some runtime tools per agent, so a tool your runtime's own description advertises may still be unavailable or gated here - that is policy, not a bug. If a tool you expected is missing or refused, say so plainly ('that tool is blocked for me here') instead of guessing or claiming capabilities you cannot verify. This manual is authoritative for chat and mesh actions; for runtime tools, trust what actually works over what any description says."
     }
   }
 }

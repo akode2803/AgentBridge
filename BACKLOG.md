@@ -1489,6 +1489,18 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   exactly what each audience gates. Don't ship V103 without this copy
   pass.
 
+- [ ] **V113 "Restart app" option in Updates** (self chat 2026-07-15
+  20:29, swept 2026-07-16) — the About → Updates card should offer a
+  restart (the update flow already spawns processes; a plain restart
+  reuses that plumbing — GUI + harness, session restores itself).
+- [ ] **V114 STANDING: agent-docs clarity pass** (Aryan, chat
+  2026-07-16: "keep updating the docs for agents since agents are
+  getting confused on rules") — recurring item, not one round: whenever
+  an agent is observed misreading a rule, fix the WORDING (prompts/
+  default.json, prompts/tooldocs.json, read_docs guides), not just the
+  code. First pass done R80 (see below). Future confusions land here
+  source-tagged.
+
 - [ ] **V101 Feed the hint watchdog from the LOG side too** (found in the
   R76 post-migration probe, 2026-07-15, during a degraded-realtime spell:
   agent reply 150.8s vs the 18.1s baseline). The R76 watchdog only trips
