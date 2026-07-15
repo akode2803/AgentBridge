@@ -1189,9 +1189,10 @@ security items below (V79–V82 are part of it per his framing).
   conversations on idle reflection** — how would it work; is the
   "spooky + major security implications" argument (GPT-5.5's answer to
   Aryan) still true in 2026? Assessment owed, honest on both sides.
-- [ ] **V78 Agents may write 2+ messages per turn** — "truly free
+- [x] **V78 Agents may write 2+ messages per turn** — "truly free
   conversation": let a run post multiple messages instead of one
-  monolithic reply.
+  monolithic reply. → **DONE R79 (v0.24.158, rig-verified)** — see the
+  queued entry below for the full story.
 - [x] **V79 SECURITY: the loose sandbox doesn't confine reads** (R67)
   — read @claude's live chat with Aryan: the agent listed his entire
   `Downloads` tree (44,241 files) and read a personal PDF (train
@@ -1299,8 +1300,27 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   the message preview while someone types (human) or shows the agent's
   current step (agent). Data exists (livefeed: typing_* docs + run-feed
   activity); needs a short sidebar livefeed poll/SSE + `lastHtml` render.
-- [ ] **V78 Multi-message agent turns** (queued) — a run may post 2+
-  messages instead of one monolithic reply.
+- [x] **V78 Multi-message agent turns** → **DONE R79 (v0.24.158,
+  rig-verified 2026-07-16)**. Shape: a `MESSAGE_BREAK` sentinel
+  (`<<<NEXT-MESSAGE>>>`) alone on its own line splits ONE reply into a
+  burst at the delivery seam (`responder.split_reply` +
+  `_deliver_reply`) — deliberately NOT a bridge `send` tool, so the
+  reply pipeline keeps owning threading, the answered-guard, and the
+  rate cap (one slot per turn; cap 4 parts, overflow merges into the
+  last, nothing lost). First part carries the trigger's reply_to (the
+  guard's transcript leg), attachments ride the LAST part, the ⏱ task
+  record anchors to the last message, feed says "Reply posted (N
+  messages)". The marker is code-injected into the prompt like SILENCE
+  (new `multi_message` pack key with a restraint rail: "most replies
+  read best as ONE message"); only-on-its-own-line matching means
+  DISCUSSING the marker never splits (the NO_REPLY lesson). Burst
+  grouping by sender means no trigger amplification between agents.
+  Rig-verified with the REAL claude adapter (ab78 folder mesh, E2EE):
+  "is water wet, answer in two messages" → "Yes." threaded to the
+  trigger + a standalone reasoning message, two separate GUI bubbles
+  (screenshot); "what is 2+2" → ONE message ("4") — the restraint rail
+  held. +3 tests (split contract, burst e2e under cap=1, files-on-last).
+  475 passed.
 - [ ] **Per-member Supabase auth + RLS** (queued, §C) — large infra.
 ### Aryan's self-notes polish batch (2026-07-15, source: his "message
 ### yourself" chat) — LOGGED, not hurried. Grouped; build in priority order.

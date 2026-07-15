@@ -7,7 +7,9 @@ import json
 from types import SimpleNamespace
 
 from agentbridge.core.models import Message
-from agentbridge.harness import Delivery, PromptManager, SILENCE, TriggerContext
+from agentbridge.harness import (
+    Delivery, MESSAGE_BREAK, PromptManager, SILENCE, TriggerContext,
+)
 from agentbridge.harness.adapters.cli import extract_step
 from agentbridge.harness.prompt import render_message
 
@@ -82,6 +84,8 @@ def test_prompt_assembly_blocks(tmp_path):
     assert SILENCE in p                              # the real sentinel rides
     assert "NO_REPLY and nothing else" not in p      # the old bare word is gone
     assert "threaded reply" in p                     # reply-vs-tag etiquette
+    assert MESSAGE_BREAK in p                        # V78: the real break marker
+    assert "ONE message" in p                        # …with the restraint rail
 
 
 def test_bridge_guidance_encourages_asking_not_refusing(tmp_path):

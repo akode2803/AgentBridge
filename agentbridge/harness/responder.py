@@ -8,6 +8,16 @@ and leading narration paragraphs. R17 made the sentinel unmistakable — the
 bare word NO_REPLY could silence an agent that merely *discussed* it — and
 moved the reply-vs-silence wording into the prompt manager (prompt.py), which
 injects ``SILENCE`` into the prompt so parser and prompt can never disagree.
+
+``split_reply`` (R79, V78) is the multi-message contract: one run may post
+several chat messages by placing ``MESSAGE_BREAK`` alone on its own line
+between them. Same discipline as the sentinel — the marker is code-owned and
+injected into the prompt by prompt.py, it only counts on a line of its own
+(discussing it inline never splits), and a missing prompt block degrades to
+single-message replies, never to a broken parse. Splitting happens AFTER
+``clean_reply`` at the delivery seam (runner ``_deliver_reply``), so the
+reply pipeline keeps owning threading, the answered-guard and the rate cap —
+the reason a raw ``send`` tool stays out of the bridge (see bridge.py).
 """
 
 from __future__ import annotations
@@ -19,11 +29,14 @@ from typing import TYPE_CHECKING, Callable, Protocol
 if TYPE_CHECKING:  # pragma: no cover
     from .conversation import Delivery
 
-__all__ = ["Reply", "Responder", "RunStopped", "clean_reply", "SILENCE"]
+__all__ = ["MESSAGE_BREAK", "Reply", "Responder", "RunStopped",
+           "clean_reply", "split_reply", "SILENCE"]
 
 OnStep = Callable[[str], None]  # live activity line -> the run feed
 
 SILENCE = "<<<NO-REPLY>>>"
+MESSAGE_BREAK = "<<<NEXT-MESSAGE>>>"
+MAX_MESSAGE_PARTS = 4  # a turn is a short burst, not a broadcast channel
 
 
 class RunStopped(RuntimeError):
@@ -74,3 +87,24 @@ def clean_reply(text: str) -> tuple[str, bool]:
     while len(paras) > 1 and _NARRATION_RE.match(paras[0].strip()):
         paras.pop(0)
     return "\n\n".join(paras).strip(), False
+
+
+def split_reply(body: str, max_parts: int = MAX_MESSAGE_PARTS) -> list[str]:
+    """The multi-message contract (V78): ``MESSAGE_BREAK`` alone on its own
+    line ends one chat message and starts the next. Runs on the already
+    ``clean_reply``-ed body. Tolerant the way the sentinel is (case, stray
+    quoting); an inline mention mid-line never splits. Empty pieces drop;
+    beyond ``max_parts`` the overflow merges into the last message so a
+    runaway splitter can't turn one turn into a flood — nothing is lost."""
+    parts, cur = [], []
+    for line in (body or "").splitlines():
+        if line.strip().strip("`'\".").upper() == MESSAGE_BREAK:
+            parts.append("\n".join(cur).strip())
+            cur = []
+        else:
+            cur.append(line)
+    parts.append("\n".join(cur).strip())
+    parts = [p for p in parts if p]
+    if len(parts) > max_parts:
+        parts[max_parts - 1:] = ["\n\n".join(parts[max_parts - 1:])]
+    return parts or [""]

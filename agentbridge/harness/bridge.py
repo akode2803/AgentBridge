@@ -20,7 +20,9 @@ agent's OWN Mesh facade, so every membership/privacy/R6 gate applies exactly
 as it would to any member. ``send``/``read`` are DELIBERATELY absent: the
 reply pipeline owns posting (threading, rate caps, the answered-guard) and
 the context file owns reading — a raw send tool would reopen the
-duplicate-reply hole. Creates are capped per run (a runaway loop can spam
+duplicate-reply hole. Multi-message turns (V78) don't change this: the
+burst is split from the ONE reply at the delivery seam
+(``responder.split_reply``), never posted mid-run. Creates are capped per run (a runaway loop can spam
 chats faster than an owner can react); mesh errors come back as plain text,
 never as a crashed run.
 """

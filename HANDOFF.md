@@ -17,7 +17,18 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.151** (fleet live on it).
+  `gui/__init__.py` in R26). Currently **v0.24.158** (fleet live on it).
+  **DELTA MODE IS LIVE** — Aryan pasted the R76 SQL on 2026-07-15; the
+  fleet self-upgraded with no restart (Settings → About shows "Sync:
+  Incremental"; ~1000× less egress than the emergency peak). **R79
+  (2026-07-16, V78)**: agents may post a short BURST of messages per
+  turn — `MESSAGE_BREAK` alone on a line splits the one reply at the
+  delivery seam (`responder.split_reply`); threading/answered-guard/rate
+  cap unchanged (one slot per turn), files ride the last part, prompt
+  contract injected like SILENCE with a restraint rail. **R78
+  (2026-07-16, V110)**: the About-page "Performance / Check for news"
+  knob retired — the local poll is fixed at 2.5s (20s under SSE); all
+  metered cadences are TransportProfile-driven since R76.
   **R76 (2026-07-15) CLOSED THE EGRESS EMERGENCY (V84)** — the free tier
   had hit 857% egress / 170% realtime / 204 peak connections. Root causes
   (measured, all fixed): the mirror's flat 4s full-snapshot loop
@@ -47,10 +58,11 @@ a stress/soak pass with a 40× read-latency fix, and the R25 security review.
   the DM standing-approval hole, R75 password-on-signout (V68), R77 the
   V69 owner-changed pill (machine claims now post each agent's own
   "left — their responsible member changed" departure before ownership
-  moves). Still queued: V78 multi-message turns, V66 typing/step
-  indicator, per-member Supabase RLS, V75/V76 (external events / silence
-  nudge), the V85–V110 polish batch (V109 = permission-prompt overhaul:
-  the app should ask the HARNESS for run state directly). Older
+  moves), R79 multi-message turns (V78). Still queued: V66 typing/step
+  indicator, V109/V85 permission-prompt overhaul (the app should ask the
+  HARNESS for run state directly), per-member Supabase RLS, V75/V76
+  (external events / silence nudge), the V85–V112 polish batch (V111 =
+  app lock; V112 = privacy-copy rename riding V103). Older
   rounds (full detail per round in REWRITE_PLAN.md; item-level in BACKLOG.md):
   R54 agent lifecycle + trust (own agents' key pins auto-verify — born
   Verified at create/adopt, backfilled at sign-in; the My-agents Runner

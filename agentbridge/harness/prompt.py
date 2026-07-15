@@ -11,10 +11,12 @@ merges one level deep, like every per-key dict in this codebase):
    etiquette tweaks stay config, never a fork of the runner (one harness,
    all agents).
 
-Assembly is fixed (persona → roster → task → capabilities → etiquette →
-silence) so an overlay can reword blocks but not reorder the rails; the
-silence block always carries the REAL sentinel (``responder.SILENCE``),
-injected here — an edited pack can never desync the prompt from the parser.
+Assembly is fixed (persona → roster → task → capabilities → multi_message →
+etiquette → silence) so an overlay can reword blocks but not reorder the
+rails; the silence block always carries the REAL sentinel
+(``responder.SILENCE``) and the multi_message block the REAL break marker
+(``responder.MESSAGE_BREAK``), injected here — an edited pack can never
+desync the prompt from the parser.
 A bad template (stray ``{``) degrades to its raw text: wording must never
 break a run.
 
@@ -33,7 +35,7 @@ from pathlib import Path
 from ..core.config import DEFAULT_HOME
 from ..core.models import Message, MsgKind
 from .conversation import Delivery
-from .responder import SILENCE
+from .responder import MESSAGE_BREAK, SILENCE
 
 __all__ = ["PromptManager", "PromptPack", "render_message"]
 
@@ -95,6 +97,9 @@ class PromptPack:
         else:
             parts.append(self.text("task_message", context_file=context_file))
         parts.append(self.text("capabilities", outbox=outbox))
+        # V78: the break marker is injected like the sentinel; a pack that
+        # drops this block simply degrades to single-message replies
+        parts.append(self.text("multi_message", delimiter=MESSAGE_BREAK))
         if bridge:  # only when the run really has the harness channel
             parts.append(self.text("bridge"))
         parts.append(self.text("etiquette"))

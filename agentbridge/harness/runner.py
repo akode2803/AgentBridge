@@ -42,7 +42,7 @@ from .feed import RunFeed, record_tasks, write_harness_doc, write_waiting
 from .peer import PeerService
 from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
-from .responder import Reply, Responder, RunStopped, clean_reply
+from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
 from .settings import HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -542,18 +542,33 @@ class AgentRunner:
             # visible quote so readers see what the reply belongs to.
             if not self._chat_moved_on(chat_id, last.ns):
                 reply_to["quote"] = False
+        # V78 (R79): one run may post a short burst of messages — the split
+        # happens HERE, at the delivery seam, so threading, the answered-guard
+        # and the rate cap keep working exactly as for a single reply: the
+        # FIRST part carries the trigger's reply_to (the guard's transcript
+        # leg matches on it), attachments ride the LAST part (the prompt says
+        # so), and the whole burst spends the one rate slot this run claimed.
+        parts = split_reply(body)
+        files = self._attach(chat_id, reply.files)
         timings.start("post")
-        posted = self.mesh.post(chat_id, body, reply_to=reply_to,
-                                files=self._attach(chat_id, reply.files))
+        posted_ids = []
+        for i, part in enumerate(parts):
+            posted = self.mesh.post(
+                chat_id, part,
+                reply_to=reply_to if i == 0 else None,
+                files=files if i == len(parts) - 1 else None)
+            posted_ids.append(posted.id)
         timings.stop()
-        self.queue.finish(group, posted.id)
+        self.queue.finish(group, posted_ids[0])
         # the timing line rides the Message-info task doc — owner-visible
-        # profiling with no new UI (R30)
-        record_tasks(self.mesh.tx, chat_id, posted.id, self.agent,
+        # profiling with no new UI (R30); on a burst it anchors to the LAST
+        # message (the one a reader treats as the reply's end)
+        record_tasks(self.mesh.tx, chat_id, posted_ids[-1], self.agent,
                      (reply.steps or feed.tasks)
                      + [{"text": f"⏱ {timings.summary()}", "ts": utcnow_iso()}])
-        note = "Reply posted" + (f" (+{len(timer_ids)} timer(s))"
-                                 if timer_ids else "")
+        note = "Reply posted" + (f" ({len(parts)} messages)"
+                                 if len(parts) > 1 else "")
+        note += f" (+{len(timer_ids)} timer(s))" if timer_ids else ""
         feed.finish("done", f"{note} · {timings.summary()}")
         self._log_perf(timings, group, "posted")
         self._maybe_leave(chat_id, reply)

@@ -344,9 +344,16 @@ live only in an adapter preset.
 - **`prompt.py` + `prompts/default.json`** (R17) — the PromptManager: all agent
   wording is **data** in a 3-layer JSON pack (shipped → machine → per-agent),
   assembled in a fixed order so an overlay can reword but not reorder the rails.
-  The silence sentinel `<<<NO-REPLY>>>` is code-injected (unspoofable). Message
+  The silence sentinel `<<<NO-REPLY>>>` and the multi-message break
+  `<<<NEXT-MESSAGE>>>` (V78/R79) are code-injected (unspoofable). Message
   lines are code-owned and carry `(id m-…)` so tools can only act on visible ids;
   bodies are indented to prevent transcript-line forgery (R25).
+  A reply may be a short **burst**: `MESSAGE_BREAK` alone on its own line splits
+  the one cleaned reply into up to 4 messages at the delivery seam
+  (`responder.split_reply` → runner `_deliver_reply`) — never a bridge `send`
+  tool, so threading, the answered-guard and the rate cap (one slot per turn)
+  stay owned by the reply pipeline; the first part carries `reply_to`, files
+  ride the last part.
 - **`broker.py`** (R18) — the Codex/Claude-Code-style PermissionBroker. Decision
   order: workspace path → allow; deny-root (harness home, mesh root) → refuse
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →

@@ -14,7 +14,8 @@ import pytest
 
 from agentbridge.core.errors import ValidationError
 from agentbridge.harness import (
-    AgentRunner, HarnessSettings, Reply, SILENCE, clean_reply,
+    AgentRunner, HarnessSettings, MESSAGE_BREAK, Reply, SILENCE, clean_reply,
+    split_reply,
 )
 from agentbridge.harness.triggers import Candidate
 from agentbridge.mesh.service import Mesh
@@ -482,6 +483,50 @@ def test_reply_files_are_sealed_and_readable_by_members(hrig, tmp_path):
     assert hrig.owner.sealer.open_blob(snap.id, blob_id, raw) == b"a,b\n1,2\n"
 
 
+def test_multi_message_burst_end_to_end(hrig):
+    """V78 (R79): a reply split by MESSAGE_BREAK posts as separate messages,
+    in order; the FIRST carries the trigger's reply_to (the answered-guard's
+    transcript leg), the rest are standalone; the feed says how many. The
+    burst runs even under a cap of 1 — one turn spends ONE rate slot."""
+    snap = hrig.owner.create_chat("Burst", members=["helper"])
+    trigger = hrig.owner.post(snap.id, "@helper walk me through it")
+    responder = Scripted(lambda d: Reply(
+        body=f"Short answer: yes.\n{MESSAGE_BREAK}\nThe longer why."))
+    runner = hrig.make_runner(responder)
+    hrig.owner.accounts.set_agent_harness("helper", {"max_replies_per_hour": 1})
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    replies = agent_msgs(hrig.owner, snap.id)
+    assert [m.body for m in replies] == ["Short answer: yes.",
+                                         "The longer why."]
+    assert (replies[0].reply_to or {}).get("id") == trigger.id
+    assert not replies[1].reply_to
+    assert replies[0].ns < replies[1].ns
+    feed = runner.mesh.tx.get_doc("status/helper_run.json")
+    assert feed["state"] == "done" and "(2 messages)" in feed["activity"]
+    # the answered-guard holds: a re-scan re-fires nothing
+    turn(hrig, runner, snap.id)
+    assert len(agent_msgs(hrig.owner, snap.id)) == 2
+
+
+def test_multi_message_files_ride_the_last_part(hrig, tmp_path):
+    out = tmp_path / "notes.txt"
+    out.write_bytes(b"hello")
+    snap = hrig.owner.create_chat("BurstFiles", members=["helper"])
+    hrig.owner.post(snap.id, "@helper the file please")
+    responder = Scripted(lambda d: Reply(
+        body=f"Making it now.\n{MESSAGE_BREAK}\nHere it is.",
+        files=[str(out)]))
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    first, last = agent_msgs(hrig.owner, snap.id)
+    assert not first.files
+    assert last.files and last.files[0]["name"] == "notes.txt"
+
+
 def test_identity_checks_and_adoption(hrig):
     # wrong machine: refuse
     foreign = hrig.make_runner(machine="laptop")
@@ -536,6 +581,26 @@ def test_clean_reply_sentinel_and_narration():
     assert (body, quiet) == ("Here it is.", False)
     # the OLD bare word never silences anyone anymore — it's just a word
     assert clean_reply("NO_REPLY") == ("NO_REPLY", False)
+
+
+def test_split_reply_contract():
+    # no marker: one message, untouched
+    assert split_reply("just one message") == ["just one message"]
+    # the marker alone on its own line splits, in order
+    assert split_reply(f"one\n{MESSAGE_BREAK}\ntwo\n{MESSAGE_BREAK}\nthree") \
+        == ["one", "two", "three"]
+    # tolerant like the sentinel: case + stray decoration still count
+    assert split_reply(f"a\n `{MESSAGE_BREAK.lower()}` \nb") == ["a", "b"]
+    # DISCUSSING the marker inline never splits (the NO_REPLY lesson)
+    body = f"the marker {MESSAGE_BREAK} splits messages"
+    assert split_reply(body) == [body]
+    # empty pieces drop: leading/trailing/doubled markers
+    assert split_reply(f"{MESSAGE_BREAK}\nx\n{MESSAGE_BREAK}\n{MESSAGE_BREAK}") == ["x"]
+    # overflow merges into the LAST message — nothing is ever lost
+    five = f"\n{MESSAGE_BREAK}\n".join(["m1", "m2", "m3", "m4", "m5"])
+    parts = split_reply(five)
+    assert len(parts) == 4
+    assert parts[:3] == ["m1", "m2", "m3"] and "m4" in parts[3] and "m5" in parts[3]
 
 
 def test_feed_first_steps_bypass_the_throttle():

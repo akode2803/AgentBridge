@@ -1792,6 +1792,26 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R79 — multi-message agent turns (V78). DONE 2026-07-16
+      (v0.24.158), rig-verified with the real claude adapter.** One run
+      may now post a short burst instead of one monolithic reply — the
+      way a person texts. Shape: ``MESSAGE_BREAK`` (``<<<NEXT-MESSAGE>>>``)
+      alone on its own line splits the ONE cleaned reply at the delivery
+      seam (``responder.split_reply`` → ``_deliver_reply`` loop) —
+      deliberately NOT a bridge ``send`` tool, so the reply pipeline
+      keeps owning threading, the answered-guard and the rate cap (one
+      slot per turn; 4-part cap merges overflow into the last part).
+      First part carries the trigger's reply_to, files ride the LAST
+      part, the ⏱ record anchors to the last message. The marker is
+      code-injected into the prompt exactly like SILENCE (new
+      ``multi_message`` pack key, restraint rail included); its
+      own-line-only matching means discussing it never splits. Rig
+      (ab78, E2EE folder mesh, real claude CLI): two-message ask →
+      "Yes." threaded + standalone reasoning, two GUI bubbles; trivial
+      ask → ONE message. Rider: de-flaked the grace-0 janitor purge
+      test (py3.12/Windows coarse-clock tick tie; poll, no sleep).
+      475 tests, 24/24 modules.
+
 - [x] **R78 — retire the Performance knob (V110). DONE 2026-07-16
       (v0.24.157), rig-verified.** Aryan's go-ahead on the V110
       assessment: the About page's "Performance / Check for news"
