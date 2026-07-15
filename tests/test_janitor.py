@@ -109,7 +109,15 @@ def test_deleted_group_purges_after_grace(world):
     assert Janitor(aryan).sweep(grace_days=7)["chats"] == 0
     assert dead.id in aryan.tx.list_chat_ids()
 
+    # grace-0 boundary: on py3.12/Windows time.time_ns() ticks ~15.6ms and
+    # the monotonic ns guard can stamp the deletion a hair AHEAD of the wall
+    # clock, so a same-tick sweep correctly says "not older than the grace
+    # yet". Poll the idempotent sweep until the tick rolls — never a sleep.
+    import time as _time
+    deadline = _time.time() + 2
     out = Janitor(aryan).sweep(grace_days=0)
+    while out["chats"] == 0 and _time.time() < deadline:
+        out = Janitor(aryan).sweep(grace_days=0)
     assert out["chats"] == 1
     assert dead.id not in aryan.tx.list_chat_ids()
     assert live.id in aryan.tx.list_chat_ids()
