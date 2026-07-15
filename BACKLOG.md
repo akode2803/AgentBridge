@@ -1296,10 +1296,23 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   silent heal and never block a login. Rig-verified end-to-end (two GUIs,
   ben's login claimed scrat: pill room shows the pill + roster drop; kept
   room untouched; owner=ben in the directory). 470 tests.
-- [ ] **V66 Typing / step indicator in the sidebar** (queued) — replaces
-  the message preview while someone types (human) or shows the agent's
-  current step (agent). Data exists (livefeed: typing_* docs + run-feed
-  activity); needs a short sidebar livefeed poll/SSE + `lastHtml` render.
+- [x] **V66 Typing / step indicator in the sidebar** → **DONE R81
+  (v0.24.160, rig-verified 2026-07-16)**. The chat row's preview line is
+  replaced while something is live: "X is typing…" (human heartbeats,
+  stale at 12s; DMs show a bare "typing…"; two names + "are typing…")
+  or the agent's current run step ("Claude: Searching for …", ghost
+  cutoff 10 min, same rules as the in-chat feed bubble). Typing wins
+  over a run line. Server: `_live_by_chat()` in api_chats.py — ONE pass
+  over the mirror's status docs per /api/mesh/state call (mirror-served,
+  ZERO new cloud traffic — the R76 lens); membership applied by
+  construction (only chats in the viewer's own list get the field;
+  payload carries `live` only when non-empty). Frontend: `liveHtml()` in
+  sidebar.js folded into `lastHtml` (rowSig picks it up on the granular
+  path), `.live-line` accent style. In-chat was already complete (typing
+  dots + step bubble + Stop). Rig-verified on ab66: typing line appears,
+  expires back to the preview, run step line renders (screenshots;
+  accent color DOM-inspected; zero rejections). +1 endpoint test
+  (fresh/stale/own-typing/ghost-run/quiet-chat).
 - [x] **V78 Multi-message agent turns** → **DONE R79 (v0.24.158,
   rig-verified 2026-07-16)**. Shape: a `MESSAGE_BREAK` sentinel
   (`<<<NEXT-MESSAGE>>>`) alone on its own line splits ONE reply into a

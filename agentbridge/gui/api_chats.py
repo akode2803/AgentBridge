@@ -61,6 +61,50 @@ def bridge_state(app: GuiApp, req) -> dict:
     }
 
 
+def _live_by_chat(mesh) -> dict[str, list[dict]]:
+    """V66: who is typing / which agent run is mid-flight, per chat — one
+    pass over the mirror's status docs (free; no cloud call rides this).
+    Membership is applied by the CALLER: only chats already in the viewer's
+    own list get annotated, so nothing leaks about rooms they aren't in.
+    Thresholds mirror the in-chat feed: typing heartbeats go stale at 12s,
+    a run silent for 10+ minutes is a ghost."""
+    from .api_messages import _age_s
+
+    live: dict[str, list[dict]] = {}
+    try:
+        paths = mesh.tx.list_docs("status")
+    except Exception:  # noqa: BLE001 — liveliness is decoration, never a 500
+        return live
+    for path in paths:
+        leaf = path.rsplit("/", 1)[-1]
+        is_typing = leaf.startswith("typing_")
+        is_run = leaf.endswith("_run.json")
+        if not (is_typing or is_run):
+            continue
+        doc = mesh.tx.get_doc(path)
+        if not isinstance(doc, dict):
+            continue
+        cid = doc.get("chat_id") or ""
+        if not cid:
+            continue
+        age = _age_s(doc.get("updated", ""))
+        if is_typing:
+            who = doc.get("user") or ""
+            if not who or who == mesh.user or age is None or age > 12:
+                continue
+            live.setdefault(cid, []).append({"user": who, "typing": True})
+        else:
+            if doc.get("state") != "running":
+                continue
+            if age is not None and age > 600:
+                continue
+            who = doc.get("agent") or leaf[: -len("_run.json")]
+            live.setdefault(cid, []).append(
+                {"user": who,
+                 "activity": " ".join(str(doc.get("activity") or "").split())[:80]})
+    return live
+
+
 def state(app: GuiApp, req) -> dict:
     """The boot/sidebar payload. Logged out: enough for the login screen.
     Logged in: the privacy-filtered directory + my chats with unread info."""
@@ -106,9 +150,13 @@ def state(app: GuiApp, req) -> dict:
         users[name] = entry
     out["users"] = users
     chats = []
+    live = _live_by_chat(mesh)
     for snap in mesh.chats_for():
         overview = mesh.chat_overview(snap.id)
-        chats.append(chat_json(snap, overview=overview))
+        entry = chat_json(snap, overview=overview)
+        if live.get(snap.id):  # V66: sidebar liveliness — set only when active
+            entry["live"] = live[snap.id]
+        chats.append(entry)
     out["chats"] = chats
     # R27: pin-mismatch alerts (an account's published keys changed) — the
     # sidebar shows a banner until the signed-in human acknowledges

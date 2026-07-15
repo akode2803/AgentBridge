@@ -468,6 +468,55 @@ def test_typing_and_livefeed(rig):
     assert feeds and feeds[0]["typing"] and feeds[0]["agent"] == "fable"
 
 
+def test_state_carries_sidebar_liveliness(rig):
+    """V66: the sidebar state annotates a chat with `live` — who's typing
+    (fresh heartbeats only, never my own) and which agent run is mid-flight
+    (running + not a ghost). Quiet chats carry no field at all."""
+    rig.signup()
+    rig.peer_account("fable")
+    cid = rig.post("/api/mesh/create_chat", name="Live",
+                   members=["fable"])["chat"]["id"]
+    other = rig.post("/api/mesh/create_chat", name="Quiet",
+                     members=["fable"])["chat"]["id"]
+
+    def chat_of(state, chat_id):
+        return next(c for c in state["chats"] if c["id"] == chat_id)
+
+    # quiet mesh: no live field anywhere
+    st = rig.get("/api/mesh/state")
+    assert "live" not in chat_of(st, cid) and "live" not in chat_of(st, other)
+
+    # my OWN typing is never news to me; fable's fresh heartbeat is
+    rig.post("/api/mesh/typing", chat_id=cid)
+    rig.app.mesh.tx.put_doc("status/typing_fable.json", {
+        "user": "fable", "chat_id": cid, "updated": utcnow_iso(),
+    })
+    # a running agent feed in the same chat + a GHOST run (stale) elsewhere
+    rig.app.mesh.tx.put_doc("status/helper_run.json", {
+        "state": "running", "agent": "helper", "chat_id": cid,
+        "updated": utcnow_iso(), "activity": "Searching for the export",
+    })
+    rig.app.mesh.tx.put_doc("status/zombie_run.json", {
+        "state": "running", "agent": "zombie", "chat_id": other,
+        "updated": "2020-01-01T00:00:00Z", "activity": "stuck",
+    })
+    st = rig.get("/api/mesh/state")
+    live = chat_of(st, cid)["live"]
+    assert {"user": "fable", "typing": True} in live
+    assert any(f.get("user") == "helper"
+               and f.get("activity") == "Searching for the export"
+               for f in live)
+    assert not any(f.get("user") == "aryan" for f in live)
+    assert "live" not in chat_of(st, other)   # the ghost never surfaces
+
+    # a stale typing heartbeat drops off
+    rig.app.mesh.tx.put_doc("status/typing_fable.json", {
+        "user": "fable", "chat_id": cid, "updated": "2020-01-01T00:00:00Z",
+    })
+    st = rig.get("/api/mesh/state")
+    assert not any(f.get("typing") for f in chat_of(st, cid).get("live", []))
+
+
 # ------------------------------------------------- harness surfaces (R15)
 def test_agent_harness_visibility_and_adoption(rig):
     rig.signup()

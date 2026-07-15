@@ -1792,6 +1792,22 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
+- [x] **R81 — the sidebar typing/step indicator (V66). DONE 2026-07-16
+      (v0.24.160), rig-verified.** The chat row now shows life instead of
+      the stale preview: "X is typing…" (composer heartbeats, 12s
+      staleness, bare "typing…" in DMs) or the agent's current step
+      ("Claude: Searching for …", 10-min ghost cutoff) — typing wins.
+      Server: `_live_by_chat()` — one pass over the mirror's status docs
+      per state call, so ZERO new cloud traffic (the R76 lens: readers
+      ride the mirror; the only metered writes are the heartbeats that
+      already existed). Membership by construction — only chats in the
+      viewer's own list get annotated, and quiet chats carry no field.
+      Frontend: `liveHtml` folded into the row's `lastHtml` (the granular
+      rowSig path repaints it), `.live-line` accent style. The in-chat
+      view already had dots/step/Stop since R36 — this closes the sidebar
+      half. Rig: typing appears → expires back to the preview → run line
+      renders; accent DOM-inspected; +1 endpoint test.
+
 - [x] **R80 — agent-docs clarity pass (V114, first pass). DONE 2026-07-16
       (v0.24.159).** Aryan: "agents are getting confused on rules" —
       evidence from @claude's live DM (the loophole tally): (a) the

@@ -275,13 +275,36 @@ function renderChatListSidebar() {
       ? ' <span class="kind-tag">agent</span>' : "";
     return esc(chatDisplay(c, ms.user)) + agentTag;
   };
-  const lastHtml = (c) => !c.last ? "No messages yet"
+  // V66: while someone types or an agent works, the row shows THAT instead
+  // of the last-message preview (WhatsApp's green "typing…" line). Typing
+  // wins over a run line — it's the fresher human signal; DMs drop the name
+  // (there's only one other member). The server sends `live` only for chats
+  // with something actually happening, membership-filtered.
+  const liveHtml = (c) => {
+    const live = c.live || [];
+    const typing = live.filter((f) => f.typing);
+    const run = live.find((f) => !f.typing);
+    if (typing.length) {
+      const t = c.kind === "dm" ? "typing…"
+        : typing.length === 1 ? `${meshDn(typing[0].user)} is typing…`
+        : `${typing.slice(0, 2).map((f) => meshDn(f.user)).join(" and ")} are typing…`;
+      return `<span class="live-line">${esc(t)}</span>`;
+    }
+    if (run) {
+      const what = run.activity || "working…";
+      const t = c.kind === "dm" ? what : `${meshDn(run.user)}: ${what}`;
+      return `<span class="live-line">${esc(t)}</span>`;
+    }
+    return "";
+  };
+  const lastHtml = (c) => liveHtml(c)
+    || (!c.last ? "No messages yet"
     : c.last.deleted ? (c.last.from === ms.user
         ? "You deleted this message" : "This message was deleted")
     : c.last.kind === "info" ? esc(meshInfoText(c.last, ms.user))
     : c.last.undecrypted // R66: keys not synced yet — honest, never blank
       ? esc(meshDn(c.last.from)) + ": Waiting for this message…"
-    : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file");
+    : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file"));
   const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;

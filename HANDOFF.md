@@ -17,7 +17,13 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.158** (fleet live on it).
+  `gui/__init__.py` in R26). Currently **v0.24.160** (fleet live on it).
+  **R81 (2026-07-16, V66)**: sidebar typing/step indicator — the chat
+  row shows "X is typing…" / the agent's current run step instead of the
+  preview, mirror-served (zero new cloud traffic). **R80 (2026-07-16,
+  V114 first pass)**: agent-docs clarity — post-R67 permissions guide,
+  silent-policy memory wording, new `toolset` guide (runtime-advertised
+  vs harness-blocked tools); V114 stays open as the standing item.
   **DELTA MODE IS LIVE** — Aryan pasted the R76 SQL on 2026-07-15; the
   fleet self-upgraded with no restart (Settings → About shows "Sync:
   Incremental"; ~1000× less egress than the emergency peak). **R79
@@ -58,11 +64,12 @@ a stress/soak pass with a 40× read-latency fix, and the R25 security review.
   the DM standing-approval hole, R75 password-on-signout (V68), R77 the
   V69 owner-changed pill (machine claims now post each agent's own
   "left — their responsible member changed" departure before ownership
-  moves), R79 multi-message turns (V78). Still queued: V66 typing/step
-  indicator, V109/V85 permission-prompt overhaul (the app should ask the
-  HARNESS for run state directly), per-member Supabase RLS, V75/V76
-  (external events / silence nudge), the V85–V112 polish batch (V111 =
-  app lock; V112 = privacy-copy rename riding V103). Older
+  moves), R79 multi-message turns (V78), R81 sidebar typing/step
+  indicator (V66). Still queued: V109/V85 permission-prompt overhaul
+  (the app should ask the HARNESS for run state directly), per-member
+  Supabase RLS, V75/V76 (external events / silence nudge), the V85–V114
+  polish batch (V111 = app lock; V112 = privacy-copy rename riding
+  V103; V113 = restart in Updates; V114 = standing agent-docs). Older
   rounds (full detail per round in REWRITE_PLAN.md; item-level in BACKLOG.md):
   R54 agent lifecycle + trust (own agents' key pins auto-verify — born
   Verified at create/adopt, backfilled at sign-in; the My-agents Runner

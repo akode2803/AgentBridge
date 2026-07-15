@@ -64,8 +64,15 @@ def test_reclaims_verified_redactions_only(world):
     assert out == {"chats": 0, "blobs": 0, "bytes": 0}
     assert aryan.tx.blob_size(doomed_path) is not None
 
-    # past the grace: exactly the redacted blob goes
+    # past the grace: exactly the redacted blob goes. Same grace-0 boundary
+    # as the chat-purge test below — the redaction's ns can sit a coarse
+    # clock tick AHEAD of the sweep's horizon on py3.12/Windows, so poll the
+    # idempotent sweep until the tick rolls (never a sleep).
+    import time as _time
+    deadline = _time.time() + 2
     out = Janitor(aryan).sweep(grace_days=0)
+    while out["blobs"] == 0 and _time.time() < deadline:
+        out = Janitor(aryan).sweep(grace_days=0)
     assert out["blobs"] == 1 and out["bytes"] > 0 and out["chats"] == 0
     assert aryan.tx.blob_size(doomed_path) is None
     assert aryan.tx.blob_size(kept_path) is not None
