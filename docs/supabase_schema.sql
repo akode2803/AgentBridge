@@ -104,28 +104,44 @@ $$;
 -- credentials the fleet keeps using the service key (which BYPASSES RLS),
 -- so pasting this changes nothing for a running mesh — it arms the gate.
 --
--- Identity: each mesh member is a Supabase AUTH user provisioned by the
--- mesh owner (python -m agentbridge.transport.supabase_admin provision).
--- The authorization claims live in app_metadata (ADMIN-set; user_metadata
--- is self-editable by the user and must never gate anything):
---   app_metadata: { "ab_member": "<username>", "ab_roots": ["mesh2"] }
---
--- The ACL for chat lanes is the chat's own meta doc
--- (chats/<id>/meta.json -> data.members object): it is maintained on every
--- membership change, written meta-FIRST at genesis (R25 ordered it so "the
--- member gate holds from here on"), and rewritten by a current member on
--- add/remove. RLS here is the coarse ACCESS gate; the authenticated event
--- fold and E2EE remain the source of truth for what a member can READ.
+-- Identity (v2.2 — account creation IS membership): a member's Supabase
+-- auth user is BORN ON THEIR OWN MACHINE via self-signup with the
+-- publishable key (the password never exists anywhere else — nothing to
+-- transfer, nothing to delete, no owner minting, no admission prompt).
+-- Creating an app account then SELF-CLAIMS the username here: one row,
+-- first-come-first-served, exactly the app directory's own rule. The
+-- mesh is as private as its bootstrap config (URL + publishable key +
+-- root name) — possession of the bootstrap IS the invite, like a group
+-- link; what RLS buys on top is CHAT-level scoping between members and
+-- the retirement of the god-mode service key from member machines.
+-- Nothing gates on JWT metadata (user_metadata is self-editable;
+-- app_metadata would drag the service key back into every signup).
 
-create or replace function public.ab_member() returns text
-language sql stable as $$
-  select coalesce((auth.jwt()->'app_metadata')->>'ab_member', '')
+-- who IS a member of which root (uid = auth.users.id)
+create table if not exists public.ab_members (
+  root     text not null,
+  username text not null,
+  uid      uuid not null,
+  added_at timestamptz not null default now(),
+  primary key (root, username),
+  unique (root, uid)
+);
+alter table public.ab_members enable row level security;
+
+-- SECURITY DEFINER: these run inside policies over the very tables they
+-- read — without definer they'd recurse through RLS. Owned by the schema
+-- owner; search_path pinned.
+create or replace function public.ab_member(p_root text) returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce((select username from public.ab_members
+                   where root = p_root and uid = auth.uid()), '')
 $$;
+revoke all on function public.ab_member(text) from public;
+grant execute on function public.ab_member(text) to authenticated;
 
 create or replace function public.ab_root_ok(p_root text) returns boolean
 language sql stable as $$
-  select public.ab_member() <> ''
-     and coalesce((auth.jwt()->'app_metadata')->'ab_roots' ? p_root, false)
+  select public.ab_member(p_root) <> ''
 $$;
 
 create or replace function public.ab_chat_of(p_path text) returns text
@@ -134,10 +150,12 @@ language sql immutable as $$
               then split_part(p_path, '/', 2) else '' end
 $$;
 
--- SECURITY DEFINER: the membership lookup itself reads ab_docs — evaluated
--- inside an ab_docs policy it would recurse through RLS. Deliberately does
--- NOT filter tombstoned metas: during the deletion grace the members'
--- janitors still need access to purge the subtree.
+-- The chat-lane ACL is the chat's own meta doc (chats/<id>/meta.json ->
+-- data.members object): maintained on every membership change, written
+-- meta-FIRST at genesis (R25: "so the member gate holds from here on"),
+-- ids commit to their genesis hash (R13.5). Deliberately does NOT filter
+-- tombstoned metas: during the deletion grace the members' janitors still
+-- need access to purge the subtree.
 create or replace function public.ab_is_member(p_root text, p_chat text)
 returns boolean
 language sql stable security definer set search_path = public as $$
@@ -145,11 +163,34 @@ language sql stable security definer set search_path = public as $$
     select 1 from public.ab_docs m
     where m.root = p_root
       and m.path = 'chats/' || p_chat || '/meta.json'
-      and m.data->'members' ? public.ab_member()
+      and m.data->'members' ? public.ab_member(p_root)
   )
 $$;
 revoke all on function public.ab_is_member(text, text) from public;
 grant execute on function public.ab_is_member(text, text) to authenticated;
+
+-- ab_members: SELF-claim on insert — your own uid, an unclaimed username
+-- (the PK is the arbiter, first come first served, mirroring the app
+-- directory's rule); one identity per uid per root (unique root+uid).
+-- You may remove yourself; removing OTHERS is the owner's act (service
+-- key), so a hostile member can't evict the mesh. Members see their
+-- root's roster; outsiders see nothing.
+drop policy if exists ab_members_select on public.ab_members;
+create policy ab_members_select on public.ab_members
+for select to authenticated using (public.ab_root_ok(root));
+
+drop policy if exists ab_members_admit on public.ab_members;
+drop policy if exists ab_members_claim on public.ab_members;
+create policy ab_members_claim on public.ab_members
+for insert to authenticated with check (uid = auth.uid());
+
+drop policy if exists ab_members_leave on public.ab_members;
+create policy ab_members_leave on public.ab_members
+for delete to authenticated using (uid = auth.uid());
+
+-- (v2.1's ab_pending queue is retired — account creation is membership;
+-- drop it if an earlier paste created it)
+drop table if exists public.ab_pending;
 
 -- ab_docs: global lanes (users/, status/, control/, machines/, presence/…)
 -- are mesh-wide by design — any member of the root reads and writes them
@@ -175,7 +216,7 @@ for insert to authenticated with check (
     or public.ab_is_member(root, public.ab_chat_of(path))
     or (
       path = 'chats/' || public.ab_chat_of(path) || '/meta.json'
-      and data->'members' ? public.ab_member()
+      and data->'members' ? public.ab_member(root)
     )
   )
 );

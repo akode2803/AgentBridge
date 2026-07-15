@@ -1792,31 +1792,35 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       hijack path; session restore stays password-free. delete_account
       threads its verified pw through. +3 HTTP assertions; live-verified.
 
-- [x] **R84 — per-member Supabase RLS (trust model v2). BUILT
-      2026-07-16 (v0.24.164); cutover awaits the SQL paste (nothing
-      breaks at any step — the R76 pattern).** v1's cliff: every machine
-      held the SERVICE key (bypasses RLS; one shared secret; zero
-      revocation; public repo). v2: one Supabase AUTH user per member
-      (admin-provisioned via `supabase_admin provision`; claims in
-      app_metadata — NEVER user_metadata, which the user can edit
-      themself), and policies scoping `chats/**` docs/logs/blobs to the
-      chat's own meta doc through one SECURITY DEFINER membership
-      helper. Meta-as-ACL works because meta is maintained at every
-      membership change, genesis writes meta FIRST (R25 ordered it for
-      exactly this), and chat ids commit to their genesis hash (R13.5);
-      the fold + E2EE stay the read-truth — RLS is the outer fence.
-      Global lanes stay mesh-wide; foreign roots invisible; tombstoned
-      metas still grant (janitors need the grace window). Transport:
-      member sign-in preferred / service fallback, JWT-expiry healing,
-      publishable-key pokes; About shows the auth mode honestly. Docs:
-      **docs/SECURITY_RLS.md** (design + threat deltas + runbook),
-      schema §R84, scripts/rls_probe.py. LIVE pre-paste proof: rlsprobe
-      provisioned, signs in, sees ZERO rows while the fleet hums.
+- [x] **R84 — per-member Supabase RLS (trust model v2.2). BUILT
+      2026-07-16 (v0.24.165); cutover = Aryan's dashboard toggle + SQL
+      paste (nothing breaks at any step — the R76 pattern).** Two designs
+      died in review: owner-minted app_metadata credentials ("I cannot be
+      minting user keys for everyone" — the service key warm at every
+      signup) and member-vouched admission queues ("no prompts for
+      admission needed"). v2.2: ACCOUNT CREATION IS MEMBERSHIP — the auth
+      user is born on the member's own machine (self-signup, publishable
+      key; the password lands only in their local supabase.env — no
+      secret transferred, nobody approves) and self-claims its username
+      in ab_members (first come first served, the app directory's rule;
+      the mesh is as private as its bootstrap config, like a group
+      link). RLS walls members off from each other's chats (meta-doc ACL
+      via SECURITY DEFINER; meta-FIRST genesis R25; genesis-committed
+      ids R13.5) and retires the god-mode key from member machines.
+      Tooling: `supabase_admin join` (also the account-creation
+      primitive for the setup-overhaul round) + owner-side seed/revoke.
+      Transport: member sign-in preferred / service fallback / JWT
+      healing / publishable-key pokes; About shows the auth mode.
+      docs/SECURITY_RLS.md = design, rejected paths, plain-language
+      trust statement, runbook, live verification record (deny-by-
+      default proven; self-signup blocked ONLY by confirmations-ON —
+      the mailer validates + rate-limits; runbook step 1 removes it;
+      Edge-Function join documented as the contingency).
       RIDER: V119 hotfix (v0.24.163) — the R82 restart's console flash
       (powershell without CREATE_NO_WINDOW) + dead relaunch
       (sys.executable = bare uv python; now the canonical venv pythonw)
       + a %TEMP% breadcrumb log; verified with two consecutive live
-      endpoint restarts. 487 tests, 24/24 modules.
+      endpoint restarts. 490 tests, 24/24 modules.
 
 - [x] **R83 — the permission-prompt overhaul (V109 + V85). DONE
       2026-07-16 (v0.24.162), rig + live verified.** Aryan's architecture

@@ -1,30 +1,31 @@
-"""Supabase member provisioning (R84) — the mesh owner's admin tool.
+"""Supabase membership tooling (R84, trust model v2.2 — account creation
+IS membership).
 
-    python -m agentbridge.transport.supabase_admin provision <username>
-        [--root mesh2] [--home DIR] [--install | --out FILE]
+No secret is ever transferred and nobody approves anything. A member's
+credential is BORN on their own machine — self-signup with the PUBLISHABLE
+key (public by design; the generated password goes straight into the local
+``supabase.env`` and never exists anywhere else) — and the same act
+SELF-CLAIMS their username in ``ab_members`` (first come first served, the
+app directory's own rule). The mesh is as private as its bootstrap config:
+URL + publishable key + root name — possession of the bootstrap is the
+invite, like a group link.
 
-Creates (or re-provisions, rotating the password of) one Supabase AUTH user
-for a mesh member, with the authorization claims RLS policies trust in
-``app_metadata`` — ADMIN-set, unlike ``user_metadata`` which the user can
-edit themself and which must therefore never gate anything:
+    new member's machine:
+        python -m agentbridge.transport.supabase_admin join <username>
 
-    app_metadata: { "ab_member": "<username>", "ab_roots": ["<root>"] }
+    the owner (service key, kept OFFLINE), rarely:
+        seed <username> [--install|--out FILE]   mint a credential for a
+                                                 machine that can't run join
+        revoke <username>                        eviction (row + auth user)
 
-Needs the SERVICE key (``supabase.env``) — provisioning is the owner's act.
-The output is two env lines for the MEMBER's machine:
+``join`` is also the primitive the app's account-creation flow calls when
+the setup overhaul lands (V-2026-07-16: "create a user key during the
+account creation") — creating an app account on a supabase mesh provisions
+the Supabase identity in the same breath.
 
-    SUPABASE_MEMBER_EMAIL=<username>@<root>.agentbridge.local
-    SUPABASE_MEMBER_PASSWORD=<generated>
-
-``--install`` appends them to this machine's own ``supabase.env`` (replacing
-existing member lines); ``--out FILE`` writes them to a file instead; the
-default prints them. Once a machine carries member credentials (plus the
-publishable key) the transport signs in as that member and the SERVICE key
-line can be REMOVED from that machine — the whole point of the round.
-
-``revoke <username>`` deletes the auth user: their credential stops working
-at the next token refresh (within the hour) and immediately for new
-sign-ins. E2EE epoch rotation remains the guarantee for message bodies.
+One-time dashboard prerequisites for ``join``: email signup enabled, email
+confirmations OFF (the addresses are synthetic; an auth user with no
+``ab_members`` row can see and touch nothing).
 """
 
 from __future__ import annotations
@@ -36,22 +37,24 @@ from pathlib import Path
 
 from .supabase import ENV_FILE, load_supabase_env
 
-__all__ = ["main"]
-
-
-def _admin_client(env: dict[str, str]):
-    from supabase import create_client
-
-    url = env.get("SUPABASE_URL", "")
-    key = env.get("SUPABASE_SECRET_KEY", "")
-    if not url or not key:
-        raise SystemExit("provisioning needs SUPABASE_URL and "
-                         "SUPABASE_SECRET_KEY in supabase.env")
-    return create_client(url, key)
+__all__ = ["main", "join_mesh"]
 
 
 def _member_email(username: str, root: str) -> str:
     return f"{username}@{root}.agentbridge.local"
+
+
+def _client(env: dict[str, str], *, admin: bool):
+    from supabase import create_client
+
+    url = env.get("SUPABASE_URL", "")
+    key = env.get("SUPABASE_SECRET_KEY" if admin
+                  else "SUPABASE_PUBLISHABLE_KEY", "")
+    if not url or not key:
+        need = "SECRET" if admin else "PUBLISHABLE"
+        raise SystemExit(f"needs SUPABASE_URL and SUPABASE_{need}_KEY "
+                         f"in supabase.env")
+    return create_client(url, key)
 
 
 def _find_user(admin, email: str):
@@ -64,36 +67,6 @@ def _find_user(admin, email: str):
             if (u.email or "").lower() == email.lower():
                 return u
         page += 1
-
-
-def provision(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
-    """Create or re-provision (password rotation) one member. Returns
-    ``(email, password)`` — the only time the password exists in plaintext."""
-    client = _admin_client(env)
-    email = _member_email(username, root)
-    password = secrets.token_urlsafe(24)
-    meta = {"ab_member": username, "ab_roots": [root]}
-    existing = _find_user(client.auth.admin, email)
-    if existing is not None:
-        client.auth.admin.update_user_by_id(existing.id, {
-            "password": password, "app_metadata": meta,
-            "email_confirm": True,
-        })
-    else:
-        client.auth.admin.create_user({
-            "email": email, "password": password,
-            "email_confirm": True, "app_metadata": meta,
-        })
-    return email, password
-
-
-def revoke(env: dict[str, str], username: str, root: str) -> bool:
-    client = _admin_client(env)
-    existing = _find_user(client.auth.admin, _member_email(username, root))
-    if existing is None:
-        return False
-    client.auth.admin.delete_user(existing.id)
-    return True
 
 
 def _write_env_lines(path: Path, email: str, password: str) -> None:
@@ -112,55 +85,119 @@ def _write_env_lines(path: Path, email: str, password: str) -> None:
     tmp.replace(path)
 
 
+# ------------------------------------------------------------ the commands
+def join_mesh(env: dict[str, str], username: str, root: str,
+              env_path: Path) -> None:
+    """The whole join, on the new member's machine: self-signup (the
+    password is generated HERE, written into supabase.env, never shown)
+    then self-claim the username. Fails cleanly if the name is taken (the
+    PK arbitrates — same first-come rule as the app directory)."""
+    client = _client(env, admin=False)
+    email = _member_email(username, root)
+    password = secrets.token_urlsafe(24)
+    res = client.auth.sign_up({"email": email, "password": password})
+    user = getattr(res, "user", None)
+    if user is None:
+        raise SystemExit("sign-up refused — is email signup enabled (and "
+                         "confirmation OFF) in the project's Auth settings?")
+    try:
+        client.table("ab_members").insert({
+            "root": root, "username": username, "uid": user.id,
+        }).execute()
+    except Exception as e:  # noqa: BLE001 — surface the taken-name case
+        if "duplicate" in str(e).lower() or "23505" in str(e):
+            raise SystemExit(f"@{username} is already claimed on {root}")
+        raise
+    _write_env_lines(env_path, email, password)
+    print(f"@{username} joined {root}; credential installed into {env_path}")
+    print("restart the app — the Connection panel should say "
+          f"'Member ({username})'")
+
+
+def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
+    """Owner-only (service key): mint the auth user AND the members row for
+    a machine that can't run ``join`` itself. Re-seeding rotates the
+    password."""
+    client = _client(env, admin=True)
+    email = _member_email(username, root)
+    password = secrets.token_urlsafe(24)
+    existing = _find_user(client.auth.admin, email)
+    if existing is not None:
+        client.auth.admin.update_user_by_id(existing.id, {
+            "password": password, "email_confirm": True})
+        uid = existing.id
+    else:
+        res = client.auth.admin.create_user({
+            "email": email, "password": password, "email_confirm": True})
+        uid = res.user.id
+    client.table("ab_members").upsert({
+        "root": root, "username": username, "uid": uid,
+    }).execute()
+    return email, password
+
+
+def revoke(env: dict[str, str], username: str, root: str) -> bool:
+    """Owner-only: eviction — the members row AND the auth user. The
+    evictee's chats stay closed either way (meta ACLs + E2EE epochs)."""
+    client = _client(env, admin=True)
+    client.table("ab_members").delete().eq("root", root) \
+        .eq("username", username).execute()
+    existing = _find_user(client.auth.admin, _member_email(username, root))
+    if existing is None:
+        return False
+    client.auth.admin.delete_user(existing.id)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agentbridge-supabase-admin")
+    ap.add_argument("--root", default="")
+    ap.add_argument("--home", default="")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("provision", help="create/rotate one member credential")
-    p.add_argument("username")
-    p.add_argument("--root", default="")
-    p.add_argument("--home", default="")
-    p.add_argument("--install", action="store_true",
-                   help="write the member lines into THIS machine's supabase.env")
-    p.add_argument("--out", default="", help="write the env lines to a file")
-    r = sub.add_parser("revoke", help="delete one member's auth user")
-    r.add_argument("username")
-    r.add_argument("--root", default="")
-    r.add_argument("--home", default="")
+    p_join = sub.add_parser("join", help="this machine joins the mesh as <username>")
+    p_join.add_argument("username")
+    p_seed = sub.add_parser("seed", help="owner: mint a member credential (service key)")
+    p_seed.add_argument("username")
+    p_seed.add_argument("--install", action="store_true",
+                        help="write the credential into THIS machine's supabase.env")
+    p_seed.add_argument("--out", default="", help="write the env lines to a file")
+    p_rev = sub.add_parser("revoke", help="owner: evict a member (service key)")
+    p_rev.add_argument("username")
     args = ap.parse_args(argv)
 
     home = Path(args.home) if args.home else None
     env = load_supabase_env(home)
     root = args.root
     if not root:
-        # the remembered mesh root (supabase://<root>) names the default
         from ..core.config import load_app_config
 
         spec = str(load_app_config(home).get("mesh_root") or "")
         root = spec.split("://", 1)[1].strip("/ ") if "://" in spec else ""
     if not root:
         ap.error("no --root given and none remembered in config.json")
+    from ..core.config import DEFAULT_HOME
 
-    if args.cmd == "revoke":
-        gone = revoke(env, args.username.strip().lower(), root)
-        print(f"@{args.username}: " + ("revoked" if gone else "no such member"))
-        return 0
+    env_path = (home or DEFAULT_HOME) / ENV_FILE
+    name = args.username.strip().lower()
 
-    email, password = provision(env, args.username.strip().lower(), root)
-    if args.install:
-        from ..core.config import DEFAULT_HOME
-
-        path = (home or DEFAULT_HOME) / ENV_FILE
-        _write_env_lines(path, email, password)
-        print(f"member credential for @{args.username} installed into {path}")
-        print("restart the app to sign in as this member; the "
-              "SUPABASE_SECRET_KEY line can be removed once verified")
-    elif args.out:
-        _write_env_lines(Path(args.out), email, password)
-        print(f"member credential for @{args.username} written to {args.out}")
-    else:
-        print(f"# add to <home>/supabase.env on @{args.username}'s machine")
-        print(f"SUPABASE_MEMBER_EMAIL={email}")
-        print(f"SUPABASE_MEMBER_PASSWORD={password}")
+    if args.cmd == "join":
+        join_mesh(env, name, root, env_path)
+    elif args.cmd == "seed":
+        email, password = seed(env, name, root)
+        if args.install:
+            _write_env_lines(env_path, email, password)
+            print(f"member credential for @{name} installed into {env_path}")
+        elif args.out:
+            _write_env_lines(Path(args.out), email, password)
+            print(f"member credential for @{name} written to {args.out}")
+        else:
+            print(f"# add to <home>/supabase.env on @{name}'s machine")
+            print(f"SUPABASE_MEMBER_EMAIL={email}")
+            print(f"SUPABASE_MEMBER_PASSWORD={password}")
+    elif args.cmd == "revoke":
+        gone = revoke(env, name, root)
+        print(f"@{name}: " + ("revoked" if gone else "members row cleared; "
+                              "no auth user found"))
     return 0
 
 
