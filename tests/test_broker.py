@@ -443,6 +443,9 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
             note = call_tool(url, "schedule_timer",
                              {"minutes": 5, "note": "check back"})
             assert "5 min" in note
+            # V74: the confirmation states the resolved local fire time (+UTC
+            # offset) so an agent/member tz mismatch is unambiguous
+            assert "at 20" in note and "UTC" in note   # "...(at 20YY-...UTC±..)"
             assert timers == [{"in_s": 300.0, "note": "check back"}]
 
         owner.sync.sync_once()

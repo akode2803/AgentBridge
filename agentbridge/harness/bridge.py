@@ -571,12 +571,24 @@ class BridgeServer:
                            at: str = "") -> str:
             """Wake yourself up in this chat later — a human 'remembers a
             task'; this is yours (V55). Give ``minutes`` (relative) OR
-            ``at`` (absolute local time: 'HH:MM' = its next occurrence,
-            'YYYY-MM-DD HH:MM', or ISO). Write ``note`` as a FULL brief for
+            ``at`` (absolute time: 'HH:MM' = its next occurrence,
+            'YYYY-MM-DD HH:MM', or ISO). An 'HH:MM'/naive time is read in
+            YOUR MACHINE's timezone — which may differ from the person
+            you're helping (V74), so the confirmation states the exact
+            local time it will fire and you should relay that if a member
+            asked for a wall-clock time. Write ``note`` as a FULL brief for
             your future self — it starts fresh and sees only this note plus
             the chat, so include what to do, for whom, and what done looks
             like. Every timer is visible to your responsible member."""
+            from datetime import datetime
+
             from .timers import parse_at
+
+            def _when(at_ns: int) -> str:
+                # V74: state the resolved wall-clock time + UTC offset so a
+                # tz mismatch between this machine and a member is unambiguous
+                dt = datetime.fromtimestamp(at_ns / 1e9).astimezone()
+                return dt.strftime("%Y-%m-%d %H:%M %Z (UTC%z)").strip()
 
             if len(self.timers) >= MAX_TIMERS_PER_RUN:
                 return "timer limit for this run reached"
@@ -595,7 +607,7 @@ class BridgeServer:
                 if at_ns <= time.time_ns() + int(30 * 1e9):
                     return "that time is already past — pick a future one"
                 self.timers.append({"at_ns": at_ns, "note": text})
-                return f"scheduled: a wake-up at {at}"
+                return f"scheduled: a wake-up at {_when(at_ns)}"
             try:
                 mins = float(minutes)
             except (TypeError, ValueError):
@@ -604,7 +616,8 @@ class BridgeServer:
                 return "give minutes (a number) or at (a time)"
             in_s = max(30.0, mins * 60.0)
             self.timers.append({"in_s": in_s, "note": text})
-            return f"scheduled: a wake-up in {in_s / 60:.0f} min"
+            fires = _when(time.time_ns() + int(in_s * 1e9))
+            return f"scheduled: a wake-up in {in_s / 60:.0f} min (at {fires})"
 
         @mcp.tool(structured_output=False)
         def peer_diagnose(agent: str, command: str = "status") -> str:

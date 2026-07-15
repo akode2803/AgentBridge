@@ -124,7 +124,7 @@
     },
     "schedule_timer": {
       "short": "Remember a task for later (relative or at a time)",
-      "long": "schedule_timer(minutes | at, note) - your 'remember to do this later'. A human messages when a notification arrives OR when they remember a task; the timer is your second half. Relative: minutes=90. Absolute local time: at='15:00' (its next occurrence), at='2026-07-16 09:30', or ISO. Write the note as a FULL brief for your future self - it starts a fresh run and sees only this note plus the chat, so spell out what to do, for whom, and what done looks like (up to ~2000 chars, line breaks kept). The wake-up run may post proactively, reply to the chat, or answer with silence if nothing is needed. Every timer is visible to your responsible member as a chip in the chat."
+      "long": "schedule_timer(minutes | at, note) - your 'remember to do this later'. A human messages when a notification arrives OR when they remember a task; the timer is your second half. Relative: minutes=90. Absolute time: at='15:00' (its next occurrence), at='2026-07-16 09:30', or ISO. A bare 'HH:MM' is read in YOUR MACHINE's timezone, which may differ from the person you're helping (V74) - the confirmation states the exact local time it will fire, so relay that when a member asked for a wall-clock time. Write the note as a FULL brief for your future self - it starts a fresh run and sees only this note plus the chat, so spell out what to do, for whom, and what done looks like (up to ~2000 chars, line breaks kept). The wake-up run may post proactively, reply to the chat, or answer with silence if nothing is needed. Every timer is visible to your responsible member as a chip in the chat."
     },
     "remember": {
       "short": "Save a durable note across runs",

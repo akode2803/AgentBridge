@@ -1764,6 +1764,14 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       Reuses the existing livefeed activity render (no frontend change);
       +1 test. 447 tests.
 
+- [x] **R73 — timer timezone clarity + V70 answer. DONE 2026-07-15
+      (v0.24.148).** BACKLOG V74: `schedule_timer` now states the
+      resolved local fire time + UTC offset in its confirmation (both
+      `at` and `minutes` paths) so an agent/member tz mismatch is
+      unambiguous; tooldoc/prompt tell the agent to relay it. +1 test.
+      V70 answered from code (janitor-vs-fetch/undo is graceful by
+      construction — no fix). Both were questions in the batch.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

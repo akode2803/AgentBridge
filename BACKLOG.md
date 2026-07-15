@@ -1096,10 +1096,17 @@ security items below (V79–V82 are part of it per his framing).
   agent's groups. Does transfer remove the agent from groups the new
   owner isn't in (logged event), or silently orphan it? Answer from
   code; fix if it orphans.
-- [ ] **V70 Question: janitor vs agent Undo/fetch_file** — after the
-  janitor reclaims a blob, does the agent's undo-delete / fetch_file
-  fail silently or gracefully say "file not found"? Answer from code;
-  make it graceful if it isn't.
+- [x] **V70 Question: janitor vs agent Undo/fetch_file** (answered from
+  code, R73 — GRACEFUL by construction, no fix needed) — the janitor
+  only reclaims blobs of REDACTED messages, and every file surface
+  reads the READ MODEL where a redacted message's files are stripped:
+  `list_files`/`fetch_file` iterate `messages_for`, so a janitored
+  file_id is never even listed and `fetch_file` returns "no such file
+  in this chat — list_files shows ids" (NOT the misleading "still
+  syncing"). A GUI undo-delete after the grace restores the text (sealed
+  body in the log) but the blob is gone → the file endpoint returns a
+  clean `{"error": "file not available"}` (a graceful toast, never a
+  crash). Nothing to fix.
 - [x] **V71 "Waiting for attachment to sync" visible note** (R72) —
   the R55/V36 attachment sync barrier deferred a run SILENTLY (no feed
   write), so a large file read as a frozen agent. Now `_process_group`
@@ -1153,10 +1160,19 @@ security items below (V79–V82 are part of it per his framing).
   give the go-ahead to flip visibility (`gh repo edit --visibility
   public`). A history rewrite (filter-repo/BFG + force-push) is the
   alternative if he'd rather scrub it — his call, it's destructive.
-- [ ] **V74 Question: timers when agent and owner are in different
-  timezones** — `parse_at` resolves 'HH:MM' in the HARNESS MACHINE's
-  local timezone (the AVD ≠ Aryan's laptop case). Answer + decide:
-  document, or carry the requester's tz.
+- [x] **V74 Question: timers when agent and owner are in different
+  timezones** (answered + fixed, R73) — `parse_at` resolves 'HH:MM' in
+  the HARNESS MACHINE's local timezone. For the agent's OWN wake-up
+  that's correct (it fires where the agent runs); the ambiguity is only
+  when a human on a different machine says "at 3pm" and the agent (e.g.
+  on the AVD) schedules it. We can't read the human's tz (not exposed),
+  so the honest fix is to make the fire time UNAMBIGUOUS: `schedule_timer`
+  now resolves and states the exact local wall-clock time + UTC offset
+  in its confirmation ("scheduled: a wake-up at 2026-07-16 09:30 <TZ>
+  (UTC+0530)"), for both the `at` and `minutes` paths, and the tooldoc +
+  prompt tell the agent to relay that when a member asked for a
+  wall-clock time. +1 test assertion. Carrying the requester's tz is a
+  future option if it proves needed.
 - [ ] **V75 §C addition (approved): agents react to EXTERNAL events**
   — webhooks / file-watch / CI-finished — "a human also messages when
   something happens outside the chat". Future round.
