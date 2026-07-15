@@ -22,6 +22,11 @@ function markReadNow(chatId) {
   Mesh.pendingRead = null;
   api("/api/mesh/read", { chat_id: chatId });
   const c = Mesh.state?.chats?.find((x) => x.id === chatId);
+  // V67: remember the tail we've now read, so a racing state fetch (the
+  // fire-and-forget read above may not have persisted yet) can't resurrect
+  // this badge — reconcileReadTail() clamps it back until a genuinely newer
+  // message arrives (last.ns beyond this mark).
+  Mesh.readTail[chatId] = Math.max(Mesh.readTail[chatId] || 0, c?.last?.ns || 0);
   if (c && (c.unread || c.forced_unread)) {
     c.unread = 0;
     c.forced_unread = false;
@@ -57,7 +62,7 @@ async function renderChats(force) {
   // don't let this stale render paint the empty chat state over the new page
   if (App.page !== "chats") return;
   const ms = Mesh.state;
-  renderSidebar();
+  renderSidebar();   // V67: renderSidebar reconciles readTail (no badge flicker)
   startAskPoll();   // asks/timers surface on the whole chats page (R19.5)
 
   if (!ms.available) {

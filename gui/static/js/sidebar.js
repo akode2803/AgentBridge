@@ -55,8 +55,27 @@ export function renderSideLoading() {
   box.innerHTML = `<div class="side-skel"><div class="skel-bar"><i></i></div>${row.repeat(6)}</div>`;
 }
 
+// V67: a chat we just marked read must not flicker its badge back when a
+// fresh /api/mesh/state (a chat switch, an SSE refresh) races the fire-and-
+// forget read POST. Applied at the single sidebar chokepoint so every render
+// path honors it: zero the unread for any chat whose newest message we've
+// already read (readTail >= last.ns); a genuinely newer message still counts,
+// and once the server agrees (unread 0) we drop the stale tail entry.
+function reconcileReadTail(ms) {
+  for (const c of ms?.chats || []) {
+    const tail = Mesh.readTail?.[c.id];
+    if (tail == null) continue;
+    // a genuinely newer message than what we read: stop clamping, let it count
+    if ((c.last?.ns || 0) > tail) { delete Mesh.readTail[c.id]; continue; }
+    // otherwise the server's unread is stale (a read POST that hasn't landed)
+    // — we've read up to the tail, so keep the badge cleared
+    if (c.unread && !c.forced_unread) c.unread = 0;
+  }
+}
+
 export function renderSidebar() {
   const ms = Mesh.state;
+  reconcileReadTail(ms);
   $("#rail-avatar").innerHTML =
     ms?.user ? meshAvatarInner(ms.user) : "?";
   $("#side-new").hidden = App.page !== "chats";

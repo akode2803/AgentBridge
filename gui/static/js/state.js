@@ -28,6 +28,11 @@ export const Mesh = {
   // mode = "select" (full action pane) or "forward" (forward-only pane).
   // Lives here so it survives the transcript's poll re-renders (see chat.js).
   select: { on: false, ids: new Set(), mode: "select" },
+  // V67: the newest ns we've marked read per chat. The read POST is fire-and-
+  // forget, so a chat switch's fresh /api/mesh/state can be computed before it
+  // persists and resurrect a badge we just cleared. We clamp such STALE unread
+  // to 0 while honoring genuinely newer messages (last.ns beyond what we read).
+  readTail: {},
 };
 window.Mesh = Mesh;
 

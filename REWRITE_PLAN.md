@@ -1745,6 +1745,17 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       flip visibility (irreversible; his real password was in it — his
       go-ahead assumed no secrets).
 
+- [x] **R71 — unread badge reappear-on-switch. DONE 2026-07-15
+      (v0.24.146).** BACKLOG V67. Not the read-cursor math — a client
+      race: `markReadNow` fires `/api/mesh/read` fire-and-forget and
+      optimistically clears the badge, but a chat switch's
+      `await /api/mesh/state` can be computed server-side before the read
+      persists and re-report the stale unread. Fix: `Mesh.readTail` per
+      chat + a `reconcileReadTail` clamp at the `renderSidebar`
+      chokepoint (clamp unread to 0 while `last.ns <= tail`; a newer
+      message drops the entry and counts). Frontend-only, 24/24; live-
+      verified the exact race on a 2-account rig.
+
 | Backlog item (source) | Covered in |
 |---|---|
 | Settings overhaul: messaging-permission model (HANDOFF #1) | R6 |

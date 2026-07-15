@@ -1064,10 +1064,24 @@ security items below (V79–V82 are part of it per his framing).
 - [ ] **V66 Typing indicator in the chat sidebar** — replaces the
   message preview while someone is typing; for AGENTS it shows the step
   the run is currently on (thinking / running a tool / writing).
-- [ ] **V67 Unread badge STILL unreliable** — new repro: the badge
-  clears while the chat is open but REAPPEARS when switching to another
-  chat. Root-cause properly this time (read-cursor vs unread_count
-  paths).
+- [x] **V67 Unread badge STILL unreliable** (R71) — repro: badge clears
+  while a chat is open but REAPPEARS on switching away. ROOT CAUSE (not
+  the read-cursor math — `mark_read` marks to the store's max ns >=
+  everything, and `unread_info` correctly uses `read_ns` skipping own +
+  info messages): a client RACE. `markReadNow` fires `/api/mesh/read`
+  FIRE-AND-FORGET and optimistically zeroes the local badge; switching
+  chats does `await api("/api/mesh/state")`, which the server can
+  compute BEFORE the read POST persists → it returns the stale unread
+  and the badge flickers back. FIX (client, frontend-only): remember
+  the newest ns we've marked read per chat (`Mesh.readTail`), and at the
+  single sidebar chokepoint (`renderSidebar` → `reconcileReadTail`)
+  clamp a chat's unread to 0 while its newest message is one we've
+  already read (`last.ns <= tail`); a genuinely newer message
+  (`last.ns > tail`) drops the entry and counts normally. Live-verified
+  on a 2-account rig (focus/visibility overridden per the embedded-pane
+  gotcha): open→clears, switch→stays clear, simulated stale server
+  unread→clamped to 0 (the exact reappear), newer message→badge
+  returns, zero console errors. 24/24 modules.
 - [ ] **V68 Protect sign-out** — Aryan's concern: sign out someone
   else's session on a shared device, sign in as yourself → machine-
   claim transfers their agents to you ("ownership transferred"). Does
