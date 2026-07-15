@@ -208,13 +208,15 @@ class CachingTransport(Transport):
 
     def _refresh_delta(self) -> bool:
         """One incremental pull (R76). Returns whether anything a poke
-        SHOULD have announced changed — the hint watchdog's signal. Classes
-        whose writers deliberately never poke (profile.silent_prefixes:
-        presence beats) apply to the mirror but don't count, or every
-        heartbeat caught by a safety poll would trip the fallback cadence
-        forever. Raises NotImplementedError when the driver has no live
-        feed (the caller falls back to a full pull) and network errors for
-        backoff."""
+        SHOULD have announced changed — the hint watchdog's signal. Two
+        exclusions keep that signal honest: classes whose writers
+        deliberately never poke (profile.silent_prefixes: presence beats),
+        and THIS PROCESS'S OWN recent writes (the write guard) — a writer
+        never receives its own broadcast (self:False), so an active user's
+        typing/read-state echoes look "unannounced" to their own mirror
+        and pinned the live GUI suspect while Aryan typed (v0.24.155).
+        Raises NotImplementedError when the driver has no live feed (the
+        caller falls back to a full pull) and network errors for backoff."""
         t0 = time.monotonic()
         changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
         silent = self.profile.silent_prefixes
@@ -237,10 +239,12 @@ class CachingTransport(Transport):
                 self._neg.clear()      # the world moved: re-answer misses
             self._cursor = max(self._cursor, cursor)
             self._last_refresh = time.time()
+            foreign = any(
+                p not in self._doc_writes
+                and not (silent and p.startswith(silent))
+                for p in (*changed, *deleted))
             self._prune_guards_locked()
-        return any(not p.startswith(silent)
-                   for p in (*changed, *deleted)) if silent \
-            else bool(changed or deleted)
+        return foreign
 
     def _start_thread(self) -> None:
         if not self.auto_refresh or (self._thread and self._thread.is_alive()):

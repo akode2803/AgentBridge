@@ -537,6 +537,20 @@ def test_silent_classes_never_trip_the_watchdog(delta_mirror):
     assert tx._refresh_delta() is True
 
 
+def test_own_write_echoes_never_look_unannounced(delta_mirror):
+    """A writer never receives its own broadcast, so this process's writes
+    coming back in its own delta must not feed the watchdog (an active
+    user's typing pinned their own GUI suspect) — while a foreign change
+    in the same pull still counts."""
+    inner, tx = delta_mirror
+    tx.refresh()
+    tx.put_doc("status/typing_a.json", {"until": 1})   # OUR write
+    assert tx._refresh_delta() is False                # echo, not suspicious
+    tx.put_doc("status/typing_a.json", {"until": 2})
+    inner.put_doc("users/b.json", {"v": 1})            # a foreign write too
+    assert tx._refresh_delta() is True
+
+
 def test_watchdog_needs_two_consecutive_silent_polls(delta_mirror):
     """One unannounced change (a cold-socket writer's dropped first poke)
     must not trip the fallback cadence; two in a row — a real outage — must.
