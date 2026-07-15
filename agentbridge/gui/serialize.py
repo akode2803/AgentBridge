@@ -37,6 +37,8 @@ def message_json(m: Message, me: str) -> dict:
         out["event"] = m.event
     if m.reactions:
         out["reactions"] = m.reactions
+    if m.undecrypted:
+        out["undecrypted"] = True  # keys not synced yet — client shows a wait
     return out
 
 
@@ -56,6 +58,8 @@ def snippet_json(m: Message | None) -> dict | None:
         snip["event"] = m.event  # info previews phrase client-side (R46)
     if m.deleted:
         snip["deleted"] = True
+    if m.undecrypted:
+        snip["undecrypted"] = True  # V59 stays honest: never a blank preview
     return snip
 
 

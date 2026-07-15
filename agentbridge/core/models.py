@@ -445,3 +445,9 @@ class Message:
     deleted: bool = False
     event: dict[str, Any] | None = None
     reactions: dict[str, list[str]] = field(default_factory=dict)  # {emoji: [users]}
+    # R66: the envelope would not unseal for THIS reader at THIS moment
+    # (fresh key epoch / sender keys not mirrored yet, or truly not my
+    # epoch). Body/tags read empty; consumers must treat that as "not yet
+    # readable", never as "an empty message" — the harness scan holds its
+    # cursor on young ones instead of consuming their triggers blind.
+    undecrypted: bool = False

@@ -112,7 +112,14 @@ def build_messages(
         )
 
         if env.kind is MsgKind.MESSAGE:
-            body = sealer.unseal(chat_id, env) or BodyRecord()
+            body = sealer.unseal(chat_id, env)
+            if body is None:
+                # R66: won't open for this reader RIGHT NOW — usually a fresh
+                # key epoch (new chat / rotation) the read mirror hasn't
+                # pulled yet; it heals on the next refresh. Flag it so
+                # consumers can tell "not yet readable" from "empty".
+                msg.undecrypted = True
+                body = BodyRecord()
             msg.body, msg.tags = body.body, body.tags
             msg.reply_to, msg.files, msg.fwd = body.reply_to, body.files, body.fwd
 

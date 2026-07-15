@@ -127,9 +127,54 @@ def test_reads_served_from_the_warm_mirror(mirror):
 
 def test_missing_doc_is_default_without_refetch(mirror):
     inner, tx = mirror
+    # users/ is a READ-THROUGH domain (R66): the FIRST miss verifies with
+    # the cloud once, then the negative cache answers until the next refresh
     for _ in range(5):
         assert tx.get_doc("users/ghost.json", default={}) == {}
-    assert inner.reads["get_doc"] == 0   # the mirror KNOWS it's absent
+    assert inner.reads["get_doc"] == 1
+    # a non-read-through domain keeps the pure-mirror behaviour
+    for _ in range(5):
+        assert tx.get_doc("presence/ghost@box.json", default={}) == {}
+    assert inner.reads["get_doc"] == 1
+
+
+# ------------------------------------------------- R66 key-doc read-through
+
+def test_fresh_key_doc_reads_through_the_mirror(mirror):
+    """The V72 lost-trigger race: a brand-new chat's key epoch doc written by
+    ANOTHER process must be readable before the next refresh — chat keys and
+    directory entries fall through on a warm-miss; everything else waits."""
+    inner, tx = mirror
+    tx.refresh()   # warm, snapshot predates everything below
+    inner.docs["chats/c1/keys/123.json"] = {"epoch": 123}
+    inner.docs["users/newbie.json"] = {"name": "newbie"}
+    inner.docs["chats/c1/meta.json"] = {"name": "c1"}
+    assert tx.get_doc("chats/c1/keys/123.json")["epoch"] == 123
+    assert tx.get_doc("users/newbie.json")["name"] == "newbie"
+    assert tx.get_doc("chats/c1/meta.json") is None  # mirror-only domain
+    # the read-through result is now memory-served (no second inner hit)
+    inner.reset_reads()
+    assert tx.get_doc("chats/c1/keys/123.json")["epoch"] == 123
+    assert inner.reads["get_doc"] == 0
+
+
+def test_empty_keys_listing_verifies_with_the_cloud_once(mirror):
+    """list_docs on a keys prefix that looks EMPTY double-checks the cloud
+    (an empty listing is what mints a duplicate epoch on the seal path);
+    a confirmed-empty answer is negative-cached until the next refresh."""
+    inner, tx = mirror
+    tx.refresh()
+    inner.docs["chats/c1/keys/9.json"] = {"epoch": 9}
+    assert tx.list_docs("chats/c1/keys") == ["chats/c1/keys/9.json"]
+    # confirmed-empty: one inner call, then the negative cache answers
+    inner.reset_reads()
+    assert tx.list_docs("chats/c2/keys") == []
+    assert tx.list_docs("chats/c2/keys") == []
+    assert inner.reads["list_docs"] == 1
+    # a refresh clears the negative cache — new epochs are seen again
+    inner.docs["chats/c2/keys/1.json"] = {"epoch": 1}
+    tx.refresh()
+    assert tx.list_docs("chats/c2/keys") == ["chats/c2/keys/1.json"]
 
 
 def test_external_change_lands_on_refresh(mirror):

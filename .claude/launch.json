@@ -2,9 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "agentbridge-gui",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "gui", "--no-browser", "--port", "7788"],
+      "name": "agentbridge-rig",
+      "runtimeExecutable": ".venv\\Scripts\\python.exe",
+      "runtimeArgs": [
+        "-m", "agentbridge.gui",
+        "--home", "C:\\Users\\AryanKumar\\AppData\\Local\\Temp\\ab66\\h1",
+        "--root", "C:\\Users\\AryanKumar\\AppData\\Local\\Temp\\ab66\\r",
+        "--port", "7788",
+        "--machine", "devverify",
+        "--no-browser"
+      ],
       "port": 7788
     }
   ]

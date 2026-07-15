@@ -209,6 +209,11 @@ class AgentRunner:
                 added += 1
         return added
 
+    # R66: how long an undecryptable message may hold its chat's scan before
+    # being skipped for good. The read mirror heals in seconds; 15 minutes is
+    # generous slack for a flaky network without ever wedging the chat.
+    UNSEAL_HOLD_NS = 15 * 60 * 1_000_000_000
+
     def _scan_chat(self, snap, settings: HarnessSettings, owner: str | None,
                    collect: list | None) -> int:
         chat_id = snap.id
@@ -216,6 +221,24 @@ class AgentRunner:
             return 0  # V62: cursor keeps its place — resume answers the backlog
         last_ns, last_edit = self.queue.scan_cursor(chat_id)
         msgs = self.mesh.messages_for(chat_id)
+        # R66: an envelope that would not unseal (fresh key epoch / sender
+        # keys the mirror hasn't pulled yet) reads as EMPTY — its tags are
+        # invisible, so advancing past it would consume the trigger silently
+        # (the V72 lost-@all bug). Hold the scan at the oldest YOUNG one and
+        # retry next tick; one past the deadline is skipped HONESTLY (ledger
+        # record), so a truly dead envelope can never wedge the chat.
+        now_ns = time.time_ns()
+        hold_ns = 0
+        for m in msgs:
+            if not m.undecrypted or m.deleted or m.ns <= last_ns:
+                continue
+            if now_ns - m.ns < self.UNSEAL_HOLD_NS:
+                hold_ns = m.ns
+                break
+            if collect is None:
+                self.queue.record_skip(chat_id, m.id, 0, "undecryptable")
+        if hold_ns:
+            msgs = [m for m in msgs if m.ns < hold_ns]
         senders = {m.from_ for m in msgs}
         kinds = {s: self.mesh.directory.kind(s) for s in senders}
         rule = settings.rule_for(chat_id, dm=snap.kind is ChatKind.DM)

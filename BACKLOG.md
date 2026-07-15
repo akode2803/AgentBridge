@@ -1035,16 +1035,124 @@ the update channel works. Atlan plugin: no action (he removes it himself).
   members); live: endpoint + Storage card verified on the rig ("Nothing
   to reclaim — all clean"). Account deletion stays soft (accounts are
   tiny docs; unchanged).
-- [ ] **V64 Question: attachment sync barrier — could the agent start
+- [x] **V64 Question: attachment sync barrier — could the agent start
   immediately and "look the file up later"**, so a large file doesn't
-  read as a frozen agent? — assessment owed (the answered-ledger means
-  nothing re-fires when the blob finally lands, so "later" never comes
-  without a new mechanism); minimum: make the wait VISIBLE (feed/status
-  "waiting for the attachment to sync") + an honest post-grace note in
-  the agent's context.
-- [ ] **V65 Question: does only the "Auto" context option use memories /
-  knowledge graphs to build context intelligently?** — answer from code
-  (Q30 semantics + H5 state).
+  read as a frozen agent? — ANSWERED in the R59–R65 wrap-up: keep the
+  barrier (the answered-ledger means nothing re-fires when the blob
+  finally lands, so "later" never comes without a new mechanism; a
+  forced second run doubles model cost and risks a confident reply
+  about a file never seen); the wait is already bounded (10 min, then
+  an honest proceed), and the agent now has its own escape hatch
+  (reply → schedule_timer → fetch_file). Aryan 2026-07-15: agreed with
+  the reasoning; the visible-wait note is approved → **V71**.
+- [x] **V65 Question: does only the "Auto" context option use memories /
+  knowledge graphs to build context intelligently?** — ANSWERED in the
+  wrap-up: NO — "Auto" just means no day-ceiling. Every option uses the
+  same machinery (verbatim tail + HistoryIndex vector recall, both
+  filtered by the ceiling; agent notes ride the bridge tools under the
+  global-memory policy). Knowledge graphs stay parked (H5 [D], needs a
+  local-LLM box).
+
+### Verbal asks (2026-07-15, security-round kickoff)
+
+Source: Aryan's reply after the R59–R65 arc. "Proceed with the security
+round" + a new batch. His notes: he updates the AVD after this round;
+the repo can go public now. Security round proper = §C key-rotation-on-
+leave + per-member Supabase RLS + THREAT_MODEL residuals, PLUS the new
+security items below (V79–V82 are part of it per his framing).
+
+- [ ] **V66 Typing indicator in the chat sidebar** — replaces the
+  message preview while someone is typing; for AGENTS it shows the step
+  the run is currently on (thinking / running a tool / writing).
+- [ ] **V67 Unread badge STILL unreliable** — new repro: the badge
+  clears while the chat is open but REAPPEARS when switching to another
+  chat. Root-cause properly this time (read-cursor vs unread_count
+  paths).
+- [ ] **V68 Protect sign-out** — Aryan's concern: sign out someone
+  else's session on a shared device, sign in as yourself → machine-
+  claim transfers their agents to you ("ownership transferred"). Does
+  it also let you read their messages "for free"? ANSWER from code
+  first (keystore/DPAPI + password-wrap say no, but verify the whole
+  path incl. the local SQLite cache), then design: password (or
+  equivalent) required to sign out; don't lean solely on "the device is
+  in safe hands".
+- [ ] **V69 Question: ownership-transfer semantics vs the
+  owner-in-group rule** — when an agent's ownership transfers (machine
+  claim), the responsible-member rule says the owner must be in the
+  agent's groups. Does transfer remove the agent from groups the new
+  owner isn't in (logged event), or silently orphan it? Answer from
+  code; fix if it orphans.
+- [ ] **V70 Question: janitor vs agent Undo/fetch_file** — after the
+  janitor reclaims a blob, does the agent's undo-delete / fetch_file
+  fail silently or gracefully say "file not found"? Answer from code;
+  make it graceful if it isn't.
+- [ ] **V71 "Waiting for attachment to sync" visible note** (approved
+  follow-up to V64) — the live feed/status should say the run is
+  waiting on the attachment barrier so a large file never reads as a
+  frozen agent.
+- [x] **V72 REGRESSION (investigated FIRST): no agents reply in Aryan's
+  test group** (R66) — the V62 pause was INNOCENT (`agents_paused:
+  False`, gates default honest). Root cause = the **lost-trigger race**:
+  a brand-new chat's key-epoch doc reaches other devices via the R29
+  read MIRROR (4s refresh) while the message itself arrives instantly
+  on the never-cached change feed. Both harnesses saw "@all tell me all
+  tools…" (delivered_to proves it), couldn't unseal it (mirror lacked
+  the fresh key doc), read it as EMPTY (no tags → no trigger), and
+  `_scan_chat` advanced the cursor past it — permanently, silently.
+  Hits ANY message sealed against a fresh epoch (new chat OR rotation
+  after member changes) — explains prior "agent randomly ignored me"
+  reports. Fixed with three legs: (1) honest `undecrypted` flag on the
+  read model (never a forgeable-looking blank — GUI shows WhatsApp's
+  "Waiting for this message…" in bubble + sidebar preview, agent
+  context says "hasn't synced here yet"); (2) the scan BARRIER — the
+  cursor never advances past a young undecryptable message (retries
+  each tick; past 15 min it's skipped with a `skipped:undecryptable`
+  ledger record, so a dead envelope can't wedge the chat); (3) mirror
+  READ-THROUGH on warm-miss for `chats/*/keys/*` + `users/*` docs (+
+  empty keys LISTINGS verified with the cloud once — an empty listing
+  is what mints a duplicate epoch on the seal path), negative-cached
+  per refresh cycle so unknown names don't hammer the API. +4 tests
+  (hold+heal end-to-end, deadline skip, doc + listing read-through).
+  Live: fleet restarted onto .141, test-group cursors rewound, both
+  agents answered Aryan's original @all message.
+- [ ] **V73 Make the AgentBridge GitHub repo public** — Aryan
+  2026-07-15: "We can make the agentbridge gh public now." Full-history
+  secret audit FIRST (supabase.env was always out of git; verify
+  nothing leaked in any commit), then flip visibility. He updates the
+  AVD after this round.
+- [ ] **V74 Question: timers when agent and owner are in different
+  timezones** — `parse_at` resolves 'HH:MM' in the HARNESS MACHINE's
+  local timezone (the AVD ≠ Aryan's laptop case). Answer + decide:
+  document, or carry the requester's tz.
+- [ ] **V75 §C addition (approved): agents react to EXTERNAL events**
+  — webhooks / file-watch / CI-finished — "a human also messages when
+  something happens outside the chat". Future round.
+- [ ] **V76 §C addition (approved): noticing silence** — a built-in
+  follow-up nudge when a message the agent sent never got answered
+  (timers can fake it today; a first-class mechanism is cleaner).
+  Future round.
+- [ ] **V77 Question/assessment: agents initiating brand-new
+  conversations on idle reflection** — how would it work; is the
+  "spooky + major security implications" argument (GPT-5.5's answer to
+  Aryan) still true in 2026? Assessment owed, honest on both sides.
+- [ ] **V78 Agents may write 2+ messages per turn** — "truly free
+  conversation": let a run post multiple messages instead of one
+  monolithic reply.
+- [ ] **V79 SECURITY: audit @claude's chat with Aryan — "the loose
+  sandbox doesn't work properly"** — read the live chat, find the
+  loophole he saw, root-cause and fix. Part of the security round.
+- [ ] **V80 Permission-ask feedback loop** — when a tool call raises an
+  owner ask, the AGENT should be told a permission was requested (and
+  its outcome) instead of the run ending blind. Pairs with V81/V82.
+- [ ] **V81 Question: third-party view of a pending owner ask** — Aryan
+  talks to someone ELSE's agent, a tool needs permission: what does the
+  asker see while the owner decides? If nothing, add an honest
+  "asking @owner for permission" surface (skip if it already exists —
+  verify from code first).
+- [ ] **V82 Encourage the agent to ASK for grantable permissions** —
+  prompt/tooldocs change: an agent facing a gated-but-askable action
+  should raise the ask itself instead of refusing until the user tells
+  it to ask.
 
 ---
 
@@ -1074,6 +1182,10 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 - **Channels** (v3; permission model already configurable).
 - **mem0/graphiti + summarization + LLM planner** (needs a local-LLM box).
 - **Adopt-agent memory transfer** (Q22, deferred by Aryan).
+- **External-event triggers** (webhooks / file-watch / CI-finished) —
+  approved 2026-07-15 (V75); own round after the security arc.
+- **Noticing silence / follow-up nudge** (first-class "he never answered
+  me") — approved 2026-07-15 (V76); own round after the security arc.
 
 ## Round map (open items → planned rounds, in intended order)
 
@@ -1111,4 +1223,9 @@ the update channel works. Atlan plugin: no action (he removes it himself).
 | parity (c) — agent context closes (R63, done) | V54 |
 | proactive timers (R64, done) | V55 (V64 assessed in the session wrap-up) |
 | storage janitor (R65, done) | V63 |
-| security round (NEXT, per Aryan — every gate is now cleared) | §C key-rotation-on-leave, per-member RLS, threat-model residuals |
+| regression triage (FIRST) | V72 (agents silent in test group), V67 (unread badge) |
+| security round (CURRENT arc, per Aryan) | §C key-rotation-on-leave, per-member RLS, threat-model residuals, V79 (claude-chat loophole), V68 (sign-out protection + answer), V69 (transfer semantics), V73 (repo public, audit first) |
+| permission feedback loop | V80, V81 (answer first), V82 |
+| agent liveliness | V66 (typing/step indicator), V71 (attachment wait note), V78 (multi-message turns) |
+| answers owed | V70 (janitor vs undo/fetch), V74 (timer timezones), V77 (idle-reflection assessment) |
+| future rounds (approved) | V75 (external events), V76 (noticing silence) |

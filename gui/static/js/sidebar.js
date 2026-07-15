@@ -260,6 +260,8 @@ function renderChatListSidebar() {
     : c.last.deleted ? (c.last.from === ms.user
         ? "You deleted this message" : "This message was deleted")
     : c.last.kind === "info" ? esc(meshInfoText(c.last, ms.user))
+    : c.last.undecrypted // R66: keys not synced yet — honest, never blank
+      ? esc(meshDn(c.last.from)) + ": Waiting for this message…"
     : esc(meshDn(c.last.from)) + ": " + esc(c.last.body || "📎 file");
   const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
   const tagsHtml = (c) => {

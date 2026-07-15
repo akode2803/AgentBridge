@@ -51,6 +51,9 @@ CLOUD_REFRESH_S = 4.0
 _WRITE_GUARD_S = 60.0
 # a failing refresh backs off up to this, still serving the last snapshot
 _MAX_BACKOFF_S = 60.0
+# read-through miss sentinel: tells "doc absent/unreachable" apart from a
+# stored None (inner.get_doc reports both as its default)
+_MISS = object()
 
 
 class CachingTransport(Transport):
@@ -64,6 +67,9 @@ class CachingTransport(Transport):
         self._lock = threading.Lock()
         self._docs: dict[str, Any] = {}        # the mirror
         self._chat_ids: list[str] = []
+        # R66: confirmed inner misses for read-through paths, so unknown
+        # names/epochs don't hammer the cloud; cleared by every refresh
+        self._neg: set[str] = set()
         self._warm = False
         self._last_refresh = 0.0               # wall clock of last good pull
         self._doc_writes: dict[str, float] = {}   # path -> monotonic of write
@@ -141,6 +147,7 @@ class CachingTransport(Transport):
                     ids.add(chat_id)
             self._docs = docs
             self._chat_ids = sorted(ids)
+            self._neg.clear()  # a fresh snapshot re-answers every miss
             self._warm = True
             self._last_refresh = time.time()
             floor = time.monotonic() - _WRITE_GUARD_S
@@ -181,11 +188,31 @@ class CachingTransport(Transport):
                 watcher.close()
 
     # ------------------------------------------------------------------ docs
+    @staticmethod
+    def _reads_through(path: str) -> bool:
+        """Correctness-critical, low-volume domains where a warm-miss falls
+        through to the cloud instead of waiting for the next refresh (R66):
+        chat-key epoch docs (a fresh epoch's first message must unseal on the
+        very next harness scan — the silent-lost-trigger bug) and directory
+        entries (a brand-new sender's sign key is needed the moment they
+        post). Everything else keeps the pure-mirror behaviour that fixed
+        the R29 miss-pinning instability."""
+        return path.startswith("users/") or (
+            path.startswith("chats/") and "/keys/" in path)
+
     def get_doc(self, path: str, default: Any = None) -> Any:
         if self._ensure_warm():
             with self._lock:
                 if path in self._docs:
                     return copy.deepcopy(self._docs[path])
+                miss_known = path in self._neg
+            if self._reads_through(path) and not miss_known:
+                val = self.inner.get_doc(path, _MISS)
+                with self._lock:
+                    if val is not _MISS:
+                        self._docs[path] = copy.deepcopy(val)
+                        return val
+                    self._neg.add(path)
             return default
         return self.inner.get_doc(path, default)
 
@@ -194,6 +221,8 @@ class CachingTransport(Transport):
         with self._lock:
             self._docs[path] = copy.deepcopy(data)
             self._doc_writes[path] = time.monotonic()
+            self._neg.discard(path)
+            self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
 
     def delete_doc(self, path: str) -> None:
         self.inner.delete_doc(path)
@@ -204,8 +233,21 @@ class CachingTransport(Transport):
     def list_docs(self, prefix: str) -> list[str]:
         if self._ensure_warm():
             with self._lock:
-                return sorted(p for p in self._docs
-                              if p.startswith(prefix) and p.endswith(".json"))
+                out = sorted(p for p in self._docs
+                             if p.startswith(prefix) and p.endswith(".json"))
+                miss_known = f"list:{prefix}" in self._neg
+            # R66: an EMPTY keys listing for a chat is how the seal path
+            # decides to mint a brand-new epoch — on a genesis race that
+            # would fork a duplicate epoch, so verify emptiness with the
+            # cloud once per refresh cycle. Established chats always list
+            # non-empty and never pay this.
+            if not out and not miss_known and self._reads_through(
+                    prefix.rstrip("/") + "/x"):
+                out = sorted(self.inner.list_docs(prefix))
+                if not out:
+                    with self._lock:
+                        self._neg.add(f"list:{prefix}")
+            return out
         return self.inner.list_docs(prefix)
 
     # ----------------------------------------------------------- chats / logs

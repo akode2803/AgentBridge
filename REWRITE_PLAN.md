@@ -1682,6 +1682,21 @@ Rounds are elastic: split when big (rule 5), merge when trivial.
       POST /api/mesh/janitor + About→Storage card + silent daily
       sweep. 438 tests (3 new over the real E2EE folder transport),
       24/24 modules; card verified live.
+- [x] **R66 — the lost-trigger race (regression triage). DONE
+      2026-07-15 (v0.24.141).** BACKLOG V72: agents silent in Aryan's
+      Test Group. NOT the V62 pause — a message sealed against a FRESH
+      key epoch (new chat / rotation) arrives instantly on the change
+      feed while the epoch doc waits for the R29 mirror refresh; it
+      unseals to nothing, its tags are invisible, and the scan cursor
+      advanced past it forever. Fix: honest `undecrypted` read-model
+      flag (GUI "Waiting for this message…" bubble + sidebar preview;
+      agent-context "hasn't synced here yet" line), the scan BARRIER
+      (cursor holds at a young undecryptable message, retries; >15 min
+      = `skipped:undecryptable` ledger record — never wedges), and
+      mirror READ-THROUGH on warm-miss for key/user docs + empty keys
+      listings (negative-cached per refresh). 442 tests (+4), 24/24
+      modules; live: cursors rewound, both agents answered the
+      original @all.
 
 | Backlog item (source) | Covered in |
 |---|---|

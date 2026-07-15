@@ -873,3 +873,57 @@ def test_timer_brief_survives_to_the_wakeup_run(hrig):
                if m.kind.value == "message"]
     assert any(m.body.startswith("reminder:") for m in replies)
     assert runner.timers.snapshot() == []    # consumed, not re-firing
+
+
+# ----------------------------------------- R66: the undecryptable-scan barrier
+
+def test_undecryptable_message_holds_the_scan_until_keys_arrive(hrig):
+    """The V72 lost-@all bug: a message sealed with a key epoch this device
+    hasn't synced yet reads as EMPTY (tags invisible) — the scan must hold
+    its cursor and retry until the key doc lands, then answer normally,
+    instead of consuming the trigger silently forever."""
+    snap = hrig.owner.create_chat("Fresh", members=["helper"])
+    trigger = hrig.owner.post(snap.id, "hey @helper, first message")
+    # hide the chat's key docs — this device "hasn't synced them yet"
+    key_docs = {p: hrig.owner.tx.get_doc(p)
+                for p in hrig.owner.tx.list_docs(f"chats/{snap.id}/keys")}
+    assert key_docs
+    for p in key_docs:
+        hrig.owner.tx.delete_doc(p)
+    responder = Scripted()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+
+    # the sealed record arrived but cannot open here — flagged, not blank
+    view = {m.id: m for m in runner.mesh.messages_for(snap.id)}
+    assert view[trigger.id].undecrypted and view[trigger.id].body == ""
+    assert runner.scan_all() == 0
+    last_ns, _ = runner.queue.scan_cursor(snap.id)
+    assert last_ns < trigger.ns                    # held, not consumed
+    assert not runner.queue.answered(snap.id, trigger.id, 0)
+
+    # the key doc lands (the mirror refresh, in production) -> answered
+    for p, doc in key_docs.items():
+        hrig.owner.tx.put_doc(p, doc)
+    turn(hrig, runner, snap.id)
+    replies = agent_msgs(hrig.owner, snap.id)
+    assert len(replies) == 1
+    assert (replies[0].reply_to or {}).get("id") == trigger.id
+
+
+def test_undecryptable_past_deadline_is_skipped_honestly(hrig):
+    """A truly dead envelope can never wedge its chat: past the hold
+    deadline the scan records the skip in the ledger and moves on."""
+    snap = hrig.owner.create_chat("Stuck", members=["helper"])
+    trigger = hrig.owner.post(snap.id, "hey @helper, doomed")
+    for p in hrig.owner.tx.list_docs(f"chats/{snap.id}/keys"):
+        hrig.owner.tx.delete_doc(p)
+    runner = hrig.make_runner(Scripted())
+    ripple(hrig, runner, snap.id)
+
+    runner.UNSEAL_HOLD_NS = 0                      # everything is instantly old
+    assert runner.scan_all() == 0
+    last_ns, _ = runner.queue.scan_cursor(snap.id)
+    assert last_ns >= trigger.ns                   # moved on — never wedged
+    assert runner.queue._ledger(snap.id).get(
+        f"{trigger.id}@0") == "skipped:undecryptable"

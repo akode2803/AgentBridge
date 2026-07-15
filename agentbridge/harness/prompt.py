@@ -232,6 +232,10 @@ def render_message(m: Message, agent: str) -> str:
         return f"[{m.ts}] · {ev.get('type', 'event')}"
     if m.deleted:
         return f"[{m.ts}] · a message was deleted"
+    if m.undecrypted:
+        # R66: sealed to a key this device hasn't synced yet — say so rather
+        # than showing a blank line the model could misread as an empty ping
+        return f"[{m.ts}] · a message from @{m.from_} hasn't synced here yet"
     who = f"@{m.from_}" + (" (you)" if m.from_ == agent else "")
     who = f"(id {m.id}) {who}" if m.id else who
     rt = m.reply_to or {}

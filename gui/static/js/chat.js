@@ -228,6 +228,7 @@ async function renderMeshChat(force) {
   // structural change (Q24: reactions never surfaced on the partial path)
   const mutSig = data.messages.map((m) =>
     (m.edited ? "e" + (m.edited.ns || "") : "") + (m.deleted ? "d" : "")
+    + (m.undecrypted ? "u" : "") // R66: repaint the moment keys arrive
     + Object.entries(m.reactions || {}).map(([e, us]) => e + us.join(",")).join("")
   ).join("|");
   // M11: a DM peer's deactivation shows an info pill + grey styling — fold
@@ -326,6 +327,23 @@ async function renderMeshChat(force) {
             <button class="msg-arrow" aria-label="Message menu">${ICONS.chevD}</button>
             ${tombSender}
             <div class="msg-body tomb">${ICONS.banned}<span>${label}</span></div>
+            <span class="meta"><span class="meta-time">${esc(timeOnly(msg.ts))}</span></span>
+          </div>
+        </div>`]);
+      prevFrom = null;
+      continue;
+    }
+    // R66: an encrypted message whose chat key hasn't synced here yet —
+    // WhatsApp's "Waiting for this message" pattern. It repaints into the
+    // real body via mutSig as soon as the mirror pulls the key doc.
+    if (msg.undecrypted) {
+      const waitSender = !isDm && !msg.mine
+        ? `<div class="sender">${esc(meshDn(msg.from))}</div>` : "";
+      parts.push(["m:" + (msg.id || "i" + i), `
+        <div class="msg ${msg.mine ? "mine" : ""} deleted" data-mid="${esc(msg.id || "")}">
+          <div class="bubble">
+            ${waitSender}
+            <div class="msg-body tomb">${ICONS.lock || ""}<span>Waiting for this message…</span></div>
             <span class="meta"><span class="meta-time">${esc(timeOnly(msg.ts))}</span></span>
           </div>
         </div>`]);
