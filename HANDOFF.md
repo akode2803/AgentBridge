@@ -17,7 +17,11 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.170** (fleet live on it;
+  `gui/__init__.py` in R26). Currently **v0.24.173** (fleet live on it;
+  R89 friendly permission details, R90 app lock — full-page, API-covered,
+  Aryan runs it live with 5-min auto-lock, so a restarted fleet boots
+  LOCKED; R91 signup-while-signed-in refusal (V124) + the update
+  dirty-rail ignoring untracked files (V123 — manual pulls are over);
   R85 restart hardening, R84 RLS cutover CLOSED on both machines —
   member creds everywhere, secret key retired to the dashboard; R86–R88
   polish: live message-info/About refresh, group @ badge, narrow-desktop

@@ -1714,24 +1714,35 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   untouched. Verified at 800 (nav 338/chat 402), 900 (438/402), 1200
   (saved 560 honored/580), and 375 mobile (full width) — everything
   fits, composer visible.
-- [ ] **V124 signup swaps a signed-in session WITHOUT a password**
-  (found auditing V111's lock coverage, 2026-07-16): V68 password-gated
-  LOGOUT because the next sign-in claims this machine's agents — but
-  POST /api/mesh/signup on a signed-in app detaches the session and
-  adopts the fresh account with no credential at all (context.signup).
-  A passer-by at an unlocked window can swap the session via signup
-  where logout would have refused them. Fix: refuse signup while a
-  session exists (the UI never offers it), or gate it on the signed-in
-  user's password like logout. While LOCKED it now refuses (R90), but
-  the unlocked hole remains.
-- [ ] **V123 update_apply's dirty-rail counts UNTRACKED files** (found
-  live 2026-07-16 rolling the fleet to .170): `git status --porcelain`
-  output includes `??` entries, so one stray file in the checkout
-  ("Detailed prompt.txt") blocks "Update now" forever with "local
-  changes on this machine". An ff-merge never touches untracked files
-  unless the incoming tree wants to CREATE the same path — filter the
-  porcelain scan to tracked modifications (or check name collisions
-  against the incoming diff). Small, api_updates._apply_blocker.
+- [x] **V124 signup swaps a signed-in session WITHOUT a password**
+  (found auditing V111's lock coverage, 2026-07-16) → **DONE R91
+  (v0.24.173)**. V68 password-gated LOGOUT because the next sign-in
+  claims this machine's agents — but POST /api/mesh/signup on a
+  signed-in app detached the session and adopted the fresh account with
+  no credential at all (context.signup). Fix: refuse while a session
+  exists ("Already signed in — sign out first") — chosen over
+  password-gating signup because the UI never offers signup while
+  signed in, so the legitimate swap composes as logout (password) →
+  signup; a signed-in signup is only ever a script or a passer-by.
+  One endpoint test was literally RIDING the hole (a passwordless
+  logout whose V68 refusal went unchecked, then a signup swap) — fixed
+  to a real password logout. New real-HTTP test: refusal + session
+  intact + the logout→signup path still works. Live: the locked app
+  refuses signup at the R90 gate first (layered, as designed).
+- [x] **V123 update_apply's dirty-rail counts UNTRACKED files** (found
+  live 2026-07-16 rolling the fleet to .170) → **DONE R91 (v0.24.173)**.
+  `git status --porcelain` included `??` entries, so one stray file in
+  the checkout ("Detailed prompt.txt") blocked "Update now" forever
+  with "local changes on this machine". Now `--untracked-files=no`: an
+  ff-merge never touches untracked files, and the one exception (the
+  incoming tree CREATES a path that exists untracked) is still refused
+  by git itself at merge time — a new gitworld test proves the honest
+  failure AND that the local file survives byte-identical. Live proof
+  on the very machine that hit it: `_apply_blocker` returns "" with
+  "Detailed prompt.txt" still sitting untracked, and the .173 ff-merge
+  landed around it. Irony: the fix couldn't ship through the button it
+  fixes (the .172 rail blocked its own update) — that pull was the last
+  manual one.
 - [ ] **V121 Agent-running visibility, round 2** (self chat 21:54,
   post-R83: "even after that round, its hard to tell if an agent is
   running, especially if the chat closes; the working messages still
