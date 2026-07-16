@@ -171,16 +171,23 @@ class GuiApp:
                          name="ab-restore-retry").start()
 
     def signup(self, name: str, display: str, password: str) -> dict:
+        """V124: refuses while someone is signed in. V68 password-gated
+        logout precisely because the next sign-in claims this machine's
+        agents — an ungated signup was a credential-free bypass around that
+        gate (sign up, session swaps, agents follow). The UI never offers
+        signup while signed in, so only a script or a passer-by hits this;
+        the legitimate swap is logout (password) → signup."""
         with self._lock:
+            if self.mesh is not None:
+                raise ValidationError("Already signed in — sign out first")
             mesh = self._build(name)
             try:
                 _, code = mesh.accounts.create_human(
                     name, password, display=display
                 )
             except Exception:
-                mesh.close()  # a failed signup never drops the old session
+                mesh.close()  # release the half-built facade
                 raise
-            self._detach()
             self._adopt(mesh)
         return {"ok": True, "user": name, "recovery_code": code}
 

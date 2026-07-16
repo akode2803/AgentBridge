@@ -87,7 +87,11 @@ def _apply_blocker(root: Path, branch: str) -> str:
     if rc != 0 or cur != branch:
         return (f"this install runs branch {cur or '?'} — "
                 "update it manually (git pull)")
-    rc, dirty = _git(root, "status", "--porcelain")
+    # V123: tracked changes only — an ff-merge never touches an untracked
+    # file, so a stray note in the checkout must not block "Update now"
+    # forever. The rare name collision (incoming tree CREATES a path that
+    # exists untracked here) is still refused by git itself at merge time.
+    rc, dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
     if rc != 0 or dirty:
         return "local changes on this machine — update manually (git pull)"
     rc, _ = _git(root, "merge-base", "--is-ancestor", "HEAD",

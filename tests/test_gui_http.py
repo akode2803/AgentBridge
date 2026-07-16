@@ -46,6 +46,22 @@ def test_signup_login_logout(rig):
     assert ok["ok"] and "recovery_code" not in ok  # keys already exist
 
 
+def test_signup_refused_while_signed_in(rig):
+    """V124: signup was a credential-free bypass around the V68 logout gate —
+    a passer-by could swap the session (and this machine's agents) just by
+    creating an account. It now refuses; the legitimate swap is a password
+    logout first."""
+    rig.signup()
+    out = rig.post("/api/mesh/signup", username="mallory",
+                   password="mallory-pw1", display="Mallory")
+    assert "sign out first" in out.get("error", "")
+    assert rig.get("/api/mesh/state")["user"] == "aryan"     # session intact
+    assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
+    out = rig.post("/api/mesh/signup", username="mallory",
+                   password="mallory-pw1", display="Mallory")
+    assert out["ok"] and out["user"] == "mallory"            # signed-out path
+
+
 def test_session_restores_across_server_restart(rig):
     rig.signup()
     # a fresh GuiApp over the same home picks the session up from disk

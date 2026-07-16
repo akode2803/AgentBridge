@@ -443,8 +443,10 @@ def test_asks_surface_and_answer_roundtrip(rig):
     v = tx.get_doc("status/peer_pending/helper_verdicts.json")
     assert v["verdicts"]["peer2"]["verdict"] == "allow"
 
-    # not the owner -> no visibility, no verdicts
-    rig.post("/api/mesh/logout")
+    # not the owner -> no visibility, no verdicts. (The logout must be a
+    # real, password-gated one: V124 made signup refuse while a session
+    # exists, so the old passwordless logout + signup swap no longer works.)
+    assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
     rig.post("/api/mesh/signup", username="mallory", password="mallory-pw1",
              display="Mallory")
     assert rig.get("/api/mesh/asks")["asks"] == []

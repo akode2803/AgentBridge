@@ -153,6 +153,36 @@ def test_git_apply_refuses_dirty_tree(gitworld):
 
 
 @requires_git
+def test_git_apply_ignores_untracked_files(gitworld):
+    """V123: a stray untracked file blocked "Update now" forever ("local
+    changes on this machine") — but an ff-merge never touches untracked
+    files. The dirty rail now counts tracked modifications only."""
+    (gitworld / "Detailed prompt.txt").write_text("scratch", encoding="utf-8")
+    r = api_updates.git_check()
+    assert r["newer"] and r["can_apply"] is True and not r["note"]
+    resp = api_updates.update_apply(_App(), None)
+    assert resp["ok"] and resp["updated"] and resp["version"] == "99.1.0"
+    assert (gitworld / "Detailed prompt.txt").read_text("utf-8") == "scratch"
+
+
+@requires_git
+def test_git_apply_untracked_name_collision_fails_honestly(gitworld):
+    """The one case where an untracked file DOES matter: the incoming tree
+    creates the same path. Git refuses the merge itself, the endpoint
+    reports the failure, and the local file survives untouched."""
+    ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
+    seed = gitworld.parent / "seed"
+    (seed / "NEW.txt").write_text("from origin", encoding="utf-8")
+    _run("git", "-C", str(seed), *ident, "add", "-A")
+    _run("git", "-C", str(seed), *ident, "commit", "-m", "adds NEW.txt")
+    _run("git", "-C", str(seed), "push", "origin", "main")
+    (gitworld / "NEW.txt").write_text("local, different", encoding="utf-8")
+    resp = api_updates.update_apply(_App(), None)
+    assert resp["ok"] is False and "update failed" in resp["note"]
+    assert (gitworld / "NEW.txt").read_text("utf-8") == "local, different"
+
+
+@requires_git
 def test_git_apply_refuses_non_default_branch(gitworld):
     _run("git", "-C", str(gitworld), "checkout", "-b", "feature")
     r = api_updates.git_check()
