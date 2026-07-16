@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME
 from ..core.models import Message, MsgKind
+from ..core.timekit import utcnow_iso
 from .conversation import Delivery
 from .responder import MESSAGE_BREAK, SILENCE
 
@@ -119,6 +121,25 @@ class PromptPack:
                       chat_kind=delivery.chat_kind),
             self.text("context_members", members=members),
         ]
+        # V117: time-grounding, code-built like the trigger lines (never
+        # per-prompt copy). The stamp matches the transcript's own [ts]
+        # format so the model can compare directly; the caution appears
+        # only when the newest message is genuinely old — a wakeup firing
+        # late or an agent that was offline otherwise reads a stale
+        # transcript as "now" (a "tomorrow" answered with yesterday's
+        # tomorrow, per the live report).
+        lines.append(f"Current time: {utcnow_iso()}.")
+        last_ns = max((m.ns for m in delivery.transcript if m.ns), default=0)
+        age_h = (time.time_ns() - last_ns) / 3.6e12 if last_ns else 0.0
+        if age_h >= 1.0:
+            age = (f"about {age_h / 24:.0f} days" if age_h >= 48
+                   else "about an hour" if round(age_h) <= 1
+                   else f"about {age_h:.0f} hours")
+            lines.append(
+                f"Note: the conversation below last moved {age} ago — you "
+                "may have been offline. Check anything time-sensitive "
+                '(deadlines, "today"/"tomorrow", timers) against the '
+                "current time before you act.")
         # V54 (parity c): the chat facts a human reads in the info pane —
         # genesis + the group's permission levels (factual, code-built like
         # the trigger lines)

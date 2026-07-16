@@ -1624,10 +1624,19 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   notifications/appearance are local prefs (nothing to refresh);
   transcript day separators crossing midnight stay stale until the
   next repaint — cosmetic, logged here for honesty, not fixed.
-- [ ] **V117 Harness tells agents the time proactively** (21:43) — an
-  agent that was down a while must check the CURRENT time before
-  posting; the harness injects this caution itself (context timestamp /
-  "the last message is N hours old" note), never per-prompt copy.
+- [x] **V117 Harness tells agents the time proactively** (21:43) →
+  **DONE R88 (v0.24.170)**. context_text now opens with
+  `Current time: <utcnow ISO>.` (same format as the transcript's [ts]
+  prefixes, so the model compares directly) and, when the newest
+  transcript ns is ≥1h old, a code-built caution: "the conversation
+  below last moved about N hours/days ago — you may have been offline.
+  Check anything time-sensitive against the current time before you
+  act." Code-injected like the trigger lines (never per-prompt copy, a
+  gutted pack can't drop it). Wording deliberately avoids the word
+  "message" (collided with a retrieval test's needle — and reads
+  better). +1 test (fresh / 5h / 3d / 1h boundary / empty transcript).
+  V88's late-wakeup warning builds on this same line when that round
+  lands.
 - [ ] **V118 Question/investigate: CoCo worse — browser sign-in every
   start?** (21:45) — CoCo's harness needs a browser sign-in each start;
   Aryan doubts it relates to the harness error being thrown. Diagnose
@@ -1648,10 +1657,19 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   so the next failure is diagnosable. Live-verified with two
   consecutive endpoint restarts (his exact scenario).
 
-- [ ] **V120 Sidebar cut-off in the narrow-desktop window** (self chat
-  21:53) — the sidebar's default width was widened once, so between the
-  lowest tolerable desktop width and the mobile breakpoint the chats
-  get cut off. Fix the responsive gap.
+- [x] **V120 Sidebar cut-off in the narrow-desktop window** (self chat
+  21:53) → **DONE R88 (v0.24.170)**. Root cause: rail (58px) + the
+  widened sidebar (clamp default up to 420px, or a saved resizer width
+  up to 560px applied as an INLINE style) + the chat's min-width 500px
+  overflowed viewports in the 761–1000px band, and #shell hides
+  overflow-x — the chat rendered cut off. Fix: viewport-reserving
+  `max-width` caps on #navrail (max-width beats an inline width, so the
+  saved resizer pref is capped, not deleted) — ≥1081px reserves the
+  chat's 500px floor; 761–1080px reserves a narrowed 400px floor.
+  Scoped to min-width:761px so mobile's full-width sidebar is
+  untouched. Verified at 800 (nav 338/chat 402), 900 (438/402), 1200
+  (saved 560 honored/580), and 375 mobile (full width) — everything
+  fits, composer visible.
 - [ ] **V121 Agent-running visibility, round 2** (self chat 21:54,
   post-R83: "even after that round, its hard to tell if an agent is
   running, especially if the chat closes; the working messages still

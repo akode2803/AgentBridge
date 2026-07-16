@@ -2504,6 +2504,21 @@ pre.configdump {
 
 #content.chat-mode { min-width: 500px; }
 
+/* V120: the band between mobile (≤760px) and a comfortable desktop used to
+   cut the open chat off — the widened sidebar default (and a saved resizer
+   width, which lands as an INLINE style; max-width still beats it) plus the
+   chat's min-width overflowed the viewport, and #shell hides overflow.
+   Reserve rail (58px) + the chat's active minimum at every desktop width,
+   narrowing the chat floor to 400px in the tight band. Scoped min-width:761
+   so the caps never touch the mobile layout's full-width sidebar. */
+@media (min-width: 1081px) {
+  #navrail { max-width: calc(100vw - 562px); }
+}
+@media (min-width: 761px) and (max-width: 1080px) {
+  #navrail { max-width: calc(100vw - 462px); }
+  #content.chat-mode { min-width: 400px; }
+}
+
 /* forms never blow out their grid/card */
 .kv dd { min-width: 0; }
 .kv select, .kv input[type=text], .kv input[type=number], .kv input[type=password] {

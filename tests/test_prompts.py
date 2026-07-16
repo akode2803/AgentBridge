@@ -155,6 +155,37 @@ def test_render_message_variants():
     assert "[files: r.pdf]" in line and "(edited)" in line
 
 
+def test_context_time_grounding(tmp_path):
+    """V117: every context carries the current time; the staleness caution
+    appears only when the newest message is genuinely old."""
+    import time as _t
+
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    now_ns = _t.time_ns()
+
+    fresh = pack.context_text(delivery(transcript=[msg(ns=now_ns)]))
+    assert "Current time: " in fresh
+    assert "you may have been offline" not in fresh
+
+    old = pack.context_text(delivery(
+        transcript=[msg(ns=now_ns - int(5 * 3.6e12))]))
+    assert "last moved about 5 hours ago" in old
+    assert "you may have been offline" in old
+
+    older = pack.context_text(delivery(
+        transcript=[msg(ns=now_ns - int(72 * 3.6e12))]))
+    assert "last moved about 3 days ago" in older
+
+    barely = pack.context_text(delivery(
+        transcript=[msg(ns=now_ns - int(1.2 * 3.6e12))]))
+    assert "last moved about an hour ago" in barely
+
+    # empty transcript (fresh chat / pure wakeup): time yes, caution no
+    empty = pack.context_text(delivery())
+    assert "Current time: " in empty
+    assert "you may have been offline" not in empty
+
+
 # ------------------------------------------------------------- feed wording
 
 def test_step_lines_are_clean_wording(tmp_path):
