@@ -17,7 +17,9 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.176** (R94: a run doc
+  `gui/__init__.py` in R26). Currently **v0.24.177** (R95: login
+  refuses while a session exists — with V68's password logout and
+  V124's signup gate, all three session-swap lanes are closed; R94: a run doc
   orphaned by a killed runner is reaped as "interrupted" at harness
   boot + between runs — no more haunting working bubbles; R93: restart
   choreography — "Restarting…"/"Connecting to your mesh…" covers, a
