@@ -642,6 +642,17 @@ h1 {
   background: var(--panel); border: 1px dashed var(--border);
   border-radius: 10px; padding: 5px 10px; align-self: flex-start;
 }
+/* V88: themed clock (currentColor follows the theme, unlike the old ⏰
+   emoji) + the in-place dismiss ✕ */
+.timer-chip svg { width: 13px; height: 13px; vertical-align: -2px; }
+.timer-x {
+  border: none; background: none; padding: 0 0 0 6px; margin-left: 2px;
+  color: var(--text-faint); cursor: pointer; vertical-align: -1px;
+}
+.timer-x:hover, [data-theme="dark"] .timer-x:hover {
+  color: var(--bad); background: none;   /* beat the global button:hover */
+}
+.timer-x svg { width: 11px; height: 11px; }
 .ag-timer { font-size: 13px; margin-bottom: 3px; }
 
 /* task 1 (2026-07-11): settings read cleaner WITHOUT the boxed cards — the

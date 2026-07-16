@@ -1489,16 +1489,26 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   members never agreed to it. (d) owner-dismiss notifies the agent —
   rides V88 (the human dismiss surface doesn't exist yet). (e)
   follow-ups on its own = V76 (approved, own round).
-- [ ] **V88 Timer polish (cluster)** — edit/delete a timer (agent AND
-  human — the AGENT-delete half shipped R99 as `cancel_timer`; the
-  human-side edit/delete GUI still doesn't exist); multiple timers
-  formatted like pins; RECURRING timers
-  (days-of-week / day-of-month / date); a wakeup that fired while the
-  agent was OFFLINE fires LATE with a "this is late, re-check relevance"
-  warning + the agent checks the time; wakeup icon follows theme, no
-  truncation here, bold in preview, a shared FORMATTER refactored out;
-  can't dismiss/stop the alert; wakeup doesn't PUSH messages (appears
-  above the last message).
+- [~] **V88 Timer polish (cluster)** — **PART 1 (owner dismiss +
+  chip polish) DONE R104 (v0.24.186)**: the chat's timer chip gains an
+  in-place ✕ — owner-gated /api/mesh/timer_cancel drops a cancel doc
+  (ids MERGE so rapid dismissals never race), the runner's loop
+  consumes it each tick (pop + delete-once), and the dismissal lands
+  in the run HISTORY as state "dismissed" ("Wake-up dismissed by
+  @aryan — was: <note>") so the agent's next run KNOWS via R99's
+  recent-runs context (V87's "owner-dismiss notifies the agent" —
+  the cross-lane handoff item; awareness on the next natural run, no
+  model run fired just for a dismissal). Chip: the ⏰ emoji replaced
+  with a themed clock SVG (currentColor); instant-kill memory on
+  dismiss (the V85 pattern — the chip never resurrects while the
+  harness converges; a failed POST rolls it back with a toast).
+  Verified: endpoint test (owner gate, id merge), harness test (pop +
+  history note + recent-runs carry), live rig journey (chip → ✕ →
+  instant removal → cancel doc on the transport). Suite 522.
+  REMAINING (part 2): RECURRING timers (days-of-week/day-of-month/
+  date), late-fire warning ("fired while offline — re-check
+  relevance"), timers formatted like pins, bold in preview, wakeup
+  doesn't PUSH messages, edit-in-place (vs dismiss+reschedule).
 - [x] **V89 Composer (cluster)** — can't paste images; chirp doesn't
   play on message EDIT; (+ the disabled-send-button hover-highlight from
   V50-era) = 3 composer fixes. → **DONE R102 (v0.24.184)**.

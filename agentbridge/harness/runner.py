@@ -675,6 +675,47 @@ class AgentRunner:
         return out
 
     # ------------------------------------------------------------ lifecycle
+    def _consume_timer_cancels(self) -> None:
+        """V88: the owner dismissed wake-ups from the chat's timer chips
+        (api_agents.timer_cancel drops a cancel doc — the stop lane's shape).
+        Pop each timer and record the dismissal into the run HISTORY, so the
+        next run's context tells the agent its wake-up was dismissed (V87's
+        "owner-dismiss notifies the agent", riding R99's recent-runs
+        plumbing — awareness on the next natural run, no model run fired
+        just for a dismissal). Best-effort; the doc is deleted once consumed
+        so a dismissal never re-applies."""
+        path = f"status/{self.agent}_timer_cancel.json"
+        try:
+            doc = self.mesh.tx.get_doc(path)
+            if not isinstance(doc, dict) or not doc.get("ids"):
+                return
+            by = str(doc.get("by") or "your member")
+            dismissed = []
+            for tid in list(doc.get("ids") or [])[:50]:
+                t = self.timers.pop(str(tid))
+                if t is not None:
+                    dismissed.append(t)
+            self.mesh.tx.delete_doc(path)
+            if not dismissed:
+                return
+            hist = f"status/{self.agent}_runs.json"
+            hdoc = self.mesh.tx.get_doc(hist, default={}) or {}
+            runs = hdoc.get("runs") if isinstance(hdoc, dict) else None
+            runs = runs if isinstance(runs, list) else []
+            for t in dismissed:
+                note = " ".join(str(t.get("note") or "").split())[:120]
+                runs.append({
+                    "chat_id": t.get("chat_id", ""), "state": "dismissed",
+                    "started": "", "finished": utcnow_iso(), "turns": 0,
+                    "note": (f"Wake-up dismissed by @{by}"
+                             + (f" — was: {note}" if note else "")),
+                })
+            self.mesh.tx.put_doc(hist, {"agent": self.agent,
+                                        "runs": runs[-20:]})
+            self.publish_status()   # the chip list shrinks on the next poll
+        except Exception:  # noqa: BLE001 — hygiene never breaks the loop
+            pass
+
     def publish_status(self) -> None:
         state = (tuple(map(str, self.queue.snapshot())),
                  tuple(map(str, self.timers.snapshot())),
@@ -778,6 +819,7 @@ class AgentRunner:
                 with self._inflight_lock:
                     running = {k[0] for k in self._inflight}
                 reap_orphan_run(self.mesh.tx, self.agent, running)
+                self._consume_timer_cancels()       # V88: owner dismissals
                 self.tick()
                 if time.monotonic() - announced > 1800:
                     announced = time.monotonic()

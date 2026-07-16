@@ -152,6 +152,33 @@ def agent_stop(app, req, mesh) -> dict:
 
 
 @authed
+def timer_cancel(app, req, mesh) -> dict:
+    """V88: the owner dismisses a scheduled wake-up from the chat's timer
+    chip. Mirrors the stop lane: a cancel doc the runner's loop consumes —
+    it pops the timer AND records the dismissal into the agent's run
+    history, so the next run's context says the wake-up was dismissed (the
+    R99 recent-runs plumbing; V87's "owner-dismiss notifies the agent").
+    Ids MERGE into any unconsumed doc so rapid dismissals never race."""
+    import time as _time
+
+    name = (req.data.get("agent") or "").strip().lower()
+    tid = (req.data.get("id") or "").strip()
+    if not tid:
+        return {"error": "no timer id"}
+    if mesh.directory.owner_of(name) != mesh.user:
+        return {"error": "only the agent's responsible member can dismiss "
+                         "its wake-ups"}
+    path = f"status/{name}_timer_cancel.json"
+    doc = mesh.tx.get_doc(path)
+    ids = list((doc or {}).get("ids") or []) if isinstance(doc, dict) else []
+    if tid not in ids:
+        ids.append(tid)
+    mesh.tx.put_doc(path, {"ids": ids[-50:], "ns": _time.time_ns(),
+                           "by": mesh.user})
+    return {"ok": True}
+
+
+@authed
 def agent_start(app, req, mesh) -> dict:
     """Start a STOPPED agent's runner (R54/V26). Owner-gated; the agent must
     be hosted on THIS machine with a real adapter. Spawns the same
@@ -374,6 +401,7 @@ POST = {
     "/api/mesh/adopt_agent": adopt_agent,
     "/api/mesh/answer_ask": answer_ask,
     "/api/mesh/agent_stop": agent_stop,
+    "/api/mesh/timer_cancel": timer_cancel,
     "/api/mesh/agent_start": agent_start,
     "/api/mesh/stand_down": stand_down,
     "/api/mesh/pause": pause,

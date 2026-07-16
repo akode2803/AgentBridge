@@ -851,9 +851,15 @@ function startAskPoll() {
       // still converging (the old grey-out un-greyed on the next tick and
       // read as "the decision didn't record"; that WAS the 2–3 tries)
       Mesh.askDone = Mesh.askDone || new Map();
+      // V88: same instant-kill memory for DISMISSED wake-ups — the cancel
+      // doc takes a harness tick to consume, and the chip must not
+      // resurrect meanwhile
+      Mesh.timerDone = Mesh.timerDone || new Map();
       const now = Date.now();
       for (const [id, ts] of Mesh.askDone)
         if (now - ts > 900000) Mesh.askDone.delete(id);
+      for (const [id, ts] of Mesh.timerDone)
+        if (now - ts > 900000) Mesh.timerDone.delete(id);
       const asks = (r.asks || []).filter((a) => !Mesh.askDone.has(a.id));
       // V85: a NEW ask pings once — a run is blocked on the owner, and a
       // prompt behind an unfocused window used to time out unseen
@@ -869,7 +875,8 @@ function startAskPoll() {
       const peer = asks.filter((a) => a.kind === "peer");
       if (cid) renderAskBar(cid,
         [...asks.filter((a) => a.chat_id === cid), ...peer],
-        timers.filter((t) => t.chat_id === cid));
+        timers.filter((t) => t.chat_id === cid
+                             && !Mesh.timerDone.has(t.id)));
     } catch { /* next tick retries */ }
   };
   Mesh.askPollId = setInterval(tick, 2000);
@@ -884,9 +891,12 @@ function renderAskBar(chatId, asks, timers) {
   if (key === Mesh.askKey) return;           // nothing moved — don't repaint
   Mesh.askKey = key;
   if (!asks.length && !(timers || []).length) { bar.innerHTML = ""; return; }
-  // scheduled wake-ups render as calm chips — informational, not actionable.
-  // V55: notes are full briefs now — clamp the chip, full text on hover;
-  // a wake-up beyond today shows its date, not a bare time.
+  // scheduled wake-ups render as calm chips. V55: notes are full briefs —
+  // clamp the chip, full text on hover; a wake-up beyond today shows its
+  // date, not a bare time. V88: the icon follows the theme (SVG, not the
+  // ⏰ emoji) and the owner can DISMISS a wake-up in place — the ✕ drops a
+  // cancel doc the harness consumes, and the agent learns about the
+  // dismissal in its next run's context.
   const chips = (timers || []).map((t) => {
     let at = "";
     if (t.at_ns) {
@@ -898,8 +908,13 @@ function renderAskBar(chatId, asks, timers) {
     }
     const note = (t.note || "").replace(/\s+/g, " ");
     const shown = note.length > 140 ? note.slice(0, 140) + "…" : note;
-    return `<div class="timer-chip" title="${esc(note)}">⏰ ${esc(meshDn(t.agent))} checks back
-      ${at ? "at " + esc(at) : "soon"}${shown ? " — " + esc(shown) : ""}</div>`;
+    return `<div class="timer-chip" data-timer="${esc(t.id || "")}"
+        data-agent="${esc(t.agent || "")}" title="${esc(note)}">
+      ${ICONS.clock} ${esc(meshDn(t.agent))} checks back
+      ${at ? "at " + esc(at) : "soon"}${shown ? " — " + esc(shown) : ""}
+      <button class="timer-x" title="Dismiss this wake-up — the agent is told"
+        aria-label="Dismiss this wake-up">${ICONS.close}</button>
+    </div>`;
   }).join("");
   bar.innerHTML = chips + asks.map((a) => {
     const q = a.kind === "question";
@@ -962,6 +977,26 @@ function renderAskBar(chatId, asks, timers) {
         <button class="ask-close" title="Dismiss — the agent is told no one answered" aria-label="Dismiss">${ICONS.close}</button>
       </div>`;
   }).join("");
+  // V88: dismiss a wake-up in place — kill the chip INSTANTLY and remember
+  // the id (the V85 pattern: the harness consumes the cancel doc on its own
+  // tick, and the chip must not resurrect while that converges). A failed
+  // POST rolls the memory back so the chip returns with a toast.
+  bar.querySelectorAll(".timer-x").forEach((x) => {
+    x.addEventListener("click", async () => {
+      const chip = x.closest(".timer-chip");
+      const tid = chip?.dataset.timer;
+      const agent = chip?.dataset.agent;
+      if (!tid || !agent) return;
+      (Mesh.timerDone = Mesh.timerDone || new Map()).set(tid, Date.now());
+      chip.remove();
+      Mesh.askKey = "";                      // repaint on the next tick
+      const r = await api("/api/mesh/timer_cancel", { agent, id: tid });
+      if (r.error) {
+        Mesh.timerDone.delete(tid);
+        toast(r.error, true);
+      }
+    });
+  });
   bar.querySelectorAll(".ask-card").forEach((card) => {
     const a = asks.find((x) => x.id === card.dataset.ask);
     if (!a) return;

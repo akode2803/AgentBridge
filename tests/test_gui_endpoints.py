@@ -457,6 +457,24 @@ def test_asks_surface_and_answer_roundtrip(rig):
     assert "error" in out
 
 
+def test_timer_cancel_owner_gated_and_merging(rig):
+    """V88: dismissing a wake-up drops a cancel doc the harness consumes.
+    Owner-only; ids MERGE into an unconsumed doc so rapid dismissals never
+    race each other."""
+    rig.signup()
+    rig.post("/api/mesh/create_agent", username="helper", display="Helper")
+    assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-1")["ok"]
+    doc = rig.app.mesh.tx.get_doc("status/helper_timer_cancel.json")
+    assert doc["ids"] == ["t-1"] and doc["by"] == "aryan"
+    assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-2")["ok"]
+    doc = rig.app.mesh.tx.get_doc("status/helper_timer_cancel.json")
+    assert doc["ids"] == ["t-1", "t-2"]          # merged, not clobbered
+    out = rig.post("/api/mesh/timer_cancel", agent="helper", id="")
+    assert "error" in out                        # no id
+    out = rig.post("/api/mesh/timer_cancel", agent="nosuch", id="t-9")
+    assert "responsible member" in out.get("error", "")
+
+
 def test_dm_blocked_flag_viewer_side_only(rig):
     """V102: a DM's meta carries `blocked` = the VIEWER blocked the peer
     (drives the "You blocked @X · Unblock" bar where the composer sat).

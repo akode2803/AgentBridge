@@ -842,6 +842,33 @@ def test_delivery_lists_this_chats_timers_only(hrig):
     assert "1 wake-up(s) scheduled in other chats" in ctx
 
 
+def test_owner_timer_dismiss_notifies_the_agent(hrig):
+    """V88: the owner's dismissal (GUI ✕ → cancel doc) pops the timer AND
+    lands a "dismissed" entry in the run history — the same tail R99 feeds
+    into every delivery, so the agent's next run knows its wake-up was
+    dismissed instead of silently losing it."""
+    runner = hrig.make_runner(Scripted())
+    snap = hrig.owner.create_chat("Sched", members=["helper"])
+    ripple(hrig, runner, snap.id)
+    tid = runner.timers.set(snap.id, 2**62, "check the export at 3pm")
+    assert tid and len(runner.timers.snapshot()) == 1
+    # the GUI endpoint's doc, planted by the owner
+    hrig.owner.tx.put_doc("status/helper_timer_cancel.json",
+                          {"ids": [tid], "by": "aryan", "ns": 1})
+    hrig.owner.outbox.flush_once()
+    runner._consume_timer_cancels()
+    assert runner.timers.snapshot() == []            # popped
+    assert runner.mesh.tx.get_doc(
+        "status/helper_timer_cancel.json") is None   # consumed once
+    hist = runner.mesh.tx.get_doc("status/helper_runs.json")
+    last = (hist or {}).get("runs", [])[-1]
+    assert last["state"] == "dismissed" and last["chat_id"] == snap.id
+    assert "@aryan" in last["note"] and "check the export" in last["note"]
+    # and the R99 delivery plumbing carries it into the next run's context
+    recent = runner.conversation._recent_runs(snap.id)
+    assert any(r.get("state") == "dismissed" for r in recent)
+
+
 def test_settings_parse_and_clamp():
     s = HarnessSettings.from_account(None)
     assert (s.default_rule, s.concurrency, s.catchup) == ("tagged", 2, "recent")

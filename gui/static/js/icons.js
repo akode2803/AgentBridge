@@ -43,6 +43,9 @@ export const ICONS = {
   bellOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.8 5.8 1.8 5.8H4.2S6 13.5 6 9M10 19.2a2 2 0 0 0 4 0"/><path d="M4 4l16 16"/></svg>',
   // clear chat: an eraser (distinct from Delete's trash)
   eraser: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 20.5-4.3-4.3a2 2 0 0 1 0-2.8l9.6-9.6a2 2 0 0 1 2.8 0l5.2 5.2a2 2 0 0 1 0 2.8L12.5 20.5zM21 20.5H7M5.2 11.3l7.5 7.5"/></svg>',
+  // V88: scheduled wake-up (timer chips) — themed via currentColor, replacing
+  // the ⏰ emoji that ignored the theme
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.8"/></svg>',
   // read-receipt ticks: single = sent, double = read (accent). State comes from
   // msg.receipt (server derives it from the other members' read cursors).
   // V95: single shares the double's viewBox AND its first check's geometry —
