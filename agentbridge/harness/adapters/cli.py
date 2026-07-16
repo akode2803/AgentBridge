@@ -135,6 +135,34 @@ def reply_from_output(lines: list[str], fmt: str) -> str:
     return result.strip()
 
 
+TMP_MAX_AGE_S = 7 * 86400.0   # V97: scratch older than a week is gone
+
+
+def _prune_tmp(workdir: Path, max_age_s: float = TMP_MAX_AGE_S) -> int:
+    """Best-effort janitor for the workspace's tmp/ scratch area (V97):
+    files untouched for a week vanish, then emptied stale dirs. Only tmp/
+    — everything else in the workspace is the agent's to keep."""
+    tmp = workdir / "tmp"
+    if not tmp.is_dir():
+        return 0
+    cutoff = time.time() - max_age_s
+    pruned = 0
+    # deepest first, so a dir emptied by file pruning goes in the same pass;
+    # empty dirs go regardless of age (deleting a child bumps the parent's
+    # mtime on Windows, and an empty scratch dir holds nothing worth keeping)
+    for p in sorted(tmp.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+        try:
+            if p.is_file():
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    pruned += 1
+            elif p.is_dir() and not any(p.iterdir()):
+                p.rmdir()
+        except OSError:  # a locked file just waits for the next run
+            continue
+    return pruned
+
+
 class CliResponder:
     """Resolve (owner config, audience) -> one CLI run -> a Reply."""
 
@@ -179,8 +207,12 @@ class CliResponder:
         workdir = (self.home / "harness" / self.agent / "workspaces"
                    / delivery.chat_id)
         outbox = workdir / "outbox"
-        for d in (workdir, outbox):
+        # V97: tmp/ is the declared SCRATCH area — the prompt sends
+        # intermediates here, tidy_workspace empties it on demand, and
+        # week-old leftovers are pruned so workspaces never grow forever
+        for d in (workdir, outbox, workdir / "tmp"):
             d.mkdir(parents=True, exist_ok=True)
+        _prune_tmp(workdir)
         for stale in outbox.iterdir():  # a fresh run owns an empty outbox
             if stale.is_file():
                 stale.unlink(missing_ok=True)

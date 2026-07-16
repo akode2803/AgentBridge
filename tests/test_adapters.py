@@ -272,6 +272,33 @@ def test_stream_errors_surfaces_ccs_reason():
     assert stream_errors(maxed, "codex-jsonl") == ""
 
 
+def test_prune_tmp_clears_only_stale_scratch(tmp_path):
+    """V97: the per-run janitor removes week-old tmp/ files (then emptied
+    stale dirs) and never touches fresh scratch or the workspace root."""
+    import os
+
+    from agentbridge.harness.adapters.cli import _prune_tmp
+
+    ws = tmp_path / "ws"
+    (ws / "tmp" / "old-dir").mkdir(parents=True)
+    old = ws / "tmp" / "old-dir" / "stale.csv"
+    old.write_text("x", encoding="utf-8")
+    fresh = ws / "tmp" / "fresh.txt"
+    fresh.write_text("y", encoding="utf-8")
+    keeper = ws / "notes.md"
+    keeper.write_text("z", encoding="utf-8")
+    then = time.time() - 8 * 86400
+    os.utime(old, (then, then))
+    os.utime(old.parent, (then, then))
+    os.utime(keeper, (then, then))
+
+    assert _prune_tmp(ws) == 1
+    assert not old.exists() and not old.parent.exists()  # stale file + dir
+    assert fresh.exists() and keeper.exists()
+    assert _prune_tmp(ws) == 0                           # idempotent
+    assert _prune_tmp(tmp_path / "nowhere") == 0         # no tmp/ = no-op
+
+
 # ------------------------------------------------------- engine + end-to-end
 
 @pytest.fixture

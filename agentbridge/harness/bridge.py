@@ -138,6 +138,62 @@ class BridgeServer:
             return ("no answer within the waiting window — decide "
                     "reasonably yourself or say you'll follow up")
 
+        @mcp.tool(structured_output=False)
+        def tidy_workspace(paths: list | None = None) -> str:
+            """Delete scratch files from YOUR workspace when you're done
+            with them — your runtime has no delete (V97). No arguments =
+            empty your tmp/ scratch folder; or pass workspace-relative
+            paths (files or folders). context.md, reply.md, MEMORY.md and
+            the inbox are managed by the harness and stay."""
+            import shutil
+
+            ws = self.workspace.resolve()
+            removed: list[str] = []
+            refused: list[str] = []
+
+            def rm(target: Path, rel: str) -> None:
+                try:
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    removed.append(rel)
+                except OSError as e:
+                    refused.append(f"{rel} ({type(e).__name__})")
+
+            if not paths:
+                tmp = ws / "tmp"
+                for child in (tmp.iterdir() if tmp.is_dir() else ()):
+                    rm(child, f"tmp/{child.name}")
+                if not removed and not refused:
+                    return "tmp/ is already empty"
+            else:
+                for raw in list(paths)[:50]:
+                    rel = str(raw or "").strip().replace("\\", "/")
+                    if not rel:
+                        continue
+                    target = (ws / rel).resolve()
+                    if target == ws or not target.is_relative_to(ws):
+                        refused.append(f"{rel} (outside your workspace)")
+                        continue
+                    inner = target.relative_to(ws)
+                    if inner.parts[0].lower() == "inbox" or (
+                            len(inner.parts) == 1 and inner.name.lower() in
+                            ("context.md", "reply.md", "memory.md")):
+                        refused.append(f"{rel} (managed by the harness)")
+                        continue
+                    if not target.exists():
+                        refused.append(f"{rel} (not found)")
+                        continue
+                    rm(target, rel)
+            bits = []
+            if removed:
+                more = f" (+{len(removed) - 10} more)" if len(removed) > 10 else ""
+                bits.append("removed " + ", ".join(removed[:10]) + more)
+            if refused:
+                bits.append("refused " + ", ".join(refused[:5]))
+            return "; ".join(bits) or "nothing to remove"
+
         if self.docs is not None:
             docs = self.docs
 

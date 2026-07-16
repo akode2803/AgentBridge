@@ -154,6 +154,10 @@
       "short": "Remember a task for later (relative or at a time)",
       "long": "schedule_timer(minutes | at, note) - your 'remember to do this later'. A human messages when a notification arrives OR when they remember a task; the timer is your second half. Relative: minutes=90. Absolute time: at='15:00' (its next occurrence), at='2026-07-16 09:30', or ISO. A bare 'HH:MM' is read in YOUR MACHINE's timezone, which may differ from the person you're helping (V74) - the confirmation states the exact local time it will fire, so relay that when a member asked for a wall-clock time. Write the note as a FULL brief for your future self - it starts a fresh run and sees only this note plus the chat, so spell out what to do, for whom, and what done looks like (up to ~2000 chars, line breaks kept). The wake-up run may post proactively, reply to the chat, or answer with silence if nothing is needed. Every timer is visible to your responsible member as a chip in the chat, and this chat's pending wake-ups are listed in your context with their ids - cancel_timer removes one."
     },
+    "tidy_workspace": {
+      "short": "Delete scratch files from your workspace",
+      "long": "tidy_workspace(paths?) - deletes files from YOUR workspace (your runtime has no delete tool). No arguments = empties your tmp/ scratch folder; or pass workspace-relative paths (files or folders, e.g. ['notes-draft.md', 'tmp/big.csv']). context.md, reply.md, MEMORY.md and the inbox are managed by the harness and refuse. Put intermediates in tmp/ in the first place - anything there older than a week is cleaned automatically."
+    },
     "cancel_timer": {
       "short": "Cancel one of this chat's pending wake-ups",
       "long": "cancel_timer(timer_id) - removes one of YOUR pending wake-ups for THIS chat; the ids are in your context's wake-up list ((id t-...) fires ...). Cancel a wake-up whose job is already done or no longer wanted - a member asking you to drop a follow-up is exactly this. Wake-ups for other chats don't cancel from here, and one scheduled earlier in this same run has no id yet."
@@ -175,7 +179,7 @@
   "guides": {
     "workspace": {
       "short": "Your desk, and how permissions work outside it",
-      "long": "Your working folder is your own desk - read and write freely there; it holds context.md (the conversation), MEMORY.md (your notepad), an inbox of staged files and your outbox. Touching paths anywhere else pauses the run while your responsible member is asked to approve it (they can allow once, always-allow it here, or deny with a note telling you what to do instead - follow that note). The platform's own storage (keys, caches, the shared mesh folder) is off limits outright. Stay inside your folder unless the task truly needs otherwise."
+      "long": "Your working folder is your own desk - read and write freely there; it holds context.md (the conversation), MEMORY.md (your notepad), an inbox of staged files, your outbox, and tmp/ for scratch work and intermediates (auto-cleaned after a week; tidy_workspace empties it or removes files you name - your runtime has no delete). Touching paths anywhere else pauses the run while your responsible member is asked to approve it (they can allow once, always-allow it here, or deny with a note telling you what to do instead - follow that note). The platform's own storage (keys, caches, the shared mesh folder) is off limits outright. Stay inside your folder unless the task truly needs otherwise."
     },
     "files": {
       "short": "Receiving and sharing files",

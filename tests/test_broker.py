@@ -544,6 +544,43 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
         owner.close()
 
 
+def test_tidy_workspace_is_workspace_scoped(tmp_path):
+    """V97: the agent's one delete tool — no args empties tmp/, named
+    paths go only when they resolve INSIDE the workspace, and the
+    harness-managed files (context/reply/MEMORY/inbox) refuse."""
+    tx, b, ws = make(tmp_path)
+    (ws / "tmp").mkdir()
+    (ws / "tmp" / "scratch.csv").write_text("x", encoding="utf-8")
+    (ws / "tmp" / "deep").mkdir()
+    (ws / "tmp" / "deep" / "notes.txt").write_text("y", encoding="utf-8")
+    (ws / "draft.md").write_text("old draft", encoding="utf-8")
+    (ws / "MEMORY.md").write_text("keep me", encoding="utf-8")
+    (ws / "inbox").mkdir()
+    (ws / "inbox" / "staged.pdf").write_text("z", encoding="utf-8")
+    outside = tmp_path / "evil.txt"
+    outside.write_text("mine", encoding="utf-8")
+
+    with BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=[],
+                      approvals=[], ask_timeout_s=0.3) as bridge:
+        out = call_tool(bridge.url, "tidy_workspace", {})
+        assert "removed" in out and "scratch.csv" in out
+        assert not any((ws / "tmp").iterdir())          # tmp emptied
+        assert (ws / "draft.md").exists()               # root untouched
+        assert "already empty" in call_tool(bridge.url, "tidy_workspace", {})
+
+        out = call_tool(bridge.url, "tidy_workspace", {
+            "paths": ["draft.md", "MEMORY.md", "inbox/staged.pdf",
+                      "../evil.txt", "missing.txt"]})
+        assert "removed draft.md" in out
+        assert not (ws / "draft.md").exists()
+        assert "MEMORY.md (managed by the harness)" in out
+        assert (ws / "MEMORY.md").exists()
+        assert (ws / "inbox" / "staged.pdf").exists()   # inbox protected
+        assert "../evil.txt (outside your workspace)" in out
+        assert outside.exists()                         # escape refused
+        assert "missing.txt (not found)" in out
+
+
 def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
     """V87: cancel_timer removes one of THIS chat's pending wake-ups from
     the runner's durable list, live; ids from other chats refuse; the tool
