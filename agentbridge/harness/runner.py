@@ -62,6 +62,13 @@ NOTICE = ("@{agent}'s harness could not produce a reply here "
           "{machine}.")
 
 
+def _reaction_only(group) -> bool:
+    """V92: is this run purely a reaction nudge? (Its surfaces read
+    differently: "Noticing a reaction", silence is the normal outcome.)"""
+    return (group.kind == "message" and group.items
+            and all(it.reason == "reaction" for it in group.items))
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -224,7 +231,10 @@ class AgentRunner:
         if self.chat_standing_down(chat_id):
             return 0  # V62: cursor keeps its place — resume answers the backlog
         last_ns, last_edit = self.queue.scan_cursor(chat_id)
-        msgs = self.mesh.messages_for(chat_id)
+        # V92: breadcrumbs=True keeps reaction info-events in the fold so a
+        # reaction to this agent's own message can trigger it (the fold
+        # drops them for every viewer surface)
+        msgs = self.mesh.messages_for(chat_id, breadcrumbs=True)
         # R66: an envelope that would not unseal (fresh key epoch / sender
         # keys the mirror hasn't pulled yet) reads as EMPTY — its tags are
         # invisible, so advancing past it would consume the trigger silently
@@ -360,7 +370,9 @@ class AgentRunner:
                     "stopped", "Stopped by your member")
                 self.publish_status()
                 return
-            transcript = self.mesh.messages_for(chat_id)
+            # breadcrumbs ride along so a reaction trigger can find its
+            # own event in the transcript (render drops them from context)
+            transcript = self.mesh.messages_for(chat_id, breadcrumbs=True)
             if group.kind == "message":
                 if not self._can_post(chat_id):
                     # R55 (V35): an agent that cannot post here must not burn
@@ -417,6 +429,10 @@ class AgentRunner:
                 return
             self.mesh.messaging.mark_read(chat_id)  # context read = read
             feed = RunFeed(self.mesh.tx, self.agent, chat_id)
+            if _reaction_only(group):
+                # V92: a reaction nudge reads differently from reading a new
+                # message — the livefeed/sidebar say what the run is about
+                feed.step("Noticing a reaction")
             timings.start("model")
             try:
                 reply = self.responder.respond(delivery, on_step=feed.step)
@@ -529,23 +545,33 @@ class AgentRunner:
         if no_reply or not body:
             self.queue.rate_refund(chat_id)  # a silent run costs no slot
             self.queue.finish(group, "no_reply")
-            feed.finish("done", "No reply needed")
+            # V92: silence after a reaction nudge is the NORMAL outcome —
+            # the runs list should say the agent noticed, not that it
+            # ignored a message
+            feed.finish("done", "Noticed the reaction — no reply needed"
+                        if _reaction_only(group) else "No reply needed")
             self._log_perf(timings, group, "no_reply")
             self._maybe_leave(chat_id, reply)
             self.publish_status()
             return
         reply_to = None
         if group.kind == "message" and delivery.triggers:
-            last = delivery.triggers[-1].message
-            reply_to = {"id": last.id, "from": last.from_,
-                        "body": (last.body or "")[:200]}
-            # R31: answering the NEWEST message displays as a plain standalone
-            # message (WhatsApp) — quote=False keeps the attribution in the
-            # record (the answered-guard's transcript leg depends on it) while
-            # clients skip the quote bubble. A chat that moved on keeps the
-            # visible quote so readers see what the reply belongs to.
-            if not self._chat_moved_on(chat_id, last.ns):
-                reply_to["quote"] = False
+            # V92: never thread onto a reaction BREADCRUMB (an info event —
+            # quoting it renders an empty bubble). Answer the last real
+            # message trigger; a reaction-only run posts standalone.
+            last_msg = next((t.message for t in reversed(delivery.triggers)
+                             if t.reason != "reaction"), None)
+            if last_msg is not None:
+                reply_to = {"id": last_msg.id, "from": last_msg.from_,
+                            "body": (last_msg.body or "")[:200]}
+                # R31: answering the NEWEST message displays as a plain
+                # standalone message (WhatsApp) — quote=False keeps the
+                # attribution in the record (the answered-guard's transcript
+                # leg depends on it) while clients skip the quote bubble. A
+                # chat that moved on keeps the visible quote so readers see
+                # what the reply belongs to.
+                if not self._chat_moved_on(chat_id, last_msg.ns):
+                    reply_to["quote"] = False
         # V78 (R79): one run may post a short burst of messages — the split
         # happens HERE, at the delivery seam, so threading, the answered-guard
         # and the rate cap keep working exactly as for a single reply: the
@@ -600,8 +626,11 @@ class AgentRunner:
             return
         try:
             reply_to = None
-            if delivery.triggers:
-                last = delivery.triggers[-1].message
+            # V92: an error notice threads to the last real MESSAGE trigger,
+            # never to a reaction breadcrumb (an info event quotes empty)
+            last = next((t.message for t in reversed(delivery.triggers)
+                         if t.reason != "reaction"), None)
+            if last is not None:
                 reply_to = {"id": last.id, "from": last.from_,
                             "body": (last.body or "")[:200]}
             self.mesh.post(

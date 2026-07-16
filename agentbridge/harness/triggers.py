@@ -3,7 +3,12 @@
 Ported v1 semantics, upgraded:
 - rules all / tagged / humans; ``@all`` (the everyone-mention) tags every
   member; a reply to one of this agent's messages counts as tagging it.
-- an agent never triggers on itself, on info events, or on tombstones.
+- an agent never triggers on itself, on info events, or on tombstones —
+  with ONE carve-out (V92): a ``reaction`` breadcrumb whose target is this
+  agent's own message raises its attention like a reply would (someone
+  reacting to YOUR message is directed at you, so it bypasses the reply
+  rule the same way ``reply`` does). The prompt tells the agent most
+  reactions deserve silence — the notification is the point, not a reply.
 - messages from before the agent's (latest) join never trigger it — being
   re-added must not replay old mentions (v1 lesson, kept).
 - a HUMAN editing an already-seen message into a mention re-triggers ONE
@@ -33,7 +38,7 @@ class Candidate:
     message: Message
     edit_ns: int      # 0 = the original text; else the edit revision handled
     trigger_ns: int   # freshness ordinal (the edit time for edit-triggers)
-    reason: str       # tagged | reply | rule-all | rule-humans | edit
+    reason: str       # tagged | reply | rule-all | rule-humans | edit | reaction
 
     @property
     def key(self) -> str:
@@ -44,7 +49,15 @@ def should_reply(
     rule: str, msg: Message, agent: str, kinds: dict[str, UserKind | None]
 ) -> str | None:
     """The reason this message triggers ``agent`` under ``rule``, or None."""
-    if msg.from_ == agent or msg.kind is not MsgKind.MESSAGE or msg.deleted:
+    if msg.from_ == agent or msg.deleted:
+        return None
+    if msg.kind is MsgKind.INFO:
+        # V92: the R60 reaction breadcrumb — `to` names the reacted message's
+        # author, so "someone reacted to MY message" needs no fold lookup
+        ev = msg.event or {}
+        return "reaction" if (ev.get("type") == "reaction"
+                              and ev.get("to") == agent) else None
+    if msg.kind is not MsgKind.MESSAGE:
         return None
     tags = msg.tags or []
     if agent in tags or "all" in tags:

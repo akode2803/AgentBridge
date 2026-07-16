@@ -323,8 +323,12 @@ class MessagingService:
         self._state(chat_id).set_flag("deleted", int(cut))
 
     # ------------------------------------------------------------------- read
-    def messages_for(self, chat_id: str) -> list[Message]:
-        """THE read choke-point: membership + every overlay applied."""
+    def messages_for(self, chat_id: str, *,
+                     breadcrumbs: bool = False) -> list[Message]:
+        """THE read choke-point: membership + every overlay applied.
+        ``breadcrumbs=True`` (the harness's trigger scan, V92) keeps the V50
+        reaction info-events in the fold; every viewer surface leaves them
+        dropped."""
         snap = self._require_member(chat_id)
         # history-on-join policy: unless the group shares history, a member
         # sees only messages from their (latest) join onward; info pills stay
@@ -345,6 +349,7 @@ class MessagingService:
             tenure=snap.tenure,
             verify_redaction=self._redaction_verifier(chat_id),
             owner_of=self.directory.owner_of if self.directory else None,
+            breadcrumbs=breadcrumbs,
         )
 
     def _crypto_boundary(self) -> bool:

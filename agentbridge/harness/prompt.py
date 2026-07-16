@@ -96,6 +96,13 @@ class PromptPack:
             parts.append(self.text(
                 "task_timer", note=(delivery.note or "").replace("'", ""),
                 context_file=context_file))
+        elif delivery.triggers and all(
+                t.reason == "reaction" for t in delivery.triggers):
+            # V92: a pure reaction nudge is an FYI, not a request — a pack
+            # without the key degrades to the normal message task
+            parts.append(self.text("task_reaction", context_file=context_file)
+                         or self.text("task_message",
+                                      context_file=context_file))
         else:
             parts.append(self.text("task_message", context_file=context_file))
         parts.append(self.text("capabilities", outbox=outbox))
@@ -163,6 +170,21 @@ class PromptPack:
         if delivery.kind == "timer":
             lines.append(self.text("context_wakeup", note=delivery.note))
         for t in delivery.triggers:
+            if t.reason == "reaction":
+                # V92: say WHAT was reacted to — the breadcrumb itself renders
+                # as nothing in the transcript. Emoji is member input: cap +
+                # single-line it (the V54 anti-smuggling rule).
+                ev = t.message.event or {}
+                emoji = " ".join(str(ev.get("emoji") or "").split())[:8]
+                target = next((m for m in delivery.transcript
+                               if m.id == ev.get("msg_id")), None)
+                excerpt = (target.body or "").replace("\n", " ")[:120] \
+                    if target else ""
+                lines.append(
+                    f"Trigger (reaction): @{t.sender} reacted {emoji} to "
+                    + (f'your message "{excerpt}"' if excerpt
+                       else "one of your messages"))
+                continue
             bits = [f"Trigger ({t.reason}): @{t.sender}"]
             if t.sender_status and t.sender_status.get("state") not in (
                     None, "available"):

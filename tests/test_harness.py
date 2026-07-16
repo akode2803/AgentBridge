@@ -743,6 +743,79 @@ def test_stop_surfaces_into_the_next_runs_context(hrig):
         PromptManager(hrig.home).for_agent(None).context_text(d)
 
 
+def test_reaction_predicate_targets_only_my_messages():
+    """V92: a reaction breadcrumb triggers ONLY the reacted message's author
+    (never the reactor, never bystanders), bypassing the reply rule like a
+    reply does."""
+    from agentbridge.core.models import MsgKind
+    from agentbridge.harness.triggers import should_reply
+
+    def crumb(frm, to):
+        return SimpleNamespace(
+            from_=frm, kind=MsgKind.INFO, deleted=False, tags=[],
+            reply_to=None, event={"type": "reaction", "msg_id": "m-1",
+                                  "emoji": "👍", "to": to})
+
+    kinds = {}
+    assert should_reply("tagged", crumb("aryan", "helper"),
+                        "helper", kinds) == "reaction"
+    assert should_reply("tagged", crumb("aryan", "aryan"),
+                        "helper", kinds) is None      # not my message
+    assert should_reply("all", crumb("helper", "helper"),
+                        "helper", kinds) is None      # my own reaction
+    other = SimpleNamespace(from_="aryan", kind=MsgKind.INFO, deleted=False,
+                            tags=[], reply_to=None, event={"type": "renamed"})
+    assert should_reply("all", other, "helper", kinds) is None
+
+
+def test_reaction_nudges_the_agent_and_silence_is_normal(hrig):
+    """V92 end-to-end: a member reacting to the agent's message raises ONE
+    run (reason 'reaction'), whose context names the emoji + the reacted
+    message; a silent outcome reads 'Noticed the reaction' in the feed; the
+    ledger never re-fires it. A substantive follow-up posts STANDALONE —
+    never quoting the breadcrumb info event."""
+    from agentbridge.harness.prompt import PromptManager
+
+    snap = hrig.owner.create_chat("Rx", members=["helper"])
+    hrig.owner.post(snap.id, "hey @helper, what's 2+2?")
+    responder = Scripted()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+    reply = agent_msgs(hrig.owner, snap.id)[-1]
+
+    hrig.owner.react(snap.id, reply.id, "👍")
+    ripple(hrig, runner, snap.id)
+    responder.fn = lambda d: Reply(body=SILENCE)      # the normal outcome
+    turn(hrig, runner, snap.id)
+    d = responder.calls[-1]
+    assert [t.reason for t in d.triggers] == ["reaction"]
+    assert d.triggers[0].sender == "aryan"
+    ctx = PromptManager(hrig.home).for_agent(None).context_text(d)
+    assert 'reacted 👍 to your message "answering @aryan"' in ctx
+    pack = PromptManager(hrig.home).for_agent(None)
+    prompt = pack.prompt(d, None, context_file="ctx.md", outbox="out")
+    assert "FYI-grade nudge" in prompt                # task_reaction block
+    feed = runner.mesh.tx.get_doc("status/helper_run.json")
+    assert feed["state"] == "done"
+    assert feed["activity"] == "Noticed the reaction — no reply needed"
+    assert [m.id for m in agent_msgs(hrig.owner, snap.id)] == [reply.id]
+
+    calls = len(responder.calls)
+    turn(hrig, runner, snap.id)                       # ledger: never re-fires
+    assert len(responder.calls) == calls
+
+    # a reaction the agent DOES answer posts standalone (no quote of the
+    # breadcrumb — an info event renders empty)
+    hrig.owner.react(snap.id, reply.id, "🎉")
+    ripple(hrig, runner, snap.id)
+    responder.fn = lambda d: Reply(body="glad that helped")
+    turn(hrig, runner, snap.id)
+    follow = agent_msgs(hrig.owner, snap.id)[-1]
+    assert follow.body == "glad that helped"
+    assert not follow.reply_to
+
+
 def test_delivery_lists_this_chats_timers_only(hrig):
     """V87: the run's context lists THIS chat's pending wake-ups (with the
     ids cancel_timer takes); other chats contribute only a count."""

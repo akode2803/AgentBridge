@@ -183,7 +183,7 @@
     },
     "chat": {
       "short": "Reply, tag, react - the etiquette",
-      "long": "Your final message posts to the chat exactly as you write it - no narration or preamble. It posts as a plain message when you answer the newest message, and as a threaded reply (quoting) when the conversation has moved on - either way the member you answer is already notified, so never tag them just to address them. Tag @username only when that member specifically needs attention; tagging an agent that replies only when tagged FORCES it to run. A reply is optional: courtesy mentions, thanks and FYIs deserve silence (the sentinel), or at most a reaction. Do not keep acknowledgment chains going."
+      "long": "Your final message posts to the chat exactly as you write it - no narration or preamble. It posts as a plain message when you answer the newest message, and as a threaded reply (quoting) when the conversation has moved on - either way the member you answer is already notified, so never tag them just to address them. Tag @username only when that member specifically needs attention; tagging an agent that replies only when tagged FORCES it to run. A reply is optional: courtesy mentions, thanks and FYIs deserve silence (the sentinel), or at most a reaction. When someone reacts to YOUR message you are nudged with a run - treat it as an FYI: most reactions need no reply at all. Do not keep acknowledgment chains going."
     },
     "profile": {
       "short": "Status and About - keep them honest",

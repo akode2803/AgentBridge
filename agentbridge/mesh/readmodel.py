@@ -55,6 +55,7 @@ def build_messages(
     tenure: dict[str, list[list[int]]] | None = None,
     verify_redaction: Callable[[str, dict, str], bool] | None = None,
     owner_of: Callable[[str], str | None] | None = None,
+    breadcrumbs: bool = False,
 ) -> list[Message]:
     edits = edits or {}
     redactions = redactions or {}
@@ -88,8 +89,12 @@ def build_messages(
         env = Envelope.from_dict(rec)
         if env.kind is MsgKind.INFO and (env.event or {}).get("type") == "reaction":
             # V50 breadcrumbs are notification fuel (sync bus → notifier),
-            # never viewer content — the reaction OVERLAY is what renders
-            continue
+            # never viewer content — the reaction OVERLAY is what renders.
+            # V92: the HARNESS opts in (breadcrumbs=True) so a reaction to
+            # the agent's own message can raise its attention; the prompt
+            # layer still renders them as nothing.
+            if not breadcrumbs:
+                continue
         if (
             history_from_ns
             and env.kind is MsgKind.MESSAGE

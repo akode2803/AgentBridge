@@ -7,6 +7,7 @@
   "roster": "Members and how they reply: {roster}.",
 
   "task_message": "New message(s) arrived for you. The conversation so far is in the file {context_file} — read it first, before anything else.",
+  "task_reaction": "Someone reacted to one of your messages — an FYI-grade nudge, not a request. The conversation is in the file {context_file} — read it first. Most reactions need NO reply: answer with silence unless the reaction genuinely changes something (a question mark on your answer, a thumbs-down on a plan you were about to execute). Never reply just to say thanks for a reaction.",
   "task_timer": "This run is a wake-up you scheduled earlier for this chat — the note you left yourself: '{note}'. The conversation so far is in the file {context_file} — read it first, then act on your note, or answer with silence if it no longer needs anything.",
 
   "capabilities": "Your final message is posted to the chat exactly as you write it, so it must contain ONLY the chat message — no narration, no preamble, no working notes. To share a file, save it into {outbox} and mention it by name. Never edit anything in the shared mesh folder by hand. If a request is unclear, say so in the chat rather than guessing.",
