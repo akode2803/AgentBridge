@@ -9,7 +9,10 @@ Audience semantics (docs/FORMAT2.md + REWRITE_PLAN D13):
 - The MESSAGING / ADD-TO-GROUP gates are strict: ``agents`` means agents
   only, no owner ride-along (explicit product decision), and these two gates
   are PUBLIC so an agent can check before reaching out instead of being
-  silently blocked.
+  silently blocked. ONE bond overrides them (V103): an agent and its OWN
+  responsible member always connect — the owner's own tool reaching them (or
+  they it) is never an "outsider", so "who can message me = nobody" gates
+  strangers, not your own Claude. Block still wins in both directions.
 
 Blocking is WhatsApp-shaped: it kills DMs in both directions (new AND
 existing), never leaks "you are blocked" as a reason, and leaves common
@@ -106,6 +109,12 @@ class PrivacyService:
             return False, f"@{recipient} is not available"
         if self.blocked_between(sender, recipient):
             return False, f"@{recipient} is not available"  # blocks never leak
+        # V103: an owner and their own agent always connect — the audience
+        # gates (recipient's inbound AND a sender-agent's outbound rule)
+        # govern OUTSIDERS opening a conversation, never the owner's own tool.
+        # Placed after the block check so an explicit block still overrides.
+        if self._agent_owner_pair(sender, recipient):
+            return True, ""
         if not self._gate_allows(r.privacy.messaging, gatekeeper=recipient, other=sender):
             return False, (f"@{recipient} accepts messages from "
                            f"{r.privacy.messaging.value} only")
@@ -124,6 +133,11 @@ class PrivacyService:
             return False, f"@{target} is not available"
         if self.blocked_between(actor, target):
             return False, f"@{target} is not available"
+        # V103: the owner↔agent bond overrides the gate here too — an agent's
+        # auto_dm room PULLS its owner in, so a strict add_to_group on the
+        # owner must not stop their own agent from starting that chat.
+        if self._agent_owner_pair(actor, target):
+            return True, ""
         if not self._gate_allows(t.privacy.add_to_group, gatekeeper=target, other=actor):
             return False, (f"@{target} can be added to groups by "
                            f"{t.privacy.add_to_group.value} only")
@@ -213,6 +227,20 @@ class PrivacyService:
         return False
 
     # ---------------------------------------------------------------- helpers
+    def _agent_owner_pair(self, a: str, b: str) -> bool:
+        """True if one of ``{a, b}`` is an agent and the other is its
+        responsible member (V103). The owner↔agent bond always connects for
+        the messaging + add-to-group gates: the owner's own agent is not an
+        outsider knocking, and neither is the owner to their agent. Block is
+        checked before this everywhere it's used, so an explicit block still
+        wins. (Profile surfaces have their own owner ride-along in
+        ``profile_allows``; this is only the strict gates.)"""
+        for agent, other in ((a, b), (b, a)):
+            if (self.directory.kind(agent) is UserKind.AGENT
+                    and self.directory.owner_of(agent) == other):
+                return True
+        return False
+
     def _gate_allows(self, aud: Audience, *, gatekeeper: str, other: str) -> bool:
         """STRICT gate audience (messaging / add-to-group): no owner
         ride-along on 'agents' (explicit product decision)."""

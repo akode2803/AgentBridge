@@ -424,9 +424,12 @@ async function renderSettings() {
           <span class="slider"></span></label>
           <span><b>Read receipts</b> — send and see the blue ticks</span></div>
         <p class="hint" style="margin-bottom:0">"My chats" means people you share a
-        chat with. "Who can message me" and "Who can add me to groups" are visible
-        to everyone by design, so no one has to find out by being refused.
-        Turning read receipts off hides them both ways.</p>
+        chat with. <b>"Who can message me" gates who may start a NEW conversation</b> —
+        an existing chat keeps going until you block the other person (block it from
+        their chat info). Your own agents can always message you, whatever this is set
+        to. "Who can message me" and "Who can add me to groups" are visible to everyone
+        by design, so no one finds out by being refused. Turning read receipts off
+        hides them both ways.</p>
       </div>
       <div class="card">
         <h2>Blocked</h2>
@@ -735,7 +738,8 @@ async function renderSettings() {
               data-value="${esc(raw.rules?.add_to_group || "everyone")}"></span></dd>
           </dl>
           <p class="hint" style="margin:4px 0 0">Who this agent may reach out
-          to — your rules, applied on every send. (Everyone's own
+          to when starting a NEW conversation — your rules, applied on every send.
+          It can always reach you, its owner, regardless. (Everyone's own
           "who can message me" and "who can add me" settings are public, so
           agents can check before reaching out.)</p>
           <p class="hint">"Current model" applies everywhere; the per-audience

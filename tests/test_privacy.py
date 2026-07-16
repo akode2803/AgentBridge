@@ -128,6 +128,36 @@ def test_messaging_audience_nobody(world):
         world["sudhir"].create_dm("aryan")
 
 
+def test_agent_and_owner_always_connect(world):
+    """V103 ("Allow claude to dm me"): the owner↔agent bond overrides the
+    messaging audience in BOTH directions — the audience gates strangers, not
+    the owner's own tool. Block still wins."""
+    aryan, claude = world["aryan"], world["claude"]
+    # the strictest possible settings on BOTH sides
+    aryan.set_privacy({"messaging": "nobody"})          # nobody may DM aryan
+    aryan.set_agent_rules("claude", {"messaging": "nobody"})  # claude msgs no one
+    dm = claude.create_dm("aryan")                      # ...yet reaches its owner
+    assert set(dm.members) == {"aryan", "claude"}
+    dm2 = aryan.create_dm("claude")                     # and the owner reaches it
+    assert set(dm2.members) == {"aryan", "claude"}
+    # a stranger is still refused (the gate still gates outsiders)
+    with pytest.raises(PermissionDenied):
+        world["sudhir"].create_dm("aryan")
+    # but an explicit block DOES override the bond
+    aryan.block("claude")
+    ok, _ = aryan.privacy.can_message("claude", "aryan")
+    assert ok is False
+
+
+def test_agent_and_NON_owner_still_gated(world):
+    """The bond is specific to the OWN owner — coco (fable's) gets no free
+    pass to aryan when aryan accepts nobody."""
+    aryan, coco = world["aryan"], world["coco"]
+    aryan.set_privacy({"messaging": "nobody"})
+    with pytest.raises(PermissionDenied):
+        coco.create_dm("aryan")                         # not coco's owner
+
+
 def test_agent_outbound_rules_gate_the_agent(world):
     aryan, claude = world["aryan"], world["claude"]
     aryan.set_agent_rules("claude", {"messaging": "nobody"})
