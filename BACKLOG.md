@@ -1670,6 +1670,14 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   untouched. Verified at 800 (nav 338/chat 402), 900 (438/402), 1200
   (saved 560 honored/580), and 375 mobile (full width) — everything
   fits, composer visible.
+- [ ] **V123 update_apply's dirty-rail counts UNTRACKED files** (found
+  live 2026-07-16 rolling the fleet to .170): `git status --porcelain`
+  output includes `??` entries, so one stray file in the checkout
+  ("Detailed prompt.txt") blocks "Update now" forever with "local
+  changes on this machine". An ff-merge never touches untracked files
+  unless the incoming tree wants to CREATE the same path — filter the
+  porcelain scan to tracked modifications (or check name collisions
+  against the incoming diff). Small, api_updates._apply_blocker.
 - [ ] **V121 Agent-running visibility, round 2** (self chat 21:54,
   post-R83: "even after that round, its hard to tell if an agent is
   running, especially if the chat closes; the working messages still

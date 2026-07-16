@@ -17,7 +17,11 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.165** (fleet live on it).
+  `gui/__init__.py` in R26). Currently **v0.24.170** (fleet live on it;
+  R85 restart hardening, R84 RLS cutover CLOSED on both machines —
+  member creds everywhere, secret key retired to the dashboard; R86–R88
+  polish: live message-info/About refresh, group @ badge, narrow-desktop
+  fix, agent time-grounding).
   **R84 (2026-07-16): per-member Supabase RLS is BUILT (trust model
   v2.2 — account creation IS membership; no owner minting, no admission
   prompts; the mesh is as private as its bootstrap config). ⚠ ARYAN'S
@@ -235,11 +239,12 @@ now primary. What's left is a new session's work:
    (folder-vs-cloud choice), installers, quit-on-window-close, and the
    mobile/PWA humans-only surface. See packaging notes below + the
    `agentbridge-account-model` memory.
-2. **Cloud follow-ups now that Supabase is primary:** per-member Supabase auth
-   + real RLS policies (currently secret-key-only, RLS on with no policies).
-   The state-latency lever is DONE (R29 mirror: ~12 ms); if the doc count ever
-   grows large, the next levers are a delta refresh on `ab_docs.updated` (+
-   periodic full pull for deletes) and persisting the mirror across restarts.
+2. **Cloud follow-ups now that Supabase is primary:** per-member auth + RLS
+   SHIPPED R84 and the cutover is CLOSED (2026-07-16: both machines on member
+   credentials, secret key retired to the dashboard; docs/SECURITY_RLS.md is
+   the design record + runbook). Remaining phase 2: private poke channel,
+   per-doc write ownership, per-owner ask lanes. The delta refresh lever
+   shipped R76.
 3. **Deferred features:** agent swarms (multiple instances of one agent, each
    with its own model — R16 registry is shaped for it) and remaining
    WhatsApp-parity polish. (Out-of-band key fingerprint verification shipped
