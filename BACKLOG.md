@@ -1791,23 +1791,35 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   if it claims "running" but this process isn't running it, finish it
   as interrupted. Check the stop path too (a stop that kills mid-run
   should finish the doc as "Stopped").
-- [ ] **V127 Auto-lock fires right after signing in** (Aryan, direct
-  chat 2026-07-16, "minor — but make sure no regressions"): the idle
-  clock (main.js lastActive) only bumps on real input events, so an
-  AUTOMATIC re-sign-in (V122 restore, zero keystrokes) leaves it
-  running from before the restart — the 5-min window can expire the
-  moment the app becomes usable. Fix: treat auth transitions as
-  activity — bump on successful unlock, login/signup, and the
-  refresh() transition from signed-out to signed-in. Discrete events
-  only, never the poll, so the idle timer keeps working.
+- [x] **V127 Auto-lock fires right after signing in** (Aryan, direct
+  chat 2026-07-16, "minor — but make sure no regressions") → **DONE
+  R92 (v0.24.174)**. The idle clock (main.js lastActive) only bumped
+  on real input events, so an AUTOMATIC re-sign-in (V122 restore, zero
+  keystrokes) left it running from before the restart — the 5-min
+  window expired the moment the app became usable. refresh() now
+  treats the discrete deltas signed-out→signed-in and locked→unlocked
+  as activity (never the poll itself — the idle timer keeps working).
+  RIDER: the V111 "unlocking elsewhere heals this window" comment was
+  aspirational — nothing removed a stale lock page; the same refresh
+  pass now closes it, with a lockPending flag shielding the optimistic
+  cover a manual lock raises before its POST lands. Live-verified on a
+  rig with a 100s-stale clock + an external unlock: healed to the app,
+  STAYED open (pre-fix: re-lock ≤5s), fresh 60s window re-locked it.
+  (Test note: hidden preview tabs throttle setInterval toward 1/min —
+  the sweep fires late in a background window; visible windows sweep
+  every 5s. Harmless: the lock covers the API regardless.)
 - [ ] **V128 livefeed without `id` skips the membership filter**
   (found preparing the V121 observation, 2026-07-16): GET
   /api/mesh/livefeed with no chat id returns every running agent's
   run-feed doc mesh-wide — chat_id + activity lines from rooms the
   caller isn't a member of (visibility=membership violation; typing
   docs in the same lane leak too). No frontend caller hits the no-id
-  lane today (chat.js always passes id). Fix: apply the same
-  membership filter per feed when id is absent.
+  lane today (chat.js always passes id). → **DONE R92 (v0.24.174)**:
+  the no-id lane filters per feed through the same membership check
+  (memoized per chat; an unreadable chat reads as "not mine"; an empty
+  chat_id never passes). Real-HTTP test: a run doc + typing heartbeat
+  in a room the caller isn't in never surface; the own-room run does,
+  with and without the id param.
 - [x] **V122 ⚠ Restart app, round 3** → **DONE R85 (v0.24.167)**. The
   breadcrumb log earned its keep — it caught FOUR distinct causes:
   (1) **the sign-out was real and PERMANENT**: `restore()` treated a
