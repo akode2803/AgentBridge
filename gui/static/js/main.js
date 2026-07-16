@@ -22,6 +22,13 @@ async function refresh(rerender) {
   } catch {
     return;  // server unreachable; next poll retries
   }
+  // V111: locked = the lock page and nothing else (no SSE churn, no page
+  // renders over it) — the poll keeps watching /api/state, which answers
+  // while locked, so unlocking elsewhere heals this window too
+  if (App.state.app_lock?.locked) {
+    V.renderLockPage();
+    return;
+  }
   // open/close the SSE stream to match the current server + auth (inert on v1)
   syncRealtime();
   renderChrome();
@@ -242,14 +249,48 @@ window.addEventListener("hashchange", route);
     const t0 = Date.now();
     (function tick() {
       // V122: 45s cap — a restart's down window runs ~20s, and dropping the
-      // cover onto a bare shell mid-boot read as "the app signed out"
-      if (!Mesh.state && App.page === "chats" && Date.now() - t0 < 45000) {
+      // cover onto a bare shell mid-boot read as "the app signed out".
+      // V111: the lock page IS a real first view — fade onto it.
+      if (!Mesh.state && !document.getElementById("lock")
+          && App.page === "chats" && Date.now() - t0 < 45000) {
         setTimeout(tick, 80); return;
       }
       b.classList.add("done");
       setTimeout(() => b.remove(), 350);
     })();
   })();
+  // ---- V111 app lock: the client-side triggers ------------------------
+  // any endpoint refusing with `locked` raises the screen (api.js event)
+  document.addEventListener("ab:locked", () => V.renderLockPage());
+  // manual lock — the settings card's "Lock now" button and Ctrl+L
+  const lockNow = async () => {
+    V.renderLockPage();                    // cover FIRST, then tell the server
+    try { await api("/api/applock/lock", {}); } catch { /* poll heals */ }
+    if (App.state?.app_lock) App.state.app_lock.locked = true;
+  };
+  window.lockAppNow = lockNow;
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "l"
+        && App.state?.app_lock?.enabled && !document.getElementById("lock")) {
+      e.preventDefault();
+      lockNow();
+    }
+  });
+  // idle auto-lock: user input bumps the clock; a slow sweep compares it
+  // to the owner-set window (0 = manual only)
+  let lastActive = Date.now();
+  const bump = () => { lastActive = Date.now(); };
+  for (const ev of ["pointerdown", "keydown", "wheel", "mousemove"]) {
+    document.addEventListener(ev, bump, { capture: true, passive: true });
+  }
+  setInterval(() => {
+    const lk = App.state?.app_lock;
+    if (!lk?.enabled || lk.locked || document.getElementById("lock")) return;
+    if (lk.autolock_min > 0
+        && Date.now() - lastActive > lk.autolock_min * 60000) {
+      lockNow();
+    }
+  }, 5000);
   // Local /api/state poll — fixed cadence (the user knob retired in V110:
   // this only hits our own localhost server's in-memory mirror; every cadence
   // that costs anything is profile-driven in the transport layer since R76).

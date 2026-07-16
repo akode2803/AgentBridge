@@ -216,5 +216,102 @@ function showRecoveryCode(code) {
   });
 }
 
+// ---- V111 app lock — the locked screen -------------------------------------
+// A separate FULL PAGE (never a modal over visible content), same visual
+// family as the sign-in page: boot identity on top, one card, the 0fr error
+// row, fade in/out. Wrong passphrase shakes the card (WhatsApp). Unlock
+// re-renders the app UNDER the cover first, then fades it away — the reveal
+// lands on fresh content, never a skeleton.
+function renderLockPage(force = false) {
+  if ($("#lock") && !force) return;
+  closeModal();   // nothing may float above the lock
+  document.querySelectorAll(".msg-menu, .mem-menu, .csel-pop")
+    .forEach((m) => m.remove());
+  let root = $("#lock");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "lock";
+    document.body.appendChild(root);
+  }
+  root.innerHTML = `
+    <div class="auth-inner">
+      <div class="boot-glyph">
+        <svg viewBox="0 0 32 32" width="34" height="34"><path d="M4 22c3.5-8 20.5-8 24 0M4 22v-4M28 22v-4" stroke="white" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+      </div>
+      <div class="boot-title">AgentBridge</div>
+      <div class="auth-card lock-card">
+        <div class="lock-badge">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        </div>
+        <div class="lock-title">App is locked</div>
+        <label class="auth-fld"><span>Passphrase</span>
+          <input type="password" id="lock-pass" autocomplete="current-password"></label>
+        <div class="auth-err" id="lock-err" role="alert"><div><span></span></div></div>
+        <button class="primary auth-go" id="lock-go">
+          <span class="spin-sm" id="lock-spin" hidden></span>
+          <span>Unlock</span>
+        </button>
+        <button class="lock-forgot" id="lock-forgot">Forgot the passphrase?</button>
+        <div class="auth-err dim" id="lock-hint"><div><span>Your account
+          password also unlocks. Failing both: close the app, delete
+          applock.json from the config folder, and start it again.</span></div></div>
+      </div>
+      <div class="boot-note">
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        End-to-end encrypted
+      </div>
+    </div>`;
+  const passIn = $("#lock-pass");
+  const errBox = $("#lock-err");
+  const setErr = (msg) => {
+    errBox.querySelector("span").textContent = msg;
+    errBox.classList.toggle("show", !!msg);
+  };
+  passIn.addEventListener("input", () => setErr(""));
+  $("#lock-forgot").addEventListener("click", () => {
+    $("#lock-hint").classList.toggle("show");
+  });
+  const go = async () => {
+    const btn = $("#lock-go");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const spin = $("#lock-spin");
+    if (spin) spin.hidden = false;
+    try {
+      const r = await api("/api/applock/unlock", { passphrase: passIn.value })
+        .catch(() => ({ error: "The app isn't reachable — try again" }));
+      if (r.error) {
+        setErr(r.error);
+        const card = root.querySelector(".auth-card");
+        card.classList.remove("shake");
+        void card.offsetWidth;                 // restart the animation
+        card.classList.add("shake");
+        passIn.select();
+        passIn.focus();
+        return;
+      }
+      // unlocked: refresh the app UNDER the cover, THEN fade it away
+      Mesh.state = null;                       // never trust pre-lock caches
+      try { await V.refresh(true); } catch { /* the poll heals */ }
+      closeLockPage();
+    } finally {
+      btn.disabled = false;
+      if (spin) spin.hidden = true;
+    }
+  };
+  $("#lock-go").addEventListener("click", go);
+  passIn.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  passIn.focus();
+}
+
+function closeLockPage() {
+  const el = $("#lock");
+  if (!el) return;
+  el.classList.add("auth-closing");
+  setTimeout(() => el.remove(), 260);
+}
+
 V.renderAuthPage = renderAuthPage;
 V.closeAuthPage = closeAuthPage;
+V.renderLockPage = renderLockPage;
+V.closeLockPage = closeLockPage;

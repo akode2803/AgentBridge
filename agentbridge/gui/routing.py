@@ -41,10 +41,18 @@ class Response:
 def authed(fn):
     """Endpoints that need a signed-in session. The handler receives the
     live Mesh as a third argument so it can't forget the check. Raw-body
-    handlers get their extra ``raw`` argument passed through."""
+    handlers get their extra ``raw`` argument passed through.
+
+    V111: the app lock gates HERE, so it covers every data endpoint in one
+    place — a lock that only covered the window would be cosmetic (the
+    localhost API would still answer). The ``locked`` flag lets the client
+    tell this apart from a sign-out."""
 
     @functools.wraps(fn)
     def wrapper(app, req, *args):
+        lock = getattr(app, "lock", None)
+        if lock is not None and lock.locked:
+            return {"error": "App is locked", "locked": True}
         mesh = app.mesh
         if mesh is None:
             return {"error": "Sign in first"}

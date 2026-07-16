@@ -64,6 +64,12 @@ async function renderChats(force) {
   try {
     Mesh.state = await api("/api/mesh/state");
   } catch { return; }
+  // V111: locked is not signed-out — never cache the refusal as state or
+  // paint "Start the mesh" over it (api.js already raised the lock screen)
+  if (Mesh.state && Mesh.state.locked) {
+    Mesh.state = null;
+    return;
+  }
   // navigated away while the state was in flight (e.g. quick chat→settings):
   // don't let this stale render paint the empty chat state over the new page
   if (App.page !== "chats") return;

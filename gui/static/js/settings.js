@@ -158,6 +158,133 @@ function startSettingsPoll() {
 }
 // ----------------------------------------------------------------------------
 
+// ---- V111 app lock — the Privacy card + its flows ---------------------------
+// Device-local (nothing rides the mesh): the card renders from
+// App.state.app_lock, the flows POST /api/applock/*. Changing or removing
+// the passphrase asks for the current one (the account password also works).
+const AUTOLOCK_OPTS = [[0, "Only when I lock manually"], [1, "After 1 minute"],
+  [5, "After 5 minutes"], [15, "After 15 minutes"], [60, "After 1 hour"]];
+
+function appLockCard() {
+  const lk = App.state?.app_lock || {};
+  return `
+    <div class="card" id="applock-card">
+      <h2>App lock</h2>
+      ${lk.enabled ? `
+      <div class="row" style="justify-content:space-between">
+        <span><b>App lock is on</b> — this window asks for a passphrase.</span>
+        <button id="al-lock-now">Lock now</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <span style="flex:none">Auto-lock</span>
+        <select id="al-auto">
+          ${AUTOLOCK_OPTS.map(([v, label]) => `<option value="${v}"
+            ${v === (lk.autolock_min || 0) ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="al-change">Change passphrase</button>
+        <button id="al-off">Turn off</button>
+      </div>` : `
+      <div class="row"><button class="primary" id="al-setup">Set up app lock</button></div>`}
+      <p class="hint" style="margin-bottom:0">A passphrase for this app window,
+      asked at launch${lk.enabled ? "" : " once set up"} — an extra local layer
+      on top of this signed-in machine, separate from your account password
+      (which also unlocks). Stored only on this device; your agents keep
+      working while locked. Ctrl+L locks any time.</p>
+    </div>`;
+}
+
+// one modal for all three flows: fields = [[id, label], ...]. The modal OWNS
+// the submit loop — a refusal (mismatch, wrong current, too short) surfaces
+// in place and the typed values survive; success closes it. Resolves true on
+// success, false on cancel.
+function appLockModal(title, fields, action, submit) {
+  return new Promise((resolve) => {
+    const box = openModal(`
+      <div class="cf-title">${esc(title)}</div>
+      ${fields.map(([id, label]) => `
+        <label class="auth-fld" style="margin:10px 2px 0"><span>${esc(label)}</span>
+          <input type="password" id="${id}" autocomplete="new-password"></label>`).join("")}
+      <div class="auth-err" id="al-m-err" role="alert"><div><span></span></div></div>
+      <div class="cf-actions">
+        <button class="cf-cancel" id="al-m-cancel">Cancel</button>
+        <button class="cf-go" id="al-m-go" style="background:var(--accent)">${esc(action)}</button>
+      </div>`);
+    box.classList.add("confirm");
+    box.parentElement.classList.add("confirm-scrim");
+    const err = (msg) => {
+      const e = box.querySelector("#al-m-err");
+      e.querySelector("span").textContent = msg;
+      e.classList.toggle("show", !!msg);
+    };
+    box.querySelector("#al-m-cancel").addEventListener("click", () => {
+      closeModal(); resolve(false);
+    });
+    const goBtn = box.querySelector("#al-m-go");
+    const go = async () => {
+      if (goBtn.disabled) return;
+      goBtn.disabled = true;
+      try {
+        const vals = fields.map(([id]) => box.querySelector("#" + id).value);
+        const msg = await submit(vals);      // null/undefined = success
+        if (msg) { err(msg); return; }
+        closeModal();
+        resolve(true);
+      } finally { goBtn.disabled = false; }
+    };
+    goBtn.addEventListener("click", go);
+    box.querySelectorAll("input").forEach((inp, i) => {
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        const next = box.querySelectorAll("input")[i + 1];
+        if (next) next.focus(); else go();
+      });
+      inp.addEventListener("input", () => err(""));
+    });
+    box.querySelector("input")?.focus();
+  });
+}
+
+function wireAppLock() {
+  const card = $("#applock-card");
+  if (!card) return;
+  const refreshCard = async () => {
+    try { App.state = await api("/api/state"); } catch { /* poll heals */ }
+    renderSettings();
+  };
+  const post = async (body) => (await api("/api/applock/set", body)).error || null;
+  $("#al-setup")?.addEventListener("click", async () => {
+    const ok = await appLockModal("Set up app lock",
+      [["al-new", "New passphrase"], ["al-new2", "Repeat it"]], "Turn on",
+      ([a, b]) => a !== b ? "The passphrases don't match"
+        : post({ passphrase: a, autolock_min: 5 }));
+    if (ok) { toast("App lock is on", { check: true }); refreshCard(); }
+  });
+  $("#al-change")?.addEventListener("click", async () => {
+    const ok = await appLockModal("Change the passphrase",
+      [["al-cur", "Current passphrase"], ["al-new", "New passphrase"],
+       ["al-new2", "Repeat it"]], "Change",
+      ([cur, a, b]) => a !== b ? "The passphrases don't match"
+        : post({ passphrase: a, current: cur }));
+    if (ok) toast("Passphrase changed", { check: true });
+  });
+  $("#al-off")?.addEventListener("click", async () => {
+    const ok = await appLockModal("Turn off app lock",
+      [["al-cur", "Current passphrase"]], "Turn off",
+      ([cur]) => post({ passphrase: "", current: cur }));
+    if (ok) { toast("App lock is off", { check: true }); refreshCard(); }
+  });
+  $("#al-lock-now")?.addEventListener("click", () => window.lockAppNow?.());
+  $("#al-auto")?.addEventListener("change", async (e) => {
+    const r = await api("/api/applock/set",
+                        { autolock_min: +e.target.value });
+    if (r.error) { toast(r.error, true); return; }
+    if (App.state?.app_lock) App.state.app_lock.autolock_min = +e.target.value;
+    toast("Auto-lock updated", { check: true });
+  });
+}
+
 // V116: the About page's connection <dl> — built the same way at mount and
 // by the live poller, which swaps ONLY these rows (so the traffic meter and
 // mirror health tick while you watch, without a full repaint wiping the
@@ -308,7 +435,8 @@ async function renderSettings() {
             <span>${esc(meshDn(b))} <span class="hint">@${esc(b)}</span></span>
             <button class="pv-unblock" data-user="${esc(b)}">Unblock</button>
           </div>`).join("") : '<p class="hint" style="margin-bottom:0">No one is blocked. Block someone from their chat info page.</p>'}
-      </div>` : ""}`;
+      </div>` : ""}
+      ${appLockCard()}`;
   } else if (section === "chats") {
     html = `${back}<h1>Chats</h1>
       <div class="card">
@@ -788,6 +916,7 @@ async function renderSettings() {
       renderSettings();
     });
   });
+  wireAppLock();   // V111: the Privacy section's App lock card
   // edit display name inline (username is fixed — the identity key). The ✎ swaps
   // the name line for an input + Save/Cancel; Enter saves, Escape cancels.
   const nameEdit = $("#acct-name-edit");

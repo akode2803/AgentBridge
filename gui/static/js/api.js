@@ -10,7 +10,13 @@ export async function api(path, body) {
     body: JSON.stringify(body),
   };
   const r = await fetch(path, opts);
-  return r.json();
+  const out = await r.json();
+  // V111: ANY endpoint refusing because the app is locked raises the lock
+  // screen — a DOM event, so this leaf module never imports a view
+  if (out && out.locked && out.error) {
+    document.dispatchEvent(new CustomEvent("ab:locked"));
+  }
+  return out;
 }
 
 export async function openTarget(target) {

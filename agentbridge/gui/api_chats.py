@@ -50,6 +50,7 @@ def bridge_state(app: GuiApp, req) -> dict:
     mesh = app.mesh
     ctl = (mesh.tx.get_doc("control.json") if mesh else
            app.directory0.tx.get_doc("control.json")) or {}
+    lock = getattr(app, "lock", None)   # V111: the lock page keys off this
     return {
         "configured": True,
         "v": 2,
@@ -58,6 +59,8 @@ def bridge_state(app: GuiApp, req) -> dict:
         "paused": bool(ctl.get("paused")),
         "user": app.user,
         "connection": _connection(app),
+        "app_lock": lock.status() if lock is not None
+        else {"enabled": False, "locked": False, "autolock_min": 0},
     }
 
 
@@ -113,6 +116,12 @@ def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
 def state(app: GuiApp, req) -> dict:
     """The boot/sidebar payload. Logged out: enough for the login screen.
     Logged in: the privacy-filtered directory + my chats with unread info."""
+    # V111: this endpoint is deliberately pre-auth (the login screen reads
+    # it), so the authed gate doesn't cover it — refuse explicitly while
+    # locked; it carries the whole directory + chat list
+    lock = getattr(app, "lock", None)
+    if lock is not None and lock.locked:
+        return {"error": "App is locked", "locked": True}
     out: dict = {
         "available": True,
         "v": 2,

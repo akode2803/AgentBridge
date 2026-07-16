@@ -373,6 +373,55 @@ body { display: flex; flex-direction: column; }
 .auth-go { width: 100%; margin-top: 4px; }
 #auth .hint { margin: 12px 0 0; font-size: 11.5px; }
 
+/* ---- the app-lock screen (V111) --------------------------------------------
+   Same family as #auth: full page riding the boot identity, fade in on
+   mount, fade away on unlock (auth.js removes the node after the
+   transition). Sits ABOVE #auth (they never co-show, but deterministic)
+   and under #boot, so the boot cover fades onto a locked launch too. */
+#lock {
+  position: fixed; inset: 0; z-index: 160;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); overflow-y: auto;
+  /* the COVER itself never animates IN: opacity/keyframes only advance
+     when the compositor produces frames, so a throttled (hidden/minimized)
+     window would hold a fading cover transparent over stale content until
+     restored. Opaque at once — the fluid entry lives on .auth-inner below,
+     where a stalled frame just means a solid blank cover. The exit keeps
+     the fade (unlock reveals fresh, authorized content). */
+  transition: opacity .26s ease;
+}
+#lock.auth-closing { opacity: 0; pointer-events: none; }
+#lock .auth-inner { animation: lock-rise .3s ease; }
+@keyframes lock-rise {
+  from { opacity: 0; transform: translateY(10px); }
+}
+.lock-badge {
+  width: 46px; height: 46px; border-radius: 50%; margin: 2px auto 10px;
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center;
+  /* a gentle spring on mount — the one playful beat on an austere page */
+  animation: lock-pop .34s cubic-bezier(.34, 1.56, .64, 1);
+}
+@keyframes lock-pop { from { transform: scale(.55); opacity: 0; } }
+.lock-title {
+  text-align: center; font-weight: 600; font-size: 15px; margin-bottom: 14px;
+}
+/* wrong passphrase: the card shakes (WhatsApp), the error row expands */
+.auth-card.shake { animation: lock-shake .4s ease; }
+@keyframes lock-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.lock-forgot {
+  border: none; background: none; color: var(--text-dim); font: inherit;
+  font-size: 12px; margin-top: 12px; cursor: pointer; align-self: center;
+}
+.lock-forgot:hover { color: var(--text); background: none; }
+/* the forgot hint reuses the 0fr expand, in calm ink instead of error red */
+.auth-err.dim span { color: var(--text-dim); padding-top: 8px; }
+
 /* first-boot sidebar skeleton: slim indeterminate bar + shimmer rows while
    the very first mesh state loads (cloud roots warm their mirror ~a second) */
 .side-skel { padding: 2px 4px; }

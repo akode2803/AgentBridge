@@ -170,6 +170,9 @@ def avatar(app, req):
     """GET ?user= | ?chat= — profile photos are matrix-gated (photo
     audience), group photos are member-gated. NOT @authed by design: it
     branches, but every branch checks the session itself."""
+    lock = getattr(app, "lock", None)   # V111: no photos while locked
+    if lock is not None and lock.locked:
+        return {"error": "App is locked", "locked": True}
     mesh = app.mesh
     if mesh is None:
         return {"error": "Sign in first"}
@@ -307,6 +310,9 @@ def open_target(app, req) -> dict:
     missing in v2, leaving them dead). Targets are FIXED names, never a
     client-supplied path: 'home' = the local config dir, 'shared' = a folder
     mesh root. A cloud root has no folder to open."""
+    lock = getattr(app, "lock", None)   # V111: opens Explorer — locked = no
+    if lock is not None and lock.locked:
+        return {"error": "App is locked", "locked": True}
     target = (req.data.get("target") or "").strip()
     if target == "home":
         desktop.open_path(app.home)

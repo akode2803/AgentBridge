@@ -21,6 +21,7 @@ from ..mesh.eventbus import Subscription
 from ..mesh.keyring import KeyStore
 from ..mesh.service import Mesh
 from ..transport import make_transport
+from .applock import AppLock
 
 __all__ = ["GuiApp"]
 
@@ -73,6 +74,9 @@ class GuiApp:
         self._lock = threading.RLock()
         self._sync_thread: threading.Thread | None = None
         self._subs: set[Subscription] = set()
+        # V111 app lock: an optional local passphrase gate — starts LOCKED
+        # whenever configured (launch always asks); routing.authed enforces it
+        self.lock = AppLock(self.home)
 
     # ------------------------------------------------------------- session
     @property

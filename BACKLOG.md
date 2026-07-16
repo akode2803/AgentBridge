@@ -1568,16 +1568,40 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   worktree rig: About = Connection/Updates/Storage only, account page
   intact, SSE + safety-net poll ticking, zero rejections.
 
-- [ ] **V111 App lock (like WhatsApp)** (Aryan, chat 2026-07-16) — an
-  extra LOCAL lock layer over the machine-trust model: the signed-in GUI
-  is open to anyone with the Windows profile (that's by design — R75's
-  sign-out password is the only backstop). Add an optional app lock:
-  a PIN/passphrase gate when the app window opens (+ auto-lock after
-  idle), purely local, does NOT replace the account password. Design
-  points when the round runs: where the secret lives (DPAPI-wrapped like
-  the keystore), lock scope (GUI window vs the localhost API — the API
-  must be covered or the lock is cosmetic), and agents keep running
-  while locked. Came out of the "how do you access my account" answer.
+- [x] **V111 App lock (like WhatsApp)** → **DONE R90 (v0.24.172)**.
+  Aryan's rails: separate NEW screen only + fluid animations ("we did a
+  great job with sign in page eventually"). Secret = a local scrypt
+  VERIFIER (salt+hash, stdlib hashlib.scrypt) at <home>/applock.json —
+  a verifier needs no DPAPI wrap; state is per-process and boots LOCKED
+  whenever configured. **The API is covered, not just the window** (the
+  backlog's rail): routing.authed refuses every data endpoint while
+  locked ({error, locked:true} — distinguishable from sign-out), plus
+  explicit gates on the deliberately-preauth surfaces (/api/mesh/state,
+  avatar, open_target, SSE) AND the session mutators (signup/login/
+  logout — a signup would swap the session UNDER the lock). /api/state
+  still answers (the lock page polls it; carries app_lock status).
+  Unlock is public + brute-force backoff (3 free tries then 1s,2s,4s…
+  capped 30s); the ACCOUNT password also unlocks (forgot-recovery — it
+  already grants a logout/login swap, so zero security lost). Frontend:
+  full-page #lock in the auth-page family (glyph identity, card,
+  0fr error rows, in-button spinner, fade-out reveal that re-renders
+  the app UNDER the cover first); wrong passphrase shakes the card and
+  selects the input; the COVER itself never animates in (a throttled
+  minimized window holds CSS animations/transitions at their first
+  frame — a fading cover would sit transparent over stale content; the
+  entry motion lives on the inner card instead, found live when the
+  preview renderer froze). Client triggers: idle auto-lock (0/1/5/15/60
+  min, 5s sweep), Ctrl+L, "Lock now"; api.js raises ab:locked on any
+  refusal so every surface converges on the lock screen; the boot cover
+  fades onto a locked launch. Settings → Privacy card: setup/change/
+  turn-off modals that keep typed values and surface refusals in place
+  (first cut re-opened an empty modal — caught live), auto-lock select.
+  Agents keep running (harness processes are separate by construction).
+  +3 tests (unit roundtrip, backoff, endpoint flow incl. API refusals);
+  full suite 501 green. Live-verified end-to-end on the rig: boot-locked
+  server start, opaque cover with empty content behind, mismatch/wrong-
+  current flows, backoff messages, Ctrl+L, auto-lock firing on idle,
+  unlock reveal, turn off; screenshots of the lock screen + Privacy card.
 - [ ] **V112 Privacy-settings copy must match V103's semantics** (Aryan,
   chat 2026-07-16, rides [V103]) — if V103 turns the messaging-privacy
   "nobody" into effectively "nobody NEW" (gating DM *creation*, not
@@ -1690,6 +1714,16 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   untouched. Verified at 800 (nav 338/chat 402), 900 (438/402), 1200
   (saved 560 honored/580), and 375 mobile (full width) — everything
   fits, composer visible.
+- [ ] **V124 signup swaps a signed-in session WITHOUT a password**
+  (found auditing V111's lock coverage, 2026-07-16): V68 password-gated
+  LOGOUT because the next sign-in claims this machine's agents — but
+  POST /api/mesh/signup on a signed-in app detaches the session and
+  adopts the fresh account with no credential at all (context.signup).
+  A passer-by at an unlocked window can swap the session via signup
+  where logout would have refused them. Fix: refuse signup while a
+  session exists (the UI never offers it), or gate it on the signed-in
+  user's password like logout. While LOCKED it now refuses (R90), but
+  the unlocked hole remains.
 - [ ] **V123 update_apply's dirty-rail counts UNTRACKED files** (found
   live 2026-07-16 rolling the fleet to .170): `git status --porcelain`
   output includes `??` entries, so one stray file in the checkout
