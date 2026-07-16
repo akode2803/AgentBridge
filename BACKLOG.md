@@ -1491,10 +1491,22 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 - [ ] **V92 Reactions polish** — notify the agent on a reaction (it may
   ignore it); an agent READING a reaction should surface differently
   from reading a message.
-- [ ] **V93 Search "searching for" broken** — doesn't display what it's
-  searching for.
+- [x] **V93 Search "searching for" broken** — doesn't display what it's
+  searching for. → **DONE R97 (v0.24.179)**. The web-search run-feed
+  activity line was "Searching the web" with no query (grep already
+  showed "Searching for {detail}"). websearch + web_search (codex)
+  now read "Searching the web for {detail}"; step_line trims a
+  dangling connector when a step has no detail, so an empty case reads
+  clean ("Searching the web" / "Searching", never "… for"). Unit test
+  + prompt-manager check.
 - [ ] **V94 Reasoning effort PER CHAT** (like the per-chat model/context).
-- [ ] **V95 Single tick = same length as double ticks** (receipt glyph).
+- [x] **V95 Single tick = same length as double ticks** (receipt glyph).
+  → **DONE R97 (v0.24.179)**. The single tick used a 14-wide viewBox,
+  the double a 22-wide, both forced to 15px — the lone check rendered
+  larger and the glyph box jumped width as a message went sent →
+  delivered. The single now shares the double's viewBox AND its first
+  check's geometry (one tick becomes two of the same size in the same
+  box, WhatsApp). Measured both at 15px on a rig.
 - [ ] **V96 Group reply intelligence** — if the default group reply
   policy becomes "every message", how well can the agent infer the
   intended recipient without a tag? Aim for a seamless-group system.
@@ -1518,7 +1530,16 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 
 - [ ] **V102 Composer disappears for blocked contacts** (18:13) — verify
   intended: a blocked DM should probably show a "you blocked X" affordance
-  with Unblock, not a vanished composer.
+  with Unblock, not a vanished composer. TRIAGE R97 (2026-07-16): blocking
+  (privacy.block) does NOT drop DM membership, so the composer's isMember
+  guard in chat.js is not the cause — the "disappears" mechanism needs a
+  live two-user DM + block to pin down (posting raises PermissionDenied
+  "@X is not available"; blocked_between kills the DM both ways). The
+  desired affordance ("you blocked @X · Unblock" where the composer sat)
+  needs a `blocked` flag on the DM chat_json — the main /api/mesh/state
+  doesn't carry blocked today (only /api/mesh/me does). Its own small
+  round: add the flag in serialize.chat_json, render the affordance,
+  verify on a rig.
 - [ ] **V103 Privacy vs DM creation (cluster)** (18:14 + 18:46) — "Allow
   claude to dm me"; "nobody in privacy rules gate dm creation or messaging
   itself — since dm creation is what is intended. block would already work
@@ -1529,15 +1550,26 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 - [ ] **V104 Agent parity audit: forward / message-info / copy / edit**
   (18:16) — check which of these exist for AGENT-authored messages and
   close the gaps (extends docs/GUI_AGENT_PARITY.md).
-- [ ] **V105 Loading spinner when an agent is stopped** (18:17) — the Stop
-  button needs immediate visible feedback.
+- [x] **V105 Loading spinner when an agent is stopped** (18:17) — the Stop
+  button needs immediate visible feedback. → **DONE R97 (v0.24.179)**.
+  The button used to just disable (dim the X). On click it now becomes
+  a spinner (full opacity — reads as "working on it") and the activity
+  line flips to "Stopping…" instantly; the next feed poll clears the
+  bubble when the run truly ends, and a failed stop rolls the button
+  back to the X. Verified the post-click DOM on a rig (13px animated
+  spinner, "Stopping…" label).
 - [ ] **V106 Question: how do agent privacy rules affect their owner?**
   (18:17) — answer from code (R6 matrix + D19), document in the answer.
 - [ ] **V107 An agent should KNOW it was stopped** (18:20) — surface the
   stop into the agent's next-run context (pairs with V87 short-term
   memory).
-- [ ] **V108 Ellipsis for long messages in permission prompts** (19:04) —
-  3-dots/clamp when the quoted message is long.
+- [x] **V108 Ellipsis for long messages in permission prompts** (19:04) —
+  3-dots/clamp when the quoted message is long. → **DONE R97
+  (v0.24.179)**. A long quoted message/command in .ask-detail could
+  push Allow/Deny off-screen. It clamps to 3 lines with an ellipsis
+  (-webkit-line-clamp); the full text stays on hover (title=) and the
+  popup still carries the exact input. Measured: a 200-word detail
+  clamps to 3 lines, overflow hidden.
 - [x] **V109 ⚠ Permission-prompt overhaul escalation** (19:08) →
   **DONE R83 (v0.24.162)** — Aryan's architecture shipped: the app asks
   the HARNESS directly. The channel is a local heartbeat file
@@ -1783,14 +1815,13 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   'aryan'" — captured live on the rig). Verified with an instrumented
   page through real rig restarts + a hidden-root blind boot; heal to
   chats 4s after the root returned, zero input. Suite 506 (+1).
-- [ ] **V131 the app window never reloads after an update** (found
-  rolling .175, 2026-07-16): nothing reloads the Edge window when the
-  server's gui_version changes — after an update+restart the page
-  keeps running the OLD frontend until a manual reload (the Settings
-  restart button reloads its own window; remote rolls and the other
-  machine's window don't). Fix: refresh() compares App.state
-  .gui_version to the version the page loaded with and does ONE
-  location.reload() on mismatch (guard against loops).
+- [x] **V131 the app window never reloads after an update** (found
+  rolling .175, 2026-07-16) → **DONE R96 (v0.24.178)**. refresh()
+  remembers the first gui_version the page saw; a different one on a
+  later poll arms a ONE-SHOT location.reload(), taken only at a safe
+  moment (no open modal, no half-typed composer text) so it never
+  interrupts a thought. Live-verified with a version-flipping rig: the
+  page reloaded itself on 0.0.1 → 0.0.2 and came back signed in.
 - [ ] **V126 Slow .pyw double-click start** (Aryan, direct chat
   2026-07-16): launching via the .pyw shows nothing for a while —
   ideally the app window + loading screen appear immediately and the
@@ -1799,6 +1830,17 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   first paint, then move it behind the first served page. DECISION
   (Aryan 2026-07-16): reuse the SAME boot screen for this and V125 —
   one loading surface for cold start and post-restart reconnect.
+  → **DONE R96 (v0.24.178)**. Measured: the cold boot spent ~1s
+  importing the mesh/crypto/cloud stack BEFORE binding the port and
+  spawning the window (transport warm-up was NOT the cost — already
+  async). New gui/fastboot.py front door: parse CLI, resolve root,
+  take the R45 lock, BIND the socket (~100ms — early requests queue in
+  the accept backlog), spawn the Edge window, THEN import the heavy
+  .app and hand the pre-bound socket to GuiServer. gui/__init__ exports
+  main lazily (PEP 562). Measured cold: TCP accepted 493ms, first HTTP
+  658ms (was ~1.4s to bind); single-instance guard still holds. The
+  V125 connecting page shows if the heavy chain is slow behind the
+  already-painted window.
 - [x] **V130 login while signed in swaps the session (V124's twin)**
   (found writing V125's login tests, 2026-07-16) → **DONE R95
   (v0.24.177)**. POST /api/mesh/login with ANY valid account's
