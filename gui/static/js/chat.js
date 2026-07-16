@@ -937,7 +937,7 @@ function renderAskBar(chatId, asks, timers) {
         <span class="chat-avatar ask-avatar">${meshAvatarInner(a.agent)}</span>
         <div class="ask-main">
           <div class="ask-head">${head}</div>
-          <div class="ask-detail">${esc(a.detail || "")}</div>
+          <div class="ask-detail" title="${esc(a.detail || "")}">${esc(a.detail || "")}</div>
           ${answerUi}
         </div>
         <button class="ask-close" title="Dismiss — the agent is told no one answered" aria-label="Dismiss">${ICONS.close}</button>
@@ -1144,12 +1144,25 @@ function bindTranscript(tr, chatId, data, ctx) {
     // owner stops an in-flight agent run (R36) — this chat's run only
     const stopBtn = e.target.closest(".feed-stop");
     if (stopBtn) {
+      // V105: immediate feedback — the button becomes a spinner and the
+      // activity line flips to "Stopping…" the instant it's clicked, so the
+      // wait for the harness to actually halt never reads as a dead click.
+      // The next feed poll clears the bubble when the run really ends.
       stopBtn.disabled = true;
+      stopBtn.classList.add("stopping");
+      stopBtn.innerHTML = '<span class="spin-sm"></span>';
+      const label = stopBtn.closest(".bubble")?.querySelector(".typing-label");
+      if (label) label.textContent = "Stopping…";
       api("/api/mesh/agent_stop", { agent: stopBtn.dataset.agent,
                                     chat_id: chatId })
         .then((r) => {
-          if (r.error) { toast(r.error, true); stopBtn.disabled = false; }
-          else toast(`Stopping @${stopBtn.dataset.agent}…`);
+          if (r.error) {
+            toast(r.error, true);
+            stopBtn.disabled = false;
+            stopBtn.classList.remove("stopping");
+            stopBtn.innerHTML = ICONS.close;
+            if (label) label.textContent = "Working";
+          }
         });
       return;
     }

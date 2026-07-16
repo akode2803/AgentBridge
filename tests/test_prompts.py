@@ -114,6 +114,21 @@ def test_prompt_timer_task(tmp_path):
     assert "ctx.md" in p                             # timers still get context
 
 
+def test_step_line_shows_search_query_and_trims_dangling(tmp_path):
+    """V93: the web-search activity line displays WHAT it's searching for
+    (it used to drop the query — "Searching the web" with no term). When a
+    step carries no detail, the dangling connector is trimmed so the line
+    still reads clean ("Searching the web", not "… for")."""
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    assert pack.step_line("tool", "WebSearch", "best pizza") \
+        == "Searching the web for best pizza"
+    assert pack.step_line("tool", "web_search", "weather") \
+        == "Searching the web for weather"          # codex spelling too
+    assert pack.step_line("tool", "WebSearch", "") == "Searching the web"
+    assert pack.step_line("tool", "Grep", "") == "Searching"   # no "for"
+    assert pack.step_line("tool", "Grep", "TODO") == "Searching for TODO"
+
+
 def test_silence_rail_survives_a_gutted_pack(tmp_path):
     pm = PromptManager(tmp_path / "nohome")
     pack = pm.for_agent(acc(prompts={"silence": ""}))

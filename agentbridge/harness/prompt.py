@@ -209,8 +209,13 @@ class PromptPack:
             line = template.format(name=name, detail=detail)
         except (KeyError, IndexError, ValueError):
             line = template
-        # a detail-less fill leaves a dangling phrase — trim it
-        return line.replace("  ", " ").strip().rstrip(":,-") or None
+        line = line.replace("  ", " ").strip().rstrip(":,-")
+        # a detail-less fill leaves a dangling connector ("Searching for",
+        # "Searching the web for") — drop it so the line still reads clean
+        if not detail:
+            line = re.sub(r"\s+(for|to|the|a|in|on|at|of|from)$", "",
+                          line, flags=re.IGNORECASE).strip()
+        return line or None
 
 
 def _friendly_tool_name(name: str) -> str:

@@ -45,7 +45,10 @@ export const ICONS = {
   eraser: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 20.5-4.3-4.3a2 2 0 0 1 0-2.8l9.6-9.6a2 2 0 0 1 2.8 0l5.2 5.2a2 2 0 0 1 0 2.8L12.5 20.5zM21 20.5H7M5.2 11.3l7.5 7.5"/></svg>',
   // read-receipt ticks: single = sent, double = read (accent). State comes from
   // msg.receipt (server derives it from the other members' read cursors).
-  tick: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L12 3"/></svg>',
+  // V95: single shares the double's viewBox AND its first check's geometry —
+  // one tick becomes two of the SAME size in the SAME box (WhatsApp), so the
+  // glyph never resizes or shifts as a message advances sent → delivered.
+  tick: '<svg viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L10 4.5"/></svg>',
   ticks: '<svg viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8l3.5 3.5L10 4.5"/><path d="M8 8l3.5 3.5L21 3"/></svg>',
   // deleted-message tombstone: a no-entry circle with a slash (WhatsApp 🚫)
   banned: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>',
