@@ -1594,11 +1594,24 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 - [ ] **V115 @ badge for replies/tags in groups** (21:24) — a group row
   where you were tagged or replied-to shows "@" in place of the unread
   counter (groups only, WhatsApp-style).
-- [ ] **V116 Message-info relative times + hot-reload audit** (21:33) —
-  message info shows "10 mins ago"/"30 mins ago" under an hour, "Today,
-  1:45 AM" / "Yesterday, 1:45 AM", else local date+time. AND: audit
-  every page for live refresh — message info and About (the cloud
-  traffic meter) should update without switching pages.
+- [x] **V116 Message-info relative times + hot-reload audit** (21:33)
+  → **DONE R86 (v0.24.168)**. New `fmtWhen` (util.js): "Just now"/"N
+  mins ago" under an hour → "Today, 1:45 AM"/"Yesterday, 1:45 AM" →
+  full local date+time; future timestamps (clock skew) fall through to
+  absolute forms. Message info now LIVE: refetches every 5s while open
+  (receipts land, relative labels age — innerHTML compare so unchanged
+  ticks never reset the scroll; the interval self-clears when the box
+  leaves the DOM). About page: the connection <dl> (#conn-kv, built by
+  the shared connKvRows) is swapped surgically by the settings poller
+  — mirror health/access/traffic meter/version tick live while the
+  Updates/Storage cards keep their transient notes (verified: a
+  planted note survived the swap; a corrupted kv self-repaired in one
+  tick). Live-verified on the rig with a real receipt: "Just now" aged
+  to "1 min ago" inside the open dialog. Audit note: chats/sidebar
+  already poll; account/agents/privacy ride the R51 slice poller;
+  notifications/appearance are local prefs (nothing to refresh);
+  transcript day separators crossing midnight stay stale until the
+  next repaint — cosmetic, logged here for honesty, not fixed.
 - [ ] **V117 Harness tells agents the time proactively** (21:43) — an
   agent that was down a while must check the CURRENT time before
   posting; the harness injects this caution itself (context timestamp /

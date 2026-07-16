@@ -1,8 +1,8 @@
 /* The chats page: auth gate, empty state, and the open-chat transcript
    with its header menu. The composer lives in composer.js. */
 
-import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, dayLabel, toast,
-         clampLong, paneCoversChat, closeMenus } from "./util.js";
+import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
+         toast, clampLong, paneCoversChat, closeMenus } from "./util.js";
 import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
@@ -1377,65 +1377,84 @@ function openMsgMenu(rect, msg, chatId, ctx) {
 // lists Read by / Delivered to / Pending. For OTHERS' messages: the sent time,
 // plus (for an agent) the tasks it ran to produce the reply.
 async function messageInfoDialog(chatId, msg) {
-  const r = await api(`/api/mesh/message_info?id=${encodeURIComponent(chatId)}`
-                      + `&msg=${encodeURIComponent(msg.id || "")}`);
+  const fetchInfo = () =>
+    api(`/api/mesh/message_info?id=${encodeURIComponent(chatId)}`
+        + `&msg=${encodeURIComponent(msg.id || "")}`);
+  const r = await fetchInfo();
   if (r.error) { toast(r.error, true); return; }
-  const members = r.members || [];
-  const memRow = (m, tsField) => `
-    <div class="mi-mem">
-      <span class="mem-avatar">${meshAvatarInner(m.user)}</span>
-      <span class="mi-mem-name">${esc(meshDn(m.user))}</span>
-      <span class="mi-time">${m[tsField] ? esc(fmtTime(m[tsField])) : "—"}</span>
-    </div>`;
-  let body = "";
-  if (r.mine && r.kind === "message") {
-    if (r.dm) {
-      const peer = members[0] || {};
-      const deliveredT = peer.delivered_ts ? fmtTime(peer.delivered_ts) : "—";
-      const readT = peer.read_ts ? fmtTime(peer.read_ts) : "—";
-      body = `
-        <div class="mi-row"><span class="mi-ic read">${ICONS.ticks}</span>
-          <span class="mi-label">Read</span><span class="mi-time">${esc(readT)}</span></div>
-        <div class="mi-row"><span class="mi-ic">${ICONS.ticks}</span>
-          <span class="mi-label">Delivered</span><span class="mi-time">${esc(deliveredT)}</span></div>`;
+  // the receipts body, built fresh each paint — times are fmtWhen (V116:
+  // "10 mins ago" under an hour) so they age while the dialog sits open
+  const buildBody = (r) => {
+    const members = r.members || [];
+    const memRow = (m, tsField) => `
+      <div class="mi-mem">
+        <span class="mem-avatar">${meshAvatarInner(m.user)}</span>
+        <span class="mi-mem-name">${esc(meshDn(m.user))}</span>
+        <span class="mi-time">${m[tsField] ? esc(fmtWhen(m[tsField])) : "—"}</span>
+      </div>`;
+    let body = "";
+    if (r.mine && r.kind === "message") {
+      if (r.dm) {
+        const peer = members[0] || {};
+        const deliveredT = peer.delivered_ts ? fmtWhen(peer.delivered_ts) : "—";
+        const readT = peer.read_ts ? fmtWhen(peer.read_ts) : "—";
+        body = `
+          <div class="mi-row"><span class="mi-ic read">${ICONS.ticks}</span>
+            <span class="mi-label">Read</span><span class="mi-time">${esc(readT)}</span></div>
+          <div class="mi-row"><span class="mi-ic">${ICONS.ticks}</span>
+            <span class="mi-label">Delivered</span><span class="mi-time">${esc(deliveredT)}</span></div>`;
+      } else {
+        const read = members.filter((m) => m.tier === "read");
+        const delivered = members.filter((m) => m.tier === "delivered");
+        const pending = members.filter((m) => m.tier === "sent");
+        body = `
+          <div class="mi-sec read"><span class="mi-sec-ic">${ICONS.ticks}</span>Read by ${read.length}</div>
+          ${read.length ? read.map((m) => memRow(m, "read_ts")).join("")
+            : '<div class="mi-empty">No one has read this yet</div>'}
+          <div class="mi-sec"><span class="mi-sec-ic">${ICONS.ticks}</span>Delivered to ${delivered.length}</div>
+          ${delivered.length ? delivered.map((m) => memRow(m, "delivered_ts")).join("")
+            : '<div class="mi-empty">—</div>'}
+          ${pending.length ? `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.tick}</span>Pending</div>
+            ${pending.map((m) => memRow(m, "x")).join("")}` : ""}`;
+      }
     } else {
-      const read = members.filter((m) => m.tier === "read");
-      const delivered = members.filter((m) => m.tier === "delivered");
-      const pending = members.filter((m) => m.tier === "sent");
-      body = `
-        <div class="mi-sec read"><span class="mi-sec-ic">${ICONS.ticks}</span>Read by ${read.length}</div>
-        ${read.length ? read.map((m) => memRow(m, "read_ts")).join("")
-          : '<div class="mi-empty">No one has read this yet</div>'}
-        <div class="mi-sec"><span class="mi-sec-ic">${ICONS.ticks}</span>Delivered to ${delivered.length}</div>
-        ${delivered.length ? delivered.map((m) => memRow(m, "delivered_ts")).join("")
-          : '<div class="mi-empty">—</div>'}
-        ${pending.length ? `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.tick}</span>Pending</div>
-          ${pending.map((m) => memRow(m, "x")).join("")}` : ""}`;
+      body = `<div class="mi-row"><span class="mi-label">Sent</span>
+        <span class="mi-time">${esc(fmtWhen(r.ts))}</span></div>`;
+      const isAgent = Mesh.state?.users?.[r.from]?.kind === "agent";
+      if (isAgent) {
+        const tasks = r.tasks || [];
+        body += `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.bot}</span>Tasks run</div>`;
+        body += tasks.length
+          ? tasks.map((t) => `<div class="mi-task">
+              <span class="mi-task-text">${esc(t.text)}</span>
+              <span class="mi-time">${esc(timeOnly(t.ts))}</span></div>`).join("")
+          : '<div class="mi-empty">No task details recorded for this message.</div>';
+      }
     }
-  } else {
-    body = `<div class="mi-row"><span class="mi-label">Sent</span>
-      <span class="mi-time">${esc(fmtTime(r.ts))}</span></div>`;
-    const isAgent = Mesh.state?.users?.[r.from]?.kind === "agent";
-    if (isAgent) {
-      const tasks = r.tasks || [];
-      body += `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.bot}</span>Tasks run</div>`;
-      body += tasks.length
-        ? tasks.map((t) => `<div class="mi-task">
-            <span class="mi-task-text">${esc(t.text)}</span>
-            <span class="mi-time">${esc(timeOnly(t.ts))}</span></div>`).join("")
-        : '<div class="mi-empty">No task details recorded for this message.</div>';
-    }
-  }
+    return body;
+  };
   const preview = stripMd(r.body || msg.body || "").replace(/\s+/g, " ").trim();
   const previewCut = preview.length > 400 ? preview.slice(0, 400) + "…" : preview;
   const box = openModal(`
     <div class="cf-title">Message info</div>
     ${preview ? `<div class="mi-preview"><div class="bubble">${esc(previewCut)}</div></div>` : ""}
-    <div class="mi-scroll">${body}</div>
+    <div class="mi-scroll">${buildBody(r)}</div>
     <div class="cf-actions"><button class="cf-cancel" id="mi-close">Close</button></div>`);
   box.classList.add("confirm");
   box.parentElement.classList.add("confirm-scrim");
   box.querySelector("#mi-close").addEventListener("click", closeModal);
+  // V116 live refresh: receipts land and relative labels age while the
+  // dialog is open — refetch and repaint until the box leaves the DOM
+  // (closeModal, scrim click, or another modal replacing this one). The
+  // innerHTML compare keeps unchanged ticks from resetting the scroll.
+  const tick = setInterval(async () => {
+    if (!document.body.contains(box)) { clearInterval(tick); return; }
+    const f = await fetchInfo();
+    if (f.error || !document.body.contains(box)) return;
+    const scroll = box.querySelector(".mi-scroll");
+    const fresh = buildBody(f);
+    if (scroll && scroll.innerHTML !== fresh) scroll.innerHTML = fresh;
+  }, 5000);
 }
 
 // pinned banner (WhatsApp multi-pin): shows one pin at a time, segment

@@ -85,6 +85,29 @@ export function fmtTimeLower(tsUtc) {
   return fmtTime(tsUtc).replace(/^Today/, "today").replace(/^Yesterday/, "yesterday");
 }
 
+// V116: human "when" for Message info — relative under an hour ("10 mins
+// ago"), then the day forms with a comma ("Today, 1:45 AM" / "Yesterday,
+// 1:45 AM"), full local date + time beyond that. A future timestamp (clock
+// skew between machines) falls through to the absolute forms.
+export function fmtWhen(tsUtc) {
+  if (!tsUtc) return "—";
+  const d = new Date(tsUtc);
+  if (isNaN(d)) return tsUtc;
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins >= 0 && mins < 60) {
+    if (mins < 1) return "Just now";
+    return mins === 1 ? "1 min ago" : `${mins} mins ago`;
+  }
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const now = new Date();
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+  if (sameDay(d, now)) return `Today, ${time}`;
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  if (sameDay(d, yest)) return `Yesterday, ${time}`;
+  return d.toLocaleDateString([], { day: "numeric", month: "short",
+                                    year: "numeric" }) + ", " + time;
+}
+
 export function timeOnly(tsUtc) {
   const d = new Date(tsUtc);
   return isNaN(d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

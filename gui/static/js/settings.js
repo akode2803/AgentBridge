@@ -105,6 +105,21 @@ function startSettingsPoll() {
         || [...document.querySelectorAll("#content .menu")].some((m) => !m.hidden)
         || (ae && $("#content")?.contains(ae)
             && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA"))) return;
+    // V116: the About meters (mirror health, access, cloud traffic, version)
+    // live on /api/state, OUTSIDE the user slice — swap just the kv rows so
+    // the meter ticks live while the Updates/Storage cards (transient check
+    // notes) stay untouched. Nothing else on this page is user-sliced.
+    if ((Settings.section || "account") === "connection") {
+      try {
+        const s2 = await api("/api/state");
+        if (s2.error || App.page !== "settings") return;
+        App.state = s2;
+        const kv = $("#conn-kv");
+        const fresh = connKvRows(s2);
+        if (kv && kv.innerHTML !== fresh) kv.innerHTML = fresh;
+      } catch { /* transient — the next tick retries */ }
+      return;
+    }
     try {
       const ms = await api("/api/mesh/state");
       if (ms.error || App.page !== "settings" || !liveData) return;
@@ -142,6 +157,22 @@ function startSettingsPoll() {
   }, 4000);
 }
 // ----------------------------------------------------------------------------
+
+// V116: the About page's connection <dl> — built the same way at mount and
+// by the live poller, which swaps ONLY these rows (so the traffic meter and
+// mirror health tick while you watch, without a full repaint wiping the
+// Updates card's transient notes). The folder "open" link is inline-bound
+// for that reason: a listener bound at mount wouldn't survive the swap.
+function connKvRows(s) {
+  const cloud = s.connection && s.connection.scheme !== "folder";
+  const root = s.connection ? s.connection.root : s.shared_dir;
+  return `${cloud
+      ? `<dt>Cloud root</dt><dd class="mono">${esc(root || "")}</dd>`
+      : `<dt>Shared folder</dt><dd class="mono">${esc(root || "")}
+          <a href="#" onclick="openTarget('shared');return false">open</a></dd>`}
+    ${V.connectionRows(s)}
+    <dt>Version</dt><dd>${V.versionLine(s)}</dd>`;
+}
 
 async function renderSettings() {
   const s = App.state;   // the About section renders connection/version from it
@@ -613,21 +644,9 @@ async function renderSettings() {
         resuming.</p>
       </div>`;
   } else if (section === "connection") {
-    // transport-aware root row (the status rows come from V.connectionRows,
-    // shared with the no-chat home card): a folder root keeps the openable
-    // path; a cloud root shows the spec — there is no folder to open
-    const cloud = s.connection && s.connection.scheme !== "folder";
-    const root = s.connection ? s.connection.root : s.shared_dir;
     html = `${back}<h1>About</h1>
       <div class="card">
-        <dl class="kv">
-          ${cloud
-            ? `<dt>Cloud root</dt><dd class="mono">${esc(root || "")}</dd>`
-            : `<dt>Shared folder</dt><dd class="mono">${esc(root || "")}
-                <a href="#" id="open-shared2">open</a></dd>`}
-          ${V.connectionRows(s)}
-          <dt>Version</dt><dd>${V.versionLine(s)}</dd>
-        </dl>
+        <dl class="kv" id="conn-kv">${connKvRows(s)}</dl>
         <div class="row" style="margin-top:10px">
           <button onclick="openTarget('home')">Open config folder</button>
         </div>
@@ -800,10 +819,6 @@ async function renderSettings() {
     });
   });
   wireAccountEditors(ms);
-  const shared2 = $("#open-shared2");
-  if (shared2) shared2.addEventListener("click", (e) => {
-    e.preventDefault(); window.openTarget("shared");
-  });
   // V45+V51: the update check — git channel (Update now applies a guarded
   // ff-pull), release channel (Download now opens it), peer hint (another
   // machine runs newer), up to date, or an honest miss. Never silent.
