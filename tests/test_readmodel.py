@@ -110,3 +110,31 @@ def test_unread_info_including_edit_marks_unread():
     assert info2["unread"] == 0
     info3 = unread_info(msgs, "me", {"read_ns": 30, "forced_unread": True})
     assert info3["forced_unread"] is True
+
+
+def test_unread_mention_tag_reply_and_all():
+    """V115: `mention` flips on an UNREAD @tag / @all / reply-to-viewer —
+    and never on read ones or other people's mentions."""
+    envs = [
+        env("m1", 10, "ann", "hey @me", tags=["me"]),
+        env("m2", 20, "ann", "for bob only", tags=["bob"]),
+        env("m3", 30, "ann", "re: yours",
+            reply_to={"id": "m0", "from": "me", "body": "mine"}),
+        env("m4", 40, "ann", "everyone @all", tags=["all"]),
+    ]
+    msgs = build_messages("c", "me", envs, SEALER)
+
+    # everything unread: tagged directly -> mention
+    assert unread_info(msgs, "me", {"read_ns": 0})["mention"] is True
+    # only bob's tag + my reply + @all unread: reply-to-me counts
+    assert unread_info(msgs, "me", {"read_ns": 15})["mention"] is True
+    # only bob's tag unread between 10 and 30: someone ELSE's tag doesn't
+    info = unread_info(msgs, "me", {"read_ns": 25})
+    assert info["mention"] is True  # m3 reply + m4 @all still unread
+    only_bob = build_messages("c", "me", [envs[1]], SEALER)
+    assert unread_info(only_bob, "me", {"read_ns": 0})["mention"] is False
+    # @all alone counts
+    only_all = build_messages("c", "me", [envs[3]], SEALER)
+    assert unread_info(only_all, "me", {"read_ns": 0})["mention"] is True
+    # everything read: no mention even though tags exist
+    assert unread_info(msgs, "me", {"read_ns": 50})["mention"] is False

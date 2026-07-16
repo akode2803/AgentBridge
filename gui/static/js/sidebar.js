@@ -309,6 +309,10 @@ function renderChatListSidebar() {
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
     const dot = !hasCount && c.forced_unread && !c.archived;  // mark-unread: no number
+    // V115: an unread message tagging you (or replying to you) in a GROUP
+    // shows @ in place of the count (WhatsApp) — a DM is all personal, so
+    // it keeps the number
+    const at = hasCount && c.mention && c.kind === "group";
     const muted = meshMuteActive(c);   // R42: slashed bell + a grey count
     // an agent is WAITING on the owner in this chat (R19.5) — the ask poller
     // keeps Mesh.askCounts current and patches rows live between state polls
@@ -317,7 +321,8 @@ function renderChatListSidebar() {
     return ask
       + (muted ? `<span class="mute-ind" title="Muted">${ICONS.bellOff}</span>` : "")
       + (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
-      + (hasCount ? `<span class="unread-badge${muted ? " muted" : ""}">${c.unread}</span>`
+      + (hasCount ? `<span class="unread-badge${muted ? " muted" : ""}${at ? " at" : ""}"${
+          at ? ' title="You were mentioned"' : ""}>${at ? "@" : c.unread}</span>`
         : dot ? `<span class="unread-badge dot"></span>` : "");
   };
   // DM/self rows show the other member's photo; group rows show the group

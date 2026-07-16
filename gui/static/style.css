@@ -1701,6 +1701,8 @@ pre.configdump {
 }
 /* manual "mark as unread" — the dot with no number */
 .unread-badge.dot { min-width: 11px; width: 11px; height: 11px; padding: 0; }
+/* V115: you were tagged/replied-to in a group — @ replaces the count */
+.unread-badge.at { font-size: 13px; padding-bottom: 1px; }
 /* a muted chat still counts, it just stops shouting (R42) */
 .unread-badge.muted { background: var(--text-faint); }
 .pin-ind, .mute-ind { display: inline-grid; place-items: center; color: var(--text-faint); }

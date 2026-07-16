@@ -1591,9 +1591,21 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
 ### Aryan's self-notes, third batch (2026-07-15 late evening, swept
 ### 2026-07-16 during the RLS round). Not hurried except V119.
 
-- [ ] **V115 @ badge for replies/tags in groups** (21:24) — a group row
-  where you were tagged or replied-to shows "@" in place of the unread
-  counter (groups only, WhatsApp-style).
+- [x] **V115 @ badge for replies/tags in groups** (21:24) → **DONE R87
+  (v0.24.169)**. `unread_info` (readmodel) now derives `mention`: true
+  when an UNREAD message tags the viewer (@name or @all — tags are the
+  server-parsed structural list, not a body regex) or replies to one of
+  the viewer's messages (`reply_to.from`, which the composer already
+  records). Rides the existing chat_overview fold — zero extra I/O.
+  chat_json passes it through; the sidebar badge shows "@" (accent
+  pill, "You were mentioned" tooltip) in place of the count for GROUPS
+  only — DMs are all personal and keep the number (verified: mention
+  flag true on a tagged DM, badge stays numeric). Rig-verified all
+  three group cases in the DOM: tag → @, reply-to-you → @, plain
+  message → count. +1 readmodel test (tag/@all/reply/other-tag/read).
+  Rig lesson for future fixtures: a bare Mesh writer needs
+  `m.outbox.flush_once()` before exit — posts queue durably and the
+  writer log never lands otherwise.
 - [x] **V116 Message-info relative times + hot-reload audit** (21:33)
   → **DONE R86 (v0.24.168)**. New `fmtWhen` (util.js): "Just now"/"N
   mins ago" under an hour → "Today, 1:45 AM"/"Yesterday, 1:45 AM" →

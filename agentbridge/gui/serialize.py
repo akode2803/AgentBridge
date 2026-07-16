@@ -87,6 +87,7 @@ def chat_json(
             last=snippet_json(overview.get("last")),
             unread=overview.get("unread", 0),
             first_unread_ns=overview.get("first_unread_ns", 0),
+            mention=bool(overview.get("mention")),  # V115: @ badge (groups)
             forced_unread=bool(overview.get("forced_unread")),
             archived=bool(overview.get("archived")),
             pinned=bool(overview.get("pinned")),

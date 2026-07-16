@@ -183,10 +183,14 @@ def build_messages(
 def unread_info(msgs: list[Message], viewer: str, state: dict[str, Any]) -> dict[str, Any]:
     """Unread derivation for one viewer. Includes v2's edit-marks-unread: an
     edit landing AFTER my read cursor makes an already-read message count as
-    unread again — derived locally, no cross-user write exists."""
+    unread again — derived locally, no cross-user write exists. ``mention``
+    is true when an unread message TAGS the viewer (@name / @all) or REPLIES
+    to one of the viewer's messages — the sidebar's WhatsApp-style @ badge
+    (V115; the client applies it to groups only)."""
     read_ns = int(state.get("read_ns", 0))
     unread = 0
     first_unread_ns = 0
+    mention = False
     for m in msgs:
         if m.from_ == viewer or m.kind is not MsgKind.MESSAGE:
             continue
@@ -198,8 +202,14 @@ def unread_info(msgs: list[Message], viewer: str, state: dict[str, Any]) -> dict
             unread += 1
             if not first_unread_ns:
                 first_unread_ns = m.ns
+            if not mention and (
+                viewer in (m.tags or []) or "all" in (m.tags or [])
+                or (m.reply_to or {}).get("from") == viewer
+            ):
+                mention = True
     return {
         "unread": unread,
         "first_unread_ns": first_unread_ns,
+        "mention": mention,
         "forced_unread": bool(state.get("forced_unread")),
     }
