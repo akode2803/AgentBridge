@@ -29,6 +29,11 @@ let prevAuth = { user: null, locked: false };
 let lockPending = false;
 // V125: consecutive failed /api/state fetches = a restart's down window
 let downTicks = 0;
+// V131: the server version this PAGE booted against. An update+restart
+// changes it under us, and the old frontend would keep running until a
+// manual reload — arm a one-shot reload instead, taken at a safe moment.
+let bootVersion = "";
+let reloadArmed = false;
 
 async function refresh(rerender) {
   try {
@@ -51,6 +56,18 @@ async function refresh(rerender) {
     return;  // server unreachable; next poll retries
   }
   downTicks = 0;
+  // V131: the server was updated under this page — reload ONCE to pick up
+  // the matching frontend, but never mid-thought: not over an open modal,
+  // not over a half-typed message. Until it's safe, keep polling armed.
+  const v = App.state.gui_version || "";
+  if (!bootVersion) bootVersion = v;
+  else if (v && v !== bootVersion) reloadArmed = true;
+  if (reloadArmed
+      && !document.querySelector(".modal-scrim")
+      && !document.getElementById("mesh-body")?.value) {
+    location.reload();
+    return;
+  }
   // V127: signed-out -> signed-in and locked -> unlocked count as activity.
   // Discrete state deltas only — the poll itself must never bump, or the
   // idle timer would stop working entirely.

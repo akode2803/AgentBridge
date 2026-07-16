@@ -11,6 +11,16 @@ to the transport. Errors surface as ``{"error": ...}`` JSON (the v1 client
 contract) — never as HTML error pages.
 """
 
-from .app import main  # noqa: F401
-
 __all__ = ["main"]
+
+
+def __getattr__(name: str):
+    # V126: importing this package must stay CHEAP — ``python -m
+    # agentbridge.gui`` imports __init__ before __main__, and an eager
+    # ``from .app import main`` dragged the whole mesh/crypto/cloud chain
+    # (~1s) in front of the fast boot's first paint. PEP 562 lazy export.
+    if name == "main":
+        from .fastboot import main
+
+        return main
+    raise AttributeError(name)

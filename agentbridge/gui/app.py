@@ -8,16 +8,14 @@ use routing.Response; ``/api/mesh/events`` is the one streaming route.
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
+import socket
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-
-from ..core.config import DEFAULT_HOME, load_app_config, save_app_config
 
 from . import (
     api_agents,
@@ -33,7 +31,7 @@ from .context import GuiApp
 from .routing import Request, Response, dispatch
 from .sse import stream
 
-__all__ = ["GuiServer", "make_server", "main"]
+__all__ = ["GuiServer", "make_server", "serve", "main"]
 
 log = logging.getLogger("agentbridge.gui")
 
@@ -215,8 +213,21 @@ class GuiServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr: tuple[str, int], app: GuiApp) -> None:
-        super().__init__(addr, Handler)
+    def __init__(self, addr: tuple[str, int], app: GuiApp,
+                 sock: socket.socket | None = None) -> None:
+        if sock is not None:
+            # V126: adopt the fast boot's pre-bound listening socket —
+            # requests that queued in the accept backlog while the heavy
+            # imports ran are answered the moment serve_forever() starts
+            super().__init__(addr, Handler, bind_and_activate=False)
+            self.socket.close()          # the unused placeholder socket
+            self.socket = sock
+            self.server_address = sock.getsockname()
+            host, port = self.server_address[:2]
+            self.server_name = host      # skip getfqdn — local app
+            self.server_port = port
+        else:
+            super().__init__(addr, Handler)
         self.gui = app
         app.server = self   # V113: endpoints can ask the server to shut down
 
@@ -230,69 +241,20 @@ class GuiServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_server(app: GuiApp, port: int = 0, host: str = "127.0.0.1") -> GuiServer:
-    return GuiServer((host, port), app)
+def make_server(app: GuiApp, port: int = 0, host: str = "127.0.0.1",
+                sock: socket.socket | None = None) -> GuiServer:
+    return GuiServer((host, port), app, sock=sock)
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="agentbridge-gui",
-                                 description="AgentBridge GUI server (v2)")
-    ap.add_argument("--root", default="",
-                    help="mesh root (the synced folder); remembered after the "
-                         "first run, so a bare launch reuses it")
-    ap.add_argument("--home", default="", help="local home dir (default: ~/.agentbridge)")
-    ap.add_argument("--port", type=int, default=7787)
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--machine", default="")
-    ap.add_argument("--no-encrypt", action="store_true",
-                    help="plaintext sealer (tests/dev only)")
-    ap.add_argument("--no-browser", action="store_true",
-                    help="serve only; don't open the app window")
-    ap.add_argument("--static", default="", help="frontend dir override")
-    args = ap.parse_args(argv)
-
+def serve(*, root, home: Path | None, args, lock=None,
+          sock: socket.socket | None = None) -> int:
+    """The server's life after the CLI front door (fastboot.main — V126:
+    it binds the socket and opens the window BEFORE this module's heavy
+    import chain runs, then hands both over)."""
     try:
         from agentbridge import __version__ as app_version  # canonical (R26)
     except ImportError:
         app_version = "dev"
-
-    home = Path(args.home) if args.home else None
-    # root: CLI wins and is REMEMBERED (merged into config, never clobbering
-    # other keys); a bare launch reuses the saved one — the R14 cutover flip
-    cfg = load_app_config(home)
-
-    def as_root(text: str):
-        # a scheme spec (supabase://…) must stay a STRING — Path() collapses
-        # the double slash and mangles it (R23); folder roots stay Paths
-        return text if "://" in text else Path(text)
-
-    if args.root:
-        root = as_root(args.root)
-        save_app_config({**cfg, "mesh_root": str(args.root)}, home)
-    elif cfg.get("mesh_root"):
-        root = as_root(cfg["mesh_root"])
-    else:
-        ap.error("no --root given and none remembered in config.json")
-
-    # single-instance guard (R45): a double-clicked AgentBridge.pyw beside
-    # the supervised fleet would otherwise co-bind :7787 (Windows SO_REUSEADDR
-    # lets two sockets share a port silently) and run a SECOND GUI — the
-    # chronic "stray GUI pair". The lock is port-scoped, so a dev rig on
-    # another port isn't blocked; an ephemeral port (0) skips it (tests). A
-    # loser opens the app window at the already-running server, then exits 0.
-    lock = None
-    if args.port:
-        from ..core.lock import SingleInstance
-
-        lock = SingleInstance((home or DEFAULT_HOME) / f"gui-{args.port}.lock")
-        if not lock.acquire():
-            running = f"http://{args.host}:{args.port}/"
-            print(f"AgentBridge GUI already running on {running} — focusing it.")
-            if not args.no_browser:
-                from .desktop import launch_window
-
-                launch_window(running)
-            return 0
 
     app = GuiApp(
         root,
@@ -303,11 +265,13 @@ def main(argv: list[str] | None = None) -> int:
         app_version=app_version,
     )
     app.restore()
-    server = make_server(app, args.port, args.host)
+    server = make_server(app, args.port, args.host, sock=sock)
     host, port = server.server_address[:2]
     url = f"http://{host}:{port}/"
     print(f"AgentBridge GUI (v2) on {url}  root={root}")
-    if not args.no_browser:
+    # V126: the fast boot already opened the window before the imports —
+    # only a direct serve() with no pre-bound socket opens it here
+    if not args.no_browser and sock is None:
         from .desktop import launch_window
 
         launch_window(url)
@@ -321,6 +285,13 @@ def main(argv: list[str] | None = None) -> int:
         if lock is not None:
             lock.release()
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Compat wrapper — the CLI front door lives in fastboot (V126)."""
+    from .fastboot import main as fast_main
+
+    return fast_main(argv)
 
 
 if __name__ == "__main__":
