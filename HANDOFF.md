@@ -17,7 +17,12 @@ retrieval, peer harness access + repair mutations, the Supabase cloud transport,
 a stress/soak pass with a 40× read-latency fix, and the R25 security review.
 
 - **Version:** `agentbridge/__init__.py` `__version__` (moved here from
-  `gui/__init__.py` in R26). Currently **v0.24.179** (R96: fast cold
+  `gui/__init__.py` in R26). Currently **v0.24.180** (R98: an agent and
+  its own owner always connect for DMs regardless of the messaging
+  audience — privacy._agent_owner_pair, block still wins — with
+  docs/PRIVACY_MODEL.md + matching Settings copy, and the CoCo
+  re-sign-in diagnosed in docs/COCO_AUTH.md (not our env stripping;
+  fix = V132); R96: fast cold
   start — gui/fastboot.py binds the port + opens the window before the
   heavy imports (~500ms to accept, was ~1.4s) — and the window
   self-reloads after an update; R97 polish: search-query wording,

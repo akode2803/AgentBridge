@@ -1540,13 +1540,19 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   doesn't carry blocked today (only /api/mesh/me does). Its own small
   round: add the flag in serialize.chat_json, render the affordance,
   verify on a rig.
-- [ ] **V103 Privacy vs DM creation (cluster)** (18:14 + 18:46) — "Allow
-  claude to dm me"; "nobody in privacy rules gate dm creation or messaging
-  itself — since dm creation is what is intended. block would already work
-  for a created dm." Decide + implement: the messaging-privacy gate should
-  not block DM creation outright (block covers the hostile case); agents
-  DMing their owner must work. ⚠ Ships together with V112 (rename the
-  audience options / add help text so the copy matches the semantics).
+- [x] **V103 Privacy vs DM creation (cluster)** (18:14 + 18:46) — "Allow
+  claude to dm me" → **DONE R98 (v0.24.180)**. Two findings: (1) the
+  messaging gate ALREADY gates DM *creation* only — post() to an existing
+  DM checks block/active, never the audience — so "block covers a created
+  dm" was already true; (2) the real gap was that the strict gates had NO
+  owner ride-along, so an owner who set "who can message me" to
+  members/nobody (or set their agent's outbound rule to nobody) cut their
+  OWN agent off. Fix: privacy._agent_owner_pair short-circuits can_message
+  AND can_add_to_group (the auto_dm room pulls the owner in) when the two
+  parties are an agent and its responsible member, in BOTH directions,
+  AFTER the block check (an explicit block still wins). +2 privacy tests;
+  live-verified an agent DM'd its owner with messaging=nobody. Shipped
+  WITH V112 (copy) + V106 (doc) as agreed.
 - [ ] **V104 Agent parity audit: forward / message-info / copy / edit**
   (18:16) — check which of these exist for AGENT-authored messages and
   close the gaps (extends docs/GUI_AGENT_PARITY.md).
@@ -1558,8 +1564,13 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   bubble when the run truly ends, and a failed stop rolls the button
   back to the X. Verified the post-click DOM on a rig (13px animated
   spinner, "Stopping…" label).
-- [ ] **V106 Question: how do agent privacy rules affect their owner?**
-  (18:17) — answer from code (R6 matrix + D19), document in the answer.
+- [x] **V106 Question: how do agent privacy rules affect their owner?**
+  (18:17) → **DONE R98 (v0.24.180)**. Answered from the code in the new
+  docs/PRIVACY_MODEL.md: profile surfaces have owner ride-along (the agent
+  could relay + the owner manages those settings); the strict messaging/
+  add-to-group gates don't, EXCEPT the V103 owner↔agent bond (own agent
+  always connects, block overrides); D19 = agents never self-manage,
+  owner-only; read-receipts symmetric booleans. Includes a summary table.
 - [ ] **V107 An agent should KNOW it was stopped** (18:20) — surface the
   stop into the agent's next-run context (pairs with V87 short-term
   memory).
@@ -1634,13 +1645,13 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   server start, opaque cover with empty content behind, mismatch/wrong-
   current flows, backoff messages, Ctrl+L, auto-lock firing on idle,
   unlock reveal, turn off; screenshots of the lock screen + Privacy card.
-- [ ] **V112 Privacy-settings copy must match V103's semantics** (Aryan,
-  chat 2026-07-16, rides [V103]) — if V103 turns the messaging-privacy
-  "nobody" into effectively "nobody NEW" (gating DM *creation*, not
-  messaging in existing DMs), the options must be renamed appropriately
-  or a help text added at the bottom of the privacy section explaining
-  exactly what each audience gates. Don't ship V103 without this copy
-  pass.
+- [x] **V112 Privacy-settings copy must match V103's semantics** (Aryan,
+  chat 2026-07-16, rides [V103]) → **DONE R98 (v0.24.180)**. Kept the
+  familiar field labels ("Who can message me") and strengthened the help
+  text instead (lower-risk, clearer): Settings → Privacy now says it gates
+  who may start a NEW conversation, an existing chat runs until you block,
+  and your own agents can always message you. The agent Reach card says
+  the same about reaching its owner. Verified the copy renders on a rig.
 
 - [x] **V113 "Restart app" option in Updates** (self chat 2026-07-15
   20:29) → **DONE R82 (v0.24.161, rig + live verified)**. About →
@@ -1713,10 +1724,27 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   better). +1 test (fresh / 5h / 3d / 1h boundary / empty transcript).
   V88's late-wakeup warning builds on this same line when that round
   lands.
-- [ ] **V118 Question/investigate: CoCo worse — browser sign-in every
-  start?** (21:45) — CoCo's harness needs a browser sign-in each start;
-  Aryan doubts it relates to the harness error being thrown. Diagnose
-  the coco adapter's auth persistence separately from the error.
+- [x] **V118 Question/investigate: CoCo worse — browser sign-in every
+  start?** (21:45) → **DIAGNOSED R98 (2026-07-16), fix = V132**. Full
+  trace in docs/COCO_AUTH.md. Finding: AgentBridge does NOT strip
+  cortex's environment — cortex inherits the harness's full env (env is
+  only overridden, and only augmented with MCP_TOOL_TIMEOUT, when the
+  permission bridge is active, which the cortex preset doesn't use; and
+  windowless_kwargs never sets env). cortex is spawned FRESH per run
+  (no daemon) with cwd = the per-chat workspace. So the re-auth is
+  Cortex Code's own persistence: it either caches relative to cwd (each
+  chat = new dir) or needs interactive browser OAuth without a durable
+  reusable token. CONFIRMED independent of the harness error (Aryan's
+  hunch). The actual fix needs the real cortex CLI (on the CoCo box) —
+  logged as V132 with a probe plan.
+- [ ] **V132 CoCo auth persistence fix** (from V118 diagnosis,
+  2026-07-16): at the CoCo/Snowflake machine, probe cortex for a
+  persistent-login flag or config-dir env (SNOWFLAKE_HOME is the likely
+  candidate — Snowflake tooling caches a connections/token file there),
+  confirm WHERE cortex caches its token (user dir vs cwd), then set a
+  stable per-agent config-dir env in the cortex preset launch OR
+  document a one-time `cortex login` that persists. Do NOT guess an env
+  var blind. Probe plan + rationale in docs/COCO_AUTH.md.
 - [x] **V119 ⚠ R82 restart regressions** (21:47, hit ~10 min after R82
   shipped): a terminal window flashes ("opens even when it didn't need
   to") and Aryan's restart left the fleet DEAD — he saw a signed-out/
