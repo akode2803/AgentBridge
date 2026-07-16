@@ -1757,18 +1757,40 @@ the DM-vs-group discrepancy (V83); his personal chat holds polish items
   returns every running agent's activity line mesh-wide — no frontend
   caller uses that lane today, but it leaks activity from rooms the
   caller isn't in. Logged as V128.)
-- [ ] **V125 Post-restart warm-up reads as a sign-out** (Aryan, direct
+- [x] **V125 Post-restart warm-up reads as a sign-out** (Aryan, direct
   chat 2026-07-16; also part of why "restart app does not work" felt
-  broken): after an app restart the cloud connector takes a while to
-  connect; V122's restore correctly keeps the session and self-heals,
-  but during the warm-up /api/state has user:null so the frontend
-  shows the SIGN-IN page — reads as "the app signed me out". Manual
-  sign-in during the window fails (directory unreadable) until it
-  recovers, then the session restores by itself. Fix: expose a
-  "restoring" signal in /api/state while a session file exists and the
-  background restore is still retrying; frontend shows the boot/
-  connecting screen instead of the auth page; login during warm-up
-  should say "still connecting" instead of a misleading failure.
+  broken; his follow-up: "after restart the boot animation did not
+  work, the sign in still failed — we will need a deeper diagnosis")
+  → **DONE R93 (v0.24.175)**. Diagnosis from his own breadcrumb log:
+  THREE restarts, one clicked 19s after the previous came back — the
+  frozen page with no signal reads as a failed restart. Shipped, all
+  four pieces: (1) a boot-family "Restarting…" cover raises on ~2
+  consecutive /api/state misses — SSE onerror kicks the poll on a
+  2.5s cooldown (edge-only kicks fired while the old server was still
+  DRAINING and reset the counter — caught live; the browser's own
+  reconnect attempts drive misses every ~3s), plus a one-shot 3s
+  re-probe after the first miss (a ~20s window fit between two slow
+  SSE-era ticks). (2) `restoring` in /api/state + /api/mesh/state
+  (session file + retry alive + no mesh) → the frontend holds a
+  "Connecting to your mesh…" page instead of flashing sign-in — the
+  same surface for V126's cold start (Aryan's one-screen decision),
+  with a 60s "Taking long? Go to sign-in" escape so a dead network
+  never traps anyone. (3) login while the directory is unreadable
+  answers "Still connecting to your mesh — try again in a moment"
+  (correct creds used to get "Wrong username or password" — the lie
+  he hit live). (4) restore() writes breadcrumbs to the V122 restart
+  log ("directory unreadable — session kept, retrying" ×N → "attached
+  'aryan'" — captured live on the rig). Verified with an instrumented
+  page through real rig restarts + a hidden-root blind boot; heal to
+  chats 4s after the root returned, zero input. Suite 506 (+1).
+- [ ] **V131 the app window never reloads after an update** (found
+  rolling .175, 2026-07-16): nothing reloads the Edge window when the
+  server's gui_version changes — after an update+restart the page
+  keeps running the OLD frontend until a manual reload (the Settings
+  restart button reloads its own window; remote rolls and the other
+  machine's window don't). Fix: refresh() compares App.state
+  .gui_version to the version the page loaded with and does ONE
+  location.reload() on mismatch (guard against loops).
 - [ ] **V126 Slow .pyw double-click start** (Aryan, direct chat
   2026-07-16): launching via the .pyw shows nothing for a while —
   ideally the app window + loading screen appear immediately and the
