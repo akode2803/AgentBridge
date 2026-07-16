@@ -39,7 +39,8 @@ from ..core.timekit import new_id, utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
 from .conversation import ConversationManager
-from .feed import RunFeed, record_tasks, write_harness_doc, write_waiting
+from .feed import (RunFeed, reap_orphan_run, record_tasks,
+                   write_harness_doc, write_waiting)
 from .peer import PeerService
 from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
@@ -703,6 +704,12 @@ class AgentRunner:
         from .broker import PermissionBroker
 
         PermissionBroker.clear_stale(self.mesh.tx, self.agent)
+        # V129: same rationale for the run feed — a previous process that
+        # died MID-RUN never wrote its finish, and the doc haunted the chat
+        # as a working bubble (the fresh beat below makes the runner look
+        # alive, so V109's process truth can't clear it). A starting runner
+        # runs nothing by definition.
+        reap_orphan_run(self.mesh.tx, self.agent)
         write_beat(self.home, self.agent)
         try:  # R25: warm the cache, then populate tenure + re-sign redactions
             self.mesh.sync.sync_once()
@@ -732,6 +739,13 @@ class AgentRunner:
                 return
             while not self._stop.is_set():
                 write_beat(self.home, self.agent)   # V109: process truth
+                # V129: self-heal a finish-less death between runs too — a
+                # doc still "running" for a chat with no in-flight group in
+                # THIS process is an orphan (the crash paths all try to
+                # finish, but a hard thread death can't)
+                with self._inflight_lock:
+                    running = {k[0] for k in self._inflight}
+                reap_orphan_run(self.mesh.tx, self.agent, running)
                 self.tick()
                 if time.monotonic() - announced > 1800:
                     announced = time.monotonic()

@@ -619,6 +619,41 @@ def test_feed_first_steps_bypass_the_throttle():
     assert len(writes) == 4                     # step 3/4 throttled as before
 
 
+def test_reap_orphan_run():
+    """V129: a run doc left "running" by a killed process is finished as
+    interrupted (live screenshot: a working bubble haunted the chat for 10
+    minutes while the relaunched harness read as online — V109's process
+    truth checks the RUNNER, not the RUN). An active run's doc and a V71
+    waiting doc are spared; the run history records the interruption."""
+    from agentbridge.harness.feed import reap_orphan_run
+
+    docs: dict[str, dict] = {}
+    tx = SimpleNamespace(
+        get_doc=lambda path, default=None: docs.get(path, default),
+        put_doc=lambda path, doc: docs.__setitem__(path, dict(doc)),
+    )
+    assert reap_orphan_run(tx, "helper") is False       # nothing to reap
+    docs["status/helper_run.json"] = {
+        "state": "running", "agent": "helper", "chat_id": "c1",
+        "started": "2026-07-16T10:00:00Z", "updated": "2026-07-16T10:00:05Z",
+        "turns": 3, "activity": "Reading the conversation",
+    }
+    assert reap_orphan_run(tx, "helper") is True        # orphan: reaped
+    assert docs["status/helper_run.json"]["state"] == "interrupted"
+    hist = docs["status/helper_runs.json"]["runs"]
+    assert hist[-1]["state"] == "interrupted" and hist[-1]["chat_id"] == "c1"
+    assert reap_orphan_run(tx, "helper") is False       # idempotent
+    # an ACTIVE run in this process is never reaped
+    docs["status/helper_run.json"] = {
+        "state": "running", "chat_id": "c2", "updated": "x"}
+    assert reap_orphan_run(tx, "helper", {"c2"}) is False
+    assert docs["status/helper_run.json"]["state"] == "running"
+    # a V71 waiting doc is spared (the durable queue owns its lifecycle)
+    docs["status/helper_run.json"] = {
+        "state": "running", "chat_id": "c3", "waiting": True, "updated": "x"}
+    assert reap_orphan_run(tx, "helper") is False
+
+
 def test_settings_parse_and_clamp():
     s = HarnessSettings.from_account(None)
     assert (s.default_rule, s.concurrency, s.catchup) == ("tagged", 2, "recent")

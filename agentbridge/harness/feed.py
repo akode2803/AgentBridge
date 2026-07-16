@@ -20,7 +20,8 @@ import time
 from ..core.timekit import utcnow_iso
 from ..transport.base import Transport
 
-__all__ = ["RunFeed", "write_harness_doc", "record_tasks", "write_waiting"]
+__all__ = ["RunFeed", "write_harness_doc", "record_tasks", "write_waiting",
+           "reap_orphan_run"]
 
 _THROTTLE_S = 1.5
 
@@ -114,6 +115,48 @@ class RunFeed:
             self.tx.put_doc(path, {"agent": self.agent, "runs": runs[-20:]})
         except Exception:  # noqa: BLE001 — history must never break a run
             pass
+
+
+def reap_orphan_run(tx: Transport, agent: str,
+                    running_chats: set[str] | None = None) -> bool:
+    """V129: finish a run doc that claims "running" when this process runs
+    no such run. A killed runner never writes its finish, so the doc
+    haunted the chat as a working bubble until the 600s ghost cutoff —
+    while the RELAUNCHED harness was honestly alive (V109's process truth
+    checks the RUNNER, not the RUN; live screenshot report). Called at
+    boot (a starting runner runs nothing by definition) and every loop
+    tick (self-heals an in-process finish-less death too). A V71
+    ``waiting`` doc is deliberately spared — the deferred run it
+    advertises lives in the durable queue, not in ``running_chats``, and
+    the queue rewrites it on its own cadence. Returns True when reaped."""
+    try:
+        path = f"status/{agent}_run.json"
+        doc = tx.get_doc(path, default=None)
+        if (not isinstance(doc, dict) or doc.get("state") != "running"
+                or doc.get("waiting")):
+            return False
+        if running_chats and doc.get("chat_id") in running_chats:
+            return False
+        tx.put_doc(path, {
+            **doc, "state": "interrupted", "updated": utcnow_iso(),
+            "activity": "Interrupted — the run never finished",
+        })
+        # the run history is the owner's "what happened?" surface — an
+        # interruption is an answer, not noise (mirrors _append_history)
+        hist = f"status/{agent}_runs.json"
+        hdoc = tx.get_doc(hist, default={}) or {}
+        runs = hdoc.get("runs") if isinstance(hdoc, dict) else None
+        runs = runs if isinstance(runs, list) else []
+        runs.append({
+            "chat_id": doc.get("chat_id", ""), "state": "interrupted",
+            "started": doc.get("started", ""), "finished": utcnow_iso(),
+            "turns": doc.get("turns", 0),
+            "note": "Interrupted — the app or agent restarted mid-run",
+        })
+        tx.put_doc(hist, {"agent": agent, "runs": runs[-20:]})
+        return True
+    except Exception:  # noqa: BLE001 — hygiene never breaks the harness
+        return False
 
 
 def record_tasks(tx: Transport, chat_id: str, msg_id: str,
