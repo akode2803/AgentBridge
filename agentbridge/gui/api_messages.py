@@ -253,8 +253,9 @@ def typing(app, req, mesh) -> dict:
 
 @authed
 def livefeed(app, req, mesh) -> dict:
-    """Agent runs (status/<agent>_run.json — the R15 harness writes these;
-    shape kept from v1) + humans typing, for one chat or all mine."""
+    """Concurrent agent runs plus humans typing, for one chat or all mine."""
+    from .livefeed import expand_runs
+
     chat_id = req.params.get("id", "")
     if chat_id and not mesh.snapshot(chat_id).is_member(mesh.user):
         return {"feeds": []}  # never leak who's typing where
@@ -280,24 +281,28 @@ def livefeed(app, req, mesh) -> dict:
         if not isinstance(doc, dict):
             continue
         leaf = path.rsplit("/", 1)[-1]
-        age = _age_s(doc.get("updated", ""))
-        if leaf.endswith("_run.json"):
-            if doc.get("state") != "running":
-                continue
-            cid = doc.get("chat_id") or ""
-            if (chat_id and cid != chat_id) or not _mine(cid):
-                continue
-            if age is not None and age > 7200:
-                continue  # a run that died without a finish write
-            # V109: a locally-hosted agent whose runner process is DEAD is
-            # not running, whatever its last doc write said (process truth)
-            from .api_agents import runner_state
+        runs = expand_runs(path, doc)
+        if runs:
+            for run in runs:
+                if run.get("state") != "running":
+                    continue
+                cid = run.get("chat_id") or ""
+                if (chat_id and cid != chat_id) or not _mine(cid):
+                    continue
+                age = _age_s(run.get("updated", ""))
+                if age is not None and age > 7200:
+                    continue  # a run that died without a finish write
+                # V109: a locally-hosted agent whose runner process is DEAD is
+                # not running, whatever its last doc write said.
+                from .api_agents import runner_state
 
-            who = doc.get("agent") or leaf[: -len("_run.json")]
-            if runner_state(app, mesh, who) is False:
-                continue
-            feeds.append({**doc, "age_s": age})
-        elif leaf.startswith("typing_"):
+                who = run.get("agent") or ""
+                if runner_state(app, mesh, who) is False:
+                    continue
+                feeds.append({**run, "age_s": age})
+            continue
+        if leaf.startswith("typing_"):
+            age = _age_s(doc.get("updated", ""))
             if not doc.get("user") or doc["user"] == mesh.user:
                 continue
             cid = doc.get("chat_id") or ""
@@ -307,6 +312,8 @@ def livefeed(app, req, mesh) -> dict:
                 continue  # heartbeat every ~3s while typing; stale = stopped
             feeds.append({"agent": doc["user"], "human": True,
                           "typing": True, "age_s": age})
+    feeds.sort(key=lambda item: (not item.get("human"), item.get("agent", ""),
+                                 item.get("run_id", "")))
     return {"feeds": feeds}
 
 

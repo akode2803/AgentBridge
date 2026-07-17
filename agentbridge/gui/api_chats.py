@@ -78,6 +78,7 @@ def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
     in ten minutes — process truth beats the stale doc."""
     from .api_agents import runner_state
     from .api_messages import _age_s
+    from .livefeed import expand_runs
 
     live: dict[str, list[dict]] = {}
     try:
@@ -87,32 +88,38 @@ def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
     for path in paths:
         leaf = path.rsplit("/", 1)[-1]
         is_typing = leaf.startswith("typing_")
-        is_run = leaf.endswith("_run.json")
-        if not (is_typing or is_run):
-            continue
         doc = mesh.tx.get_doc(path)
         if not isinstance(doc, dict):
             continue
-        cid = doc.get("chat_id") or ""
-        if not cid:
-            continue
-        age = _age_s(doc.get("updated", ""))
         if is_typing:
+            cid = doc.get("chat_id") or ""
+            age = _age_s(doc.get("updated", ""))
             who = doc.get("user") or ""
-            if not who or who == mesh.user or age is None or age > 12:
+            if (not cid or not who or who == mesh.user or age is None
+                    or age > 12):
                 continue
             live.setdefault(cid, []).append({"user": who, "typing": True})
-        else:
-            if doc.get("state") != "running":
+            continue
+        for run in expand_runs(path, doc):
+            if run.get("state") != "running":
                 continue
+            cid = run.get("chat_id") or ""
+            if not cid:
+                continue
+            age = _age_s(run.get("updated", ""))
             if age is not None and age > 600:
                 continue
-            who = doc.get("agent") or leaf[: -len("_run.json")]
+            who = run.get("agent") or ""
             if runner_state(app, mesh, who) is False:
                 continue
             live.setdefault(cid, []).append(
-                {"user": who,
-                 "activity": " ".join(str(doc.get("activity") or "").split())[:80]})
+                {"user": who, "run_id": run.get("run_id") or "",
+                 "activity": " ".join(
+                     str(run.get("activity") or "").split())[:80]})
+    for entries in live.values():
+        entries.sort(key=lambda item: (not item.get("typing"),
+                                       item.get("user", ""),
+                                       item.get("run_id", "")))
     return live
 
 

@@ -269,8 +269,12 @@ class CliResponder:
             if not mcp_config:
                 # no live ask gate on this run — the web relax never applies
                 blocklist = list(inv.preset.blocklist)
+            cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
+            file_limit = (f"{max(1, cap // (1024 * 1024))} MB per file"
+                          if cap else "the configured per-file limit")
             prompt = pack.prompt(delivery, acc, context_file=context_file,
-                                 outbox=outbox, bridge=bool(mcp_config))
+                                 outbox=outbox, bridge=bool(mcp_config),
+                                 file_limit=file_limit)
             argv = inv.preset.build_argv(
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
@@ -474,4 +478,3 @@ class CliResponder:
                 except Exception:  # noqa: BLE001 — a bad blob never kills a run
                     continue
         return staged
-

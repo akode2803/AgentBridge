@@ -381,8 +381,8 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
 
         assert [m for m in owner.messages_for(snap.id)
                 if m.from_ == "helper"] == []           # no reply, no notice
-        feed = runner.mesh.tx.get_doc("status/helper_run.json")
-        assert feed and feed["state"] == "stopped"
+        runs = (runner.mesh.tx.get_doc("status/helper_runs.json") or {}).get("runs")
+        assert runs and runs[-1]["state"] == "stopped"
         runs = runner.mesh.tx.get_doc("status/helper_runs.json")
         assert runs and runs["runs"][-1]["state"] == "stopped"
         # handled: a second pass never re-runs the same trigger

@@ -306,7 +306,9 @@ async function renderMeshChat(force) {
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
     pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig,
-    feeds.map((f) => [f.agent, f.turns, f.activity, (f.draft || "").length])]);
+    feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
+      (f.draft || "").length, (f.steps || []).map((s) =>
+        `${s.ts || ""}:${s.text || ""}`).join("|")])]);
   // structural signature — drives the FULL rebuild (incl. the header). name
   // rides here so a rename (local or from another client) repaints the header;
   // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
@@ -510,9 +512,16 @@ async function renderMeshChat(force) {
     let line = f.activity || (draft ? "Writing the reply" : "Working");
     if (stale) line += ` (no updates for ${Math.round(f.age_s / 60)} min)`;
     const isOwner = (ms.users?.[f.agent]?.owners || []).includes(ms.user);
-    parts.push(["feed:" + f.agent, `
+    const runId = f.run_id || `legacy-${f.agent}`;
+    const steps = f.steps || [];
+    Mesh.feedExpand = Mesh.feedExpand || {};
+    const tasksOpen = !!Mesh.feedExpand[runId];
+    const taskRows = steps.map((s) => `
+      <div class="feed-step"><span class="feed-step-text">${esc(s.text || "")}</span>
+        <span class="mi-time">${esc(timeOnly(s.ts || ""))}</span></div>`).join("");
+    parts.push(["feed:" + runId, `
       <div class="msg feed-msg" data-feed-agent="${esc(f.agent)}"
-           data-feed-steps="${esc(JSON.stringify(f.steps || []))}">
+           data-feed-run="${esc(runId)}">
         ${feedHead(f.agent)}
         <div class="bubble typing">
           ${isOwner ? `<button class="feed-stop" data-agent="${esc(f.agent)}"
@@ -520,6 +529,9 @@ async function renderMeshChat(force) {
           ${feedSender(f.agent, true)}
           <div class="typing-row"><span class="tdot"></span><span class="tdot"></span>
             <span class="tdot"></span><span class="typing-label">${esc(line)}</span></div>
+          ${steps.length ? `<button class="feed-details" aria-expanded="${tasksOpen}"
+            type="button">${tasksOpen ? "Hide tasks" : "Show tasks"} (${steps.length})</button>
+            <div class="feed-task-list" ${tasksOpen ? "" : "hidden"}>${taskRows}</div>` : ""}
           ${draft ? `<div class="typing-draft">${md(draft)}<span class="caret">▍</span></div>` : ""}
         </div>
       </div>`]);
@@ -1231,6 +1243,21 @@ function bindTranscript(tr, chatId, data, ctx) {
         });
       return;
     }
+    const taskBtn = e.target.closest(".feed-details");
+    if (taskBtn) {
+      const row = taskBtn.closest(".feed-msg");
+      const runId = row?.dataset.feedRun;
+      if (!runId) return;
+      Mesh.feedExpand = Mesh.feedExpand || {};
+      const open = !Mesh.feedExpand[runId];
+      Mesh.feedExpand[runId] = open;
+      taskBtn.setAttribute("aria-expanded", String(open));
+      const count = row.querySelectorAll(".feed-task-list .feed-step").length;
+      taskBtn.textContent = `${open ? "Hide tasks" : "Show tasks"} (${count})`;
+      const list = row.querySelector(".feed-task-list");
+      if (list) list.hidden = !open;
+      return;
+    }
     // the reaction badge opens the who-reacted popup (R50) — the write
     // paths are the quick-react bar and the popup's own row
     const rx = e.target.closest(".rx-badge");
@@ -1283,41 +1310,12 @@ function bindTranscript(tr, chatId, data, ctx) {
                     top: e.clientY, bottom: e.clientY }, msg, chatId, tr._ctx);
       return;
     }
-    // the in-progress bubble's own menu: tasks undertaken so far, with
-    // timestamps (R36) — the only relevant option mid-run
-    const feedRow = e.target.closest(".feed-msg");
-    if (feedRow) {
-      e.preventDefault();
-      let steps = [];
-      try { steps = JSON.parse(feedRow.dataset.feedSteps || "[]"); } catch {}
-      openFeedMenu(e.clientX, e.clientY, feedRow.dataset.feedAgent, steps);
-      return;
-    }
+    // Task disclosure is an explicit Show/Hide control now. Right-clicking a
+    // live run should not fall through to the unrelated chat-level menu.
+    if (e.target.closest(".feed-msg")) { e.preventDefault(); return; }
     const cm = document.getElementById("chat-menu");
     if (cm && cm._openAt) { e.preventDefault(); cm._openAt(e.clientX, e.clientY); }
   });
-}
-
-// tasks-so-far menu for an in-progress run (R36): timestamped steps, newest
-// last — read-only, positioned at the cursor like the message menu
-function openFeedMenu(x, y, agent, steps) {
-  closeMenus();
-  const menu = document.createElement("div");
-  menu.className = "menu msg-menu feed-menu";
-  const rows = (steps || []).slice(-10).map((s) => `
-    <div class="feed-step"><span class="feed-step-text">${esc(s.text || "")}</span>
-      <span class="mi-time">${esc(timeOnly(s.ts || ""))}</span></div>`).join("");
-  menu.innerHTML = `<div class="feed-menu-head">@${esc(agent)} — tasks so far</div>
-    ${rows || '<div class="mi-empty">Nothing logged yet</div>'}`;
-  document.body.appendChild(menu);
-  menu.style.visibility = "hidden";
-  menu.hidden = false;
-  const w = menu.offsetWidth, h = menu.offsetHeight;
-  menu.style.left = Math.min(x, window.innerWidth - w - 8) + "px";
-  menu.style.top = Math.min(y, window.innerHeight - h - 8) + "px";
-  menu.style.visibility = "";
-  setTimeout(() => document.addEventListener(
-    "click", () => menu.remove(), { once: true }));
 }
 
 // the message context menu. A quick-react emoji bar leads (WhatsApp), then

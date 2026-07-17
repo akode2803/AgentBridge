@@ -318,6 +318,13 @@ live only in an adapter preset.
   runner (it stands aside with rc 3). The loop: sync → scan triggers → dispatch
   → post. Honors the global stand-down (`control.json`) and a persisted local
   peer-hold. Calls `mesh.harden_startup()` on start.
+- **`feed.py`** (R108) — concurrent run visibility is one bounded
+  `status/<agent>_live.json` document containing independently keyed run
+  entries. A process-local coordinator serializes worker-thread updates, so
+  one run finishing cannot erase another; active runs heartbeat every 60s
+  while a model is quiet. The GUI dual-reads the old singleton during rollout.
+  Completed outcomes live in the capped `<agent>_runs.json` history, and boot
+  reaping records genuinely orphaned entries as interrupted.
 - **`perf.py`** (R30) — per-run response-time profile: `pickup` (trigger
   posted → group claimed) / `context` (delivery build) / `model` (the
   responder run) / `post` (seal + commit). One JSONL record per run in
@@ -348,7 +355,10 @@ live only in an adapter preset.
   (`responder.split_reply` → runner `_deliver_reply`) — never a bridge `send`
   tool, so threading, the answered-guard and the rate cap (one slot per turn)
   stay owned by the reply pipeline; the first part carries `reply_to`, files
-  ride the last part.
+  ride the last part, and attachment delivery preflights every outbox file
+  before uploading. A file whose sealed payload exceeds the transport cap is
+  named in the reply and skipped; unexpected partial upload failures roll back
+  blobs from that attempt and retain the normal failure path.
 - **`broker.py`** (R18) — the Codex/Claude-Code-style PermissionBroker. Decision
   order: workspace path → allow; deny-root (harness home, mesh root) → refuse
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →
@@ -515,15 +525,21 @@ re-render on every poll would reset scroll / steal focus.
 
 ## 11. Known sharp edges (inherent to the design, not bugs)
 
-- **Status/feed files lag reality.** `status/<agent>_run.json` is written on the
-  agent's machine and read through sync — it can say "running" seconds after the
-  agent went idle. Never diagnose "stuck" from one read; cross-check the
-  transcript.
+- **Status/feed files lag reality.** `status/<agent>_live.json` is written on
+  the agent's machine and read through sync. Its per-run heartbeat prevents
+  long quiet calls from disappearing, but completion can still take a sync
+  beat to reach another device. Never diagnose "stuck" from one read;
+  cross-check process truth and the transcript.
 - **A venv/uv launcher shows as TWO OS processes.** A uv-managed `.venv`
   Python's `pythonw.exe` is a stub that spawns the uv base interpreter as a
   child; killing the parent takes the child. So one logical harness/GUI process
   appears as a `.venv` + a `uv`-path pair — **not** a duplicate. Check the
   command line and parent PID before "cleaning up" a second process.
+- **Repository double-click launchers are platform-aware, not installers.**
+  `AgentBridge.pyw` and `AgentHarness.pyw` select `.venv/Scripts/pythonw.exe`
+  on Windows and `.venv/bin/python3` on macOS/POSIX, detach with the native
+  process flags, and log to `~/.agentbridge/launcher.log`. A packaged app should
+  still replace these development wrappers with a signed OS-native launcher.
 - **PowerShell text round-trips corrupt source** (UTF-16+BOM, mangled em-dashes).
   Edit `.py`/`.js` only with proper tools; bump the version with Edit.
 - **`meta.json` is last-writer-wins** but rebuildable — a raced/clobbered write

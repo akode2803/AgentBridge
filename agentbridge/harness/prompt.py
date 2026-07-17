@@ -80,7 +80,7 @@ class PromptPack:
 
     # ------------------------------------------------------------ the prompt
     def prompt(self, delivery: Delivery, acc, *, context_file, outbox,
-               bridge: bool = False) -> str:
+               bridge: bool = False, file_limit: str = "configured limit") -> str:
         roster = "; ".join(
             f"@{r['name']} ({r.get('desc', '')})" for r in delivery.roster)
         parts = [self.text(
@@ -105,7 +105,8 @@ class PromptPack:
                                       context_file=context_file))
         else:
             parts.append(self.text("task_message", context_file=context_file))
-        parts.append(self.text("capabilities", outbox=outbox))
+        parts.append(self.text("capabilities", outbox=outbox,
+                               file_limit=file_limit))
         # V78: the break marker is injected like the sentinel; a pack that
         # drops this block simply degrades to single-message replies
         parts.append(self.text("multi_message", delimiter=MESSAGE_BREAK))

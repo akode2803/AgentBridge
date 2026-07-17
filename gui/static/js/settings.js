@@ -634,6 +634,11 @@ async function renderSettings() {
             <dt>Replies per hour</dt><dd><span class="csel-slot ag-rate"
               data-agent="${esc(a.username)}"
               data-value="${st.max_replies_per_hour != null ? esc(st.max_replies_per_hour) : ""}"></span></dd>
+            <dt>Parallel runs</dt><dd><span class="csel-slot ag-concurrency"
+              data-agent="${esc(a.username)}"
+              data-value="${esc(st.concurrency || 2)}"></span>
+              <span class="hint">Maximum simultaneous responses for this agent;
+              capped at 4 to protect the machine and provider quota</span></dd>
             <dt>Global memory</dt><dd><span class="csel-slot ag-gmem"
               data-agent="${esc(a.username)}"
               data-value="${esc(st.global_memory || "dm")}"></span>
@@ -1063,7 +1068,7 @@ async function renderSettings() {
   // elements (privacy audiences, status) mounted by wireAccountEditors.
   if (section === "agents") {
     const ruleOpts = Object.entries(RULE_LABELS).map(([v, label]) => ({ v, label }));
-    const rateOpts = [
+      const rateOpts = [
       { v: "", label: "Default (30 / hour)" },
       ...[10, 20, 30, 50, 100, 200, 500].map((n) => ({ v: String(n), label: `${n} / hour` })),
     ];
@@ -1092,6 +1097,9 @@ async function renderSettings() {
         // harness spawns no runs for it
         { v: "none", label: "No runs — MCP only" },
       ];
+      const concurrencyOpts = [1, 2, 3, 4].map((n) => ({
+        v: String(n), label: n === 1 ? "1 — one at a time" : `${n} simultaneous`,
+      }));
       const modelOpts = (fam, blank) => [
         { v: "", label: blank },
         ...((fam && fam.models) || []).map((m) => ({ v: m, label: m })),
@@ -1167,6 +1175,7 @@ async function renderSettings() {
         if (slot.classList.contains("ag-route-model"))
           return modelOpts(famFor(slot.dataset.agent), "Use current model");
         if (slot.classList.contains("ag-peer")) return peerOpts;
+        if (slot.classList.contains("ag-concurrency")) return concurrencyOpts;
         if (!slot.classList.contains("ag-rate")) return ruleOpts;
         // surface a previously-set non-preset value so it labels correctly
         const cur = slot.dataset.value;
@@ -1500,6 +1509,7 @@ function agConfigSave(agent) {
       document.querySelector(`${sel}[data-agent="${agent}"]`)?.dataset.value || "";
     const rateRaw = val(".ag-rate");
     const rateN = parseInt(rateRaw, 10);
+    const concurrencyN = parseInt(val(".ag-concurrency"), 10);
     const routing = {};
     document.querySelectorAll(`.ag-route-on[data-agent="${agent}"]`)
       .forEach((sw) => {
@@ -1518,6 +1528,7 @@ function agConfigSave(agent) {
       global_memory: val(".ag-gmem") || "dm",
       peer_access: val(".ag-peer") || "off",
       peer_repair: !!document.querySelector(`.ag-repair[data-agent="${agent}"]`)?.checked,
+      concurrency: isNaN(concurrencyN) ? 2 : Math.max(1, Math.min(4, concurrencyN)),
       routing,
       // blank clears back to the default; otherwise clamp to a sane band
       max_replies_per_hour: !rateRaw || isNaN(rateN)

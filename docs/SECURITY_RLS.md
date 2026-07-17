@@ -150,7 +150,9 @@ row security`.
    until it claims a members row, and RLS decides what a claim can do).
 2. **Paste** `docs/supabase_schema.sql` (idempotent, whole file is fine).
    The fleet keeps running on the service key, which bypasses RLS —
-   pasting only *arms* the gate for `authenticated` users.
+   pasting only *arms* the gate for `authenticated` users. Re-pasting is also
+   the supported migration path: the R108 verification specifically requires
+   the current `ab_docs_member_insert` genesis exception.
 3. **Join from each machine** (from the repo root):
    `.\.venv\Scripts\python.exe -m agentbridge.transport.supabase_admin join aryan`
    here, `... join aryanonavd` on the AVD. Each machine mints and installs
@@ -212,3 +214,11 @@ row security`.
   panel, then delete its `SUPABASE_SECRET_KEY=` line and restart once
   (runbook step 6). The secret key now lives only in the dashboard —
   re-fetch it there for future `seed`/`revoke` runs.
+- R108 genesis probe (2026-07-18): fresh member authentication is healthy
+  (`ab_member('mesh2') = 'aryan'`), but live group creation and a minimal
+  `chats/<scratch>/meta.json` insert containing `members.aryan` both return
+  42501. No row was left behind. This is policy drift or an outdated installed
+  policy, not the stale-session case fixed in R107. V137 tracks re-pasting the
+  current schema and verifying group + DM genesis; persistent failure requires
+  comparing the dashboard's installed `ab_docs_member_insert` definition with
+  `docs/supabase_schema.sql`.

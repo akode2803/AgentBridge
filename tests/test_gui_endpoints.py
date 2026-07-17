@@ -329,10 +329,12 @@ def test_agents_create_patch_standdown_delete(rig):
     out = rig.post("/api/mesh/agent", username="helper",
                    patch={"model": "grok-4", "reasoning": "high",
                           "default_rule": "tagged", "max_replies_per_hour": 50,
+                          "concurrency": 4,
                           "display": "Helper Bot"})
     h = out["agent"]["harness"]
     assert h["model"] == "grok-4" and h["reasoning"] == "high"
     assert h["default_rule"] == "tagged" and h["max_replies_per_hour"] == 50
+    assert h["concurrency"] == 4
     assert out["agent"]["display"] == "Helper Bot"  # profile key routed out
     assert out["agent"]["settings"] == h  # the frontend reads settings == harness
 
@@ -573,9 +575,16 @@ def test_state_carries_sidebar_liveliness(rig):
         "user": "fable", "chat_id": cid, "updated": utcnow_iso(),
     })
     # a running agent feed in the same chat + a GHOST run (stale) elsewhere
-    rig.app.mesh.tx.put_doc("status/helper_run.json", {
-        "state": "running", "agent": "helper", "chat_id": cid,
-        "updated": utcnow_iso(), "activity": "Searching for the export",
+    rig.app.mesh.tx.put_doc("status/helper_live.json", {
+        "kind": "run-set", "agent": "helper", "updated": utcnow_iso(),
+        "runs": [
+            {"run_id": "run-a", "state": "running", "agent": "helper",
+             "chat_id": cid, "updated": utcnow_iso(),
+             "activity": "Searching for the export"},
+            {"run_id": "run-b", "state": "running", "agent": "helper",
+             "chat_id": cid, "updated": utcnow_iso(),
+             "activity": "Checking the totals"},
+        ],
     })
     rig.app.mesh.tx.put_doc("status/zombie_run.json", {
         "state": "running", "agent": "zombie", "chat_id": other,
@@ -587,6 +596,8 @@ def test_state_carries_sidebar_liveliness(rig):
     assert any(f.get("user") == "helper"
                and f.get("activity") == "Searching for the export"
                for f in live)
+    assert {f.get("run_id") for f in live if f.get("user") == "helper"} \
+        == {"run-a", "run-b"}
     assert not any(f.get("user") == "aryan" for f in live)
     assert "live" not in chat_of(st, other)   # the ghost never surfaces
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from ..core.models import Account
 
 __all__ = ["HarnessSettings", "Route", "RULES", "CATCHUP_POLICIES",
-           "CATEGORIES"]
+           "CATEGORIES", "MAX_CONCURRENCY"]
 
 RULES = ("all", "tagged", "humans")
 CATCHUP_POLICIES = ("recent", "none", "all")
@@ -20,6 +20,7 @@ CATCHUP_POLICIES = ("recent", "none", "all")
 # and whether that audience is served at all. Timer runs bill as "owner"
 # (self-scheduled work serves the responsible member).
 CATEGORIES = ("owner", "humans", "agents")
+MAX_CONCURRENCY = 4
 
 _MODEL_RE_MAX = 64  # model ids ride argv; keep them short and sane
 
@@ -119,7 +120,7 @@ class HarnessSettings:
             default_rule=rule if rule in RULES else "tagged",
             rules=rules,
             models=models,
-            concurrency=_int(h.get("concurrency"), 2, 1, 8),
+            concurrency=_int(h.get("concurrency"), 2, 1, MAX_CONCURRENCY),
             max_replies_per_hour=_int(h.get("max_replies_per_hour"), 30, 1, 1000),
             catchup=catchup if catchup in CATCHUP_POLICIES else "recent",
             catchup_window_h=float(_int(h.get("catchup_window_h"), 48, 1, 24 * 30)),

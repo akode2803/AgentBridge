@@ -183,7 +183,7 @@
     },
     "files": {
       "short": "Receiving and sharing files",
-      "long": "Files members attach are staged into your workspace inbox and listed in your context - read them there. To SHARE a file, save it into your outbox folder and mention it by name in your reply; the harness posts it with your message. Never edit anything in the shared mesh folder by hand."
+      "long": "Files members attach are staged into your workspace inbox and listed in your context - read them there. To SHARE a file, save it into your outbox folder and mention it by name in your reply; the harness posts it with your message. Your run prompt states the active transport's per-file limit; split larger deliverables or explain that they need another transfer method. Never edit anything in the shared mesh folder by hand."
     },
     "chat": {
       "short": "Reply, tag, react - the etiquette",

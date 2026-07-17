@@ -23,6 +23,7 @@ import argparse
 import contextlib
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -45,7 +46,7 @@ from .peer import PeerService
 from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
-from .settings import HarnessSettings
+from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
 
@@ -53,7 +54,7 @@ __all__ = ["AgentRunner", "SingleInstance", "supervise", "main",
            "EXIT_ALREADY_RUNNING"]
 
 EXIT_ALREADY_RUNNING = 3
-MAX_WORKERS = 8          # hard ceiling; the owner-set concurrency gates below
+MAX_WORKERS = MAX_CONCURRENCY  # one hard ceiling for pool + parsed owner setting
 RATE_RETRY_S = 600.0     # capped chat: revisit in this many seconds
 BLOB_GRACE_S = 600.0     # v1 value: a lost attachment must not wedge a chat
 STOP_FRESH_S = 600.0     # a claim-time stop doc older than this is stale
@@ -67,6 +68,18 @@ def _reaction_only(group) -> bool:
     differently: "Noticing a reaction", silence is the normal outcome.)"""
     return (group.kind == "message" and group.items
             and all(it.reason == "reaction" for it in group.items))
+
+
+def _failure_reason(err: Exception) -> str:
+    """Bounded one-line reason for owner-visible history and notices."""
+    why = type(err).__name__
+    detail = " ".join(str(err).split())
+    detail = detail.replace(str(Path.home()), "~")
+    detail = re.sub(
+        r"(?i)\b(password|token|secret|api[_-]?key)\s*[:=]\s*\S+",
+        r"\1=<redacted>", detail,
+    )[:160]
+    return f"{why}: {detail}" if detail else why
 
 
 class AgentRunner:
@@ -584,7 +597,16 @@ class AgentRunner:
         # leg matches on it), attachments ride the LAST part (the prompt says
         # so), and the whole burst spends the one rate slot this run claimed.
         parts = split_reply(body)
-        files = self._attach(chat_id, reply.files)
+        files, skipped = self._attach(chat_id, reply.files)
+        if skipped:
+            cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
+            cap_mb = max(1, cap // (1024 * 1024)) if cap else 0
+            limit = f"{cap_mb} MB" if cap_mb else "configured"
+            shown = ", ".join(skipped[:8])
+            if len(skipped) > 8:
+                shown += f", and {len(skipped) - 8} more"
+            parts[-1] += ("\n\nNot attached - over the transport's "
+                          f"{limit} file limit: " + shown)
         timings.start("post")
         posted_ids = []
         for i, part in enumerate(parts):
@@ -622,7 +644,8 @@ class AgentRunner:
 
     def _run_failed(self, group: WorkGroup, feed: RunFeed,
                     settings: HarnessSettings, delivery, err: Exception) -> None:
-        feed.finish("error", f"Run failed: {type(err).__name__}")
+        reason = _failure_reason(err)
+        feed.finish("error", f"Run failed: {reason}")
         self.queue.finish(group, f"error:{type(err).__name__}")
         if group.kind == "timer":
             self.timers.pop(group.items[0].key.split("timer:", 1)[-1],
@@ -641,7 +664,7 @@ class AgentRunner:
                             "body": (last.body or "")[:200]}
             self.mesh.post(
                 group.chat_id,
-                NOTICE.format(agent=self.agent, err=type(err).__name__,
+                NOTICE.format(agent=self.agent, err=reason,
                               machine=self.machine),
                 reply_to=reply_to,
             )
@@ -660,25 +683,60 @@ class AgentRunner:
         except Exception:  # noqa: BLE001 — unsure = quote, the safe default
             return True
 
-    def _attach(self, chat_id: str, paths: list[str]) -> list[dict]:
+    def _attach(self, chat_id: str,
+                paths: list[str]) -> tuple[list[dict], list[str]]:
         """Local files a Reply shares -> sealed chat blobs -> files[] records
-        (the harness-side mirror of the GUI's seal_attachments)."""
+        (the harness-side mirror of the GUI's seal_attachments).
+
+        Known oversize files are named and skipped rather than killing the
+        reply. Everything is preflighted before the first upload; an unexpected
+        upload failure rolls back blobs already written by this attempt.
+        """
+        import contextlib
         import hashlib
 
-        out = []
+        cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
+        prepared: list[tuple[str, bytes, dict]] = []
+        skipped: list[str] = []
         for p in paths or []:
+            path = Path(p)
+            name = path.name[:120]
             try:
-                raw = Path(p).read_bytes()
+                size = path.stat().st_size
             except OSError:
                 continue
-            name = Path(p).name[:120]
+            # Avoid loading a known multi-gigabyte file merely to reject it.
+            # Equality is also rejected: authenticated sealing adds overhead.
+            if cap and size >= cap:
+                skipped.append(f"{name} ({size / 1_000_000:.0f} MB)")
+                continue
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                continue
             dot = name.rfind(".")
             blob_id = new_id("f") + (name[dot:][:12].lower() if dot > 0 else "")
             sealed = self.mesh.sealer.seal_blob(chat_id, blob_id, raw)
-            self.mesh.tx.put_blob(f"chats/{chat_id}/files/{blob_id}", sealed)
-            out.append({"id": blob_id, "name": name, "bytes": len(raw),
-                        "sha256": hashlib.sha256(raw).hexdigest()})
-        return out
+            if cap and len(sealed) > cap:
+                skipped.append(f"{name} ({len(raw) / 1_000_000:.0f} MB)")
+                continue
+            blob_path = f"chats/{chat_id}/files/{blob_id}"
+            prepared.append((blob_path, sealed, {
+                "id": blob_id, "name": name, "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }))
+
+        uploaded: list[str] = []
+        try:
+            for blob_path, sealed, _record in prepared:
+                self.mesh.tx.put_blob(blob_path, sealed)
+                uploaded.append(blob_path)
+        except Exception:
+            for blob_path in uploaded:
+                with contextlib.suppress(Exception):
+                    self.mesh.tx.delete_blob(blob_path)
+            raise
+        return [record for _path, _sealed, record in prepared], skipped
 
     # ------------------------------------------------------------ lifecycle
     def _consume_timer_cancels(self) -> None:

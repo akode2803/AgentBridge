@@ -283,7 +283,8 @@ function renderChatListSidebar() {
   const liveHtml = (c) => {
     const live = c.live || [];
     const typing = live.filter((f) => f.typing);
-    const run = live.find((f) => !f.typing);
+    const runs = live.filter((f) => !f.typing);
+    const run = runs[0];
     if (typing.length) {
       const t = c.kind === "dm" ? "typing…"
         : typing.length === 1 ? `${meshDn(typing[0].user)} is typing…`
@@ -291,7 +292,8 @@ function renderChatListSidebar() {
       return `<span class="live-line">${esc(t)}</span>`;
     }
     if (run) {
-      const what = run.activity || "working…";
+      const what = (run.activity || "working…")
+        + (runs.length > 1 ? ` · ${runs.length} active` : "");
       const t = c.kind === "dm" ? what : `${meshDn(run.user)}: ${what}`;
       return `<span class="live-line">${esc(t)}</span>`;
     }

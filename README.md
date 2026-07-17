@@ -116,6 +116,12 @@ To host the agents assigned to this machine:
 python -m agentbridge.harness --all
 ```
 
+For a configured repository checkout, `AgentBridge.pyw` and
+`AgentHarness.pyw` are the double-click wrappers. They select the project venv
+on Windows or macOS and write startup diagnostics to
+`~/.agentbridge/launcher.log`; packaged releases will replace them with native
+launchers.
+
 CLI examples:
 
 ```bash

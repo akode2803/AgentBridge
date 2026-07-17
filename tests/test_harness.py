@@ -81,6 +81,15 @@ def agent_msgs(mesh, chat_id, agent="helper"):
     return [m for m in mesh.messages_for(chat_id) if m.from_ == agent]
 
 
+def latest_run(tx, agent="helper"):
+    runs = (tx.get_doc(f"status/{agent}_runs.json") or {}).get("runs") or []
+    return runs[-1] if runs else None
+
+
+def active_runs(tx, agent="helper"):
+    return (tx.get_doc(f"status/{agent}_live.json") or {}).get("runs") or []
+
+
 # ---------------------------------------------------------------- the basics
 
 def test_tagged_reply_end_to_end(hrig):
@@ -102,7 +111,7 @@ def test_tagged_reply_end_to_end(hrig):
     assert d.triggers[0].sender_kind == "human"
     assert any(r["name"] == "helper" and r["you"] for r in d.roster)
     # the run feed closed cleanly
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
+    feed = latest_run(runner.mesh.tx)
     assert feed and feed["state"] == "done" and feed["chat_id"] == snap.id
 
 
@@ -125,8 +134,8 @@ def test_reply_timings_are_profiled(hrig):
     for key in ("total_s", "pickup_s", "context_s", "model_s", "post_s"):
         assert key in rec and rec[key] >= 0
     # the run feed carries the human summary…
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
-    assert "total" in feed["activity"] and "model" in feed["activity"]
+    feed = latest_run(runner.mesh.tx)
+    assert "total" in feed["note"] and "model" in feed["note"]
     # …and so does the reply's Message-info task doc
     reply = agent_msgs(hrig.owner, snap.id)[0]
     tasks = runner.mesh.tx.get_doc(f"chats/{snap.id}/tasks/{reply.id}.json")
@@ -458,8 +467,9 @@ def test_responder_failure_posts_notice_once(hrig):
     assert len(replies) == 1                           # one notice, no loop
     assert "could not produce a reply" in replies[0].body
     assert len(responder.calls) == 1
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
-    assert feed["state"] == "error"
+    feed = latest_run(runner.mesh.tx)
+    assert feed["state"] == "error" and "adapter fell over" in feed["note"]
+    assert "RuntimeError: adapter fell over" in replies[0].body
 
 
 # ------------------------------------------------- files, identity, adoption
@@ -483,6 +493,59 @@ def test_reply_files_are_sealed_and_readable_by_members(hrig, tmp_path):
     assert hrig.owner.sealer.open_blob(snap.id, blob_id, raw) == b"a,b\n1,2\n"
 
 
+def test_oversized_attachment_is_named_but_reply_still_posts(hrig, tmp_path):
+    small = tmp_path / "summary.txt"
+    large = tmp_path / "archive.zip"
+    small.write_text("ready", encoding="utf-8")
+    large.write_bytes(b"x" * 2048)
+    snap = hrig.owner.create_chat("File cap", members=["helper"])
+    hrig.owner.post(snap.id, "@helper send both files")
+    runner = hrig.make_runner(Scripted(lambda d: Reply(
+        body="Delivery ready", files=[str(small), str(large)])))
+    runner.mesh.tx.max_upload_bytes = 1024
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    reply = agent_msgs(hrig.owner, snap.id)[0]
+    assert reply.body.startswith("Delivery ready")
+    assert "Not attached" in reply.body and "archive.zip" in reply.body
+    assert [f["name"] for f in reply.files] == ["summary.txt"]
+    assert latest_run(runner.mesh.tx)["state"] == "done"
+
+
+def test_attachment_upload_failure_rolls_back_earlier_blobs(hrig, tmp_path,
+                                                            monkeypatch):
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    snap = hrig.owner.create_chat("Rollback", members=["helper"])
+    runner = hrig.make_runner(Scripted())
+    tx = runner.mesh.tx
+    original_put = tx.put_blob
+    original_delete = tx.delete_blob
+    uploaded = []
+    deleted = []
+
+    def flaky_put(path, data):
+        if uploaded:
+            raise OSError("storage unavailable")
+        original_put(path, data)
+        uploaded.append(path)
+
+    def tracked_delete(path):
+        deleted.append(path)
+        original_delete(path)
+
+    monkeypatch.setattr(tx, "put_blob", flaky_put)
+    monkeypatch.setattr(tx, "delete_blob", tracked_delete)
+    with pytest.raises(OSError, match="storage unavailable"):
+        runner._attach(snap.id, [str(first), str(second)])
+
+    assert deleted == uploaded
+    assert tx.get_blob(uploaded[0]) is None
+
+
 def test_multi_message_burst_end_to_end(hrig):
     """V78 (R79): a reply split by MESSAGE_BREAK posts as separate messages,
     in order; the FIRST carries the trigger's reply_to (the answered-guard's
@@ -503,8 +566,8 @@ def test_multi_message_burst_end_to_end(hrig):
     assert (replies[0].reply_to or {}).get("id") == trigger.id
     assert not replies[1].reply_to
     assert replies[0].ns < replies[1].ns
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
-    assert feed["state"] == "done" and "(2 messages)" in feed["activity"]
+    feed = latest_run(runner.mesh.tx)
+    assert feed["state"] == "done" and "(2 messages)" in feed["note"]
     # the answered-guard holds: a re-scan re-fires nothing
     turn(hrig, runner, snap.id)
     assert len(agent_msgs(hrig.owner, snap.id)) == 2
@@ -614,9 +677,54 @@ def test_feed_first_steps_bypass_the_throttle():
     feed = RunFeed(tx, "helper", "c1")          # forced init write
     for i in range(5):
         feed.step(f"step {i}")                  # all within the throttle
-    activities = [w["activity"] for w in writes]
+    activities = [w["runs"][0]["activity"] for w in writes]
     assert activities[:4] == ["Starting up…", "step 0", "step 1", "step 2"]
     assert len(writes) == 4                     # step 3/4 throttled as before
+    feed.finish("done", "finished")
+
+
+def test_parallel_run_feeds_finish_independently():
+    """V91: one agent's concurrent runs share a bounded document, but each
+    stable run id owns its entry and finishing one leaves the other visible."""
+    from agentbridge.harness.feed import RunFeed
+
+    docs: dict[str, dict] = {}
+    tx = SimpleNamespace(
+        get_doc=lambda path, default=None: docs.get(path, default),
+        put_doc=lambda path, doc: docs.__setitem__(path, dict(doc)),
+    )
+    first = RunFeed(tx, "parallel", "c1")
+    second = RunFeed(tx, "parallel", "c2")
+    live = docs["status/parallel_live.json"]["runs"]
+    assert {r["run_id"] for r in live} == {first.run_id, second.run_id}
+
+    first.finish("done", "first complete")
+    live = docs["status/parallel_live.json"]["runs"]
+    assert [r["run_id"] for r in live] == [second.run_id]
+    second.finish("done", "second complete")
+    assert docs["status/parallel_live.json"]["runs"] == []
+    assert [r["note"] for r in docs["status/parallel_runs.json"]["runs"]] \
+        == ["first complete", "second complete"]
+
+
+def test_run_feed_heartbeats_while_model_is_quiet(monkeypatch):
+    """A long blocking model call stays fresh even when it emits no steps."""
+    from agentbridge.harness import feed as feed_mod
+
+    writes = []
+    tx = SimpleNamespace(
+        get_doc=lambda path, default=None: default,
+        put_doc=lambda path, doc: writes.append((path, dict(doc))),
+    )
+    monkeypatch.setattr(feed_mod, "_HEARTBEAT_S", 0.01)
+    feed = feed_mod.RunFeed(tx, "heartbeat", "c1")
+    deadline = time.monotonic() + 0.5
+    while len(writes) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(writes) >= 2
+    feed.finish("done", "complete")
+    feed._heartbeat.join(timeout=0.5)
+    assert not feed._heartbeat.is_alive()
 
 
 def test_reap_orphan_run():
@@ -796,9 +904,9 @@ def test_reaction_nudges_the_agent_and_silence_is_normal(hrig):
     pack = PromptManager(hrig.home).for_agent(None)
     prompt = pack.prompt(d, None, context_file="ctx.md", outbox="out")
     assert "FYI-grade nudge" in prompt                # task_reaction block
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
+    feed = latest_run(runner.mesh.tx)
     assert feed["state"] == "done"
-    assert feed["activity"] == "Noticed the reaction — no reply needed"
+    assert feed["note"] == "Noticed the reaction — no reply needed"
     assert [m.id for m in agent_msgs(hrig.owner, snap.id)] == [reply.id]
 
     calls = len(responder.calls)
@@ -930,7 +1038,7 @@ def test_settings_parse_and_clamp():
     }))
     s = HarnessSettings.from_account(acc)
     assert s.default_rule == "all"
-    assert s.concurrency == 8                          # clamped to the ceiling
+    assert s.concurrency == 4                          # clamped to the ceiling
     assert s.catchup == "recent"                       # unknown fails closed
     assert s.rule_for("c1") == "humans"
     assert s.rule_for("c1", dm=True) == "humans"       # explicit beats the DM default
@@ -972,8 +1080,8 @@ def test_cannot_post_group_resolves_without_model_run(hrig):
     assert agent_msgs(hrig.owner, snap.id) == []
     assert runner.queue.answered(snap.id, trigger.id)  # never re-fires
     assert runner.queue._pending() == {}
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
-    assert feed["state"] == "done" and "restricted" in feed["activity"]
+    feed = latest_run(runner.mesh.tx)
+    assert feed["state"] == "done" and "restricted" in feed["note"]
 
 
 def test_post_failure_is_terminal_not_a_loop(hrig):
@@ -1040,8 +1148,8 @@ def test_attachment_sync_barrier_defers_until_blob_lands(hrig):
     assert runner.queue._pending()                    # still queued
     # V71: the wait is VISIBLE — a running feed with a "waiting" activity so
     # the requester sees the agent is waiting on the file, not frozen
-    feed = runner.mesh.tx.get_doc("status/helper_run.json")
-    assert feed and feed.get("state") == "running" and feed.get("waiting")
+    feed = active_runs(runner.mesh.tx)[0]
+    assert feed.get("state") == "running" and feed.get("waiting")
     assert "syncing" in feed.get("activity", "") and "report.bin" in feed["activity"]
 
     sealed = hrig.owner.sealer.seal_blob(snap.id, "fx1.bin", b"hello")

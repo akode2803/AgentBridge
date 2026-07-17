@@ -1,7 +1,8 @@
 """Runtime status docs — the harness's owner- and member-visible surfaces.
 
-- ``status/<agent>_run.json``: the per-run live feed (v1 shape, kept — the
-  GUI livefeed already reads it). v2 drops the streaming ``draft`` body: in
+- ``status/<agent>_live.json``: a bounded set of independently keyed live runs.
+  The GUI also reads the pre-R108 singleton ``<agent>_run.json`` during rollout.
+  The current shape drops the streaming ``draft`` body: in
   an E2EE mesh a reply draft is content, not metadata, and this doc is plain
   at rest. Activity lines stay (tool-step summaries; R17 rewords them).
 - ``chats/<id>/tasks/<msg_id>.json``: the task steps behind one reply, for
@@ -15,15 +16,64 @@ message handling (v1 rule, kept).
 
 from __future__ import annotations
 
+import threading
 import time
+from dataclasses import dataclass, field
 
-from ..core.timekit import utcnow_iso
+from ..core.timekit import new_id, utcnow_iso
 from ..transport.base import Transport
 
 __all__ = ["RunFeed", "write_harness_doc", "record_tasks", "write_waiting",
            "reap_orphan_run"]
 
 _THROTTLE_S = 1.5
+_HEARTBEAT_S = 60.0
+
+
+def _live_path(agent: str) -> str:
+    return f"status/{agent}_live.json"
+
+
+def _waiting_id(chat_id: str) -> str:
+    import hashlib
+
+    return "waiting-" + hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class _FeedCoordinator:
+    """One bounded cloud document for every concurrent run of one agent.
+
+    Agent runners are single-process owners of their status lane, but model
+    calls run on several threads. Serializing the aggregate here prevents one
+    run's finish from erasing another run's activity without creating a new
+    Supabase row (and eventual tombstone) for every turn.
+    """
+
+    tx: Transport
+    agent: str
+    runs: dict[str, dict] = field(default_factory=dict)
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def write(self) -> None:
+        self.tx.put_doc(_live_path(self.agent), {
+            "kind": "run-set", "agent": self.agent, "updated": utcnow_iso(),
+            "runs": list(self.runs.values()),
+        })
+
+
+_COORDINATORS: dict[tuple[int, str], _FeedCoordinator] = {}
+_COORDINATORS_LOCK = threading.RLock()
+
+
+def _coordinator(tx: Transport, agent: str) -> _FeedCoordinator:
+    key = (id(tx), agent)
+    with _COORDINATORS_LOCK:
+        coord = _COORDINATORS.get(key)
+        if coord is None or coord.tx is not tx:
+            coord = _FeedCoordinator(tx, agent)
+            _COORDINATORS[key] = coord
+        return coord
 
 
 def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> None:
@@ -35,12 +85,19 @@ def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> Non
     real run overwrites this the moment the blob lands (or the grace expires
     and it proceeds); a stale one ages out with every other run feed."""
     try:
-        tx.put_doc(f"status/{agent}_run.json", {
-            "state": "running", "agent": agent, "chat_id": chat_id,
-            "started": utcnow_iso(), "updated": utcnow_iso(),
-            "turns": 0, "activity": " ".join((activity or "").split())[:120],
-            "recent": [], "draft": "", "steps": [], "waiting": True,
-        })
+        coord = _coordinator(tx, agent)
+        run_id = _waiting_id(chat_id)
+        now = utcnow_iso()
+        with coord.lock:
+            previous = coord.runs.get(run_id) or {}
+            coord.runs[run_id] = {
+                "run_id": run_id, "state": "running", "agent": agent,
+                "chat_id": chat_id, "started": previous.get("started", now),
+                "updated": now, "turns": 0,
+                "activity": " ".join((activity or "").split())[:120],
+                "recent": [], "draft": "", "steps": [], "waiting": True,
+            }
+            coord.write()
     except Exception:  # noqa: BLE001 — a status write never blocks handling
         pass
 
@@ -52,27 +109,44 @@ class RunFeed:
         self.tx = tx
         self.agent = agent
         self.chat_id = chat_id
+        self.run_id = new_id("r")
         self.turns = 0
         self.activity = "Starting up…"
         self.recent: list[str] = []
         self.tasks: list[dict] = []
         self.started = utcnow_iso()
         self._last_write = 0.0
+        self._finished = False
+        self._stop = threading.Event()
+        self._coord = _coordinator(tx, agent)
+        # A real claim supersedes the attachment-wait placeholder for this
+        # chat. Only that stable waiting entry is removed; parallel runs stay.
+        with self._coord.lock:
+            self._coord.runs.pop(_waiting_id(chat_id), None)
         self.write("running", force=True)
+        self._heartbeat = threading.Thread(
+            target=self._heartbeat_loop, name=f"ab-feed-{agent}-{self.run_id}",
+            daemon=True,
+        )
+        self._heartbeat.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(_HEARTBEAT_S):
+            self.write("running", force=True)
 
     def step(self, line: str) -> None:
         try:
             line = " ".join((line or "").split())[:120]
             if not line:
                 return
-            self.turns += 1
-            self.activity = line
-            self.recent = (self.recent + [line])[-8:]
-            self.tasks.append({"text": line, "ts": utcnow_iso()})
-            # the first steps land inside the throttle window right after the
-            # forced init write — without forcing them too, the pane opens on
-            # "Starting up…" and jumps straight to mid-run (live feedback)
-            self.write("running", force=self.turns <= 3)
+            with self._coord.lock:
+                self.turns += 1
+                self.activity = line
+                self.recent = (self.recent + [line])[-8:]
+                self.tasks.append({"text": line, "ts": utcnow_iso()})
+                # the first steps land inside the throttle window right after
+                # init — otherwise the pane jumps from startup to mid-run.
+                self.write("running", force=self.turns <= 3)
         except Exception:  # noqa: BLE001 — the feed must never break a run
             pass
 
@@ -80,15 +154,20 @@ class RunFeed:
         if not force and time.time() - self._last_write < _THROTTLE_S:
             return
         try:
-            self.tx.put_doc(f"status/{self.agent}_run.json", {
-                "state": state, "agent": self.agent, "chat_id": self.chat_id,
-                "started": self.started, "updated": utcnow_iso(),
-                "turns": self.turns, "activity": self.activity,
-                "recent": self.recent, "draft": "",
-                # timestamped steps for the in-progress right-click menu (R36)
-                "steps": self.tasks[-12:],
-            })
-            self._last_write = time.time()
+            with self._coord.lock:
+                if self._finished and state == "running":
+                    return
+                self._coord.runs[self.run_id] = {
+                    "run_id": self.run_id, "state": state,
+                    "agent": self.agent, "chat_id": self.chat_id,
+                    "started": self.started, "updated": utcnow_iso(),
+                    "turns": self.turns, "activity": self.activity,
+                    "recent": self.recent, "draft": "",
+                    # timestamped steps for the in-progress task disclosure
+                    "steps": self.tasks[-12:],
+                }
+                self._coord.write()
+                self._last_write = time.time()
         except Exception:  # noqa: BLE001
             pass
 
@@ -97,12 +176,24 @@ class RunFeed:
         # activity line — capture what the run was doing before it's gone, so
         # the history (and the agent's next-run context) can say it. turns==0
         # means nothing ran yet ("Starting up…" is not an activity).
-        doing = self.activity if self.turns and note and note != self.activity \
-            else ""
-        if note:
-            self.activity = note
-        self.write(state, force=True)
-        self._append_history(state, doing=doing)
+        self._stop.set()
+        try:
+            with self._coord.lock:
+                if self._finished:
+                    return
+                self._finished = True
+                doing = self.activity if self.turns and note \
+                    and note != self.activity else ""
+                if note:
+                    self.activity = note
+                # History is the durable completed-run surface. The live
+                # aggregate contains active runs only, so finishing one cannot
+                # hide another.
+                self._append_history(state, doing=doing)
+                self._coord.runs.pop(self.run_id, None)
+                self._coord.write()
+        except Exception:  # noqa: BLE001 - status must never break delivery
+            pass
 
     def _append_history(self, state: str, doing: str = "") -> None:
         """The 'tasks completed by this agent' record (R36): finished runs
@@ -141,17 +232,50 @@ def reap_orphan_run(tx: Transport, agent: str,
     advertises lives in the durable queue, not in ``running_chats``, and
     the queue rewrites it on its own cadence. Returns True when reaped."""
     try:
-        path = f"status/{agent}_run.json"
-        doc = tx.get_doc(path, default=None)
-        if (not isinstance(doc, dict) or doc.get("state") != "running"
-                or doc.get("waiting")):
-            return False
-        if running_chats and doc.get("chat_id") in running_chats:
-            return False
-        tx.put_doc(path, {
-            **doc, "state": "interrupted", "updated": utcnow_iso(),
-            "activity": "Interrupted — the run never finished",
-        })
+        coord = _coordinator(tx, agent)
+        with coord.lock:
+            doc = tx.get_doc(_live_path(agent), default=None)
+            saved = doc.get("runs") if isinstance(doc, dict) else None
+            saved = saved if isinstance(saved, list) else []
+            active = set(coord.runs)
+            orphans = [r for r in saved if isinstance(r, dict)
+                       and r.get("state") == "running" and not r.get("waiting")
+                       and r.get("run_id") not in active
+                       and (not running_chats
+                            or r.get("chat_id") not in running_chats)]
+            # Rollout compatibility: the pre-R108 single-run document may be
+            # the only stale record left after an update/restart.
+            legacy_path = f"status/{agent}_run.json"
+            legacy = tx.get_doc(legacy_path, default=None)
+            if (isinstance(legacy, dict) and legacy.get("state") == "running"
+                    and not legacy.get("waiting")
+                    and (not running_chats
+                         or legacy.get("chat_id") not in running_chats)):
+                orphans.append(legacy)
+                tx.put_doc(legacy_path, {
+                    **legacy, "state": "interrupted", "updated": utcnow_iso(),
+                    "activity": "Interrupted — the run never finished",
+                })
+            if not orphans:
+                return False
+            for orphan in orphans:
+                _append_interrupted_history(tx, agent, orphan)
+            # Rebuild from process truth. Waiting placeholders and all active
+            # entries survive; stale saved entries do not.
+            coord.runs = {
+                str(r.get("run_id")): r for r in saved
+                if isinstance(r, dict) and r.get("run_id")
+                and (r.get("run_id") in active or r.get("waiting"))
+            }
+            coord.write()
+            return True
+    except Exception:  # noqa: BLE001 — hygiene never breaks the harness
+        return False
+
+
+def _append_interrupted_history(tx: Transport, agent: str, doc: dict) -> None:
+    """Record one orphan in the same capped history used by RunFeed.finish."""
+    try:
         # the run history is the owner's "what happened?" surface — an
         # interruption is an answer, not noise (mirrors _append_history)
         hist = f"status/{agent}_runs.json"
@@ -170,9 +294,8 @@ def reap_orphan_run(tx: Transport, agent: str,
             entry["doing"] = doing[:120]
         runs.append(entry)
         tx.put_doc(hist, {"agent": agent, "runs": runs[-20:]})
-        return True
     except Exception:  # noqa: BLE001 — hygiene never breaks the harness
-        return False
+        pass
 
 
 def record_tasks(tx: Transport, chat_id: str, msg_id: str,
