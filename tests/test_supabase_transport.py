@@ -655,3 +655,59 @@ def test_auth_expiry_heals_in_the_retry_path(monkeypatch):
     monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0.01)
     assert tx._retry(flaky) == "ok"
     assert client.auth.refreshes == 1
+
+
+def test_rls_denial_gets_one_fresh_member_signin(monkeypatch):
+    """A stale/signed-out member session is reported by PostgREST as a
+    generic 42501 row-policy failure. One fresh sign-in heals it without
+    changing or bypassing the policy."""
+    import supabase as sb_mod
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(sb_mod, "create_client",
+                        lambda url, key: _ClientStub(key))
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0.01)
+    tx = SupabaseTransport("mesh2", env=_member_env())
+    client = tx._sb()
+    calls = {"n": 0}
+
+    def stale_session():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(
+                "{'message': 'new row violates row-level security policy "
+                "for table ab_docs', 'code': '42501'}"
+            )
+        return "ok"
+
+    assert tx._retry(stale_session) == "ok"
+    assert calls["n"] == 2
+    assert len(client.auth.signins) == 2  # initial login + one fresh login
+    assert client.auth.refreshes == 0
+
+
+def test_persistent_rls_denial_does_not_reauth_loop(monkeypatch):
+    """A real policy failure stays a failure. Re-auth is bounded to one
+    attempt rather than becoming an auth loop or a service-key fallback."""
+    import supabase as sb_mod
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(sb_mod, "create_client",
+                        lambda url, key: _ClientStub(key))
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0.01)
+    tx = SupabaseTransport("mesh2", env=_member_env())
+    client = tx._sb()
+    calls = {"n": 0}
+
+    def forbidden():
+        calls["n"] += 1
+        raise RuntimeError(
+            "{'message': 'new row violates row-level security policy "
+            "for table ab_docs', 'code': '42501'}"
+        )
+
+    with pytest.raises(RuntimeError, match="42501"):
+        tx._retry(forbidden)
+    assert calls["n"] == supabase_mod._RETRIES
+    assert len(client.auth.signins) == 2  # initial login + one bounded retry
+    assert tx.auth_mode == "member:aryan"  # never fell back to service

@@ -250,9 +250,13 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
 - **`transport/supabase.py`** (R23, economics reworked R76) — docs →
   `ab_docs`, logs → `ab_logs` (row id = read offset), blobs → the `ab-mesh`
   bucket, realtime broadcast hints on a daemon thread (degrade → poll).
-  Trust model v1: **only the secret key** talks to the project (RLS on, no
-  policies, so the publishable key can do nothing); bodies arrive
-  pre-sealed, so the server only ever stores ciphertext. Fast paths:
+  Each machine signs in with its own member credential and RLS scopes chat
+  rows to membership; bodies arrive pre-sealed, so the server only ever
+  stores ciphertext. Long-running member sessions heal explicit JWT expiry
+  in the retry path. PostgREST may instead surface a stale/signed-out session
+  as a generic 42501 row-policy denial: that exact shape gets one fresh
+  member sign-in and one normal retry. A genuine policy failure remains
+  denied, and this path never falls back to the service key. Fast paths:
   `get_docs` (one paged query), `changed_logs` (`ab_logs` ids are one
   global identity column), and the R76 **doc delta feed** —
   `ab_docs.seq` (trigger-bumped from one sequence) + **soft deletes**

@@ -128,10 +128,15 @@ account→member→machine ownership map the DB doesn't have yet.
 signs in as that member; the service key is the fallback — a mixed fleet
 keeps working during rollout, and a failed member sign-in
 falls back loudly instead of bricking the fleet. JWT expiry mid-run heals
-in the retry path (`_refresh_auth`). The poke channel always prefers the
-publishable key (it's public + content-free). The Connection panel shows
-the honest mode: `Access · ✓ Member (aryan)` vs `Service key — shared,
-bypasses row security`.
+in the retry path (`_refresh_auth`). PostgREST can report a stale or signed-out
+member session as PostgreSQL 42501 ("new row violates row-level security")
+instead of an explicit JWT error. The transport treats only that exact shape
+as an auth candidate: one fresh password sign-in, then one normal retry under
+the unchanged policy. Persistent 42501 remains denied; re-auth never loops and
+never falls back to the service key. The poke channel always prefers the
+publishable key (it's public + content-free). The Connection panel shows the
+honest mode: `Access · ✓ Member (aryan)` vs `Service key — shared, bypasses
+row security`.
 
 ## 4. The runbook (in this order — nothing breaks at any step)
 

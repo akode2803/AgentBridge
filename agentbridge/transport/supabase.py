@@ -102,6 +102,15 @@ def _is_auth_expired(err: Exception) -> bool:
     return any(m.lower() in s.lower() for m in _AUTH_EXPIRED_MARKS)
 
 
+def _is_rls_denied(err: Exception) -> bool:
+    """PostgREST can surface a missing/stale member session as the same
+    42501 row-policy denial as a genuine authorization failure. Treat only
+    that narrow shape as a re-auth candidate; the retry still has to pass the
+    unchanged policy."""
+    s = str(err).lower()
+    return "42501" in s and "row-level security policy" in s
+
+
 def _check(path: str) -> str:
     """POSIX-relative path discipline, same as the folder driver."""
     p = (path or "").replace("\\", "/").strip("/")
@@ -197,35 +206,56 @@ class SupabaseTransport(Transport):
                             self.auth_mode = "service"
         return self._client
 
-    def _refresh_auth(self) -> None:
+    def _refresh_auth(self, *, fresh: bool = False) -> bool:
         """Best-effort member-session refresh after a JWT-expired error —
         the library refreshes on its own; this is the belt for long-lived
-        fleet processes whose timer thread died or drifted."""
+        fleet processes whose timer thread died or drifted. ``fresh`` skips
+        the refresh token and signs in from the local member credential; RLS
+        42501 is ambiguous, so that path gets exactly one clean re-auth before
+        the unchanged policy is allowed to fail for real."""
         client, mode = self._client, self.auth_mode
         if client is None or not mode.startswith("member:"):
-            return
-        try:
-            client.auth.refresh_session()
-        except Exception:  # noqa: BLE001 — a fresh sign-in is the last resort
+            return False
+        if not fresh:
             try:
-                client.auth.sign_in_with_password({
-                    "email": self._env.get("SUPABASE_MEMBER_EMAIL", ""),
-                    "password": self._env.get("SUPABASE_MEMBER_PASSWORD", ""),
-                })
-            except Exception:  # noqa: BLE001 — the retry loop reports it
+                client.auth.refresh_session()
+                return True
+            except Exception:  # noqa: BLE001 — fresh sign-in is last resort
                 pass
+        try:
+            client.auth.sign_in_with_password({
+                "email": self._env.get("SUPABASE_MEMBER_EMAIL", ""),
+                "password": self._env.get("SUPABASE_MEMBER_PASSWORD", ""),
+            })
+            return True
+        except Exception:  # noqa: BLE001 — the retry loop reports it
+            return False
 
     def _retry(self, fn):
         last = None
+        rls_reauth_attempted = False
         for i in range(_RETRIES):
             try:
                 return fn()
             except Exception as e:  # noqa: BLE001 — transient network faults
                 if _is_missing_column(e):
                     raise            # deterministic: retrying can't help
+                healed = False
                 if _is_auth_expired(e):
-                    self._refresh_auth()   # heal, then retry normally
+                    healed = self._refresh_auth()
+                elif (
+                    not rls_reauth_attempted
+                    and self.auth_mode.startswith("member:")
+                    and _is_rls_denied(e)
+                ):
+                    # A signed-out/stale client produces the SAME 42501 as a
+                    # real policy refusal. One fresh sign-in is safe: the next
+                    # attempt still runs under the unchanged RLS policy.
+                    rls_reauth_attempted = True
+                    healed = self._refresh_auth(fresh=True)
                 last = e
+                if healed:
+                    continue
                 time.sleep(_RETRY_WAIT * (i + 1))
         raise last
 
