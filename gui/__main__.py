@@ -1,8 +1,7 @@
 """Compatibility entry point for ``python -m gui``.
 
 The supported GUI server lives in ``agentbridge.gui``. Keep this tiny shim so
-older local launch habits still land on the v2 app instead of the retired
-bridge-era server.
+older local launch habits still land on the current app.
 """
 
 from agentbridge.gui.fastboot import main

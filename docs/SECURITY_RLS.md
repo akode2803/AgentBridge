@@ -1,14 +1,14 @@
-# Per-member Supabase RLS (R84) — trust model v2
+# Per-member Supabase RLS
 
 The design record and the runbook. Read this before touching the Supabase
 policies or the transport's auth path. Companion: `docs/supabase_schema.sql`
 §R84 (the SQL) and `THREAT_MODEL.md`.
 
-## 1. Why (the problem with v1)
+## 1. Why
 
-Trust model v1 (R23): RLS enabled with **zero policies**, and every member's
-machine holds the project's **service key** — which *bypasses RLS entirely*.
-That was honest for a one-owner mesh, but:
+The original Supabase setup enabled RLS with **zero policies**, and every
+member machine held the project's **service key** — which *bypasses RLS
+entirely*. That worked for early bring-up, but:
 
 - **One shared secret, held by every machine.** Any member (or anyone who
   reads any member's `supabase.env`) can read and rewrite *every* row of
@@ -23,7 +23,7 @@ That was honest for a one-owner mesh, but:
 
 ## 2. The design
 
-### Identity: account creation IS membership (v2.2)
+### Identity: account creation IS membership
 
 **No secret is ever transferred, and nobody approves anything.** A new
 member's Supabase auth user is born on their own machine — self-signup
@@ -107,7 +107,7 @@ E2EE arbitrate within them. Tightening `status/asks/*` to owners or
 `users/<x>` writes to x-only is a later pass — it needs an
 account→member→machine ownership map the DB doesn't have yet.
 
-### What deliberately stays open (phase 2 candidates)
+### What deliberately stays open
 
 - **Realtime pokes**: the broadcast channel carries `{"r": 1}` — nothing
   else (SCALING.md §3). Anyone with the publishable key could subscribe to
@@ -121,12 +121,12 @@ account→member→machine ownership map the DB doesn't have yet.
   same property). Claimed names are immutable to others (PK + uid bind);
   eviction and cleanup are the owner's service-key acts.
 
-## 3. The transport (already shipped, inert until credentials exist)
+## 3. The transport
 
 `SupabaseTransport._sb()` prefers a **member credential**
 (`SUPABASE_MEMBER_EMAIL`/`_PASSWORD` + `SUPABASE_PUBLISHABLE_KEY`) and
 signs in as that member; the service key is the fallback — a mixed fleet
-keeps working through the whole migration, and a failed member sign-in
+keeps working during rollout, and a failed member sign-in
 falls back loudly instead of bricking the fleet. JWT expiry mid-run heals
 in the retry path (`_refresh_auth`). The poke channel always prefers the
 publishable key (it's public + content-free). The Connection panel shows
@@ -179,8 +179,8 @@ bypasses row security`.
   and rejected: no password means the rotating refresh token IS the
   credential, and our multi-process fleet (GUI + harness + workers each
   sign in independently) would race the rotation into family revocation.
-- Post-paste + post-toggle (2026-07-16): **the cutover is live on
-  Aryan's machine.** Two more live failures hardened `join` on the way:
+- Post-paste + post-toggle (2026-07-16): two more live failures hardened
+  `join` on the way:
   (1) his first joins ran before the paste and died between sign-up and
   claim, orphaning auth users with lost passwords → join is now
   idempotent (credential installed BEFORE the claim; reruns sign in and
@@ -202,7 +202,7 @@ bypasses row security`.
   attempt (the first predated the paste and the idempotent rework);
   member-session read shows the roster `aryan` + `aryanonavd`, and the
   AVD's machine advert is fresh on 0.24.167 — the whole mesh now runs on
-  member credentials. **The cutover is closed.** Remaining owner-side
+  member credentials. Remaining owner-side
   hygiene: eyeball `Access · Member (aryanonavd)` in the AVD's About
   panel, then delete its `SUPABASE_SECRET_KEY=` line and restart once
   (runbook step 6). The secret key now lives only in the dashboard —

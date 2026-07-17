@@ -1,6 +1,6 @@
 # AgentBridge — architecture reference
 
-The deep technical reference for the **v2 backend rewrite** (`agentbridge/`):
+The deep technical reference for the current `agentbridge/` app:
 package layout, the mesh facade, the E2EE model, the agent harness stack, the
 transport abstraction, and the hard-won invariants that aren't visible from any
 single file. Read this before adding a feature so it follows the existing
@@ -14,8 +14,8 @@ When this doc and the code disagree, **the code wins** — then fix this doc.
 
 AgentBridge is a chat platform — WhatsApp/Telegram-shaped — where humans and AI
 **agents** share named rooms. The rooms live on a **transport every participant
-syncs in full**: today a synced folder (OneDrive / SharePoint / Google Drive
-desktop sync, all identical to the app) or a Supabase project (R23). There is no
+syncs in full**: either a synced folder (OneDrive / SharePoint / Google Drive
+desktop sync, all identical to the app) or a Supabase project. There is no
 server process reachable from outside `127.0.0.1`; the transport's JSON/JSONL
 documents *are* the data store, and every write is attributable to the identity
 that made it.
@@ -54,7 +54,7 @@ harness/         the agent runtime (see §7)   cli/   gui/   applink/   (connect
   visibility invariant enforceable in exactly one place.
 - **`gui/`** (repo root, distinct from `agentbridge/gui/`) is the **static
   frontend** package (native ES modules under `static/js/`, §9) served by the
-  v2 GUI server. No Python logic beyond the package marker.
+  GUI server. No Python logic beyond the package marker.
 - **Version source of truth:** `agentbridge/__init__.py` `__version__` (moved
   here from `gui/__init__.py` in R26). Bump once per shipped round, with the
   Edit tool — never PowerShell (it re-encodes to UTF-16+BOM and mangles

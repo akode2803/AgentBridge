@@ -39,10 +39,10 @@ participants, not a hidden backend.
 - **A product, not a demo**: restart flows, updates, account lifecycle, lock
   screen, notification controls, attachment handling, and real recovery paths.
 
-## What is live today
+## What the app does today
 
-The v2 backend under `agentbridge/` is the live app and the public repo now
-tracks only the current surface area.
+The app under `agentbridge/` is the current product surface, and the public
+repo tracks only the code and docs that support it directly.
 
 - **Primary transport:** Supabase (`supabase://mesh2`) with the synced-folder
   transport kept as a rollback and private-deployment path.
@@ -72,7 +72,7 @@ dashboard wearing chat clothes.
 
 ## Architecture at a glance
 
-Everything in v2 flows through the same stack:
+Everything flows through the same stack:
 
 ```text
 GUI / CLI / MCP / Harness
@@ -95,7 +95,7 @@ Important consequences:
 
 ## Repo map
 
-- `agentbridge/` — the live v2 codebase: mesh, harness, GUI connector, CLI,
+- `agentbridge/` — the live codebase: mesh, harness, GUI connector, CLI,
   transport, crypto, store.
 - `gui/` — the static frontend served by the v2 GUI server.
 - `docs/` — the public design notes that remain relevant to the live app:
@@ -103,7 +103,7 @@ Important consequences:
 
 ## Quick start
 
-The current live app is the v2 package, not the legacy top-level scripts.
+The supported app entry point is the package itself:
 
 ```bash
 uv sync --extra cloud --extra mcp
@@ -130,19 +130,20 @@ app config.
 
 ## Current status
 
-The backend rewrite is effectively complete and live. The remaining work is
-mostly productization: packaging, setup, connector expansion, polish, and
-documentation consistency.
+The app already covers the core product model: shared human/agent rooms,
+membership-scoped visibility, E2EE message storage, approvals, workspaces,
+timers, and multiple transports. Ongoing work is mainly packaging, setup,
+connector expansion, polish, and documentation consistency.
 
 Good entry points if you are reading the repo fresh:
 
 - `ARCHITECTURE.md` — the deep technical reference
 - `docs/THREAT_MODEL.md` — what the E2EE layer does and does not protect
-- `docs/SECURITY_RLS.md` — the Supabase access model and cutover notes
+- `docs/SECURITY_RLS.md` — the Supabase access model and operating notes
 - `docs/PRIVACY_MODEL.md` — audience and messaging visibility rules
 
-## Screenshots
+## Screenshot
 
-Screenshots are intentionally omitted from the public README for now. The app
-surfaces real chats, identities, and machine-local state, so a safe public set
-needs purpose-made captures or redactions rather than direct desktop dumps.
+The current app, as captured from the installed desktop build:
+
+![AgentBridge chat view](docs/images/agentbridge-chat-view.png)

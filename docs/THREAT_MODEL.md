@@ -1,4 +1,4 @@
-# AgentBridge threat model (R9)
+# AgentBridge threat model
 
 What the E2EE layer does and does NOT protect, stated plainly. Companion to
 the code in `agentbridge/crypto/` +
@@ -122,7 +122,7 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   the reader tolerates junk, but E2EE is about confidentiality/authenticity,
   not anti-abuse (that's the permission layer + rate limits, R15).
 
-## File-blob encryption — SETTLED R13
+## File-blob encryption
 
 Attachment blobs are sealed under the chat's epoch keys: AAD binds
 `chat|blob|blob-id|epoch`, so a blob can't be
@@ -136,7 +136,7 @@ rest anymore). Profile photos and group
 photos are deliberately METADATA (plain at rest, like names): view access is
 matrix-/membership-gated at the connectors, not by crypto.
 
-## Fold genesis integrity — CLOSED R13.5
+## Fold genesis integrity
 
 Found by our own R13 tests: info events were plaintext and unsigned, and the
 fold's "first `created` wins" rule trusted `ns` ordering — so a writer could
@@ -169,7 +169,7 @@ events from keyless authors, epoch-0 plaintext — are gone, and with them the
 previously documented residual (a migrated chat's member back-dating its own
 genesis): no migrated chats remain to carry it.
 
-## Security review — CLOSED R25
+## Security review
 
 A full pass over every mutating endpoint, the E2EE surfaces, harness prompts,
 and peer access (findings + fixes; the endpoint sweep confirmed every GUI/CLI
@@ -215,7 +215,7 @@ Left as documented residuals (above): the unsigned directory root of trust (the
 central item, addressed in R27 below) and the non-destructive reaction/pin
 overlays.
 
-## Directory root of trust — CLOSED R27
+## Directory root of trust
 
 The account doc publishes the keys every signature check and epoch-key wrap
 depends on, but the transport lets any member write any path. R27 makes trust
@@ -264,7 +264,7 @@ Mark as verified) — the nudge disappears the moment the peer is verified.
 What remains is purely behavioral: a user who never compares codes keeps TOFU
 semantics — the same honest floor as Signal/WhatsApp safety numbers.
 
-## Overlay authentication + fingerprints — CLOSED R31
+## Overlay authentication + fingerprints
 
 The two residuals left open by R25/R27, closed with the same machinery that
 closed redactions:
@@ -312,7 +312,7 @@ Also closed as **by design** after a live QA pass (Aryan's checklist):
   is the intended anti-flood shape, not a delivery gap — each message is still
   individually present in the agent's context.
 
-## State-doc authentication + keystore wrap — CLOSED R31.5
+## State-doc authentication + keystore wrap
 
 Two closures on top of R31, same machinery:
 
@@ -341,7 +341,7 @@ version-skewed fleet a pre-R31.5 process writes unsigned state docs that
 newer readers ignore until `harden_startup` re-signs them — upgrade all of an
 account's processes together (the standing restart discipline).
 
-## Agent filesystem sandbox — TIGHTENED R67 (V79)
+## Agent filesystem sandbox
 
 The R18 broker confines an inner CLI's tool use to its per-chat **workspace**
 (the agent's own desk under `~/.agentbridge/harness/<agent>/workspaces/<chat>`).
@@ -391,8 +391,8 @@ agent cannot distinguish an owner-approved action from an ungated one
 told in its prompt never to infer "the sandbox is open" from a successful
 op; a DENY is surfaced to it as the tool result.
 
-## Migration — R9.5 (retired R16.5)
+## Migration note
 
-The v1→v2 migration tool ran the one R14 cutover; its legacy chats were
-exported to plain text and removed in R16.5. The public repo no longer ships
-that migration tooling.
+An earlier migration tool was used during the one-time move to the current app
+format. Its chats were exported to plain text and removed afterward, and the
+public repo no longer ships that tooling.

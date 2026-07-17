@@ -1,4 +1,4 @@
-"""AgentBridge v2 backend.
+"""AgentBridge backend.
 
 Layout: core -> transport/store/crypto -> mesh services -> harness / cli /
 gui connectors.
@@ -8,6 +8,6 @@ gui connectors.
 PowerShell (it re-encodes to UTF-16+BOM and mangles em-dashes).
 """
 
-__version__ = "0.24.191"
+__version__ = "0.24.192"
 
 __all__ = ["__version__"]
