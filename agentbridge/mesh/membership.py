@@ -163,7 +163,10 @@ class MembershipService:
         env = self.messaging.build_event(chat_id, event)
         # meta FIRST (fold of the genesis), so the member gate holds from here on
         snap = events.fold(chat_id, [env.to_dict()], self.directory)
-        self.tx.put_doc(P.meta(chat_id), snap.to_dict())
+        # Genesis is an INSERT, not an UPSERT. Supabase RLS intentionally
+        # admits this one birth row before ab_is_member can resolve the chat;
+        # later meta materializations keep using put_doc below.
+        self.tx.create_doc(P.meta(chat_id), snap.to_dict())
         self.messaging.commit_envelope(chat_id, env)
         return snap
 

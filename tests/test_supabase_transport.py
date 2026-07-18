@@ -125,12 +125,28 @@ class FakeQuery:
                            else None)
         if op == "insert":
             payload = dict(payload)
+            if self.table == "ab_docs" and any(
+                r.get("root") == payload.get("root")
+                and r.get("path") == payload.get("path") for r in rows
+            ):
+                raise RuntimeError("duplicate key value violates unique constraint (23505)")
             payload["id"] = self.db["_seq"] = self.db.get("_seq", 0) + 1
             self._touch(payload)
             rows.append(payload)
             return FakeResult([payload])
         if op == "upsert":
             payload = dict(payload)
+            if (self.db.get("_deny_genesis_upsert")
+                    and self.table == "ab_docs"
+                    and str(payload.get("path", "")).startswith("chats/")
+                    and str(payload.get("path", "")).endswith("/meta.json")
+                    and not any(r.get("root") == payload.get("root")
+                                and r.get("path") == payload.get("path")
+                                for r in rows)):
+                raise RuntimeError(
+                    "new row violates row-level security policy for table "
+                    "ab_docs (42501)"
+                )
             key = ("root", "path")
             rows[:] = [r for r in rows
                        if not all(r.get(k) == payload.get(k) for k in key)]
@@ -275,6 +291,27 @@ def test_doc_roundtrip_and_prefix_listing(tx):
     assert tx.get_doc("users/aryan.json")["name"] == "Aryan K"
     tx.delete_doc("users/aryan.json")
     assert tx.get_doc("users/aryan.json") is None
+
+
+def test_create_doc_uses_insert_when_genesis_upsert_is_denied(tx, monkeypatch):
+    """Chat genesis has an INSERT-only RLS exception. PostgREST UPSERT also
+    evaluates UPDATE authorization and is refused before membership exists."""
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0)
+    tx._client.db["_deny_genesis_upsert"] = True
+    path = "chats/new-g123/meta.json"
+    doc = {"members": {"aryan": {"role": "admin"}}}
+
+    with pytest.raises(RuntimeError, match="42501"):
+        tx.put_doc(path, doc)
+    tx.create_doc(path, doc)
+    assert tx.get_doc(path) == doc
+
+    # A response-lost retry is idempotent only when the existing row matches.
+    tx.create_doc(path, doc)
+    with pytest.raises(RuntimeError, match="23505"):
+        tx.create_doc(path, {"members": {"mallory": {"role": "admin"}}})
 
 
 def test_get_docs_bulk_read(tx):

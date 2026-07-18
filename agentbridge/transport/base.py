@@ -117,6 +117,15 @@ class Transport(ABC):
     def put_doc(self, path: str, data: Any) -> None:
         """Atomically replace the document (creating parents)."""
 
+    def create_doc(self, path: str, data: Any) -> None:
+        """Create a document that is expected not to exist yet.
+
+        Local transports may safely use their normal atomic replace. Cloud
+        transports can override this when row security distinguishes INSERT
+        from UPSERT, as chat genesis does on Supabase.
+        """
+        self.put_doc(path, data)
+
     @abstractmethod
     def delete_doc(self, path: str) -> None:
         """Remove a document; missing is not an error."""

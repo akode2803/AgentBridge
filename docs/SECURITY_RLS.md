@@ -138,6 +138,15 @@ publishable key (it's public + content-free). The Connection panel shows the
 honest mode: `Access · ✓ Member (aryan)` vs `Service key — shared, bypasses
 row security`.
 
+Chat genesis is the one write whose create/update distinction is security
+relevant. `Mesh` calls `Transport.create_doc()` for the first
+`chats/<id>/meta.json`; Supabase implements that as a plain INSERT, while
+ordinary writes remain UPSERTs through `put_doc()`. An absent-row UPSERT is
+not equivalent here: PostgreSQL also evaluates its UPDATE authorization, and
+UPDATE correctly requires membership from the meta row that is only now being
+created. A duplicate identical INSERT is accepted as an idempotent
+response-lost retry; a conflicting duplicate remains a unique-key error.
+
 ## 4. The runbook (in this order — nothing breaks at any step)
 
 > All commands run from the repo root **with the project's own venv
@@ -214,17 +223,12 @@ row security`.
   panel, then delete its `SUPABASE_SECRET_KEY=` line and restart once
   (runbook step 6). The secret key now lives only in the dashboard —
   re-fetch it there for future `seed`/`revoke` runs.
-- R108 genesis probe (2026-07-18): fresh member authentication is healthy
-  (`ab_member('mesh2') = 'aryan'`), but live group creation and a minimal
-  `chats/<scratch>/meta.json` insert containing `members.aryan` both return
-  42501. No row was left behind. This is policy drift or an outdated installed
-  policy, not the stale-session case fixed in R107. V137 tracks re-pasting the
-  current schema and verifying group + DM genesis; persistent failure requires
-  comparing the dashboard's installed `ab_docs_member_insert` definition with
-  `docs/supabase_schema.sql`.
-- R109 recheck (2026-07-18): agent creation's global `users/` row succeeds
-  under the live member credential, including from the visible Settings form,
-  but the minimal chat-genesis row still returns 42501. The agent path now also
-  persists and pins its local identity before publication and rolls that state
-  back on denial. V137 therefore remains specifically a dashboard-installed
-  chat policy problem; no service-key application fallback was introduced.
+- Chat-genesis resolution (2026-07-18): the installed policy exactly matched
+  this file. A plain authenticated INSERT of genesis succeeded, while the
+  transport's `INSERT ... ON CONFLICT DO UPDATE` failed 42501 because the
+  UPDATE policy cannot see membership before genesis exists. Genesis now uses
+  `create_doc()`/INSERT; direct and group chat creation both passed through the
+  visible app as `member:aryan`. As authenticated `aryanonavd`, the scratch
+  meta returned zero rows, a no-op UPDATE changed zero rows, and an attempted
+  child-doc INSERT was rejected 42501. All scratch docs/logs/blobs were then
+  removed. No policy was widened and no service-key fallback was introduced.

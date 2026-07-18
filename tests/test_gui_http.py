@@ -288,6 +288,7 @@ def test_bridge_state_compat_shape(rig):
     st = rig.get("/api/state")
     assert st["configured"] is True
     assert st["v"] == 2
+    assert st["instance_id"] == rig.app.instance_id
     assert st["caps"]["sse"] is True
     assert st["paused"] is False
     conn = st["connection"]

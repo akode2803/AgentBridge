@@ -13,6 +13,35 @@ export const App = {
 };
 window.App = App;  // console/debug access
 
+export const RESTART_KEY = "ab:restart";
+const RESTART_TTL_MS = 90000;
+
+export function restartIntent() {
+  try {
+    const intent = JSON.parse(localStorage.getItem(RESTART_KEY) || "null");
+    if (!intent || !Number.isFinite(intent.started)
+        || Date.now() - intent.started > RESTART_TTL_MS) {
+      localStorage.removeItem(RESTART_KEY);
+      return null;
+    }
+    return intent;
+  } catch {
+    try { localStorage.removeItem(RESTART_KEY); } catch { /* unavailable */ }
+    return null;
+  }
+}
+
+export function beginRestartIntent(instanceId) {
+  const intent = { started: Date.now(), instance: instanceId || "" };
+  try { localStorage.setItem(RESTART_KEY, JSON.stringify(intent)); } catch { /* unavailable */ }
+  document.dispatchEvent(new CustomEvent("ab:restart", { detail: intent }));
+  return intent;
+}
+
+export function clearRestartIntent() {
+  try { localStorage.removeItem(RESTART_KEY); } catch { /* unavailable */ }
+}
+
 export const Mesh = {
   state: null,        // /api/mesh/state payload
   chatId: null,       // open chat, from #/chats/<id>

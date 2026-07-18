@@ -10,6 +10,7 @@ local keystore, so restoring a session never needs the password again.
 from __future__ import annotations
 
 import platform
+import secrets
 import threading
 from pathlib import Path
 
@@ -70,6 +71,9 @@ class GuiApp:
         self.machine = machine or platform.node() or "gui"
         self.encrypt = encrypt
         self.app_version = app_version
+        # One process generation, exposed to clients so a restart cover cannot
+        # mistake the still-draining old server for the relaunched instance.
+        self.instance_id = secrets.token_hex(8)
         self.poll_s = poll_s
         self.sse_ping_s = sse_ping_s
         # repo layout default: agentbridge/gui/context.py -> <repo>/gui/static

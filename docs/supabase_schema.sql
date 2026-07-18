@@ -198,7 +198,10 @@ drop table if exists public.ab_pending;
 -- chats/ lanes are members-only, with ONE insert exception: genesis — a
 -- fresh meta.json for a chat with no meta yet, listing the creator among
 -- its members. Chat ids commit to their genesis hash (R13.5), so squatting
--- a foreign id is not practical.
+-- a foreign id is not practical. The client MUST issue INSERT, not UPSERT,
+-- for this first row: PostgreSQL evaluates an UPSERT's UPDATE policy before
+-- the membership-bearing meta exists, so the intentional INSERT-only
+-- exception cannot authorize it.
 drop policy if exists ab_docs_member_select on public.ab_docs;
 create policy ab_docs_member_select on public.ab_docs
 for select to authenticated using (

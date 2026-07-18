@@ -3,7 +3,8 @@
 
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, resetSubviews, renderChrome } from "./state.js";
+import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
+         resetSubviews, renderChrome } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
@@ -34,6 +35,42 @@ let downTicks = 0;
 // manual reload — arm a one-shot reload instead, taken at a safe moment.
 let bootVersion = "";
 let reloadArmed = false;
+let restartWatchActive = false;
+
+function watchRestartGeneration() {
+  if (restartWatchActive) return;
+  restartWatchActive = true;
+  (async function tick() {
+    if (!restartIntent()) {
+      restartWatchActive = false;
+      return;
+    }
+    try { await refresh(false); } catch { /* the next probe heals */ }
+    if (!restartIntent()) {
+      restartWatchActive = false;
+      return;
+    }
+    setTimeout(tick, 750);
+  })();
+}
+
+function showRestarting() {
+  V.renderConnectingPage("Restarting…");
+  // The normal realtime safety poll may be 20s away. During a requested
+  // restart, probe only localhost at a short cadence until the process
+  // generation changes so the cover reads as progress instead of a hang.
+  watchRestartGeneration();
+}
+
+document.addEventListener("ab:restart", showRestarting);
+window.addEventListener("storage", (e) => {
+  if (e.key !== RESTART_KEY) return;
+  if (restartIntent()) showRestarting();
+  else {
+    Mesh.state = null;
+    Promise.resolve(refresh(true)).catch(() => {});
+  }
+});
 
 async function refresh(rerender) {
   try {
@@ -77,10 +114,20 @@ async function refresh(rerender) {
   if ((!was.user && prevAuth.user) || (was.locked && !prevAuth.locked)) {
     bumpIdle();
   }
+  const restarting = restartIntent();
+  // The POSTing client may still reach the draining old server for a few
+  // seconds. Its process generation must change before any window drops the
+  // shared cover or considers a userless response authoritative.
+  if (restarting && restarting.instance
+      && App.state.instance_id === restarting.instance) {
+    showRestarting();
+    return;
+  }
   // V111: locked = the lock page and nothing else (no SSE churn, no page
   // renders over it) — the poll keeps watching /api/state, which answers
   // while locked, so unlocking elsewhere heals this window too
   if (App.state.app_lock?.locked) {
+    if (restarting) clearRestartIntent();
     V.renderLockPage();
     return;
   }
@@ -88,17 +135,36 @@ async function refresh(rerender) {
   // the server says unlocked (another window's unlock, the account password
   // over the API) fades away onto the app rendered below
   if (!lockPending && document.getElementById("lock")) V.closeLockPage();
+  if (restarting) {
+    if (!App.state.user) {
+      V.renderConnectingPage(App.state.restoring
+        ? "Connecting to your mesh…" : "Restarting…");
+      return;
+    }
+    clearRestartIntent();
+    Mesh.state = null;
+    V.closeConnectingPage();
+    rerender = true;
+  }
+  const recoveringCover = !!document.getElementById("connecting");
+  if (!restarting && App.state.user && recoveringCover) {
+    Mesh.state = null;
+    rerender = true;
+  }
   // open/close the SSE stream to match the current server + auth (inert on v1)
   syncRealtime();
   renderChrome();
-  if (rerender) PAGES[App.page]();
+  if (rerender) {
+    try { await PAGES[App.page](); } catch { /* the next poll heals */ }
+    if (App.state.user) V.closeConnectingPage();
+  }
   else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
   // V122: the server came back (App.state just fetched fine) but this page
   // never got a mesh state — a reload that landed during a restart's down
   // window used to sit on the dropped boot cover forever, reading as a
   // sign-out. Kick a full chats render; its own fetch fills Mesh.state.
-  else if (App.page === "chats" && !Mesh.state) {
-    Promise.resolve(V.renderChats(true)).catch(() => {});
+  else if (!Mesh.state && PAGES[App.page]) {
+    Promise.resolve(PAGES[App.page]()).catch(() => {});
   }
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
   // another window, setup assist, the CLI. Never re-render the auth page
@@ -205,7 +271,7 @@ function route() {
   $("#rail-chats").classList.toggle("active", page === "chats" || page === "new");
   $("#rail-account").classList.toggle("active", page === "settings");
   renderChrome();
-  PAGES[App.page]();
+  Promise.resolve(PAGES[App.page]()).catch(() => {});
 }
 
 window.addEventListener("hashchange", route);
@@ -279,7 +345,13 @@ window.addEventListener("hashchange", route);
       && $("#transcript")?.contains(sel.anchorNode));
     content.classList.toggle("sel-text", active);
   });
-  App.state = await api("/api/state");
+  if (restartIntent()) showRestarting();
+  try {
+    App.state = await api("/api/state");
+  } catch {
+    downTicks = 2;
+    V.renderConnectingPage(restartIntent() ? "Restarting…" : "Connecting…");
+  }
   if (!location.hash) location.hash = "#/chats";
   route();
   // V45: the daily auto update check (About page pref, default on). Signed

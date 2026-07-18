@@ -372,6 +372,13 @@ class CachingTransport(Transport):
 
     def put_doc(self, path: str, data: Any) -> None:
         self.inner.put_doc(path, data)
+        self._remember_doc_write(path, data)
+
+    def create_doc(self, path: str, data: Any) -> None:
+        self.inner.create_doc(path, data)
+        self._remember_doc_write(path, data)
+
+    def _remember_doc_write(self, path: str, data: Any) -> None:
         with self._lock:
             self._docs[path] = copy.deepcopy(data)
             self._doc_writes[path] = time.monotonic()

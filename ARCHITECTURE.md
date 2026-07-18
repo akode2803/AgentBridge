@@ -222,7 +222,8 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
 
 ## 6. Transports & storage
 
-- **`transport/base.py`** — the `Transport` ABC: `get_doc`/`put_doc`/`delete_doc`,
+- **`transport/base.py`** — the `Transport` ABC: `get_doc`/`put_doc`/`create_doc`/
+  `delete_doc`,
   `list_docs`, `append_log`/`read_log`(offset-based)/`list_logs`,
   blob put/get/size, `list_chat_ids`, `watch()` (a wake-up *hint* only). Plus a
   `cache_key` for store partitioning. **Adding a connector = implement the
@@ -256,7 +257,11 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
   in the retry path. PostgREST may instead surface a stale/signed-out session
   as a generic 42501 row-policy denial: that exact shape gets one fresh
   member sign-in and one normal retry. A genuine policy failure remains
-  denied, and this path never falls back to the service key. Fast paths:
+  denied, and this path never falls back to the service key. Chat genesis uses
+  `create_doc` (plain INSERT), not the normal `put_doc` UPSERT: an absent-row
+  UPSERT still evaluates UPDATE RLS before the meta can establish membership.
+  Identical duplicate creates are idempotent; conflicting duplicates remain
+  denied by the unique key. Fast paths:
   `get_docs` (one paged query), `changed_logs` (`ab_logs` ids are one
   global identity column), and the R76 **doc delta feed** —
   `ab_docs.seq` (trigger-bumped from one sequence) + **soft deletes**
@@ -423,7 +428,12 @@ Route tables are plain dicts contributed by the `api_*` modules; `@authed`
 injects the live Mesh so an endpoint can't forget the check; `dispatch` maps a
 domain error to `{"error": …}` JSON. One GuiApp = at most one signed-in human;
 the session survives restarts via a local `gui_session.json` (the E2EE bundle is
-already local, so restore never needs the password). `/api/mesh/events` is the
+already local, so restore never needs the password). Each process exposes a
+random `instance_id` in both state endpoints. Restart intent is a short-lived,
+device-local signal shared across browser clients; every open client raises the
+same Restarting/Connecting cover, ignores userless state from the draining old
+generation, and clears the cover only after a new generation restores the
+session. `/api/mesh/events` is the
 one SSE stream; its frames stay minimal (type + chat + ids — the client
 refetches through the read model) with one exception: a frame that deserves a
 desktop ping carries a `notify` lane (chat name, sender, 120-char preview)

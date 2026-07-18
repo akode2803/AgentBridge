@@ -7,7 +7,9 @@ import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
 import { openModal, closeModal, swapModal, openPhotoViewer, confirmModal } from "./modal.js";
-import { App, Mesh, Settings, RULE_LABELS, meshDn, meshAvatar, meshAvatarInner, chatDisplay, renderChrome } from "./state.js";
+import { App, Mesh, Settings, RULE_LABELS, beginRestartIntent,
+         clearRestartIntent, meshDn, meshAvatar, meshAvatarInner, chatDisplay,
+         renderChrome } from "./state.js";
 import { notifyPrefs } from "./notify.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
@@ -1031,32 +1033,26 @@ async function renderSettings() {
         : "Nothing to reclaim — all clean";
     });
   }
-  // V113: restart the whole app (server + harness) — the button waits out
-  // the downtime by polling /api/state (never a fixed sleep) and reloads
-  // when the new server answers, so the same window just comes back
+  // V140: restart intent is device-wide (localStorage + storage event), so
+  // every open window raises the same cover before the server goes away.
+  // main.js owns recovery and waits for a NEW server instance; reloading here
+  // could hit the still-draining old process and strand the static boot cover.
   const restartBtn = $("#app-restart");
   if (restartBtn) {
     const note = $("#restart-note");
     restartBtn.addEventListener("click", async () => {
       restartBtn.disabled = true;
       note.textContent = "Restarting…";
-      const r = await api("/api/app_restart", {});
+      beginRestartIntent(App.state?.instance_id);
+      let r = null;
+      try { r = await api("/api/app_restart", {}); } catch { /* handled below */ }
       if (!r || r.error || !r.ok) {
+        clearRestartIntent();
+        V.closeConnectingPage();
         restartBtn.disabled = false;
         note.textContent = (r && (r.error || r.note)) || "Couldn't restart";
         return;
       }
-      const t0 = Date.now();
-      (async function waitBack() {
-        while (Date.now() - t0 < 60000) {
-          await new Promise((res) => setTimeout(res, 1500));
-          try {
-            const s = await fetch("/api/state", { cache: "no-store" });
-            if (s.ok) { location.reload(); return; }
-          } catch { /* still down — keep waiting */ }
-        }
-        note.textContent = "Still starting — reload the window manually";
-      })();
     });
   }
   // My-agents dropdowns use the shared custom select (task 13):

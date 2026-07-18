@@ -111,6 +111,10 @@ def _is_rls_denied(err: Exception) -> bool:
     return "42501" in s and "row-level security policy" in s
 
 
+def _is_unique_violation(err: Exception) -> bool:
+    return "23505" in str(err)
+
+
 def _check(path: str) -> str:
     """POSIX-relative path discipline, same as the folder driver."""
     p = (path or "").replace("\\", "/").strip("/")
@@ -238,7 +242,7 @@ class SupabaseTransport(Transport):
             try:
                 return fn()
             except Exception as e:  # noqa: BLE001 — transient network faults
-                if _is_missing_column(e):
+                if _is_missing_column(e) or _is_unique_violation(e):
                     raise            # deterministic: retrying can't help
                 healed = False
                 if _is_auth_expired(e):
@@ -424,6 +428,45 @@ class SupabaseTransport(Transport):
             self._delta_reprobe = time.monotonic() + _DELTA_REPROBE_S
             row.pop("deleted")
             self._write(build)
+        self._count()
+        self._hint_for(path)
+
+    def create_doc(self, path: str, data: Any) -> None:
+        """Insert a brand-new document without PostgREST's UPSERT path.
+
+        Supabase evaluates UPDATE authorization for an UPSERT even when the
+        target row is absent. Chat genesis is intentionally INSERT-only under
+        RLS, so using put_doc there denies a legitimate creator. An identical
+        existing row is accepted as a response-lost retry; a conflicting row
+        remains a hard failure.
+        """
+        path = _check(path)
+        row = {"root": self.root, "path": path, "data": data}
+        if self._delta_ok():
+            row["deleted"] = False
+
+        def build(kw):
+            def run():
+                return self._sb().table("ab_docs").insert(row, **kw).execute()
+            return run
+
+        try:
+            self._write(build)
+        except Exception as e:  # noqa: BLE001 - conflict is checked below
+            if _is_unique_violation(e):
+                absent = object()
+                if self.get_doc(path, absent) == data:
+                    self._count()
+                    self._hint_for(path)
+                    return
+                raise
+            elif _is_missing_column(e) and "deleted" in row:
+                self._delta = False
+                self._delta_reprobe = time.monotonic() + _DELTA_REPROBE_S
+                row.pop("deleted")
+                self._write(build)
+            else:
+                raise
         self._count()
         self._hint_for(path)
 
