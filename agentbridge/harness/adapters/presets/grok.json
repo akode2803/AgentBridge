@@ -3,6 +3,7 @@
   "label": "Grok CLI",
   "command": "grok",
   "args": ["-p", "{prompt}"],
+  "env_allow": ["XAI_API_KEY", "XAI_BASE_URL", "GROK_API_KEY"],
   "model_args": ["--model", "{model}"],
   "format": "text",
   "models": ["grok-4", "grok-4-fast"],

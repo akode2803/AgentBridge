@@ -59,6 +59,10 @@ class Preset:
     # safety-class: applied in BOTH full and minimal argv, never dropped
     permission_args: list[str] = field(default_factory=list)
     auto_allow: list[str] = field(default_factory=list)    # read-class tools
+    # Explicit host variables this provider process may inherit. The adapter
+    # supplies a small cross-platform process baseline separately; credentials
+    # and provider endpoints must be named here instead of inheriting the host.
+    env_allow: list[str] = field(default_factory=list)
     format: str = "text"              # claude-stream | codex-jsonl | text
     default_model: str = ""
     models: list[str] = field(default_factory=list)        # picker suggestions

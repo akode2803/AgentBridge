@@ -1,6 +1,6 @@
 # Agent runtime, sandbox, and visible orchestration plan
 
-Status: **adversarially reviewed planning baseline; implementation not yet approved**  
+Status: **adversarially reviewed baseline; C0 implementation in progress**
 Backlog: **V141**  
 Prepared: **2026-07-20**  
 Reference baseline: OpenAI Agents SDK repository at
@@ -1511,16 +1511,17 @@ governance; it does not mean copying every class or storage adapter.
 
 Estimate: **1.5-2.5 weeks**. No new capability.
 
-- [ ] Reproduce and document the current unsigned ask/answer and loopback MCP
+- [x] Reproduce and document the current unsigned ask/answer and loopback MCP
   trust boundaries in a scratch mesh.
-- [ ] Inventory exactly which environment variables each live CLI needs; stop
+- [x] Inventory exactly which environment variables each live CLI needs; stop
   inheriting the full host environment by default.
-- [ ] Specify per-run MCP authentication/token or private transport and migration
+- [x] Specify and ship per-run MCP bearer authentication plus migration
   behavior before a container can connect.
-- [ ] Complete the preset capability/enforcement matrix on macOS, Windows and
+- [~] Complete the preset capability/enforcement matrix on macOS, Windows and
   Linux where available: provider version, track, hook, blocklist, sandbox
-  claim, evidence and downgrade.
-- [ ] Add threat cases for forged control docs, bridge impersonation, provider
+  claim, evidence and downgrade. macOS evidence is recorded in
+  `docs/AGENT_RUNTIME_C0_AUDIT.md`; Windows and Linux remain open.
+- [~] Add threat cases for forged control docs, bridge impersonation, provider
   flag fallback, environment leakage and owner/membership change.
 
 Affected: `broker.py`, `bridge.py`, `adapters/cli.py`, presets/registry,

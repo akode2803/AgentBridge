@@ -40,11 +40,48 @@ from ..retrieval import HistoryIndex, plan_query
 from ..settings import HarnessSettings
 from .registry import Invocation, ModelRegistry, effective_gates
 
-__all__ = ["CliResponder", "extract_step", "reply_from_output",
-           "stream_errors"]
+__all__ = ["CliResponder", "extract_step", "provider_env",
+           "reply_from_output", "stream_errors"]
 
 STAGE_TAIL = 30          # messages whose attachments get staged (v1 value)
 STDERR_SNIP = 1200
+
+# Process mechanics and local CLI login discovery only. Provider credentials,
+# endpoints, and feature flags are preset-declared in ``env_allow``. Keeping
+# HOME/USERPROFILE is a compatibility compromise for native CLIs that store
+# login state there; this is environment minimization, not host containment.
+_PROCESS_ENV = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "USERNAME", "USERDOMAIN",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+    "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE",
+    "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+)
+
+
+def provider_env(preset, *, injected: dict[str, str] | None = None,
+                 source=None) -> dict[str, str]:
+    """Build the default-deny environment for one provider subprocess.
+
+    The adapter never forwards the host environment wholesale. Presets opt in
+    provider-specific names; AgentBridge-owned run values arrive via
+    ``injected`` and cannot be sourced accidentally from the host.
+    """
+    source = os.environ if source is None else source
+    wanted = list(dict.fromkeys((*_PROCESS_ENV, *(preset.env_allow or []))))
+    if os.name == "nt":
+        actual = {str(k).upper(): str(k) for k in source}
+        env = {actual[name.upper()]: str(source[actual[name.upper()]])
+               for name in wanted if name.upper() in actual}
+    else:
+        env = {name: str(source[name]) for name in wanted if name in source}
+    for name, value in (injected or {}).items():
+        if value is not None:
+            env[str(name)] = str(value)
+    return env
 
 
 def extract_step(obj: dict, fmt: str) -> tuple[str, str, str] | None:
@@ -245,7 +282,7 @@ class CliResponder:
         auto_allow, blocklist = effective_gates(inv.preset, settings)
         with contextlib.ExitStack() as stack:
             mcp_config = ""
-            env = None
+            injected_env: dict[str, str] = {}
             bridge = None
             if inv.preset.permission_args:
                 bridge = stack.enter_context(BridgeServer(
@@ -263,8 +300,7 @@ class CliResponder:
                 ))
                 mcp_config = bridge.mcp_config()
                 # the inner CLI must out-wait the owner-answer window
-                env = dict(os.environ)
-                env["MCP_TOOL_TIMEOUT"] = str(
+                injected_env["MCP_TOOL_TIMEOUT"] = str(
                     int((settings.ask_timeout_s + 60) * 1000))
             if not mcp_config:
                 # no live ask gate on this run — the web relax never applies
@@ -281,6 +317,7 @@ class CliResponder:
                 effort=inv.effort, minimal=inv.preset.id in self._minimal,
                 mcp_config=mcp_config, blocklist=blocklist,
             )
+            env = provider_env(inv.preset, injected=injected_env)
             rc, lines, err = self._run(argv, workdir, settings.timeout_s,
                                        inv, pack, step, env=env,
                                        chat_id=delivery.chat_id)

@@ -383,9 +383,14 @@ def test_ask_detail_friendly_then_json_then_empty(tmp_path):
 
 # ---------------------------------------------------------- the MCP channel
 
-def call_tool(url: str, tool: str, args: dict) -> str:
+def call_tool(endpoint, tool: str, args: dict) -> str:
+    if isinstance(endpoint, BridgeServer):
+        url, headers = endpoint.url, endpoint.auth_headers
+    else:
+        url, headers = endpoint, None
+
     async def _run():
-        async with streamablehttp_client(url) as (r, w, _):
+        async with streamablehttp_client(url, headers=headers) as (r, w, _):
             async with ClientSession(r, w) as session:
                 await session.initialize()
                 res = await session.call_tool(tool, args)
@@ -394,43 +399,74 @@ def call_tool(url: str, tool: str, args: dict) -> str:
     return anyio.run(_run)
 
 
+def test_bridge_requires_its_per_run_bearer_token(tmp_path):
+    tx, b, ws = make(tmp_path)
+    with BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=["Read"],
+                      approvals=[], ask_timeout_s=0.3) as bridge:
+        config = json.loads(bridge.mcp_config())["mcpServers"]["ab"]
+        assert config["url"] == bridge.url
+        assert config["headers"] == bridge.auth_headers
+        assert config["headers"]["Authorization"].startswith("Bearer ")
+        assert config["headers"]["Authorization"] not in bridge.url
+
+        with pytest.raises(Exception):
+            call_tool(bridge.url, "approve", {
+                "tool_name": "Read", "input": {},
+            })
+
+        async def wrong_token():
+            async with streamablehttp_client(
+                    bridge.url,
+                    headers={"Authorization": "Bearer wrong"}) as (r, w, _):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+
+        with pytest.raises(Exception):
+            anyio.run(wrong_token)
+
+        out = json.loads(call_tool(bridge, "approve", {
+            "tool_name": "Read", "input": {},
+        }))
+        assert out["behavior"] == "allow"
+
+
 def test_bridge_approve_and_ask_member_over_http(tmp_path):
     tx, b, ws = make(tmp_path)
     with BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=["Read"],
                       approvals=[], ask_timeout_s=0.3,
                       deny_roots=[tmp_path / "home"]) as bridge:
-        out = json.loads(call_tool(bridge.url, "approve", {
+        out = json.loads(call_tool(bridge, "approve", {
             "tool_name": "Write",
             "input": {"file_path": str(ws / "ok.txt")}}))
         assert out["behavior"] == "allow"
         assert out["updatedInput"]["file_path"].endswith("ok.txt")
 
-        out = json.loads(call_tool(bridge.url, "approve", {
+        out = json.loads(call_tool(bridge, "approve", {
             "tool_name": "Write",
             "input": {"file_path": str(tmp_path / "elsewhere.txt")}}))
         assert out["behavior"] == "deny"          # timeout -> fail closed
 
         # V79 over the wire: an auto_allow READ of a path outside the
         # workspace no longer passes silently — it becomes an ask (deny here)
-        out = json.loads(call_tool(bridge.url, "approve", {
+        out = json.loads(call_tool(bridge, "approve", {
             "tool_name": "Read",
             "input": {"file_path": str(tmp_path / "downloads" / "personal.pdf")}}))
         assert out["behavior"] == "deny"
         # but a no-path read stays instant (workspace cwd)
-        out = json.loads(call_tool(bridge.url, "approve", {
+        out = json.loads(call_tool(bridge, "approve", {
             "tool_name": "Read", "input": {}}))
         assert out["behavior"] == "allow"
 
         t = answer(tx, "answer", text="go ahead", delay=0.05)
         try:
-            reply = call_tool(bridge.url, "ask_member",
+            reply = call_tool(bridge, "ask_member",
                               {"question": "may I proceed?"})
             assert reply == "go ahead"
         finally:
             t.join()
     # the context manager tore the server down
     with pytest.raises(Exception):
-        call_tool(bridge.url, "approve", {"tool_name": "Read", "input": {}})
+        call_tool(bridge, "approve", {"tool_name": "Read", "input": {}})
 
 
 def test_bridge_question_options_and_read_docs_over_http(tmp_path):
@@ -459,7 +495,7 @@ def test_bridge_question_options_and_read_docs_over_http(tmp_path):
         t = threading.Timer(0.05, run)
         t.start()
         try:
-            reply = call_tool(bridge.url, "ask_member", {
+            reply = call_tool(bridge, "ask_member", {
                 "question": "which color?",
                 # strings and {label, description} mix; junk drops; caps at 4
                 "options": ["red", {"label": "blue", "description": "calm and cool"},
@@ -472,11 +508,11 @@ def test_bridge_question_options_and_read_docs_over_http(tmp_path):
         finally:
             t.join()
 
-        cat = call_tool(bridge.url, "read_docs", {})
+        cat = call_tool(bridge, "read_docs", {})
         assert "pin_message" in cat and "Guides:" in cat
-        entry = call_tool(bridge.url, "read_docs", {"topic": "workspace"})
+        entry = call_tool(bridge, "read_docs", {"topic": "workspace"})
         assert "your own desk" in entry
-        assert "No entry" in call_tool(bridge.url, "read_docs",
+        assert "No entry" in call_tool(bridge, "read_docs",
                                        {"topic": "flying"})
 
 
@@ -506,7 +542,7 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent,
                           timers_out=timers) as bridge:
-            url = bridge.url
+            url = bridge
             chats = json.loads(call_tool(url, "list_chats", {}))
             assert {c["id"] for c in chats} == {chat.id, other.id}
 
@@ -562,13 +598,13 @@ def test_tidy_workspace_is_workspace_scoped(tmp_path):
 
     with BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=[],
                       approvals=[], ask_timeout_s=0.3) as bridge:
-        out = call_tool(bridge.url, "tidy_workspace", {})
+        out = call_tool(bridge, "tidy_workspace", {})
         assert "removed" in out and "scratch.csv" in out
         assert not any((ws / "tmp").iterdir())          # tmp emptied
         assert (ws / "draft.md").exists()               # root untouched
-        assert "already empty" in call_tool(bridge.url, "tidy_workspace", {})
+        assert "already empty" in call_tool(bridge, "tidy_workspace", {})
 
-        out = call_tool(bridge.url, "tidy_workspace", {
+        out = call_tool(bridge, "tidy_workspace", {
             "paths": ["draft.md", "MEMORY.md", "inbox/staged.pdf",
                       "../evil.txt", "missing.txt"]})
         assert "removed draft.md" in out
@@ -611,19 +647,20 @@ def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent,
                           timer_svc=svc) as bridge:
-            out = call_tool(bridge.url, "cancel_timer", {"timer_id": "t-nope"})
+            out = call_tool(bridge, "cancel_timer", {"timer_id": "t-nope"})
             assert "no pending wake-up" in out
-            out = call_tool(bridge.url, "cancel_timer", {"timer_id": there})
+            out = call_tool(bridge, "cancel_timer", {"timer_id": there})
             assert "another chat" in out
-            out = call_tool(bridge.url, "cancel_timer", {"timer_id": here})
+            out = call_tool(bridge, "cancel_timer", {"timer_id": here})
             assert out.startswith("cancelled:") and "check the deploy" in out
             assert "UTC" in out                       # V74: unambiguous time
         assert [t["id"] for t in svc.snapshot()] == [there]
 
         # no TimerService bound -> the tool isn't offered at all
-        def tool_names(url):
+        def tool_names(endpoint):
             async def _run():
-                async with streamablehttp_client(url) as (r, w, _):
+                async with streamablehttp_client(
+                        endpoint.url, headers=endpoint.auth_headers) as (r, w, _):
                     async with ClientSession(r, w) as session:
                         await session.initialize()
                         res = await session.list_tools()
@@ -633,11 +670,11 @@ def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3,
                           mesh=agent) as bridge:
-            assert "cancel_timer" not in tool_names(bridge.url)
+            assert "cancel_timer" not in tool_names(bridge)
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent,
                           timer_svc=svc) as bridge:
-            assert "cancel_timer" in tool_names(bridge.url)
+            assert "cancel_timer" in tool_names(bridge)
     finally:
         agent.close()
         owner.close()
@@ -664,15 +701,15 @@ def test_read_status_tool_is_privacy_gated(tmp_path):
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent) as bridge:
-            out = call_tool(bridge.url, "read_status", {"username": "aryan"})
+            out = call_tool(bridge, "read_status", {"username": "aryan"})
             assert "dnd" in out and "migration" in out
             assert "no such member" in call_tool(
-                bridge.url, "read_status", {"username": "nobody"})
+                bridge, "read_status", {"username": "nobody"})
 
         owner.set_privacy({"status": "nobody"})   # aryan hides status
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent) as bridge:
-            out = call_tool(bridge.url, "read_status", {"username": "aryan"})
+            out = call_tool(bridge, "read_status", {"username": "aryan"})
             assert "dnd" not in out and "migration" not in out
     finally:
         agent.close()
@@ -702,19 +739,19 @@ def test_agent_profile_and_permission_tools(tmp_path):
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent) as bridge:
-            assert call_tool(bridge.url, "set_status", {
+            assert call_tool(bridge, "set_status", {
                 "state": "busy", "working_on": "indexing the repo",
             }) == "status updated"
-            assert call_tool(bridge.url, "set_about", {
+            assert call_tool(bridge, "set_about", {
                 "about": "I run the nightly reports",
             }) == "about updated"
 
-            own = json.loads(call_tool(bridge.url, "read_permissions", {}))
+            own = json.loads(call_tool(bridge, "read_permissions", {}))
             assert own["outbound"]["may_message"] == "members"
             assert "privacy" in own and own["set_by"]
 
             other = json.loads(call_tool(
-                bridge.url, "read_permissions", {"username": "aryan"}))
+                bridge, "read_permissions", {"username": "aryan"}))
             assert other["messaging"] == "members"          # public by design
             assert "privacy" not in other                   # the rest hidden
 
@@ -754,7 +791,7 @@ def test_agent_edits_and_deletes_only_its_own_messages(tmp_path):
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3, mesh=agent) as bridge:
-            url = bridge.url
+            url = bridge
             # its own message: edit + delete both work
             assert call_tool(url, "edit_message", {
                 "message_id": mine.id, "new_body": "the agent's revised take"}) \
@@ -794,7 +831,7 @@ def test_capability_creates_are_gated_and_capped(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3,
                           mesh=agent) as bridge:
-            url = bridge.url
+            url = bridge
             # the owner's R6 rule refuses politely — and burns no slot
             owner.set_agent_rules("helper", {"messaging": "nobody"})
             out = call_tool(url, "create_dm", {"user": "sudhir"})
@@ -874,7 +911,7 @@ def test_chat_member_tools_flags_and_group_edits(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.4,
                           mesh=agent) as bridge:
-            url = bridge.url
+            url = bridge
             # own per-chat flags — the agent's view only
             assert "muted for 8h" in call_tool(url, "mute_chat",
                                                {"duration": "8h"})
@@ -936,7 +973,7 @@ def test_leave_and_clear_are_owner_gated(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.5,
                           mesh=agent) as bridge:
-            url = bridge.url
+            url = bridge
             # silence = fail closed, nothing changed
             out = call_tool(url, "leave_chat", {"reason": "done here"})
             assert "did not approve" in out
@@ -1025,7 +1062,7 @@ def test_context_and_files_parity_c(tmp_path):
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
                           approvals=[], ask_timeout_s=0.3,
                           mesh=agent) as bridge:
-            url = bridge.url
+            url = bridge
             chats = json.loads(call_tool(url, "list_chats", {}))
             row = next(c for c in chats if c["id"] == chat.id)
             assert row["unread"] >= 1          # the promised counts (c2)

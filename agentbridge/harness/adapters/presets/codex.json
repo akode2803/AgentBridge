@@ -6,6 +6,8 @@
            "{prompt}"],
   "args_minimal": ["exec", "--json", "{prompt}"],
   "safety_args": ["--sandbox", "read-only"],
+  "env_allow": ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME",
+                "CODEX_EVERYWHERE_API_KEY"],
   "model_args": ["-m", "{model}"],
   "effort_args": ["-c", "model_reasoning_effort={effort}"],
   "efforts": ["minimal", "low", "medium", "high"],

@@ -16,7 +16,7 @@ import pytest
 from agentbridge.core.errors import ValidationError
 from agentbridge.harness import AgentRunner
 from agentbridge.harness.adapters import (
-    CliResponder, ModelRegistry, Preset, reply_from_output,
+    CliResponder, ModelRegistry, Preset, provider_env, reply_from_output,
 )
 from agentbridge.harness.settings import HarnessSettings
 from agentbridge.mesh.service import Mesh
@@ -66,6 +66,7 @@ def stub_preset(tmp_path, **overrides) -> dict:
         "efforts": ["low", "high"],
         "blocklist_args": ["--block", "{tool}"],
         "blocklist": ["shell"],
+        "env_allow": ["STUB_OUTBOX"],
         "format": "claude-stream",
     }
     d.update(overrides)
@@ -113,6 +114,36 @@ def test_minimal_argv_keeps_safety_and_blocklist():
     for argv in (full, slim):                          # the rails never are
         assert "--read-only" in argv
         assert argv[argv.index("--deny") + 1] == "shell"
+
+
+def test_provider_environment_is_default_deny_and_preset_declared():
+    preset = Preset.from_dict({
+        "id": "x", "command": "x", "env_allow": ["PROVIDER_TOKEN"],
+    })
+    source = {
+        "PATH": "/bin", "HOME": "/Users/test",
+        "PROVIDER_TOKEN": "needed", "SUPABASE_SECRET_KEY": "mesh-secret",
+        "GITHUB_TOKEN": "unrelated", "MCP_TOOL_TIMEOUT": "forged-host-value",
+    }
+    env = provider_env(
+        preset, source=source, injected={"MCP_TOOL_TIMEOUT": "180000"})
+
+    assert env["PATH"] == "/bin"
+    assert env["HOME"] == "/Users/test"
+    assert env["PROVIDER_TOKEN"] == "needed"
+    assert env["MCP_TOOL_TIMEOUT"] == "180000"
+    assert "SUPABASE_SECRET_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_provider_environment_does_not_inherit_undeclared_credentials():
+    preset = Preset.from_dict({"id": "x", "command": "x"})
+    env = provider_env(preset, source={
+        "PATH": "/bin", "OPENAI_API_KEY": "secret",
+        "ANTHROPIC_API_KEY": "secret", "SUPABASE_MEMBER_PASSWORD": "secret",
+    })
+
+    assert env == {"PATH": "/bin"}
 
 
 def test_resolution_order_and_degrades(tmp_path):

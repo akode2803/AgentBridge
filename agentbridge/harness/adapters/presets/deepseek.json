@@ -3,6 +3,7 @@
   "label": "DeepSeek (via Ollama)",
   "command": "ollama",
   "args": ["run", "{model}", "{prompt}"],
+  "env_allow": ["OLLAMA_HOST", "OLLAMA_NOHISTORY", "OLLAMA_API_KEY"],
   "format": "text",
   "requires_model": true,
   "default_model": "deepseek-r1",

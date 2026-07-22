@@ -381,7 +381,9 @@ live only in an adapter preset.
   paragraph keeps behaviour rules + the tool roster and points at the manual
   for semantics (documentation is a tool, not context).
 - **`bridge.py`** (R18/R19/R20/R22) — a per-run FastMCP streamable-http server on
-  an ephemeral `127.0.0.1` port, tools bound to the run's chat/workspace/policy:
+  an ephemeral `127.0.0.1` port, authenticated on every request by a fresh
+  in-memory bearer credential carried in that run's MCP headers. Tools are
+  bound to the run's chat/workspace/policy:
   the `approve` permission gate + `ask_member` (R43: may offer ≤4 one-tap
   options) + `read_docs`; capability tools
   (pin/star/react/forward/create_dm/create_group[capped]/schedule_timer, all
@@ -408,7 +410,12 @@ live only in an adapter preset.
   by the runner, touch only harness-local runtime state). Every outcome audited.
 - **`adapters/`** — the ModelRegistry + preset engine. A preset (`presets/*.json`)
   declares the CLI family, model list, effort support, blocklist, `auto_allow`,
-  `aux_web` and `permission_args`. The `claude` preset wires the broker;
+  `aux_web`, `permission_args` and the provider-specific `env_allow`. Provider
+  subprocesses receive only a cross-platform process/login baseline, those
+  declared names, and explicit harness injections — never the complete host
+  environment. `HOME`/`USERPROFILE` remains a native-CLI login compatibility
+  allowance, so this is minimization rather than process containment. The
+  `claude` preset wires the broker;
   `codex`/`cortex` rely on their own sandbox (`--sandbox read-only` /
   `--sql-read-only`); others are pure text generators. Safety flags (blocklist,
   sandbox) are **never** dropped, even on the minimal-flags fallback retry.

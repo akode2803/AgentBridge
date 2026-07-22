@@ -391,6 +391,37 @@ agent cannot distinguish an owner-approved action from an ungated one
 told in its prompt never to infer "the sandbox is open" from a successful
 op; a DENY is surfaced to it as the tool result.
 
+## Native runtime control plane (C0 audit)
+
+The portable-runtime foundation audit found two current boundaries that could
+be hardened independently and a set that must migrate together.
+
+**Closed in C0.1:** the per-run MCP bridge is no longer port-authenticated in
+practice. Every HTTP request now needs a fresh in-memory bearer credential
+carried in the provider's MCP authorization headers. Missing and sibling/random
+credentials receive HTTP 401 before FastMCP dispatch; teardown destroys the
+endpoint and credential together. The native residual is same-OS-user process
+inspection: the provider receives inline MCP JSON in argv, so this does not
+claim isolation from a malicious process already running as that OS user.
+
+**Closed in C0.1:** provider CLIs no longer inherit the complete host
+environment. The adapter passes a process/login baseline, variables explicitly
+declared by the preset, and harness-owned run injections. Unrelated mesh,
+database and application secrets are absent by default, and minimal-argument
+fallback uses the same environment. `HOME`/`USERPROFILE` and explicitly named
+provider credentials remain compatibility allowances, so this is minimization,
+not filesystem or secret containment.
+
+**Open and release-blocking for C1:** permission answers, peer verdicts, run
+stop, timer cancel, global/room pause and AppLink control messages are transport
+documents without a uniform signature, encryption, authority-epoch or replay
+contract. Most are availability controls, but a forged answer for a published
+live ask id can authorize a real tool call, and a forged peer verdict can
+authorize a genuine signed peer request. AgentBridge will not add stronger
+tools on top of these records. They move together to the signed/E2EE runtime
+data plane described in `docs/AGENT_RUNTIME_PLAN.md`; the exact boundary and
+abuse table is frozen in `docs/AGENT_RUNTIME_C0_AUDIT.md`.
+
 ## Migration note
 
 An earlier migration tool was used during the one-time move to the current app

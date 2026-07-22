@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -44,6 +45,42 @@ __all__ = ["BridgeServer"]
 _START_TIMEOUT_S = 15.0
 MAX_CREATES_PER_RUN = 2
 MAX_TIMERS_PER_RUN = 5
+
+
+class _BearerAuthApp:
+    """Small ASGI gate for the per-run MCP endpoint.
+
+    FastMCP owns the protocol; this wrapper owns the local channel boundary.
+    Every HTTP request must carry the run's short-lived bearer token. Lifespan
+    events pass through because they are server control, not client traffic.
+    """
+
+    def __init__(self, app, token: str) -> None:
+        self.app = app
+        self.token = token.encode("ascii")
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        supplied = b""
+        for name, value in scope.get("headers") or ():
+            if name.lower() == b"authorization":
+                supplied = value
+                break
+        expected = b"Bearer " + self.token
+        if not secrets.compare_digest(supplied, expected):
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": b"unauthorized"})
+            return
+        await self.app(scope, receive, send)
 
 
 class BridgeServer:
@@ -80,6 +117,7 @@ class BridgeServer:
         # so the agent's goodbye still lands while it is a member.
         self.leave_requested = False
         self.port = 0
+        self._token = ""
         self._server = None
         self._thread: threading.Thread | None = None
 
@@ -88,6 +126,10 @@ class BridgeServer:
         from mcp.server.fastmcp import FastMCP
         import uvicorn
 
+        # One unguessable credential per server entry. It exists only in
+        # memory and in the child CLI's per-run MCP config, then is cleared at
+        # teardown. A sibling local process that finds the port cannot use it.
+        self._token = secrets.token_urlsafe(32)
         mcp = FastMCP("ab")
 
         @mcp.tool(structured_output=False)
@@ -210,7 +252,8 @@ class BridgeServer:
         if self.memory is not None:
             self._memory_tools(mcp)
 
-        config = uvicorn.Config(mcp.streamable_http_app(), host="127.0.0.1",
+        app = _BearerAuthApp(mcp.streamable_http_app(), self._token)
+        config = uvicorn.Config(app, host="127.0.0.1",
                                 port=0, log_level="error", access_log=False)
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True,
@@ -841,13 +884,22 @@ class BridgeServer:
             self._thread.join(timeout=10)
         self._server = None
         self._thread = None
+        self._token = ""
 
     # ------------------------------------------------------------- config
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/mcp"
 
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        """Headers for protocol tests and provider MCP configuration."""
+        return {"Authorization": f"Bearer {self._token}"}
+
     def mcp_config(self) -> str:
-        """The inline --mcp-config JSON an inner CLI consumes."""
+        """The authenticated inline --mcp-config an inner CLI consumes."""
         return json.dumps(
-            {"mcpServers": {"ab": {"type": "http", "url": self.url}}})
+            {"mcpServers": {"ab": {
+                "type": "http", "url": self.url,
+                "headers": self.auth_headers,
+            }}})
