@@ -132,6 +132,13 @@ function renderAuthPage(force = false) {
       // hiccup: stay quiet — submit still validates authoritatively
       if (seq !== checkSeq || !r || r.error || !r.ok) return;
       if (userIn.value.trim().toLowerCase() !== r.name) return;
+      if (!r.taken && r.lookup_complete === false) {
+        const unavailable = r.lookup_state === "restricted"
+          ? "Cloud access is restricted — account lookup is unavailable"
+          : "Waiting for network — account lookup is unavailable";
+        setNameError(unavailable);
+        return;
+      }
       if (mode === "signup") {
         setNameError(r.taken ? `@${r.name} is already taken` : "");
       } else {

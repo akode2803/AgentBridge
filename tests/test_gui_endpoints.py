@@ -30,7 +30,7 @@ def test_check_name_preauth_facts(rig):
     r = rig.post("/api/mesh/check_name", username="admin")
     assert r["ok"] and not r["valid"]          # reserved word
     r = rig.post("/api/mesh/check_name", username="fresh-name")
-    assert r["ok"] and r["valid"] and not r["taken"]
+    assert r["ok"] and r["valid"] and not r["taken"] and r["lookup_complete"]
     # after an account exists, the same probe reports it taken —
     # case-insensitively, like signup itself
     rig.signup()
@@ -38,6 +38,26 @@ def test_check_name_preauth_facts(rig):
     assert r["ok"] and r["valid"] and r["taken"]
     r = rig.post("/api/mesh/check_name", username="")
     assert r["ok"] and not r["valid"] and r["hint"] == ""
+
+
+def test_check_name_cloud_absence_requires_an_authoritative_mirror(rig, monkeypatch):
+    monkeypatch.setattr(rig.app._tx0, "scheme", "supabase")
+    monkeypatch.setattr(
+        rig.app._tx0,
+        "mirror_status",
+        lambda: {"state": "restricted", "warm": False},
+        raising=False,
+    )
+
+    r = rig.post("/api/mesh/check_name", username="unknown-user")
+    assert r["ok"] and not r["taken"]
+    assert r["lookup_complete"] is False
+    assert r["lookup_state"] == "restricted"
+
+    # A cached account row is positive evidence even while refresh is blocked.
+    rig.signup()
+    r = rig.post("/api/mesh/check_name", username="aryan")
+    assert r["taken"] and r["lookup_complete"] is True
 
 
 # ------------------------------------------------------------- attachments

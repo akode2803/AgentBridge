@@ -69,7 +69,8 @@ def logout(app: GuiApp, req) -> dict:
 
 def check_name(app: GuiApp, req) -> dict:
     """Facts only — the client phrases per mode (signup wants "taken",
-    sign-in wants "doesn't exist"). ``hint`` carries the format rule."""
+    sign-in wants "doesn't exist"). ``lookup_complete`` prevents a cold or
+    unavailable cloud mirror from turning "unknown" into "absent"."""
     name = (req.data.get("username") or req.data.get("name") or "").strip().lower()
     if not name:
         return {"ok": True, "name": name, "valid": False, "taken": False, "hint": ""}
@@ -81,7 +82,20 @@ def check_name(app: GuiApp, req) -> dict:
         taken = bool(app.directory0.handle_taken(name))
     except Exception:  # noqa: BLE001 — transport hiccup: stay quiet, not wrong
         return {"ok": False, "error": "directory unavailable"}
-    return {"ok": True, "name": name, "valid": True, "taken": taken, "hint": ""}
+    lookup_complete = True
+    lookup_state = "online"
+    tx = app.transport
+    if not taken and getattr(tx, "scheme", "folder") != "folder":
+        status_fn = getattr(tx, "mirror_status", None)
+        try:
+            status = status_fn() if callable(status_fn) else {}
+        except Exception:  # noqa: BLE001 — status failure also means unknown
+            status = {}
+        lookup_state = str(status.get("state") or "loading")
+        lookup_complete = bool(status.get("warm") and lookup_state == "online")
+    return {"ok": True, "name": name, "valid": True, "taken": taken,
+            "lookup_complete": lookup_complete, "lookup_state": lookup_state,
+            "hint": ""}
 
 
 # ------------------------------------------------------------- app lock (V111)
