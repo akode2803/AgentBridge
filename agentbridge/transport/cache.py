@@ -47,7 +47,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..core.config import atomic_write_json, read_json
 from .base import Transport, Watcher
+from .health import retry_delay, transport_error_message, classify_transport_error
 
 __all__ = ["CachingTransport"]
 
@@ -68,13 +70,17 @@ _MISS = object()
 
 class CachingTransport(Transport):
     def __init__(self, inner: Transport, refresh_s: float | None = None,
-                 *, auto_refresh: bool = True) -> None:
+                 *, auto_refresh: bool = True,
+                 snapshot_path: Path | None = None,
+                 nonblocking_cold: bool = False) -> None:
         self.inner = inner
         prof = inner.profile
         # explicit refresh_s (tests) wins; else the profile decides (R76)
         self.refresh_s = float(refresh_s) if refresh_s is not None else (
             prof.idle_poll_s if prof.metered else CLOUD_REFRESH_S)
         self.auto_refresh = auto_refresh
+        self.snapshot_path = Path(snapshot_path) if snapshot_path else None
+        self.nonblocking_cold = nonblocking_cold
         self.scheme = inner.scheme
         self.max_upload_bytes = inner.max_upload_bytes
         self.profile = prof
@@ -96,7 +102,16 @@ class CachingTransport(Transport):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._warm_lock = threading.Lock()
+        self._warm_start_lock = threading.Lock()
+        self._warm_thread: threading.Thread | None = None
+        self._persist_lock = threading.Lock()
         self._next_warm_try = 0.0
+        self._persisted = False
+        self._health_state = "loading"
+        self._last_error_kind: str | None = None
+        self._last_error_message: str | None = None
+        self._last_attempt = 0.0
+        self._load_snapshot()
 
     # delegate unknown attributes (root, cache_key, …) to the inner transport
     def __getattr__(self, name: str) -> Any:
@@ -104,11 +119,106 @@ class CachingTransport(Transport):
             raise AttributeError(name)
         return getattr(self.inner, name)
 
+    def _load_snapshot(self) -> None:
+        """Hydrate only a snapshot for this exact provider project/root."""
+        if self.snapshot_path is None:
+            return
+        doc = read_json(self.snapshot_path, default=None)
+        expected = str(getattr(self.inner, "cache_key", ""))
+        if not isinstance(doc, dict) or doc.get("v") != 1 \
+                or doc.get("cache_key") != expected:
+            return
+        docs = doc.get("docs")
+        chat_ids = doc.get("chat_ids")
+        if not isinstance(docs, dict) or not isinstance(chat_ids, list):
+            return
+        try:
+            cursor = max(0, int(doc.get("cursor") or 0))
+            saved = float(doc.get("saved") or 0)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            self._docs = copy.deepcopy(docs)
+            self._chat_ids = sorted({str(c) for c in chat_ids if c})
+            self._cursor = cursor
+            self._last_refresh = saved
+            self._last_full = time.monotonic()
+            self._warm = True
+            self._persisted = True
+            self._health_state = "cached"
+
+    def _persist_snapshot(self) -> None:
+        """Best-effort local bootstrap cache; transport success never depends on it."""
+        if self.snapshot_path is None:
+            return
+        try:
+            with self._persist_lock:
+                with self._lock:
+                    payload = {
+                        "v": 1,
+                        "cache_key": str(getattr(self.inner, "cache_key", "")),
+                        "saved": self._last_refresh or time.time(),
+                        "cursor": self._cursor,
+                        "docs": copy.deepcopy(self._docs),
+                        "chat_ids": list(self._chat_ids),
+                    }
+                atomic_write_json(self.snapshot_path, payload)
+                try:
+                    self.snapshot_path.chmod(0o600)
+                except OSError:
+                    pass
+                with self._lock:
+                    self._persisted = True
+        except Exception:  # noqa: BLE001 - cache failure cannot break the mesh
+            pass
+
+    def _record_success(self) -> None:
+        with self._lock:
+            self._health_state = "online"
+            self._last_error_kind = None
+            self._last_error_message = None
+            self._next_warm_try = 0.0
+
+    def _record_failure(self, exc: BaseException) -> str:
+        kind = classify_transport_error(exc)
+        delay = retry_delay(
+            kind,
+            self.profile.fallback_poll_s if self.profile.metered else self.refresh_s,
+        )
+        if not self.profile.metered and kind in {"offline", "service_error"}:
+            delay = self.refresh_s
+        with self._lock:
+            self._health_state = kind
+            self._last_error_kind = kind
+            self._last_error_message = transport_error_message(kind)
+            self._last_attempt = time.time()
+            self._next_warm_try = time.monotonic() + delay
+        return kind
+
     # ----------------------------------------------------------- mirror core
     def warm_async(self) -> None:
         """Kick the first bulk load in the background (boot-time warmup)."""
-        threading.Thread(target=self._ensure_warm, daemon=True,
-                         name="ab-mirror-warm").start()
+        with self._warm_start_lock:
+            if self._warm_thread and self._warm_thread.is_alive():
+                return
+            self._warm_thread = threading.Thread(
+                target=self._warm_background, daemon=True,
+                name="ab-mirror-warm")
+            self._warm_thread.start()
+
+    def _warm_background(self) -> None:
+        try:
+            if self._warm:
+                try:
+                    self._refresh_tick()
+                except Exception:  # noqa: BLE001 - status records the failure
+                    pass
+            else:
+                self._ensure_warm(background=True)
+        finally:
+            # Even a first pull that fails needs a slow recovery loop. Reads
+            # remain local and nonblocking while that loop owns provider retry.
+            self._start_thread()
 
     def refresh(self) -> None:
         """One synchronous snapshot pull (tests; the loop calls this too).
@@ -129,9 +239,23 @@ class CachingTransport(Transport):
             warm = self._warm
             last = self._last_refresh
             cursor = self._cursor
+            health = self._health_state
+            persisted = self._persisted
+            error_kind = self._last_error_kind
+            error_message = self._last_error_message
+            last_attempt = self._last_attempt
+            retry_in = max(0.0, self._next_warm_try - time.monotonic())
         stats = getattr(self.inner, "transfer_stats", None)
         return {"warm": warm,
+                "state": health,
+                "cached": bool(warm and health != "online"),
+                "persisted": persisted,
                 "age_s": (time.time() - last) if last else None,
+                "last_success": last or None,
+                "last_attempt": last_attempt or None,
+                "failure_kind": error_kind,
+                "message": error_message,
+                "retry_in_s": retry_in if error_kind else None,
                 "refresh_s": self.suggest_poll_s(self.refresh_s),
                 "mode": ("delta" if cursor and self.profile.supports_doc_delta
                          else "full"),
@@ -164,12 +288,15 @@ class CachingTransport(Transport):
         if self.profile.metered:
             self._watchdog(changed, hinted, lane="logs")
 
-    def _ensure_warm(self) -> bool:
+    def _ensure_warm(self, *, background: bool = False) -> bool:
         """Mirror ready? Warm it on first use; if warming FAILS (offline),
         back off for a cycle and let reads fall through to the inner
         transport instead of blocking every caller on retries."""
         if self._warm:
             return True
+        if self.nonblocking_cold and not background:
+            self.warm_async()
+            return False
         with self._warm_lock:
             if self._warm:
                 return True
@@ -177,12 +304,7 @@ class CachingTransport(Transport):
                 return False
             try:
                 self._refresh_once()
-            except Exception:  # noqa: BLE001 — cloud unreachable: degrade
-                # retry on the FAST leash — a slow metered idle cadence is
-                # for healthy steady-state, not for getting warm after boot
-                self._next_warm_try = time.monotonic() + (
-                    self.profile.fallback_poll_s if self.profile.metered
-                    else self.refresh_s)
+            except Exception:  # noqa: BLE001 - _refresh_once records the cause
                 return False
             self._start_thread()
             return True
@@ -191,9 +313,15 @@ class CachingTransport(Transport):
         t0 = time.monotonic()
         # snapshot_docs = full pull + the delta cursor it is current at
         # (base default wraps get_docs with cursor 0 for feed-less drivers)
-        docs, cursor = self.inner.snapshot_docs()
-        docs = dict(docs)
-        ids = set(self.inner.list_chat_ids())
+        with self._lock:
+            self._last_attempt = time.time()
+        try:
+            docs, cursor = self.inner.snapshot_docs()
+            docs = dict(docs)
+            ids = set(self.inner.list_chat_ids())
+        except Exception as exc:
+            self._record_failure(exc)
+            raise
         with self._lock:
             # local writes newer than the snapshot query win until the next
             # cycle (present = keep ours; absent = we deleted it, keep it gone)
@@ -214,6 +342,8 @@ class CachingTransport(Transport):
             self._last_refresh = time.time()
             self._last_full = time.monotonic()
             self._prune_guards_locked()
+        self._record_success()
+        self._persist_snapshot()
 
     def _prune_guards_locked(self) -> None:
         floor = time.monotonic() - _WRITE_GUARD_S
@@ -234,7 +364,15 @@ class CachingTransport(Transport):
         Raises NotImplementedError when the driver has no live feed (the
         caller falls back to a full pull) and network errors for backoff."""
         t0 = time.monotonic()
-        changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+        with self._lock:
+            self._last_attempt = time.time()
+        try:
+            changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+        except NotImplementedError:
+            raise
+        except Exception as exc:
+            self._record_failure(exc)
+            raise
         silent = self.profile.silent_prefixes
         with self._lock:
             for path, val in changed.items():
@@ -260,6 +398,9 @@ class CachingTransport(Transport):
                 and not (silent and p.startswith(silent))
                 for p in (*changed, *deleted))
             self._prune_guards_locked()
+        self._record_success()
+        if changed or deleted:
+            self._persist_snapshot()
         return foreign
 
     def _start_thread(self) -> None:
@@ -276,7 +417,7 @@ class CachingTransport(Transport):
         except Exception:  # noqa: BLE001 — no hints: pure cadence
             watcher = None
         prof = self.profile
-        backoff = 0.0
+        backoff = max(0.0, self._next_warm_try - time.monotonic())
         try:
             while not self._stop.is_set():
                 wait = backoff or self.suggest_poll_s(self.refresh_s)
@@ -290,9 +431,12 @@ class CachingTransport(Transport):
                 try:
                     changed = self._refresh_tick()
                     backoff = 0.0
-                except Exception:  # noqa: BLE001 — keep serving the last good
-                    backoff = min(max(backoff, self.refresh_s) * 2,
-                                  _MAX_BACKOFF_S)
+                except Exception:  # noqa: BLE001 - cause recorded at pull site
+                    floor = max(0.0, self._next_warm_try - time.monotonic())
+                    backoff = max(
+                        floor,
+                        min(max(backoff, self.refresh_s) * 2, _MAX_BACKOFF_S),
+                    )
                     continue
                 if prof.metered:
                     self._watchdog(changed, hinted)
@@ -360,13 +504,19 @@ class CachingTransport(Transport):
                 if path in self._docs:
                     return copy.deepcopy(self._docs[path])
                 miss_known = path in self._neg
-            if self._reads_through(path) and not miss_known:
+            # A cached/offline mirror must never turn a harmless miss into a
+            # foreground network wait. Read-through is only for a provider we
+            # most recently proved healthy; the delta loop heals cached mode.
+            if (self._health_state == "online" and self._reads_through(path)
+                    and not miss_known):
                 val = self.inner.get_doc(path, _MISS)
                 with self._lock:
                     if val is not _MISS:
                         self._docs[path] = copy.deepcopy(val)
                         return val
                     self._neg.add(path)
+            return default
+        if self.nonblocking_cold:
             return default
         return self.inner.get_doc(path, default)
 
@@ -384,12 +534,14 @@ class CachingTransport(Transport):
             self._doc_writes[path] = time.monotonic()
             self._neg.discard(path)
             self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
+        self._persist_snapshot()
 
     def delete_doc(self, path: str) -> None:
         self.inner.delete_doc(path)
         with self._lock:
             self._docs.pop(path, None)
             self._doc_writes[path] = time.monotonic()
+        self._persist_snapshot()
 
     def list_docs(self, prefix: str) -> list[str]:
         if self._ensure_warm():
@@ -402,13 +554,15 @@ class CachingTransport(Transport):
             # would fork a duplicate epoch, so verify emptiness with the
             # cloud once per refresh cycle. Established chats always list
             # non-empty and never pay this.
-            if not out and not miss_known and self._reads_through(
-                    prefix.rstrip("/") + "/x"):
+            if (self._health_state == "online" and not out and not miss_known
+                    and self._reads_through(prefix.rstrip("/") + "/x")):
                 out = sorted(self.inner.list_docs(prefix))
                 if not out:
                     with self._lock:
                         self._neg.add(f"list:{prefix}")
             return out
+        if self.nonblocking_cold:
+            return []
         return self.inner.list_docs(prefix)
 
     # ----------------------------------------------------------- chats / logs
@@ -422,6 +576,8 @@ class CachingTransport(Transport):
                         if len(parts) > 2 and parts[1]:
                             ids.add(parts[1])
                 return sorted(ids)
+        if self.nonblocking_cold:
+            return []
         return self.inner.list_chat_ids()
 
     def list_logs(self, chat_id: str) -> list[tuple[str, int]]:
@@ -443,6 +599,7 @@ class CachingTransport(Transport):
             if chat_id not in self._chat_ids:
                 self._chat_ids = sorted({*self._chat_ids, chat_id})
             self._chat_writes[chat_id] = time.monotonic()
+        self._persist_snapshot()
 
     def read_log(
         self, chat_id: str, log_name: str, offset: int = 0
@@ -459,6 +616,7 @@ class CachingTransport(Transport):
                 self._doc_writes[p] = now
             self._chat_ids = [c for c in self._chat_ids if c != chat_id]
             self._chat_writes.pop(chat_id, None)
+        self._persist_snapshot()
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:

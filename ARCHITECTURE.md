@@ -242,12 +242,22 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
   answer live cadence to hint-woken loops; `note_log_poll(changed, hinted)`
   lets `SyncEngine` feed log-side hint health back into the same economics
   contract.
-- **`transport/folder.py`** — the synced-folder impl. Retries transient
+- **`transport/folder.py`** — the folder impl: a plain local directory is a
+  first-class single-machine mesh, while a OneDrive/Drive/SharePoint-backed
+  directory adds cross-machine replication without changing the data model.
+  The local filesystem remains authoritative and usable while the sync client
+  or internet is down. Retries transient
   `PermissionError` (OneDrive mid-sync locks), tolerates half-synced files (BOM
   strip, partial trailing JSONL line not consumed), a memoized path-escape guard
   (`_abs`), and a best-effort `ReadDirectoryChangesW` watcher that only shortens
   poll latency (polling stays the truth — OneDrive doesn't reliably notify for
   files synced *down*).
+- **`transport/health.py`** (R113) — provider-independent failure
+  classification for quota restriction, rate limiting, authentication,
+  authorization/RLS, configuration, network/DNS/TLS/timeout and provider
+  service failures. The Supabase inline retry loop retries only bounded network
+  and 5xx-class failures; deterministic failures go to the mirror circuit
+  breaker immediately (60s for rate limits, 5 min for quota/auth/policy/config).
 - **`transport/supabase.py`** (R23, economics reworked R76) — docs →
   `ab_docs`, logs → `ab_logs` (row id = read offset), blobs → the `ab-mesh`
   bucket, realtime broadcast hints on a daemon thread (degrade → poll).
@@ -261,7 +271,8 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
   `create_doc` (plain INSERT), not the normal `put_doc` UPSERT: an absent-row
   UPSERT still evaluates UPDATE RLS before the meta can establish membership.
   Identical duplicate creates are idempotent; conflicting duplicates remain
-  denied by the unique key. Fast paths:
+  denied by the unique key. PostgREST calls use a 6s request deadline instead
+  of the library's 120s default; storage retains a 20s deadline. Fast paths:
   `get_docs` (one paged query), `changed_logs` (`ab_logs` ids are one
   global identity column), and the R76 **doc delta feed** —
   `ab_docs.seq` (trigger-bumped from one sequence) + **soft deletes**
@@ -276,7 +287,7 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
   polls; sign-in/out flips call `hint_now()`). `transfer_stats()` counts
   queries + approximate bytes for the Connection panel and soak tests.
 - **`transport/cache.py`** (R28, reworked R29, delta + adaptive cadence
-  R76) — `CachingTransport`, a warm in-memory **read mirror**
+  R76, offline bootstrap R113) — `CachingTransport`, a warm **read mirror**
   (`get_doc`/`list_docs`/`list_chat_ids`; NOT logs or blobs) that
   `make_transport` wraps around a **cloud** transport only (a folder read is
   already free). Warm = one full `snapshot_docs()` (docs + the cursor they
@@ -291,16 +302,27 @@ risks live in docs/THREAT_MODEL.md ("What is NOT protected").
   (legacy schema) it full-pulls at
   the slow cadence with a fallback-rate floor against poke bursts — still
   ~30× cheaper than the old flat 4s loop that burned 21 GB/day (V84).
-  Stability rules unchanged from R29: a FAILED refresh keeps serving the
+  The GUI additionally persists an atomic, mode-0600 last-good document
+  snapshot under local `home/cache/`, keyed by a hash of the exact Supabase
+  project + mesh root. It hydrates before any provider call, so session restore,
+  sidebars and locally cached transcripts remain usable across a process restart.
+  GUI cold reads never fall through to a slow provider; one background warm
+  flight owns loading and recovery. Harness processes deliberately keep
+  process-local mirrors so concurrent agents cannot race over the GUI bootstrap
+  file. Stability rules unchanged from R29: a FAILED refresh keeps serving the
   last good snapshot; writes are write-through and mirror-synchronous; the
   recent-write guard protects local writes from racing pulls (full AND
   delta); returned docs are deep copies. A tombstoned `meta.json` drops the
   chat id at delta-apply time. The GUI shares ONE mirrored transport between
   the pre-auth directory and the Mesh (`GuiApp._build` passes `_tx0`).
-  `mirror_status()` reports warmth, age, sync mode (delta/full), hint
-  health + transfer stats; the Connection panel renders Connected /
-  Reconnecting, the sync mode (with a paste-the-migration warning while
-  legacy), and a session traffic meter. **Never build a transport per call
+  `mirror_status()` reports `loading`/`cached`/`online`/`offline`/`restricted`/
+  `rate_limited`/auth/policy/config/service state, last success/attempt, retry
+  delay, warmth, age, sync mode, hint health and transfer stats. The header and
+  Connection panel render the same state. Cached cloud reads use the last
+  authenticated membership snapshot; remote revocation cannot be observed
+  until connectivity returns. Only message sends have a durable offline outbox;
+  generic membership/key/settings mutations remain fail-visible. **Never build
+  a transport per call
   in a loop** — `supervise_all` doing that (one leaked mirror + realtime
   socket per 30s rescan) was half the V84 fire; helpers take a `tx`.
 - **`store/db.py`** — a local SQLite **read cache** (messages + per-log

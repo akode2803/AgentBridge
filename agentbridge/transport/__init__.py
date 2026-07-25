@@ -1,5 +1,6 @@
 """Transport layer: the only code that touches bytes-at-rest (FORMAT2)."""
 
+import hashlib
 from pathlib import Path
 
 from .base import Transport, Watcher
@@ -12,7 +13,7 @@ __all__ = [
 ]
 
 
-def make_transport(spec, home: Path | None = None) -> Transport:
+def make_transport(spec, home: Path | None = None, *, offline_cache: bool = False) -> Transport:
     """One factory for every driver: a ``supabase://<root-name>`` spec builds
     the cloud driver (credentials from ``<home>/supabase.env``, R23);
     anything else is a synced-folder path. Callers keep passing whatever the
@@ -30,5 +31,16 @@ def make_transport(spec, home: Path | None = None) -> Transport:
     if text.startswith("supabase://"):
         from .supabase import SupabaseTransport
 
-        return CachingTransport(SupabaseTransport(text[len("supabase://"):], home=home))
+        inner = SupabaseTransport(text[len("supabase://"):], home=home)
+        snapshot_path = None
+        if offline_cache:
+            from ..core.config import DEFAULT_HOME
+
+            digest = hashlib.sha256(inner.cache_key.encode("utf-8")).hexdigest()[:24]
+            snapshot_path = (home or DEFAULT_HOME) / "cache" / f"cloud-{digest}.json"
+        return CachingTransport(
+            inner,
+            snapshot_path=snapshot_path,
+            nonblocking_cold=offline_cache,
+        )
     return FolderTransport(spec)

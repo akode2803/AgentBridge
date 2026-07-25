@@ -243,4 +243,25 @@ export function renderChrome() {
   const s = App.state;
   if (!s) return;
   $("#paused-badge").hidden = !(s.paused || Mesh?.state?.paused);
+  const c = s.connection || Mesh?.state?.connection || {};
+  const state = c.state || c.mirror?.state || "online";
+  const labels = {
+    loading: "Loading...",
+    cached: "Loading latest changes...",
+    offline: "Waiting for network...",
+    restricted: "Cloud access restricted",
+    rate_limited: "Cloud rate limited",
+    auth_error: "Cloud sign-in required",
+    permission_error: "Cloud access denied",
+    configuration_error: "Cloud setup needs attention",
+    service_error: "Reconnecting...",
+    folder_unavailable: "Waiting for folder...",
+    folder_read_only: "Folder is read-only",
+    sync_paused: "Sync paused - using local data",
+  };
+  const title = $("#side-head .side-title");
+  if (title) {
+    title.textContent = labels[state] || "AgentBridge";
+    title.title = labels[state] ? `AgentBridge - ${labels[state]}` : "AgentBridge";
+  }
 }

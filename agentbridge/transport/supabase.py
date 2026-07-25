@@ -41,13 +41,17 @@ from typing import Any
 
 from ..core.errors import ValidationError
 from .base import Transport, TransportProfile, Watcher
+from .health import classify_transport_error, retry_inline
 
 __all__ = ["SupabaseTransport", "load_supabase_env"]
 
 BUCKET = "ab-mesh"
 ENV_FILE = "supabase.env"
-_RETRIES = 3
+_RETRIES = 2
 _RETRY_WAIT = 0.4
+_POSTGREST_TIMEOUT_S = 6
+_STORAGE_TIMEOUT_S = 20
+_FUNCTION_TIMEOUT_S = 6
 
 # R76 (docs/SCALING.md §3) — writer-side hint coalescing. A hint is a
 # content-free wake-up; per-class intervals bound how long a write may wait
@@ -175,6 +179,7 @@ class SupabaseTransport(Transport):
             with self._client_lock:
                 if self._client is None:
                     from supabase import create_client
+                    from supabase.client import ClientOptions
 
                     url = self._env.get("SUPABASE_URL", "")
                     email = self._env.get("SUPABASE_MEMBER_EMAIL", "")
@@ -187,12 +192,30 @@ class SupabaseTransport(Transport):
                             "and either a member credential (R84) or "
                             "SUPABASE_SECRET_KEY in ~/.agentbridge/"
                             "supabase.env")
+                    # The library default is 120 seconds for PostgREST. A weak
+                    # connection then makes the local GUI look frozen even
+                    # though its server is healthy. Keep every provider call
+                    # bounded; the mirror/outbox own retries across calls.
+                    options = ClientOptions(
+                        postgrest_client_timeout=_POSTGREST_TIMEOUT_S,
+                        storage_client_timeout=_STORAGE_TIMEOUT_S,
+                        function_client_timeout=_FUNCTION_TIMEOUT_S,
+                    )
+
+                    def connect(key: str):
+                        try:
+                            return create_client(url, key, options=options)
+                        except TypeError:
+                            # Compatibility with older supabase-py releases
+                            # (and small injected test factories) that predate
+                            # the options parameter.
+                            return create_client(url, key)
                     # R84: member auth first — the RLS trust model. A failed
                     # sign-in FALLS BACK to the service key (never brick the
                     # fleet), and the About panel shows the honest mode.
                     if email and pw and pub:
                         try:
-                            client = create_client(url, pub)
+                            client = connect(pub)
                             client.auth.sign_in_with_password(
                                 {"email": email, "password": pw})
                             self.auth_mode = ("member:"
@@ -205,7 +228,7 @@ class SupabaseTransport(Transport):
                             if not secret:
                                 raise
                     if self._client is None:
-                        self._client = create_client(url, secret)
+                        self._client = connect(secret)
                         if not self.auth_mode.startswith("member-signin"):
                             self.auth_mode = "service"
         return self._client
@@ -260,6 +283,11 @@ class SupabaseTransport(Transport):
                 last = e
                 if healed:
                     continue
+                # Quota/auth/policy/schema/rate-limit failures are not healed
+                # by replaying the same request milliseconds later. Let the
+                # mirror's circuit breaker choose a provider-appropriate delay.
+                if not retry_inline(classify_transport_error(e)):
+                    raise
                 time.sleep(_RETRY_WAIT * (i + 1))
         raise last
 

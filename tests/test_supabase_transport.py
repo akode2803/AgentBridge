@@ -670,6 +670,40 @@ def test_service_key_alone_still_works(monkeypatch):
     assert tx.auth_mode == "service"
 
 
+def test_client_uses_bounded_provider_timeouts(monkeypatch):
+    import supabase as sb_mod
+
+    seen = {}
+
+    def factory(url, key, options=None):
+        seen["options"] = options
+        return _ClientStub(key)
+
+    monkeypatch.setattr(sb_mod, "create_client", factory)
+    env = {"SUPABASE_URL": "https://x.supabase.co",
+           "SUPABASE_SECRET_KEY": "secret-key"}
+    SupabaseTransport("mesh2", env=env)._sb()
+    assert seen["options"].postgrest_client_timeout == 6
+    assert seen["options"].storage_client_timeout == 20
+
+
+def test_quota_and_rate_limit_failures_do_not_retry_immediately(monkeypatch):
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0.01)
+    tx = SupabaseTransport("mesh2", env={}, client=FakeClient())
+    for message in ("402 Payment Required", "429 Too Many Requests"):
+        calls = {"n": 0}
+
+        def terminal():
+            calls["n"] += 1
+            raise RuntimeError(message)
+
+        with pytest.raises(RuntimeError, match=message.split()[0]):
+            tx._retry(terminal)
+        assert calls["n"] == 1
+
+
 def test_auth_expiry_heals_in_the_retry_path(monkeypatch):
     """A JWT-expired error triggers a session refresh before the retry —
     the belt for long-lived fleet processes."""

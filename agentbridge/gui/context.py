@@ -86,7 +86,7 @@ class GuiApp:
         # pre-auth reads (login screen, name checks) — directory only, no store.
         # make_transport so the login screen works on a cloud root too, not just
         # a folder (the FolderTransport hard-wire here broke supabase:// roots).
-        self._tx0 = make_transport(self.root, home=self.home)
+        self._tx0 = make_transport(self.root, home=self.home, offline_cache=True)
         self.directory0 = Directory(self._tx0)
         # cloud roots: start the mirror's first bulk load NOW so the first
         # /api/mesh/state finds it hot instead of paying the warm-up (R29)

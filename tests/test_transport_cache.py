@@ -10,6 +10,7 @@ proves the folder stays bare and a supabase root gets wrapped.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -269,6 +270,76 @@ def test_cold_start_offline_falls_through_then_recovers():
     inner.reset_reads()
     assert tx.get_doc("users/a.json")["v"] == 1
     assert inner.reads["get_doc"] == 0   # served from the mirror again
+
+
+def test_persistent_snapshot_survives_restart_and_is_project_scoped(tmp_path):
+    path = tmp_path / "cloud.json"
+    inner = BulkTransport()
+    inner.put_doc("users/a.json", {"v": 1})
+    first = CachingTransport(inner, auto_refresh=False, snapshot_path=path)
+    first.refresh()
+    assert path.is_file()
+
+    restarted = CachingTransport(
+        inner, auto_refresh=False, snapshot_path=path, nonblocking_cold=True)
+    assert restarted.get_doc("users/a.json") == {"v": 1}
+    status = restarted.mirror_status()
+    assert status["state"] == "cached"
+    assert status["cached"] is True and status["persisted"] is True
+
+    other = BulkTransport()
+    other.cache_key = "counting:another-project"
+    isolated = CachingTransport(
+        other, auto_refresh=False, snapshot_path=path, nonblocking_cold=True)
+    assert isolated.mirror_status()["warm"] is False
+    assert isolated.get_doc("users/a.json") is None
+
+
+def test_nonblocking_cold_read_does_not_wait_for_slow_provider():
+    class SlowBulk(BulkTransport):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def get_docs(self, prefix=""):
+            self.started.set()
+            self.release.wait(2)
+            return super().get_docs(prefix)
+
+    inner = SlowBulk()
+    inner.put_doc("users/a.json", {"v": 1})
+    tx = CachingTransport(inner, auto_refresh=False, nonblocking_cold=True)
+    tx.warm_async()
+    assert inner.started.wait(1)
+    started = time.monotonic()
+    assert tx.get_doc("users/a.json") is None
+    assert time.monotonic() - started < 0.1
+    inner.release.set()
+    assert tx._warm_thread is not None
+    tx._warm_thread.join(2)
+    assert tx.get_doc("users/a.json") == {"v": 1}
+
+
+def test_failure_state_keeps_cache_and_clears_after_recovery(tmp_path):
+    inner = BulkTransport()
+    inner.put_doc("users/a.json", {"v": 1})
+    tx = CachingTransport(inner, auto_refresh=False,
+                          snapshot_path=tmp_path / "cloud.json")
+    tx.refresh()
+    inner.fail = True
+    with pytest.raises(ConnectionError):
+        tx.refresh()
+    failed = tx.mirror_status()
+    assert failed["state"] == "offline"
+    assert failed["cached"] is True
+    assert tx.get_doc("users/a.json") == {"v": 1}
+
+    inner.fail = False
+    tx.refresh()
+    healed = tx.mirror_status()
+    assert healed["state"] == "online"
+    assert healed["failure_kind"] is None
 
 
 def test_local_write_survives_a_racing_refresh(mirror):

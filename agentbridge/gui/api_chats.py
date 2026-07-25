@@ -8,6 +8,7 @@ with the Delivered tier, per-user ``archived``.
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -32,13 +33,35 @@ def _connection(app: GuiApp) -> dict:
     if scheme == "folder":
         from .desktop import sync_client_running
 
-        out["shared_ok"] = isinstance(app.root, Path) and app.root.is_dir()
-        out["sync_client"] = sync_client_running()
+        root = app.root if isinstance(app.root, Path) else Path(app.root)
+        parts = [part.lower() for part in root.parts]
+        provider = next((name for name, marks in (
+            ("OneDrive", ("onedrive", "sharepoint")),
+            ("Google Drive", ("google drive", "googledrive")),
+            ("Dropbox", ("dropbox",)),
+            ("iCloud Drive", ("icloud drive", "mobile documents")),
+        ) if any(mark in part for part in parts for mark in marks)), None)
+        shared_ok = root.is_dir()
+        writable = shared_ok and os.access(root, os.W_OK)
+        out.update(
+            mode="synced" if provider else "local",
+            provider=provider,
+            shared_ok=shared_ok,
+            writable=writable,
+        )
+        out["sync_client"] = sync_client_running() if provider == "OneDrive" else None
+        out["state"] = (
+            "folder_unavailable" if not shared_ok
+            else "folder_read_only" if not writable
+            else "sync_paused" if provider == "OneDrive" and out["sync_client"] is False
+            else "online"
+        )
         return out
     out["host"] = str(getattr(tx, "host", "") or "")
     status = getattr(tx, "mirror_status", None)
     if callable(status):
         out["mirror"] = status()
+        out["state"] = out["mirror"].get("state", "loading")
     return out
 
 
@@ -142,6 +165,7 @@ def state(app: GuiApp, req) -> dict:
         "encrypted": app.encrypt,
         "caps": {"sse": True, "receipts": "delivered", "admins": True},
         "max_upload_bytes": None,
+        "connection": _connection(app),
     }
     mesh = app.mesh
     # the any-human stand-down switch (the R15 harness reads the same doc)

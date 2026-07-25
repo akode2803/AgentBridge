@@ -173,18 +173,43 @@ function connectionRows(s) {
     { scheme: "folder", root: s.shared_dir, shared_ok: s.shared_ok,
       sync_client: s.onedrive_running };
   if (c.scheme === "folder") {
+    const local = c.mode === "local";
+    const storage = local ? "Local folder" : `${esc(c.provider || "Synced folder")}`;
+    const ready = !c.shared_ok ? "✗ Folder unavailable"
+      : c.writable === false ? "✗ Read-only"
+        : c.state === "sync_paused" ? "⚠ Local data available; sync client paused"
+          : "✓ Ready";
+    const sync = !local && c.provider === "OneDrive"
+      ? `<dt>Sync client</dt><dd>${c.sync_client == null ? "Unknown"
+        : c.sync_client ? "✓ Running" : "✗ Not running"}</dd>` : "";
     return `
-      <dt>Folder synced</dt><dd>${c.shared_ok ? "✓ Yes" : "✗ No — check OneDrive"}</dd>
-      <dt>Sync client</dt><dd>${c.sync_client == null ? "Unknown" : c.sync_client ? "✓ Running" : "✗ Not running"}</dd>`;
+      <dt>Storage</dt><dd>${storage}</dd>
+      <dt>Folder</dt><dd>${ready}</dd>${sync}`;
   }
   // cloud: warm mirror = connected; warm but long past the safety-poll
   // cadence (45s idle, backoff caps at 60s) = the refresher is failing,
   // serving cached
   const m = c.mirror || {};
-  const stale = m.age_s != null && m.age_s > 120;
-  const status = !m.warm ? "Connecting…"
-    : stale ? "⚠ Reconnecting — showing cached data"
-      : "✓ Connected";
+  const labels = {
+    loading: "Connecting...",
+    cached: "Loading latest changes - showing cached data",
+    offline: "Waiting for network",
+    restricted: "Access restricted until provider usage resets",
+    rate_limited: "Rate limited - retrying later",
+    auth_error: "Member authentication failed",
+    permission_error: "Row security refused access",
+    configuration_error: "Cloud configuration needs attention",
+    service_error: "Cloud service unavailable",
+  };
+  const state = m.state || (!m.warm ? "loading"
+    : m.age_s != null && m.age_s > 120 ? "service_error" : "online");
+  let status = state === "online" ? "✓ Connected" : (labels[state] || "Reconnecting...");
+  if (m.cached && !["cached", "loading"].includes(state)) {
+    status += " - showing cached data";
+  }
+  if (m.retry_in_s != null && state !== "online") {
+    status += `; retry in ${Math.max(1, Math.ceil(m.retry_in_s))}s`;
+  }
   // R76: how this mirror stays fresh — incremental (delta cursor) or full
   // snapshots (the pre-migration schema), plus the metered-traffic meter
   let syncRow = "";
