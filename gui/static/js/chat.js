@@ -464,7 +464,8 @@ async function renderMeshChat(force) {
     // bubble, Telegram-style
     const showSender = !isDm && !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
-    const kindTag = msg.kind === "agent" ? `<span class="kind-tag">agent</span>` : "";
+    const kindTag = ms.users?.[msg.from]?.kind === "agent"
+      ? `<span class="kind-tag">agent</span>` : "";
     // M11: a departed (deleted) member's messages grey out — name and
     // words remain, nothing else of them does. Keyed on `departed`
     // (deactivated), not active=false — that alone is also the pause switch.
