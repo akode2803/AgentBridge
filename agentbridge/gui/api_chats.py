@@ -304,19 +304,27 @@ def _created_by(msgs) -> str:
 def post(app: GuiApp, req, mesh) -> dict:
     data = req.data
     chat_id = data.get("chat_id") or ""
-    files = None
+    prepared = []
+    staged = []
     if data.get("attachments"):
-        from .api_files import seal_attachments
+        from .api_files import prepare_attachments
 
-        files = seal_attachments(app, mesh, chat_id, data["attachments"])
-        if not files and not (data.get("body") or "").strip():
+        prepared, staged = prepare_attachments(
+            app, mesh, chat_id, data["attachments"])
+        if not prepared and not (data.get("body") or "").strip():
             return {"error": "attachments were not found — upload them again"}
-    env = mesh.post(
-        chat_id,
-        data.get("body") or "",
-        reply_to=data.get("reply_to"),
-        files=files,
-    )
+    try:
+        env = mesh.post(
+            chat_id,
+            data.get("body") or "",
+            reply_to=data.get("reply_to"),
+            attachments=prepared,
+        )
+    except Exception:
+        mesh.cancel_attachments(prepared)
+        raise
+    for path in staged:
+        path.unlink(missing_ok=True)  # durable outbox owns the sealed copy now
     # the read-cursor write is one cloud round-trip on a cloud root — keep it
     # OFF the response path (composer latency = this endpoint's latency). A
     # lost cursor write just re-shows an unread badge; posting stays durable

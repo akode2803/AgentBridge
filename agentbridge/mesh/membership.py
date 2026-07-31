@@ -295,9 +295,10 @@ class MembershipService:
         if reason:
             event["reason"] = reason
         self.messaging.post_event(chat_id, event)
-        healed = self.refold(chat_id)
+        healed = self.refold(chat_id, write=False)
         if self.keys is not None:  # R69: rotate the epoch away from me on exit
             self.keys.on_member_left(chat_id, healed)
+        self.messaging.flush_outbox()
         return healed
 
     def grant_admin(self, chat_id: str, who: str) -> ChatSnapshot:
@@ -380,7 +381,9 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_DELETED, "by": self.user}
         )
-        return self.refold(chat_id)
+        preview = self.refold(chat_id, write=False)
+        self.messaging.flush_outbox()
+        return preview
 
     def set_permissions(self, chat_id: str, changes: dict) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
@@ -396,7 +399,7 @@ class MembershipService:
         return self.refold(chat_id)
 
     # -------------------------------------------------------------- snapshots
-    def refold(self, chat_id: str) -> ChatSnapshot:
+    def refold(self, chat_id: str, *, write: bool = True) -> ChatSnapshot:
         """Recompute the snapshot from the event log and rewrite meta.json.
         Heals any clobbered/stale meta (the whole point of tenet 3).
 
@@ -406,6 +409,8 @@ class MembershipService:
         snap = events.fold(chat_id, self.store.messages(chat_id), self.directory)
         if not snap.members and not snap.deleted:
             return self.messaging.snapshot(chat_id)
+        if not write:
+            return snap
         try:
             self.tx.put_doc(P.meta(chat_id), snap.to_dict())
         except TransportError:

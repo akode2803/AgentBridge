@@ -21,9 +21,10 @@ from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
 from . import authz
-from .events import EV_REACTION, pin_signing_bytes, reaction_signing_bytes, \
-    redaction_signing_bytes, signing_bytes, state_signing_bytes, \
-    unredaction_signing_bytes
+from .attachments import PreparedAttachment
+from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
+    pin_signing_bytes, reaction_signing_bytes, redaction_signing_bytes, \
+    signing_bytes, state_signing_bytes, unredaction_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
 from .paths import P
 from .readmodel import build_messages, parse_tags, unread_info
@@ -44,9 +45,11 @@ class MessagingService:
         machine: str,
         *,
         notify_outbox=lambda: None,
+        flush_outbox=lambda: 0,
         privacy=None,  # PrivacyService, wired by the Mesh facade (avoids a cycle)
         event_signer=lambda data: "",  # (bytes)->sig; facade wires the identity
         directory=None,  # Directory — resolves sign_pub for redaction verify (R25)
+        attachments=None,  # AttachmentDelivery — durable sealed spool owner
     ) -> None:
         self.tx = tx
         self.store = store
@@ -54,9 +57,12 @@ class MessagingService:
         self.user = user
         self.machine = machine
         self._notify_outbox = notify_outbox
+        self._flush_outbox = flush_outbox
+        self._apply_terminal = lambda _chat_id: None
         self.privacy = privacy
         self._sign_event = event_signer
         self.directory = directory
+        self.attachments = attachments
 
     # ------------------------------------------------------------- membership
     def snapshot(self, chat_id: str) -> ChatSnapshot:
@@ -65,9 +71,13 @@ class MessagingService:
             raise NotAMember(f"unknown chat {chat_id}")
         return ChatSnapshot.from_dict(doc)
 
-    def _require_member(self, chat_id: str) -> ChatSnapshot:
+    def _require_member(
+        self, chat_id: str, *, drain_before_terminal: bool = False,
+    ) -> ChatSnapshot:
         snap = self.snapshot(chat_id)
-        if not snap.is_member(self.user):
+        if (not snap.is_member(self.user)
+                or (not drain_before_terminal
+                    and self.pending_terminal(chat_id))):
             raise NotAMember(f"{self.user} is not a member of {chat_id}")
         return snap
 
@@ -80,9 +90,42 @@ class MessagingService:
         tags: list[str] | None = None,
         reply_to: dict | None = None,
         files: list[dict] | None = None,
+        attachments: list[PreparedAttachment] | None = None,
         fwd: dict | None = None,
     ) -> Envelope:
-        snap = self._require_member(chat_id)
+        self.require_send(chat_id)
+        prepared = list(attachments or [])
+        for item in prepared:
+            if not isinstance(item, PreparedAttachment) or item.chat_id != chat_id:
+                raise ValidationError("attachment was prepared for another chat")
+        public_files = list(files or []) + [item.record for item in prepared]
+        if prepared and self.attachments is None:
+            raise ValidationError("attachment delivery is unavailable")
+        if not (body or "").strip() and not public_files:
+            raise ValidationError("empty message")
+        record = BodyRecord(
+            body=body,
+            tags=tags if tags is not None else parse_tags(body),
+            reply_to=reply_to,
+            files=public_files,
+            fwd=fwd,
+        )
+        # id/ns are minted FIRST so the sealer can bind them (replay-proofing)
+        ns = next_ns()
+        env_id = new_id("m", ns)
+        env = Envelope(
+            id=env_id, ns=ns, ts=utcnow_iso(), from_=self.user,
+            kind=MsgKind.MESSAGE, **self.sealer.seal(chat_id, env_id, ns, record),
+        )
+        self.commit_envelope(chat_id, env, attachments=prepared)
+        return env
+
+    def require_send(
+        self, chat_id: str, *, drain_before_terminal: bool = False,
+    ) -> ChatSnapshot:
+        """Validate a target before any attachment read, seal or remote write."""
+        snap = self._require_member(
+            chat_id, drain_before_terminal=drain_before_terminal)
         if not authz.can_send(snap, self.user):
             raise PermissionDenied("sending messages is restricted in this chat")
         # R6/R7: a block kills the EXISTING DM too (WhatsApp), and so does the
@@ -95,24 +138,45 @@ class MessagingService:
                 if (peer is None or not peer.active
                         or self.privacy.blocked_between(self.user, other)):
                     raise PermissionDenied(f"@{other} is not available")
-        if not (body or "").strip() and not files:
-            raise ValidationError("empty message")
-        record = BodyRecord(
-            body=body,
-            tags=tags if tags is not None else parse_tags(body),
-            reply_to=reply_to,
-            files=files or [],
-            fwd=fwd,
-        )
-        # id/ns are minted FIRST so the sealer can bind them (replay-proofing)
-        ns = next_ns()
-        env_id = new_id("m", ns)
-        env = Envelope(
-            id=env_id, ns=ns, ts=utcnow_iso(), from_=self.user,
-            kind=MsgKind.MESSAGE, **self.sealer.seal(chat_id, env_id, ns, record),
-        )
-        self.commit_envelope(chat_id, env)
-        return env
+        return snap
+
+    def set_terminal_applier(self, callback) -> None:
+        self._apply_terminal = callback
+
+    def flush_outbox(self) -> int:
+        return int(self._flush_outbox() or 0)
+
+    def pending_terminal(self, chat_id: str) -> bool:
+        target = f"{chat_id}|{P.log_name(self.user, self.machine)}"
+        for payload in self.store.outbox_payloads(target=target, state="pending"):
+            envelope = (self.attachments.envelope(payload)
+                        if self.attachments is not None else payload)
+            if not isinstance(envelope, dict) or envelope.get("kind") != "info":
+                continue
+            event = envelope.get("event") or {}
+            if isinstance(event, dict) and event.get("type") in {
+                    EV_DELETED, EV_MEMBER_LEFT}:
+                return True
+        return False
+
+    def prepare_attachment(self, chat_id: str, name: str,
+                           raw: bytes) -> PreparedAttachment:
+        self.require_send(chat_id)
+        if self.attachments is None:
+            raise ValidationError("attachment delivery is unavailable")
+        return self.attachments.prepare(chat_id, name, raw)
+
+    def cancel_attachments(self, prepared: list[PreparedAttachment]) -> None:
+        if self.attachments is not None:
+            self.attachments.cancel(prepared)
+
+    def open_attachment(self, chat_id: str, blob_id: str) -> bytes | None:
+        self._require_member(chat_id)
+        data = self.tx.get_blob(P.file(chat_id, blob_id))
+        if data is None and self.attachments is not None:
+            data = self.attachments.local_sealed(blob_id)
+        return self.sealer.open_blob(chat_id, blob_id, data) \
+            if data is not None else None
 
     # ------------------------------------------------------------ info events
     def build_event(self, chat_id: str, event: dict) -> Envelope:
@@ -133,13 +197,27 @@ class MessagingService:
         self.commit_envelope(chat_id, env)
         return env
 
-    def commit_envelope(self, chat_id: str, env: Envelope) -> None:
+    def commit_envelope(
+        self, chat_id: str, env: Envelope,
+        *, attachments: list[PreparedAttachment] | None = None,
+    ) -> None:
         """Optimistic local cache + durable outbox commit (the send guarantee)."""
         payload = env.to_dict()
-        self.store.upsert_messages(chat_id, [payload])
-        self.store.outbox_add(
-            OUTBOX_APPEND, f"{chat_id}|{P.log_name(self.user, self.machine)}", payload
-        )
+        outbox_payload = payload
+        if attachments:
+            outbox_payload = {
+                "v": 1,
+                "envelope": payload,
+                "attachments": [dict(item.manifest) for item in attachments],
+            }
+        try:
+            self.store.cache_and_outbox_add(
+                chat_id, payload, OUTBOX_APPEND,
+                f"{chat_id}|{P.log_name(self.user, self.machine)}", outbox_payload)
+        except Exception:
+            if attachments and self.attachments is not None:
+                self.attachments.cancel(attachments)
+            raise
         self._notify_outbox()
 
     def _acts_for(self, author: str) -> bool:
@@ -574,6 +652,76 @@ class MessagingService:
             chat_id, _, log_name = target.partition("|")
             if not chat_id or not log_name:
                 raise ValidationError(f"malformed append target {target!r}")
-            self.tx.append_log(chat_id, log_name, payload)
+            envelope = (self.attachments.envelope(payload)
+                        if self.attachments is not None else payload)
+            if not isinstance(envelope, dict) or not envelope.get("id"):
+                raise ValidationError("malformed envelope payload")
+            kind = envelope.get("kind", "message")
+            if kind == "message":
+                try:
+                    self.require_send(chat_id, drain_before_terminal=True)
+                except PermissionDenied as exc:
+                    # A terminally deleted/left chat must not be recreated by
+                    # an old ordinary send. Info events still carry the leave/
+                    # delete mutation that made the chat terminal.
+                    try:
+                        snap = self.snapshot(chat_id)
+                    except PermissionDenied:
+                        raise ValidationError(
+                            "chat is no longer sendable") from exc
+                    if (snap.is_member(self.user)
+                            or not self._local_terminal_follows(target, envelope)):
+                        raise ValidationError(
+                            "chat is no longer sendable") from exc
+            elif kind == "info":
+                event = envelope.get("event") or {}
+                etype = event.get("type") if isinstance(event, dict) else ""
+                if etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                    try:
+                        snap = self.snapshot(chat_id)
+                    except PermissionDenied as exc:
+                        raise ValidationError(
+                            "terminal chat no longer exists") from exc
+                    if ((etype == EV_DELETED and snap.deleted)
+                            or (etype == EV_MEMBER_LEFT
+                                and not snap.is_member(self.user))):
+                        return  # append landed before a crash; state is applied
+            if self.attachments is not None:
+                for manifest in self.attachments.manifests(payload):
+                    self.attachments.upload(chat_id, manifest)
+            self.tx.append_log(chat_id, log_name, envelope)
+            if kind == "info" and etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                self._apply_terminal(chat_id)
 
         return {OUTBOX_APPEND: append_log}
+
+    def _local_terminal_follows(self, target: str, envelope: dict) -> bool:
+        """Was this message queued before our own leave/delete event?"""
+        ns = int(envelope.get("ns", 0) or 0)
+        for payload in self.store.outbox_payloads(
+                target=target, state="pending"):
+            later = (self.attachments.envelope(payload)
+                     if self.attachments is not None else payload)
+            if not isinstance(later, dict) or int(later.get("ns", 0) or 0) <= ns:
+                continue
+            event = later.get("event") or {}
+            etype = event.get("type") if isinstance(event, dict) else ""
+            if etype == EV_DELETED:
+                return True
+            if etype == EV_MEMBER_LEFT and later.get("from") == self.user:
+                return True
+        return False
+
+    def outbox_success_hooks(self) -> dict:
+        if self.attachments is None:
+            return {}
+        return {OUTBOX_APPEND: lambda _target, payload:
+                self.attachments.cleanup_payload(payload)}
+
+    def outbox_dead_hooks(self) -> dict:
+        # The inspectable dead row retains its sealed retry source. Its bounded
+        # prune hook removes both together after the review window.
+        return {}
+
+    def outbox_prune_hooks(self) -> dict:
+        return self.outbox_success_hooks()

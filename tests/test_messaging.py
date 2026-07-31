@@ -5,6 +5,8 @@ other identity syncs -> reads through the choke point. Membership gates on
 EVERY operation (the v0.24.1 lesson).
 """
 
+import time
+
 import pytest
 
 from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationError
@@ -56,6 +58,175 @@ def test_post_flows_to_other_member(world):
     msgs = bob.messages_for(CHAT)
     assert len(msgs) == 1 and msgs[0].body == "hello @bob"
     assert msgs[0].tags == ["bob"]
+
+
+def test_attachment_manifest_is_durable_before_remote_upload(world):
+    ann, bob = world["ann"], world["bob"]
+    prepared = ann.prepare_attachment(CHAT, "report.txt", b"durable report")
+    blob_id = prepared.record["id"]
+    spool = ann.attachments.root / blob_id
+    env = ann.post(CHAT, "attached", attachments=[prepared])
+
+    assert spool.is_file()
+    assert ann.tx.get_blob(P.file(CHAT, blob_id)) is None
+    assert ann.open_attachment(CHAT, blob_id) == b"durable report"
+    payload = ann.store.outbox_payloads()[0]
+    assert payload["envelope"]["id"] == env.id
+    assert payload["attachments"][0]["blob_id"] == blob_id
+
+    flush_and_sync(ann, bob)
+    assert ann.tx.get_blob(P.file(CHAT, blob_id)) is not None
+    assert not spool.exists()
+    assert bob.messages_for(CHAT)[0].files[0]["id"] == blob_id
+
+
+def test_attachment_spool_is_cancelled_when_local_commit_fails(world, monkeypatch):
+    ann = world["ann"]
+    prepared = ann.prepare_attachment(CHAT, "rollback.txt", b"not committed")
+    spool = ann.attachments.root / prepared.record["id"]
+    monkeypatch.setattr(
+        ann.store, "cache_and_outbox_add",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        ann.post(CHAT, "rollback", attachments=[prepared])
+
+    assert not spool.exists()
+    assert ann.store.outbox_counts() == {}
+    assert ann.messages_for(CHAT) == []
+
+
+def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
+        world, monkeypatch):
+    ann, bob = world["ann"], world["bob"]
+    prepared = ann.prepare_attachment(CHAT, "retry.bin", b"same bytes")
+    blob_id = prepared.record["id"]
+    ann.post(CHAT, "retry me", attachments=[prepared])
+    original_put = ann.tx.put_blob
+    original_append = ann.tx.append_log
+    writes = []
+
+    def track_put(path, data):
+        writes.append(path)
+        original_put(path, data)
+
+    def fail_append(*_args, **_kwargs):
+        raise OSError("append unavailable")
+
+    monkeypatch.setattr(ann.tx, "put_blob", track_put)
+    monkeypatch.setattr(ann.tx, "append_log", fail_append)
+    ann.outbox.base_delay = ann.outbox.max_delay = 0.001
+    assert ann.outbox.flush_once() == 0
+    assert ann.store.outbox_counts() == {"pending": 1}
+    assert ann.tx.get_blob(P.file(CHAT, blob_id)) is not None
+    assert (ann.attachments.root / blob_id).is_file()
+
+    monkeypatch.setattr(ann.tx, "append_log", original_append)
+    deadline = time.monotonic() + 2.0
+    delivered = 0
+    while not delivered and time.monotonic() < deadline:
+        delivered = ann.outbox.flush_once()
+        if not delivered:
+            time.sleep(0.002)
+    assert delivered == 1
+    bob.sync.sync_once([CHAT])
+    assert writes == [P.file(CHAT, blob_id), P.file(CHAT, blob_id)]
+    assert [m.body for m in bob.messages_for(CHAT)] == ["retry me"]
+    assert not (ann.attachments.root / blob_id).exists()
+
+
+def test_crash_after_append_retries_same_ids_and_projects_once(world, monkeypatch):
+    ann, bob = world["ann"], world["bob"]
+    prepared = ann.prepare_attachment(CHAT, "acked.txt", b"ack boundary")
+    blob_id = prepared.record["id"]
+    env = ann.post(CHAT, "ack crash", attachments=[prepared])
+    original_done = ann.store.outbox_done
+    monkeypatch.setattr(
+        ann.store, "outbox_done",
+        lambda _seq: (_ for _ in ()).throw(OSError("crash before ack")))
+    with pytest.raises(OSError, match="crash before ack"):
+        ann.outbox.flush_once()
+    assert ann.tx.get_blob(P.file(CHAT, blob_id)) is not None
+    assert (ann.attachments.root / blob_id).is_file()
+
+    monkeypatch.setattr(ann.store, "outbox_done", original_done)
+    ann.store._conn().execute("UPDATE outbox SET lease_ns=0")
+    assert ann.outbox.flush_once() == 1
+    bob.sync.sync_once([CHAT])
+    assert [m.id for m in bob.messages_for(CHAT)] == [env.id]
+    records, _ = ann.tx.read_log(CHAT, "ann@mach1", 0)
+    assert [r["id"] for r in records] == [env.id, env.id]
+    assert not (ann.attachments.root / blob_id).exists()
+
+
+def test_pending_message_cannot_recreate_a_deleted_chat(world):
+    ann = world["ann"]
+    prepared = ann.prepare_attachment(CHAT, "doomed.txt", b"doomed")
+    blob_id = prepared.record["id"]
+    ann.post(CHAT, "must not return", attachments=[prepared])
+    ann.tx.delete_chat(CHAT)
+
+    assert ann.outbox.flush_once() == 0
+    assert CHAT not in ann.tx.list_chat_ids()
+    assert ann.tx.get_blob(P.file(CHAT, blob_id)) is None
+    assert ann.store.outbox_counts() == {"dead": 1}
+    assert (ann.attachments.root / blob_id).is_file()
+
+    ann.store._conn().execute("UPDATE outbox SET created_ns=0 WHERE state='dead'")
+    ann.outbox.flush_once()
+    assert ann.store.outbox_counts() == {}
+    assert not (ann.attachments.root / blob_id).exists()
+
+
+def test_terminal_event_stops_retrying_after_chat_is_physically_reclaimed(world):
+    ann = world["ann"]
+    terminal = ann.build_event(CHAT, {"type": "chat_deleted", "by": "ann"})
+    ann.commit_envelope(CHAT, terminal)
+    ann.tx.delete_chat(CHAT)
+
+    assert ann.outbox.flush_once() == 0
+    assert ann.store.outbox_counts() == {"dead": 1}
+    assert CHAT not in ann.tx.list_chat_ids()
+
+
+def test_already_applied_terminal_event_acknowledges_without_reappend(
+        world, monkeypatch):
+    ann = world["ann"]
+    terminal = ann.build_event(CHAT, {"type": "chat_deleted", "by": "ann"})
+    ann.commit_envelope(CHAT, terminal)
+    meta = ann.tx.get_doc(P.meta(CHAT))
+    meta["deleted"] = True
+    meta["members"] = {}
+    ann.tx.put_doc(P.meta(CHAT), meta)
+    monkeypatch.setattr(
+        ann.tx, "append_log",
+        lambda *_args, **_kwargs: pytest.fail("terminal event was re-appended"))
+
+    assert ann.outbox.flush_once() == 1
+    assert ann.store.outbox_counts() == {}
+
+
+def test_terminal_followup_does_not_bypass_a_live_send_restriction(world):
+    bob = world["bob"]
+    blocked = bob.post(CHAT, "queued before restriction")
+    meta = bob.tx.get_doc(P.meta(CHAT))
+    meta.setdefault("permissions", {})["send_messages"] = "admins"
+    bob.tx.put_doc(P.meta(CHAT), meta)
+    leave = bob.build_event(CHAT, {"type": "member_left"})
+    bob.commit_envelope(CHAT, leave)
+
+    assert bob.outbox.flush_once() == 1
+    assert bob.store.outbox_counts() == {"dead": 1}
+    records, _ = bob.tx.read_log(CHAT, "bob@mach1", 0)
+    assert [record["id"] for record in records] == [leave.id]
+    assert blocked.id not in {record["id"] for record in records}
+
+
+def test_nonmember_cannot_prepare_target_attachment(world):
+    eve = world["eve"]
+    with pytest.raises(NotAMember):
+        eve.prepare_attachment(CHAT, "leak.txt", b"never sealed")
+    assert list(eve.attachments.root.iterdir()) == []
 
 
 def test_every_endpoint_membership_gated(world):

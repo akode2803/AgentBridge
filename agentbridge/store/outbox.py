@@ -19,6 +19,7 @@ from .db import OutboxItem, Store
 __all__ = ["OutboxWorker"]
 
 Handler = Callable[[str, dict[str, Any]], None]  # (target, payload) -> None
+Hook = Callable[[str, dict[str, Any]], None]
 
 
 class OutboxWorker:
@@ -31,6 +32,9 @@ class OutboxWorker:
         max_delay: float = 60.0,
         poll_s: float = 5.0,
         lease_s: float = 120.0,
+        success_hooks: dict[str, Hook] | None = None,
+        dead_hooks: dict[str, Hook] | None = None,
+        prune_hooks: dict[str, Hook] | None = None,
     ) -> None:
         self.store = store
         self.handlers = handlers
@@ -38,6 +42,9 @@ class OutboxWorker:
         self.max_delay = max_delay
         self.poll_s = poll_s
         self.lease_s = lease_s
+        self.success_hooks = success_hooks or {}
+        self.dead_hooks = dead_hooks or {}
+        self.prune_hooks = prune_hooks or {}
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -76,6 +83,8 @@ class OutboxWorker:
         """Claim and dispatch every currently-due item. Returns how many were
         completed. Deterministic — tests and synchronous callers use this."""
         done = 0
+        for item in self.store.outbox_prune_dead():
+            self._hook(self.prune_hooks, item)
         while True:
             items = self.store.outbox_claim_due(lease_s=self.lease_s)
             if not items:
@@ -93,6 +102,7 @@ class OutboxWorker:
         except ValidationError as e:
             # structurally unprocessable — retrying can never help
             self.store.outbox_dead(item.seq, f"{type(e).__name__}: {e}")
+            self._hook(self.dead_hooks, item)
             return 0
         except Exception as e:  # noqa: BLE001 — transient: retry forever
             delay = min(self.base_delay * (2**item.attempts), self.max_delay)
@@ -100,4 +110,15 @@ class OutboxWorker:
             self.store.outbox_retry(item.seq, f"{type(e).__name__}: {e}", delay)
             return 0
         self.store.outbox_done(item.seq)
+        self._hook(self.success_hooks, item)
         return 1
+
+    @staticmethod
+    def _hook(hooks: dict[str, Hook], item: OutboxItem) -> None:
+        hook = hooks.get(item.kind)
+        if hook is None:
+            return
+        try:
+            hook(item.target, item.payload)
+        except Exception:  # noqa: BLE001 — cleanup never changes send outcome
+            pass

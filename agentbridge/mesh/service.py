@@ -17,6 +17,7 @@ from ..transport.base import Transport
 from ..applink import AppLink
 from . import eventbus
 from .accounts import AccountsService
+from .attachments import AttachmentDelivery
 from .directory import Directory
 from .eventbus import Event, EventBus
 from .keyring import ChatKeyService, KeyStore
@@ -87,24 +88,33 @@ class Mesh:
         else:
             self.sealer = PlainSealer()
         self.privacy = PrivacyService(self.tx, self.directory, user)
+        self.attachments = AttachmentDelivery(
+            self.home, self.store, self.tx, self.sealer)
         self.messaging = MessagingService(
             self.tx, self.store, self.sealer, user, machine,
             notify_outbox=lambda: self.outbox.notify(),
+            flush_outbox=lambda: self.outbox.flush_once(),
             privacy=self.privacy,
             event_signer=self._sign_event,
             directory=self.directory,
+            attachments=self.attachments,
         )
         self.membership = MembershipService(
             self.tx, self.store, self.directory, self.messaging,
             privacy=self.privacy, keys=self.keys,
         )
+        self.messaging.set_terminal_applier(self.membership.refold)
         self.accounts = AccountsService(
             self.tx, self.directory, self.messaging, self.membership,
             user, machine, keystore=self.keystore,
         )
         self.presence = PresenceService(self.tx, self.privacy, user, machine)
         self.receipts = ReceiptsService(self.messaging, self.privacy, self.presence)
-        self.outbox = OutboxWorker(self.store, self.messaging.outbox_handlers())
+        self.outbox = OutboxWorker(
+            self.store, self.messaging.outbox_handlers(),
+            success_hooks=self.messaging.outbox_success_hooks(),
+            dead_hooks=self.messaging.outbox_dead_hooks(),
+            prune_hooks=self.messaging.outbox_prune_hooks())
         self.bus = EventBus()
         self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
         self.applink = AppLink(

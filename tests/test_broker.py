@@ -580,6 +580,55 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
         owner.close()
 
 
+def test_bridge_attachment_forward_uses_durable_manifest(tmp_path, monkeypatch):
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    home = tmp_path / "home"
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    try:
+        source = owner.create_chat("Source", members=["helper"])
+        target = owner.create_chat("Target", members=["helper"])
+        made = owner.prepare_attachment(source.id, "report.txt", b"bridge report")
+        original = owner.post(source.id, "forward this", attachments=[made])
+        owner.outbox.flush_once()
+        agent.sync.sync_once([source.id, target.id])
+
+        broker = PermissionBroker(agent.tx, "helper")
+        workspace = tmp_path / "ws-forward"
+        workspace.mkdir()
+        flush = agent.outbox.flush_once
+        monkeypatch.setattr(agent.outbox, "flush_once", lambda: 0)
+        with BridgeServer(
+            broker, chat_id=source.id, workspace=workspace, auto_allow=[],
+            approvals=[], ask_timeout_s=0.3, mesh=agent,
+        ) as bridge:
+            assert call_tool(bridge, "forward_message", {
+                "message_id": original.id, "to_chat_id": target.id,
+            }) == "forwarded"
+        monkeypatch.setattr(agent.outbox, "flush_once", flush)
+
+        payload = agent.store.outbox_payloads()[0]
+        manifest = payload["attachments"][0]
+        blob_id = manifest["blob_id"]
+        remote = f"chats/{target.id}/files/{blob_id}"
+        assert agent.tx.get_blob(remote) is None
+        assert (agent.attachments.root / blob_id).is_file()
+
+        assert agent.outbox.flush_once() == 1
+        owner.sync.sync_once([target.id])
+        forwarded = owner.messages_for(target.id)[-1]
+        assert forwarded.fwd["from"] == "aryan"
+        assert forwarded.files[0]["id"] == blob_id
+        assert agent.tx.get_blob(remote) is not None
+        assert not (agent.attachments.root / blob_id).exists()
+    finally:
+        agent.close()
+        owner.close()
+
+
 def test_tidy_workspace_is_workspace_scoped(tmp_path):
     """V97: the agent's one delete tool — no args empties tmp/, named
     paths go only when they resolve INSIDE the workspace, and the

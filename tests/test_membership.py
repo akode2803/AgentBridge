@@ -3,7 +3,7 @@
 import pytest
 
 from agentbridge.core.errors import PermissionDenied, ValidationError
-from agentbridge.core.models import ChatKind, Role, UserKind
+from agentbridge.core.models import ChatKind, ChatSnapshot, Role, UserKind
 from agentbridge.mesh import events
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
@@ -436,6 +436,41 @@ def test_delete_chat_terminal_and_admin_only(world):
     aryan.sync.sync_once([snap.id])
     refolded = aryan.membership.refold(snap.id)
     assert refolded.deleted is True and refolded.members == {}
+
+
+def test_terminal_events_append_before_rls_terminal_meta(world, monkeypatch):
+    aryan, fable = world["aryan"], world["fable"]
+    doomed = aryan.create_chat("RLS delete order", members=["fable"])
+    leaving = aryan.create_chat("RLS leave order", members=["fable"])
+    ripple(aryan, doomed.id, fable)
+    ripple(aryan, leaving.id, fable)
+    observed = []
+
+    def enforce_current_membership(mesh):
+        original = mesh.tx.append_log
+
+        def append(chat_id, log_name, record):
+            event = record.get("event") or {}
+            if event.get("type") in {"chat_deleted", "member_left"}:
+                before = ChatSnapshot.from_dict(mesh.tx.get_doc(P.meta(chat_id)))
+                assert record.get("from") in before.members
+                assert not before.deleted
+                observed.append((chat_id, event["type"]))
+            original(chat_id, log_name, record)
+
+        monkeypatch.setattr(mesh.tx, "append_log", append)
+
+    enforce_current_membership(aryan)
+    aryan.delete_chat(doomed.id)
+    assert aryan.snapshot(doomed.id).deleted
+
+    enforce_current_membership(fable)
+    fable.leave(leaving.id)
+    assert "fable" not in fable.snapshot(leaving.id).members
+    assert observed == [
+        (doomed.id, "chat_deleted"),
+        (leaving.id, "member_left"),
+    ]
 
 
 def test_delete_chat_refused_for_dm(world):

@@ -1,5 +1,6 @@
 """Store: cache idempotency, offsets/cursors, and outbox durability."""
 
+import sqlite3
 import threading
 
 import pytest
@@ -68,6 +69,19 @@ def test_outbox_claim_lease_done(store):
     assert store.outbox_counts() == {}
 
 
+def test_message_cache_and_send_intent_are_one_transaction(store):
+    store._conn().execute(
+        "CREATE TRIGGER reject_outbox BEFORE INSERT ON outbox "
+        "BEGIN SELECT RAISE(ABORT, 'intent failed'); END")
+    record = {"id": "m-atomic", "ns": 10, "from": "aryan",
+              "kind": "message"}
+    with pytest.raises(sqlite3.IntegrityError):
+        store.cache_and_outbox_add(
+            "c1", record, "append_log", "c1|aryan@box", record)
+    assert store.message_count("c1") == 0
+    assert store.outbox_counts() == {}
+
+
 def test_outbox_survives_restart(store, tmp_path):
     """The 'no message ever lost' core: enqueue, crash before flush, reopen."""
     store.outbox_add("post", "c1", {"id": "m1"})
@@ -99,6 +113,17 @@ def test_outbox_dead(store):
     store.outbox_dead(seq, "no handler")
     assert store.outbox_claim_due() == []
     assert store.outbox_counts() == {"dead": 1}
+
+
+def test_dead_outbox_rows_are_bounded_without_touching_pending(store):
+    pending = store.outbox_add("post", "c1", {"id": "pending"})
+    for i in range(4):
+        seq = store.outbox_add("bad", "c1", {"id": f"dead-{i}"})
+        store.outbox_dead(seq, "bad")
+    removed = store.outbox_prune_dead(max_age_s=10**9, max_rows=2)
+    assert len(removed) == 2
+    assert store.outbox_counts() == {"dead": 2, "pending": 1}
+    assert any(i.seq == pending for i in store.outbox_claim_due())
 
 
 def test_store_multithreaded_writes(store):

@@ -47,6 +47,32 @@ def test_order_preserved_within_flush(store):
     assert sent == [f"m{i}" for i in range(5)]
 
 
+def test_failed_target_head_cannot_be_overtaken(store):
+    seen = []
+    fail = {"once": True}
+
+    def handler(target, payload):
+        seen.append((target, payload["id"]))
+        if target == "c1" and fail["once"]:
+            fail["once"] = False
+            raise OSError("first c1 send failed")
+
+    worker = OutboxWorker(store, {"post": handler},
+                          base_delay=0.001, max_delay=0.001)
+    store.outbox_add("post", "c1", {"id": "first"})
+    store.outbox_add("post", "c1", {"id": "second"})
+    store.outbox_add("post", "c2", {"id": "independent"})
+    assert worker.flush_once() == 1
+    assert seen == [("c1", "first"), ("c2", "independent")]
+
+    deadline = time.monotonic() + 2.0
+    while store.outbox_counts() and time.monotonic() < deadline:
+        worker.flush_once()
+        time.sleep(0.002)
+    assert seen[-2:] == [("c1", "first"), ("c1", "second")]
+    assert store.outbox_counts() == {}
+
+
 def test_unknown_kind_goes_dead_not_lost(store):
     w = OutboxWorker(store, {"post": lambda t, p: None})
     store.outbox_add("teleport", "c1", {"id": "m1"})

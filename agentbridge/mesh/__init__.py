@@ -3,6 +3,7 @@ by the Mesh facade."""
 
 from . import authz, events, eventbus
 from .accounts import AccountsService
+from .attachments import AttachmentDelivery, PreparedAttachment
 from .directory import Directory
 from .eventbus import Event, EventBus
 from .keyring import ChatKeyService, KeyStore
@@ -25,5 +26,6 @@ __all__ = [
     "KeyStore", "ChatKeyService", "SyncEngine", "ChatOverlays", "UserState",
     "P", "Sealer", "PlainSealer", "E2EESealer", "EventBus", "Event",
     "Notifier", "Notification", "CommandHook", "authz", "events", "eventbus",
-    "build_messages", "parse_tags", "unread_info",
+    "build_messages", "parse_tags", "unread_info", "AttachmentDelivery",
+    "PreparedAttachment",
 ]

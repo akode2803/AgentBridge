@@ -101,7 +101,14 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         try:
-            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0:
+                raise ValueError("negative body length")
+            if length > MAX_BODY:
+                self.close_connection = True
+                self._json({"error": "request body exceeds the 64 MB limit"},
+                           status=413)
+                return
             raw = self.rfile.read(length) if length else b""
         except (ValueError, OSError):
             self._json({"error": "unreadable body"}, status=400)

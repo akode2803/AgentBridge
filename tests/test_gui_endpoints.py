@@ -6,9 +6,15 @@ profile/privacy/blocks/password, agents + the stand-down switches.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import time
+import urllib.error
 
 import pytest
 
+from agentbridge.gui import app as gui_app
+from agentbridge.gui.api_files import stage_dir
 from agentbridge.core.timekit import utcnow_iso
 from agentbridge.mesh.paths import P
 
@@ -105,6 +111,40 @@ def test_sealed_attachment_roundtrip(rig):
     assert "error" in again
 
 
+def test_raw_body_above_limit_is_rejected_not_truncated(rig, monkeypatch):
+    rig.signup()
+    monkeypatch.setattr(gui_app, "MAX_BODY", 8)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        rig.post_raw("/api/mesh/upload", b"123456789", name="too-big.bin")
+    assert exc.value.code == 413
+    body = json.loads(exc.value.read())
+    assert "exceeds" in body["error"]
+
+
+def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
+        rig, monkeypatch):
+    rig.signup()
+    cid = rig.post("/api/mesh/create_chat", name="Stage", members=[])["chat"]["id"]
+    up = rig.post_raw("/api/mesh/upload", PNG, name="draft.png")
+    staged = stage_dir(rig.app, "aryan") / up["token"]
+    assert staged.is_file() and staged.parent.name == "aryan"
+    assert not any(p.name.endswith(".tmp") for p in staged.parent.iterdir())
+    assert staged.stat().st_mode & 0o777 == 0o600
+
+    monkeypatch.setattr(
+        rig.app.mesh.store, "cache_and_outbox_add",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("sqlite unavailable")))
+    failed = rig.post("/api/mesh/post", chat_id=cid, body="keep upload",
+                      attachments=[up["token"]])
+    assert "error" in failed and staged.is_file()
+    assert list(rig.app.mesh.attachments.root.iterdir()) == []
+
+    old = time.time() - 25 * 3600
+    os.utime(staged, (old, old))
+    stage_dir(rig.app, "aryan")
+    assert not staged.exists()
+
+
 def test_forward_reseals_attachments(rig):
     rig.signup()
     c1 = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]
@@ -124,6 +164,27 @@ def test_forward_reseals_attachments(rig):
     assert new_id != src_msg["files"][0]["id"]  # re-sealed for the target
     _, body = rig.get_bytes("/api/mesh/file", chat=c2, id=new_id)
     assert body == PNG
+
+
+def test_forward_rejects_every_target_before_reading_source_files(
+        rig, monkeypatch):
+    rig.signup()
+    rig.peer_account("fable")
+    src = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]
+    up = rig.post_raw("/api/mesh/upload", PNG, name="private.png")
+    rig.post("/api/mesh/post", chat_id=src, body="private",
+             attachments=[up["token"]])
+    msg = rig.get("/api/mesh/chat", id=src)["messages"][-1]
+    with rig.peer_mesh("fable") as peer:
+        target = peer.create_chat("Not Aryan's", members=[]).id
+
+    touched = []
+    monkeypatch.setattr(
+        rig.app.mesh, "prepare_attachment",
+        lambda *_a, **_kw: touched.append(True))
+    out = rig.post("/api/mesh/forward", chat_id=src, msg_id=msg["id"],
+                   targets=[target])
+    assert "error" in out and touched == []
 
 
 # ----------------------------------------------------------------- avatars

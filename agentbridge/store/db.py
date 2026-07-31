@@ -200,6 +200,29 @@ class Store:
             )
             return int(cur.lastrowid)
 
+    def cache_and_outbox_add(
+        self, chat_id: str, record: dict[str, Any],
+        kind: str, target: str, outbox_payload: dict[str, Any],
+    ) -> int:
+        """Atomically publish the optimistic cache row and durable send intent."""
+        rid, ns = record.get("id"), record.get("ns")
+        if not rid or not isinstance(ns, int):
+            raise ValueError("message record needs id and integer ns")
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload)"
+                " VALUES(?,?,?,?,?,?)",
+                (chat_id, rid, ns, record.get("from", ""),
+                 record.get("kind", "message"),
+                 json.dumps(record, ensure_ascii=False)),
+            )
+            cur = c.execute(
+                "INSERT INTO outbox(kind,target,payload,created_ns) VALUES(?,?,?,?)",
+                (kind, target, json.dumps(outbox_payload, ensure_ascii=False),
+                 time.time_ns()),
+            )
+            return int(cur.lastrowid)
+
     def outbox_claim_due(self, *, lease_s: float = 120.0, limit: int = 50) -> list[OutboxItem]:
         """Claim due pending items by taking a lease. A crash mid-send simply
         lets the lease expire, after which the item is claimable again."""
@@ -208,9 +231,11 @@ class Store:
         items: list[OutboxItem] = []
         with self._conn() as c:
             rows = c.execute(
-                "SELECT seq,kind,target,payload,attempts FROM outbox"
-                " WHERE state='pending' AND next_ns<=? AND lease_ns<=?"
-                " ORDER BY seq LIMIT ?",
+                "SELECT o.seq,o.kind,o.target,o.payload,o.attempts FROM outbox o"
+                " WHERE o.state='pending' AND o.next_ns<=? AND o.lease_ns<=?"
+                " AND NOT EXISTS (SELECT 1 FROM outbox earlier"
+                " WHERE earlier.state='pending' AND earlier.target=o.target"
+                " AND earlier.seq<o.seq) ORDER BY o.seq LIMIT ?",
                 (now, now, limit),
             ).fetchall()
             for seq, kind, target, payload, attempts in rows:
@@ -248,3 +273,55 @@ class Store:
             "SELECT state, COUNT(*) FROM outbox GROUP BY state"
         ).fetchall()
         return {state: int(n) for state, n in rows}
+
+    def outbox_payloads(
+        self, *, target: str | None = None, state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Manifest ownership scan used only by bounded local spool cleanup."""
+        out = []
+        query = "SELECT payload FROM outbox"
+        clauses = []
+        args: list[str] = []
+        if target is not None:
+            clauses.append("target=?")
+            args.append(target)
+        if state is not None:
+            clauses.append("state=?")
+            args.append(state)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        for (payload,) in self._conn().execute(query, args):
+            try:
+                value = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                out.append(value)
+        return out
+
+    def outbox_prune_dead(
+        self, *, max_age_s: float = 30 * 86400.0, max_rows: int = 100
+    ) -> list[OutboxItem]:
+        """Bound inspectable structural failures; pending sends are untouched."""
+        now = time.time_ns()
+        cutoff = now - int(max_age_s * 1e9)
+        removed: list[OutboxItem] = []
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT seq,kind,target,payload,attempts,created_ns FROM outbox"
+                " WHERE state='dead' ORDER BY created_ns DESC,seq DESC"
+            ).fetchall()
+            kept = 0
+            for seq, kind, target, payload, attempts, created_ns in rows:
+                if kept < max_rows and int(created_ns) >= cutoff:
+                    kept += 1
+                    continue
+                try:
+                    parsed = json.loads(payload)
+                except (TypeError, json.JSONDecodeError):
+                    parsed = {}
+                removed.append(OutboxItem(
+                    int(seq), str(kind), str(target),
+                    parsed if isinstance(parsed, dict) else {}, int(attempts)))
+                c.execute("DELETE FROM outbox WHERE seq=?", (seq,))
+        return removed

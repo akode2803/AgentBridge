@@ -1,8 +1,10 @@
 """Attachments + avatars: upload staging, sealed chat blobs (R13 closes the
 R9 OPEN item — file bytes ride chat keys), decrypt-serving, OS handoff.
 
-Staged uploads are one-shot local files under ``<home>/gui_uploads``; posting
-seals them into ``chats/<id>/files/`` and deletes the staging copy. Serving
+Staged uploads are account-scoped local files under ``<home>/gui_uploads``.
+Posting seals each into a durable local delivery spool and commits its stable
+manifest with the message; the outbox uploads that exact blob before appending
+the envelope, then removes the spool only after acknowledgement. Serving
 verifies membership first and (when the signed message carried a sha256)
 verifies provenance before a single byte leaves the endpoint.
 """
@@ -13,15 +15,19 @@ import hashlib
 import mimetypes
 import re
 import secrets
+import time
 
-from ..core.timekit import new_id
 from ..mesh.paths import P
 from . import desktop
 from .routing import Response, authed
 
-__all__ = ["GET", "POST", "RAW_POST", "safe_name", "stage_dir", "seal_attachments"]
+__all__ = ["GET", "POST", "RAW_POST", "safe_name", "stage_dir",
+           "prepare_attachments"]
 
 _TOKEN_RE = re.compile(r"^[a-f0-9]{16}_[^/\\]+$")
+_STAGE_MAX_AGE_S = 24 * 3600.0
+_STAGE_MAX_BYTES = 1024 * 1024 * 1024
+_STAGE_MAX_FILES = 100
 
 
 def safe_name(name: str) -> str:
@@ -30,10 +36,47 @@ def safe_name(name: str) -> str:
     return name[:120]
 
 
-def stage_dir(app):
-    d = app.home / "gui_uploads"
-    d.mkdir(parents=True, exist_ok=True)
+def stage_dir(app, user: str = ""):
+    account = re.sub(r"[^a-z0-9_-]", "_", (user or app.user or "signed-out").lower())
+    base = app.home / "gui_uploads"
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _prune_stage(base)  # age out pre-R118 flat staging files too
+    d = base / account
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _prune_stage(d)
     return d
+
+
+def _prune_stage(root) -> int:
+    now = time.time()
+    entries = []
+    pruned = 0
+    for path in root.iterdir():
+        try:
+            if path.is_symlink() or (path.name.startswith(".")
+                                     and path.name.endswith(".tmp")):
+                path.unlink(missing_ok=True)
+                pruned += 1
+            elif path.is_file():
+                stat = path.stat()
+                entries.append((path, stat.st_size, stat.st_mtime))
+        except OSError:
+            continue
+    kept_bytes = 0
+    kept_files = 0
+    for path, size, mtime in sorted(entries, key=lambda x: x[2], reverse=True):
+        expired = mtime < now - _STAGE_MAX_AGE_S
+        over = kept_files >= _STAGE_MAX_FILES or kept_bytes + size > _STAGE_MAX_BYTES
+        if expired or over:
+            try:
+                path.unlink()
+                pruned += 1
+            except OSError:
+                pass
+            continue
+        kept_files += 1
+        kept_bytes += size
+    return pruned
 
 
 # ------------------------------------------------- blob disk cache (R76/V84)
@@ -90,33 +133,48 @@ def upload(app, req, mesh, raw: bytes) -> dict:
     the client passes back in post()'s ``attachments``."""
     if not raw:
         return {"error": "empty upload"}
+    cap = int(getattr(mesh.tx, "max_upload_bytes", 0) or 0)
+    if cap and len(raw) > cap:
+        return {"error": "file exceeds this connection's storage limit"}
     name = safe_name(req.params.get("name", "file"))
     token = f"{secrets.token_hex(8)}_{name}"
-    (stage_dir(app) / token).write_bytes(raw)
+    target = stage_dir(app, mesh.user) / token
+    tmp = target.with_name(f".{token}.{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_bytes(raw)
+        tmp.chmod(0o600)
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
     return {"ok": True, "token": token, "name": name, "bytes": len(raw)}
 
 
-def seal_attachments(app, mesh, chat_id: str, tokens: list) -> list[dict]:
-    """Staged tokens -> sealed chat blobs -> files[] records (id, name,
-    bytes, sha256). The sha rides the SIGNED message = provenance."""
-    files = []
-    for token in tokens or []:
-        token = str(token or "")
-        if not _TOKEN_RE.match(token):
-            continue  # not one of ours; never touch arbitrary paths
-        staged = stage_dir(app) / token
-        if not staged.is_file():
-            continue
-        raw = staged.read_bytes()
-        name = safe_name(token.split("_", 1)[1])
-        dot = name.rfind(".")
-        blob_id = new_id("f") + (name[dot:][:12].lower() if dot > 0 else "")
-        sealed = mesh.sealer.seal_blob(chat_id, blob_id, raw)
-        mesh.tx.put_blob(P.file(chat_id, blob_id), sealed)
-        files.append({"id": blob_id, "name": name, "bytes": len(raw),
-                      "sha256": hashlib.sha256(raw).hexdigest()})
-        staged.unlink(missing_ok=True)  # one-shot
-    return files
+def prepare_attachments(app, mesh, chat_id: str, tokens: list) -> tuple[list, list]:
+    """Stage tokens into durable message-owned sealed spools.
+
+    Staging files remain until the envelope+manifest commit succeeds. A partial
+    prepare failure removes only newly created spools, so retrying the composer
+    never needs the member to upload the originals again.
+    """
+    mesh.require_send(chat_id)  # authorization precedes file reads and sealing
+    prepared = []
+    staged_paths = []
+    try:
+        for token in tokens or []:
+            token = str(token or "")
+            if not _TOKEN_RE.match(token):
+                continue  # not one of ours; never touch arbitrary paths
+            staged = stage_dir(app, mesh.user) / token
+            if not staged.is_file() or staged.is_symlink():
+                continue
+            raw = staged.read_bytes()
+            name = safe_name(token.split("_", 1)[1])
+            prepared.append(mesh.prepare_attachment(chat_id, name, raw))
+            staged_paths.append(staged)
+    except Exception:
+        mesh.cancel_attachments(prepared)
+        raise
+    return prepared, staged_paths
 
 
 # ----------------------------------------------------------------- serving
@@ -133,10 +191,7 @@ def _find_file_record(mesh, chat_id: str, blob_id: str) -> dict | None:
 
 
 def _open_blob(mesh, chat_id: str, blob_id: str) -> bytes | None:
-    data = mesh.tx.get_blob(P.file(chat_id, blob_id))
-    if data is None:
-        return None
-    return mesh.sealer.open_blob(chat_id, blob_id, data)
+    return mesh.open_attachment(chat_id, blob_id)
 
 
 @authed

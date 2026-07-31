@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from ..core.timekit import new_id, utcnow_iso
+from ..core.timekit import utcnow_iso
 from .routing import authed
 from .serialize import chat_json, message_json
 
@@ -130,15 +130,23 @@ def forward(app, req, mesh) -> dict:
     if original is None or original.deleted:
         return {"error": "That message is no longer available"}
     fwd = {"from": original.from_, "ts": original.ts}
+    targets = list(dict.fromkeys(str(t or "") for t in (d.get("targets") or [])))
+    for target in targets:
+        mesh.require_send(target)  # all targets before any source blob read
     sent = 0
-    for target in d.get("targets") or []:
-        files = []
-        for f in original.files or []:
-            raw = _open_file_blob(app, mesh, src_chat, f)
-            if raw is None:
-                continue
-            files.append(_put_file_blob(app, mesh, target, f.get("name", "file"), raw))
-        mesh.post(target, original.body, files=files or None, fwd=fwd)
+    for target in targets:
+        prepared = []
+        try:
+            for f in original.files or []:
+                raw = _open_file_blob(app, mesh, src_chat, f)
+                if raw is None:
+                    continue
+                prepared.append(mesh.prepare_attachment(
+                    target, f.get("name", "file"), raw))
+            mesh.post(target, original.body, attachments=prepared, fwd=fwd)
+        except Exception:
+            mesh.cancel_attachments(prepared)
+            raise
         sent += 1
     return {"ok": True, "forwarded": sent}
 
@@ -332,34 +340,7 @@ def _age_s(updated: str) -> float | None:
 # (shared with api_files; defined here to avoid a circular import)
 def _open_file_blob(app, mesh, chat_id: str, f: dict) -> bytes | None:
     blob_id = f.get("id") or ""
-    data = mesh.tx.get_blob(_file_path(chat_id, blob_id))
-    if data is None:
-        return None
-    return mesh.sealer.open_blob(chat_id, blob_id, data)
-
-
-def _put_file_blob(app, mesh, chat_id: str, name: str, raw: bytes) -> dict:
-    import hashlib
-
-    from .api_files import safe_name
-
-    name = safe_name(name)
-    blob_id = new_id("f") + _suffix(name)
-    sealed = mesh.sealer.seal_blob(chat_id, blob_id, raw)
-    mesh.tx.put_blob(_file_path(chat_id, blob_id), sealed)
-    return {"id": blob_id, "name": name, "bytes": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest()}
-
-
-def _file_path(chat_id: str, blob_id: str) -> str:
-    from ..mesh.paths import P
-
-    return P.file(chat_id, blob_id)
-
-
-def _suffix(name: str) -> str:
-    dot = name.rfind(".")
-    return name[dot:][:12].lower() if dot > 0 else ""
+    return mesh.open_attachment(chat_id, blob_id)
 
 
 GET = {

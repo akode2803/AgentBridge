@@ -34,10 +34,11 @@ from pathlib import Path
 
 from .. import __version__
 from ..core.config import DEFAULT_HOME, load_app_config
+from ..core.errors import ValidationError
 from ..core.models import ChatKind, UserKind
 from ..core.runstate import clear_beat, write_beat
 from ..mesh import authz
-from ..core.timekit import new_id, utcnow_iso
+from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
 from .conversation import ConversationManager
@@ -86,11 +87,10 @@ def _failure_reason(err: Exception) -> str:
 
 @dataclass
 class _AttachmentBatch:
-    records: list[dict] = field(default_factory=list)
+    prepared: list = field(default_factory=list)
     skipped_labels: list[str] = field(default_factory=list)
     delivered_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
-    blob_paths: list[str] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -632,12 +632,11 @@ class AgentRunner:
                 posted = self.mesh.post(
                     chat_id, part,
                     reply_to=reply_to if i == 0 else None,
-                    files=batch.records if i == len(parts) - 1 else None)
+                    attachments=(batch.prepared
+                                 if i == len(parts) - 1 else None))
                 posted_ids.append(posted.id)
         except Exception:
-            for blob_path in batch.blob_paths:
-                with contextlib.suppress(Exception):
-                    self.mesh.tx.delete_blob(blob_path)
+            self.mesh.cancel_attachments(batch.prepared)
             if reply.artifact_outbox:
                 archive_outbox(Path(reply.artifact_outbox), "delivery-failed")
             raise
@@ -717,18 +716,14 @@ class AgentRunner:
             return True
 
     def _attach(self, chat_id: str, paths: list[str]) -> _AttachmentBatch:
-        """Local files a Reply shares -> sealed chat blobs -> files[] records
-        (the harness-side mirror of the GUI's seal_attachments).
+        """Local files a Reply shares -> durable prepared attachments.
 
         Known oversize files are named and skipped rather than killing the
-        reply. Everything is preflighted before the first upload; an unexpected
-        upload failure rolls back blobs already written by this attempt.
+        reply. Everything is preflighted before sealed spool creation; no remote
+        write occurs until the envelope+manifest is durable in SQLite.
         """
-        import contextlib
-        import hashlib
-
         cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
-        prepared: list[tuple[str, bytes, dict]] = []
+        candidates: list[tuple[Path, str, bytes]] = []
         batch = _AttachmentBatch()
         for p in paths or []:
             path = Path(p)
@@ -756,33 +751,24 @@ class AgentRunner:
                 batch.skipped_labels.append(f"{name} (unreadable)")
                 batch.skipped_paths.append(str(path))
                 continue
-            dot = name.rfind(".")
-            blob_id = new_id("f") + (name[dot:][:12].lower() if dot > 0 else "")
-            sealed = self.mesh.sealer.seal_blob(chat_id, blob_id, raw)
-            if cap and len(sealed) > cap:
-                batch.skipped_labels.append(
-                    f"{name} ({len(raw) / 1_000_000:.0f} MB)")
-                batch.skipped_paths.append(str(path))
-                continue
-            blob_path = f"chats/{chat_id}/files/{blob_id}"
-            prepared.append((blob_path, sealed, {
-                "id": blob_id, "name": name, "bytes": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-            }))
-            batch.delivered_paths.append(str(path))
+            candidates.append((path, name, raw))
 
-        uploaded: list[str] = []
         try:
-            for blob_path, sealed, _record in prepared:
-                self.mesh.tx.put_blob(blob_path, sealed)
-                uploaded.append(blob_path)
+            for path, name, raw in candidates:
+                try:
+                    item = self.mesh.prepare_attachment(chat_id, name, raw)
+                except ValidationError as exc:
+                    if "storage limit" not in str(exc):
+                        raise
+                    batch.skipped_labels.append(
+                        f"{name} ({len(raw) / 1_000_000:.0f} MB)")
+                    batch.skipped_paths.append(str(path))
+                    continue
+                batch.prepared.append(item)
+                batch.delivered_paths.append(str(path))
         except Exception:
-            for blob_path in uploaded:
-                with contextlib.suppress(Exception):
-                    self.mesh.tx.delete_blob(blob_path)
+            self.mesh.cancel_attachments(batch.prepared)
             raise
-        batch.records = [record for _path, _sealed, record in prepared]
-        batch.blob_paths = uploaded
         return batch
 
     # ------------------------------------------------------------ lifecycle

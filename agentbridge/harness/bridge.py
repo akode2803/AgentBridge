@@ -29,7 +29,6 @@ never as a crashed run.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import secrets
 import threading
@@ -37,7 +36,6 @@ import time
 from pathlib import Path
 
 from ..core.models import MsgKind
-from ..core.timekit import new_id
 from .broker import PermissionBroker
 
 __all__ = ["BridgeServer"]
@@ -507,25 +505,21 @@ class BridgeServer:
                                  if m.id == message_id), None)
                 if original is None or original.deleted:
                     return "that message is no longer available"
-                files = []
-                for f in original.files or []:
-                    raw = mesh.tx.get_blob(f"chats/{chat}/files/{f.get('id')}")
-                    data = mesh.sealer.open_blob(chat, f.get("id"), raw) \
-                        if raw is not None else None
-                    if data is None:
-                        continue
-                    name = f.get("name", "file")
-                    dot = name.rfind(".")
-                    blob_id = new_id("f") + (name[dot:][:12].lower()
-                                             if dot > 0 else "")
-                    sealed = mesh.sealer.seal_blob(to_chat_id, blob_id, data)
-                    mesh.tx.put_blob(
-                        f"chats/{to_chat_id}/files/{blob_id}", sealed)
-                    files.append({
-                        "id": blob_id, "name": name, "bytes": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest()})
-                mesh.post(to_chat_id, original.body, files=files or None,
-                          fwd={"from": original.from_, "ts": original.ts})
+                mesh.require_send(to_chat_id)  # before source reads or sealing
+                prepared = []
+                try:
+                    for f in original.files or []:
+                        data = mesh.open_attachment(chat, f.get("id") or "")
+                        if data is None:
+                            continue
+                        prepared.append(mesh.prepare_attachment(
+                            to_chat_id, f.get("name", "file"), data))
+                    mesh.post(
+                        to_chat_id, original.body, attachments=prepared,
+                        fwd={"from": original.from_, "ts": original.ts})
+                except Exception:
+                    mesh.cancel_attachments(prepared)
+                    raise
                 return "forwarded"
 
             return guarded(do)

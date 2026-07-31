@@ -575,8 +575,8 @@ def test_message_enqueue_failure_rolls_back_blobs_and_retains_sources(
     ripple(hrig, runner, snap.id)
     turn(hrig, runner, snap.id)
 
-    assert uploaded and deleted == uploaded
-    assert all(runner.mesh.tx.get_blob(path) is None for path in uploaded)
+    assert uploaded == [] and deleted == []  # no remote write before enqueue
+    assert list(runner.mesh.attachments.root.iterdir()) == []
     recovered = list((workdir / "recovery").rglob("result.txt"))
     assert len(recovered) == 1
     assert recovered[0].read_text(encoding="utf-8") == "important result"
@@ -601,8 +601,8 @@ def test_silent_run_retains_but_does_not_send_its_artifact(hrig):
     assert latest_run(runner.mesh.tx)["state"] == "done"
 
 
-def test_attachment_upload_failure_rolls_back_earlier_blobs(hrig, tmp_path,
-                                                            monkeypatch):
+def test_partial_attachment_upload_remains_owned_and_retries_stable_ids(
+        hrig, tmp_path, monkeypatch):
     first = tmp_path / "one.txt"
     second = tmp_path / "two.txt"
     first.write_text("one", encoding="utf-8")
@@ -611,9 +611,7 @@ def test_attachment_upload_failure_rolls_back_earlier_blobs(hrig, tmp_path,
     runner = hrig.make_runner(Scripted())
     tx = runner.mesh.tx
     original_put = tx.put_blob
-    original_delete = tx.delete_blob
     uploaded = []
-    deleted = []
 
     def flaky_put(path, data):
         if uploaded:
@@ -621,17 +619,25 @@ def test_attachment_upload_failure_rolls_back_earlier_blobs(hrig, tmp_path,
         original_put(path, data)
         uploaded.append(path)
 
-    def tracked_delete(path):
-        deleted.append(path)
-        original_delete(path)
-
     monkeypatch.setattr(tx, "put_blob", flaky_put)
-    monkeypatch.setattr(tx, "delete_blob", tracked_delete)
-    with pytest.raises(OSError, match="storage unavailable"):
-        runner._attach(snap.id, [str(first), str(second)])
+    batch = runner._attach(snap.id, [str(first), str(second)])
+    runner.mesh.post(snap.id, "two files", attachments=batch.prepared)
+    runner.mesh.outbox.base_delay = runner.mesh.outbox.max_delay = 0.001
+    assert runner.mesh.outbox.flush_once() == 0
+    assert len(uploaded) == 1 and tx.get_blob(uploaded[0]) is not None
+    assert runner.mesh.store.outbox_counts() == {"pending": 1}
+    assert len(list(runner.mesh.attachments.root.iterdir())) == 2
 
-    assert deleted == uploaded
-    assert tx.get_blob(uploaded[0]) is None
+    monkeypatch.setattr(tx, "put_blob", original_put)
+    deadline = time.monotonic() + 2.0
+    delivered = 0
+    while not delivered and time.monotonic() < deadline:
+        delivered = runner.mesh.outbox.flush_once()
+        if not delivered:
+            time.sleep(0.002)
+    assert delivered == 1
+    assert runner.mesh.store.outbox_counts() == {}
+    assert list(runner.mesh.attachments.root.iterdir()) == []
 
 
 def test_multi_message_burst_end_to_end(hrig):
