@@ -24,14 +24,14 @@ from agentbridge.mesh.service import Mesh
 # ------------------------------------------------------------------ the stub
 
 STUB = textwrap.dedent("""
-    import json, os, sys, time
+    import json, os, re, sys, time
     args = sys.argv[1:]
     if "--bogus-flag" in args:
         sys.stderr.write("Usage: stub [options]\\n")
         sys.exit(2)
     if "--sleep" in args:
         time.sleep(30)
-    prompt = args[-1]
+    prompt = next((a for a in reversed(args) if "save it into" in a), args[-1])
     print(json.dumps({"type": "system", "subtype": "init"}))
     print(json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "search", "input": {"query": "the request"}}
@@ -42,12 +42,18 @@ STUB = textwrap.dedent("""
     blocked = ",".join(a for i, a in enumerate(args)
                        if i and args[i-1] == "--block")
     out = os.environ.get("STUB_OUTBOX")
+    if out == "FROM_PROMPT":
+        out = os.environ.get("AGENTBRIDGE_OUTBOX", "")
     if out:
         with open(os.path.join(out, "made.txt"), "w") as fh:
             fh.write("made by the stub")
         open(os.path.join(out, "scrap.txt"), "w").close()  # empty scratch
+    if os.environ.get("STUB_FAIL_AFTER_FILE"):
+        sys.stderr.write("stub failed after producing files\\n")
+        sys.exit(1)
+    recovery = "yes" if "NOT resent automatically" in prompt else "no"
     print(json.dumps({"type": "result",
-                      "result": f"stub reply model={model} blocked={blocked}"}))
+                      "result": f"stub reply model={model} blocked={blocked} recovery={recovery}"}))
 """)
 
 
@@ -478,9 +484,7 @@ def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
     """Files a run leaves in its outbox attach to the reply; 0-byte scratch
     does not (a live model once shipped an empty placeholder.txt)."""
     snap = arig.owner.create_chat("Files", members=["helper"])
-    monkeypatch.setenv("STUB_OUTBOX",           # the per-chat workspace (R18)
-                       str(arig.home / "harness" / "helper" / "workspaces"
-                           / snap.id / "outbox"))
+    monkeypatch.setenv("STUB_OUTBOX", "FROM_PROMPT")
     arig.owner.post(snap.id, "@helper make me a file")
     arig.owner.outbox.flush_once()
     runner = AgentRunner(arig.root, "helper", home=arig.home,
@@ -496,6 +500,69 @@ def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
                  if m.from_ == "helper"][0]
         names = [f["name"] for f in reply.files]
         assert names == ["made.txt"]          # scrap.txt (empty) stayed home
+    finally:
+        runner.close()
+
+
+def test_failed_cli_files_are_retained_and_disclosed_next_run(arig, monkeypatch):
+    preset = stub_preset(
+        arig.home, env_allow=["STUB_OUTBOX", "STUB_FAIL_AFTER_FILE"])
+    (arig.home / "adapters").mkdir(parents=True, exist_ok=True)
+    (arig.home / "adapters" / "stub.json").write_text(
+        json.dumps(preset), encoding="utf-8")
+    monkeypatch.setenv("STUB_OUTBOX", "FROM_PROMPT")
+    monkeypatch.setenv("STUB_FAIL_AFTER_FILE", "1")
+    snap = arig.owner.create_chat("Recovery", members=["helper"])
+    arig.owner.post(snap.id, "@helper build the file")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        recovery = (arig.home / "harness" / "helper" / "workspaces" /
+                    snap.id / "recovery")
+        assert len(list(recovery.rglob("made.txt"))) == 1
+
+        monkeypatch.delenv("STUB_FAIL_AFTER_FILE")
+        arig.owner.post(snap.id, "@helper try again using what remains")
+        arig.owner.outbox.flush_once()
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        runner.mesh.outbox.flush_once()
+        arig.owner.sync.sync_once([snap.id])
+        replies = [m for m in arig.owner.messages_for(snap.id)
+                   if m.from_ == "helper" and "stub reply" in m.body]
+        assert replies and "recovery=yes" in replies[-1].body
+    finally:
+        runner.close()
+
+
+def test_preprocess_failure_also_retains_run_artifacts(arig, monkeypatch):
+    snap = arig.owner.create_chat("Early failure", members=["helper"])
+    arig.owner.post(snap.id, "@helper prepare it")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+
+    def fail_stage(_delivery, _workdir):
+        outbox = runner.responder._run_local.outbox
+        (outbox / "early.txt").write_text("keep me", encoding="utf-8")
+        raise OSError("staging failed")
+
+    monkeypatch.setattr(runner.responder, "_stage_inbox", fail_stage)
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        recovery = (arig.home / "harness" / "helper" / "workspaces" /
+                    snap.id / "recovery")
+        kept = list(recovery.rglob("early.txt"))
+        assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "keep me"
     finally:
         runner.close()
 

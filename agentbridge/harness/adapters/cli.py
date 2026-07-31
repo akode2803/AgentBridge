@@ -28,13 +28,14 @@ import time
 from pathlib import Path
 
 from ...core.config import DEFAULT_HOME
-from ...core.timekit import utcnow_iso
+from ...core.timekit import new_id, utcnow_iso
 from ..bridge import BridgeServer
 from ..broker import PermissionBroker
 from ..conversation import Delivery
 from ..docs import ToolDocs
 from ..memory import MemoryStore
 from ..prompt import PromptManager, PromptPack, TRANSCRIPT_TAIL
+from ..recovery import archive_outbox, prepare_outbox
 from ..responder import OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..settings import HarnessSettings
@@ -220,9 +221,25 @@ class CliResponder:
         # per-chat high-water mark lives in the agent's SQLite store
         self.history = HistoryIndex(self.memory, getattr(mesh, "store", None))
         self._minimal: set[str] = set()  # preset ids that needed the fallback
+        self._run_local = threading.local()  # one responder serves concurrent runs
 
     # ------------------------------------------------------------- the run
     def respond(self, delivery: Delivery, on_step: OnStep | None = None) -> Reply:
+        """Retain this run's files on every failure, not only CLI exit errors."""
+        try:
+            return self._respond(delivery, on_step=on_step)
+        except BaseException as err:
+            outbox = getattr(self._run_local, "outbox", None)
+            if outbox is not None:
+                archive_outbox(
+                    outbox, "stopped" if isinstance(err, RunStopped) else "failed")
+            raise
+        finally:
+            with contextlib.suppress(AttributeError):
+                del self._run_local.outbox
+
+    def _respond(self, delivery: Delivery,
+                 on_step: OnStep | None = None) -> Reply:
         acc = self.mesh.directory.get(self.agent)
         settings = HarnessSettings.from_account(acc)
         category = self._category(delivery, acc)
@@ -243,16 +260,14 @@ class CliResponder:
         # context, inbox, outbox (R20 adds memory) live here, runs cwd here
         workdir = (self.home / "harness" / self.agent / "workspaces"
                    / delivery.chat_id)
-        outbox = workdir / "outbox"
         # V97: tmp/ is the declared SCRATCH area — the prompt sends
         # intermediates here, tidy_workspace empties it on demand, and
         # week-old leftovers are pruned so workspaces never grow forever
-        for d in (workdir, outbox, workdir / "tmp"):
+        for d in (workdir, workdir / "tmp"):
             d.mkdir(parents=True, exist_ok=True)
         _prune_tmp(workdir)
-        for stale in outbox.iterdir():  # a fresh run owns an empty outbox
-            if stale.is_file():
-                stale.unlink(missing_ok=True)
+        outbox, recovery = prepare_outbox(workdir, new_id("run"))
+        self._run_local.outbox = outbox
 
         self._retrieve(delivery, cutoff_ns)  # long chats stop forgetting (R21)
         staged = self._stage_inbox(delivery, workdir)
@@ -282,7 +297,9 @@ class CliResponder:
         auto_allow, blocklist = effective_gates(inv.preset, settings)
         with contextlib.ExitStack() as stack:
             mcp_config = ""
-            injected_env: dict[str, str] = {}
+            injected_env: dict[str, str] = {
+                "AGENTBRIDGE_OUTBOX": str(outbox),
+            }
             bridge = None
             if inv.preset.permission_args:
                 bridge = stack.enter_context(BridgeServer(
@@ -310,7 +327,8 @@ class CliResponder:
                           if cap else "the configured per-file limit")
             prompt = pack.prompt(delivery, acc, context_file=context_file,
                                  outbox=outbox, bridge=bool(mcp_config),
-                                 file_limit=file_limit)
+                                 file_limit=file_limit,
+                                 recovery_notice=recovery.prompt_text())
             argv = inv.preset.build_argv(
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
@@ -318,9 +336,9 @@ class CliResponder:
                 mcp_config=mcp_config, blocklist=blocklist,
             )
             env = provider_env(inv.preset, injected=injected_env)
-            rc, lines, err = self._run(argv, workdir, settings.timeout_s,
-                                       inv, pack, step, env=env,
-                                       chat_id=delivery.chat_id)
+            rc, lines, err = self._run(
+                argv, workdir, settings.timeout_s, inv, pack, step,
+                env=env, chat_id=delivery.chat_id)
             if self._usage_error(rc, err) and inv.preset.id not in self._minimal:
                 # a CLI update rejected our flags — drop conveniences, keep
                 # safety args AND the permission plumbing
@@ -332,9 +350,9 @@ class CliResponder:
                     effort=inv.effort, minimal=True, mcp_config=mcp_config,
                     blocklist=blocklist,
                 )
-                rc, lines, err = self._run(argv, workdir, settings.timeout_s,
-                                           inv, pack, step, env=env,
-                                           chat_id=delivery.chat_id)
+                rc, lines, err = self._run(
+                    argv, workdir, settings.timeout_s, inv, pack, step,
+                    env=env, chat_id=delivery.chat_id)
 
         text = reply_from_output(lines, inv.preset.format)
         if not text and reply_file.is_file():
@@ -355,7 +373,12 @@ class CliResponder:
         # R18's workspace scoping owns the real fix.
         files = sorted(str(p) for p in outbox.iterdir()
                        if p.is_file() and p.stat().st_size)
+        for empty in outbox.iterdir():
+            if (empty.is_file() and not empty.is_symlink()
+                    and empty.stat().st_size == 0):
+                empty.unlink(missing_ok=True)
         return Reply(body=text, steps=steps, files=files, timers=timers,
+                     artifact_outbox=str(outbox),
                      leave_chat=bool(bridge and bridge.leave_requested))
 
     def close(self) -> None:

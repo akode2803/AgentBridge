@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import __version__
@@ -45,6 +46,7 @@ from .feed import (RunFeed, reap_orphan_run, record_tasks,
 from .peer import PeerService
 from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
+from .recovery import archive_outbox, discard_delivered, retain_paths
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
@@ -80,6 +82,15 @@ def _failure_reason(err: Exception) -> str:
         r"\1=<redacted>", detail,
     )[:160]
     return f"{why}: {detail}" if detail else why
+
+
+@dataclass
+class _AttachmentBatch:
+    records: list[dict] = field(default_factory=list)
+    skipped_labels: list[str] = field(default_factory=list)
+    delivered_paths: list[str] = field(default_factory=list)
+    skipped_paths: list[str] = field(default_factory=list)
+    blob_paths: list[str] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -561,6 +572,8 @@ class AgentRunner:
             self.timers.pop(group.items[0].key.split("timer:", 1)[-1],
                             reschedule=True)
         if no_reply or not body:
+            if reply.artifact_outbox:
+                archive_outbox(Path(reply.artifact_outbox), "no-reply")
             self.queue.rate_refund(chat_id)  # a silent run costs no slot
             self.queue.finish(group, "no_reply")
             # V92: silence after a reaction nudge is the NORMAL outcome —
@@ -597,24 +610,44 @@ class AgentRunner:
         # leg matches on it), attachments ride the LAST part (the prompt says
         # so), and the whole burst spends the one rate slot this run claimed.
         parts = split_reply(body)
-        files, skipped = self._attach(chat_id, reply.files)
-        if skipped:
+        try:
+            batch = self._attach(chat_id, reply.files)
+        except Exception:
+            if reply.artifact_outbox:
+                archive_outbox(Path(reply.artifact_outbox), "attachment-failed")
+            raise
+        if batch.skipped_labels:
             cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
             cap_mb = max(1, cap // (1024 * 1024)) if cap else 0
             limit = f"{cap_mb} MB" if cap_mb else "configured"
-            shown = ", ".join(skipped[:8])
-            if len(skipped) > 8:
-                shown += f", and {len(skipped) - 8} more"
-            parts[-1] += ("\n\nNot attached - over the transport's "
-                          f"{limit} file limit: " + shown)
+            shown = ", ".join(batch.skipped_labels[:8])
+            if len(batch.skipped_labels) > 8:
+                shown += f", and {len(batch.skipped_labels) - 8} more"
+            parts[-1] += ("\n\nNot attached - unavailable, unsafe, or over "
+                          f"the transport's {limit} file limit: " + shown)
         timings.start("post")
         posted_ids = []
-        for i, part in enumerate(parts):
-            posted = self.mesh.post(
-                chat_id, part,
-                reply_to=reply_to if i == 0 else None,
-                files=files if i == len(parts) - 1 else None)
-            posted_ids.append(posted.id)
+        try:
+            for i, part in enumerate(parts):
+                posted = self.mesh.post(
+                    chat_id, part,
+                    reply_to=reply_to if i == 0 else None,
+                    files=batch.records if i == len(parts) - 1 else None)
+                posted_ids.append(posted.id)
+        except Exception:
+            for blob_path in batch.blob_paths:
+                with contextlib.suppress(Exception):
+                    self.mesh.tx.delete_blob(blob_path)
+            if reply.artifact_outbox:
+                archive_outbox(Path(reply.artifact_outbox), "delivery-failed")
+            raise
+        discard_delivered(batch.delivered_paths)
+        retain_paths(batch.skipped_paths, "over-limit")
+        if reply.artifact_outbox:
+            # A model may leave auxiliary files or directories it did not name
+            # in Reply.files. Resolve the run marker and retain that remainder
+            # instead of stranding an apparently active lane forever.
+            archive_outbox(Path(reply.artifact_outbox), "not-delivered")
         timings.stop()
         self.queue.finish(group, posted_ids[0])
         # the timing line rides the Message-info task doc — owner-visible
@@ -683,8 +716,7 @@ class AgentRunner:
         except Exception:  # noqa: BLE001 — unsure = quote, the safe default
             return True
 
-    def _attach(self, chat_id: str,
-                paths: list[str]) -> tuple[list[dict], list[str]]:
+    def _attach(self, chat_id: str, paths: list[str]) -> _AttachmentBatch:
         """Local files a Reply shares -> sealed chat blobs -> files[] records
         (the harness-side mirror of the GUI's seal_attachments).
 
@@ -697,34 +729,47 @@ class AgentRunner:
 
         cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
         prepared: list[tuple[str, bytes, dict]] = []
-        skipped: list[str] = []
+        batch = _AttachmentBatch()
         for p in paths or []:
             path = Path(p)
             name = path.name[:120]
+            if path.is_symlink():
+                batch.skipped_labels.append(f"{name} (unsafe link)")
+                batch.skipped_paths.append(str(path))
+                continue
             try:
                 size = path.stat().st_size
             except OSError:
+                batch.skipped_labels.append(f"{name} (unreadable)")
+                batch.skipped_paths.append(str(path))
                 continue
             # Avoid loading a known multi-gigabyte file merely to reject it.
             # Equality is also rejected: authenticated sealing adds overhead.
             if cap and size >= cap:
-                skipped.append(f"{name} ({size / 1_000_000:.0f} MB)")
+                batch.skipped_labels.append(
+                    f"{name} ({size / 1_000_000:.0f} MB)")
+                batch.skipped_paths.append(str(path))
                 continue
             try:
                 raw = path.read_bytes()
             except OSError:
+                batch.skipped_labels.append(f"{name} (unreadable)")
+                batch.skipped_paths.append(str(path))
                 continue
             dot = name.rfind(".")
             blob_id = new_id("f") + (name[dot:][:12].lower() if dot > 0 else "")
             sealed = self.mesh.sealer.seal_blob(chat_id, blob_id, raw)
             if cap and len(sealed) > cap:
-                skipped.append(f"{name} ({len(raw) / 1_000_000:.0f} MB)")
+                batch.skipped_labels.append(
+                    f"{name} ({len(raw) / 1_000_000:.0f} MB)")
+                batch.skipped_paths.append(str(path))
                 continue
             blob_path = f"chats/{chat_id}/files/{blob_id}"
             prepared.append((blob_path, sealed, {
                 "id": blob_id, "name": name, "bytes": len(raw),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }))
+            batch.delivered_paths.append(str(path))
 
         uploaded: list[str] = []
         try:
@@ -736,7 +781,9 @@ class AgentRunner:
                 with contextlib.suppress(Exception):
                     self.mesh.tx.delete_blob(blob_path)
             raise
-        return [record for _path, _sealed, record in prepared], skipped
+        batch.records = [record for _path, _sealed, record in prepared]
+        batch.blob_paths = uploaded
+        return batch
 
     # ------------------------------------------------------------ lifecycle
     def _consume_timer_cancels(self) -> None:

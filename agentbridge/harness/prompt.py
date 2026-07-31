@@ -80,7 +80,8 @@ class PromptPack:
 
     # ------------------------------------------------------------ the prompt
     def prompt(self, delivery: Delivery, acc, *, context_file, outbox,
-               bridge: bool = False, file_limit: str = "configured limit") -> str:
+               bridge: bool = False, file_limit: str = "configured limit",
+               recovery_notice: str = "") -> str:
         roster = "; ".join(
             f"@{r['name']} ({r.get('desc', '')})" for r in delivery.roster)
         parts = [self.text(
@@ -107,6 +108,10 @@ class PromptPack:
             parts.append(self.text("task_message", context_file=context_file))
         parts.append(self.text("capabilities", outbox=outbox,
                                file_limit=file_limit))
+        if recovery_notice:
+            # Code-owned fact: an overlay must not hide retained or pruned
+            # local artifacts from the agent that can recover them.
+            parts.append(recovery_notice)
         # V78: the break marker is injected like the sentinel; a pack that
         # drops this block simply degrades to single-message replies
         parts.append(self.text("multi_message", delimiter=MESSAGE_BREAK))

@@ -58,6 +58,7 @@ class Reply:
     steps: list[dict] = field(default_factory=list)   # [{text, ts}] task log
     timers: list[dict] = field(default_factory=list)  # [{in_s | at_ns, note}]
     files: list[str] = field(default_factory=list)    # local paths (R16 stages)
+    artifact_outbox: str = ""  # managed run lane; runner resolves it on outcome
     # V53: owner-approved leave_chat — DEFERRED so the goodbye posts first;
     # the runner executes it after delivery
     leave_chat: bool = False

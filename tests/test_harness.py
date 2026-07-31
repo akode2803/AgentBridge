@@ -18,6 +18,7 @@ from agentbridge.harness import (
     split_reply,
 )
 from agentbridge.harness.triggers import Candidate
+from agentbridge.harness.recovery import prepare_outbox
 from agentbridge.mesh.service import Mesh
 
 
@@ -510,6 +511,93 @@ def test_oversized_attachment_is_named_but_reply_still_posts(hrig, tmp_path):
     assert reply.body.startswith("Delivery ready")
     assert "Not attached" in reply.body and "archive.zip" in reply.body
     assert [f["name"] for f in reply.files] == ["summary.txt"]
+    assert latest_run(runner.mesh.tx)["state"] == "done"
+
+
+def test_managed_delivery_cleans_success_and_retains_oversize(hrig):
+    snap = hrig.owner.create_chat("Managed files", members=["helper"])
+    hrig.owner.post(snap.id, "@helper send both")
+    workdir = (hrig.home / "harness" / "helper" / "workspaces" / snap.id)
+    outbox, _ = prepare_outbox(workdir, "managed-success")
+    small = outbox / "summary.txt"
+    large = outbox / "archive.zip"
+    auxiliary = outbox / "drafts" / "notes.txt"
+    small.write_text("ready", encoding="utf-8")
+    large.write_bytes(b"x" * 2048)
+    auxiliary.parent.mkdir()
+    auxiliary.write_text("keep for later", encoding="utf-8")
+    runner = hrig.make_runner(Scripted(lambda d: Reply(
+        body="Delivery ready", files=[str(small), str(large)],
+        artifact_outbox=str(outbox))))
+    runner.mesh.tx.max_upload_bytes = 1024
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    reply = agent_msgs(hrig.owner, snap.id)[0]
+    assert [f["name"] for f in reply.files] == ["summary.txt"]
+    assert not small.exists()
+    recovered = list((workdir / "recovery").rglob("archive.zip"))
+    assert len(recovered) == 1 and recovered[0].read_bytes() == b"x" * 2048
+    leftovers = list((workdir / "recovery").rglob("notes.txt"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text(encoding="utf-8") == "keep for later"
+    assert not (workdir / "runs").exists()
+
+
+def test_message_enqueue_failure_rolls_back_blobs_and_retains_sources(
+        hrig, monkeypatch):
+    snap = hrig.owner.create_chat("Post rollback", members=["helper"])
+    hrig.owner.post(snap.id, "@helper send the result")
+    workdir = (hrig.home / "harness" / "helper" / "workspaces" / snap.id)
+    outbox, _ = prepare_outbox(workdir, "managed-failure")
+    source = outbox / "result.txt"
+    source.write_text("important result", encoding="utf-8")
+    runner = hrig.make_runner(Scripted(lambda d: Reply(
+        body="Here it is", files=[str(source)], artifact_outbox=str(outbox))))
+    uploaded = []
+    deleted = []
+    original_put = runner.mesh.tx.put_blob
+    original_delete = runner.mesh.tx.delete_blob
+
+    def track_put(path, data):
+        original_put(path, data)
+        uploaded.append(path)
+
+    def track_delete(path):
+        deleted.append(path)
+        original_delete(path)
+
+    monkeypatch.setattr(runner.mesh.tx, "put_blob", track_put)
+    monkeypatch.setattr(runner.mesh.tx, "delete_blob", track_delete)
+    monkeypatch.setattr(runner.mesh, "post",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            OSError("local enqueue unavailable")))
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    assert uploaded and deleted == uploaded
+    assert all(runner.mesh.tx.get_blob(path) is None for path in uploaded)
+    recovered = list((workdir / "recovery").rglob("result.txt"))
+    assert len(recovered) == 1
+    assert recovered[0].read_text(encoding="utf-8") == "important result"
+    assert latest_run(runner.mesh.tx)["state"] == "error"
+
+
+def test_silent_run_retains_but_does_not_send_its_artifact(hrig):
+    snap = hrig.owner.create_chat("Silent artifact", members=["helper"])
+    hrig.owner.post(snap.id, "@helper only reply if needed")
+    workdir = (hrig.home / "harness" / "helper" / "workspaces" / snap.id)
+    outbox, _ = prepare_outbox(workdir, "silent")
+    source = outbox / "draft.txt"
+    source.write_text("unfinished", encoding="utf-8")
+    runner = hrig.make_runner(Scripted(lambda d: Reply(
+        body=SILENCE, files=[str(source)], artifact_outbox=str(outbox))))
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    assert agent_msgs(hrig.owner, snap.id) == []
+    recovered = list((workdir / "recovery").rglob("draft.txt"))
+    assert len(recovered) == 1
     assert latest_run(runner.mesh.tx)["state"] == "done"
 
 

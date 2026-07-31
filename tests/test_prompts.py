@@ -85,6 +85,14 @@ def test_prompt_assembly_blocks(tmp_path):
     assert "NO_REPLY and nothing else" not in p      # the old bare word is gone
     assert "threaded reply" in p                     # reply-vs-tag etiquette
     assert MESSAGE_BREAK in p                        # V78: the real break marker
+
+
+def test_recovery_notice_is_code_owned_prompt_fact(tmp_path):
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    p = pack.prompt(
+        delivery(), acc(), context_file="ctx", outbox="out",
+        recovery_notice="RECOVERY FACT: recovery/old/result.zip")
+    assert "RECOVERY FACT: recovery/old/result.zip" in p
     assert "ONE message" in p                        # …with the restraint rail
 
 
