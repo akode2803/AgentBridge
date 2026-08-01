@@ -30,10 +30,12 @@ Policy, in resolution order (first hit wins):
    a popup (approve / always-allow / deny). No answer inside the timeout
    means **deny** — unattended agents never get the benefit of the doubt.
 
-Asks and answers ride two transport docs with ONE writer each (the v1
-overlay lesson — merge, never fight over a doc):
-- ``status/asks/<agent>.json``      — pending asks; written by the harness;
-- ``status/asks/<agent>_answers.json`` — verdicts; written by the owner's GUI.
+Production asks and decisions ride the C1.1 secure permission lane: immutable
+chat-scoped documents, pairwise encryption to the agent and responsible
+member, signatures, current authority epochs, full intent digests, absolute
+expiry, and a durable one-use claim. There is no production downgrade to the
+old plaintext ``status/asks`` lane. A private legacy lane remains only for the
+pre-C1 unit fixtures that isolate policy resolution from transport security.
 
 A denied intent is cached per run: inner CLIs retry a denied tool call
 (seen live in the R18 spike — three asks for one Write), and the owner
@@ -125,8 +127,12 @@ class Ask:
 class PermissionBroker:
     """One broker per runner; runs bind it to their (chat, workspace)."""
 
-    def __init__(self, tx, agent: str, docs=None) -> None:
-        self.tx = tx
+    def __init__(self, mesh_or_tx, agent: str, docs=None,
+                 *, _legacy_test_lane: bool = False) -> None:
+        self.mesh = mesh_or_tx if hasattr(mesh_or_tx, "directory") else None
+        if self.mesh is None and not _legacy_test_lane:
+            raise TypeError("PermissionBroker requires a Mesh secure lane")
+        self.tx = self.mesh.tx if self.mesh is not None else mesh_or_tx
         self.agent = agent
         self.docs = docs   # ToolDocs (R43): friendly popup phrases; optional
         self._lock = threading.Lock()
@@ -138,12 +144,19 @@ class PermissionBroker:
         # processes; this covers the rest of this one. Same constraint as
         # approvals: never consulted for an outside-workspace path (V83).
         self._grants: set[tuple[str, str]] = set()   # (tool, chat_id)
+        self._lane = None
+        self._secure_pending = {}
+        self._withdrawn: set[str] = set()
+        if self.mesh is not None:
+            from .runtime.permissions import PermissionLane
+            self._lane = PermissionLane(self.mesh, self.agent)
 
     # -------------------------------------------------------------- policy
     def decide(self, *, chat_id: str, workspace: Path, tool: str,
                tool_input: dict, auto_allow: tuple[str, ...] | list[str],
                approvals: list[dict], timeout_s: float,
-               deny_roots: list[Path] | None = None) -> tuple[bool, str]:
+               deny_roots: list[Path] | None = None, run_id: str = "",
+               call_id: str = "") -> tuple[bool, str]:
         """Returns ``(allowed, message)``; blocks while the owner decides."""
         target = path_of(tool_input)
         outside = False
@@ -174,7 +187,7 @@ class PermissionBroker:
                     return True, ""
         digest = hashlib.sha256(
             f"{chat_id}|{tool}|{json.dumps(tool_input, sort_keys=True, default=str)}"
-            .encode()).hexdigest()[:16]
+            .encode()).hexdigest()
         with self._lock:
             if digest in self._denied:   # a retry of a denied intent
                 return False, self._denied[digest]
@@ -190,7 +203,8 @@ class PermissionBroker:
         verdict, note = self.ask(chat_id=chat_id, kind="permission",
                                  tool=tool, detail=detail[:MAX_DETAIL],
                                  input_hash=digest, timeout_s=timeout_s,
-                                 scope="outside" if outside else "")
+                                 scope="outside" if outside else "",
+                                 run_id=run_id, call_id=call_id)
         if verdict == "always" and not outside:
             with self._lock:
                 self._grants.add((tool, chat_id))
@@ -203,7 +217,8 @@ class PermissionBroker:
     # ----------------------------------------------------------- the pipe
     def ask(self, *, chat_id: str, kind: str, tool: str, detail: str,
             input_hash: str = "", timeout_s: float = 120.0,
-            options: list | None = None, scope: str = "") -> tuple[str, str]:
+            options: list | None = None, scope: str = "", run_id: str = "",
+            call_id: str = "") -> tuple[str, str]:
         """Publish one ask and wait for the owner. Returns
         ``(verdict, text)`` — verdict allow|always|deny|timeout for
         permissions, answer|timeout for questions (text = the reply/reason).
@@ -212,6 +227,48 @@ class PermissionBroker:
         """
         label = (self.docs.ask_phrase(tool)
                  if self.docs is not None and kind == "permission" else "")
+        if self._lane is not None:
+            from .runtime.permissions import digest
+            full_digest = input_hash or digest({
+                "chat_id": chat_id, "kind": kind, "tool": tool,
+                "detail": detail, "options": options or [], "scope": scope,
+            })
+            try:
+                secure = self._lane.publish_ask(
+                    chat_id=chat_id, kind=kind, tool=tool, detail=detail,
+                    input_digest=full_digest, timeout_s=timeout_s,
+                    run_id=run_id, call_id=call_id, label=label,
+                    options=options, scope=scope,
+                )
+            except Exception as exc:  # fail closed; never downgrade to plaintext
+                return "timeout", f"secure owner approval unavailable: {exc}"
+            with self._lock:
+                self._secure_pending[secure.id] = secure
+            try:
+                deadline = secure.record["expires_ns"]
+                while time.time_ns() < deadline:
+                    with self._lock:
+                        if secure.id in self._withdrawn:
+                            return "timeout", "the run ended before an answer arrived"
+                    ans = self._lane.read_decision(secure)
+                    if ans is not None:
+                        verdict = str(ans.get("verdict") or "deny")
+                        text = str(ans.get("text") or "")
+                        if kind == "question":
+                            return ("answer" if verdict == "answer" else "timeout", text)
+                        if verdict not in ("allow", "always", "deny"):
+                            verdict = "deny"
+                        return verdict, text or (
+                            "the responsible member denied this" if verdict == "deny" else "")
+                    time.sleep(POLL_S)
+                return "timeout", ("no answer from the responsible member "
+                                   f"within {int(timeout_s)}s — denied")
+            finally:
+                with self._lock:
+                    self._secure_pending.pop(secure.id, None)
+                    self._withdrawn.discard(secure.id)
+                self._lane.withdraw(secure)
+
         a = Ask(self.agent, chat_id, kind, tool, detail, input_hash,
                 timeout_s, label=label, options=options, scope=scope)
         with self._lock:
@@ -245,6 +302,8 @@ class PermissionBroker:
 
     def pending(self) -> list[dict]:
         with self._lock:
+            if self._lane is not None:
+                return [a.record.copy() for a in self._secure_pending.values()]
             return [a.to_doc() for a in self._pending.values()
                     if not a.withdrawn]
 
@@ -254,6 +313,13 @@ class PermissionBroker:
         two minutes later) and every blocked ``ask()`` returns on its next
         poll tick. Chat-scoped: parallel runs in other chats keep theirs."""
         with self._lock:
+            secure = [a for a in self._secure_pending.values()
+                      if a.record["chat_id"] == chat_id]
+            for a in secure:
+                self._withdrawn.add(a.id)
+                self._lane.withdraw(a)
+            if secure:
+                return len(secure)
             hit = [a for a in self._pending.values()
                    if a.chat_id == chat_id and not a.withdrawn]
             for a in hit:
@@ -263,11 +329,14 @@ class PermissionBroker:
         return len(hit)
 
     @classmethod
-    def clear_stale(cls, tx, agent: str) -> None:
+    def clear_stale(cls, mesh_or_tx, agent: str) -> None:
         """Boot hygiene (V85: 'persists after a fleet restart'): a process
         that died mid-ask left its asks doc advertising prompts no one can
         answer. A starting runner has no pending asks by definition — reset
         the doc to empty. Best-effort."""
+        if hasattr(mesh_or_tx, "directory"):
+            return  # secure records expire and are validated individually
+        tx = mesh_or_tx
         try:
             tx.put_doc(ASK_DOC.format(agent=agent), {
                 "agent": agent, "updated": utcnow_iso(), "asks": [],
@@ -278,6 +347,8 @@ class PermissionBroker:
     # ------------------------------------------------------------- plumbing
     def _publish(self) -> None:
         """The asks doc (harness = its only writer). Best-effort."""
+        if self._lane is not None:
+            return
         try:
             self.tx.put_doc(ASK_DOC.format(agent=self.agent), {
                 "agent": self.agent, "updated": utcnow_iso(),

@@ -1546,6 +1546,28 @@ still legacy unsigned records, no production consumer imports the new models,
 and no signature, E2EE, replay, transport, RLS, dual-read, or authorization
 claim is made until the remaining C1 data-plane work lands together.
 
+**C1.1 permission-control slice (R121):** production permission asks and owner
+decisions no longer use `status/asks/`. Each ask lives under its actual room at
+`chats/<chat>/runtime/owner-control/<agent>/asks/<id>.json`; each decision is a
+unique append-only document below that ask. The sensitive payload is encrypted
+to exactly the agent and responsible member with a fresh record key, the full
+header/ciphertext/wrapped audience is signed, and room, identities, absolute
+`ns` expiry, run, call, input digest, key epoch, policy revision, membership
+epoch and ownership epoch are revalidated when opened and consumed. Decisions
+are bound to the full ask digest and atomically claimed once in local SQLite,
+including after restart. Conflicting valid owner decisions fail closed. The GUI
+reconstructs the ask server-side and never trusts echoed tool/scope bindings;
+outside-workspace approvals cannot become standing grants. There is no
+production plaintext or mixed-version fallback. Peer verdicts remain on their
+separate legacy path for the next complete slice.
+
+This is intentionally narrower than the complete C1/C5 data plane. Generic
+run/task/handoff/effect records, effect receipts and `unknown` outcomes, stop
+and revocation records, old-client projections, and peer verdict migration are
+still open. In particular, an approval consumed immediately before a provider
+crash is durably non-replayable but has no effect receipt yet; recovery must
+report/resolve that unknown outcome in the later effect-ledger slice.
+
 - [ ] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.
 - [ ] Add run/task/handoff/effect/continuation/control record envelopes with
@@ -1648,7 +1670,9 @@ populate data only with real evidence.
 
 Estimate: **3-4.5 weeks**.
 
-- [ ] Implement signed/E2EE asks, answers, grants, revocations and stop records.
+- [~] Implement signed/E2EE asks, answers, grants, revocations and stop records.
+  Ask/answer and persisted standing-approval creation shipped in R121;
+  revocations, stop records and first-class grant records remain open.
 - [ ] Bind grant tokens to subject, issuer, parent, room/run/task/call, backend
   session, policy/membership epoch, input/resource digest, nonce, expiry and
   atomic remaining use count.

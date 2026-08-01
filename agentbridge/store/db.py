@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS cursors(
   PRIMARY KEY(scope, key)
 );
 
+CREATE TABLE IF NOT EXISTS claims(
+  scope TEXT NOT NULL,
+  key   TEXT NOT NULL,
+  ns    INTEGER NOT NULL,
+  PRIMARY KEY(scope, key)
+);
+CREATE INDEX IF NOT EXISTS idx_claims_ns ON claims(ns);
+
 CREATE TABLE IF NOT EXISTS docs(
   path       TEXT PRIMARY KEY,
   payload    TEXT NOT NULL,
@@ -100,6 +108,22 @@ class Store:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    def claim_once(self, scope: str, key: str, ns: int) -> bool:
+        """Atomically and durably claim one replay-sensitive record."""
+        c = self._conn()
+        with c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO claims(scope,key,ns) VALUES(?,?,?)",
+                (scope, key, int(ns)),
+            )
+        return cur.rowcount == 1
+
+    def prune_claims(self, before_ns: int) -> int:
+        c = self._conn()
+        with c:
+            cur = c.execute("DELETE FROM claims WHERE ns < ?", (int(before_ns),))
+        return cur.rowcount
 
     # -------------------------------------------------------- message cache
     def upsert_messages(self, chat_id: str, records: Iterable[dict]) -> list[dict]:

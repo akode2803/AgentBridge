@@ -605,12 +605,16 @@ def test_workspace_leaks_nothing_from_other_chats(arig):
 
 def test_engine_timeout_kills_the_run(arig, tmp_path):
     reg = ModelRegistry.load(arig.home)
-    responder = CliResponder(reg, SimpleNamespace(user="helper", tx=None),
-                             arig.home)
-    inv = reg.resolve(settings(adapter="stub"), "humans")
-    pack = responder.prompts.for_agent(None)
-    stub = tmp_path / "stub_cli.py"
-    rc, lines, err = responder._run(
-        [sys.executable, str(stub), "--sleep", "p"],
-        arig.home, 1.0, inv, pack, lambda s: None)
-    assert rc is None and err == "timed out"
+    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+                store_path=tmp_path / "timeout.sqlite")
+    try:
+        responder = CliResponder(reg, mesh, arig.home)
+        inv = reg.resolve(settings(adapter="stub"), "humans")
+        pack = responder.prompts.for_agent(None)
+        stub = tmp_path / "stub_cli.py"
+        rc, lines, err = responder._run(
+            [sys.executable, str(stub), "--sleep", "p"],
+            arig.home, 1.0, inv, pack, lambda s: None)
+        assert rc is None and err == "timed out"
+    finally:
+        mesh.close()

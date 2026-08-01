@@ -1,8 +1,9 @@
-"""Versioned contracts for the future signed runtime data plane.
+"""Versioned contracts and secure runtime-control primitives.
 
-These models are deliberately not wired into the current ``status/`` control
-paths. C1.0 freezes validation and canonical spelling; later C1 releases add
-encryption, signatures, transport, replay protection, and compatibility reads.
+C1.0 freezes the generic record contracts. C1.1 adds a production, room-bound
+permission lane with pairwise encryption, signatures, epoch validation, and
+durable one-use decisions. Other runtime controls remain on their documented
+legacy paths until their complete vertical slices land.
 """
 
 from .models import (

@@ -58,7 +58,7 @@ _FUNCTION_TIMEOUT_S = 6
 # for its poke. None = never poke (safety polls carry it). First match wins.
 _HINT_CLASSES: list[tuple[str, float | None]] = [
     ("presence/", None),      # heartbeats never poke; flips use hint_now()
-    ("status/asks/", 1.0),    # permission prompts are latency-critical (V85)
+    ("status/asks/", 1.0),    # legacy test/old-client lane only
     ("status/", 5.0),         # run-feed spinners: progress, not content
 ]
 _HINT_STATE_S = 10.0          # chats/*/state/* (read receipts) may settle lazily
@@ -719,6 +719,9 @@ class SupabaseTransport(Transport):
         """Class-coalesced change poke (R76): latency-critical writes
         announce fast, chatty maintenance classes batch, presence never
         pokes (SCALING.md §3). The hint stays garnish; polls stay truth."""
+        if "/runtime/owner-control/" in path:
+            self._hints.request(1.0)  # signed owner prompts are latency-critical
+            return
         for prefix, interval in _HINT_CLASSES:
             if path.startswith(prefix):
                 self._hints.request(interval)

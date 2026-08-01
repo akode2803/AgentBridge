@@ -150,7 +150,7 @@ def test_store_without_a_backend_reports_unavailable(tmp_path):
 # ------------------------------------------------------------ bridge tools
 
 def bridge_for(tmp_path, store, chat_kind="dm", global_memory="dm"):
-    b = PermissionBroker(FakeTx(), "helper")
+    b = PermissionBroker(FakeTx(), "helper", _legacy_test_lane=True)
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
     return BridgeServer(b, chat_id="c1", workspace=ws, auto_allow=[],

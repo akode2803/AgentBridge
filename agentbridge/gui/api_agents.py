@@ -257,23 +257,19 @@ def asks(app, req, mesh) -> dict:
     chat = (req.params.get("chat") or "").strip()
     out = []
     timers = []
+    alive_by_agent = {}
+    from ..harness.runtime.permissions import list_owner_asks
+
+    try:
+        out.extend(list_owner_asks(mesh, chat_id=chat))
+    except Exception:
+        pass
     for name in mesh.directory.names():
         acc = mesh.directory.get(name)
         if not (acc and acc.agent and acc.agent.owner == mesh.user):
             continue
         alive = runner_state(app, mesh, name)
-        doc = mesh.tx.get_doc(f"status/asks/{name}.json")
-        pending = doc.get("asks") if isinstance(doc, dict) else None
-        for a in pending or []:
-            if not isinstance(a, dict):
-                continue
-            if chat and a.get("chat_id") != chat:
-                continue
-            if alive is False:
-                continue     # the runner is gone — this prompt is a ghost
-            if alive is None and _ask_expired(doc, a):
-                continue     # remote agent: past its own timeout = decided
-            out.append({**a, "agent": name})
+        alive_by_agent[name] = alive
         hdoc = mesh.tx.get_doc(f"status/{name}_harness.json")
         for t in (hdoc.get("timers") if isinstance(hdoc, dict) else None) or []:
             if not isinstance(t, dict):
@@ -304,6 +300,8 @@ def asks(app, req, mesh) -> dict:
                                        else f"@{a.get('from')} wants a "
                                             f"diagnostic session ({cmd})"),
                             "peer": a.get("from")})
+    out = [a for a in out if a.get("kind") == "peer"
+           or alive_by_agent.get(a.get("agent")) is not False]
     return {"ok": True, "asks": out, "timers": timers}
 
 
@@ -339,24 +337,16 @@ def answer_ask(app, req, mesh) -> dict:
                 cur.append(str(d["peer"]))
                 mesh.set_agent_harness(agent, {"peer_auto": cur})
         return {"ok": True}
-    path = f"status/asks/{agent}_answers.json"
-    doc = mesh.tx.get_doc(path)
-    doc = doc if isinstance(doc, dict) else {}
-    answers = doc.setdefault("answers", {})
-    answers[ask_id] = {"verdict": verdict, "text": str(d.get("text") or "")[:2000],
-                       "by": mesh.user, "ts": utcnow_iso()}
-    for stale in list(answers)[:-100]:      # the doc never grows unbounded
-        answers.pop(stale, None)
-    mesh.tx.put_doc(path, doc)
-    if verdict == "always" and d.get("tool"):
-        acc = mesh.directory.get(agent)
-        cur = list((acc.agent.harness or {}).get("approvals") or []) \
-            if acc and acc.agent else []
-        rule = {"tool": str(d["tool"]),
-                "chat": str(d.get("chat") or "*")}
-        if rule not in cur:
-            cur.append(rule)
-            mesh.set_agent_harness(agent, {"approvals": cur})
+    from ..harness.runtime.envelope import EnvelopeError
+    from ..harness.runtime.permissions import PermissionRecordError, answer
+
+    chat_id = str(d.get("chat") or d.get("chat_id") or "")
+    try:
+        answer(mesh, chat_id=chat_id, agent=agent, ask_id=ask_id,
+               verdict=verdict, text=str(d.get("text") or ""))
+    except (PermissionRecordError, EnvelopeError, PermissionError,
+            OSError, ValueError) as exc:
+        return {"error": str(exc)}
     return {"ok": True}
 
 

@@ -85,6 +85,7 @@ class BridgeServer:
     """One run's MCP endpoint. Use as a context manager."""
 
     def __init__(self, broker: PermissionBroker, *, chat_id: str,
+                 run_id: str = "",
                  workspace: Path, auto_allow: list[str],
                  approvals: list[dict], ask_timeout_s: float,
                  deny_roots: list[Path] | None = None,
@@ -94,6 +95,7 @@ class BridgeServer:
                  timer_svc=None) -> None:
         self.broker = broker
         self.chat_id = chat_id
+        self.run_id = run_id
         self.workspace = workspace
         self.auto_allow = list(auto_allow or [])
         self.approvals = list(approvals or [])
@@ -138,6 +140,7 @@ class BridgeServer:
             allowed, message = self.broker.decide(
                 chat_id=self.chat_id, workspace=self.workspace,
                 tool=tool_name, tool_input=input or {},
+                run_id=self.run_id, call_id=tool_use_id,
                 auto_allow=self.auto_allow, approvals=self.approvals,
                 timeout_s=self.ask_timeout_s, deny_roots=self.deny_roots)
             if allowed:
@@ -172,7 +175,8 @@ class BridgeServer:
                     break
             verdict, text = self.broker.ask(
                 chat_id=self.chat_id, kind="question", tool="question",
-                detail=q, timeout_s=self.ask_timeout_s, options=opts)
+                detail=q, timeout_s=self.ask_timeout_s, options=opts,
+                run_id=self.run_id)
             if verdict == "answer" and text:
                 return text
             return ("no answer within the waiting window — decide "
@@ -627,7 +631,8 @@ class BridgeServer:
             None = approved, otherwise the refusal text to return."""
             verdict, text = self.broker.ask(
                 chat_id=self.chat_id, kind="permission", tool=tool,
-                detail=detail, timeout_s=self.ask_timeout_s)
+                detail=detail, timeout_s=self.ask_timeout_s,
+                run_id=self.run_id)
             if verdict in ("allow", "always"):
                 return None
             if verdict == "deny":

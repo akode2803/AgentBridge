@@ -460,41 +460,43 @@ def test_agents_create_patch_standdown_delete(rig):
 def test_asks_surface_and_answer_roundtrip(rig):
     """R18: the owner sees their agents' pending asks and answers them; an
     'always' verdict persists a standing approval rule."""
+    from agentbridge.harness.runtime.permissions import PermissionLane
+    from agentbridge.mesh.service import Mesh
     from agentbridge.transport.folder import FolderTransport
 
     rig.signup()
     rig.post("/api/mesh/create_agent", username="helper", display="Helper")
+    cid = rig.post("/api/mesh/create_chat", name="Approval room",
+                   members=["helper"])["chat"]["id"]
     tx = FolderTransport(rig.root)
-    # the harness would write this doc; simulate one pending ask — and its
-    # RUNNER's heartbeat (V109: an ask without a live run is a ghost)
+    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+                  store_path=rig.home / "helper-ask.sqlite")
+    helper.sync.sync_once([cid])
+    ask = PermissionLane(helper, "helper").publish_ask(
+        chat_id=cid, kind="permission", tool="Write",
+        detail="C:/elsewhere/x.txt", input_digest="a" * 64,
+        timeout_s=120, run_id="run-1", call_id="call-1")
     _beat(rig, "helper")
-    tx.put_doc("status/asks/helper.json", {
-        "agent": "helper", "asks": [
-            {"id": "ask1", "chat_id": "c1", "kind": "permission",
-             "tool": "Write", "detail": "C:/elsewhere/x.txt"}]})
-    out = rig.get("/api/mesh/asks", chat="c1")
-    assert [a["id"] for a in out["asks"]] == ["ask1"]
+    out = rig.get("/api/mesh/asks", chat=cid)
+    assert [a["id"] for a in out["asks"]] == [ask.id]
     assert out["asks"][0]["agent"] == "helper"
     assert rig.get("/api/mesh/asks", chat="other")["asks"] == []
 
     # scheduled wake-ups surface through the same endpoint (R19.5)
     tx.put_doc("status/helper_harness.json", {
         "agent": "helper", "paused": False, "queue": [],
-        "timers": [{"id": "t1", "chat_id": "c1", "at_ns": 1,
+        "timers": [{"id": "t1", "chat_id": cid, "at_ns": 1,
                     "note": "check back"}]})
     out = rig.get("/api/mesh/asks")
-    assert out["timers"] == [{"agent": "helper", "id": "t1", "chat_id": "c1",
+    assert out["timers"] == [{"agent": "helper", "id": "t1", "chat_id": cid,
                               "at_ns": 1, "note": "check back"}]
     assert rig.get("/api/mesh/asks", chat="other")["timers"] == []
 
-    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="ask1",
-                   verdict="always", tool="Write", chat="c1")
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=ask.id,
+                   verdict="always", tool="ForgedTool", chat=cid)
     assert out["ok"]
-    doc = tx.get_doc("status/asks/helper_answers.json")
-    assert doc["answers"]["ask1"]["verdict"] == "always"
-    assert doc["answers"]["ask1"]["by"] == "aryan"
     me = rig.get("/api/mesh/me")   # the standing rule persisted
-    assert {"tool": "Write", "chat": "c1"} \
+    assert {"tool": "Write", "chat": cid} \
         in me["my_agents"][0]["harness"]["approvals"]
 
     # peer session requests surface as a chatless ask, and a verdict routes
@@ -535,9 +537,10 @@ def test_asks_surface_and_answer_roundtrip(rig):
     rig.post("/api/mesh/signup", username="mallory", password="mallory-pw1",
              display="Mallory")
     assert rig.get("/api/mesh/asks")["asks"] == []
-    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="ask1",
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=ask.id,
                    verdict="allow")
     assert "error" in out
+    helper.close()
 
 
 def test_timer_cancel_owner_gated_and_merging(rig):
@@ -710,19 +713,25 @@ def test_asks_are_gated_by_process_truth(rig):
     no live runner (no/stale heartbeat, dead pid) contributes NO asks; a
     fresh heartbeat with a live pid revives them; a remote agent falls back
     to the ask's own timeout."""
+    from agentbridge.harness.runtime.permissions import PermissionLane
+    from agentbridge.mesh.service import Mesh
+
     rig.signup()
     rig.post("/api/mesh/create_agent", username="helper")   # machine=guibox
-    ask = {"id": "ask-1", "chat_id": "c1", "kind": "permission",
-           "tool": "Read", "detail": "x", "created": utcnow_iso(),
-           "expires_in_s": 120}
-    rig.app.mesh.tx.put_doc("status/asks/helper.json", {
-        "agent": "helper", "updated": utcnow_iso(), "asks": [ask]})
+    cid = rig.post("/api/mesh/create_chat", name="Local asks",
+                   members=["helper"])["chat"]["id"]
+    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+                  store_path=rig.home / "helper-liveness.sqlite")
+    helper.sync.sync_once([cid])
+    ask = PermissionLane(helper, "helper").publish_ask(
+        chat_id=cid, kind="permission", tool="Read", detail="x",
+        input_digest="c" * 64, timeout_s=120, run_id="r", call_id="c")
 
     # dead runner (no heartbeat at all): the prompt is a ghost
     assert rig.get("/api/mesh/asks")["asks"] == []
     # fresh heartbeat + live pid: the prompt is real
     _beat(rig, "helper")
-    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == ["ask-1"]
+    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == [ask.id]
     # stale heartbeat: dead again — a reused pid can't fake life
     _beat(rig, "helper", age_s=3600)
     assert rig.get("/api/mesh/asks")["asks"] == []
@@ -732,19 +741,21 @@ def test_asks_are_gated_by_process_truth(rig):
 
     # a REMOTE agent (hosted elsewhere): process truth is unknowable here,
     # so the ask's own timeout decides
-    rig.app.mesh.tx.put_doc("users/farbot.json", {
-        "name": "farbot", "kind": "agent", "display": "Farbot",
-        "created": "2026-01-01T00:00:00Z", "active": True,
-        "agent": {"owner": "aryan", "machine": "elsewhere", "harness": {}},
-    })
-    rig.app.mesh.tx.put_doc("status/asks/farbot.json", {
-        "agent": "farbot", "updated": utcnow_iso(),
-        "asks": [{**ask, "id": "ask-2"}]})
-    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == ["ask-2"]
-    rig.app.mesh.tx.put_doc("status/asks/farbot.json", {
-        "agent": "farbot", "updated": "2020-01-01T00:00:00Z",
-        "asks": [{**ask, "id": "ask-2", "expires_in_s": 60}]})
-    assert rig.get("/api/mesh/asks")["asks"] == []
+    rig.post("/api/mesh/create_agent", username="farbot")
+    rig.app.mesh.directory.patch(
+        "farbot", lambda doc: doc["agent"].update(machine="elsewhere"))
+    remote_cid = rig.post("/api/mesh/create_chat", name="Remote asks",
+                          members=["farbot"])["chat"]["id"]
+    farbot = Mesh(rig.root, "farbot", "elsewhere", encrypt=True, home=rig.home,
+                  store_path=rig.home / "farbot-liveness.sqlite")
+    farbot.sync.sync_once([remote_cid])
+    remote = PermissionLane(farbot, "farbot").publish_ask(
+        chat_id=remote_cid, kind="permission", tool="Read", detail="remote",
+        input_digest="d" * 64, timeout_s=0.2, run_id="r2", call_id="c2")
+    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == [remote.id]
+    wait_for(lambda: rig.get("/api/mesh/asks")["asks"] == [], timeout=2)
+    farbot.close()
+    helper.close()
 
 
 def test_run_lines_need_a_live_runner(rig):

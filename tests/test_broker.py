@@ -40,7 +40,7 @@ def fast_poll(monkeypatch):
 
 def make(tmp_path):
     tx = FakeTx()
-    b = PermissionBroker(tx, "helper")
+    b = PermissionBroker(tx, "helper", _legacy_test_lane=True)
     ws = tmp_path / "ws"
     ws.mkdir(parents=True, exist_ok=True)
     return tx, b, ws
@@ -231,7 +231,8 @@ def test_ask_doc_carries_label_and_options(tmp_path):
     from agentbridge.harness.docs import ToolDocs
 
     tx = FakeTx()
-    b = PermissionBroker(tx, "helper", docs=ToolDocs.load(tmp_path / "home"))
+    b = PermissionBroker(tx, "helper", docs=ToolDocs.load(tmp_path / "home"),
+                         _legacy_test_lane=True)
     ws = tmp_path / "ws"
     ws.mkdir()
 
@@ -341,7 +342,8 @@ def test_ask_detail_friendly_then_json_then_empty(tmp_path):
     from agentbridge.harness.docs import ToolDocs
 
     tx = FakeTx()
-    b = PermissionBroker(tx, "helper", docs=ToolDocs.load(tmp_path / "home"))
+    b = PermissionBroker(tx, "helper", docs=ToolDocs.load(tmp_path / "home"),
+                         _legacy_test_lane=True)
     ws = tmp_path / "ws"
     ws.mkdir()
 
@@ -535,7 +537,7 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id, other.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         timers: list[dict] = []
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -596,7 +598,7 @@ def test_bridge_attachment_forward_uses_durable_manifest(tmp_path, monkeypatch):
         owner.outbox.flush_once()
         agent.sync.sync_once([source.id, target.id])
 
-        broker = PermissionBroker(agent.tx, "helper")
+        broker = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         workspace = tmp_path / "ws-forward"
         workspace.mkdir()
         flush = agent.outbox.flush_once
@@ -690,7 +692,7 @@ def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
         here = svc.set(chat.id, at_ns, "check the deploy")
         there = svc.set(other.id, at_ns, "other chat's business")
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -745,7 +747,7 @@ def test_read_status_tool_is_privacy_gated(tmp_path):
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -783,7 +785,7 @@ def test_agent_profile_and_permission_tools(tmp_path):
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -835,7 +837,7 @@ def test_agent_edits_and_deletes_only_its_own_messages(tmp_path):
         agent.outbox.flush_once()
         agent.sync.sync_once([chat.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -874,7 +876,7 @@ def test_capability_creates_are_gated_and_capped(tmp_path):
     try:
         chat = owner.create_chat("Main", members=["helper"])
         agent.sync.sync_once()
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -954,7 +956,7 @@ def test_chat_member_tools_flags_and_group_edits(tmp_path):
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -1016,7 +1018,7 @@ def test_leave_and_clear_are_owner_gated(tmp_path):
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id])
 
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],
@@ -1105,7 +1107,7 @@ def test_context_and_files_parity_c(tmp_path):
         assert "Group permissions:" in ctx and "send_messages=all" in ctx
 
         # --- tools over real HTTP
-        b = PermissionBroker(agent.tx, "helper")
+        b = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
         ws = tmp_path / "ws"
         ws.mkdir()
         with BridgeServer(b, chat_id=chat.id, workspace=ws, auto_allow=[],

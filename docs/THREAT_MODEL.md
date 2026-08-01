@@ -412,15 +412,31 @@ fallback uses the same environment. `HOME`/`USERPROFILE` and explicitly named
 provider credentials remain compatibility allowances, so this is minimization,
 not filesystem or secret containment.
 
-**Open and release-blocking for C1:** permission answers, peer verdicts, run
-stop, timer cancel, global/room pause and AppLink control messages are transport
-documents without a uniform signature, encryption, authority-epoch or replay
-contract. Most are availability controls, but a forged answer for a published
-live ask id can authorize a real tool call, and a forged peer verdict can
-authorize a genuine signed peer request. AgentBridge will not add stronger
-tools on top of these records. They move together to the signed/E2EE runtime
-data plane described in `docs/AGENT_RUNTIME_PLAN.md`; the exact boundary and
-abuse table is frozen in `docs/AGENT_RUNTIME_C0_AUDIT.md`.
+**Closed for permission asks/decisions in C1.1 (R121):** production permission
+prompts no longer use the global plaintext `status/asks` documents. The ask and
+each append-only decision live below the actual chat, are encrypted to exactly
+the agent and its responsible member with a fresh record key, and are signed
+over routing, wrapped audience, nonce and ciphertext. Opening and consumption
+revalidate both current room memberships, owner binding, trusted identity keys,
+room key epoch, policy/membership/ownership epochs, absolute `ns` expiry, run,
+call and full input/ask digests. The GUI reconstructs the signed ask rather than
+trusting echoed tool or scope fields. Local SQLite atomically claims the ask id
+once, so a copied decision cannot authorize a second call after restart; two
+different valid owner answers fail closed. Invalid, legacy and mixed-version
+records are ignored, never downgraded. Pairwise encryption is required even
+inside the room because ordinary room members must not read a private host path
+or owner question simply because they share the chat.
+
+**Still open and release-blocking for later C1 slices:** peer verdicts, run
+stop, timer cancel, global/room pause and AppLink control messages remain
+transport documents without the complete signature, encryption,
+authority-epoch and replay contract. A forged peer verdict can still authorize
+a genuine signed peer request. Permission use is now non-replayable, but the
+effect ledger has not landed: a provider crash after consumption and before an
+effect receipt is a fail-closed unknown outcome, not a safely retryable action.
+AgentBridge will not add stronger tools on top of the remaining records. Their
+boundaries and abuse table remain in `docs/AGENT_RUNTIME_C0_AUDIT.md` and the
+delivery order in `docs/AGENT_RUNTIME_PLAN.md`.
 
 ## Migration note
 

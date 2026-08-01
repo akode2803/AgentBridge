@@ -69,6 +69,7 @@ class Delivery:
     # a harness that was offline fires the backlog late, and the prompt
     # warns the agent to re-check relevance instead of acting on stale plans
     late_s: float = 0.0
+    run_id: str = ""              # bound by Runner to the live RunFeed id
 
 
 class ConversationManager:

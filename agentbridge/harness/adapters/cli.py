@@ -213,7 +213,7 @@ class CliResponder:
         self.timer_svc = timers  # V87: the runner's TimerService (or None)
         self.prompts = PromptManager(self.home)
         self.docs = ToolDocs.load(self.home)   # R43: manual + popup phrases
-        self.broker = PermissionBroker(mesh.tx, self.agent, docs=self.docs)
+        self.broker = PermissionBroker(mesh, self.agent, docs=self.docs)
         # one store per agent process (qdrant local mode is single-process
         # per path); backends load lazily on the first remember/recall
         self.memory = MemoryStore(self.home / "harness" / self.agent / "memory")
@@ -304,6 +304,7 @@ class CliResponder:
             if inv.preset.permission_args:
                 bridge = stack.enter_context(BridgeServer(
                     self.broker, chat_id=delivery.chat_id,
+                    run_id=delivery.run_id,
                     workspace=workdir, auto_allow=auto_allow,
                     approvals=settings.approvals,
                     ask_timeout_s=settings.ask_timeout_s,

@@ -453,6 +453,7 @@ class AgentRunner:
                 return
             self.mesh.messaging.mark_read(chat_id)  # context read = read
             feed = RunFeed(self.mesh.tx, self.agent, chat_id)
+            delivery.run_id = feed.run_id
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
                 # message — the livefeed/sidebar say what the run is about
@@ -873,7 +874,7 @@ class AgentRunner:
         # heartbeat (process truth for the GUI) starts beating here too.
         from .broker import PermissionBroker
 
-        PermissionBroker.clear_stale(self.mesh.tx, self.agent)
+        PermissionBroker.clear_stale(self.mesh, self.agent)
         # V129: same rationale for the run feed — a previous process that
         # died MID-RUN never wrote its finish, and the doc haunted the chat
         # as a working bubble (the fresh beat below makes the runner look

@@ -154,8 +154,8 @@ def test_canonical_json_rejects_non_json_numbers():
         canonical_json_bytes({"value": float("nan")})
 
 
-def test_runtime_contract_is_not_integrated_with_legacy_controls():
-    """C1.0 must not silently make a partial security migration."""
+def test_legacy_controls_do_not_import_generic_runtime_records():
+    """C1.1 uses a dedicated secure lane, never generic partial records."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "agentbridge"
@@ -166,5 +166,4 @@ def test_runtime_contract_is_not_integrated_with_legacy_controls():
     ]
     for path in production:
         source = path.read_text(encoding="utf-8")
-        assert "harness.runtime" not in source
         assert "runtime.models" not in source
