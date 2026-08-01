@@ -258,12 +258,31 @@ def asks(app, req, mesh) -> dict:
     out = []
     timers = []
     alive_by_agent = {}
+    from ..harness.runtime.peer_control import list_owner_asks as list_peer_asks
     from ..harness.runtime.permissions import list_owner_asks
 
     try:
         out.extend(list_owner_asks(mesh, chat_id=chat))
     except Exception:
         pass
+    if not chat:
+        try:
+            for a in list_peer_asks(mesh):
+                repair = bool(a["repair"])
+                command = a["command"]
+                requester = a["requester"]
+                target = a["target"]
+                out.append({
+                    "id": a["id"], "agent": target, "kind": "peer",
+                    "tool": command, "chat_id": "", "repair": repair,
+                    "detail": (f"@{requester} wants to {command} "
+                               f"{target}'s harness" if repair else
+                               f"@{requester} wants a diagnostic session "
+                               f"({command})"),
+                    "peer": requester,
+                })
+        except Exception:
+            pass
     for name in mesh.directory.names():
         acc = mesh.directory.get(name)
         if not (acc and acc.agent and acc.agent.owner == mesh.user):
@@ -282,26 +301,8 @@ def asks(app, req, mesh) -> dict:
                            # V88: only recurring timers carry the key
                            **({"repeat": t["repeat"]}
                               if t.get("repeat") else {})})
-        # peer harness-access requests awaiting this owner (R22) — chatless,
-        # so they only surface in the unfiltered poll (the whole-page sweep).
-        # Served by the runner's loop, so a dead local runner = ghosts too.
-        if not chat and alive is not False:
-            pdoc = mesh.tx.get_doc(f"status/peer_pending/{name}.json")
-            for a in (pdoc.get("awaiting") if isinstance(pdoc, dict)
-                      else None) or []:
-                if not isinstance(a, dict):
-                    continue
-                repair = bool(a.get("repair"))
-                cmd = a.get("command")
-                out.append({"id": a.get("id"), "agent": name, "kind": "peer",
-                            "tool": cmd, "chat_id": "", "repair": repair,
-                            "detail": (f"@{a.get('from')} wants to {cmd} "
-                                       f"{name}'s harness" if repair
-                                       else f"@{a.get('from')} wants a "
-                                            f"diagnostic session ({cmd})"),
-                            "peer": a.get("from")})
-    out = [a for a in out if a.get("kind") == "peer"
-           or alive_by_agent.get(a.get("agent")) is not False]
+    out = [a for a in out
+           if alive_by_agent.get(a.get("agent")) is not False]
     return {"ok": True, "asks": out, "timers": timers}
 
 
@@ -318,33 +319,20 @@ def answer_ask(app, req, mesh) -> dict:
     verdict = str(d.get("verdict") or "").lower()
     if not ask_id or verdict not in ("allow", "always", "deny", "answer"):
         return {"error": "unknown ask or verdict"}
-    # peer sessions ride their own verdict doc (the harness's PeerService
-    # reads it); everything else rides the R18 answers doc
-    if d.get("kind") == "peer":
-        path = f"status/peer_pending/{agent}_verdicts.json"
-        doc = mesh.tx.get_doc(path)
-        doc = doc if isinstance(doc, dict) else {}
-        vs = doc.setdefault("verdicts", {})
-        vs[ask_id] = {"verdict": verdict, "by": mesh.user, "ts": utcnow_iso()}
-        for stale in list(vs)[:-100]:
-            vs.pop(stale, None)
-        mesh.tx.put_doc(path, doc)
-        if verdict == "always" and d.get("peer"):
-            acc = mesh.directory.get(agent)
-            cur = list((acc.agent.harness or {}).get("peer_auto") or []) \
-                if acc and acc.agent else []
-            if d["peer"] not in cur:
-                cur.append(str(d["peer"]))
-                mesh.set_agent_harness(agent, {"peer_auto": cur})
-        return {"ok": True}
     from ..harness.runtime.envelope import EnvelopeError
+    from ..harness.runtime.peer_control import (
+        PeerControlError, answer as answer_peer,
+    )
     from ..harness.runtime.permissions import PermissionRecordError, answer
 
     chat_id = str(d.get("chat") or d.get("chat_id") or "")
     try:
-        answer(mesh, chat_id=chat_id, agent=agent, ask_id=ask_id,
-               verdict=verdict, text=str(d.get("text") or ""))
-    except (PermissionRecordError, EnvelopeError, PermissionError,
+        if chat_id:
+            answer(mesh, chat_id=chat_id, agent=agent, ask_id=ask_id,
+                   verdict=verdict, text=str(d.get("text") or ""))
+        else:
+            answer_peer(mesh, target=agent, ask_id=ask_id, verdict=verdict)
+    except (PeerControlError, PermissionRecordError, EnvelopeError, PermissionError,
             OSError, ValueError) as exc:
         return {"error": str(exc)}
     return {"ok": True}

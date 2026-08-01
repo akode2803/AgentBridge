@@ -4,12 +4,21 @@ forged-request rejection — all over a real folder mesh with real keys."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from agentbridge.harness import PeerService
 from agentbridge.harness import peer as peer_mod
+from agentbridge.harness.runtime.envelope import EnvelopeError
+from agentbridge.harness.runtime.peer_control import (
+    PeerAsk,
+    PeerControlError,
+    answer as answer_peer,
+    ask_path,
+    list_owner_asks,
+)
 from agentbridge.harness.settings import HarnessSettings
 from agentbridge.mesh.service import Mesh
 
@@ -57,12 +66,9 @@ def repair_ops():
     return ops, calls
 
 
-def owner_answers(target: Mesh, req_id: str, verdict: str) -> None:
-    """Stand in for the GUI writing a verdict."""
-    path = f"status/peer_pending/{target.user}_verdicts.json"
-    doc = target.tx.get_doc(path) or {}
-    doc.setdefault("verdicts", {})[req_id] = {"verdict": verdict, "by": "owner"}
-    target.tx.put_doc(path, doc)
+def owner_answers(owner: Mesh, target: str, req_id: str, verdict: str) -> None:
+    """Stand in for the GUI creating authenticated owner evidence."""
+    answer_peer(owner, target=target, ask_id=req_id, verdict=verdict)
 
 
 # ------------------------------------------------------------ the happy path
@@ -78,7 +84,7 @@ def test_ask_then_owner_allows_then_response(world):
     assert [p["from"] for p in target.pending()] == ["ops"]
     assert requester.read_response("claude", rid) is None
 
-    owner_answers(claude, rid, "allow")
+    owner_answers(world["aryan"], "claude", rid, "allow")
     assert target.serve_once(settings("ask")) == 1
     resp = requester.read_response("claude", rid)
     assert resp and resp["payload"]["ok"] is True
@@ -90,30 +96,28 @@ def test_ask_then_owner_allows_then_response(world):
     assert [e["outcome"] for e in audit] == ["requested", "allowed"]
 
 
-def test_idle_ticks_never_rewrite_the_pending_doc(world):
-    """R76: _publish_pending is change-guarded. It used to write (and poke
-    every mirror in the fleet) on EVERY 5s tick forever — the last writer
-    that kept an idle mesh from ever idling on the metered transport."""
+def test_idle_ticks_never_rewrite_owner_control(world):
+    """Idle ticks never rewrite latency-critical owner-control evidence."""
     claude = world["claude"]
     target = PeerService(claude)
     writes = []
     real_put = claude.tx.put_doc
 
     def counting_put(path, data):
-        if "peer_pending" in path:
+        if "runtime/owner-control" in path:
             writes.append(path)
         return real_put(path, data)
 
     claude.tx.put_doc = counting_put
     for _ in range(5):                      # five idle ticks
         target.serve_once(settings("ask"))
-    assert len(writes) == 1                 # one initial publish, then silence
+    assert len(writes) == 0
 
     PeerService(world["ops"]).request("claude", "status")
     target.serve_once(settings("ask"))      # the list moved: one more write
-    assert len(writes) == 2
+    assert len(writes) == 1
     target.serve_once(settings("ask"))      # unchanged again: silent
-    assert len(writes) == 2
+    assert len(writes) == 1
 
 
 def test_off_policy_denies_silently_but_audits(world):
@@ -147,7 +151,7 @@ def test_always_verdict_serves_this_session(world):
     rid = PeerService(ops).request("claude", "status")
     target = PeerService(claude)
     target.serve_once(settings("ask"))
-    owner_answers(claude, rid, "always")
+    owner_answers(world["aryan"], "claude", rid, "always")
     target.serve_once(settings("ask"))
     resp = PeerService(ops).read_response("claude", rid)
     assert resp["payload"]["ok"] is True
@@ -158,7 +162,7 @@ def test_deny_and_idempotent_serves(world):
     rid = PeerService(ops).request("claude", "status")
     target = PeerService(claude)
     target.serve_once(settings("ask"))
-    owner_answers(claude, rid, "deny")
+    owner_answers(world["aryan"], "claude", rid, "deny")
     target.serve_once(settings("ask"))
     resp = PeerService(ops).read_response("claude", rid)
     assert resp["payload"]["ok"] is False
@@ -187,6 +191,147 @@ def test_forged_request_is_rejected(world):
     assert target.serve_once(settings("ask")) == 0
     assert target.pending() == []
     assert claude.tx.get_doc("status/peer_audit/claude.json") is None
+
+
+def test_valid_signed_request_cannot_be_retargeted(world):
+    """A member can copy bytes, but a valid request remains bound to `to`."""
+    claude, ops = world["claude"], world["ops"]
+    PeerService(ops).request("missing", "status")
+    raw = ops.tx.get_doc("peer/missing/req/ops.json")
+    claude.tx.put_doc("peer/claude/req/ops.json", raw)
+    assert PeerService(claude).serve_once(settings("ask")) == 0
+    assert PeerService(claude).pending() == []
+
+
+def test_owner_ask_is_encrypted_and_tamper_fails_closed(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    rid = PeerService(ops).request("claude", "status")
+    target = PeerService(claude)
+    assert target.serve_once(settings("ask")) == 1
+    path = ask_path("claude", rid)
+    raw = claude.tx.get_doc(path)
+    encoded = json.dumps(raw, sort_keys=True)
+    assert "ops" not in encoded and "status" not in encoded
+    assert [a["id"] for a in list_owner_asks(owner)] == [rid]
+
+    tampered = dict(raw)
+    tampered["ct"] = ("A" if raw["ct"][:1] != "A" else "B") + raw["ct"][1:]
+    claude.tx.put_doc(path, tampered)
+    assert list_owner_asks(owner) == []
+    with pytest.raises((EnvelopeError, PeerControlError)):
+        answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+
+
+def test_plaintext_legacy_verdict_is_ignored(world):
+    claude, ops = world["claude"], world["ops"]
+    rid = PeerService(ops).request("claude", "status")
+    target = PeerService(claude)
+    target.serve_once(settings("ask"))
+    claude.tx.put_doc("status/peer_pending/claude_verdicts.json", {
+        "verdicts": {rid: {"verdict": "allow", "by": "aryan"}}
+    })
+    assert target.serve_once(settings("ask")) == 0
+    assert [p["id"] for p in target.pending()] == [rid]
+    assert PeerService(ops).read_response("claude", rid) is None
+
+
+def test_policy_and_owner_changes_invalidate_peer_ask(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    rid = PeerService(ops).request("claude", "status")
+    PeerService(claude).serve_once(settings("ask"))
+    owner.set_agent_harness("claude", {"peer_access": "off"})
+    with pytest.raises(PeerControlError, match="policy_revision"):
+        answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+
+    rid2 = PeerService(ops).request("claude", "run_feed")
+    PeerService(claude).serve_once(settings("ask"))
+    owner.directory.patch(
+        "claude", lambda doc: doc.setdefault("agent", {}).update(owner="fable")
+    )
+    with pytest.raises(PeerControlError, match="responsible member"):
+        answer_peer(owner, target="claude", ask_id=rid2, verdict="allow")
+
+
+def test_duplicate_and_conflicting_owner_decisions_fail_closed(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    rid = PeerService(ops).request("claude", "status")
+    target = PeerService(claude)
+    target.serve_once(settings("ask"))
+    ask = PeerAsk(target._state()["awaiting"][rid]["control"])
+    answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+    answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+    assert target.control.read_decision(ask)["verdict"] == "allow"
+    assert target.control.read_decision(ask) == {"verdict": "deny", "replayed": True}
+
+    rid2 = PeerService(ops).request("claude", "run_feed")
+    target.serve_once(settings("ask"))
+    ask2 = PeerAsk(target._state()["awaiting"][rid2]["control"])
+    answer_peer(owner, target="claude", ask_id=rid2, verdict="allow")
+    answer_peer(owner, target="claude", ask_id=rid2, verdict="deny")
+    assert target.control.read_decision(ask2) == {"verdict": "deny", "conflict": True}
+    assert target.control.read_decision(ask2) == {"verdict": "deny", "replayed": True}
+
+
+def test_pending_owner_decision_survives_service_restart(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    rid = PeerService(ops).request("claude", "status")
+    first = PeerService(claude)
+    first.serve_once(settings("ask"))
+    answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+
+    restarted = PeerService(claude)
+    assert [p["id"] for p in restarted.pending()] == [rid]
+    assert restarted.serve_once(settings("ask")) == 1
+    assert PeerService(ops).read_response("claude", rid)["payload"]["ok"] is True
+
+
+def test_inactive_requester_invalidates_pending_ask(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    rid = PeerService(ops).request("claude", "status")
+    PeerService(claude).serve_once(settings("ask"))
+    owner.directory.patch("ops", lambda doc: doc.update(active=False))
+    with pytest.raises(PeerControlError, match="no longer active"):
+        answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+
+
+def test_always_never_grants_repair_and_rolls_back_on_write_failure(world,
+                                                                    monkeypatch):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    repair_id = PeerService(ops).request("claude", "pause")
+    PeerService(claude).serve_once(settings("ask", repair=True))
+    with pytest.raises(PeerControlError, match="only be allowed once"):
+        answer_peer(owner, target="claude", ask_id=repair_id, verdict="always")
+    assert owner.directory.get("claude").agent.harness.get("peer_auto") in (None, [])
+
+    diagnostic_id = PeerService(ops).request("claude", "status")
+    PeerService(claude).serve_once(settings("ask", repair=True))
+
+    def fail_create(path, doc):
+        raise OSError("transport unavailable")
+
+    monkeypatch.setattr(owner.tx, "create_doc", fail_create)
+    with pytest.raises(OSError, match="transport unavailable"):
+        answer_peer(owner, target="claude", ask_id=diagnostic_id,
+                    verdict="always")
+    assert owner.directory.get("claude").agent.harness.get("peer_auto") == []
+
+
+def test_consumed_repair_is_never_retried_after_crash_boundary(world):
+    claude, ops, owner = world["claude"], world["ops"], world["aryan"]
+    repair, calls = repair_ops()
+    rid = PeerService(ops).request("claude", "pause")
+    target = PeerService(claude, repair_ops=repair)
+    target.serve_once(settings("ask", repair=True))
+    ask = PeerAsk(target._state()["awaiting"][rid]["control"])
+    answer_peer(owner, target="claude", ask_id=rid, verdict="allow")
+    assert target.control.read_decision(ask)["verdict"] == "allow"
+
+    # Simulate a crash after durable claim but before the mutation executes.
+    assert target.serve_once(settings("ask", repair=True)) == 1
+    assert calls == []
+    resp = PeerService(ops).read_response("claude", rid)
+    assert resp["payload"]["ok"] is False
+    assert "outcome is unknown" in resp["payload"]["error"]
 
 
 def test_unknown_command_is_refused(world):
@@ -225,7 +370,7 @@ def test_repair_always_asks_even_for_auto_peer(world):
     audit = claude.tx.get_doc("status/peer_audit/claude.json")["entries"]
     assert audit[-1]["outcome"] == "requested-repair"
 
-    owner_answers(claude, rid, "allow")
+    owner_answers(world["aryan"], "claude", rid, "allow")
     target.serve_once(settings("ask", auto=["ops"], repair=True))
     assert calls == ["pause"]                 # ran only after the owner allowed
     resp = PeerService(ops).read_response("claude", rid)
@@ -239,7 +384,7 @@ def test_repair_denied_by_owner_does_not_run(world):
     rid = PeerService(ops).request("claude", "clear_timers")
     target = PeerService(claude, repair_ops=ops_svc)
     target.serve_once(settings("ask", repair=True))
-    owner_answers(claude, rid, "deny")
+    owner_answers(world["aryan"], "claude", rid, "deny")
     target.serve_once(settings("ask", repair=True))
     assert calls == []
     assert PeerService(ops).read_response("claude", rid)["payload"]["ok"] is False

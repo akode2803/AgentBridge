@@ -461,16 +461,21 @@ def test_asks_surface_and_answer_roundtrip(rig):
     """R18: the owner sees their agents' pending asks and answers them; an
     'always' verdict persists a standing approval rule."""
     from agentbridge.harness.runtime.permissions import PermissionLane
+    from agentbridge.harness.peer import PeerService
     from agentbridge.mesh.service import Mesh
     from agentbridge.transport.folder import FolderTransport
+    from types import SimpleNamespace
 
     rig.signup()
     rig.post("/api/mesh/create_agent", username="helper", display="Helper")
+    rig.post("/api/mesh/create_agent", username="ops", display="Ops")
     cid = rig.post("/api/mesh/create_chat", name="Approval room",
                    members=["helper"])["chat"]["id"]
     tx = FolderTransport(rig.root)
     helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
                   store_path=rig.home / "helper-ask.sqlite")
+    ops = Mesh(rig.root, "ops", "guibox", encrypt=True, home=rig.home,
+               store_path=rig.home / "ops-peer.sqlite")
     helper.sync.sync_once([cid])
     ask = PermissionLane(helper, "helper").publish_ask(
         chat_id=cid, kind="permission", tool="Write",
@@ -499,36 +504,37 @@ def test_asks_surface_and_answer_roundtrip(rig):
     assert {"tool": "Write", "chat": cid} \
         in me["my_agents"][0]["harness"]["approvals"]
 
-    # peer session requests surface as a chatless ask, and a verdict routes
-    # to the peer verdict doc; "always" grants a standing peer_auto (R22)
-    tx.put_doc("status/peer_pending/helper.json", {
-        "agent": "helper", "awaiting": [
-            {"id": "peer1", "from": "ops", "command": "status"}]})
+    # Peer prompts are reconstructed from target-signed, pairwise-encrypted
+    # owner evidence. Browser-supplied kind/peer/tool fields are ignored.
+    peer_settings = SimpleNamespace(peer_access="ask", peer_auto=[],
+                                    peer_repair=True)
+    target = PeerService(helper, repair_ops={"pause": lambda: "held"})
+    requester = PeerService(ops)
+    peer1 = requester.request("helper", "status")
+    assert target.serve_once(peer_settings) == 1
     surfaced = [a for a in rig.get("/api/mesh/asks")["asks"]
                 if a.get("kind") == "peer"]
     assert surfaced and surfaced[0]["peer"] == "ops"
-    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="peer1",
-                   verdict="always", kind="peer", peer="ops")
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=peer1,
+                   verdict="always", kind="permission", peer="mallory",
+                   tool="ForgedTool")
     assert out["ok"]
-    v = tx.get_doc("status/peer_pending/helper_verdicts.json")
-    assert v["verdicts"]["peer1"]["verdict"] == "always"
+    assert target.serve_once(peer_settings) == 1
+    assert requester.read_response("helper", peer1)["payload"]["ok"] is True
     me = rig.get("/api/mesh/me")
     assert "ops" in me["my_agents"][0]["harness"]["peer_auto"]
 
-    # a REPAIR request surfaces with its repair flag + a mutation-worded
-    # detail; a verdict routes the same way (R22.5)
-    tx.put_doc("status/peer_pending/helper.json", {
-        "agent": "helper", "awaiting": [
-            {"id": "peer2", "from": "ops", "command": "pause",
-             "repair": True}]})
+    # A repair request is also reconstructed server-side and remains one-shot.
+    peer2 = requester.request("helper", "pause")
+    assert target.serve_once(peer_settings) == 1
     rep = [a for a in rig.get("/api/mesh/asks")["asks"]
-           if a.get("id") == "peer2"][0]
+           if a.get("id") == peer2][0]
     assert rep["repair"] is True and "pause" in rep["detail"]
-    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id="peer2",
-                   verdict="allow", kind="peer", peer="ops")
+    out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=peer2,
+                   verdict="allow", kind="permission", peer="mallory")
     assert out["ok"]
-    v = tx.get_doc("status/peer_pending/helper_verdicts.json")
-    assert v["verdicts"]["peer2"]["verdict"] == "allow"
+    assert target.serve_once(peer_settings) == 1
+    assert requester.read_response("helper", peer2)["payload"]["ok"] is True
 
     # not the owner -> no visibility, no verdicts. (The logout must be a
     # real, password-gated one: V124 made signup refuse while a session
@@ -540,6 +546,7 @@ def test_asks_surface_and_answer_roundtrip(rig):
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=ask.id,
                    verdict="allow")
     assert "error" in out
+    ops.close()
     helper.close()
 
 

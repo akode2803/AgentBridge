@@ -1558,12 +1558,27 @@ are bound to the full ask digest and atomically claimed once in local SQLite,
 including after restart. Conflicting valid owner decisions fail closed. The GUI
 reconstructs the ask server-side and never trusts echoed tool/scope bindings;
 outside-workspace approvals cannot become standing grants. There is no
-production plaintext or mixed-version fallback. Peer verdicts remain on their
-separate legacy path for the next complete slice.
+production plaintext or mixed-version fallback.
+
+**C1.2 responsible-member peer-control slice (R122):** chatless peer harness
+prompts no longer use global plaintext pending/verdict maps. The target writes
+one strict ask under `runtime/owner-control/<target>/peer/asks/<id>.json`, and
+the responsible member writes unique decisions beneath that ask. Ask and
+decision payloads are pairwise encrypted to exactly target and current owner,
+signed over routing/audience/ciphertext, and bound to the exact authenticated
+peer-request digest, requester, command, repair class, ownership epoch, policy
+revision and absolute expiry. Owner discovery scans owned agents rather than
+inventing a room; GUI answers reopen the signed ask and ignore all echoed peer,
+tool and repair fields. Decisions are one-use across restart, conflicts deny,
+legacy plaintext allows are ignored, and repair approvals are never standing
+grants or automatically retried after an ambiguous crash. This slice also
+closes signed request/response retargeting checks. Peer request, response and
+audit payload confidentiality, generic effect receipts, and the remaining
+runtime controls are still later C1 work.
 
 This is intentionally narrower than the complete C1/C5 data plane. Generic
-run/task/handoff/effect records, effect receipts and `unknown` outcomes, stop
-and revocation records, old-client projections, and peer verdict migration are
+run/task/handoff/effect records, generic effect receipts, stop and revocation
+records, old-client projections, and peer request/response/audit encryption are
 still open. In particular, an approval consumed immediately before a provider
 crash is durably non-replayable but has no effect receipt yet; recovery must
 report/resolve that unknown outcome in the later effect-ledger slice.

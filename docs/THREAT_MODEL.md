@@ -427,16 +427,31 @@ records are ignored, never downgraded. Pairwise encryption is required even
 inside the room because ordinary room members must not read a private host path
 or owner question simply because they share the chat.
 
-**Still open and release-blocking for later C1 slices:** peer verdicts, run
-stop, timer cancel, global/room pause and AppLink control messages remain
-transport documents without the complete signature, encryption,
-authority-epoch and replay contract. A forged peer verdict can still authorize
-a genuine signed peer request. Permission use is now non-replayable, but the
-effect ledger has not landed: a provider crash after consumption and before an
-effect receipt is a fail-closed unknown outcome, not a safely retryable action.
-AgentBridge will not add stronger tools on top of the remaining records. Their
-boundaries and abuse table remain in `docs/AGENT_RUNTIME_C0_AUDIT.md` and the
-delivery order in `docs/AGENT_RUNTIME_PLAN.md`.
+**Closed for chatless peer verdicts in C1.2 (R122):** target-agent asks and
+responsible-member decisions now use a distinct pairwise-encrypted, signed
+contract rather than a fake room or plaintext `status/peer_pending` map. Each
+decision binds the full authenticated request and ask digests, verified
+requester/command/repair class, current target-owner key epoch, policy revision
+and expiry, then receives a durable one-use claim. GUI discovery and answer
+routing reconstruct those records server-side; copied, retargeted, tampered,
+stale-owner, stale-policy, inactive-requester, conflicting, replayed and legacy
+plaintext evidence fails closed. Diagnostic `always` grants use only the
+verified requester and roll back if decision publication fails; repair remains
+one-shot. A repair approval consumed across a crash reports an unknown outcome
+and is never automatically retried.
+
+**Still open and release-blocking for later C1 slices:** run stop, timer cancel,
+global/room pause and AppLink control messages remain transport documents
+without the complete signature, encryption,
+authority-epoch and replay contract. Peer request/response/audit payloads also
+remain signed plaintext metadata paths; C1.2 authenticates owner authorization,
+not full peer-channel confidentiality. Permission use is non-replayable, but
+the generic effect ledger has not landed: a provider crash after consumption
+and before an effect receipt is a fail-closed unknown outcome, not a safely
+retryable action. AgentBridge will not add stronger tools on top of the
+remaining records. Their boundaries and abuse table remain in
+`docs/AGENT_RUNTIME_C0_AUDIT.md` and the delivery order in
+`docs/AGENT_RUNTIME_PLAN.md`.
 
 ## Migration note
 

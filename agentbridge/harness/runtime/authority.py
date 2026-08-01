@@ -18,20 +18,11 @@ def _revision(value) -> int:
 
 def authority(mesh, agent: str, chat_id: str) -> dict[str, int | str]:
     """Return deterministic epochs for the current agent-owner-room binding."""
-    owner = mesh.directory.owner_of(agent)
-    if not owner:
-        raise AuthorityError("agent has no responsible member")
+    base = responsible_authority(mesh, agent)
+    owner = str(base["owner"])
     snap = mesh.snapshot(chat_id)
     if agent not in snap.members or owner not in snap.members:
         raise AuthorityError("agent and responsible member must both be chat members")
-    agent_acc = mesh.directory.get(agent)
-    owner_acc = mesh.directory.get(owner)
-    if not agent_acc or not owner_acc or not agent_acc.active or not owner_acc.active:
-        raise AuthorityError("agent and responsible member must be active")
-    if not agent_acc.keys.sign_pub or not agent_acc.keys.agree_pub:
-        raise AuthorityError("agent identity keys are unavailable")
-    if not owner_acc.keys.sign_pub or not owner_acc.keys.agree_pub:
-        raise AuthorityError("responsible member identity keys are unavailable")
     members = [
         {
             "name": name,
@@ -40,6 +31,26 @@ def authority(mesh, agent: str, chat_id: str) -> dict[str, int | str]:
         }
         for name, member in sorted(snap.members.items())
     ]
+    return {
+        **base,
+        "key_epoch": int(snap.key_epoch),
+        "membership_epoch": _revision(members),
+    }
+
+
+def responsible_authority(mesh, agent: str) -> dict[str, int | str]:
+    """Return the current chatless target-agent/responsible-member binding."""
+    owner = mesh.directory.owner_of(agent)
+    if not owner:
+        raise AuthorityError("agent has no responsible member")
+    agent_acc = mesh.directory.get(agent)
+    owner_acc = mesh.directory.get(owner)
+    if not agent_acc or not owner_acc or not agent_acc.active or not owner_acc.active:
+        raise AuthorityError("agent and responsible member must be active")
+    if not agent_acc.keys.sign_pub or not agent_acc.keys.agree_pub:
+        raise AuthorityError("agent identity keys are unavailable")
+    if not owner_acc.keys.sign_pub or not owner_acc.keys.agree_pub:
+        raise AuthorityError("responsible member identity keys are unavailable")
     ownership = {
         "agent": agent,
         "owner": owner,
@@ -53,8 +64,6 @@ def authority(mesh, agent: str, chat_id: str) -> dict[str, int | str]:
     harness = dict(agent_acc.agent.harness or {}) if agent_acc.agent else {}
     return {
         "owner": owner,
-        "key_epoch": int(snap.key_epoch),
-        "membership_epoch": _revision(members),
         "ownership_epoch": _revision(ownership),
         "policy_revision": _revision(harness),
     }

@@ -17,8 +17,9 @@ The target gate, owner-controlled (never the agent's own choice):
   which runs without asking thereafter.
 
 ``serve_once`` runs in the target harness's tick — NON-BLOCKING: a request
-awaiting the owner is parked in a pending doc (the GUI raises it) and
-resolved on a later tick when the verdict lands, or denied on timeout.
+awaiting the owner is parked in local state and projected through a signed,
+pairwise-encrypted responsible-member ask. It resolves on a later tick when a
+valid one-use owner decision lands, or denies on timeout.
 
 Two command classes:
 - READ diagnostics (ping / status / run_feed) — gated by ``peer_access``;
@@ -43,14 +44,13 @@ import time
 
 from .. import crypto
 from ..core.timekit import new_id, utcnow_iso
+from .runtime.peer_control import PeerAsk, PeerControlLane
 
 __all__ = ["PeerService", "PEER_COMMANDS", "signing_bytes"]
 
 REQ_DIR = "peer/{target}/req/"
 REQ_DOC = "peer/{target}/req/{requester}.json"
 RESP_DOC = "peer/{target}/resp/{requester}.json"
-PENDING_DOC = "status/peer_pending/{target}.json"
-VERDICT_DOC = "status/peer_pending/{target}_verdicts.json"
 AUDIT_DOC = "status/peer_audit/{target}.json"
 STATE_KEY = "harness/peer_state"          # per-requester resolve cursor + awaiting
 
@@ -86,7 +86,7 @@ class PeerService:
         # commands can't run here, only be sent.
         self.repair_ops = repair_ops or {}
         self._lock = threading.Lock()
-        self._last_pending: list[dict] | None = None  # change guard (R76)
+        self.control = PeerControlLane(mesh, self.agent)
 
     # ------------------------------------------------------------- signing
     def _bundle(self):
@@ -121,7 +121,9 @@ class PeerService:
         """The target's signed reply to my request, once it lands (verified).
         ``req_id`` filters to a specific request."""
         env = self.tx.get_doc(RESP_DOC.format(target=target, requester=self.agent))
-        if not isinstance(env, dict) or not self._authentic(env, target):
+        if (not isinstance(env, dict) or env.get("kind") != "response"
+                or env.get("to") != self.agent or env.get("from") != target
+                or not self._authentic(env, target)):
             return None
         if req_id and env.get("req_id") != req_id:
             return None
@@ -138,9 +140,10 @@ class PeerService:
             return 0
 
     def pending(self) -> list[dict]:
-        doc = self.tx.get_doc(PENDING_DOC.format(target=self.agent))
-        awaiting = (doc or {}).get("awaiting") if isinstance(doc, dict) else None
-        return list(awaiting or [])
+        awaiting = (self._state().get("awaiting") or {}).values()
+        return [{"id": m.get("id"), "from": m.get("from"),
+                 "command": m.get("command"), "repair": bool(m.get("repair"))}
+                for m in awaiting]
 
     # ------------------------------------------------------------- guts
     def _state(self) -> dict:
@@ -163,17 +166,35 @@ class PeerService:
         resolved_ns = dict(state.get("resolved_ns") or {})
         wrote = 0
 
-        # 1) verdicts the owner has answered
-        verdicts = self.tx.get_doc(VERDICT_DOC.format(target=self.agent)) or {}
-        vmap = verdicts.get("verdicts") if isinstance(verdicts, dict) else {}
+        # 1) signed, encrypted verdicts the responsible member has answered
         for rid, meta in list(awaiting.items()):
-            v = (vmap or {}).get(rid)
-            if not isinstance(v, dict):
+            control = meta.get("control")
+            if not isinstance(control, dict):
+                # A pre-R122 local await has no authenticated owner evidence.
+                self._respond(meta, ok=False,
+                              error="owner approval expired during upgrade")
+                self._audit(meta, "denied-legacy-verdict")
+                resolved[meta["from"]] = rid
+                awaiting.pop(rid, None)
+                wrote += 1
+                continue
+            ask = PeerAsk(control)
+            v = self.control.read_decision(ask)
+            if v is None:
+                continue
+            if v.get("replayed") and meta.get("repair"):
+                self._respond(
+                    meta, ok=False,
+                    error=("repair approval was already consumed; its outcome "
+                           "is unknown and the mutation will not be retried"),
+                )
+                self._audit(meta, "repair-outcome-unknown")
+                resolved[meta["from"]] = rid
+                awaiting.pop(rid, None)
+                self.control.withdraw(ask)
+                wrote += 1
                 continue
             verdict = str(v.get("verdict") or "deny")
-            # "always" persistence is the OWNER's write (D19: only the
-            # responsible member sets agent config) — the GUI does it when it
-            # records the verdict; here always simply serves this session
             if verdict in ("allow", "always"):
                 self._run_and_respond(meta)
                 self._audit(meta, "allowed")
@@ -183,17 +204,21 @@ class PeerService:
                 self._audit(meta, "denied")
             resolved[meta["from"]] = rid
             awaiting.pop(rid, None)
+            self.control.withdraw(ask)
             wrote += 1
 
         # 2) expire awaits nobody answered (fail closed)
-        now = time.time()
+        now_ns = time.time_ns()
         for rid, meta in list(awaiting.items()):
-            if now - meta.get("at", now) > AWAIT_TIMEOUT_S:
+            control = meta.get("control") or {}
+            if now_ns >= int(control.get("expires_ns") or 0):
                 self._respond(meta, ok=False,
                               error="no answer from the responsible member")
                 self._audit(meta, "timed-out")
                 resolved[meta["from"]] = rid
                 awaiting.pop(rid, None)
+                if isinstance(control, dict) and control:
+                    self.control.withdraw(PeerAsk(control))
                 wrote += 1
 
         # 3) new requests
@@ -207,6 +232,9 @@ class PeerService:
             requester = env.get("from") or ""
             rid = env.get("id") or ""
             if not requester or not rid:
+                continue
+            if (env.get("to") != self.agent or env.get("kind") != "request"
+                    or env.get("from") != requester):
                 continue
             if resolved.get(requester) == rid or rid in awaiting:
                 continue  # already handled / already awaiting
@@ -225,7 +253,7 @@ class PeerService:
                 continue
             is_repair = command in REPAIR_COMMANDS
             meta = {"id": rid, "from": requester, "command": command,
-                    "payload": env.get("payload") or {}, "at": now,
+                    "payload": env.get("payload") or {},
                     "repair": is_repair}
             if policy == "off":
                 self._respond(meta, ok=False,
@@ -239,6 +267,8 @@ class PeerService:
                 self._audit(meta, "denied-no-repair")
             elif is_repair:
                 # a mutation ALWAYS asks — peer_auto covers diagnostics only
+                meta["control"] = self.control.publish(
+                    env, repair=True, timeout_s=AWAIT_TIMEOUT_S).record
                 awaiting[rid] = meta
                 self._audit(meta, "requested-repair")
             elif requester in auto:
@@ -246,13 +276,14 @@ class PeerService:
                 resolved[requester] = rid
                 self._audit(meta, "allowed-auto")
             else:
+                meta["control"] = self.control.publish(
+                    env, repair=False, timeout_s=AWAIT_TIMEOUT_S).record
                 awaiting[rid] = meta        # park for the owner popup
                 self._audit(meta, "requested")
             wrote += 1
 
         self._save_state({"awaiting": awaiting, "resolved": resolved,
                           "resolved_ns": resolved_ns})
-        self._publish_pending(awaiting)
         return wrote
 
     # ------------------------------------------------------------ commands
@@ -305,23 +336,6 @@ class PeerService:
                        "command": req_env.get("command")}, ok=ok, error=error)
 
     # ------------------------------------------------------------ plumbing
-    def _publish_pending(self, awaiting: dict) -> None:
-        rows = [{"id": m["id"], "from": m["from"],
-                 "command": m["command"],
-                 "repair": bool(m.get("repair"))}
-                for m in awaiting.values()]
-        # R76: change-guarded like publish_status — this used to write (and
-        # poke every mirror in the fleet) on EVERY 5s tick forever, which
-        # single-handedly kept the mesh from ever idling (hint meter: 33
-        # pokes/90s from two idle runners). Write only when the list moved.
-        if rows == self._last_pending:
-            return
-        self._last_pending = rows
-        self.tx.put_doc(PENDING_DOC.format(target=self.agent), {
-            "agent": self.agent, "updated": utcnow_iso(),
-            "awaiting": rows,
-        })
-
     def _audit(self, meta: dict, outcome: str) -> None:
         path = AUDIT_DOC.format(target=self.agent)
         doc = self.tx.get_doc(path)

@@ -36,9 +36,6 @@ def seal(mesh, *, kind: str, record_id: str, ns: int, sender: str,
          recipient: str, agent: str, chat_id: str, expires_ns: int,
          key_epoch: int, membership_epoch: int, ownership_epoch: int,
          policy_revision: int, payload: dict) -> dict:
-    bundle = mesh.keystore.load(sender)
-    if not bundle:
-        raise EnvelopeError(f"identity key for @{sender} is locked or unavailable")
     header = {
         "v": 1, "kind": kind, "id": record_id, "ns": int(ns),
         "sender": sender, "recipient": recipient, "agent": agent,
@@ -48,6 +45,20 @@ def seal(mesh, *, kind: str, record_id: str, ns: int, sender: str,
         "ownership_epoch": int(ownership_epoch),
         "policy_revision": int(policy_revision),
     }
+    return seal_pairwise(
+        mesh, header=header, sender=sender, recipient=recipient,
+        payload=payload,
+    )
+
+
+def seal_pairwise(mesh, *, header: dict, sender: str, recipient: str,
+                  payload: dict) -> dict:
+    """Seal an exact protocol header to one signer and one recipient."""
+    bundle = mesh.keystore.load(sender)
+    if not bundle:
+        raise EnvelopeError(f"identity key for @{sender} is locked or unavailable")
+    if header.get("sender") != sender or header.get("recipient") != recipient:
+        raise EnvelopeError("envelope header audience does not match its keys")
     key = crypto.new_chat_key()
     wrapped = {
         sender: crypto.wrap_key_for(_agree_pub(mesh, sender), key),
@@ -62,39 +73,53 @@ def seal(mesh, *, kind: str, record_id: str, ns: int, sender: str,
 def open_envelope(mesh, raw: object, *, expected_kind: str,
                   expected_sender: str, expected_recipient: str,
                   expected_agent: str, expected_chat: str) -> OpenedEnvelope:
-    env = _strict(raw, {"header", "wrapped", "nonce", "ct", "sig"}, "envelope")
-    header = _strict(env["header"], {
+    fields = {
         "v", "kind", "id", "ns", "sender", "recipient", "agent",
         "chat_id", "expires_ns", "membership_epoch", "ownership_epoch",
         "policy_revision", "key_epoch",
-    }, "header")
+    }
     expected = {
         "v": 1, "kind": expected_kind, "sender": expected_sender,
         "recipient": expected_recipient, "agent": expected_agent,
         "chat_id": expected_chat,
     }
+    return open_pairwise(
+        mesh, raw, header_fields=fields, expected=expected,
+        sender=expected_sender, recipient=expected_recipient,
+        viewer=expected_recipient,
+    )
+
+
+def open_pairwise(mesh, raw: object, *, header_fields: set[str], expected: dict,
+                  sender: str, recipient: str, viewer: str) -> OpenedEnvelope:
+    """Verify and decrypt one strict pairwise envelope for an audience member."""
+    env = _strict(raw, {"header", "wrapped", "nonce", "ct", "sig"}, "envelope")
+    header = _strict(env["header"], header_fields, "header")
     if any(header.get(k) != v for k, v in expected.items()):
         raise EnvelopeError("envelope routing does not match the expected authority")
     for name in ("id",):
         if not isinstance(header.get(name), str) or not header[name]:
             raise EnvelopeError(f"invalid header {name}")
-    for name in ("ns", "expires_ns", "key_epoch", "membership_epoch",
-                 "ownership_epoch", "policy_revision"):
-        if isinstance(header.get(name), bool) or not isinstance(header.get(name), int):
-            raise EnvelopeError(f"invalid header {name}")
+    for name, value in header.items():
+        if (name == "ns" or name.endswith("_ns")
+                or name.endswith("_epoch") or name == "policy_revision"):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise EnvelopeError(f"invalid header {name}")
     wrapped = env["wrapped"]
-    if not isinstance(wrapped, dict) or set(wrapped) != {expected_sender, expected_recipient}:
+    if not isinstance(wrapped, dict) or set(wrapped) != {sender, recipient}:
         raise EnvelopeError("envelope audience is not exactly sender and recipient")
+    if viewer not in wrapped:
+        raise EnvelopeError("viewer is outside the envelope audience")
     signed = {k: env[k] for k in ("header", "wrapped", "nonce", "ct")}
-    sign_pub = mesh.directory.sign_pub(expected_sender)
+    sign_pub = mesh.directory.sign_pub(sender)
     if not sign_pub or not crypto.verify(sign_pub, str(env["sig"]),
                                          canonical_json_bytes(signed)):
         raise EnvelopeError("invalid envelope signature")
-    bundle = mesh.keystore.load(expected_recipient)
+    bundle = mesh.keystore.load(viewer)
     if not bundle:
-        raise EnvelopeError(f"identity key for @{expected_recipient} is locked or unavailable")
+        raise EnvelopeError(f"identity key for @{viewer} is locked or unavailable")
     try:
-        key = crypto.unwrap_key_with(bundle, wrapped[expected_recipient])
+        key = crypto.unwrap_key_with(bundle, wrapped[viewer])
         aad = canonical_json_bytes({"header": header, "wrapped": wrapped})
         plain = crypto.unseal_bytes(key, aad, str(env["nonce"]), str(env["ct"]))
         import json
