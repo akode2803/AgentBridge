@@ -17,14 +17,25 @@ import "./members.js";
 import "./forward.js";
 import "./settings.js";
 
-// V127: the idle auto-lock clock. Real input bumps it (listeners in init
-// below), and so do the auth transitions detected in refresh() — an
-// AUTOMATIC re-sign-in (V122 restore) or an unlock arrives with zero
-// keystrokes, and a 5-min window that expired while the app was busy
-// recovering must not lock it the moment it becomes usable.
-let lastActive = Date.now();
-const bumpIdle = () => { lastActive = Date.now(); };
-let prevAuth = { user: null, locked: false };
+// V127/V147: report only real input to the process-wide app-lock clock. The
+// server owns expiry, so background-tab timer throttling and idle sibling
+// windows cannot produce conflicting lock decisions.
+let lastActivityReport = 0;
+const bumpIdle = () => {
+  const now = Date.now();
+  if (now - lastActivityReport < 1000) return;
+  lastActivityReport = now;
+  api("/api/applock/activity", {
+    instance_id: App.state?.instance_id || "",
+  }).catch(() => {});
+};
+// Install before asynchronous boot work so interaction on the loading screen
+// counts too. The shared endpoint is throttled to one request per second.
+for (const ev of ["pointerdown", "keydown", "beforeinput", "input", "paste",
+                  "compositionstart", "wheel", "touchstart"]) {
+  document.addEventListener(ev, bumpIdle, { capture: true, passive: true });
+}
+document.addEventListener("pointermove", bumpIdle, { capture: true, passive: true });
 // a manual lock raises the cover BEFORE its POST lands — the poll's heal
 // below must not eat that optimistic cover (set/cleared by lockNow)
 let lockPending = false;
@@ -104,15 +115,6 @@ async function refresh(rerender) {
       && !document.getElementById("mesh-body")?.value) {
     location.reload();
     return;
-  }
-  // V127: signed-out -> signed-in and locked -> unlocked count as activity.
-  // Discrete state deltas only — the poll itself must never bump, or the
-  // idle timer would stop working entirely.
-  const was = prevAuth;
-  prevAuth = { user: App.state.user || null,
-               locked: !!App.state.app_lock?.locked };
-  if ((!was.user && prevAuth.user) || (was.locked && !prevAuth.locked)) {
-    bumpIdle();
   }
   const restarting = restartIntent();
   // The POSTing client may still reach the draining old server for a few
@@ -411,20 +413,6 @@ window.addEventListener("hashchange", route);
       lockNow();
     }
   });
-  // idle auto-lock: user input bumps the clock (module-scope, V127 — auth
-  // transitions in refresh() bump it too); a slow sweep compares it to the
-  // owner-set window (0 = manual only)
-  for (const ev of ["pointerdown", "keydown", "wheel", "mousemove"]) {
-    document.addEventListener(ev, bumpIdle, { capture: true, passive: true });
-  }
-  setInterval(() => {
-    const lk = App.state?.app_lock;
-    if (!lk?.enabled || lk.locked || document.getElementById("lock")) return;
-    if (lk.autolock_min > 0
-        && Date.now() - lastActive > lk.autolock_min * 60000) {
-      lockNow();
-    }
-  }, 5000);
   // Local /api/state poll — fixed cadence (the user knob retired in V110:
   // this only hits our own localhost server's in-memory mirror; every cadence
   // that costs anything is profile-driven in the transport layer since R76).

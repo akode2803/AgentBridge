@@ -13,10 +13,11 @@ directory is public inside a mesh (every member sees the roster), so
 existence here leaks nothing the app doesn't already show.
 
 App lock (V111, gui/applock.py): ``unlock`` is public (it IS the door) and
-backed off against brute force; ``lock`` and ``set`` are authed. Changing
-or removing the passphrase needs the current one — or the account password,
-which also unlocks (it already grants a full sign-out/sign-in swap, so
-accepting it here loses nothing and saves the forgot-it file surgery).
+backed off against brute force; process-bound ``activity`` is public so the
+auth/lock surfaces can report real input; ``lock`` and ``set`` are authed.
+Changing or removing the passphrase needs the current one — or the account
+password, which also unlocks (it already grants a full sign-out/sign-in swap,
+so accepting it here loses nothing and saves the forgot-it file surgery).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ def _locked(app) -> dict | None:
     a signup/login would swap the session UNDER the lock. Recovery still
     works: unlock accepts the account password, then sign out normally."""
     lock = getattr(app, "lock", None)
-    if lock is not None and lock.locked:
+    if lock is not None and lock.expire_if_idle():
         return {"error": "App is locked", "locked": True}
     return None
 
@@ -112,8 +113,11 @@ def applock_unlock(app: GuiApp, req) -> dict:
     """Public — this endpoint IS the lock screen's door. Cooldown first so
     a scripted caller can't outpace the backoff by ignoring errors."""
     lock = app.lock
-    if not lock.enabled or not lock.locked:
+    if not lock.enabled:
         lock.unlock()          # not configured / already open: stay open
+        return {"ok": True}
+    if not lock.expire_if_idle():
+        lock.unlock()
         return {"ok": True}
     wait = lock.retry_in()
     if wait > 0:
@@ -128,6 +132,15 @@ def applock_unlock(app: GuiApp, req) -> dict:
     return {"error": "Wrong passphrase"
             + (f" — next try in {int(wait)}s" if wait else ""),
             "retry_in_s": round(wait, 1)}
+
+
+def applock_activity(app: GuiApp, req) -> dict:
+    """Process-wide real-input clock shared by every GUI client."""
+    if str(req.data.get("instance_id") or "") != app.instance_id:
+        return {"error": "stale app window"}
+    if not app.lock.note_activity():
+        return {"error": "App is locked", "locked": True}
+    return {"ok": True}
 
 
 @authed
@@ -176,6 +189,7 @@ POST = {
     "/api/mesh/logout": logout,
     "/api/mesh/check_name": check_name,
     "/api/applock/unlock": applock_unlock,
+    "/api/applock/activity": applock_activity,
     "/api/applock/lock": applock_lock,
     "/api/applock/set": applock_set,
 }

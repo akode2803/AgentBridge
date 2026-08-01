@@ -4,9 +4,12 @@ locked), backoff, and the account-password recovery lane."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.timeout(120)
+JS_ROOT = Path(__file__).resolve().parents[1] / "gui" / "static" / "js"
 
 
 def test_applock_unit_roundtrip(tmp_path):
@@ -53,6 +56,21 @@ def test_applock_endpoint_flow(rig):
     r = rig.post("/api/applock/set", passphrase="open sesame", autolock_min=5)
     assert r["ok"] and r["enabled"] and not r["locked"]
     assert r["autolock_min"] == 5
+
+    # Activity is process-wide. A signal before the deadline resets it; one
+    # arriving after the deadline cannot rescue the session from auto-lock.
+    rig.app.lock._last_activity -= 299
+    before = rig.app.lock._last_activity
+    assert "stale" in rig.post("/api/applock/activity")["error"]
+    assert rig.app.lock._last_activity == before
+    instance_id = rig.get("/api/state")["instance_id"]
+    assert rig.post("/api/applock/activity", instance_id=instance_id)["ok"]
+    assert not rig.app.lock.locked
+    rig.app.lock._last_activity -= 301
+    expired = rig.post("/api/applock/activity", instance_id=instance_id)
+    assert expired["locked"] and rig.app.lock.locked
+    assert rig.post("/api/applock/unlock", passphrase="open sesame")["ok"]
+
     assert rig.post("/api/applock/lock")["locked"] is True
 
     # locked: every authed endpoint refuses WITH the distinguishing flag
@@ -90,3 +108,17 @@ def test_applock_endpoint_flow(rig):
     r = rig.post("/api/applock/set", passphrase="", current="fresh-one")
     assert r["ok"] and not r["enabled"] and not r["locked"]
     assert rig.get("/api/state")["app_lock"]["enabled"] is False
+
+
+def test_autolock_activity_is_shared_across_app_windows():
+    main = (JS_ROOT / "main.js").read_text(encoding="utf-8")
+
+    assert 'api("/api/applock/activity", {' in main
+    assert 'instance_id: App.state?.instance_id || ""' in main
+    assert "now - lastActivityReport < 1000" in main
+    for event in ("pointerdown", "pointermove", "keydown", "beforeinput",
+                  "input", "paste", "compositionstart", "wheel", "touchstart"):
+        assert f'"{event}"' in main
+    assert 'window.addEventListener("focus"' not in main
+    assert "sharedLastActive" not in main
+    assert "idleLockPending" not in main

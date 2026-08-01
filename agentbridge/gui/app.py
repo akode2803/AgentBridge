@@ -190,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
         # V111: no new event streams while locked (authed covers the JSON
         # endpoints; this is the one route that dispatches around it)
         lock = getattr(app, "lock", None)
-        if lock is not None and lock.locked:
+        if lock is not None and lock.expire_if_idle():
             self._json({"error": "App is locked", "locked": True}, status=401)
             return
         sub = app.subscribe()

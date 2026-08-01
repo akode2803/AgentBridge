@@ -1,6 +1,6 @@
 # Agent runtime, sandbox, and visible orchestration plan
 
-Status: **adversarially reviewed baseline; C0 implementation in progress**
+Status: **adversarially reviewed baseline; C1 contract implementation in progress**
 Backlog: **V141**  
 Prepared: **2026-07-20**  
 Reference baseline: OpenAI Agents SDK repository at
@@ -1536,6 +1536,15 @@ versions and fixtures.
 ### C1 - Signed and encrypted runtime data plane
 
 Estimate: **3-5 weeks**. No new capability.
+
+**C1.0 contract baseline (R120):** `agentbridge/harness/runtime/models.py`
+defines immutable, versioned run/task/handoff/effect/continuation/control
+records, strict lineage and epoch bindings, fail-closed enum/version parsing,
+canonical JSON bytes, and the future authenticated-envelope spelling. This is
+intentionally behavior-preserving: current `status/` and AppLink controls are
+still legacy unsigned records, no production consumer imports the new models,
+and no signature, E2EE, replay, transport, RLS, dual-read, or authorization
+claim is made until the remaining C1 data-plane work lands together.
 
 - [ ] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.

@@ -55,6 +55,7 @@ class AppLock:
         self._mx = threading.Lock()
         self._fails = 0
         self._cooldown_until = 0.0
+        self._last_activity = time.monotonic()
         self.locked = self.enabled
 
     @property
@@ -73,8 +74,30 @@ class AppLock:
             return 0
 
     def status(self) -> dict:
+        self.expire_if_idle()
         return {"enabled": self.enabled, "locked": self.locked,
                 "autolock_min": self.autolock_min}
+
+    def expire_if_idle(self) -> bool:
+        """Apply the process-wide inactivity deadline; return lock state."""
+        with self._mx:
+            if (self.enabled and not self.locked and self.autolock_min > 0
+                    and time.monotonic() - self._last_activity
+                    >= self.autolock_min * 60):
+                self.locked = True
+            return self.locked
+
+    def note_activity(self) -> bool:
+        """Record real client input unless the idle deadline already passed."""
+        with self._mx:
+            now = time.monotonic()
+            if (self.enabled and not self.locked and self.autolock_min > 0
+                    and now - self._last_activity >= self.autolock_min * 60):
+                self.locked = True
+            if self.locked:
+                return False
+            self._last_activity = now
+            return True
 
     # ------------------------------------------------------------ verifying
     def retry_in(self) -> float:
@@ -108,11 +131,14 @@ class AppLock:
 
     # -------------------------------------------------------------- actions
     def lock(self) -> None:
-        if self.enabled:
-            self.locked = True
+        with self._mx:
+            if self.enabled:
+                self.locked = True
 
     def unlock(self) -> None:
-        self.locked = False
+        with self._mx:
+            self.locked = False
+            self._last_activity = time.monotonic()
 
     def configure(self, passphrase: str, autolock_min: int = 0) -> None:
         salt = os.urandom(16)
@@ -122,13 +148,17 @@ class AppLock:
             "hash": base64.b64encode(_hash(passphrase, salt)).decode(),
             "autolock_min": max(0, int(autolock_min)),
         })
+        self._last_activity = time.monotonic()
 
     def set_autolock(self, autolock_min: int) -> None:
         doc = self._doc()
         if doc:
             doc["autolock_min"] = max(0, int(autolock_min))
             atomic_write_json(self.path, doc)
+            self._last_activity = time.monotonic()
 
     def remove(self) -> None:
         self.path.unlink(missing_ok=True)
-        self.locked = False
+        with self._mx:
+            self.locked = False
+            self._last_activity = time.monotonic()

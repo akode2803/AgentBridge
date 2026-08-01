@@ -51,7 +51,7 @@ def authed(fn):
     @functools.wraps(fn)
     def wrapper(app, req, *args):
         lock = getattr(app, "lock", None)
-        if lock is not None and lock.locked:
+        if lock is not None and lock.expire_if_idle():
             return {"error": "App is locked", "locked": True}
         mesh = app.mesh
         if mesh is None:
