@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import time
 
+from ..core.errors import TransportError, ValidationError
 from ..core.models import Envelope
 from . import events
+from .attachments import attachment_path
 from .overlays import ChatOverlays
+from .readmodel import member_at
 
 __all__ = ["Janitor", "GRACE_DAYS"]
 
@@ -78,24 +81,76 @@ class Janitor:
         """Purge a chat whose (plaintext, signed) event fold says deleted,
         with the deletion older than the grace window."""
         records: list[dict] = []
+        info_records: list[dict] = []
         deleted_ns = 0
         for log_name, _size in self.mesh.tx.list_logs(chat_id):
             recs, _ = self.mesh.tx.read_log(chat_id, log_name, 0)
             for r in recs:
+                records.append(r)
                 if r.get("kind") != "info":
                     continue
-                records.append(r)
+                info_records.append(r)
                 if (r.get("event") or {}).get("type") == events.EV_DELETED:
                     deleted_ns = max(deleted_ns, int(r.get("ns", 0)))
         if not deleted_ns or deleted_ns > horizon:
             return False
         # the FOLD is the judge — it verifies signatures and admin authority,
         # so a forged chat_deleted from a non-admin purges nothing
-        snap = events.fold(chat_id, records, self.mesh.directory)
+        snap = events.fold(chat_id, info_records, self.mesh.directory)
         if not snap.deleted:
             return False
+        for path in self._owned_attachment_paths(chat_id, records, snap.tenure):
+            self.mesh.tx.delete_blob(path)
         self.mesh.tx.delete_chat(chat_id)
         return True
+
+    def reclaim_deleted_chat_attachments(self, chat_id: str) -> int:
+        """Delete exact signed references before terminal ACL materialization."""
+        records: list[dict] = []
+        info_records: list[dict] = []
+        for log_name, _size in self.mesh.tx.list_logs(chat_id):
+            recs, _ = self.mesh.tx.read_log(chat_id, log_name, 0)
+            records.extend(recs)
+            info_records.extend(r for r in recs if r.get("kind") == "info")
+        snap = events.fold(chat_id, info_records, self.mesh.directory)
+        if not snap.deleted:
+            raise TransportError("terminal deletion event is not yet readable")
+        # A provider read immediately after append can briefly omit an older
+        # row even though this client already durably ingested it. Merge that
+        # signed local evidence before deriving exact paths; IDs deduplicate
+        # the normal case where the remote scan is already complete.
+        seen = {r.get("id") for r in records if r.get("id")}
+        records.extend(
+            r for r in self.mesh.store.messages(chat_id)
+            if r.get("id") not in seen
+        )
+        paths = self._owned_attachment_paths(chat_id, records, snap.tenure)
+        for path in paths:
+            self.mesh.tx.delete_blob(path)
+        return len(paths)
+
+    def _owned_attachment_paths(
+        self, chat_id: str, records: list[dict], tenure: dict[str, list[list[int]]]
+    ) -> list[str]:
+        """Exact blob paths proven by signed, decryptable message bodies."""
+        paths: set[str] = set()
+        for rec in records:
+            if rec.get("kind", "message") != "message":
+                continue
+            env = Envelope.from_dict(rec)
+            if (not isinstance(env.id, str) or not env.id
+                    or not isinstance(env.from_, str) or not env.from_
+                    or not isinstance(env.ns, int) or isinstance(env.ns, bool)
+                    or not member_at(
+                        tenure.get(env.from_), env.ns)):
+                continue
+            body = self.mesh.sealer.unseal(chat_id, env)
+            for item in (body.files if body else None) or []:
+                try:
+                    paths.add(attachment_path(chat_id, item.get("id")))
+                except (AttributeError, ValidationError):
+                    continue  # malformed signed body: skip, never guess
+        return sorted(paths)
 
     # ------------------------------------------------------------- blob leg
     def _purge_redacted_blobs(self, chat_id: str, horizon: int) -> tuple[int, int]:
@@ -130,7 +185,10 @@ class Janitor:
                 blob_id = f.get("id")
                 if not blob_id:
                     continue
-                path = f"chats/{chat_id}/files/{blob_id}"
+                try:
+                    path = attachment_path(chat_id, blob_id)
+                except ValidationError:  # malformed signed body: skip, never guess
+                    continue
                 got = self.mesh.tx.blob_size(path)
                 if got is None:
                     continue                   # already reclaimed

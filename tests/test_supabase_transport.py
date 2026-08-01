@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from agentbridge.core.errors import ValidationError
+from agentbridge.core.errors import TransportError, ValidationError
 from agentbridge.transport import CachingTransport, FolderTransport, make_transport
 from agentbridge.transport.supabase import SupabaseTransport
 
@@ -204,8 +204,12 @@ class FakeBucketApi:
         return out
 
     def remove(self, keys):
+        removed = []
         for k in keys:
-            self.objects.pop(k, None)
+            if k in self.objects:
+                self.objects.pop(k)
+                removed.append({"name": k})
+        return removed
 
 
 class FakeStorage:
@@ -381,10 +385,16 @@ def test_delete_chat_wipes_rows_and_docs(tx):
     tx.append_log("c1", "log.jsonl", {"id": "m1"})
     tx.put_doc("chats/c1/meta.json", {"name": "Room"})
     tx.put_doc("chats/other/meta.json", {"name": "Keep"})
+    tx.put_blob("chats/c1/files/referenced", b"owned")
+    tx.put_blob("chats/c1/files/unknown-legacy", b"preserve")
     tx.delete_chat("c1")
     assert tx.list_logs("c1") == []
     assert tx.get_doc("chats/c1/meta.json") is None
     assert tx.get_doc("chats/other/meta.json")["name"] == "Keep"
+    # The transport has no proof that either object is message-owned. The
+    # janitor deletes exact verified references before calling delete_chat.
+    assert tx.get_blob("chats/c1/files/referenced") == b"owned"
+    assert tx.get_blob("chats/c1/files/unknown-legacy") == b"preserve"
 
 
 # ------------------------------------------------------------------- blobs
@@ -396,6 +406,48 @@ def test_blob_roundtrip_and_size(tx):
     assert tx.get_blob("chats/c1/files/missing.bin") is None
     with pytest.raises(ValidationError):
         tx.put_blob("big.bin", b"x" * (tx.max_upload_bytes + 1))
+
+
+def test_blob_delete_failure_propagates_for_janitor_retry(tx, monkeypatch):
+    tx.put_blob("chats/c1/files/f1", b"owned")
+    bucket = tx._store()
+
+    def fail_remove(_keys):
+        raise ConnectionError("storage unavailable")
+
+    monkeypatch.setattr(bucket, "remove", fail_remove)
+    monkeypatch.setattr(tx._client.storage, "from_", lambda _name: bucket)
+    monkeypatch.setattr(tx, "_retry", lambda fn: fn())
+    with pytest.raises(ConnectionError, match="storage unavailable"):
+        tx.delete_blob("chats/c1/files/f1")
+    assert tx.get_blob("chats/c1/files/f1") == b"owned"
+
+
+def test_blob_delete_does_not_treat_storage_list_failure_as_missing(
+        tx, monkeypatch):
+    tx.put_blob("chats/c1/files/f1", b"owned")
+    bucket = tx._store()
+
+    def fail_list(_prefix):
+        raise ConnectionError("storage list unavailable")
+
+    monkeypatch.setattr(bucket, "list", fail_list)
+    monkeypatch.setattr(tx._client.storage, "from_", lambda _name: bucket)
+    monkeypatch.setattr(tx, "_retry", lambda fn: fn())
+    with pytest.raises(ConnectionError, match="list unavailable"):
+        tx.delete_blob("chats/c1/files/f1")
+    assert tx.get_blob("chats/c1/files/f1") == b"owned"
+
+
+def test_blob_delete_requires_exact_storage_confirmation(tx, monkeypatch):
+    tx.put_blob("chats/c1/files/f1", b"owned")
+    bucket = tx._store()
+    monkeypatch.setattr(bucket, "remove", lambda _keys: [])
+    monkeypatch.setattr(tx._client.storage, "from_", lambda _name: bucket)
+    monkeypatch.setattr(tx, "_retry", lambda fn: fn())
+    with pytest.raises(TransportError, match="did not confirm exact"):
+        tx.delete_blob("chats/c1/files/f1")
+    assert tx.get_blob("chats/c1/files/f1") == b"owned"
 
 
 # ----------------------------------------------------------------- factory

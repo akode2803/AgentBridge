@@ -80,6 +80,11 @@ def test_attachment_manifest_is_durable_before_remote_upload(world):
     assert bob.messages_for(CHAT)[0].files[0]["id"] == blob_id
 
 
+def test_open_attachment_rejects_malformed_blob_id(world):
+    with pytest.raises(ValidationError, match="malformed attachment blob id"):
+        world["ann"].open_attachment(CHAT, "../outside")
+
+
 def test_attachment_spool_is_cancelled_when_local_commit_fails(world, monkeypatch):
     ann = world["ann"]
     prepared = ann.prepare_attachment(CHAT, "rollback.txt", b"not committed")

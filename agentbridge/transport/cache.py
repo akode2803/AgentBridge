@@ -631,6 +631,9 @@ class CachingTransport(Transport):
     def blob_size(self, path: str) -> int | None:
         return self.inner.blob_size(path)
 
+    def delete_blob(self, path: str) -> None:
+        self.inner.delete_blob(path)
+
     def local_path(self, path: str) -> Path | None:
         return self.inner.local_path(path)
 

@@ -113,7 +113,12 @@ class FolderTransport(Transport):
         base = self.root / "chats"
         if not base.is_dir():
             return []
-        return sorted(p.name for p in base.iterdir() if p.is_dir())
+        # A reclaimed chat may retain unproven blob artifacts. Records, not a
+        # leftover files directory, determine whether a live chat exists.
+        return sorted(
+            p.name for p in base.iterdir()
+            if p.is_dir() and ((p / "meta.json").is_file() or (p / "msgs").is_dir())
+        )
 
     def _log_path(self, chat_id: str, log_name: str) -> Path:
         if not log_name.endswith(".jsonl"):
@@ -176,8 +181,24 @@ class FolderTransport(Transport):
 
     def delete_chat(self, chat_id: str) -> None:
         base = self._abs(f"chats/{chat_id}")
-        if base.exists():
-            self._retrying(lambda: shutil.rmtree(base), f"delete chat {chat_id}")
+        if not base.exists():
+            return
+        # Blob ownership is established by the janitor and deleted by exact
+        # path first. Preserve unknown files/avatar artifacts rather than
+        # treating their shared prefix as proof of ownership.
+        for name in ("msgs", "keys", "overlays"):
+            target = base / name
+            if target.exists():
+                self._retrying(lambda p=target: shutil.rmtree(p),
+                               f"delete chat records {chat_id}/{name}")
+        meta = base / "meta.json"
+        if meta.exists():
+            self._retrying(lambda: meta.unlink(missing_ok=True),
+                           f"delete chat records {chat_id}/meta.json")
+        try:
+            base.rmdir()  # succeeds only when no unproven artifacts remain
+        except OSError:
+            pass
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:

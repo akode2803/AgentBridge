@@ -20,7 +20,7 @@ from ..core.errors import ValidationError
 from ..core.timekit import new_id
 from .paths import P
 
-__all__ = ["AttachmentDelivery", "PreparedAttachment"]
+__all__ = ["AttachmentDelivery", "PreparedAttachment", "attachment_path"]
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$")
 _SHA_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -43,6 +43,14 @@ def _safe_name(name: str) -> str:
     value = str(name or "file").replace("\\", "/").rsplit("/", 1)[-1]
     value = re.sub(r"[^\w.\- ()\[\]]", "_", value).strip() or "file"
     return value[:120]
+
+
+def attachment_path(chat_id: str, blob_id: str) -> str:
+    """Return the only valid remote path for a stable attachment id."""
+    blob_id = str(blob_id or "")
+    if not _ID_RE.fullmatch(blob_id):
+        raise ValidationError("malformed attachment blob id")
+    return P.file(chat_id, blob_id)
 
 
 class AttachmentDelivery:
@@ -98,13 +106,13 @@ class AttachmentDelivery:
         except OSError:
             # Cleanup runs only after outbox acknowledgement, so this branch is
             # exceptional. A verified remote copy can still complete a retry.
-            sealed = self.tx.get_blob(P.file(chat_id, item["blob_id"]))
+            sealed = self.tx.get_blob(attachment_path(chat_id, item["blob_id"]))
             if sealed is None:
                 raise ValidationError("attachment spool is missing")
         if (len(sealed) != item["sealed_bytes"]
                 or hashlib.sha256(sealed).hexdigest() != item["sealed_sha256"]):
             raise ValidationError("attachment spool failed verification")
-        self.tx.put_blob(P.file(chat_id, item["blob_id"]), sealed)
+        self.tx.put_blob(attachment_path(chat_id, item["blob_id"]), sealed)
 
     def cancel(self, prepared: list[PreparedAttachment]) -> None:
         for item in prepared or []:
@@ -201,7 +209,7 @@ class AttachmentDelivery:
             raise ValidationError("malformed sealed attachment hash")
         # Deriving the remote path here keeps a tampered outbox payload from
         # choosing an arbitrary transport destination.
-        P.file(chat_id, blob_id)
+        attachment_path(chat_id, blob_id)
         return {
             **manifest,
             "blob_id": blob_id,

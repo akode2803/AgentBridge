@@ -473,6 +473,79 @@ def test_terminal_events_append_before_rls_terminal_meta(world, monkeypatch):
     ]
 
 
+def test_terminal_delete_reclaims_exact_attachments_before_empty_acl(
+        world, monkeypatch):
+    aryan = world["aryan"]
+    doomed = aryan.create_chat("Exact terminal cleanup", members=["fable"])
+    blob_id = "f-terminal-owned.txt"
+    owned = P.file(doomed.id, blob_id)
+    unknown = P.file(doomed.id, "unknown-legacy.bin")
+    aryan.tx.put_blob(
+        owned, aryan.sealer.seal_blob(doomed.id, blob_id, b"owned"))
+    aryan.tx.put_blob(unknown, b"unknown")
+    aryan.post(doomed.id, "file", files=[{
+        "id": blob_id, "name": "owned.txt", "bytes": 5,
+    }])
+    aryan.outbox.flush_once()
+    original_delete = aryan.tx.delete_blob
+    observed = []
+
+    def delete_while_member(path):
+        before = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
+        assert before.is_member("aryan") and not before.deleted
+        observed.append(path)
+        original_delete(path)
+
+    monkeypatch.setattr(aryan.tx, "delete_blob", delete_while_member)
+    aryan.delete_chat(doomed.id)
+    terminal = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
+    assert terminal.deleted and terminal.members == {}
+    assert observed == [owned]
+    assert aryan.tx.blob_size(owned) is None
+    assert aryan.tx.get_blob(unknown) == b"unknown"
+
+
+def test_terminal_delete_retries_cleanup_before_materializing_acl(
+        world, monkeypatch):
+    aryan = world["aryan"]
+    doomed = aryan.create_chat("Retry terminal cleanup", members=["fable"])
+    blob_id = "f-terminal-retry.txt"
+    path = P.file(doomed.id, blob_id)
+    aryan.tx.put_blob(
+        path, aryan.sealer.seal_blob(doomed.id, blob_id, b"retry"))
+    aryan.post(doomed.id, "file", files=[{
+        "id": blob_id, "name": "retry.txt", "bytes": 5,
+    }])
+    aryan.outbox.flush_once()
+    original_delete = aryan.tx.delete_blob
+    failed = False
+
+    def fail_once(target):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("storage unavailable")
+        original_delete(target)
+
+    monkeypatch.setattr(aryan.tx, "delete_blob", fail_once)
+    aryan.outbox.base_delay = 0.001
+    aryan.outbox.max_delay = 0.001
+    preview = aryan.delete_chat(doomed.id)
+    assert preview.deleted and failed
+    still_authorized = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
+    assert still_authorized.is_member("aryan") and not still_authorized.deleted
+    assert aryan.store.outbox_counts().get("pending") == 1
+
+    import time
+    deadline = time.monotonic() + 2
+    while aryan.outbox.flush_once() == 0 and time.monotonic() < deadline:
+        pass
+    assert aryan.store.outbox_counts() == {}
+    terminal = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
+    assert terminal.deleted and terminal.members == {}
+    assert aryan.tx.blob_size(path) is None
+
+
 def test_delete_chat_refused_for_dm(world):
     aryan = world["aryan"]
     dm = aryan.create_dm("fable")

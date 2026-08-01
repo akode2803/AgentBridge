@@ -104,6 +104,10 @@ class Mesh:
             privacy=self.privacy, keys=self.keys,
         )
         self.messaging.set_terminal_applier(self.membership.refold)
+        from .janitor import Janitor
+        self.messaging.set_terminal_reclaimer(
+            lambda chat_id: Janitor(self).reclaim_deleted_chat_attachments(chat_id)
+        )
         self.accounts = AccountsService(
             self.tx, self.directory, self.messaging, self.membership,
             user, machine, keystore=self.keystore,

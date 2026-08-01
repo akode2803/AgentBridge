@@ -21,7 +21,7 @@ from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
 from . import authz
-from .attachments import PreparedAttachment
+from .attachments import PreparedAttachment, attachment_path
 from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
     pin_signing_bytes, reaction_signing_bytes, redaction_signing_bytes, \
     signing_bytes, state_signing_bytes, unredaction_signing_bytes
@@ -59,6 +59,7 @@ class MessagingService:
         self._notify_outbox = notify_outbox
         self._flush_outbox = flush_outbox
         self._apply_terminal = lambda _chat_id: None
+        self._reclaim_terminal = lambda _chat_id: None
         self.privacy = privacy
         self._sign_event = event_signer
         self.directory = directory
@@ -143,6 +144,9 @@ class MessagingService:
     def set_terminal_applier(self, callback) -> None:
         self._apply_terminal = callback
 
+    def set_terminal_reclaimer(self, callback) -> None:
+        self._reclaim_terminal = callback
+
     def flush_outbox(self) -> int:
         return int(self._flush_outbox() or 0)
 
@@ -172,7 +176,8 @@ class MessagingService:
 
     def open_attachment(self, chat_id: str, blob_id: str) -> bytes | None:
         self._require_member(chat_id)
-        data = self.tx.get_blob(P.file(chat_id, blob_id))
+        path = attachment_path(chat_id, blob_id)
+        data = self.tx.get_blob(path)
         if data is None and self.attachments is not None:
             data = self.attachments.local_sealed(blob_id)
         return self.sealer.open_blob(chat_id, blob_id, data) \
@@ -691,6 +696,11 @@ class MessagingService:
                     self.attachments.upload(chat_id, manifest)
             self.tx.append_log(chat_id, log_name, envelope)
             if kind == "info" and etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                if etype == EV_DELETED:
+                    # Member RLS still sees the pre-terminal ACL here. Exact
+                    # attachment cleanup must finish before refold writes the
+                    # terminal empty-members snapshot.
+                    self._reclaim_terminal(chat_id)
                 self._apply_terminal(chat_id)
 
         return {OUTBOX_APPEND: append_log}

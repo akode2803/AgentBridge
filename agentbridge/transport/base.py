@@ -199,7 +199,11 @@ class Transport(ABC):
 
     @abstractmethod
     def delete_chat(self, chat_id: str) -> None:
-        """Remove a chat subtree (admin-gated far above this layer)."""
+        """Remove chat records, preserving blobs not deleted by exact path.
+
+        Terminal authorization and blob ownership are proved far above this
+        layer. Drivers must not infer blob ownership from a broad prefix.
+        """
 
     # ----------------------------------------------------------------- blobs
     @abstractmethod

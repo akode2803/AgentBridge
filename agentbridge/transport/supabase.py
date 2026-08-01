@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..core.errors import ValidationError
+from ..core.errors import TransportError, ValidationError
 from .base import Transport, TransportProfile, Watcher
 from .health import classify_transport_error, retry_inline
 
@@ -636,16 +636,6 @@ class SupabaseTransport(Transport):
                         .eq("root", self.root)
                         .like("path", f"chats/{chat_id}/%").execute())
         self._hint_for(f"chats/{chat_id}/meta.json")
-        try:  # blobs are best-effort cleanup
-            store = sb.storage.from_(BUCKET)
-            for area in ("files",):
-                objs = store.list(f"{self.root}/chats/{chat_id}/{area}")
-                names = [f"{self.root}/chats/{chat_id}/{area}/{o['name']}"
-                         for o in objs or []]
-                if names:
-                    store.remove(names)
-        except Exception:  # noqa: BLE001
-            pass
 
     # ----------------------------------------------------------------- blobs
     def _store(self):
@@ -682,23 +672,41 @@ class SupabaseTransport(Transport):
 
     def blob_size(self, path: str) -> int | None:
         path = _check(path)
-        full = f"{self.root}/{path}"
-        parent, _, name = full.rpartition("/")
         try:
-            for o in self._store().list(parent) or []:
-                if o.get("name") == name:
-                    meta = o.get("metadata") or {}
-                    return int(meta.get("size") or 0) or None
+            return self._strict_blob_size(path)
         except Exception:  # noqa: BLE001
             return None
+
+    def _strict_blob_size(self, path: str) -> int | None:
+        """Return exact object size; unlike the read API, propagate failures."""
+        full = f"{self.root}/{_check(path)}"
+        parent, _, name = full.rpartition("/")
+        rows = self._retry(lambda: self._store().list(parent))
+        for obj in rows or []:
+            if obj.get("name") == name:
+                meta = obj.get("metadata") or {}
+                return int(meta.get("size") or 0) or None
         return None
 
     def delete_blob(self, path: str) -> None:
         path = _check(path)
-        try:  # idempotent — a missing object is already the goal (V63)
-            self._retry(lambda: self._store().remove([f"{self.root}/{path}"]))
-        except Exception:  # noqa: BLE001 — next sweep retries
-            pass
+        # A missing object is already the goal. When it is currently visible,
+        # require Storage to confirm that exact full key in its delete result;
+        # the SDK may otherwise return an empty success under RLS.
+        if self._strict_blob_size(path) is None:
+            return
+        full = f"{self.root}/{path}"
+
+        def remove() -> None:
+            rows = self._store().remove([full])
+            names = {
+                str(row.get("name") or "") for row in (rows or [])
+                if isinstance(row, dict)
+            }
+            if full not in names:
+                raise TransportError("storage did not confirm exact blob deletion")
+
+        self._retry(remove)
 
     # ---------------------------------------------------------------- events
     def watch(self) -> Watcher:

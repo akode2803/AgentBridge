@@ -155,8 +155,10 @@ def test_blobs_roundtrip_and_cap(tx, tmp_path):
 def test_delete_chat(tx):
     tx.append_log("gone", "a@m", {"id": "m1", "ns": 1})
     tx.put_doc("chats/gone/meta.json", {"id": "gone"})
+    tx.put_blob("chats/gone/files/unknown-legacy", b"preserve")
     tx.delete_chat("gone")
     assert tx.list_chat_ids() == []
+    assert tx.get_blob("chats/gone/files/unknown-legacy") == b"preserve"
     tx.delete_chat("never-existed")  # not an error
 
 

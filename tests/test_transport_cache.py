@@ -219,6 +219,14 @@ def test_delete_chat_drops_subtree_and_id(mirror):
     assert tx.list_chat_ids() == []
 
 
+def test_blob_delete_delegates_to_cloud_driver(mirror, monkeypatch):
+    inner, tx = mirror
+    deleted = []
+    monkeypatch.setattr(inner, "delete_blob", deleted.append)
+    tx.delete_blob("chats/c1/files/f1")
+    assert deleted == ["chats/c1/files/f1"]
+
+
 # ------------------------------------------------- stability under failure
 
 def test_failed_refresh_keeps_serving_the_last_snapshot(mirror):
