@@ -17,6 +17,7 @@ from agentbridge.gui import app as gui_app
 from agentbridge.gui.api_files import stage_dir
 from agentbridge.core.timekit import utcnow_iso
 from agentbridge.mesh.paths import P
+from agentbridge.mesh.service import Mesh
 
 from conftest import wait_for
 
@@ -551,19 +552,33 @@ def test_asks_surface_and_answer_roundtrip(rig):
 
 
 def test_timer_cancel_owner_gated_and_merging(rig):
-    """V88: dismissing a wake-up drops a cancel doc the harness consumes.
-    Owner-only; ids MERGE into an unconsumed doc so rapid dismissals never
-    race each other."""
+    """V88: dismissals bind signed commands to server-published timers."""
     rig.signup()
     rig.post("/api/mesh/create_agent", username="helper", display="Helper")
+    now = time.time_ns()
+    rig.app.mesh.tx.put_doc("status/helper_harness.json", {
+        "timers": [
+            {"id": "t-1", "chat_id": "c1", "at_ns": now + 10**12},
+            {"id": "t-2", "chat_id": "c2", "at_ns": now + 2 * 10**12},
+        ],
+    })
     assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-1")["ok"]
-    doc = rig.app.mesh.tx.get_doc("status/helper_timer_cancel.json")
-    assert doc["ids"] == ["t-1"] and doc["by"] == "aryan"
     assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-2")["ok"]
-    doc = rig.app.mesh.tx.get_doc("status/helper_timer_cancel.json")
-    assert doc["ids"] == ["t-1", "t-2"]          # merged, not clobbered
+    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+                  store_path=rig.home / "helper-controls.sqlite")
+    try:
+        from agentbridge.harness.runtime.controls import owner_commands
+
+        commands = owner_commands(helper, target="helper", action="timer_cancel")
+        assert [(c["timer_id"], c["chat_id"]) for c in commands] == [
+            ("t-1", "c1"), ("t-2", "c2"),
+        ]
+    finally:
+        helper.close()
     out = rig.post("/api/mesh/timer_cancel", agent="helper", id="")
     assert "error" in out                        # no id
+    out = rig.post("/api/mesh/timer_cancel", agent="helper", id="t-9")
+    assert "no longer pending" in out.get("error", "")
     out = rig.post("/api/mesh/timer_cancel", agent="nosuch", id="t-9")
     assert "responsible member" in out.get("error", "")
 

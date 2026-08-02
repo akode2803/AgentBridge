@@ -11,7 +11,7 @@ The runner is deliberately model-agnostic: it hands deliveries to an injected
 ``Responder`` (R16's registry provides real ones) and posts what comes back.
 Without a responder it can only ``--dry-run`` — honest about R15's scope.
 
-Stand-down: the global ``control.json`` pause (any member) and the agent's
+Stand-down: the signed global pause (any member) and the agent's
 ``active`` flag (its owner's explicit switch) both hold scanning and
 dispatch; cursors and the queue keep their place so resume answers the
 backlog under the catch-up policy instead of dropping it.
@@ -60,7 +60,6 @@ EXIT_ALREADY_RUNNING = 3
 MAX_WORKERS = MAX_CONCURRENCY  # one hard ceiling for pool + parsed owner setting
 RATE_RETRY_S = 600.0     # capped chat: revisit in this many seconds
 BLOB_GRACE_S = 600.0     # v1 value: a lost attachment must not wedge a chat
-STOP_FRESH_S = 600.0     # a claim-time stop doc older than this is stale
 NOTICE = ("@{agent}'s harness could not produce a reply here "
           "({err}). Its responsible member can check the harness on "
           "{machine}.")
@@ -140,6 +139,7 @@ class AgentRunner:
         # V62 per-chat stand-down reads, cached a few ticks (scan hits every
         # chat every poll): {chat_id: (paused, monotonic_read_at)}
         self._chat_pause: dict[str, tuple[bool, float]] = {}
+        self._global_pause: tuple[bool, float] | None = None
 
     # ------------------------------------------------------------ identity
     def verify_identity(self) -> list[str]:
@@ -172,7 +172,7 @@ class AgentRunner:
 
     def _peer_set_hold(self, held: bool) -> str:
         """A peer-repair pause: a harness-LOCAL hold, distinct from the owner's
-        active flag and the global control.json. Persisted so it survives a
+        active flag and the signed global member control. Persisted so it survives a
         restart — a peer pauses a runaway agent and it STAYS paused until
         resumed (by the peer or the owner)."""
         self.mesh.store.cache_doc(self.HOLD_DOC, {"held": bool(held)})
@@ -187,7 +187,7 @@ class AgentRunner:
 
     def chat_standing_down(self, chat_id: str) -> bool:
         """The per-chat stand-down (V62): any member can hold ALL agents in
-        one chat (``chats/<id>/control.json``, the global doc's shape).
+        one chat (an immutable signed member-control state).
         Scan + claim both honor it; cursors and the queue keep their place so
         resume answers the backlog under the catch-up policy — exactly the
         global switch's semantics, chat-scoped."""
@@ -195,18 +195,31 @@ class AgentRunner:
         hit = self._chat_pause.get(chat_id)
         if hit is not None and now - hit[1] < self.CHAT_PAUSE_TTL_S:
             return hit[0]
-        paused = False
         try:
-            doc = self.mesh.tx.get_doc(f"chats/{chat_id}/control.json")
-            paused = bool(isinstance(doc, dict) and doc.get("paused"))
-        except Exception:  # noqa: BLE001 — unreadable control = not paused
-            paused = False
+            from .runtime.controls import read_pause
+
+            snap = self.mesh.snapshot(chat_id)
+            paused = read_pause(
+                self.mesh.directory, self.mesh.tx, chat_id=chat_id,
+                snapshot=snap,
+            )
+        except Exception:  # noqa: BLE001 — retain last truth; unknown fails closed
+            paused = hit[0] if hit is not None else True
         self._chat_pause[chat_id] = (paused, now)
         return paused
 
     def standing_down(self) -> bool:
-        doc = self.mesh.tx.get_doc("control.json")
-        if isinstance(doc, dict) and doc.get("paused"):
+        from .runtime.controls import read_pause
+
+        now = time.monotonic()
+        hit = self._global_pause
+        if hit is None or now - hit[1] >= self.CHAT_PAUSE_TTL_S:
+            try:
+                paused = read_pause(self.mesh.directory, self.mesh.tx)
+            except Exception:  # noqa: BLE001 — retain last truth; unknown fails closed
+                paused = hit[0] if hit is not None else True
+            hit = self._global_pause = (paused, now)
+        if hit[0]:
             return True
         if self._peer_held():                # a peer-repair hold (R22.5)
             return True
@@ -514,21 +527,13 @@ class AgentRunner:
             return True
 
     def _owner_stop_requested(self, chat_id: str) -> bool:
-        """A fresh stop doc for this agent (global or naming this chat) that
-        no live run consumed. Consumed here exactly once; stale docs are
-        ignored so a leftover can't eat runs hours later."""
-        path = f"status/{self.agent}_stop.json"
+        """Consume one valid owner stop for this agent and matching chat."""
         try:
-            doc = self.mesh.tx.get_doc(path)
-            if not isinstance(doc, dict):
-                return False
-            if doc.get("chat_id") and doc.get("chat_id") != chat_id:
-                return False
-            if int(doc.get("ns", 0)) < time.time_ns() - int(STOP_FRESH_S * 1e9):
-                return False
-            with contextlib.suppress(Exception):
-                self.mesh.tx.delete_doc(path)
-            return True
+            from .runtime.controls import consume_owner_command
+
+            return consume_owner_command(
+                self.mesh, target=self.agent, action="stop", chat_id=chat_id,
+            ) is not None
         except Exception:  # noqa: BLE001 — a transport blip never stops a run
             return False
 
@@ -775,32 +780,42 @@ class AgentRunner:
     # ------------------------------------------------------------ lifecycle
     def _consume_timer_cancels(self) -> None:
         """V88: the owner dismissed wake-ups from the chat's timer chips
-        (api_agents.timer_cancel drops a cancel doc — the stop lane's shape).
+        (api_agents.timer_cancel publishes an authenticated owner command).
         Pop each timer and record the dismissal into the run HISTORY, so the
         next run's context tells the agent its wake-up was dismissed (V87's
         "owner-dismiss notifies the agent", riding R99's recent-runs
         plumbing — awareness on the next natural run, no model run fired
-        just for a dismissal). Best-effort; the doc is deleted once consumed
-        so a dismissal never re-applies."""
-        path = f"status/{self.agent}_timer_cancel.json"
+        just for a dismissal). The local claim ledger makes every command
+        one-use even if transport deletion is delayed or fails."""
         try:
-            doc = self.mesh.tx.get_doc(path)
-            if not isinstance(doc, dict) or not doc.get("ids"):
-                return
-            by = str(doc.get("by") or "your member")
             dismissed = []
-            for tid in list(doc.get("ids") or [])[:50]:
-                t = self.timers.pop(str(tid))
+            from .runtime.controls import consume_owner_command
+
+            while True:
+                record = consume_owner_command(
+                    self.mesh, target=self.agent, action="timer_cancel",
+                )
+                if record is None:
+                    break
+                current = next((
+                    t for t in self.timers.snapshot()
+                    if t.get("id") == record["timer_id"]
+                ), None)
+                if (current is None
+                        or current.get("chat_id") != record["chat_id"]
+                        or int(current.get("at_ns") or 0)
+                        != record["timer_at_ns"]):
+                    continue
+                t = self.timers.pop(record["timer_id"])
                 if t is not None:
-                    dismissed.append(t)
-            self.mesh.tx.delete_doc(path)
+                    dismissed.append((t, record["owner"]))
             if not dismissed:
                 return
             hist = f"status/{self.agent}_runs.json"
             hdoc = self.mesh.tx.get_doc(hist, default={}) or {}
             runs = hdoc.get("runs") if isinstance(hdoc, dict) else None
             runs = runs if isinstance(runs, list) else []
-            for t in dismissed:
+            for t, by in dismissed:
                 note = " ".join(str(t.get("note") or "").split())[:120]
                 runs.append({
                     "chat_id": t.get("chat_id", ""), "state": "dismissed",

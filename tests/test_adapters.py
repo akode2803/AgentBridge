@@ -409,8 +409,11 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
         runner.mesh.sync.sync_once([snap.id])
         # the stop request lands just before dispatch — the poller's first
         # check catches it and kills the subprocess long before 30s
-        owner.tx.put_doc("status/helper_stop.json",
-                         {"ns": time.time_ns(), "by": "aryan", "chat_id": ""})
+        from agentbridge.harness.runtime.controls import publish_owner_command
+
+        publish_owner_command(
+            owner, target="helper", action="stop", timeout_s=60,
+        )
         runner.tick()
         runner.drain(timeout=60)
         runner.mesh.outbox.flush_once()

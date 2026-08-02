@@ -19,6 +19,9 @@ from agentbridge.harness import (
 )
 from agentbridge.harness.triggers import Candidate
 from agentbridge.harness.recovery import prepare_outbox
+from agentbridge.harness.runtime.controls import (
+    publish_owner_command, publish_pause,
+)
 from agentbridge.mesh.service import Mesh
 
 
@@ -423,13 +426,14 @@ def test_global_pause_holds_then_resume_answers(hrig):
     snap = hrig.owner.create_chat("Paused", members=["helper"])
     responder = Scripted()
     runner = hrig.make_runner(responder)
-    hrig.owner.tx.put_doc("control.json", {"paused": True})
+    publish_pause(hrig.owner, paused=True)
     hrig.owner.post(snap.id, "@helper are you there?")
     ripple(hrig, runner, snap.id)
     turn(hrig, runner, snap.id)
     assert responder.calls == []                       # standing down
 
-    hrig.owner.tx.put_doc("control.json", {"paused": False})
+    publish_pause(hrig.owner, paused=False)
+    runner._global_pause = None
     turn(hrig, runner, snap.id)
     assert len(agent_msgs(hrig.owner, snap.id)) == 1   # backlog answered
 
@@ -1103,14 +1107,16 @@ def test_owner_timer_dismiss_notifies_the_agent(hrig):
     ripple(hrig, runner, snap.id)
     tid = runner.timers.set(snap.id, 2**62, "check the export at 3pm")
     assert tid and len(runner.timers.snapshot()) == 1
-    # the GUI endpoint's doc, planted by the owner
-    hrig.owner.tx.put_doc("status/helper_timer_cancel.json",
-                          {"ids": [tid], "by": "aryan", "ns": 1})
+    timer = runner.timers.snapshot()[0]
+    publish_owner_command(
+        hrig.owner, target="helper", action="timer_cancel",
+        chat_id=snap.id, timer_id=tid, timer_at_ns=timer["at_ns"],
+        timeout_s=3600,
+    )
     hrig.owner.outbox.flush_once()
     runner._consume_timer_cancels()
     assert runner.timers.snapshot() == []            # popped
-    assert runner.mesh.tx.get_doc(
-        "status/helper_timer_cancel.json") is None   # consumed once
+    assert runner._consume_timer_cancels() is None    # consumed once
     hist = runner.mesh.tx.get_doc("status/helper_runs.json")
     last = (hist or {}).get("runs", [])[-1]
     assert last["state"] == "dismissed" and last["chat_id"] == snap.id
@@ -1118,6 +1124,28 @@ def test_owner_timer_dismiss_notifies_the_agent(hrig):
     # and the R99 delivery plumbing carries it into the next run's context
     recent = runner.conversation._recent_runs(snap.id)
     assert any(r.get("state") == "dismissed" for r in recent)
+
+
+def test_stale_owner_timer_dismiss_cannot_cancel_rearmed_timer(hrig):
+    runner = hrig.make_runner(Scripted())
+    snap = hrig.owner.create_chat("Rearmed", members=["helper"])
+    tid = runner.timers.set(
+        snap.id, time.time_ns() - int(60e9), "first schedule", repeat="daily",
+    )
+    first = runner.timers.snapshot()[0]
+    publish_owner_command(
+        hrig.owner, target="helper", action="timer_cancel",
+        chat_id=snap.id, timer_id=tid, timer_at_ns=first["at_ns"],
+        timeout_s=3600,
+    )
+    runner.timers.pop(tid, reschedule=True)
+
+    runner._consume_timer_cancels()
+
+    left = runner.timers.snapshot()
+    assert len(left) == 1 and left[0]["id"] == tid
+    assert left[0]["note"] == "first schedule"
+    assert left[0]["at_ns"] != first["at_ns"]
 
 
 def test_settings_parse_and_clamp():
@@ -1280,8 +1308,9 @@ def test_claim_time_stop_doc_consumed(hrig):
     stop doc now resolves the next claimed group as stopped-by-owner."""
     snap = hrig.owner.create_chat("StopMe", members=["helper"])
     trigger = hrig.owner.post(snap.id, "hey @helper, don't answer")
-    hrig.owner.tx.put_doc("status/helper_stop.json", {
-        "ns": time.time_ns(), "by": "aryan", "chat_id": ""})
+    publish_owner_command(
+        hrig.owner, target="helper", action="stop", timeout_s=60,
+    )
     responder = Scripted()
     runner = hrig.make_runner(responder)
     ripple(hrig, runner, snap.id)
@@ -1291,7 +1320,7 @@ def test_claim_time_stop_doc_consumed(hrig):
     assert responder.calls == []
     assert agent_msgs(hrig.owner, snap.id) == []
     assert runner.queue.answered(snap.id, trigger.id)
-    assert runner.mesh.tx.get_doc("status/helper_stop.json") is None
+    assert runner._owner_stop_requested(snap.id) is False
     runs = runner.mesh.tx.get_doc("status/helper_runs.json")
     assert runs["runs"][-1]["state"] == "stopped"
 
@@ -1324,9 +1353,7 @@ def test_chat_stand_down_holds_and_resumes(hrig):
     ripple(hrig, runner, snap.id)
     ripple(hrig, runner, other.id)
 
-    # the pause doc lands (what /api/mesh/chat_pause writes)
-    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
-                          {"paused": True, "by": "aryan"})
+    publish_pause(hrig.owner, paused=True, chat_id=snap.id)
     hrig.owner.post(snap.id, "hey @helper, held ask")
     hrig.owner.post(other.id, "hey @helper, live ask")
     ripple(hrig, runner, snap.id)
@@ -1338,8 +1365,7 @@ def test_chat_stand_down_holds_and_resumes(hrig):
     assert len(agent_msgs(hrig.owner, other.id)) == 1  # other chat unaffected
 
     # resume: the cursor never moved, so the backlog answers now
-    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
-                          {"paused": False, "by": "aryan"})
+    publish_pause(hrig.owner, paused=False, chat_id=snap.id)
     runner._chat_pause.clear()   # tests skip the 20s TTL wait
     turn(hrig, runner, snap.id)
     assert len(agent_msgs(hrig.owner, snap.id)) == 1
@@ -1357,8 +1383,7 @@ def test_chat_stand_down_gates_claimed_groups(hrig):
 
     runner.mesh.sync.sync_once([snap.id])
     runner.scan_all()             # trigger is IN the queue now
-    hrig.owner.tx.put_doc(f"chats/{snap.id}/control.json",
-                          {"paused": True, "by": "aryan"})
+    publish_pause(hrig.owner, paused=True, chat_id=snap.id)
     hrig.owner.outbox.flush_once()
     runner._chat_pause.clear()
     runner.dispatch_fill()

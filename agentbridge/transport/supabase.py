@@ -719,9 +719,11 @@ class SupabaseTransport(Transport):
         """Class-coalesced change poke (R76): latency-critical writes
         announce fast, chatty maintenance classes batch, presence never
         pokes (SCALING.md §3). The hint stays garnish; polls stay truth."""
-        if (path.startswith("runtime/owner-control/")
-                or "/runtime/owner-control/" in path):
-            self._hints.request(1.0)  # signed owner prompts are latency-critical
+        if (path.startswith(("runtime/owner-control/",
+                             "runtime/member-control/"))
+                or "/runtime/owner-control/" in path
+                or "/runtime/member-control/" in path):
+            self._hints.request(1.0)  # signed runtime controls are latency-critical
             return
         for prefix, interval in _HINT_CLASSES:
             if path.startswith(prefix):

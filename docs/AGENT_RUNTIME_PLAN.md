@@ -1583,9 +1583,27 @@ still open. In particular, an approval consumed immediately before a provider
 crash is durably non-replayable but has no effect receipt yet; recovery must
 report/resolve that unknown outcome in the later effect-ledger slice.
 
+**C1.3 direct runtime-control slice (R123):** owner stop and timer dismissal no
+longer use unsigned mutable `status/` documents. Each is an immutable,
+pairwise-encrypted owner command signed over its exact routing and ciphertext,
+bound to the current target owner and harness-policy revisions, expiring, and
+durably claimed once across restart. Timer cancellation binds the server-seen
+live timer id, room and scheduled nanosecond value, so arbitrary or stale ids
+cannot become commands and rapid dismissals cannot overwrite each other.
+Global and room pause/resume are visible append-only signed member states;
+actors must be current active humans, room actors must remain members, and
+`(ns, id)` gives deterministic convergence. Legacy singleton controls and
+malformed, copied or tampered records are ignored. On transport uncertainty a
+runner retains its last verified pause state and an unknown cold read fails
+closed. Stop remains chat-bound rather than run-id-bound until the canonical
+run ledger exists. Machine stand-down, the unsigned directory root, AppLink,
+generic effect receipts and retention/compaction remain later slices. A live
+member-authenticated Supabase scratch room proved signed pause, signed resume,
+deterministic fold and exact room cleanup on v0.24.210.
+
 - [ ] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.
-- [ ] Add run/task/handoff/effect/continuation/control record envelopes with
+- [~] Add run/task/handoff/effect/continuation/control record envelopes with
   signatures, E2EE, `ns`, policy and membership/ownership epochs.
 - [ ] Define tenure behavior and derived-data invalidation after removal,
   rejoin-without-history, owner change, redaction and room deletion.

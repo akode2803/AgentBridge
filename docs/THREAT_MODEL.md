@@ -440,11 +440,27 @@ verified requester and roll back if decision publication fails; repair remains
 one-shot. A repair approval consumed across a crash reports an unknown outcome
 and is never automatically retried.
 
-**Still open and release-blocking for later C1 slices:** run stop, timer cancel,
-global/room pause and AppLink control messages remain transport documents
-without the complete signature, encryption,
-authority-epoch and replay contract. Peer request/response/audit payloads also
-remain signed plaintext metadata paths; C1.2 authenticates owner authorization,
+**Closed for direct runtime mutation controls in C1.3 (R123):** stop and owner
+timer cancellation are strict append-only owner-to-agent envelopes, encrypted
+to exactly that pair and signed over their routing and ciphertext. They bind
+the current ownership and harness-policy revisions, expire, and receive a
+durable one-use claim; timer cancellation additionally binds the exact timer
+id, room and scheduled nanosecond value reconstructed from the live harness
+status. Global and room pause/resume are append-only signed states from a
+current active human; room records additionally require the actor's current
+membership. Deterministic `(ns, id)` ordering resolves concurrent state, legacy
+singletons and malformed/tampered records are inert, and runners retain the
+last verified pause state on read failure, failing closed on an unknown cold
+read. Stop preserves the established current-or-next matching run behavior and
+is chat-bound but not yet canonical-run-id-bound; that stronger binding waits
+for the run ledger.
+
+**Still open and release-blocking for later C1 slices:** machine agent
+stand-down still mutates the unsigned directory `active` field, and AppLink
+control messages remain unauthenticated. The directory itself remains the
+documented unsigned root of trust, so C1.3 does not claim resistance to an
+adversary who can rewrite ownership itself. Peer request/response/audit
+payloads also remain signed plaintext metadata paths; C1.2 authenticates owner authorization,
 not full peer-channel confidentiality. Permission use is non-replayable, but
 the generic effect ledger has not landed: a provider crash after consumption
 and before an effect receipt is a fail-closed unknown outcome, not a safely

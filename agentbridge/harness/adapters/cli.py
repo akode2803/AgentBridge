@@ -454,22 +454,19 @@ class CliResponder:
         # stop_req = the owner really asked; run_over = just releases the poller
         stop_req = threading.Event()
         run_over = threading.Event()
-        run_start_ns = time.time_ns()
-        stop_path = f"status/{self.mesh.user}_stop.json"
-
         def _poll_stop() -> None:
             while proc.poll() is None and not run_over.is_set() \
                     and not timed_out.is_set():
                 try:
-                    doc = self.mesh.tx.get_doc(stop_path)
-                    if (isinstance(doc, dict)
-                            and int(doc.get("ns", 0)) >= run_start_ns - int(30e9)
-                            and (not doc.get("chat_id")
-                                 or doc.get("chat_id") == chat_id)):
+                    from ..runtime.controls import consume_owner_command
+
+                    command = consume_owner_command(
+                        self.mesh, target=self.mesh.user, action="stop",
+                        chat_id=chat_id,
+                    )
+                    if command is not None:
                         stop_req.set()
                         proc.kill()
-                        with contextlib.suppress(Exception):
-                            self.mesh.tx.delete_doc(stop_path)  # consumed
                         return
                 except Exception:  # noqa: BLE001 — polling must never crash
                     pass

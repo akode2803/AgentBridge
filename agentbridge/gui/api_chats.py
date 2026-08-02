@@ -12,6 +12,7 @@ import os
 import threading
 from pathlib import Path
 
+from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
 from .context import GuiApp
 from .routing import authed
@@ -71,8 +72,8 @@ def bridge_state(app: GuiApp, req) -> dict:
     frontend actually reads are configured/v/caps/paused/connection
     (+ version)."""
     mesh = app.mesh
-    ctl = (mesh.tx.get_doc("control.json") if mesh else
-           app.directory0.tx.get_doc("control.json")) or {}
+    directory = mesh.directory if mesh else app.directory0
+    tx = mesh.tx if mesh else app.directory0.tx
     lock = getattr(app, "lock", None)   # V111: the lock page keys off this
     return {
         "configured": True,
@@ -80,7 +81,7 @@ def bridge_state(app: GuiApp, req) -> dict:
         "gui_version": app.app_version,
         "instance_id": getattr(app, "instance_id", ""),
         "caps": {"sse": True, "receipts": "delivered", "admins": True},
-        "paused": bool(ctl.get("paused")),
+        "paused": read_pause(directory, tx),
         "user": app.user,
         # V125: a blind session restore in flight — the frontend holds the
         # boot surface instead of flashing the sign-in page
@@ -168,10 +169,9 @@ def state(app: GuiApp, req) -> dict:
         "connection": _connection(app),
     }
     mesh = app.mesh
-    # the any-human stand-down switch (the R15 harness reads the same doc)
-    ctl = app.directory0.tx.get_doc("control.json") if mesh is None else \
-        mesh.tx.get_doc("control.json")
-    out["paused"] = bool((ctl or {}).get("paused"))
+    directory = app.directory0 if mesh is None else mesh.directory
+    tx = app.directory0.tx if mesh is None else mesh.tx
+    out["paused"] = read_pause(directory, tx)
     if mesh is None:
         # V125: signed-out-with-a-pending-restore is NOT signed-out
         out["restoring"] = bool(getattr(app, "restoring", False))
@@ -249,9 +249,10 @@ def chat(app: GuiApp, req, mesh) -> dict:
     meta["created_by"] = _created_by(msgs)
     meta["archived"] = mine["archived"]  # per-user flag; the header menu flips on it
     meta["pins"] = _pins_list(mesh.pins(chat_id), msgs)
-    # V62: the per-chat agents stand-down flag (shared, any member flips it)
-    ctl = mesh.tx.get_doc(f"chats/{chat_id}/control.json")
-    meta["agents_paused"] = bool(isinstance(ctl, dict) and ctl.get("paused"))
+    # V62: the per-chat agents stand-down flag (shared, any member flips it).
+    meta["agents_paused"] = read_pause(
+        mesh.directory, mesh.tx, chat_id=chat_id, snapshot=snap,
+    )
     # V102: the blocker's own view of a blocked DM — the frontend swaps the
     # composer for a "You blocked @X · Unblock" bar. ONLY the viewer's own
     # block list feeds this; being blocked BY the peer never leaks (the

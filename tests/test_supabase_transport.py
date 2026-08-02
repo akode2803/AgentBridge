@@ -610,11 +610,15 @@ def test_hint_classes(tx):
     tx.put_doc("status/asks/claude.json", {"ask": 1})
     tx.put_doc("chats/c1/runtime/owner-control/claude/asks/a.json", {"ask": 2})
     tx.put_doc("runtime/owner-control/claude/peer/asks/a.json", {"ask": 3})
+    tx.put_doc("runtime/member-control/global/pause/a.json", {"paused": True})
+    tx.put_doc("chats/c1/runtime/member-control/pause/a.json", {"paused": True})
     tx.put_doc("status/claude_run.json", {"step": 1})
     tx.put_doc("chats/c1/state/a.json", {"read_ns": 1})
     tx.put_doc("chats/c1/meta.json", {"name": "Room"})
     tx.append_log("c1", "a@box.jsonl", {"id": "m1"})
-    assert tx._hints.calls == [None, 1.0, 1.0, 1.0, 5.0, 10.0, 1.0, 0.5]
+    assert tx._hints.calls == [
+        None, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 10.0, 1.0, 0.5,
+    ]
     tx.hint_now()
     assert tx._hints.calls[-1] == 0.0
 

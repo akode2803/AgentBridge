@@ -1,7 +1,7 @@
 # Agent runtime C0 boundary audit
 
-Status: **C0.1 implemented and verified on macOS; signed control records remain open**
-Date: **2026-07-23**
+Status: **C0.1 implemented and verified on macOS; C1.1-C1.3 control slices implemented**
+Date: **2026-08-02**
 Parent plan: `docs/AGENT_RUNTIME_PLAN.md` / V141
 
 This record freezes the current native CLI boundary before AgentBridge adds a
@@ -30,15 +30,15 @@ network, resource, and secret isolation requires the later execution backend.
 
 ## Trust-boundary inventory
 
-| Surface | Producer | Consumer | Before C0.1 | C0.1 state | Remaining action |
+| Surface | Producer | Consumer | Before C0.1 | Current state | Remaining action |
 |---|---|---|---|---|---|
-| Permission ask | Harness broker | Owner GUI | Unsigned transport doc | Unchanged; display/status only | Sign and bind to agent, room, run, call, policy, owner epoch and expiry |
-| Permission answer | Owner GUI | Harness broker | Unsigned transport doc; an at-rest writer who learns the ask id can forge a one-call allow | Unchanged and release-blocking for C1 | Signed/E2EE answer with one-use consume and owner revalidation |
-| Peer verdict | Owner GUI | Target peer service | Unsigned transport doc can authorize a genuine signed peer request | Unchanged and release-blocking for C1 | Use the same signed grant/consume contract as permission answers |
-| Run stop | Owner GUI | Provider adapter | Unsigned status doc; forgery can kill a run | Unchanged; availability risk | Signed request bound to owner, agent, run/chat and freshness window |
-| Timer cancel | Owner GUI | Harness runner | Unsigned merged status doc; forgery can cancel work | Unchanged; availability risk | Signed cancellation entries with replay-safe ids |
-| Global pause | Human GUI | Harness runner | Unsigned singleton; a writer can pause or resume all agents | Unchanged | Signed actor plus current human/membership authorization |
-| Room pause | Room member GUI | Harness runner | Unsigned room doc; a writer can pause or resume room agents | Unchanged | Signed actor, room binding, membership/tenure check and monotonic version |
+| Permission ask | Harness broker | Owner GUI | Unsigned transport doc | C1.1: strict signed/E2EE room record | Generic effect receipt remains open |
+| Permission answer | Owner GUI | Harness broker | Unsigned transport doc; an at-rest writer who learns the ask id can forge a one-call allow | C1.1: signed/E2EE, digest-bound, current-authority checked and one-use | Generic effect receipt remains open |
+| Peer verdict | Owner GUI | Target peer service | Unsigned transport doc can authorize a genuine signed peer request | C1.2: signed/E2EE, request-bound and one-use | Encrypt peer request/response/audit metadata |
+| Run stop | Owner GUI | Provider adapter | Unsigned status doc; forgery can kill a run | C1.3: signed/E2EE owner command, current-authority checked, chat-bound, expiring and one-use | Bind to canonical run/session id when that ledger lands |
+| Timer cancel | Owner GUI | Harness runner | Unsigned merged status doc; forgery can cancel work | C1.3: append-only signed/E2EE command bound to the exact live timer and one-use | Generic effect receipt remains open |
+| Global pause | Human GUI | Harness runner | Unsigned singleton; a writer can pause or resume all agents | C1.3: append-only signed current-human state with deterministic ordering | Signed directory root and retention/compaction remain open |
+| Room pause | Room member GUI | Harness runner | Unsigned room doc; a writer can pause or resume room agents | C1.3: signed room-bound state, current-member checked, deterministic ordering | Signed directory root and retention/compaction remain open |
 | AppLink message | Local app instance | Recipient machine | Plain, unsigned machine-addressed doc | Unchanged | Authenticate sender/user/machine and encrypt sensitive proposals in C1 |
 | Per-run MCP | Provider CLI | Run-bound bridge | Unauthenticated ephemeral loopback HTTP | Fresh bearer required on every request | Move toward private socket/pipe or isolated network; add explicit call nonce if transport stops providing session ordering |
 | Provider environment | Harness adapter | Provider CLI | Entire parent environment | Default deny plus preset allowlist | Replace raw long-lived credential variables with provider-held or broker-held connections |
@@ -129,9 +129,9 @@ fallback, stop behavior, and a real smoke result.
 | Put mesh/database/GitHub secret in host environment | Missing from provider child unless a preset explicitly declares it |
 | Provider rejects convenience flags and minimal retry runs | Same environment policy, safety args, blocklist and MCP auth remain |
 | Forge ask display doc | May create misleading transport/UI metadata; cannot create an in-memory broker call |
-| Forge answer for a live ask id | Still accepted today; C1 release blocker |
-| Forge stop/pause/timer/peer verdict | Still affects current control path as described above; C1 release blocker |
-| Owner changes or loses authority while a run waits | Current docs do not revalidate a signed authority epoch; C1 release blocker |
+| Forge answer for a live ask id | Ignored unless it opens as the current owner's exact signed/E2EE decision |
+| Forge stop/pause/timer/peer verdict | Legacy, malformed, copied and tampered records are inert in production |
+| Owner changes or loses authority while a control waits | Owner controls revalidate ownership and policy epochs; pause actors revalidate active identity and room membership |
 
 ## Verification completed
 
@@ -150,8 +150,7 @@ fallback, stop behavior, and a real smoke result.
 - [x] Stop full provider environment inheritance and add preset declarations.
 - [x] Authenticate the current per-run MCP bridge with an ephemeral credential.
 - [~] Complete capability/enforcement evidence: macOS partial; Windows and Linux open.
-- [~] Add threat cases: bridge and environment fixtures landed; signed control,
-  replay, owner/membership change and mixed-version fixtures move with the C1
-  record schema so tests do not bless an interim wire format.
-- [ ] Design and ship the signed/E2EE runtime data plane before adding tools,
+- [x] Add threat cases for bridge/environment, forged and tampered controls,
+  replay, owner/policy change, room-member removal and mixed-version records.
+- [~] Design and ship the signed/E2EE runtime data plane before adding tools,
   containers or hidden delegation capability.

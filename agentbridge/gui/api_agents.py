@@ -5,7 +5,6 @@ formalizes its schema (model, reasoning effort, per-purpose routing).
 
 from __future__ import annotations
 
-from ..core.timekit import utcnow_iso
 from .routing import authed
 from .serialize import user_json
 
@@ -139,28 +138,26 @@ def agent_stop(app, req, mesh) -> dict:
     adapter polls; the run's subprocess is killed and the outcome is recorded
     as a deliberate stop (no error notice, slot refunded). ``chat_id`` limits
     the stop to one chat's run; empty stops whatever is running."""
-    import time as _time
-
     name = (req.data.get("agent") or "").strip().lower()
     if mesh.directory.owner_of(name) != mesh.user:
         return {"error": "only the agent's responsible member can stop it"}
-    mesh.tx.put_doc(f"status/{name}_stop.json", {
-        "ns": _time.time_ns(), "by": mesh.user,
-        "chat_id": (req.data.get("chat_id") or "").strip(),
-    })
+    from ..harness.runtime.controls import publish_owner_command
+
+    publish_owner_command(
+        mesh, target=name, action="stop",
+        chat_id=(req.data.get("chat_id") or "").strip(), timeout_s=60,
+    )
     return {"ok": True}
 
 
 @authed
 def timer_cancel(app, req, mesh) -> dict:
     """V88: the owner dismisses a scheduled wake-up from the chat's timer
-    chip. Mirrors the stop lane: a cancel doc the runner's loop consumes —
+    chip. A signed owner command is bound to the live timer the server sees;
+    the runner consumes it once,
     it pops the timer AND records the dismissal into the agent's run
     history, so the next run's context says the wake-up was dismissed (the
-    R99 recent-runs plumbing; V87's "owner-dismiss notifies the agent").
-    Ids MERGE into any unconsumed doc so rapid dismissals never race."""
-    import time as _time
-
+    R99 recent-runs plumbing; V87's "owner-dismiss notifies the agent")."""
     name = (req.data.get("agent") or "").strip().lower()
     tid = (req.data.get("id") or "").strip()
     if not tid:
@@ -168,13 +165,22 @@ def timer_cancel(app, req, mesh) -> dict:
     if mesh.directory.owner_of(name) != mesh.user:
         return {"error": "only the agent's responsible member can dismiss "
                          "its wake-ups"}
-    path = f"status/{name}_timer_cancel.json"
-    doc = mesh.tx.get_doc(path)
-    ids = list((doc or {}).get("ids") or []) if isinstance(doc, dict) else []
-    if tid not in ids:
-        ids.append(tid)
-    mesh.tx.put_doc(path, {"ids": ids[-50:], "ns": _time.time_ns(),
-                           "by": mesh.user})
+    status = mesh.tx.get_doc(f"status/{name}_harness.json")
+    timers = (status.get("timers") if isinstance(status, dict) else None) or []
+    timer = next((t for t in timers
+                  if isinstance(t, dict) and str(t.get("id") or "") == tid), None)
+    if timer is None:
+        return {"error": "that wake-up is no longer pending"}
+    import time as _time
+    from ..harness.runtime.controls import publish_owner_command
+
+    remaining_s = max(0.0, (int(timer.get("at_ns") or 0) - _time.time_ns()) / 1e9)
+    publish_owner_command(
+        mesh, target=name, action="timer_cancel",
+        chat_id=str(timer.get("chat_id") or ""), timer_id=tid,
+        timer_at_ns=int(timer.get("at_ns") or 0),
+        timeout_s=max(7 * 24 * 3600.0, remaining_s + 24 * 3600.0),
+    )
     return {"ok": True}
 
 
@@ -185,7 +191,6 @@ def agent_start(app, req, mesh) -> dict:
     supervised child AgentHarness.pyw would — the per-agent single-instance
     lock makes a duplicate stand aside (rc 3), so pressing twice is safe.
     The runner's presence heartbeat is what flips the GUI's Runner row."""
-    import os
     import subprocess
     import sys
 
@@ -347,27 +352,28 @@ def stand_down(app, req, mesh) -> dict:
 
 @authed
 def pause(app, req, mesh) -> dict:
-    """The any-human global stand-down (v1 control.json, same shape — the
-    R15 harness reads it every cycle and holds its triggers)."""
-    doc = {"paused": bool(req.data.get("paused")),
-           "by": mesh.user, "ts": utcnow_iso()}
-    mesh.tx.put_doc("control.json", doc)
-    return {"ok": True, "paused": doc["paused"]}
+    """Append an authenticated any-human global pause/resume state."""
+    from ..harness.runtime.controls import publish_pause
+
+    record = publish_pause(mesh, paused=bool(req.data.get("paused")))
+    return {"ok": True, "paused": record["paused"]}
 
 
 @authed
 def chat_pause(app, req, mesh) -> dict:
     """Per-chat stand-down (V62): any MEMBER holds every agent in THIS chat
-    (``chats/<id>/control.json``, the global doc's shape chat-scoped). The
-    harness skips the chat's triggers + timers while it's set; cursors keep
-    their place, so resuming answers the backlog under the catch-up policy."""
+    through an immutable signed state. The harness skips the chat's triggers
+    + timers while it is set; cursors keep their place, so resuming answers
+    the backlog under the catch-up policy."""
     chat_id = (req.data.get("chat_id") or "").strip()
     if not chat_id or not mesh.snapshot(chat_id).is_member(mesh.user):
         return {"error": "not a member of this chat"}
-    doc = {"paused": bool(req.data.get("paused")),
-           "by": mesh.user, "ts": utcnow_iso()}
-    mesh.tx.put_doc(f"chats/{chat_id}/control.json", doc)
-    return {"ok": True, "paused": doc["paused"]}
+    from ..harness.runtime.controls import publish_pause
+
+    record = publish_pause(
+        mesh, paused=bool(req.data.get("paused")), chat_id=chat_id,
+    )
+    return {"ok": True, "paused": record["paused"]}
 
 
 GET = {
