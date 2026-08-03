@@ -1219,7 +1219,9 @@ async function renderSettings() {
           const c = (Mesh.state.chats || []).find((x) => x.id === id);
           return c ? chatDisplay(c, Mesh.state.user) : (id || "");
         };
-        const timers = (h.timers || []).map((t) => {
+        const timerRows = (h.timers || []).filter(
+          (t) => !(Mesh.timerDone || new Map()).has(t.id));
+        const timers = timerRows.map((t) => {
           // V55: notes are full briefs — clamp here, full text on hover; a
           // wake-up beyond today shows its date
           let at = "soon";
@@ -1232,12 +1234,52 @@ async function renderSettings() {
           }
           const note = (t.note || "").replace(/\s+/g, " ");
           const shown = note.length > 140 ? note.slice(0, 140) + "…" : note;
-          return `<div class="ag-timer" title="${esc(note)}">⏰ ${esc(at)} in ${esc(chatName(t.chat_id))}${
-            shown ? " — " + esc(shown) : ""}</div>`;
+          const recurring = Boolean(t.repeat);
+          return `<div class="ag-timer" title="${esc(note)}"
+              data-timer="${esc(t.id || "")}">
+            <span>${ICONS.clock} ${esc(at)} in ${esc(chatName(t.chat_id))}${
+              shown ? " — " + esc(shown) : ""}</span>
+            <button class="ag-timer-x" data-agent="${esc(agent)}"
+              data-timer="${esc(t.id || "")}" title="${recurring
+                ? "Dismiss this recurring wake-up (ends the series) — the agent is told"
+                : "Dismiss this wake-up — the agent is told"}"
+              aria-label="Dismiss this wake-up">${ICONS.close}</button>
+          </div>`;
         }).join("");
         const queued = (h.queue || []).length;
         dd.innerHTML = (timers || `<span class="hint">No wake-ups scheduled</span>`)
           + (queued ? `<div class="hint">${queued} queued trigger(s)</div>` : "");
+        dd.querySelectorAll(".ag-timer-x").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const tid = btn.dataset.timer;
+            if (!tid || btn.disabled) return;
+            const row = btn.closest(".ag-timer");
+            const next = row?.nextSibling || null;
+            btn.disabled = true;
+            (Mesh.timerDone = Mesh.timerDone || new Map()).set(tid, Date.now());
+            row?.remove();
+            if (!dd.querySelector(".ag-timer")) {
+              dd.insertAdjacentHTML("afterbegin",
+                '<span class="hint ag-timer-empty">No wake-ups scheduled</span>');
+            }
+            Mesh.askKey = "";
+            let cancelled;
+            try {
+              cancelled = await api("/api/mesh/timer_cancel", {
+                agent: btn.dataset.agent, id: tid,
+              });
+            } catch (_err) {
+              cancelled = { error: "Unable to dismiss the wake-up while offline" };
+            }
+            if (cancelled.error) {
+              Mesh.timerDone.delete(tid);
+              dd.querySelector(".ag-timer-empty")?.remove();
+              if (row) dd.insertBefore(row, next?.parentNode === dd ? next : null);
+              btn.disabled = false;
+              toast(cancelled.error, true);
+            }
+          });
+        });
         // completed runs, newest first (R36 — the "tasks completed" list)
         const runsDd = document.querySelector(`.ag-runs[data-agent="${agent}"]`);
         if (runsDd) {

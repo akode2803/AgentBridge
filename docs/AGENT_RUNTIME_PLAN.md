@@ -1601,6 +1601,26 @@ generic effect receipts and retention/compaction remain later slices. A live
 member-authenticated Supabase scratch room proved signed pause, signed resume,
 deterministic fold and exact room cleanup on v0.24.210.
 
+**C1.4 identity lifecycle and AppLink slice (R124):** mutable account authority
+now comes from strict append-only signed lifecycle records rather than writable
+profile rows. Bootstrap, state, host, transfer and terminal deactivation form a
+deterministically ordered chain; agent host/owner changes require agent-key
+proof, active owner authority is revalidated, and a local verified-head cache
+prevents deletion rollback after observation. Raw account fields remain a
+compatibility projection and unrelated profile fields remain unsigned.
+Existing identities migrate only where this machine has the keys needed to
+prove their current state; a fresh machine retains the documented TOFU
+bootstrap residual.
+
+Machine announcements are now strict per-identity signed records and aggregate
+capabilities by logical machine. AppLink control uses exact user+machine
+routing, pairwise encryption, signatures, absolute expiry, request-digest-bound
+replies, current active registration checks and success-side durable
+consumption. Legacy/malformed/tampered/retargeted records fail closed and
+handler failures retry. A machine label is user-asserted routing metadata, not
+hardware attestation. Setup assist is deliberately disabled until its owner
+permission moves out of the unsigned profile projection.
+
 - [ ] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.
 - [~] Add run/task/handoff/effect/continuation/control record envelopes with

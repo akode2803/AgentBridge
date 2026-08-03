@@ -1,13 +1,10 @@
 """Setup-assist (R11) — a permitted agent helps another machine write its
 agent/harness config during install. Rides the control lane.
 
-Trust model:
-  * ANYONE may ASK for help (the requester is a machine being set up).
-  * An agent only ANSWERS if its owner granted ``AgentRules.setup_assist``
-    (default off, R6/R11) — otherwise the request is auto-declined.
-  * The reply is a PROPOSED config; the requesting side ALWAYS reviews it
-    before applying (apply is out of scope here — the returned proposal is
-    handed to the setup UI). A proposal never auto-writes anything.
+R124 authenticates and encrypts the request path, validates exact target
+hosting, and then declines every proposal because the legacy owner permission
+still lives in an unsigned profile projection. The proposer API remains as a
+compatibility seam but cannot run until authenticated policy evidence lands.
 """
 
 from __future__ import annotations
@@ -39,8 +36,12 @@ class SetupAssist:
     # -------------------------------------------------------- requester side
     def request(self, to_machine: str, agent: str, context: dict | None = None) -> str:
         """Ask ``agent`` (hosted on ``to_machine``) to propose a config."""
+        acc = self.directory.get(agent)
+        if not acc or not acc.agent or acc.agent.machine != to_machine:
+            raise ValueError("target agent is not active on that machine")
         return self.lane.send(
-            to_machine, KIND, {"agent": agent, "context": context or {}}
+            to_machine, KIND, {"agent": agent, "context": context or {}},
+            to_user=acc.agent.owner,
         )
 
     # -------------------------------------------------------- responder side
@@ -51,13 +52,11 @@ class SetupAssist:
         acc = self.directory.get(agent)
         if acc is None or acc.kind is not UserKind.AGENT:
             return {"ok": False, "reason": "unknown agent"}
+        if (not acc.agent or acc.agent.machine != self.lane.machine
+                or acc.agent.owner != self.lane.user):
+            return {"ok": False, "reason": "agent is not hosted by this responder"}
         # the gate: the agent's OWNER must have opted this agent into helping
         if not acc.rules().setup_assist:
             return {"ok": False, "reason": "setup-assist not permitted for this agent"}
-        proposal = {}
-        if self._proposer is not None:
-            try:
-                proposal = self._proposer(agent, msg.payload.get("context") or {})
-            except Exception:  # noqa: BLE001 — a broken proposer just declines
-                return {"ok": False, "reason": "proposer error"}
-        return {"ok": True, "agent": agent, "proposal": proposal}
+        return {"ok": False,
+                "reason": "setup-assist permission is not yet authenticated"}

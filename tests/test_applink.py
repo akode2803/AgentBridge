@@ -51,15 +51,52 @@ def test_announce_and_peers(world):
         b.close()
 
 
+def test_registry_ignores_unsigned_tampered_and_misrouted_records(world):
+    a = world("aryan", "lenovo")
+    try:
+        a.applink.announce(capabilities=["gui"])
+        path = "machines/lenovo/aryan.json"
+        signed = a.tx.get_doc(path)
+        a.tx.put_doc("machines/forged/mallory.json", {
+            "machine": "forged", "user": "aryan", "capabilities": ["admin"],
+        })
+        a.tx.put_doc("machines/other/aryan.json", signed)
+        tampered = {**signed, "record": {
+            **signed["record"], "capabilities": ["gui", "harness"],
+        }}
+        a.tx.put_doc(path, tampered)
+        assert a.applink.registry.get("lenovo") is None
+        assert a.applink.registry.get("forged") is None
+        assert a.applink.registry.get("other") is None
+    finally:
+        a.close()
+
+
+def test_same_machine_announcements_merge_capabilities(world):
+    human = world("aryan", "lenovo")
+    agent = world("claude", "lenovo")
+    try:
+        human.applink.announce(capabilities=["gui"])
+        agent.applink.announce(capabilities=["harness"])
+        rec = human.applink.registry.get("lenovo")
+        assert rec["users"] == ["aryan", "claude"]
+        assert rec["capabilities"] == ["gui", "harness"]
+    finally:
+        human.close()
+        agent.close()
+
+
 # --------------------------------------------------------------- control lane
 
 def test_control_request_reply_roundtrip(world):
     a = world("aryan", "lenovo")
     b = world("fable", "desktop")
     try:
+        a.applink.announce(capabilities=["gui"])
+        b.applink.announce(capabilities=["gui"])
         received = []
         b.applink.control.register("ping", lambda m: (received.append(m.payload), {"pong": m.payload["n"]})[1])
-        a.applink.control.send("desktop", "ping", {"n": 42})
+        a.applink.control.send("desktop", "ping", {"n": 42}, to_user="fable")
 
         b.applink.control.poll()                 # desktop handles + auto-replies
         assert received and received[0]["n"] == 42
@@ -78,9 +115,11 @@ def test_control_idempotent_no_double_handle(world):
     a = world("aryan", "lenovo")
     b = world("fable", "desktop")
     try:
+        a.applink.announce()
+        b.applink.announce()
         count = {"n": 0}
         b.applink.control.register("tick", lambda m: count.__setitem__("n", count["n"] + 1))
-        a.applink.control.send("desktop", "tick", {})
+        a.applink.control.send("desktop", "tick", {}, to_user="fable")
         b.applink.control.poll()
         b.applink.control.poll()      # second pass: already seen
         assert count["n"] == 1
@@ -89,10 +128,60 @@ def test_control_idempotent_no_double_handle(world):
         b.close()
 
 
+def test_control_rejects_tamper_misroute_and_expiry(world):
+    a = world("aryan", "lenovo")
+    b = world("fable", "desktop")
+    try:
+        a.applink.announce()
+        b.applink.announce()
+        msg_id = a.applink.control.send(
+            "desktop", "ping", {"secret": "value"}, to_user="fable",
+        )
+        path = f"runtime/applink/desktop/fable/{msg_id}.json"
+        signed = a.tx.get_doc(path)
+        a.tx.put_doc(path, {**signed, "ct": signed["ct"][:-2] + "AA"})
+        a.tx.put_doc(f"runtime/applink/desktop/fable/copied-{msg_id}.json", signed)
+        assert b.applink.control.inbox() == []
+
+        expiring = a.applink.control.send(
+            "desktop", "ping", {}, to_user="fable", ttl_s=1e-9,
+        )
+        assert expiring
+        assert b.applink.control.inbox() == []
+    finally:
+        a.close()
+        b.close()
+
+
+def test_handler_failure_is_retried_before_marking_seen(world):
+    a = world("aryan", "lenovo")
+    b = world("fable", "desktop")
+    try:
+        a.applink.announce()
+        b.applink.announce()
+        attempts = []
+
+        def flaky(message):
+            attempts.append(message.id)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary")
+            return None
+
+        b.applink.control.register("retry", flaky)
+        a.applink.control.send("desktop", "retry", {}, to_user="fable")
+        assert b.applink.control.poll() == []
+        assert len(b.applink.control.poll()) == 1
+        assert len(attempts) == 2
+    finally:
+        a.close()
+        b.close()
+
+
 def test_control_gc_removes_expired(world):
     a = world("aryan", "lenovo")
     try:
-        a.applink.control.send("lenovo", "x", {})
+        a.applink.announce()
+        a.applink.control.send("lenovo", "x", {}, to_user="aryan")
         assert a.applink.control.gc(ttl_s=1e9) == 0     # far future floor keeps it
         assert a.applink.control.gc(ttl_s=-1.0) == 1     # everything is "expired"
     finally:
@@ -170,7 +259,7 @@ def test_update_apply_requires_confirm_and_verifies_digest(world):
 
 # ------------------------------------------------------------- setup-assist
 
-def test_setup_assist_permitted_agent_replies_with_proposal(world, tmp_path):
+def test_setup_assist_unsigned_permission_fails_closed(world, tmp_path):
     # grant claude the setup_assist capability (owner-set)
     tx = FolderTransport(tmp_path / "mesh2")
     doc = tx.get_doc(P.user("claude"))
@@ -180,6 +269,8 @@ def test_setup_assist_permitted_agent_replies_with_proposal(world, tmp_path):
     requester = world("fable", "newbox")        # a machine being set up
     host = world("aryan", "lenovo")             # hosts claude
     try:
+        requester.applink.announce()
+        host.applink.announce()
         host.applink.setup_assist.set_proposer(
             lambda agent, ctx: {"agent_cmd": "claude", "model": ctx.get("model", "sonnet")}
         )
@@ -190,8 +281,9 @@ def test_setup_assist_permitted_agent_replies_with_proposal(world, tmp_path):
         replies = []
         requester.applink.control.register("setup_assist", lambda m: replies.append(m) or None)
         requester.applink.control.poll()
-        assert replies and replies[0].payload["ok"] is True
-        assert replies[0].payload["proposal"]["model"] == "opus"
+        assert replies and replies[0].payload["ok"] is False
+        assert "not yet authenticated" in replies[0].payload["reason"]
+        assert "proposal" not in replies[0].payload
     finally:
         requester.close()
         host.close()
@@ -201,6 +293,8 @@ def test_setup_assist_declined_without_permission(world):
     requester = world("fable", "newbox")
     host = world("aryan", "lenovo")             # claude has NO setup_assist grant
     try:
+        requester.applink.announce()
+        host.applink.announce()
         host.applink.setup_assist.set_proposer(lambda a, c: {"secret": "leaked?"})
         requester.applink.setup_assist.request("lenovo", "claude", {})
         host.applink.control.poll()
@@ -220,12 +314,10 @@ def test_setup_assist_unknown_agent_declined(world):
     requester = world("fable", "newbox")
     host = world("aryan", "lenovo")
     try:
-        requester.applink.setup_assist.request("lenovo", "ghost", {})
-        host.applink.control.poll()
-        replies = []
-        requester.applink.control.register("setup_assist", lambda m: replies.append(m) or None)
-        requester.applink.control.poll()
-        assert replies[0].payload["ok"] is False
+        requester.applink.announce()
+        host.applink.announce()
+        with pytest.raises(ValueError, match="not active on that machine"):
+            requester.applink.setup_assist.request("lenovo", "ghost", {})
     finally:
         requester.close()
         host.close()

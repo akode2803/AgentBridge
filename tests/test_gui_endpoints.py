@@ -764,8 +764,12 @@ def test_asks_are_gated_by_process_truth(rig):
     # a REMOTE agent (hosted elsewhere): process truth is unknowable here,
     # so the ask's own timeout decides
     rig.post("/api/mesh/create_agent", username="farbot")
-    rig.app.mesh.directory.patch(
-        "farbot", lambda doc: doc["agent"].update(machine="elsewhere"))
+    from agentbridge.mesh.lifecycle import publish_change
+
+    publish_change(
+        rig.app.mesh.directory, rig.app.mesh.keystore, "farbot", actor="aryan",
+        action="host", machine="elsewhere",
+    )
     remote_cid = rig.post("/api/mesh/create_chat", name="Remote asks",
                           members=["farbot"])["chat"]["id"]
     farbot = Mesh(rig.root, "farbot", "elsewhere", encrypt=True, home=rig.home,

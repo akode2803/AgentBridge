@@ -121,7 +121,12 @@ def test_signed_global_pause_resume_and_legacy_inert(controls):
 def test_inactive_pause_actor_has_no_authority(controls):
     owner, _ = controls
     publish_pause(owner, paused=True)
-    owner.directory.patch("aryan", lambda doc: doc.update(active=False))
+    from agentbridge.mesh.lifecycle import publish_change
+
+    publish_change(
+        owner.directory, owner.keystore, "aryan", actor="aryan",
+        action="state", active=False,
+    )
     assert read_pause(owner.directory, owner.tx) is False
 
 

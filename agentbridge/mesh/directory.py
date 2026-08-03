@@ -22,11 +22,13 @@ __all__ = ["Directory"]
 
 
 class Directory:
-    def __init__(self, tx: Transport, pins: KeyPinStore | None = None) -> None:
+    def __init__(self, tx: Transport, pins: KeyPinStore | None = None,
+                 store=None) -> None:
         self.tx = tx
         self.pins = pins
+        self.store = store
 
-    def get(self, name: str) -> Account | None:
+    def _raw_get(self, name: str) -> Account | None:
         doc = self.tx.get_doc(P.user(name))
         if not isinstance(doc, dict):
             return None
@@ -37,6 +39,24 @@ class Directory:
                 name, acc.keys.sign_pub, acc.keys.agree_pub,
                 keys.get("history") if isinstance(keys, dict) else None,
             )
+        return acc
+
+    def get(self, name: str) -> Account | None:
+        acc = self._raw_get(name)
+        if acc is None:
+            return None
+        try:
+            from .lifecycle import resolve_lifecycle
+
+            state = resolve_lifecycle(self, name, store=self.store)
+        except Exception:  # noqa: BLE001 — unreadable evidence retains raw compatibility
+            state = None
+        if state is not None:
+            acc.active = bool(state["active"])
+            acc.deactivated = str(state["deactivated"])
+            if acc.agent is not None:
+                acc.agent.owner = str(state["owner"])
+                acc.agent.machine = str(state["machine"])
         return acc
 
     def pin_keys(self, name: str, sign_pub: str, agree_pub: str) -> None:
@@ -112,7 +132,7 @@ class Directory:
             raise ValidationError(f"unknown user @{name}")
         apply(doc)
         self.tx.put_doc(P.user(name), doc)
-        return Account.from_dict(doc)
+        return self.get(name)
 
     def missing_owners(self, members: list[str]) -> dict[str, str]:
         """FREE-CHATTING invariant (ported from v1 ``_missing_owners``): for

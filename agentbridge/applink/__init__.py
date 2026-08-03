@@ -25,14 +25,21 @@ class AppLink:
         tx: Transport,
         store: Store,
         directory: Directory,
+        keystore,
         machine: str,
         *,
         user: str = "",
         app_version: str = "",
         release_info=None,
     ) -> None:
-        self.registry = MachineRegistry(tx, machine, user=user, app_version=app_version)
-        self.control = ControlLane(tx, store, machine, user=user)
+        self.registry = MachineRegistry(
+            tx, machine, user=user, app_version=app_version,
+            directory=directory, keystore=keystore,
+        )
+        self.control = ControlLane(
+            tx, store, machine, user=user, directory=directory,
+            keystore=keystore, registry=self.registry,
+        )
         self.setup_assist = SetupAssist(self.control, directory)
         self.update = (
             UpdateService(self.registry, app_version, release_info=release_info)

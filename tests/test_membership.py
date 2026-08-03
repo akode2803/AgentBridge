@@ -28,6 +28,9 @@ def world(tmp_path):
     def mk(user):
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
+        for agent, owner in (("claude", "aryan"), ("coco", "fable")):
+            if user == owner:
+                install_key(home, agent, bundles[agent])
         return Mesh(FolderTransport(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude", "coco")}

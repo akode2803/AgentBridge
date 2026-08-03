@@ -97,7 +97,9 @@ class AccountsService:
                 "recovery": crypto.wrap_bundle(bundle, recovery_code),
             },
         }
-        self._publish_identity(name, doc, bundle, sign_pub, agree_pub)
+        self._publish_identity(
+            name, doc, bundle, sign_pub, agree_pub, lifecycle_actor=name,
+        )
         return Account.from_dict(doc), recovery_code
 
     def create_agent(
@@ -132,7 +134,9 @@ class AccountsService:
                       "harness": harness or {}},
         }
         self._publish_identity(
-            name, doc, bundle, sign_pub, agree_pub, verify_local=True)
+            name, doc, bundle, sign_pub, agree_pub, verify_local=True,
+            lifecycle_actor=owner,
+        )
         return Account.from_dict(doc)
 
     def _publish_identity(
@@ -144,6 +148,7 @@ class AccountsService:
         agree_pub: str,
         *,
         verify_local: bool = False,
+        lifecycle_actor: str = "",
     ) -> None:
         """Persist private identity state before publishing its account row.
 
@@ -168,7 +173,17 @@ class AccountsService:
                 if verify_local:
                     pins.mark_verified(name)
             self.tx.put_doc(P.user(name), doc)
+            if lifecycle_actor:
+                from .lifecycle import ensure_bootstrap
+
+                ensure_bootstrap(
+                    self.directory, self.keystore, name, actor=lifecycle_actor,
+                )
         except Exception:
+            try:
+                self.tx.delete_doc(P.user(name))
+            except Exception:
+                pass
             self.keystore.forget(name)
             if pins is not None and not prior_fp:
                 pins.forget(name)
@@ -432,10 +447,18 @@ class AccountsService:
             # R54 (V31): keys minted here — the pin is born Verified
             if self.directory.pins is not None:
                 self.directory.pins.mark_verified(target)
-        return self.directory.patch(
+        self.ensure_lifecycle(target)
+        from .lifecycle import publish_change
+
+        publish_change(
+            self.directory, self.keystore, target, actor=self.user,
+            action="host", machine=self.machine,
+        )
+        self.directory.patch(
             target, lambda doc: doc.setdefault("agent", {}).update(
                 machine=self.machine)
         )
+        return self.directory.get(target)
 
     def set_machine_agents_active(self, active: bool) -> list[str]:
         """The EXPLICIT stand-down/resume switch for this machine's agents.
@@ -446,6 +469,13 @@ class AccountsService:
         for name in self._owned_agents():
             acc = self.directory.get(name)
             if acc and acc.agent and acc.agent.machine == self.machine:
+                self.ensure_lifecycle(name)
+                from .lifecycle import publish_change
+
+                publish_change(
+                    self.directory, self.keystore, name, actor=self.user,
+                    action="state", active=active,
+                )
                 self.directory.patch(name, lambda doc: doc.update(active=active))
                 changed.append(name)
         return changed
@@ -458,15 +488,12 @@ class AccountsService:
         if me is None or me.kind is not UserKind.HUMAN:
             raise PermissionDenied("only a signed-in member can claim agents")
         out = []
-        for path in self.tx.list_docs("users"):
-            doc = self.tx.get_doc(path)
-            agent_info = (doc or {}).get("agent") or {}
-            if (
-                isinstance(doc, dict)
-                and agent_info.get("machine") == self.machine
-                and agent_info.get("owner") not in ("", self.user)
-            ):
-                out.append(doc["name"])
+        for name in self.directory.names():
+            acc = self.directory.get(name)
+            if (acc and acc.agent and acc.agent.machine == self.machine
+                    and acc.agent.owner not in ("", self.user)
+                    and self.keystore.load(name) is not None):
+                out.append(name)
         return sorted(out)
 
     def claim_machine_agents(self) -> list[str]:
@@ -479,6 +506,13 @@ class AccountsService:
         owner-changed departure pills; this primitive only moves ownership."""
         claimed = []
         for name in self.claimable_agents():
+            self.ensure_lifecycle(name)
+            from .lifecycle import publish_change
+
+            publish_change(
+                self.directory, self.keystore, name, actor=self.user,
+                action="transfer", owner=self.user, machine=self.machine,
+            )
             self.directory.patch(
                 name, lambda d: d.setdefault("agent", {}).update(owner=self.user)
             )
@@ -497,8 +531,16 @@ class AccountsService:
                     self.membership.remove_member(snap.id, agent)
                 except Exception:  # noqa: BLE001 — deletion must not wedge
                     continue
+        at = utcnow_iso()
+        self.ensure_lifecycle(agent)
+        from .lifecycle import publish_change
+
+        publish_change(
+            self.directory, self.keystore, agent, actor=self.user,
+            action="deactivate", active=False, deactivated=at,
+        )
         self.directory.patch(agent, lambda doc: doc.update(
-            active=False, deactivated=utcnow_iso()))
+            active=False, deactivated=at))
         self.keystore.forget(agent)
 
     def delete_account(self, password: str) -> None:
@@ -514,20 +556,57 @@ class AccountsService:
                     self.membership.leave(snap.id)
                 except Exception:  # noqa: BLE001 — deletion must not wedge
                     continue
+        at = utcnow_iso()
+        from .lifecycle import publish_change
+
         for agent in self._owned_agents():
+            self.ensure_lifecycle(agent)
+            publish_change(
+                self.directory, self.keystore, agent, actor=self.user,
+                action="deactivate", active=False, deactivated=at,
+            )
             self.directory.patch(agent, lambda doc: doc.update(
-                active=False, deactivated=utcnow_iso()))
+                active=False, deactivated=at))
+        self.ensure_lifecycle(self.user)
+        publish_change(
+            self.directory, self.keystore, self.user, actor=self.user,
+            action="deactivate", active=False, deactivated=at,
+        )
         self.directory.patch(self.user, lambda doc: doc.update(
-            active=False, deactivated=utcnow_iso()))
+            active=False, deactivated=at))
 
     # ---------------------------------------------------------------- helpers
     def _owned_agents(self) -> list[str]:
         out = []
-        for path in self.tx.list_docs("users"):
-            doc = self.tx.get_doc(path)
-            if isinstance(doc, dict) and (doc.get("agent") or {}).get("owner") == self.user:
-                out.append(doc["name"])
+        for name in self.directory.names():
+            acc = self.directory.get(name)
+            if acc and acc.agent and acc.agent.owner == self.user:
+                out.append(name)
         return sorted(out)
+
+    def ensure_lifecycle(self, subject: str | None = None) -> list[str]:
+        """TOFU-migrate locally provable account lifecycle state."""
+        from .lifecycle import ensure_bootstrap, resolve_lifecycle
+
+        names = [subject] if subject else [self.user, *self._owned_agents()]
+        done = []
+        for name in dict.fromkeys(n for n in names if n):
+            if resolve_lifecycle(
+                self.directory, name, store=self.directory.store,
+            ) is not None:
+                done.append(name)
+                continue
+            acc = self.directory._raw_get(name)
+            if acc is None:
+                continue
+            actor = name if acc.kind is UserKind.HUMAN else self.user
+            if self.keystore.load(actor) is None:
+                continue
+            if acc.kind is UserKind.AGENT and self.keystore.load(name) is None:
+                continue
+            ensure_bootstrap(self.directory, self.keystore, name, actor=actor)
+            done.append(name)
+        return done
 
     def _writable_target(self, agent: str | None, *, allow_self: bool = False) -> str:
         if agent is None:

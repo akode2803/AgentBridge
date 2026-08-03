@@ -7,10 +7,11 @@ authorization mechanism by itself.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, ClassVar
+
+from ...core.jsonkit import canonical_json_bytes as _canonical_json_bytes
 
 
 SCHEMA_VERSION = 1
@@ -107,10 +108,7 @@ class ControlState(str, Enum):
 def canonical_json_bytes(value: Any) -> bytes:
     """Return the sole JSON spelling used for digests, AAD, and signatures."""
     try:
-        return json.dumps(
-            value, ensure_ascii=False, allow_nan=False, sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        return _canonical_json_bytes(value)
     except (TypeError, ValueError) as exc:
         raise RuntimeContractError(f"value is not canonical JSON: {exc}") from exc
 

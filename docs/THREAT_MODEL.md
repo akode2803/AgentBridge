@@ -455,17 +455,37 @@ read. Stop preserves the established current-or-next matching run behavior and
 is chat-bound but not yet canonical-run-id-bound; that stronger binding waits
 for the run ledger.
 
-**Still open and release-blocking for later C1 slices:** machine agent
-stand-down still mutates the unsigned directory `active` field, and AppLink
-control messages remain unauthenticated. The directory itself remains the
-documented unsigned root of trust, so C1.3 does not claim resistance to an
-adversary who can rewrite ownership itself. Peer request/response/audit
+**Closed for mutable account lifecycle and AppLink in C1.4 (R124):** account
+genesis/profile documents remain plaintext projections, but `active`,
+`deactivated`, and agent `owner`/`machine` authority now folds from strict,
+append-only Ed25519 lifecycle evidence. Agent bootstrap, host moves and owner
+transfers require the agent's own key proof; transfers additionally require
+the new active owner's signature. Deactivation is terminal. Deterministic
+ordering, pinned identity keys and a machine-local verified-head cache make an
+unsigned row rewrite, malformed fork, or deletion rollback inert after that
+machine has observed the chain. Existing accounts migrate only where local
+keys prove the bootstrap state; a never-before-seen machine still has the
+directory/key-pin TOFU residual and no hardware identity is claimed.
+
+Machine discovery now uses strict per-user signed records, so GUI and harness
+announcements on one logical machine aggregate rather than overwrite.
+AppLink control payloads are pairwise encrypted and signed to exact
+sender/recipient user+machine routes, expire absolutely, bind replies to the
+request envelope digest, validate current lifecycle plus a fresh signed
+announcement, and mark a message consumed only after successful handling (and
+reply publication). Legacy plaintext lanes, retargeted paths, tampering and
+unregistered identities are ignored. Cleanup is limited to the caller's own
+inbox. Setup assist remains disabled even when its legacy profile toggle is on:
+that owner policy is not authenticated yet, so enabling it would reopen the
+boundary the transport now closes.
+
+**Still open for later C1/C5 slices:** peer request/response/audit
 payloads also remain signed plaintext metadata paths; C1.2 authenticates owner authorization,
 not full peer-channel confidentiality. Permission use is non-replayable, but
 the generic effect ledger has not landed: a provider crash after consumption
 and before an effect receipt is a fail-closed unknown outcome, not a safely
 retryable action. AgentBridge will not add stronger tools on top of the
-remaining records. Their boundaries and abuse table remain in
+remaining effect records. Their boundaries and abuse table remain in
 `docs/AGENT_RUNTIME_C0_AUDIT.md` and the delivery order in
 `docs/AGENT_RUNTIME_PLAN.md`.
 

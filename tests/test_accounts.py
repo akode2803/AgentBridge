@@ -5,6 +5,7 @@ import pytest
 from agentbridge.core.errors import PermissionDenied, ValidationError
 from agentbridge.core.models import MsgKind, Role, UserKind
 from agentbridge.mesh.paths import P
+from agentbridge.mesh.keyring import KeyStore
 from agentbridge.mesh.service import Mesh
 from agentbridge.transport.folder import FolderTransport
 
@@ -12,14 +13,18 @@ from agentbridge.transport.folder import FolderTransport
 @pytest.fixture
 def world(tmp_path):
     root = tmp_path / "mesh2"
+    bundles = {}
 
     def mk(user, machine="mach1"):
-        return Mesh(FolderTransport(root), user, machine,
-                    home=tmp_path / f"home-{user}-{machine}")
+        home = tmp_path / f"home-{user}-{machine}"
+        if user in bundles:
+            KeyStore(home).save(user, bundles[user])
+        return Mesh(FolderTransport(root), user, machine, home=home)
 
     boot = mk("aryan")
     boot.accounts.create_human("aryan", "aryan-pass")
     boot.accounts.create_human("fable", "fable-pass")
+    bundles.update({name: boot.keystore.load(name) for name in ("aryan", "fable")})
     boot.close()
 
     meshes = {"aryan": mk("aryan"), "fable": mk("fable")}
@@ -295,20 +300,19 @@ def test_agents_cannot_self_manage_account(world):
         claude.close()
 
 
-def test_claim_machine_agents_transfers_ownership(world):
+def test_claim_machine_agents_requires_agent_key(world):
     meshes, _ = world
     aryan, fable = meshes["aryan"], meshes["fable"]
     aryan.accounts.create_agent("claude")               # on mach1, owner aryan
     room = aryan.create_chat("Only aryan here", members=["claude"])
 
-    claimed = fable.accounts.claim_machine_agents()     # the bare primitive
-    assert claimed == ["claude"]
-    assert fable.directory.owner_of("claude") == "fable"
+    assert fable.accounts.claimable_agents() == []
+    assert fable.accounts.claim_machine_agents() == []
+    assert fable.directory.owner_of("claude") == "aryan"
 
-    # invariant fallout: fable isn't in aryan's room -> claude cascades out
+    # A matching machine label is not authority and has no membership fallout.
     healed = aryan.membership.refold(room.id)
-    assert "claude" not in healed.members
-    assert set(healed.members) == {"aryan"}
+    assert "claude" in healed.members
 
 
 def test_claim_posts_owner_changed_departures(world):

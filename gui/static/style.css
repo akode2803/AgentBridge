@@ -653,7 +653,22 @@ h1 {
   color: var(--bad); background: none;   /* beat the global button:hover */
 }
 .timer-x svg { width: 11px; height: 11px; }
-.ag-timer { font-size: 13px; margin-bottom: 3px; }
+.ag-timer {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 8px; font-size: 13px; margin-bottom: 5px;
+}
+.ag-timer > span { min-width: 0; overflow-wrap: anywhere; }
+.ag-timer > span > svg {
+  width: 13px; height: 13px; vertical-align: -2px; color: var(--text-dim);
+}
+.ag-timer-x {
+  flex: 0 0 28px; width: 28px; height: 28px; margin: -5px -6px -5px 0;
+  padding: 7px; border: 0; background: none; color: var(--text-faint);
+}
+.ag-timer-x:hover, [data-theme="dark"] .ag-timer-x:hover {
+  color: var(--bad); background: none;
+}
+.ag-timer-x svg { width: 13px; height: 13px; }
 
 /* task 1 (2026-07-11): settings read cleaner WITHOUT the boxed cards — the
    boxes + their mismatched 560/640 widths were the "inconsistent" feeling.

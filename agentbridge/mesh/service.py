@@ -73,7 +73,7 @@ class Mesh:
         # store — a rewritten directory doc can't displace keys already seen.
         # (named key_pins: mesh.pins(chat_id) is the delegated message-pin API)
         self.key_pins = KeyPinStore(self.home, root_key)
-        self.directory = Directory(self.tx, pins=self.key_pins)
+        self.directory = Directory(self.tx, pins=self.key_pins, store=self.store)
         self.keystore = KeyStore(self.home)
         self._sign_bundle: bytes | None = None  # _sign_event's positive cache
         self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user)
@@ -122,7 +122,7 @@ class Mesh:
         self.bus = EventBus()
         self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
         self.applink = AppLink(
-            self.tx, self.store, self.directory, machine,
+            self.tx, self.store, self.directory, self.keystore, machine,
             user=user, app_version=app_version, release_info=release_info,
         )
         self.sync = SyncEngine(
@@ -233,6 +233,7 @@ class Mesh:
 
         try:
             self.key_pins.auto_verify_local(self.keystore.load, identity_pubs)
+            self.accounts.ensure_lifecycle()
         except Exception:  # noqa: BLE001 — trust polish never blocks a login
             pass
 
