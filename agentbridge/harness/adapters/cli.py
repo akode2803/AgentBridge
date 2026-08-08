@@ -224,6 +224,20 @@ class CliResponder:
         self._run_local = threading.local()  # one responder serves concurrent runs
 
     # ------------------------------------------------------------- the run
+    def prepare(self, delivery: Delivery, settings: HarnessSettings) -> dict[str, str]:
+        """Resolve once before the canonical run start; respond reuses it."""
+        acc = self.mesh.directory.get(self.agent)
+        category = self._category(delivery, acc)
+        invocation = self.registry.resolve(settings, category, delivery.chat_id)
+        delivery.invocation = invocation
+        delivery.harness_settings = settings
+        return {
+            "provider": invocation.preset.id,
+            # An empty model delegates to mutable external CLI configuration;
+            # record that honestly instead of pretending it is an exact model.
+            "model": invocation.model or "provider-default-unattested",
+        }
+
     def respond(self, delivery: Delivery, on_step: OnStep | None = None) -> Reply:
         """Retain this run's files on every failure, not only CLI exit errors."""
         try:
@@ -241,10 +255,14 @@ class CliResponder:
     def _respond(self, delivery: Delivery,
                  on_step: OnStep | None = None) -> Reply:
         acc = self.mesh.directory.get(self.agent)
-        settings = HarnessSettings.from_account(acc)
-        category = self._category(delivery, acc)
-        inv = self.registry.resolve(settings, category,
-                                    delivery.chat_id)  # raises with a reason
+        settings = (delivery.harness_settings
+                    if isinstance(delivery.harness_settings, HarnessSettings)
+                    else HarnessSettings.from_account(acc))
+        inv = delivery.invocation
+        if not isinstance(inv, Invocation):
+            category = self._category(delivery, acc)
+            inv = self.registry.resolve(settings, category,
+                                        delivery.chat_id)  # direct-call fallback
         pack = self.prompts.for_agent(acc)
 
         # per-chat context ceiling (Q30): the owner caps how many DAYS of

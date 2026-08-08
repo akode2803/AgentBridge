@@ -49,6 +49,7 @@ from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
 from .recovery import archive_outbox, discard_delivered, retain_paths
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
+from .runtime.runs import RunLedger
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -111,6 +112,7 @@ class AgentRunner:
         self.poll_s = poll_s
         self.mesh = Mesh(root, agent, self.machine, encrypt=encrypt,
                          home=self.home, app_version=__version__)
+        self.run_ledger = RunLedger(self.mesh)
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         # V87: the conversation manager reads the timer list so a run's
@@ -403,7 +405,7 @@ class AgentRunner:
                 # evaporate — the in-run poller was the only consumer. Honor
                 # it at claim time: the owner already refused this run.
                 self.queue.finish(group, "stopped-by-owner")
-                RunFeed(self.mesh.tx, self.agent, chat_id).finish(
+                self._new_feed(group).finish(
                     "stopped", "Stopped by your member")
                 self.publish_status()
                 return
@@ -419,7 +421,7 @@ class AgentRunner:
                     # stayed plain members; every run then died at post.
                     self.queue.finish(group, "skipped:cannot-post")
                     self._log_perf(timings, group, "cannot-post")
-                    RunFeed(self.mesh.tx, self.agent, chat_id).finish(
+                    self._new_feed(group).finish(
                         "done", "Can't reply — sending is restricted in this chat")
                     self.publish_status()
                     return
@@ -465,7 +467,10 @@ class AgentRunner:
                 self.queue.finish(group, "gone")  # trigger deleted meanwhile
                 return
             self.mesh.messaging.mark_read(chat_id)  # context read = read
-            feed = RunFeed(self.mesh.tx, self.agent, chat_id)
+            invocation = self._prepare_invocation(delivery, settings)
+            feed = self._new_feed(
+                group, **invocation, policy_revision=settings.policy_revision,
+            )
             delivery.run_id = feed.run_id
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
@@ -512,9 +517,30 @@ class AgentRunner:
             # resolves as an error instead of retrying forever
             if not self.queue.retry_or_fail(group, retry_in_s=self.poll_s * 4):
                 with contextlib.suppress(Exception):
-                    RunFeed(self.mesh.tx, self.agent, chat_id).finish(
+                    self._new_feed(group).finish(
                         "error", "Run failed repeatedly — giving up on this trigger")
                     self.publish_status()
+
+    def _prepare_invocation(self, delivery, settings: HarnessSettings) -> dict[str, str]:
+        prepare = getattr(self.responder, "prepare", None)
+        if callable(prepare):
+            value = prepare(delivery, settings)
+            if isinstance(value, dict) and value.get("provider") and value.get("model"):
+                return {"provider": str(value["provider"]),
+                        "model": str(value["model"])}
+            raise ValidationError("responder returned invalid invocation metadata")
+        return {"provider": type(self.responder).__name__ or "injected",
+                "model": "injected"}
+
+    def _new_feed(self, group: WorkGroup, *, provider: str = "not-invoked",
+                  model: str = "not-invoked",
+                  policy_revision: int | None = None) -> RunFeed:
+        trigger_id = group.last.msg_id or group.last.key
+        return RunFeed(
+            self.mesh.tx, self.agent, group.chat_id, ledger=self.run_ledger,
+            trigger_id=trigger_id,
+            provider=provider, model=model, policy_revision=policy_revision,
+        )
 
     # ------------------------------------------------- claim-time guards (R55)
     def _can_post(self, chat_id: str) -> bool:
@@ -902,6 +928,8 @@ class AgentRunner:
             self.mesh.harden_startup()
         except Exception:  # noqa: BLE001 — hardening never blocks the harness
             pass
+        with contextlib.suppress(Exception):
+            self.run_ledger.recover_open()
         # V51: advertise this machine's app version on the R11 registry so
         # peers' update checks can hint at it (records age out at STALE_S,
         # so a long-lived harness re-announces below)
@@ -932,6 +960,7 @@ class AgentRunner:
                 with self._inflight_lock:
                     running = {k[0] for k in self._inflight}
                 reap_orphan_run(self.mesh.tx, self.agent, running)
+                self.run_ledger.retry_terminals()
                 self._consume_timer_cancels()       # V88: owner dismissals
                 self.tick()
                 if time.monotonic() - announced > 1800:

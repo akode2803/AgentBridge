@@ -8,8 +8,10 @@ the schema — this module owns the runner half.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 
 from ..core.models import Account
+from ..core.jsonkit import canonical_json_bytes
 
 __all__ = ["HarnessSettings", "Route", "RULES", "CATCHUP_POLICIES",
            "CATEGORIES", "MAX_CONCURRENCY"]
@@ -51,6 +53,7 @@ class Route:
 
 @dataclass
 class HarnessSettings:
+    policy_revision: int = 0       # exact source harness snapshot
     default_rule: str = "tagged"
     rules: dict[str, str] = field(default_factory=dict)   # chat_id -> rule
     models: dict[str, str] = field(default_factory=dict)  # chat_id -> model
@@ -100,6 +103,9 @@ class HarnessSettings:
     @classmethod
     def from_account(cls, acc: Account | None) -> "HarnessSettings":
         h = dict(acc.agent.harness) if (acc and acc.agent) else {}
+        policy_revision = int.from_bytes(
+            hashlib.sha256(canonical_json_bytes(h)).digest()[:8], "big",
+        ) & ((1 << 63) - 1)
         rule = str(h.get("default_rule") or "tagged").lower()
         rules = {
             str(k): str(v).lower()
@@ -117,6 +123,7 @@ class HarnessSettings:
             for cat in CATEGORIES
         }
         return cls(
+            policy_revision=policy_revision,
             default_rule=rule if rule in RULES else "tagged",
             rules=rules,
             models=models,

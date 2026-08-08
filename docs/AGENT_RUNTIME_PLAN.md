@@ -1621,18 +1621,42 @@ handler failures retry. A machine label is user-asserted routing metadata, not
 hardware attestation. Setup assist is deliberately disabled until its owner
 permission moves out of the unsigned profile projection.
 
-- [ ] Freeze room-ledger, responsible-member evidence and local-diagnostic
+**C1.5 canonical run-event slice (R125):** every real harness run now commits
+an immutable `running` event before model execution and one terminal event
+under `chats/<chat>/runtime/runs/<run>/`. The event payload is encrypted with
+the room epoch key; canonical metadata, nonce and ciphertext are signed by the
+agent. Reads require current room membership, sender tenure, a valid signature
+and epoch key, strict runtime-contract parsing, current responsible-member,
+policy, membership and ownership evidence, coherent start-to-terminal fields,
+and deterministic first-terminal folding. Authority drift deliberately
+invalidates the canonical projection until historical tenure/lifecycle
+semantics land; the bounded status feed/history remains the old-client and
+rollback projection. Start and terminal documents share a durable per-run
+outbox lane, so offline publication preserves order across restart. Start
+recovery state and its outbox intent are committed in one local transaction;
+terminal intent is saved before signing, retried during the harness loop, and
+removed only after successful delivery. The selected provider, requested model
+(or an explicit `provider-default-unattested` marker), and exact policy revision
+are frozen before the start event. Terminal records retain that start policy,
+so a settings change cannot silently relabel completed work. Startup closes
+locally open runs as interrupted. This
+slice does not claim canonical
+tasks, handoffs, capabilities, effects, receipts, retention or GUI ledger
+projection. The existing `brokered_native` path records an empty canonical
+capability ceiling until the capability registry owns that field.
+
+- [~] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.
 - [~] Add run/task/handoff/effect/continuation/control record envelopes with
   signatures, E2EE, `ns`, policy and membership/ownership epochs.
-- [ ] Define tenure behavior and derived-data invalidation after removal,
+- [~] Define tenure behavior and derived-data invalidation after removal,
   rejoin-without-history, owner change, redaction and room deletion.
-- [ ] Implement transport/store/cache/delta/RLS spellings and retention.
+- [~] Implement transport/store/cache/delta/RLS spellings and retention.
 - [ ] Implement membership-filtered GUI/API projections without exposing raw
   private diagnostics.
 - [ ] Implement old-client dual-read/projection, feature flag, active-run drain
   and rollback.
-- [ ] Preserve current run feed/history through a compatibility projection.
+- [x] Preserve current run feed/history through a compatibility projection.
 
 Affected: `core/models.py`, mesh events/readmodel/sealer/keyring/service,
 transport/cache/store, Supabase schema/RLS, harness feed, GUI serializers/SSE,

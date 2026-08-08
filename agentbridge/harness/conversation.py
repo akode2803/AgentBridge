@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..core.models import ChatKind, Message, UserKind
 from ..mesh.service import Mesh
@@ -70,6 +71,8 @@ class Delivery:
     # warns the agent to re-check relevance instead of acting on stale plans
     late_s: float = 0.0
     run_id: str = ""              # bound by Runner to the live RunFeed id
+    invocation: Any = None        # adapter-owned immutable resolved invocation
+    harness_settings: Any = None  # settings snapshot paired with invocation
 
 
 class ConversationManager:

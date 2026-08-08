@@ -247,6 +247,25 @@ class Store:
             )
             return int(cur.lastrowid)
 
+    def cache_doc_and_outbox_add(
+        self, path: str, data: Any, kind: str, target: str,
+        payload: dict[str, Any],
+    ) -> int:
+        """Atomically persist local recovery state and its remote send intent."""
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)"
+                " ON CONFLICT(path) DO UPDATE SET payload=excluded.payload,"
+                " fetched_ns=excluded.fetched_ns",
+                (path, json.dumps(data, ensure_ascii=False), time.time_ns()),
+            )
+            cur = c.execute(
+                "INSERT INTO outbox(kind,target,payload,created_ns) VALUES(?,?,?,?)",
+                (kind, target, json.dumps(payload, ensure_ascii=False),
+                 time.time_ns()),
+            )
+            return int(cur.lastrowid)
+
     def outbox_claim_due(self, *, lease_s: float = 120.0, limit: int = 50) -> list[OutboxItem]:
         """Claim due pending items by taking a lease. A crash mid-send simply
         lets the lease expire, after which the item is claimable again."""

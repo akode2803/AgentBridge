@@ -378,8 +378,35 @@ def test_cli_responder_end_to_end_through_the_runner(arig):
         doc = runner.mesh.tx.get_doc(
             f"chats/{snap.id}/tasks/{replies[0].id}.json")
         assert any("search" in t["text"] for t in doc["tasks"])
+        events = runner.run_ledger.read(snap.id)
+        assert [(event.provider, event.model) for event in events] == [
+            ("stub", "provider-default-unattested"),
+            ("stub", "provider-default-unattested"),
+        ]
     finally:
         runner.close()
+
+
+def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path):
+    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+                store_path=tmp_path / "prepare.sqlite")
+    try:
+        responder = CliResponder(ModelRegistry.load(arig.home), mesh, arig.home)
+        delivery = SimpleNamespace(
+            kind="timer", triggers=[], chat_id="timer-chat",
+            invocation=None, harness_settings=None,
+        )
+        snap = settings(
+            adapter="stub",
+            routing={"owner": {"model": "owner-model"},
+                     "agents": {"model": "wrong-model"}},
+        )
+        metadata = responder.prepare(delivery, snap)
+        assert metadata == {"provider": "stub", "model": "owner-model"}
+        assert delivery.invocation.model == "owner-model"
+        assert delivery.harness_settings is snap
+    finally:
+        mesh.close()
 
 
 def test_owner_stop_kills_the_run_cleanly(tmp_path):

@@ -105,7 +105,9 @@ def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> Non
 class RunFeed:
     """One agent run's live feed. Single writer: this agent's machine."""
 
-    def __init__(self, tx: Transport, agent: str, chat_id: str) -> None:
+    def __init__(self, tx: Transport, agent: str, chat_id: str, *,
+                 ledger=None, trigger_id: str = "", provider: str = "",
+                 model: str = "", policy_revision: int | None = None) -> None:
         self.tx = tx
         self.agent = agent
         self.chat_id = chat_id
@@ -119,10 +121,19 @@ class RunFeed:
         self._finished = False
         self._stop = threading.Event()
         self._coord = _coordinator(tx, agent)
+        self._ledger = ledger
         # A real claim supersedes the attachment-wait placeholder for this
         # chat. Only that stable waiting entry is removed; parallel runs stay.
         with self._coord.lock:
             self._coord.runs.pop(_waiting_id(chat_id), None)
+        if self._ledger is not None:
+            self._ledger.start(
+                run_id=self.run_id, chat_id=chat_id,
+                trigger_id=trigger_id or "unknown-trigger",
+                provider=provider or "configured-adapter",
+                model=model or "configured-model",
+                policy_revision=policy_revision,
+            )
         self.write("running", force=True)
         self._heartbeat = threading.Thread(
             target=self._heartbeat_loop, name=f"ab-feed-{agent}-{self.run_id}",
@@ -181,11 +192,20 @@ class RunFeed:
             with self._coord.lock:
                 if self._finished:
                     return
-                self._finished = True
                 doing = self.activity if self.turns and note \
                     and note != self.activity else ""
                 if note:
                     self.activity = note
+                if self._ledger is not None:
+                    try:
+                        self._ledger.finish(self.run_id, state, self.activity)
+                    except Exception:
+                        # The terminal event remains in the durable runtime
+                        # outbox where possible. Compatibility history must
+                        # still settle instead of leaving a ghost live run.
+                        if not self._ledger.has_terminal_intent(self.run_id):
+                            raise
+                self._finished = True
                 # History is the durable completed-run surface. The live
                 # aggregate contains active runs only, so finishing one cannot
                 # hide another.

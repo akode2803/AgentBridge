@@ -19,3 +19,16 @@ def test_agent_timer_rows_have_accessible_signed_dismiss_flow():
     assert "Unable to dismiss the wake-up while offline" in settings
     assert "dd.insertBefore(row" in settings
     assert ".ag-timer-x" in style and "width: 28px" in style
+
+
+def test_mobile_agent_routes_can_shrink_inside_settings_grid():
+    style = STYLE.read_text(encoding="utf-8")
+
+    assert "@media (max-width: 760px)" in style
+    assert ".settings-body .ag-route-name" in style
+    assert ".settings-body .ag-route .csel" in style
+    assert "grid-template-columns: auto minmax(0, 1fr)" in style
+    assert ".settings-body .ag-route-model { grid-column: 1 / -1;" in style
+    assert "overflow: visible; text-overflow: clip; white-space: normal;" in style
+    assert ".settings-body .ag-route .csel { width: 100%; }" in style
+    assert ".settings-body .ag-head h2 { min-width: 0; }" in style

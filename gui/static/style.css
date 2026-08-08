@@ -2155,6 +2155,21 @@ pre.configdump {
 .ag-route-name { flex: 1; min-width: 60px; font-size: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-route .csel { min-width: 170px; }
+@media (max-width: 760px) {
+  .settings-body .ag-route {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 10px;
+  }
+  .settings-body .ag-route-model { grid-column: 1 / -1; min-width: 0; }
+  .settings-body .ag-route-name,
+  .settings-body .ag-route .csel,
+  .settings-body .ag-head h2 { min-width: 0; }
+  .settings-body .ag-route-name {
+    overflow: visible; text-overflow: clip; white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .settings-body .ag-route .csel { width: 100%; }
+  .settings-body .ag-head h2 { overflow-wrap: anywhere; }
+}
 .ag-machine button { font-size: 12.5px; }
 .ag-photo-menu { left: 0; transform: none; animation: menu-drop-l .14s ease; }   /* left-aligned, straight drop */
 .ci-name { font-weight: 600; font-size: 17px; }
