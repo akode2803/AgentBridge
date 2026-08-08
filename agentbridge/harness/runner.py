@@ -50,6 +50,7 @@ from .queue import WorkGroup, WorkItem, WorkQueue
 from .recovery import archive_outbox, discard_delivered, retain_paths
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
 from .runtime.runs import RunLedger
+from .runtime.tasks import TaskLedger
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -113,6 +114,7 @@ class AgentRunner:
         self.mesh = Mesh(root, agent, self.machine, encrypt=encrypt,
                          home=self.home, app_version=__version__)
         self.run_ledger = RunLedger(self.mesh)
+        self.task_ledger = TaskLedger(self.mesh, self.run_ledger)
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         # V87: the conversation manager reads the timer list so a run's
@@ -501,6 +503,7 @@ class AgentRunner:
                 self._run_failed(group, feed, settings, delivery, e)
                 return
             timings.stop()
+            feed.checkpoint()
             try:
                 self._deliver_reply(group, delivery, reply, feed, timings)
             except Exception as e:  # noqa: BLE001 — a failed POST is terminal
@@ -538,6 +541,7 @@ class AgentRunner:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
             self.mesh.tx, self.agent, group.chat_id, ledger=self.run_ledger,
+            task_ledger=self.task_ledger,
             trigger_id=trigger_id,
             provider=provider, model=model, policy_revision=policy_revision,
         )
@@ -929,6 +933,8 @@ class AgentRunner:
         except Exception:  # noqa: BLE001 — hardening never blocks the harness
             pass
         with contextlib.suppress(Exception):
+            self.task_ledger.recover_open()
+        with contextlib.suppress(Exception):
             self.run_ledger.recover_open()
         # V51: advertise this machine's app version on the R11 registry so
         # peers' update checks can hint at it (records age out at STALE_S,
@@ -960,6 +966,7 @@ class AgentRunner:
                 with self._inflight_lock:
                     running = {k[0] for k in self._inflight}
                 reap_orphan_run(self.mesh.tx, self.agent, running)
+                self.task_ledger.retry_terminals()
                 self.run_ledger.retry_terminals()
                 self._consume_timer_cancels()       # V88: owner dismissals
                 self.tick()

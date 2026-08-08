@@ -266,6 +266,31 @@ class Store:
             )
             return int(cur.lastrowid)
 
+    def cache_docs_and_outbox_add_many(
+        self, docs: dict[str, Any],
+        rows: list[tuple[str, str, dict[str, Any]]],
+    ) -> list[int]:
+        """Atomically persist related recovery maps and remote send intents."""
+        with self._conn() as c:
+            fetched_ns = time.time_ns()
+            for path, data in docs.items():
+                c.execute(
+                    "INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)"
+                    " ON CONFLICT(path) DO UPDATE SET payload=excluded.payload,"
+                    " fetched_ns=excluded.fetched_ns",
+                    (path, json.dumps(data, ensure_ascii=False), fetched_ns),
+                )
+            seqs = []
+            for kind, target, payload in rows:
+                cur = c.execute(
+                    "INSERT INTO outbox(kind,target,payload,created_ns)"
+                    " VALUES(?,?,?,?)",
+                    (kind, target, json.dumps(payload, ensure_ascii=False),
+                     time.time_ns()),
+                )
+                seqs.append(int(cur.lastrowid))
+            return seqs
+
     def outbox_claim_due(self, *, lease_s: float = 120.0, limit: int = 50) -> list[OutboxItem]:
         """Claim due pending items by taking a lease. A crash mid-send simply
         lets the lease expire, after which the item is claimable again."""

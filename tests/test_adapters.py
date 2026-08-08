@@ -383,6 +383,11 @@ def test_cli_responder_end_to_end_through_the_runner(arig):
             ("stub", "provider-default-unattested"),
             ("stub", "provider-default-unattested"),
         ]
+        tasks = runner.task_ledger.read(snap.id)
+        assert [event.state.value for event in tasks] == [
+            "active", "active", "completed",
+        ]
+        assert events[0].active_task_ids == (tasks[0].meta.task_id,)
     finally:
         runner.close()
 
@@ -452,6 +457,9 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
         assert runs and runs[-1]["state"] == "stopped"
         runs = runner.mesh.tx.get_doc("status/helper_runs.json")
         assert runs and runs["runs"][-1]["state"] == "stopped"
+        assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+            "active", "stopped",
+        ]
         # handled: a second pass never re-runs the same trigger
         runner.tick()
         runner.drain(timeout=30)

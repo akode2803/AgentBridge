@@ -1645,6 +1645,32 @@ tasks, handoffs, capabilities, effects, receipts, retention or GUI ledger
 projection. The existing `brokered_native` path records an empty canonical
 capability ceiling until the capability registry owns that field.
 
+**C1.6 canonical root-task slice (R126):** every real harness run now promises
+exactly one manager-retained root task in its signed start record and commits
+both starts plus both outbox intents in one local SQLite transaction before
+model execution. Task events live under
+`chats/<chat>/runtime/tasks/<run>/<task>/`; their payloads use the same strict
+room-epoch encryption, agent signature, membership, tenure, key, policy,
+membership-epoch and ownership-epoch checks as canonical runs. Readers also
+require an exact valid run start, task membership in that run, coherent
+manager/assigner/assignee/return bindings, no parent or call, a trigger-bound
+context digest, and empty grant/dependency sets for this deliberately narrow
+root slice.
+
+The root lifecycle is one unambiguous immutable `active` start, at most one
+fixed content-free milestone after model work, then one valid `completed`,
+`failed`, `stopped`, or `interrupted` terminal state. Backdated events are
+ignored and competing coherent starts, progress events, or terminals fail
+closed instead of choosing a signer-controlled winner. Terminal summaries are
+fixed protocol text: provider output, prompts, tools, paths, errors and reply
+content never enter canonical task progress or results. Offline start,
+progress and terminal records remain ordered in durable per-task outbox lanes;
+terminal intent is persisted before signing and cleared only after delivery.
+Startup closes abandoned roots before their runs. Existing `RunFeed` activity
+and Message Info step documents remain unchanged compatibility projections.
+This slice does not claim child tasks, handoffs, capability grants, effects,
+receipts, retention, historical authority, or a GUI task graph.
+
 - [~] Freeze room-ledger, responsible-member evidence and local-diagnostic
   record schemas.
 - [~] Add run/task/handoff/effect/continuation/control record envelopes with

@@ -107,7 +107,8 @@ class RunFeed:
 
     def __init__(self, tx: Transport, agent: str, chat_id: str, *,
                  ledger=None, trigger_id: str = "", provider: str = "",
-                 model: str = "", policy_revision: int | None = None) -> None:
+                 model: str = "", policy_revision: int | None = None,
+                 task_ledger=None) -> None:
         self.tx = tx
         self.agent = agent
         self.chat_id = chat_id
@@ -122,11 +123,21 @@ class RunFeed:
         self._stop = threading.Event()
         self._coord = _coordinator(tx, agent)
         self._ledger = ledger
+        self._task_ledger = task_ledger
+        self.task_id = new_id("t") if task_ledger is not None else ""
         # A real claim supersedes the attachment-wait placeholder for this
         # chat. Only that stable waiting entry is removed; parallel runs stay.
         with self._coord.lock:
             self._coord.runs.pop(_waiting_id(chat_id), None)
-        if self._ledger is not None:
+        if self._task_ledger is not None:
+            self._task_ledger.start_with_run(
+                run_id=self.run_id, task_id=self.task_id, chat_id=chat_id,
+                trigger_id=trigger_id or "unknown-trigger",
+                provider=provider or "configured-adapter",
+                model=model or "configured-model",
+                policy_revision=policy_revision,
+            )
+        elif self._ledger is not None:
             self._ledger.start(
                 run_id=self.run_id, chat_id=chat_id,
                 trigger_id=trigger_id or "unknown-trigger",
@@ -159,6 +170,15 @@ class RunFeed:
                 # init — otherwise the pane jumps from startup to mid-run.
                 self.write("running", force=self.turns <= 3)
         except Exception:  # noqa: BLE001 — the feed must never break a run
+            pass
+
+    def checkpoint(self) -> None:
+        """Record one safe canonical milestone outside the model callback."""
+        if self._task_ledger is None or not self.turns:
+            return
+        try:
+            self._task_ledger.progress(self.task_id)
+        except Exception:  # canonical retry state must not block reply delivery
             pass
 
     def write(self, state: str, force: bool = False) -> None:
@@ -196,7 +216,17 @@ class RunFeed:
                     and note != self.activity else ""
                 if note:
                     self.activity = note
-                if self._ledger is not None:
+                if self._task_ledger is not None:
+                    try:
+                        self._task_ledger.finish_with_run(
+                            self.task_id, self.run_id, state, self.activity,
+                        )
+                    except Exception:
+                        if (not self._task_ledger.has_terminal_intent(self.task_id)
+                                or not self._ledger
+                                or not self._ledger.has_terminal_intent(self.run_id)):
+                            raise
+                elif self._ledger is not None:
                     try:
                         self._ledger.finish(self.run_id, state, self.activity)
                     except Exception:

@@ -304,6 +304,9 @@ def test_no_reply_sentinel_stays_quiet(hrig):
     assert len(responder.calls) == 1
     assert agent_msgs(hrig.owner, snap.id) == []
     assert runner.queue.answered(snap.id, trig.id, 0)
+    assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+        "active", "completed",
+    ]
     turn(hrig, runner, snap.id)                    # and it never re-fires
     assert len(responder.calls) == 1
 
@@ -475,6 +478,9 @@ def test_responder_failure_posts_notice_once(hrig):
     feed = latest_run(runner.mesh.tx)
     assert feed["state"] == "error" and "adapter fell over" in feed["note"]
     assert "RuntimeError: adapter fell over" in replies[0].body
+    assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+        "active", "failed",
+    ]
 
 
 # ------------------------------------------------- files, identity, adoption
@@ -926,6 +932,9 @@ def test_stop_surfaces_into_the_next_runs_context(hrig):
     hist = runner.mesh.tx.get_doc("status/helper_runs.json")["runs"]
     assert hist[-1]["state"] == "stopped"
     assert hist[-1]["doing"] == "Scanning the files"
+    assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+        "active", "stopped",
+    ]
 
     # the next trigger's delivery knows, and the context says it up top
     responder = Scripted()
@@ -1225,6 +1234,9 @@ def test_post_failure_is_terminal_not_a_loop(hrig):
     assert agent_msgs(hrig.owner, snap.id) == []      # nothing ever posted
     assert runner.queue.answered(snap.id, trigger.id)
     assert runner.queue._pending() == {}
+    assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+        "active", "failed",
+    ]
 
 
 def test_repeated_pre_model_failure_gives_up(hrig):

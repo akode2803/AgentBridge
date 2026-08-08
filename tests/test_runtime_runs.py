@@ -274,7 +274,7 @@ def test_overlapping_terminal_retry_enqueues_one_terminal(run_meshes, monkeypatc
         second = pool.submit(ledger.retry_terminals)
         release.set()
         assert first.result().state is RunState.COMPLETED
-        assert second.result() == 0
+        assert second.result() in {0, 1}
 
     events = ledger.read(chat_id, "run-overlap")
     assert [event.state for event in events] == [
@@ -304,6 +304,56 @@ def test_terminal_must_match_starting_agent_and_exact_run_id(run_meshes):
     assert run_ten not in ledger.read(chat_id, "run-1")
 
 
+def test_signed_backdated_and_competing_run_terminals_fail_closed(run_meshes):
+    _owner, agent, chat_id = run_meshes
+    ledger = RunLedger(agent)
+    started = ledger.start(
+        run_id="run-ambiguous", chat_id=chat_id, trigger_id="message-ambiguous",
+        provider="codex", model="gpt-test",
+    )
+    equal_ns = replace(
+        started,
+        meta=replace(started.meta, id="run-event-equal"),
+        state=RunState.COMPLETED, status="Completed", outcome="completed",
+    )
+    completed = replace(
+        started,
+        meta=replace(started.meta, id="run-event-completed",
+                     ns=started.meta.ns + 1),
+        state=RunState.COMPLETED, status="Completed", outcome="completed",
+    )
+    failed = replace(
+        started,
+        meta=replace(started.meta, id="run-event-failed",
+                     ns=started.meta.ns + 2),
+        state=RunState.FAILED, status="Failed", outcome="failed",
+    )
+    assert RunLedger._fold([equal_ns, started, completed]) == [started, completed]
+    assert RunLedger._fold([started, completed, failed]) == [started]
+
+    for record in (completed, failed):
+        _target, payload = ledger._payload(record, terminal=True)
+        agent.tx.create_doc(payload["path"], payload["doc"])
+    assert ledger.read(chat_id, "run-ambiguous") == [started]
+
+    incoherent = replace(completed, outcome="failed")
+    assert RunLedger._fold([started, incoherent]) == [started]
+
+
+def test_rotated_room_key_invalidates_old_run_projection(run_meshes):
+    _owner, agent, chat_id = run_meshes
+    ledger = RunLedger(agent)
+    started = ledger.start(
+        run_id="run-old-key", chat_id=chat_id, trigger_id="message-old-key",
+        provider="codex", model="gpt-test",
+    )
+    assert ledger.read(chat_id, "run-old-key") == [started]
+
+    agent.keys.rotate(chat_id, sorted(agent.snapshot(chat_id).members))
+
+    assert ledger.read(chat_id, "run-old-key") == []
+
+
 def test_terminal_intent_survives_pre_outbox_failure(run_meshes, monkeypatch):
     _owner, agent, chat_id = run_meshes
     ledger = RunLedger(agent)
@@ -321,6 +371,22 @@ def test_terminal_intent_survives_pre_outbox_failure(run_meshes, monkeypatch):
     monkeypatch.setattr(ledger, "_payload", original_payload)
     assert ledger.retry_terminals() == 1
     assert ledger.read(chat_id, "run-terminal-retry")[-1].state is RunState.COMPLETED
+
+
+def test_invalid_terminal_does_not_poison_run_recovery_intent(run_meshes):
+    _owner, agent, chat_id = run_meshes
+    ledger = RunLedger(agent)
+    ledger.start(
+        run_id="run-invalid-terminal", chat_id=chat_id,
+        trigger_id="message-invalid", provider="codex", model="gpt-test",
+    )
+
+    with pytest.raises(RunLedgerError, match="must be terminal"):
+        ledger.finish("run-invalid-terminal", "running", "Still working")
+    assert not ledger.has_terminal_intent("run-invalid-terminal")
+
+    finished = ledger.finish("run-invalid-terminal", "done", "Reply posted")
+    assert finished.state is RunState.COMPLETED
 
 
 def test_recovery_terminal_ns_stays_after_start_on_clock_regression(

@@ -50,6 +50,7 @@ class TaskState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
     RETURNED = "returned"
 
 

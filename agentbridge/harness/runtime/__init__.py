@@ -30,6 +30,7 @@ from .models import (
     record_from_dict,
 )
 from .runs import RunLedger, RunLedgerError
+from .tasks import TaskLedger, TaskLedgerError
 
 __all__ = [
     "ContinuationRecord", "ContinuationState", "ControlRecord", "ControlState",
@@ -37,4 +38,5 @@ __all__ = [
     "HandoffType", "RecordKind", "RecordMeta", "RunRecord", "RunState",
     "RuntimeContractError", "RuntimeEnvelope", "TaskRecord", "TaskState",
     "RunLedger", "RunLedgerError", "canonical_json_bytes", "record_from_dict",
+    "TaskLedger", "TaskLedgerError",
 ]
