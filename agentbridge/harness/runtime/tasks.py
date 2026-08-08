@@ -1,8 +1,8 @@
 """Canonical signed and room-encrypted root-task lifecycle.
 
-R126 deliberately owns one manager-retained root task per current harness run.
-Child tasks, handoffs, capabilities, effects and GUI graph projection remain
-separate vertical slices.
+R126 owns one manager-retained root task per current harness run. R127 pairs
+source-authored offered child tasks through ``HandoffLedger``; active child
+execution, capabilities, effects and GUI graph projection remain later slices.
 """
 
 from __future__ import annotations

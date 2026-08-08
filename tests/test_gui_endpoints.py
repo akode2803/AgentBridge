@@ -338,7 +338,9 @@ def test_group_settings_admins_and_delete(rig):
 
     # admin deletes the group for everyone -> terminal
     assert rig.post("/api/mesh/delete_chat", chat_id=cid)["ok"]
-    assert all(c["id"] != cid for c in rig.get("/api/mesh/state")["chats"])
+    state = rig.get("/api/mesh/state")
+    assert "chats" in state, state
+    assert all(c["id"] != cid for c in state["chats"])
     assert "error" in rig.get("/api/mesh/chat", id=cid)
 
 

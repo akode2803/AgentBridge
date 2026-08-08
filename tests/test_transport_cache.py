@@ -178,6 +178,43 @@ def test_empty_keys_listing_verifies_with_the_cloud_once(mirror):
     assert tx.list_docs("chats/c2/keys") == ["chats/c2/keys/1.json"]
 
 
+def test_fresh_runtime_event_listing_reads_through_the_mirror(mirror):
+    """A destination must see an immutable handoff immediately, even when
+    its warm snapshot predates the source agent's write."""
+    inner, tx = mirror
+    tx.refresh()
+    prefix = "chats/c1/runtime/handoffs/run-1/handoff-1/"
+    path = prefix + "event-1.json"
+    inner.docs[path] = {"ct": "sealed"}
+
+    assert tx.list_docs(prefix) == [path]
+    assert tx.get_doc(path) == {"ct": "sealed"}
+
+    inner.reset_reads()
+    second = prefix + "event-2.json"
+    inner.docs[second] = {"ct": "decision"}
+    assert tx.list_docs(prefix) == [path, second]
+    assert tx.get_doc(path) == {"ct": "sealed"}
+    assert tx.get_doc(second) == {"ct": "decision"}
+    assert inner.reads["list_docs"] == 1
+    assert inner.reads["get_doc"] == 1
+
+
+def test_runtime_listing_network_failure_serves_warm_snapshot(
+        mirror, monkeypatch):
+    inner, tx = mirror
+    path = "chats/c1/runtime/handoffs/r1/h1/event-1.json"
+    inner.docs[path] = {"ct": "sealed"}
+    tx.refresh()
+    monkeypatch.setattr(
+        inner, "list_docs",
+        lambda _prefix: (_ for _ in ()).throw(ConnectionError("offline")),
+    )
+
+    assert tx.list_docs("chats/c1/runtime/handoffs/r1/h1/") == [path]
+    assert tx.mirror_status()["state"] == "offline"
+
+
 def test_external_change_lands_on_refresh(mirror):
     inner, tx = mirror
     inner.put_doc("users/a.json", {"v": 1})

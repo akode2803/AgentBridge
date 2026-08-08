@@ -496,7 +496,8 @@ class CachingTransport(Transport):
         post). Everything else keeps the pure-mirror behaviour that fixed
         the R29 miss-pinning instability."""
         return path.startswith("users/") or (
-            path.startswith("chats/") and "/keys/" in path)
+            path.startswith("chats/")
+            and ("/keys/" in path or "/runtime/" in path))
 
     def get_doc(self, path: str, default: Any = None) -> Any:
         if self._ensure_warm():
@@ -549,6 +550,17 @@ class CachingTransport(Transport):
                 out = sorted(p for p in self._docs
                              if p.startswith(prefix) and p.endswith(".json"))
                 miss_known = f"list:{prefix}" in self._neg
+            # Runtime lanes are immutable append-only ledgers. A non-empty
+            # cached prefix may still lack its next decision or terminal, so
+            # merge a live listing for these low-volume authority records.
+            if (self._health_state == "online"
+                    and prefix.startswith("chats/")
+                    and "/runtime/" in prefix):
+                try:
+                    return sorted({*out, *self.inner.list_docs(prefix)})
+                except Exception as exc:  # warm authority remains readable offline
+                    self._record_failure(exc)
+                    return out
             # R66: an EMPTY keys listing for a chat is how the seal path
             # decides to mint a brand-new epoch — on a genesis race that
             # would fork a duplicate epoch, so verify emptiness with the

@@ -51,6 +51,7 @@ from .recovery import archive_outbox, discard_delivered, retain_paths
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
 from .runtime.runs import RunLedger
 from .runtime.tasks import TaskLedger
+from .runtime.handoffs import HandoffLedger
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -115,6 +116,9 @@ class AgentRunner:
                          home=self.home, app_version=__version__)
         self.run_ledger = RunLedger(self.mesh)
         self.task_ledger = TaskLedger(self.mesh, self.run_ledger)
+        # Register the handoff outbox handler before Mesh starts its worker so
+        # a crash cannot turn a durable pending offer/decision into dead mail.
+        self.handoff_ledger = HandoffLedger(self.mesh, self.task_ledger)
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         # V87: the conversation manager reads the timer list so a run's
@@ -936,6 +940,8 @@ class AgentRunner:
             self.task_ledger.recover_open()
         with contextlib.suppress(Exception):
             self.run_ledger.recover_open()
+        with contextlib.suppress(Exception):
+            self.handoff_ledger.retry_open()
         # V51: advertise this machine's app version on the R11 registry so
         # peers' update checks can hint at it (records age out at STALE_S,
         # so a long-lived harness re-announces below)
@@ -968,6 +974,7 @@ class AgentRunner:
                 reap_orphan_run(self.mesh.tx, self.agent, running)
                 self.task_ledger.retry_terminals()
                 self.run_ledger.retry_terminals()
+                self.handoff_ledger.retry_open()
                 self._consume_timer_cancels()       # V88: owner dismissals
                 self.tick()
                 if time.monotonic() - announced > 1800:
