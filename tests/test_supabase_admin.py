@@ -5,11 +5,35 @@ credential installed BEFORE the claim, reruns resume, clear errors."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agentbridge.transport import supabase_admin as admin
+
+
+def _policy(sql: str, name: str) -> str:
+    return sql.split(f"create policy {name}", 1)[1].split(";", 1)[0]
+
+
+def test_deleted_chat_rls_is_read_delete_only_for_former_members():
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    assert "m.data->'tenure' ? public.ab_member(p_root)" in sql
+    for lane in ("docs", "logs", "blobs"):
+        assert "ab_can_read_chat" in _policy(
+            sql, f"ab_{lane}_member_select",
+        )
+        assert "ab_can_read_chat" in _policy(
+            sql, f"ab_{lane}_member_delete",
+        )
+        assert "ab_is_member" in _policy(
+            sql, f"ab_{lane}_member_insert",
+        )
+    assert "ab_is_member" in _policy(sql, "ab_docs_member_update")
+    assert "ab_is_member" in _policy(sql, "ab_blobs_member_update")
 
 
 class _Table:

@@ -162,6 +162,22 @@ class Store:
         ).fetchone()
         return int(row[0])
 
+    def state_events_after(self, chat_id: str, ns: int) -> list[dict]:
+        """Locally ingested chat-state events newer than a materialized fold.
+
+        Reaction info rows are notification breadcrumbs, not chat state. Keep
+        them out here so one reaction cannot force every later snapshot down
+        the reconciliation path.
+        """
+        rows = self._conn().execute(
+            "SELECT payload FROM messages"
+            " WHERE chat_id=? AND kind='info' AND ns>?"
+            " AND coalesce(json_extract(payload, '$.event.type'), '') != 'reaction'"
+            " ORDER BY ns",
+            (chat_id, int(ns)),
+        )
+        return [json.loads(row[0]) for row in rows]
+
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))

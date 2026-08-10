@@ -15,12 +15,12 @@ from __future__ import annotations
 import time
 
 from .. import crypto
-from ..core.errors import NotAMember, PermissionDenied, ValidationError
+from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from ..core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Message, MsgKind
 from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
-from . import authz
+from . import authz, events
 from .attachments import PreparedAttachment, attachment_path
 from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
     pin_signing_bytes, reaction_signing_bytes, redaction_signing_bytes, \
@@ -66,11 +66,25 @@ class MessagingService:
         self.attachments = attachments
 
     # ------------------------------------------------------------- membership
-    def snapshot(self, chat_id: str) -> ChatSnapshot:
+    def _materialized_snapshot(self, chat_id: str) -> ChatSnapshot:
         doc = self.tx.get_doc(P.meta(chat_id))
         if not isinstance(doc, dict):
             raise NotAMember(f"unknown chat {chat_id}")
         return ChatSnapshot.from_dict(doc)
+
+    def snapshot(self, chat_id: str) -> ChatSnapshot:
+        materialized = self._materialized_snapshot(chat_id)
+        newer = self.store.state_events_after(
+            chat_id, materialized.materialized_ns,
+        )
+        if not newer:
+            return materialized
+
+        # The event log is authoritative and meta.json is only its rebuildable
+        # projection. A terminal event can append successfully while a later
+        # RLS/meta write is lost. Advance from that trusted projection rather
+        # than rebuilding from a potentially incomplete multi-log cache.
+        return events.advance(materialized, newer, self.directory)
 
     def _require_member(
         self, chat_id: str, *, drain_before_terminal: bool = False,
@@ -683,8 +697,18 @@ class MessagingService:
                 etype = event.get("type") if isinstance(event, dict) else ""
                 if etype in {EV_DELETED, EV_MEMBER_LEFT}:
                     try:
-                        snap = self.snapshot(chat_id)
+                        # Local optimistic info rows are authoritative for
+                        # access, but cannot prove this outbox append already
+                        # reached the transport after a crash.
+                        snap = self._materialized_snapshot(chat_id)
                     except PermissionDenied as exc:
+                        # A warm mirror that still lists the room but cannot
+                        # currently read its meta is uncertain, not proof of
+                        # physical reclamation. Preserve the durable retry.
+                        if chat_id in self.tx.list_chat_ids():
+                            raise TransportError(
+                                "terminal chat metadata is temporarily unavailable"
+                            ) from exc
                         raise ValidationError(
                             "terminal chat no longer exists") from exc
                     if ((etype == EV_DELETED and snap.deleted)

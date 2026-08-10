@@ -3,6 +3,7 @@
 import pytest
 
 from agentbridge.core.errors import PermissionDenied, ValidationError
+from agentbridge.mesh import events
 from agentbridge.mesh.service import Mesh
 from agentbridge.transport.folder import FolderTransport
 
@@ -213,6 +214,19 @@ def test_profile_about_members_only(world):
     assert "about" not in sudhir.visible_profile("aryan")
     sudhir.create_chat("Now we share", members=["aryan"])
     assert "about" in sudhir.visible_profile("aryan")
+
+
+def test_members_only_profile_uses_newer_local_terminal_membership(world):
+    aryan, sudhir = world["aryan"], world["sudhir"]
+    aryan.set_privacy({"about": "members"})
+    group = sudhir.create_chat("Stale profile relationship", members=["aryan"])
+    assert "about" in sudhir.visible_profile("aryan")
+
+    terminal = sudhir.build_event(
+        group.id, {"type": events.EV_DELETED, "by": "sudhir"},
+    )
+    sudhir.store.upsert_messages(group.id, [terminal.to_dict()])
+    assert "about" not in sudhir.visible_profile("aryan")
 
 
 def test_profile_agents_audience_admits_agent_owners(world):

@@ -18,7 +18,7 @@ import logging
 import re
 import secrets
 
-from ..core.errors import PermissionDenied, TransportError, ValidationError
+from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from ..core.models import ChatKind, ChatPermissions, ChatSnapshot, Role, UserKind
 from ..store.db import Store
 from ..transport.base import Transport
@@ -241,7 +241,7 @@ class MembershipService:
                 {"type": events.EV_MEMBER_ADDED, "who": owner, "by": self.user,
                  "reason": "responsible_member", "agent": agent},
             )
-        healed = self.refold(chat_id)
+        healed = self.materialize(chat_id)
         if self.keys is not None:
             newcomers = [n for n in [*todo, *pulled] if n in healed.members]
             self.keys.on_members_added(chat_id, healed, newcomers)
@@ -273,7 +273,7 @@ class MembershipService:
                 chat_id, {"type": events.EV_MEMBER_REMOVED, "who": agent,
                           "by": self.user, "reason": "with_owner", "owner": who}
             )
-        healed = self.refold(chat_id)
+        healed = self.materialize(chat_id)
         if self.keys is not None:  # rotate away from the removed member now
             self.keys.on_members_removed(chat_id, healed)
         return healed
@@ -295,7 +295,7 @@ class MembershipService:
         if reason:
             event["reason"] = reason
         self.messaging.post_event(chat_id, event)
-        healed = self.refold(chat_id, write=False)
+        healed = self.materialize(chat_id, write=False)
         if self.keys is not None:  # R69: rotate the epoch away from me on exit
             self.keys.on_member_left(chat_id, healed)
         self.messaging.flush_outbox()
@@ -312,7 +312,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_ADMIN_GRANTED, "who": who, "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def revoke_admin(self, chat_id: str, who: str) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
@@ -323,7 +323,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_ADMIN_REVOKED, "who": who, "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def rename(self, chat_id: str, name: str) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
@@ -334,7 +334,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_RENAMED, "name": name.strip(), "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def set_description(self, chat_id: str, text: str) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
@@ -343,7 +343,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_DESCRIPTION, "text": text or "", "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def set_avatar(self, chat_id: str, data: bytes) -> ChatSnapshot:
         """Group photo: blob + an EV_AVATAR event carrying its sha (the
@@ -358,7 +358,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_AVATAR, "sha": sha, "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def clear_avatar(self, chat_id: str) -> ChatSnapshot:
         snap = self.messaging.snapshot(chat_id)
@@ -367,7 +367,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_AVATAR, "sha": "", "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     def delete_chat(self, chat_id: str) -> ChatSnapshot:
         """Group deletion for everyone — admin-only, TERMINAL in the fold
@@ -381,7 +381,7 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_DELETED, "by": self.user}
         )
-        preview = self.refold(chat_id, write=False)
+        preview = self.materialize(chat_id, write=False)
         self.messaging.flush_outbox()
         return preview
 
@@ -396,16 +396,34 @@ class MembershipService:
         self.messaging.post_event(
             chat_id, {"type": events.EV_PERMISSIONS, "permissions": changes, "by": self.user}
         )
-        return self.refold(chat_id)
+        return self.materialize(chat_id)
 
     # -------------------------------------------------------------- snapshots
+    def materialize(self, chat_id: str, *, write: bool = True) -> ChatSnapshot:
+        """Persist the effective snapshot without rebuilding local history.
+
+        Routine mutations start from the trusted remote materialization and
+        advance it with authenticated local state events. This preserves a
+        contracted ACL even when the local cache temporarily lacks an older
+        writer log.
+        """
+        snap = self.messaging.snapshot(chat_id)
+        if not write:
+            return snap
+        try:
+            self.tx.put_doc(P.meta(chat_id), snap.to_dict())
+        except TransportError:
+            log.warning("meta write for %s deferred (transient lock)", chat_id)
+        return snap
+
     def refold(self, chat_id: str, *, write: bool = True) -> ChatSnapshot:
         """Recompute the snapshot from the event log and rewrite meta.json.
         Heals any clobbered/stale meta (the whole point of tenet 3).
 
-        Guard: a local cache that hasn't synced the chat's GENESIS yet would
-        fold to an empty snapshot — never clobber meta with that; partial-but-
-        genesis-bearing folds converge via every member's next refold."""
+        This explicit repair path performs a complete replay. Routine sync and
+        authorization reads never call it because a transient folder listing
+        is not proof that every writer log is locally present.
+        """
         snap = events.fold(chat_id, self.store.messages(chat_id), self.directory)
         if not snap.members and not snap.deleted:
             return self.messaging.snapshot(chat_id)
@@ -427,6 +445,7 @@ class MembershipService:
 
     def _snapshots(self):
         for chat_id in self.tx.list_chat_ids():
-            doc = self.tx.get_doc(P.meta(chat_id))
-            if isinstance(doc, dict):
-                yield ChatSnapshot.from_dict(doc)
+            try:
+                yield self.messaging.snapshot(chat_id)
+            except (NotAMember, ValueError, TypeError):
+                continue

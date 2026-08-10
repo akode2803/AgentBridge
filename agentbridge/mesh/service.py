@@ -99,11 +99,14 @@ class Mesh:
             directory=self.directory,
             attachments=self.attachments,
         )
+        if isinstance(self.sealer, E2EESealer):
+            self.sealer.set_snapshot_resolver(self.messaging.snapshot)
+        self.privacy.set_snapshot_resolver(self.messaging.snapshot)
         self.membership = MembershipService(
             self.tx, self.store, self.directory, self.messaging,
             privacy=self.privacy, keys=self.keys,
         )
-        self.messaging.set_terminal_applier(self.membership.refold)
+        self.messaging.set_terminal_applier(self.membership.materialize)
         from .janitor import Janitor
         self.messaging.set_terminal_reclaimer(
             lambda chat_id: Janitor(self).reclaim_deleted_chat_attachments(chat_id)
@@ -126,7 +129,8 @@ class Mesh:
             user=user, app_version=app_version, release_info=release_info,
         )
         self.sync = SyncEngine(
-            self.tx, self.store, is_member=self._is_member, workers=sync_workers,
+            self.tx, self.store, is_member=self._can_sync_chat,
+            workers=sync_workers,
             on_records=self._pump,
         )
 
@@ -145,9 +149,11 @@ class Mesh:
         return crypto.sign(bundle, data) if bundle else ""
 
     def _pump(self, chat_id: str, records: list[dict]) -> None:
-        """Sync -> bus: publish exactly-once events; info events also refresh
-        the local snapshot (meta stays warm without anyone calling refold)."""
-        saw_info = False
+        """Publish exactly-once sync events and advance delivery receipts.
+
+        Snapshot refresh happens in SyncEngine's all-writer completion callback
+        so a partial multi-log scan can never materialize an incomplete ACL.
+        """
         max_msg_ns = 0
         for rec in records:
             ns = int(rec.get("ns", 0))
@@ -162,7 +168,6 @@ class Mesh:
                         {"by": rec.get("from", ""), **ev}, ns,
                     ))
                     continue
-                saw_info = True
                 # added later, OR a founding member of someone else's GROUP —
                 # genesis bakes the roster into one `created` event, so there
                 # is no member_added for founders (R42). DMs stay quiet: the
@@ -183,11 +188,10 @@ class Mesh:
             else:
                 max_msg_ns = max(max_msg_ns, ns)
                 self.bus.publish(Event(eventbus.MESSAGE, chat_id, rec, ns))
-        if saw_info:
-            try:
-                self.membership.refold(chat_id)
-            except Exception:  # noqa: BLE001 — repaint later beats crashing sync
-                pass
+        # Synced state events stay as a local authoritative overlay until their
+        # writer publishes meta. Never rematerialize here: a folder listing may
+        # temporarily omit another writer log, so local history is not proof of
+        # a complete fold and must not overwrite the trusted metadata ACL.
         # R33: fetching a message IS delivery. Advance my delivered cursor to
         # what just synced in — this is the "worker receives message =
         # Delivered" receipt, for humans and agents alike. Guarded (only writes
@@ -203,6 +207,21 @@ class Mesh:
         try:
             return self.messaging.snapshot(chat_id).is_member(self.user)
         except Exception:  # noqa: BLE001 — unreadable meta = not my chat (yet)
+            return False
+
+    def _can_sync_chat(self, chat_id: str) -> bool:
+        """Current membership plus terminal-evidence catch-up authority.
+
+        Deleted metadata empties ``members`` before another client may have
+        fetched the signed terminal log. Former authenticated tenure is enough
+        to fetch that evidence, but does not restore GUI/message membership.
+        """
+        try:
+            snap = self.messaging.snapshot(chat_id)
+            return snap.is_member(self.user) or (
+                snap.deleted and self.user in snap.tenure
+            )
+        except Exception:  # noqa: BLE001 — unreadable meta = not sync-visible
             return False
 
     # -------------------------------------------------------- R25 hardening

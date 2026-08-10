@@ -194,6 +194,24 @@ def test_terminal_event_stops_retrying_after_chat_is_physically_reclaimed(world)
     assert CHAT not in ann.tx.list_chat_ids()
 
 
+def test_terminal_event_retries_when_listed_meta_is_temporarily_unreadable(
+        world, monkeypatch):
+    ann = world["ann"]
+    terminal = ann.build_event(CHAT, {"type": "chat_deleted", "by": "ann"})
+    ann.commit_envelope(CHAT, terminal)
+    original = ann.tx.get_doc
+
+    def unavailable(path, default=None):
+        if path == P.meta(CHAT):
+            return default
+        return original(path, default)
+
+    monkeypatch.setattr(ann.tx, "get_doc", unavailable)
+    assert CHAT in ann.tx.list_chat_ids()
+    assert ann.outbox.flush_once() == 0
+    assert ann.store.outbox_counts() == {"pending": 1}
+
+
 def test_already_applied_terminal_event_acknowledges_without_reappend(
         world, monkeypatch):
     ann = world["ann"]

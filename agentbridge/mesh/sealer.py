@@ -113,6 +113,7 @@ class E2EESealer(Sealer):
         self.keys = keys
         self.user = user
         self._bundle = keystore_bundle
+        self._snapshot_resolver = None
         # unseal-result LRU (R24): a sealed envelope is IMMUTABLE for its
         # (id, ns, epoch, nonce) — the AAD binds them — so re-verifying and
         # re-decrypting on every read is pure waste. The profile showed the
@@ -122,14 +123,23 @@ class E2EESealer(Sealer):
         self._cache: dict[tuple, BodyRecord] = {}
         self._cache_cap = 4096
 
+    def set_snapshot_resolver(self, resolver) -> None:
+        """Use the same effective membership view as message authorization."""
+        self._snapshot_resolver = resolver
+
+    def _snapshot(self, chat_id: str) -> ChatSnapshot:
+        if self._snapshot_resolver is not None:
+            return self._snapshot_resolver(chat_id)
+        snap_doc = self.tx.get_doc(P.meta(chat_id))
+        if not isinstance(snap_doc, dict):
+            raise crypto.CryptoFail(f"unknown chat {chat_id}")
+        return ChatSnapshot.from_dict(snap_doc)
+
     def seal(self, chat_id: str, env_id: str, ns: int, body: BodyRecord) -> dict:
         bundle = self._bundle()
         if bundle is None:
             raise crypto.CryptoFail("identity keys are locked — sign in first")
-        snap_doc = self.tx.get_doc(P.meta(chat_id))
-        if not isinstance(snap_doc, dict):
-            raise crypto.CryptoFail(f"unknown chat {chat_id}")
-        epoch, key = self.keys.ensure(chat_id, ChatSnapshot.from_dict(snap_doc))
+        epoch, key = self.keys.ensure(chat_id, self._snapshot(chat_id))
         aad = _aad(chat_id, env_id, ns, self.user, epoch)
         nonce, ct = crypto.seal_bytes(
             key, aad, json.dumps(body.to_dict(), ensure_ascii=False).encode()
@@ -176,10 +186,7 @@ class E2EESealer(Sealer):
         return record
 
     def seal_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes:
-        snap_doc = self.tx.get_doc(P.meta(chat_id))
-        if not isinstance(snap_doc, dict):
-            raise crypto.CryptoFail(f"unknown chat {chat_id}")
-        epoch, key = self.keys.ensure(chat_id, ChatSnapshot.from_dict(snap_doc))
+        epoch, key = self.keys.ensure(chat_id, self._snapshot(chat_id))
         sealed = crypto.seal_raw(key, _blob_aad(chat_id, blob_id, epoch), data)
         return _BLOB_MAGIC + epoch.to_bytes(8, "big") + sealed
 

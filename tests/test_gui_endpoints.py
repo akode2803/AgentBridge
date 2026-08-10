@@ -355,6 +355,21 @@ def test_delete_chat_needs_admin(rig):
             fable.delete_chat(cid)
 
 
+def test_state_hides_terminal_event_when_meta_is_stale(rig):
+    rig.signup()
+    rig.peer_account("fable")
+    cid = rig.post("/api/mesh/create_chat", name="Stale GUI group",
+                   members=["fable"])["chat"]["id"]
+    mesh = rig.app.mesh
+    terminal = mesh.build_event(
+        cid, {"type": "chat_deleted", "by": "aryan"},
+    )
+    mesh.store.upsert_messages(cid, [terminal.to_dict()])
+
+    assert all(c["id"] != cid for c in rig.get("/api/mesh/state")["chats"])
+    assert "error" in rig.get("/api/mesh/chat", id=cid)
+
+
 # ------------------------------------------------------------------ profile
 def test_profile_privacy_and_blocks(rig):
     rig.signup()

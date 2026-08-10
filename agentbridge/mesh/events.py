@@ -40,7 +40,7 @@ __all__ = [
     "EV_ADMIN_GRANTED", "EV_ADMIN_REVOKED", "EV_RENAMED", "EV_DESCRIPTION",
     "EV_PERMISSIONS", "EV_AVATAR", "EV_DELETED", "EV_KEY_ROTATED",
     "EV_REACTION",
-    "Resolver", "fold", "signing_bytes", "redaction_signing_bytes",
+    "Resolver", "fold", "advance", "signing_bytes", "redaction_signing_bytes",
     "unredaction_signing_bytes",
     "reaction_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
     "genesis_gid", "GID_LEN", "is_legacy_chat_id",
@@ -169,8 +169,38 @@ def fold(chat_id: str, envelopes: list[dict], directory: Resolver) -> ChatSnapsh
     snap = ChatSnapshot(id=chat_id, kind=ChatKind.GROUP, name="")
     snap.members = {}
     for env in infos:
-        _apply(snap, env, directory)
-        snap.materialized_ns = max(snap.materialized_ns, int(env.get("ns", 0)))
+        if _apply(snap, env, directory):
+            snap.materialized_ns = max(
+                snap.materialized_ns, int(env.get("ns", 0)),
+            )
+    return snap
+
+
+def advance(
+    materialized: ChatSnapshot, envelopes: list[dict], directory: Resolver,
+) -> ChatSnapshot:
+    """Apply a newer authenticated event suffix to a trusted materialization.
+
+    Unlike ``fold``, this does not assume the local cache contains genesis or
+    every earlier writer log. ``materialized_ns`` is the boundary: only newer
+    records are eligible, so an in-progress multi-log sync cannot reconstruct
+    authority from a partial history and accidentally widen membership.
+    """
+    snap = ChatSnapshot.from_dict(materialized.to_dict())
+    infos = sorted(
+        (
+            e for e in envelopes
+            if e.get("kind") == "info"
+            and isinstance(e.get("event"), dict)
+            and int(e.get("ns", 0)) > materialized.materialized_ns
+        ),
+        key=lambda e: (e.get("ns", 0), e.get("from", ""), e.get("id", "")),
+    )
+    for env in infos:
+        if _apply(snap, env, directory):
+            snap.materialized_ns = max(
+                snap.materialized_ns, int(env.get("ns", 0)),
+            )
     return snap
 
 
@@ -228,21 +258,21 @@ def _tenure_close(snap: ChatSnapshot, name: str, ns: int) -> None:
         spans[-1][1] = ns
 
 
-def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> None:
+def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> bool:
     ev = env["event"]
     etype = ev.get("type")
     author = env.get("from", "")
     ns = int(env.get("ns", 0))
 
     if snap.deleted:
-        return  # terminal: nothing folds after deletion (incl. a re-'created')
+        return False  # terminal: nothing folds after deletion
 
     if not _authentic(snap.id, env, etype, author, d):
-        return  # forged genesis / unsigned-or-mis-signed event: never counts
+        return False  # forged / unsigned / mis-signed: never counts
 
     if etype == EV_CREATED:
         if snap.members:
-            return  # first created wins; later ones are forged/noise
+            return False  # first created wins; later ones are noise
         snap.kind = ChatSnapshot.from_dict({"kind": ev.get("kind", "group")}).kind
         snap.name = str(ev.get("name") or "")
         snap.description = str(ev.get("description") or "")
@@ -257,92 +287,103 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> None:
             )
             _tenure_open(snap, name, ns)
         _heal(snap, d, ns)
-        return
+        return True
 
     if not snap.members:
-        return  # nothing exists before genesis
+        return False  # nothing exists before genesis
 
     fixed_membership = snap.kind in (ChatKind.DM, ChatKind.SELF)
 
     if etype == EV_MEMBER_ADDED:
         who = ev.get("who", "")
         if fixed_membership or not who or who in snap.members:
-            return
+            return False
         author_owner = (
             d.owner_of(author) if d.kind(author) is UserKind.AGENT else None
         )
         if not authz.can_add_members(snap, author, agent_owner=author_owner):
-            return
+            return False
         # pull-ins into a PREEXISTING group join as plain members — genesis
         # is the only moment humans get admin automatically (Aryan 2026-07-12)
         snap.members[who] = Member(role=Role.MEMBER, joined_ns=ns)
         _tenure_open(snap, who, ns)
+        return True
 
     elif etype == EV_MEMBER_REMOVED:
         who = ev.get("who", "")
         if fixed_membership or who == author or who not in snap.members:
-            return
+            return False
         if not authz.can_remove_member(
             snap, author,
             is_agent=d.kind(author) is UserKind.AGENT,
             owns_target=(d.kind(who) is UserKind.AGENT and d.owner_of(who) == author),
         ):
-            return
+            return False
         del snap.members[who]
         _tenure_close(snap, who, ns)
         _heal(snap, d, ns)
+        return True
 
     elif etype == EV_MEMBER_LEFT:
         if fixed_membership or author not in snap.members:
-            return
+            return False
         del snap.members[author]
         _tenure_close(snap, author, ns)
         _heal(snap, d, ns)
+        return True
 
     elif etype == EV_ADMIN_GRANTED:
         who = ev.get("who", "")
-        if (
-            not fixed_membership
-            and authz.can_grant_admin(snap, author)
-            and who in snap.members
-            and d.kind(who) is not UserKind.AGENT  # agents can never be admins
-        ):
-            snap.members[who].role = Role.ADMIN
+        if (fixed_membership
+                or not authz.can_grant_admin(snap, author)
+                or who not in snap.members
+                or d.kind(who) is UserKind.AGENT):
+            return False
+        snap.members[who].role = Role.ADMIN
+        return True
 
     elif etype == EV_ADMIN_REVOKED:
         who = ev.get("who", "")
-        if not fixed_membership and authz.can_grant_admin(snap, author) and who in snap.members:
-            snap.members[who].role = Role.MEMBER
-            _heal(snap, d, ns)
+        if (fixed_membership
+                or not authz.can_grant_admin(snap, author)
+                or who not in snap.members):
+            return False
+        snap.members[who].role = Role.MEMBER
+        _heal(snap, d, ns)
+        return True
 
     elif etype in (EV_RENAMED, EV_DESCRIPTION, EV_AVATAR):
         if not authz.can_edit_settings(snap, author):
-            return
+            return False
         if etype == EV_RENAMED:
             snap.name = str(ev.get("name") or snap.name)
         elif etype == EV_DESCRIPTION:
             snap.description = str(ev.get("text") or "")
         else:
             snap.avatar = str(ev.get("sha") or "")  # "" clears the photo
+        return True
 
     elif etype == EV_DELETED:
         # groups only, admins only — a DM/self chat is cleared, never deleted
         if snap.kind is not ChatKind.GROUP or not authz.is_admin(snap, author):
-            return
+            return False
         snap.deleted = True
         for name in list(snap.members):
             _tenure_close(snap, name, ns)
         snap.members = {}  # nobody is a member of a dead chat (reads all stop)
+        return True
 
     elif etype == EV_PERMISSIONS:
         if fixed_membership or not authz.can_change_permissions(snap, author):
-            return
+            return False
         merged = {**snap.permissions.__dict__, **(ev.get("permissions") or {})}
         snap.permissions = ChatPermissions.from_dict(
             {k: getattr(v, "value", v) for k, v in merged.items()}
         )
+        return True
 
     # unknown event types: ignore (a newer peer may emit ones we don't know)
+    return False
 
 
 def _heal(snap: ChatSnapshot, d: Resolver, ns: int = 0) -> None:

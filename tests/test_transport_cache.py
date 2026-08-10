@@ -589,6 +589,44 @@ def test_delta_meta_tombstone_drops_the_chat_id(delta_mirror):
     assert tx.list_chat_ids() == []
 
 
+def test_delta_tick_evicts_chat_hidden_by_remote_rls(delta_mirror):
+    inner, tx = delta_mirror
+    inner.put_doc("chats/c1/meta.json", {"id": "c1", "members": {"u": {}}})
+    inner.put_doc("chats/c1/state/u.json", {"read": 1})
+    tx.refresh()
+    assert tx.list_chat_ids() == ["c1"]
+
+    # A membership contraction makes every row invisible to this identity;
+    # unlike a physical delete, RLS returns no delta tombstone.
+    inner.docs = {
+        path: value for path, value in inner.docs.items()
+        if not path.startswith("chats/c1/")
+    }
+    assert tx._refresh_tick() is True
+    assert tx.list_chat_ids() == []
+    assert tx.get_doc("chats/c1/meta.json") is None
+    assert tx.list_docs("chats/c1/") == []
+
+
+def test_revocation_beats_a_racing_append_for_an_established_chat(delta_mirror):
+    inner, tx = delta_mirror
+    inner.put_doc("chats/c1/meta.json", {"id": "c1", "members": {"u": {}}})
+    tx.refresh()
+    assert tx.list_chat_ids() == ["c1"]
+
+    # RLS contracts visibility while this client has one final append in
+    # flight. A write guard may preserve a brand-new room, never an established
+    # room that the authoritative id query has revoked.
+    inner.list_chat_ids = lambda: []
+    inner.on_delta = lambda: tx.append_log(
+        "c1", "u@m.jsonl", {"id": "late", "from": "u", "ns": 1},
+    )
+    assert tx._refresh_tick() is True
+    inner.on_delta = None
+    assert tx.list_chat_ids() == []
+    assert tx.get_doc("chats/c1/meta.json") is None
+
+
 def test_local_write_survives_a_racing_delta(delta_mirror):
     inner, tx = delta_mirror
     inner.put_doc("users/a.json", {"v": 1})

@@ -131,6 +131,29 @@ def test_removed_member_keeps_history_loses_future(world):
     assert fable.keys.my_key(group.id, new_epoch) is None      # future: opaque
 
 
+def test_stale_meta_never_rewraps_a_new_key_to_locally_removed_member(world):
+    meshes, _, _, _ = world
+    aryan, fable, sudhir = meshes["aryan"], meshes["fable"], meshes["sudhir"]
+    group = aryan.create_chat("Stale encrypted roster", members=["fable", "sudhir"])
+    aryan.post(group.id, "seed")
+    ripple(aryan, group.id, fable, sudhir)
+
+    # The authenticated removal reached local SQLite, but the rebuildable
+    # transport meta still has the old roster (the live V156 failure shape).
+    removal = aryan.build_event(
+        group.id, {"type": "member_removed", "who": "fable", "by": "aryan"},
+    )
+    aryan.store.upsert_messages(group.id, [removal.to_dict()])
+    assert "fable" in aryan.tx.get_doc(P.meta(group.id))["members"]
+
+    env = aryan.post(group.id, "sealed after local removal")
+    epoch, doc = aryan.keys.latest(group.id)
+    assert env.epoch == epoch
+    assert set(doc["wrapped"]) == {"aryan", "sudhir"}
+    fable.keys._cache.clear()
+    assert fable.keys.my_key(group.id, epoch) is None
+
+
 def test_leave_rotates_the_epoch_away_from_the_leaver(world):
     """R69: leaving rotates the chat key away from the departing member, so a
     message posted after they leave is sealed under an epoch they were never
@@ -179,7 +202,8 @@ def test_ensure_distrusts_an_epoch_from_a_departed_creator(world):
     # removed) fable — only the departed-creator check can catch this
     aryan.remove_member(group.id, "fable")
     ep2, doc2 = aryan.keys.latest(group.id)      # remove_member rotated
-    forged = dict(doc2); forged["by"] = "fable"  # a departed member's stamp
+    forged = dict(doc2)
+    forged["by"] = "fable"  # a departed member's stamp
     FolderTransport(root).put_doc(P.keys(group.id, ep2), forged)
     aryan.keys._cache.clear()
     env = aryan.post(group.id, "after the plant")  # ensure() must re-key

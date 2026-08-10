@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentbridge.core.errors import PermissionDenied, ValidationError
+from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationError
 from agentbridge.core.models import ChatKind, ChatSnapshot, Role, UserKind
 from agentbridge.mesh import events
 from agentbridge.mesh.paths import P
@@ -320,6 +320,95 @@ def test_chats_for_lists_only_my_chats(world):
     both = aryan.create_chat("Shared", members=["fable"])
     assert {s.id for s in aryan.membership.chats_for()} == {mine.id, both.id}
     assert {s.id for s in fable.membership.chats_for()} == {both.id}
+
+
+def test_newer_local_terminal_fold_overrides_stale_meta(world):
+    aryan = world["aryan"]
+    snap = aryan.create_chat("Stale terminal", members=["fable"])
+    terminal = aryan.build_event(
+        snap.id, {"type": events.EV_DELETED, "by": "aryan"},
+    )
+    aryan.store.upsert_messages(snap.id, [terminal.to_dict()])
+
+    resolved = aryan.snapshot(snap.id)
+    assert resolved.deleted and resolved.members == {}
+    assert all(chat.id != snap.id for chat in aryan.chats_for())
+    # Terminal tenure is sync-only authority so another client can still fetch
+    # the signed deletion record after terminal meta arrives first.
+    assert snap.id in aryan.sync.my_chat_ids()
+    with pytest.raises(NotAMember):
+        aryan.messages_for(snap.id)
+    with pytest.raises(NotAMember):
+        aryan.post(snap.id, "must not escape")
+
+
+def test_terminal_meta_before_log_still_allows_evidence_catch_up(world):
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Terminal evidence", members=["fable"])
+    ripple(aryan, snap.id, fable)
+    terminal = aryan.build_event(
+        snap.id, {"type": events.EV_DELETED, "by": "aryan"},
+    )
+
+    # Model cloud ordering: terminal metadata is visible before its writer-log
+    # append. The former member must remain eligible to fetch only the proof.
+    terminal_snap = events.advance(snap, [terminal.to_dict()], aryan.directory)
+    aryan.tx.put_doc(P.meta(snap.id), terminal_snap.to_dict())
+    assert terminal.id not in {row["id"] for row in fable.store.messages(snap.id)}
+    assert snap.id in fable.sync.my_chat_ids()
+    assert all(chat.id != snap.id for chat in fable.chats_for())
+
+    aryan.tx.append_log(
+        snap.id, P.log_name("aryan", aryan.machine), terminal.to_dict(),
+    )
+    assert fable.sync.sync_once() == 1
+    assert terminal.id in {row["id"] for row in fable.store.messages(snap.id)}
+    with pytest.raises(NotAMember):
+        fable.messages_for(snap.id)
+
+
+def test_newer_local_removal_fold_revokes_stale_membership(world):
+    aryan, fable = world["aryan"], world["fable"]
+    snap = aryan.create_chat("Stale removal", members=["fable"])
+    ripple(aryan, snap.id, fable)
+    removal = aryan.build_event(
+        snap.id,
+        {"type": events.EV_MEMBER_REMOVED, "who": "fable", "by": "aryan"},
+    )
+    fable.store.upsert_messages(snap.id, [removal.to_dict()])
+
+    assert not fable.snapshot(snap.id).is_member("fable")
+    assert all(chat.id != snap.id for chat in fable.chats_for())
+    with pytest.raises(NotAMember):
+        fable.messages_for(snap.id)
+
+
+def test_partial_history_cannot_roll_back_materialized_membership(world):
+    aryan = world["aryan"]
+    snap = aryan.create_chat("Materialized authority", members=["fable"])
+    ripple(aryan, snap.id)
+    aryan.remove_member(snap.id, "fable")
+    ripple(aryan, snap.id)
+    materialized = aryan.tx.get_doc(P.meta(snap.id))
+    assert "fable" not in materialized["members"]
+
+    # Simulate a cache that retained genesis but missed the later removal.
+    genesis = next(
+        row for row in aryan.store.messages(snap.id)
+        if (row.get("event") or {}).get("type") == events.EV_CREATED
+    )
+    aryan.store.forget_chat(snap.id)
+    aryan.store.upsert_messages(snap.id, [genesis])
+
+    resolved = aryan.snapshot(snap.id)
+    assert "fable" not in resolved.members
+    assert resolved.materialized_ns == materialized["materialized_ns"]
+
+    renamed = aryan.rename(snap.id, "Still contracted")
+    persisted = aryan.tx.get_doc(P.meta(snap.id))
+    assert renamed.name == "Still contracted"
+    assert "fable" not in renamed.members
+    assert "fable" not in persisted["members"]
 
 
 # --------------------------------------------------- agent oversight (R6.1)

@@ -39,6 +39,10 @@ class PrivacyService:
         self.tx = tx
         self.directory = directory
         self.user = user
+        self._snapshot_resolver = None
+
+    def set_snapshot_resolver(self, resolver) -> None:
+        self._snapshot_resolver = resolver
 
     # ------------------------------------------------------------- write side
     def set_privacy(self, changes: dict, *, agent: str | None = None) -> Account:
@@ -219,11 +223,18 @@ class PrivacyService:
     def shares_chat(self, a: str, b: str) -> bool:
         """D13 'members' audience: a and b sit in at least one chat together."""
         for chat_id in self.tx.list_chat_ids():
-            doc = self.tx.get_doc(P.meta(chat_id))
-            if isinstance(doc, dict):
-                snap = ChatSnapshot.from_dict(doc)
-                if snap.is_member(a) and snap.is_member(b):
-                    return True
+            try:
+                if self._snapshot_resolver is not None:
+                    snap = self._snapshot_resolver(chat_id)
+                else:
+                    doc = self.tx.get_doc(P.meta(chat_id))
+                    if not isinstance(doc, dict):
+                        continue
+                    snap = ChatSnapshot.from_dict(doc)
+            except (PermissionDenied, ValueError, TypeError):
+                continue
+            if snap.is_member(a) and snap.is_member(b):
+                return True
         return False
 
     # ---------------------------------------------------------------- helpers

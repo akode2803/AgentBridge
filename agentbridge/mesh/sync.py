@@ -140,7 +140,8 @@ class SyncEngine:
         ok = True
         for chat_id, log_name in todo:
             try:
-                new += self._sync_log(chat_id, log_name)
+                found = self._sync_log(chat_id, log_name)
+                new += found
             except Exception:  # noqa: BLE001 — keep the cursor, retry next tick
                 ok = False
         if ok and new_cursor != cursor:

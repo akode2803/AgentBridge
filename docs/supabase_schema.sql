@@ -169,6 +169,29 @@ $$;
 revoke all on function public.ab_is_member(text, text) from public;
 grant execute on function public.ab_is_member(text, text) to authenticated;
 
+-- A deleted room has no current members, but its former members must still be
+-- able to observe the terminal meta/log evidence and perform bounded janitor
+-- cleanup. This is read/delete authority only; insert/update policies continue
+-- to use ab_is_member, so terminal rooms cannot receive new content.
+create or replace function public.ab_can_read_chat(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.ab_docs m
+    where m.root = p_root
+      and m.path = 'chats/' || p_chat || '/meta.json'
+      and (
+        m.data->'members' ? public.ab_member(p_root)
+        or (
+          m.data @> '{"deleted": true}'::jsonb
+          and m.data->'tenure' ? public.ab_member(p_root)
+        )
+      )
+  )
+$$;
+revoke all on function public.ab_can_read_chat(text, text) from public;
+grant execute on function public.ab_can_read_chat(text, text) to authenticated;
+
 -- ab_members: SELF-claim on insert — your own uid, an unclaimed username
 -- (the PK is the arbiter, first come first served, mirroring the app
 -- directory's rule); one identity per uid per root (unique root+uid).
@@ -207,7 +230,7 @@ create policy ab_docs_member_select on public.ab_docs
 for select to authenticated using (
   public.ab_root_ok(root) and (
     path not like 'chats/%'
-    or public.ab_is_member(root, public.ab_chat_of(path))
+    or public.ab_can_read_chat(root, public.ab_chat_of(path))
   )
 );
 
@@ -238,7 +261,7 @@ create policy ab_docs_member_delete on public.ab_docs
 for delete to authenticated using (
   public.ab_root_ok(root) and (
     path not like 'chats/%'
-    or public.ab_is_member(root, public.ab_chat_of(path))
+    or public.ab_can_read_chat(root, public.ab_chat_of(path))
   )
 );
 
@@ -248,7 +271,7 @@ for delete to authenticated using (
 drop policy if exists ab_logs_member_select on public.ab_logs;
 create policy ab_logs_member_select on public.ab_logs
 for select to authenticated using (
-  public.ab_root_ok(root) and public.ab_is_member(root, chat_id)
+  public.ab_root_ok(root) and public.ab_can_read_chat(root, chat_id)
 );
 
 drop policy if exists ab_logs_member_insert on public.ab_logs;
@@ -260,7 +283,7 @@ for insert to authenticated with check (
 drop policy if exists ab_logs_member_delete on public.ab_logs;
 create policy ab_logs_member_delete on public.ab_logs
 for delete to authenticated using (
-  public.ab_root_ok(root) and public.ab_is_member(root, chat_id)
+  public.ab_root_ok(root) and public.ab_can_read_chat(root, chat_id)
 );
 
 -- Storage (bucket "ab-mesh", keys "<root>/<path>"): chat blobs are
@@ -273,7 +296,7 @@ for select to authenticated using (
   and public.ab_root_ok(split_part(name, '/', 1))
   and (
     split_part(name, '/', 2) <> 'chats'
-    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+    or public.ab_can_read_chat(split_part(name, '/', 1), split_part(name, '/', 3))
   )
 );
 
@@ -306,6 +329,6 @@ for delete to authenticated using (
   and public.ab_root_ok(split_part(name, '/', 1))
   and (
     split_part(name, '/', 2) <> 'chats'
-    or public.ab_is_member(split_part(name, '/', 1), split_part(name, '/', 3))
+    or public.ab_can_read_chat(split_part(name, '/', 1), split_part(name, '/', 3))
   )
 );

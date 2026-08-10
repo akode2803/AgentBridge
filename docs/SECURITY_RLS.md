@@ -89,14 +89,23 @@ evaluating it. Why meta and not a separate ACL table:
   the source of truth for what a member can actually **read**; RLS is the
   outer fence, not the arbiter.
 
-Tombstoned metas still grant access on purpose: during the deletion grace
-the members' janitors must reach the subtree to purge it.
+Terminal metas keep authenticated tenure but have no current members. R128
+adds a separate `ab_can_read_chat` policy helper: current members retain the
+ordinary path; former members of a `deleted=true` room may still **select** its
+terminal evidence and **delete** rows/blobs during bounded janitor cleanup.
+Insert and update policies continue to require `ab_is_member`, so this grace
+cannot post messages, create runtime records, upload files, or mutate room
+state. Besides making cleanup truthful, this lets another online client fetch
+the terminal meta/log after the deleting client closes the current-member ACL;
+otherwise RLS could hide the very evidence needed to remove a stale sidebar
+projection.
 
 ### The lanes
 
 | rows | who |
 |---|---|
-| `chats/<id>/**` (docs, logs, blobs) | members of `<id>` per its meta |
+| active `chats/<id>/**` (docs, logs, blobs) | current members of `<id>` per its meta |
+| deleted `chats/<id>/**` | former members in authenticated tenure: select/delete only |
 | genesis insert of `chats/<id>/meta.json` | any root member who lists themself in it |
 | everything else under the root (`users/`, `status/`, `presence/`, `control/`, `machines/`, avatars) | any member of that root |
 | other roots on the project | nobody without a members row for that root |

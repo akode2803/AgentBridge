@@ -30,6 +30,17 @@ def test_upsert_idempotent_and_ordered(store):
     assert store.message_count("c1") == 2
 
 
+def test_state_events_after_ignores_messages_and_reaction_breadcrumbs(store):
+    store.upsert_messages("c1", [
+        {"id": "i1", "ns": 10, "kind": "info", "event": {"type": "created"}},
+        {"id": "m1", "ns": 30, "kind": "message", "body": "newer"},
+        {"id": "i2", "ns": 20, "kind": "info", "event": {"type": "renamed"}},
+        {"id": "i3", "ns": 40, "kind": "info", "event": {"type": "reaction"}},
+    ])
+    assert [row["id"] for row in store.state_events_after("c1", 10)] == ["i2"]
+    assert store.state_events_after("missing", 0) == []
+
+
 def test_malformed_records_skipped(store):
     ins = store.upsert_messages("c1", [{"id": "ok", "ns": 1}, {"ns": 2}, {"id": "x"}])
     assert [r["id"] for r in ins] == ["ok"] and store.message_count("c1") == 1

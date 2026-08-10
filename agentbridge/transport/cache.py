@@ -368,6 +368,11 @@ class CachingTransport(Transport):
             self._last_attempt = time.time()
         try:
             changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+            # RLS can make a room disappear from this member's view without
+            # returning its changed meta row. Reconcile the authoritative
+            # visible-id set every delta tick so removals contract the mirror
+            # promptly instead of waiting for the rare full snapshot.
+            visible_ids = set(self.inner.list_chat_ids())
         except NotImplementedError:
             raise
         except Exception as exc:
@@ -375,6 +380,11 @@ class CachingTransport(Transport):
             raise
         silent = self.profile.silent_prefixes
         with self._lock:
+            recent_ids = {
+                chat_id for chat_id, wrote in self._chat_writes.items()
+                if wrote >= t0
+            }
+            revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
             for path, val in changed.items():
                 wrote = self._doc_writes.get(path)
                 if wrote is not None and wrote >= t0:
@@ -389,17 +399,26 @@ class CachingTransport(Transport):
                     # a tombstoned meta = the chat is gone; stop listing it
                     cid = path.split("/")[1]
                     self._chat_ids = [c for c in self._chat_ids if c != cid]
+            if revoked_ids:
+                revoked_prefixes = tuple(
+                    f"chats/{chat_id}/" for chat_id in revoked_ids
+                )
+                self._docs = {
+                    path: value for path, value in self._docs.items()
+                    if not path.startswith(revoked_prefixes)
+                }
+            self._chat_ids = sorted(visible_ids | recent_ids)
             if changed or deleted:
                 self._neg.clear()      # the world moved: re-answer misses
             self._cursor = max(self._cursor, cursor)
             self._last_refresh = time.time()
-            foreign = any(
+            foreign = bool(revoked_ids) or any(
                 p not in self._doc_writes
                 and not (silent and p.startswith(silent))
                 for p in (*changed, *deleted))
             self._prune_guards_locked()
         self._record_success()
-        if changed or deleted:
+        if changed or deleted or revoked_ids:
             self._persist_snapshot()
         return foreign
 
@@ -608,9 +627,13 @@ class CachingTransport(Transport):
         self.inner.append_log(chat_id, log_name, record)
         with self._lock:
             # a first append can create a new chat — visible to us at once
-            if chat_id not in self._chat_ids:
+            is_new = chat_id not in self._chat_ids
+            if is_new:
                 self._chat_ids = sorted({*self._chat_ids, chat_id})
-            self._chat_writes[chat_id] = time.monotonic()
+                # Only new-chat publication needs this race guard. For an
+                # established room, authoritative RLS disappearance is a
+                # revocation and must beat a concurrent local append.
+                self._chat_writes[chat_id] = time.monotonic()
         self._persist_snapshot()
 
     def read_log(
