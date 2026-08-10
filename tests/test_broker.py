@@ -18,7 +18,7 @@ from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
 
 from agentbridge.harness import BridgeServer, PermissionBroker  # noqa: E402
 from agentbridge.harness import broker as broker_mod  # noqa: E402
-from agentbridge.harness.adapters.registry import Preset  # noqa: E402
+from agentbridge.harness.adapters.registry import PRESET_DIR, Preset  # noqa: E402
 from agentbridge.mesh.service import Mesh  # noqa: E402
 
 
@@ -518,6 +518,42 @@ def test_bridge_question_options_and_read_docs_over_http(tmp_path):
                                        {"topic": "flying"})
 
 
+def test_bridge_delegate_agent_is_bounded_and_optional(tmp_path):
+    tx, broker, workspace = make(tmp_path)
+    seen = {}
+
+    def delegate(**values):
+        seen.update(values)
+        assert not values["cancelled"]()
+        return "specialist contribution"
+
+    with BridgeServer(
+            broker, chat_id="c1", workspace=workspace, auto_allow=[],
+            approvals=[], ask_timeout_s=1.0, delegate=delegate) as bridge:
+        assert call_tool(bridge, "delegate_agent", {
+            "destination_agent": "@specialist",
+            "objective": "  Review   the plan  ",
+            "success_criteria": [" Find risks ", "", "Suggest fixes"],
+            "reason": " Independent   review ",
+        }) == "specialist contribution"
+        assert seen["destination_agent"] == "specialist"
+        assert seen["objective"] == "Review the plan"
+        assert seen["success_criteria"] == ("Find risks", "Suggest fixes")
+        assert seen["reason"] == "Independent review"
+        assert "required" in call_tool(
+            bridge, "delegate_agent", {"destination_agent": "specialist"})
+
+    # No callback means no delegation tool is exposed at all.
+    with BridgeServer(
+            broker, chat_id="c1", workspace=workspace, auto_allow=[],
+            approvals=[], ask_timeout_s=1.0) as bridge:
+        unavailable = call_tool(bridge, "delegate_agent", {
+            "destination_agent": "specialist", "objective": "Review",
+            "success_criteria": ["Return a finding"],
+        })
+        assert "unknown tool" in unavailable.lower()
+
+
 # -------------------------------------------------- capability tools (R19)
 
 def test_capability_tools_ride_the_agents_own_gates(tmp_path):
@@ -917,6 +953,28 @@ def test_permission_args_ride_both_argv_modes():
         assert "--permission-prompt-tool" in argv
     bare = p.build_argv(prompt="p", workdir="w", reply_file="r")
     assert "--mcp-config" not in bare             # no bridge, no flags
+
+
+def test_shipped_codex_preset_receives_authenticated_bridge_config():
+    preset = Preset.from_dict(json.loads(
+        (PRESET_DIR / "codex.json").read_text(encoding="utf-8"),
+    ))
+    for minimal in (False, True):
+        argv = preset.build_argv(
+            prompt="p", workdir="/tmp/work", reply_file="",
+            mcp_config='{"mcpServers":{}}',
+            mcp_url="http://127.0.0.1:8123/mcp", minimal=minimal,
+        )
+        assert 'approval_policy="never"' in argv
+        assert 'mcp_servers.ab.url="http://127.0.0.1:8123/mcp"' in argv
+        assert ('mcp_servers.ab.bearer_token_env_var='
+                '"AGENTBRIDGE_MCP_TOKEN"') in argv
+        assert ('mcp_servers.ab.default_tools_approval_mode="prompt"') in argv
+        assert ('mcp_servers.ab.tools.delegate_agent.approval_mode="approve"') \
+            in argv
+        assert "mcp_servers.ab.tool_timeout_sec=960" in argv
+        assert "--sandbox" in argv and "read-only" in argv
+        assert "--ignore-user-config" in argv
 
 # ------------------------------------------- chat-level member tools (V53)
 

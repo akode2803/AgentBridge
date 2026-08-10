@@ -20,14 +20,19 @@ the stream (``extract_step``) and runs the process.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
+import hashlib
 import json
 import os
+import re
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 from ...core.config import DEFAULT_HOME
+from ...core.errors import ValidationError
 from ...core.timekit import new_id, utcnow_iso
 from ..bridge import BridgeServer
 from ..broker import PermissionBroker
@@ -36,16 +41,18 @@ from ..docs import ToolDocs
 from ..memory import MemoryStore
 from ..prompt import PromptManager, PromptPack, TRANSCRIPT_TAIL
 from ..recovery import archive_outbox, prepare_outbox
-from ..responder import OnStep, Reply, RunStopped
+from ..responder import MESSAGE_BREAK, SILENCE, OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..settings import HarnessSettings
 from .registry import Invocation, ModelRegistry, effective_gates
 
-__all__ = ["CliResponder", "extract_step", "provider_env",
-           "reply_from_output", "stream_errors"]
+__all__ = ["ChildInvocation", "ChildRequest", "ChildResult", "CliResponder",
+           "extract_step", "provider_env", "reply_from_output",
+           "stream_errors"]
 
 STAGE_TAIL = 30          # messages whose attachments get staged (v1 value)
 STDERR_SNIP = 1200
+MAX_CHILD_OUTPUT_CHARS = 65_536
 
 # Process mechanics and local CLI login discovery only. Provider credentials,
 # endpoints, and feature flags are preset-declared in ``env_allow``. Keeping
@@ -61,6 +68,99 @@ _PROCESS_ENV = (
     "NODE_EXTRA_CA_CERTS", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 )
+
+
+@dataclass(frozen=True)
+class ChildRequest:
+    """The complete, caller-rendered input to one specialist contribution."""
+
+    objective: str
+    success_criteria: tuple[str, ...]
+    rendered_context: str
+    max_output_chars: int
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.objective, str) or not self.objective.strip()
+                or "\x00" in self.objective):
+            raise ValidationError("a child objective is required")
+        if (not isinstance(self.rendered_context, str)
+                or "\x00" in self.rendered_context):
+            raise ValidationError("child rendered_context must be text")
+        if not isinstance(self.success_criteria, (tuple, list)):
+            raise ValidationError("child success criteria are required")
+        criteria = tuple(self.success_criteria)
+        if not criteria or any(
+                not isinstance(item, str) or not item.strip() or "\x00" in item
+                for item in criteria):
+            raise ValidationError("child success criteria are required")
+        if (isinstance(self.max_output_chars, bool)
+                or not isinstance(self.max_output_chars, int)
+                or not 1 <= self.max_output_chars <= MAX_CHILD_OUTPUT_CHARS):
+            raise ValidationError(
+                f"child output bound must be between 1 and "
+                f"{MAX_CHILD_OUTPUT_CHARS} characters")
+        object.__setattr__(self, "success_criteria", criteria)
+
+
+@dataclass(frozen=True)
+class ChildInvocation:
+    """Prepared provider-neutral child call, safe to journal before launch."""
+
+    request: ChildRequest
+    provider: str
+    model: str
+    effort: str
+    prompt: str
+    prompt_digest: str
+    timeout_s: float
+    chat_id: str
+    policy_revision: int
+
+
+@dataclass(frozen=True)
+class ChildResult:
+    """One bounded contribution; never a room ``Reply``."""
+
+    text: str
+    provider: str
+    model: str
+    prompt_digest: str
+
+
+def _child_prompt(request: ChildRequest) -> str:
+    criteria = "\n".join(
+        f"{index}. {item}" for index, item in enumerate(
+            request.success_criteria, start=1))
+    return (
+        "This is a bounded specialist contribution to another agent's active "
+        "task.\n"
+        "Return one plain-text contribution only. Do not use tools, execute "
+        "actions, access files, retrieve memory, schedule work, or post to "
+        "the room. The coordinating agent will decide how to use your "
+        "contribution. Do not emit chat control markers.\n\n"
+        f"Objective:\n{request.objective}\n\n"
+        f"Success criteria:\n{criteria}\n\n"
+        "Exact context supplied by the coordinator:\n"
+        "<agentbridge-child-context>\n"
+        f"{request.rendered_context}\n"
+        "</agentbridge-child-context>\n\n"
+        f"Maximum contribution length: {request.max_output_chars} characters."
+    )
+
+
+def _plain_contribution(text: str, bound: int) -> str:
+    # These tokens have chat semantics only. Neutralize them before the result
+    # can be fed back to a manager or accidentally passed through Reply tools.
+    for marker, replacement in (
+        (MESSAGE_BREAK, "[child message-break marker omitted]"),
+        (SILENCE, "[child silence marker omitted]"),
+    ):
+        text = re.sub(re.escape(marker), replacement, text,
+                      flags=re.IGNORECASE)
+    text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
+    text = "".join(
+        ch for ch in text if ch in "\n\t" or ord(ch) >= 32).strip()
+    return text[:bound].rstrip()
 
 
 def provider_env(preset, *, injected: dict[str, str] | None = None,
@@ -222,6 +322,7 @@ class CliResponder:
         self.history = HistoryIndex(self.memory, getattr(mesh, "store", None))
         self._minimal: set[str] = set()  # preset ids that needed the fallback
         self._run_local = threading.local()  # one responder serves concurrent runs
+        self.delegation = None       # runner-owned V157 coordinator
 
     # ------------------------------------------------------------- the run
     def prepare(self, delivery: Delivery, settings: HarnessSettings) -> dict[str, str]:
@@ -237,6 +338,147 @@ class CliResponder:
             # record that honestly instead of pretending it is an exact model.
             "model": invocation.model or "provider-default-unattested",
         }
+
+    # ------------------------------------------------------ child sidecar
+    def prepare_child(self, request: ChildRequest, *,
+                      chat_id: str = "") -> ChildInvocation:
+        """Resolve the destination's current agent-audience route.
+
+        The exact rendered context is supplied by the orchestration layer;
+        this path never reads room history, retrieval, memory, or attachments.
+        """
+        if not isinstance(request, ChildRequest):
+            raise TypeError("request must be a ChildRequest")
+        acc = self.mesh.directory.get(self.agent)
+        settings = HarnessSettings.from_account(acc)
+        inv = self.registry.resolve(settings, "agents", chat_id)
+        if not inv.preset.is_child_text_only_safe():
+            raise ValidationError(
+                f"{inv.preset.label or inv.preset.id} is not approved for "
+                "text-only child contributions")
+        prompt = _child_prompt(request)
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return ChildInvocation(
+            request=request,
+            provider=inv.preset.id,
+            model=inv.model or "provider-default-unattested",
+            effort=inv.effort,
+            prompt=prompt,
+            prompt_digest=digest,
+            timeout_s=settings.timeout_s,
+            chat_id=chat_id,
+            policy_revision=settings.policy_revision,
+        )
+
+    def respond_child(self, prepared: ChildInvocation, *,
+                      cancelled=None) -> ChildResult:
+        """Run one isolated, no-tool contribution in fresh temporary state."""
+        if not isinstance(prepared, ChildInvocation):
+            raise TypeError("prepared must be a ChildInvocation")
+        expected_prompt = _child_prompt(prepared.request)
+        expected_digest = hashlib.sha256(
+            expected_prompt.encode("utf-8")).hexdigest()
+        if (prepared.prompt != expected_prompt
+                or prepared.prompt_digest != expected_digest):
+            raise ValidationError("the prepared child prompt was modified")
+        preset = self.registry.presets.get(prepared.provider)
+        if preset is None or not preset.is_child_text_only_safe():
+            raise ValidationError(
+                "the prepared child adapter is no longer approved")
+        acc = self.mesh.directory.get(self.agent)
+        settings = HarnessSettings.from_account(acc)
+        current = self.registry.resolve(settings, "agents", prepared.chat_id)
+        current_model = current.model or "provider-default-unattested"
+        if (settings.policy_revision != prepared.policy_revision
+                or current.preset.id != prepared.provider
+                or current_model != prepared.model
+                or current.effort != prepared.effort):
+            raise ValidationError(
+                "the destination adapter settings changed after preparation")
+
+        with tempfile.TemporaryDirectory(prefix="agentbridge-child-") as raw:
+            workdir = Path(raw)
+            minimal = preset.id in self._minimal
+            argv = preset.build_argv(
+                prompt=prepared.prompt,
+                workdir=str(workdir),
+                reply_file="",
+                model=("" if prepared.model == "provider-default-unattested"
+                       else prepared.model),
+                effort=prepared.effort,
+                minimal=minimal,
+                mcp_config="",
+                blocklist=[],
+            )
+            env = provider_env(preset)
+            rc, lines, err = self._run_child_process(
+                argv, workdir, prepared.timeout_s, env,
+                cancelled=cancelled)
+            if self._usage_error(rc, err) and not minimal:
+                self._minimal.add(preset.id)
+                argv = preset.build_argv(
+                    prompt=prepared.prompt,
+                    workdir=str(workdir),
+                    reply_file="",
+                    model=("" if prepared.model
+                           == "provider-default-unattested"
+                           else prepared.model),
+                    effort=prepared.effort,
+                    minimal=True,
+                    mcp_config="",
+                    blocklist=[],
+                )
+                rc, lines, err = self._run_child_process(
+                    argv, workdir, prepared.timeout_s, env,
+                    cancelled=cancelled)
+
+        text = _plain_contribution(
+            reply_from_output(lines, preset.format),
+            prepared.request.max_output_chars,
+        )
+        if rc != 0 or not text:
+            why = err or "no contribution text"
+            raise RuntimeError(
+                f"{preset.id} child run failed (rc={rc}): "
+                f"{why[:STDERR_SNIP]}")
+        return ChildResult(
+            text=text,
+            provider=prepared.provider,
+            model=prepared.model,
+            prompt_digest=prepared.prompt_digest,
+        )
+
+    @staticmethod
+    def _run_child_process(argv: list[str], workdir: Path,
+                           timeout_s: float,
+                           env: dict[str, str], *, cancelled=None) \
+            -> tuple[int | None, list[str], str]:
+        """Minimal subprocess path: no mesh polling or persistent run state."""
+        kwargs: dict = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            argv, cwd=str(workdir), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", env=env, **kwargs,
+        )
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if callable(cancelled) and cancelled():
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return None, stdout.splitlines(), "cancelled by authority change"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return None, stdout.splitlines(), "timed out"
+            try:
+                stdout, stderr = proc.communicate(timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        return proc.returncode, stdout.splitlines(), stderr
 
     def respond(self, delivery: Delivery, on_step: OnStep | None = None) -> Reply:
         """Retain this run's files on every failure, not only CLI exit errors."""
@@ -313,6 +555,13 @@ class CliResponder:
         # blocklist into the ask gate (never without the gate; see
         # effective_gates). Both argv builds below use THIS blocklist.
         auto_allow, blocklist = effective_gates(inv.preset, settings)
+        delegate_tool = None
+        if self.delegation is not None and settings.agent_tools_enabled:
+            def delegate_tool(**values):
+                return self.delegation.delegate(
+                    chat_id=delivery.chat_id, run_id=delivery.run_id,
+                    parent_task_id=delivery.task_id, **values,
+                )
         with contextlib.ExitStack() as stack:
             mcp_config = ""
             injected_env: dict[str, str] = {
@@ -333,11 +582,14 @@ class CliResponder:
                     # bridge's memory gate sees the effective policy
                     global_memory=settings.global_memory_for(delivery.chat_id),
                     docs=self.docs, timer_svc=self.timer_svc,
+                    delegate=delegate_tool,
                 ))
                 mcp_config = bridge.mcp_config()
+                injected_env["AGENTBRIDGE_MCP_TOKEN"] = bridge.bearer_token
                 # the inner CLI must out-wait the owner-answer window
                 injected_env["MCP_TOOL_TIMEOUT"] = str(
-                    int((settings.ask_timeout_s + 60) * 1000))
+                    int((max(settings.ask_timeout_s, settings.timeout_s) + 60)
+                        * 1000))
             if not mcp_config:
                 # no live ask gate on this run — the web relax never applies
                 blocklist = list(inv.preset.blocklist)
@@ -352,7 +604,9 @@ class CliResponder:
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
                 effort=inv.effort, minimal=inv.preset.id in self._minimal,
-                mcp_config=mcp_config, blocklist=blocklist,
+                mcp_config=mcp_config,
+                mcp_url=(bridge.url if bridge is not None else ""),
+                blocklist=blocklist,
             )
             env = provider_env(inv.preset, injected=injected_env)
             rc, lines, err = self._run(
@@ -367,6 +621,7 @@ class CliResponder:
                     prompt=prompt, workdir=str(workdir),
                     reply_file=str(reply_file), model=inv.model,
                     effort=inv.effort, minimal=True, mcp_config=mcp_config,
+                    mcp_url=(bridge.url if bridge is not None else ""),
                     blocklist=blocklist,
                 )
                 rc, lines, err = self._run(

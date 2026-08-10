@@ -62,11 +62,14 @@ class HandoffType(str, Enum):
 class HandoffState(str, Enum):
     OFFERED = "offered"
     ACCEPTED = "accepted"
+    AUTHORIZED = "authorized"
     ACTIVE = "active"
     RETURNED = "returned"
+    CONSUMED = "consumed"
     DECLINED = "declined"
     TIMED_OUT = "timed_out"
     STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
 
 
 class EffectState(str, Enum):

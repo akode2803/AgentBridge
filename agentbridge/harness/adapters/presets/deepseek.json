@@ -5,6 +5,7 @@
   "args": ["run", "{model}", "{prompt}"],
   "env_allow": ["OLLAMA_HOST", "OLLAMA_NOHISTORY", "OLLAMA_API_KEY"],
   "format": "text",
+  "child_text_only": true,
   "requires_model": true,
   "default_model": "deepseek-r1",
   "models": ["deepseek-r1", "deepseek-v3"],

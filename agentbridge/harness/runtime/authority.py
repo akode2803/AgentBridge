@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from .models import canonical_json_bytes
+from ..settings import runtime_policy_revision
 
 
 class AuthorityError(PermissionError):
@@ -65,5 +66,5 @@ def responsible_authority(mesh, agent: str) -> dict[str, int | str]:
     return {
         "owner": owner,
         "ownership_epoch": _revision(ownership),
-        "policy_revision": _revision(harness),
+        "policy_revision": runtime_policy_revision(harness),
     }

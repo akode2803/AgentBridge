@@ -8,6 +8,8 @@ uses — with a scripted Responder standing in for R16's adapters.
 from __future__ import annotations
 
 import time
+import threading
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +94,45 @@ def latest_run(tx, agent="helper"):
 
 def active_runs(tx, agent="helper"):
     return (tx.get_doc(f"status/{agent}_live.json") or {}).get("runs") or []
+
+
+def test_child_dispatch_has_reserved_capacity_when_root_pool_is_full(hrig):
+    class ChildCapable(Scripted):
+        def prepare_child(self, request, *, chat_id=""):
+            return request
+
+        def respond_child(self, prepared, *, cancelled=None):
+            return prepared
+
+    runner = hrig.make_runner(ChildCapable())
+    root_future = Future()
+    runner._inflight[("chat", "sender")] = root_future
+    work = SimpleNamespace(handoff_id="handoff-1", chat_id="chat")
+    ran = threading.Event()
+    runner.delegation.claim_ready = lambda **_kwargs: [work]
+    runner.delegation.execute = lambda *_args: ran.set()
+    try:
+        assert runner.dispatch_handoffs() == 1
+        assert ran.wait(2)
+    finally:
+        runner._inflight.pop(("chat", "sender"), None)
+
+
+def test_failed_consumption_bookkeeping_does_not_replay_provider(hrig):
+    chat = hrig.owner.create_chat("No replay", members=["helper"])
+    hrig.owner.post(chat.id, "@helper answer once")
+    responder = Scripted()
+    runner = hrig.make_runner(responder)
+    runner.delegation.consume_for_run = lambda _run_id: (_ for _ in ()).throw(
+        OSError("bookkeeping unavailable"),
+    )
+    ripple(hrig, runner, chat.id)
+
+    turn(hrig, runner, chat.id)
+    turn(hrig, runner, chat.id)
+
+    assert len(responder.calls) == 1
+    assert len(agent_msgs(hrig.owner, chat.id)) == 1
 
 
 # ---------------------------------------------------------------- the basics

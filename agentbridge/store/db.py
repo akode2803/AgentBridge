@@ -119,6 +119,28 @@ class Store:
             )
         return cur.rowcount == 1
 
+    def claim_with_doc(self, scope: str, key: str, ns: int,
+                       path: str, data: Any) -> bool:
+        """Atomically claim replay-sensitive work and create its journal.
+
+        A caller may safely retry work whose journal says PREPARED. Once it
+        records EXECUTING, recovery must settle ambiguity instead of invoking
+        the external provider again.
+        """
+        c = self._conn()
+        with c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO claims(scope,key,ns) VALUES(?,?,?)",
+                (scope, key, int(ns)),
+            )
+            if cur.rowcount:
+                c.execute(
+                    "INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)"
+                    " ON CONFLICT(path) DO NOTHING",
+                    (path, json.dumps(data, ensure_ascii=False), time.time_ns()),
+                )
+        return cur.rowcount == 1
+
     def prune_claims(self, before_ns: int) -> int:
         c = self._conn()
         with c:
@@ -228,6 +250,31 @@ class Store:
             "SELECT payload FROM docs WHERE path=?", (path,)
         ).fetchone()
         return json.loads(row[0]) if row else default
+
+    def replace_cached_doc_if(self, path: str, expected: dict[str, Any],
+                              data: Any) -> bool:
+        """Compare-and-swap one local journal under a write transaction."""
+        c = self._conn()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT payload FROM docs WHERE path=?", (path,),
+            ).fetchone()
+            current = json.loads(row[0]) if row else None
+            if (not isinstance(current, dict)
+                    or any(current.get(key) != value
+                           for key, value in expected.items())):
+                c.rollback()
+                return False
+            c.execute(
+                "UPDATE docs SET payload=?,fetched_ns=? WHERE path=?",
+                (json.dumps(data, ensure_ascii=False), time.time_ns(), path),
+            )
+            c.commit()
+            return True
+        except Exception:
+            c.rollback()
+            raise
 
     # ----------------------------------------------------------------- outbox
     def outbox_add(self, kind: str, target: str, payload: dict[str, Any]) -> int:

@@ -68,16 +68,48 @@ class Preset:
     models: list[str] = field(default_factory=list)        # picker suggestions
     requires_model: bool = False      # e.g. `ollama run <model>` is mandatory
     verified: bool = False            # ran against the real CLI at least once
+    # V157: explicit opt-in for the isolated specialist sidecar. False is the
+    # security default; this declaration is accepted only for structurally
+    # plain-text presets with no bridge/tool or reply-file plumbing.
+    child_text_only: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "Preset":
         known = {f: d[f] for f in cls.__dataclass_fields__ if f in d}
+        # JSON booleans only. In particular, the string "true" must not turn
+        # an owner overlay into an executable child preset.
+        known["child_text_only"] = d.get("child_text_only") is True
         p = cls(**known)
         if not p.id or not p.command:
             raise ValidationError("a preset needs at least id and command")
         if p.format not in FORMATS:
             raise ValidationError(f"unknown preset format {p.format!r}")
+        if p.child_text_only and not p.is_child_text_only_safe():
+            raise ValidationError(
+                f"preset {p.id!r} declares child_text_only but exposes "
+                "non-text invocation features")
         return p
+
+    def is_child_text_only_safe(self) -> bool:
+        """Whether this data declaration describes the bounded child ABI.
+
+        The declaration remains the source of truth, while these structural
+        checks stop contradictory overlay data from weakening it.
+        """
+        reserved = ("{mcp_config}", "{reply_file}")
+        argv_templates = (*self.args, *self.args_minimal)
+        return bool(
+            self.child_text_only is True
+            and self.format == "text"
+            and not self.permission_args
+            and not self.auto_allow
+            and not self.aux_web
+            and not self.blocklist_args
+            and not self.blocklist
+            and not self.reply_file_arg
+            and not any(token in arg for arg in argv_templates
+                        for token in reserved)
+        )
 
     def efforts_for(self, model: str) -> list[str]:
         """The effort levels THIS model accepts (family list when the model
@@ -95,13 +127,15 @@ class Preset:
         blocklist: list[str] | None = None,
         minimal: bool = False,
         mcp_config: str = "",
+        mcp_url: str = "",
     ) -> list[str]:
         """The run's argv — a LIST, never a shell string (v1 quoted prompts
         into a shell; argv removes that whole class). The minimal variant
         drops conveniences only — safety args, the blocklist and the
         permission plumbing are kept."""
         fill = {"prompt": prompt, "workdir": workdir, "reply_file": reply_file,
-                "mcp_config": mcp_config}
+                "mcp_config": mcp_config, "mcp_url": mcp_url,
+                "model": model, "effort": effort}
         base = self.args_minimal if (minimal and self.args_minimal) else self.args
         argv = [self.command]
         argv += [a.format(**fill) for a in base]
@@ -155,9 +189,16 @@ class ModelRegistry:
         for d in dirs:
             if not d.is_dir():
                 continue
+            shipped = d.resolve() == PRESET_DIR.resolve()
             for f in sorted(d.glob("*.json")):
                 try:
                     p = Preset.from_dict(json.loads(f.read_text(encoding="utf-8")))
+                    # Owner overlays may configure ordinary providers, but
+                    # cannot self-certify an arbitrary host command as the
+                    # zero-capability child ABI. That trust bit ships only
+                    # with reviewed package presets.
+                    if not shipped:
+                        p.child_text_only = False
                     presets[p.id] = p
                 except (OSError, ValueError, ValidationError):
                     continue  # one bad preset never blocks the rest

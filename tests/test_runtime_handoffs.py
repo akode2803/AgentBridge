@@ -180,6 +180,8 @@ def test_offline_pair_has_one_durable_intent_and_retries(handoff_meshes,
         "runtime/handoff-open",
     )
     assert manager.store.outbox_counts().get("pending") == 1
+    with pytest.raises(HandoffLedgerError, match="pending child"):
+        _offer(handoffs, chat_id)
 
     monkeypatch.setattr(manager.tx, "create_doc", original)
     manager.store._conn().execute(
@@ -190,6 +192,7 @@ def test_offline_pair_has_one_durable_intent_and_retries(handoff_meshes,
     assert handoffs.read(
         chat_id, "run-1", view.events[0].meta.call_id or "",
     ) == [view]
+    assert len(handoffs.read(chat_id, "run-1")) == 1
 
 
 def test_forged_source_acceptance_and_conflicting_decisions_fail_closed(
@@ -304,6 +307,11 @@ def test_destination_decision_is_hidden_after_wall_expiry(
         chat_id=chat_id, run_id="run-1",
         handoff_id=offer.meta.call_id or "", accept=True,
     )
+    repeated = destination.decide(
+        chat_id=chat_id, run_id="run-1",
+        handoff_id=offer.meta.call_id or "", accept=True,
+    )
+    assert repeated.meta.id == accepted.meta.id
     assert handoffs.read(
         chat_id, "run-1", offer.meta.call_id or "",
     )[0].events == (offer, accepted)
@@ -350,6 +358,222 @@ def test_execution_transfer_type_is_visible_but_not_activated(handoff_meshes):
     assert accepted.handoff_type is HandoffType.HANDOFF
     assert accepted.state is HandoffState.ACCEPTED
     assert view.task.state is TaskState.OFFERED
+
+
+def test_authorized_agent_tool_runs_paired_child_lifecycle(handoff_meshes):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    handoff_id = offered.events[0].meta.call_id or ""
+    _r, _t, destination = _ledgers(specialist)
+    accepted = destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        accept=True,
+    )
+    authorized = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        execution_timeout_s=60,
+    )
+    assert json.loads(authorized.result or "")["after"] == accepted.meta.id
+
+    active = destination.activate(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        manifest={"version": 1, "messages": ["m-1"], "omitted": 0},
+    )
+    returned = destination.return_result(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        contribution="The proposal is coherent.", prompt_digest="a" * 64,
+    )
+    consumed = source.consume(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+    )
+    view = source.read(chat_id, "run-1", handoff_id)[0]
+    assert [event.state for event in view.events] == [
+        HandoffState.OFFERED, HandoffState.ACCEPTED,
+        HandoffState.AUTHORIZED, HandoffState.ACTIVE,
+        HandoffState.RETURNED, HandoffState.CONSUMED,
+    ]
+    assert json.loads(active.result or "")["after"] == authorized.meta.id
+    assert json.loads(returned.result or "")["after"] == active.meta.id
+    assert json.loads(returned.result or "")["contribution"] \
+        == "The proposal is coherent."
+    assert json.loads(consumed.result or "")["after"] == returned.meta.id
+
+    child_docs = []
+    prefix = f"chats/{chat_id}/runtime/tasks/run-1/{view.task.meta.task_id}/"
+    for path in manager.tx.list_docs(prefix):
+        child_docs.append(manager.tx.get_doc(path))
+    assert len(child_docs) == 3
+
+
+def test_causal_predecessors_survive_cross_machine_clock_skew(
+        handoff_meshes, monkeypatch):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    offer = offered.events[0]
+    handoff_id = offer.meta.call_id or ""
+    _r, _t, destination = _ledgers(specialist)
+
+    # The destination is one second ahead, then both writers appear far
+    # behind. Exact predecessor IDs, not comparable wall clocks, define order.
+    monkeypatch.setattr(
+        "agentbridge.harness.runtime.handoffs.next_ns",
+        lambda: offer.meta.ns + 1_000_000_000,
+    )
+    accepted = destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id, accept=True,
+    )
+    monkeypatch.setattr(
+        "agentbridge.harness.runtime.handoffs.next_ns", lambda: 1,
+    )
+    authorized = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        execution_timeout_s=60,
+    )
+    active = destination.activate(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        manifest={"version": 1},
+    )
+    returned = destination.return_result(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        contribution="Clock-independent result", prompt_digest="b" * 64,
+    )
+    consumed = source.consume(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+    )
+
+    assert accepted.meta.ns < authorized.meta.ns < active.meta.ns
+    assert active.meta.ns < returned.meta.ns < consumed.meta.ns
+    assert source.read(chat_id, "run-1", handoff_id)[0].events[-1].state \
+        is HandoffState.CONSUMED
+
+
+def test_authorization_freezes_in_window_acceptance_after_expiry(
+        handoff_meshes, monkeypatch):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id, timeout_s=3600)
+    offer = offered.events[0]
+    _r, _t, destination = _ledgers(specialist)
+    destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=offer.meta.call_id or "",
+        accept=True,
+    )
+    source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=offer.meta.call_id or "",
+        execution_timeout_s=7200,
+    )
+    monkeypatch.setattr(
+        "agentbridge.harness.runtime.handoffs.time.time_ns",
+        lambda: int(offer.meta.expires_ns or 0) + 1,
+    )
+    assert [event.state for event in source.read(
+        chat_id, "run-1", offer.meta.call_id or "",
+    )[0].events] == [
+        HandoffState.OFFERED, HandoffState.ACCEPTED, HandoffState.AUTHORIZED,
+    ]
+
+
+def test_forged_authorization_predecessor_fails_closed(handoff_meshes):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    offer = offered.events[0]
+    _r, _t, destination = _ledgers(specialist)
+    destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=offer.meta.call_id or "",
+        accept=True,
+    )
+    authorized = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=offer.meta.call_id or "",
+    )
+    forged = replace(
+        authorized,
+        meta=replace(authorized.meta, id="handoff-event-wrong-parent",
+                     ns=authorized.meta.ns + 1),
+        result=json.dumps({"after": "not-the-acceptance"}),
+    )
+    manager.tx.create_doc(handoff_event_path(
+        chat_id, "run-1", offer.meta.call_id or "", forged.meta.id,
+    ), source._sealed(forged))
+    assert [event.state for event in source.read(
+        chat_id, "run-1", offer.meta.call_id or "",
+    )[0].events] == [HandoffState.OFFERED, HandoffState.ACCEPTED]
+
+
+def test_agent_tool_execution_rejects_declared_capabilities(handoff_meshes):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    runs = RunLedger(manager)
+    tasks = TaskLedger(manager, runs)
+    source = HandoffLedger(manager, tasks)
+    run, _task = tasks.start_with_run(
+        run_id="run-cap", task_id="task-cap", chat_id=chat_id,
+        trigger_id="message-cap", provider="codex", model="gpt-test",
+    )
+    # The root contract currently starts with an empty ceiling. Constructing
+    # a capable offer is therefore rejected before execution authorization.
+    assert run.capability_ceiling == ()
+    with pytest.raises(HandoffLedgerError, match="root ceiling"):
+        source.offer(
+            chat_id=chat_id, run_id="run-cap", parent_task_id="task-cap",
+            destination_agent="specialist", objective="Review", reason="Review",
+            success_criteria=("Review",),
+            requested_capabilities=("filesystem.read",),
+        )
+
+
+def test_root_allows_only_one_child_even_after_return(handoff_meshes):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    handoff_id = offered.events[0].meta.call_id or ""
+    _r, _t, destination = _ledgers(specialist)
+    destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id, accept=True,
+    )
+    source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+    )
+    destination.activate(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        manifest={"version": 1},
+    )
+    destination.return_result(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        contribution="done", prompt_digest="f" * 64,
+    )
+    with pytest.raises(HandoffLedgerError, match="one allowed child"):
+        _offer(source, chat_id)
+
+
+def test_result_after_execution_deadline_is_rejected(
+        handoff_meshes, monkeypatch):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    handoff_id = offered.events[0].meta.call_id or ""
+    _r, _t, destination = _ledgers(specialist)
+    destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id, accept=True,
+    )
+    authorized = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        execution_timeout_s=60,
+    )
+    destination.activate(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+        manifest={"version": 1},
+    )
+    monkeypatch.setattr(
+        "agentbridge.harness.runtime.handoffs.time.time_ns",
+        lambda: int(authorized.meta.expires_ns or 0) + 1,
+    )
+    with pytest.raises(HandoffLedgerError, match="execution window"):
+        destination.return_result(
+            chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+            contribution="late", prompt_digest="f" * 64,
+        )
 
 
 def test_offer_local_intent_and_outbox_commit_atomically(handoff_meshes,
@@ -623,6 +847,39 @@ def test_offline_destination_decision_retries(handoff_meshes, monkeypatch):
     specialist.outbox.flush_once()
     assert destination.retry_open() == 0
     assert handoffs.read(chat_id, "run-1")[0].events == (offer, accepted)
+
+
+def test_offline_authorization_reuses_exact_pending_event(handoff_meshes,
+                                                          monkeypatch):
+    _owner, manager, specialist, chat_id = handoff_meshes
+    _runs, _tasks, source, _run, _task = _root(manager, chat_id)
+    offered = _offer(source, chat_id)
+    handoff_id = offered.events[0].meta.call_id or ""
+    _r, _t, destination = _ledgers(specialist)
+    destination.decide(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id, accept=True,
+    )
+    original = manager.tx.create_doc
+    monkeypatch.setattr(
+        manager.tx, "create_doc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    first = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+    )
+    repeated = source.authorize(
+        chat_id=chat_id, run_id="run-1", handoff_id=handoff_id,
+    )
+    assert repeated.meta.id == first.meta.id
+
+    monkeypatch.setattr(manager.tx, "create_doc", original)
+    manager.store._conn().execute(
+        "UPDATE outbox SET next_ns=0, lease_ns=0 WHERE state='pending'",
+    )
+    manager.outbox.flush_once()
+    view = source.read(chat_id, "run-1", handoff_id)[0]
+    assert view.events[-1].state is HandoffState.AUTHORIZED
+    assert sum(event.state is HandoffState.AUTHORIZED for event in view.events) == 1
 
 
 def test_real_runner_registers_handoff_recovery_handler(handoff_meshes):

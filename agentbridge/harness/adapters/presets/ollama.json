@@ -5,6 +5,7 @@
   "args": ["run", "{model}", "{prompt}"],
   "env_allow": ["OLLAMA_HOST", "OLLAMA_NOHISTORY", "OLLAMA_API_KEY"],
   "format": "text",
+  "child_text_only": true,
   "requires_model": true,
   "models": ["llama3.3", "qwen3", "mistral"],
   "verified": false

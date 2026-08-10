@@ -52,6 +52,7 @@ from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
 from .runtime.runs import RunLedger
 from .runtime.tasks import TaskLedger
 from .runtime.handoffs import HandoffLedger
+from .runtime.delegation import DelegationCoordinator
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -112,6 +113,7 @@ class AgentRunner:
         self.machine = machine or platform.node() or "harness"
         self.responder = responder
         self.poll_s = poll_s
+        self._stop = threading.Event()
         self.mesh = Mesh(root, agent, self.machine, encrypt=encrypt,
                          home=self.home, app_version=__version__)
         self.run_ledger = RunLedger(self.mesh)
@@ -119,6 +121,12 @@ class AgentRunner:
         # Register the handoff outbox handler before Mesh starts its worker so
         # a crash cannot turn a durable pending offer/decision into dead mail.
         self.handoff_ledger = HandoffLedger(self.mesh, self.task_ledger)
+        self.delegation = DelegationCoordinator(
+            self.mesh, self.handoff_ledger, machine=self.machine,
+            stopping=self._stop.is_set,
+        )
+        if self.responder is not None and hasattr(self.responder, "delegation"):
+            self.responder.delegation = self.delegation
         self.queue = WorkQueue(self.mesh.store, agent)
         self.timers = TimerService(self.mesh.store)
         # V87: the conversation manager reads the timer list so a run's
@@ -135,12 +143,18 @@ class AgentRunner:
         })
         self._pool = ThreadPoolExecutor(max_workers=MAX_WORKERS,
                                         thread_name_prefix="ab-harness")
+        # Child contributions cannot share the manager pool: two concurrency-1
+        # agents delegating to each other would otherwise occupy both sole
+        # root workers while each waits for the other's child.
+        self._child_pool = ThreadPoolExecutor(
+            max_workers=MAX_WORKERS, thread_name_prefix="ab-child",
+        )
         self._inflight: dict[tuple[str, str], Future] = {}
+        self._child_inflight: dict[str, Future] = {}
         # RLock: a future that completes instantly runs its done-callback on
         # the submitting thread, which still holds this lock
         self._inflight_lock = threading.RLock()
         self._wake = threading.Event()
-        self._stop = threading.Event()
         self._started_ns = time.time_ns()
         self._last_doc: tuple | None = None
         self._blobs_ok: set[str] = set()  # sync-barrier verified blob ids
@@ -387,6 +401,36 @@ class AgentRunner:
                 started += 1
         return started
 
+    def dispatch_handoffs(self) -> int:
+        """Claim authorized text-only child work without social queue rules."""
+        if (self.responder is None
+                or not callable(getattr(self.responder, "prepare_child", None))
+                or not callable(getattr(self.responder, "respond_child", None))):
+            return 0
+        settings = self.settings()
+        started = 0
+        with self._inflight_lock:
+            room = (min(settings.concurrency, MAX_WORKERS)
+                    - len(self._child_inflight))
+            if room <= 0:
+                return 0
+            exclude = set(self._child_inflight)
+            for work in self.delegation.claim_ready(exclude=exclude)[:room]:
+                future = self._child_pool.submit(
+                    self.delegation.execute, work, self.responder,
+                )
+                self._child_inflight[work.handoff_id] = future
+                future.add_done_callback(
+                    lambda _f, k=work.handoff_id: self._child_done(k),
+                )
+                started += 1
+        return started
+
+    def _child_done(self, handoff_id: str) -> None:
+        with self._inflight_lock:
+            self._child_inflight.pop(handoff_id, None)
+        self._wake.set()
+
     def _done(self, gkey) -> None:
         with self._inflight_lock:
             self._inflight.pop(gkey, None)
@@ -478,6 +522,7 @@ class AgentRunner:
                 group, **invocation, policy_revision=settings.policy_revision,
             )
             delivery.run_id = feed.run_id
+            delivery.task_id = feed.task_id
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
                 # message — the livefeed/sidebar say what the run is about
@@ -507,6 +552,15 @@ class AgentRunner:
                 self._run_failed(group, feed, settings, delivery, e)
                 return
             timings.stop()
+            # A returned child contribution is canonically consumed only now:
+            # the manager provider has received the MCP result and resumed to
+            # completion. A crash inside the tool call leaves it RETURNED.
+            with contextlib.suppress(Exception):
+                self.delegation.mark_provider_completed(delivery.run_id)
+            # Consumption is durable follow-up bookkeeping. Failure here must
+            # not replay a provider invocation that already completed.
+            with contextlib.suppress(Exception):
+                self.delegation.consume_for_run(delivery.run_id)
             feed.checkpoint()
             try:
                 self._deliver_reply(group, delivery, reply, feed, timings)
@@ -895,10 +949,13 @@ class AgentRunner:
         # peer access runs even while standing down — diagnosing a paused or
         # stuck agent is exactly when a peer needs in (read-only, R22)
         self.peer.serve_once(settings)
+        with contextlib.suppress(Exception):
+            self.delegation.retry_consumptions()
         if self.standing_down():
             self.publish_status()
             return 0
         added = self.scan_all()
+        self.dispatch_handoffs()
         self.dispatch_fill()
         self.publish_status()
         return added
@@ -910,6 +967,7 @@ class AgentRunner:
         self.responder = CliResponder(
             ModelRegistry.load(self.home), self.mesh, self.home,
             timers=self.timers)  # V87: cancel_timer acts on the live list
+        self.responder.delegation = self.delegation
 
     def run(self, *, once: bool = False) -> None:
         if self.responder is None and not once:
@@ -942,6 +1000,8 @@ class AgentRunner:
             self.run_ledger.recover_open()
         with contextlib.suppress(Exception):
             self.handoff_ledger.retry_open()
+        with contextlib.suppress(Exception):
+            self.delegation.retry_consumptions()
         # V51: advertise this machine's app version on the R11 registry so
         # peers' update checks can hint at it (records age out at STALE_S,
         # so a long-lived harness re-announces below)
@@ -989,7 +1049,7 @@ class AgentRunner:
     def drain(self, timeout: float = 30.0) -> int:
         """Wait for every in-flight run to finish; returns how many there were."""
         with self._inflight_lock:
-            futures = list(self._inflight.values())
+            futures = [*self._inflight.values(), *self._child_inflight.values()]
         for f in futures:
             try:
                 f.result(timeout=timeout)
@@ -1005,6 +1065,7 @@ class AgentRunner:
         self.stop()
         self.drain()
         self._pool.shutdown(wait=True)
+        self._child_pool.shutdown(wait=True)
         resp_close = getattr(self.responder, "close", None)
         if callable(resp_close):
             resp_close()   # e.g. the CLI responder's qdrant path lock

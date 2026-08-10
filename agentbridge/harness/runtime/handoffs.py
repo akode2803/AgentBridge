@@ -1,14 +1,16 @@
-"""Canonical same-room child-task offers and handoff decisions.
+"""Canonical same-room handoff authority and depth-one child lifecycles.
 
-R127 establishes authority and durable visibility only. It does not invoke the
-destination agent or grant capabilities. Offers pair one child-task record with
-one handoff record; destination-authored decisions remain handoff events until
-the execution-routing slice adds active child-task transitions.
+R127 established paired offers and destination decisions. R129 adds the
+manager-retained agent-tool chain without broadening capabilities: a source
+authorizes one exact acceptance, and destination-authored active/terminal
+events are paired with child-task events. Provider execution remains owned by
+the orchestration coordinator, not this immutable ledger.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import threading
 import time
@@ -41,6 +43,33 @@ class HandoffLedgerError(RuntimeContractError):
 class HandoffView:
     task: TaskRecord
     events: tuple[HandoffRecord, ...]
+
+
+_SOURCE_STATES = {
+    HandoffState.OFFERED, HandoffState.AUTHORIZED,
+    HandoffState.CONSUMED, HandoffState.TIMED_OUT,
+}
+_DESTINATION_STATES = {
+    HandoffState.ACCEPTED, HandoffState.ACTIVE, HandoffState.RETURNED,
+    HandoffState.DECLINED, HandoffState.STOPPED, HandoffState.INTERRUPTED,
+}
+_EXECUTION_TERMINALS = {
+    HandoffState.RETURNED, HandoffState.STOPPED, HandoffState.INTERRUPTED,
+}
+_MAX_RESULT = 8_000
+
+
+def _result_payload(record: HandoffRecord) -> dict:
+    try:
+        value = json.loads(record.result or "")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _causal_result(after: str, **values) -> str:
+    return json.dumps({"after": after, **values}, sort_keys=True,
+                      separators=(",", ":"), ensure_ascii=False)
 
 
 def handoff_prefix(chat_id: str, run_id: str = "", handoff_id: str = "") -> str:
@@ -137,9 +166,17 @@ class HandoffLedger:
                              meta.call_id, meta.ns, meta.expires_ns)
                             for meta in metas}) != 1):
                 raise ValidationError("runtime handoff offer pair is malformed")
-        elif phase == "decision":
+        elif phase in {"decision", "transition"}:
             if len(metas) != 1 or metas[0].kind is not RecordKind.HANDOFF:
                 raise ValidationError("runtime handoff decision is malformed")
+        elif phase == "lifecycle":
+            if (len(metas) != 2
+                    or {meta.kind for meta in metas}
+                       != {RecordKind.TASK, RecordKind.HANDOFF}
+                    or len({(meta.chat_id, meta.run_id, meta.task_id,
+                             meta.call_id, meta.ns, meta.expires_ns)
+                            for meta in metas}) != 1):
+                raise ValidationError("runtime handoff lifecycle pair is malformed")
         else:
             raise ValidationError("runtime handoff outbox phase is malformed")
         for item in docs:
@@ -241,6 +278,19 @@ class HandoffLedger:
                     or parents[0].parent_task_id is not None):
                 raise HandoffLedgerError("handoff parent is not an active root task")
             run = runs[0]
+            if any(view.task.parent_task_id == parent_task_id
+                   for view in self.read(chat_id, run_id)):
+                raise HandoffLedgerError(
+                    "this root task already has its one allowed child",
+                )
+            if any(
+                isinstance(entry, dict)
+                and entry.get("parent_task_id") == parent_task_id
+                for entry in self._opened().values()
+            ):
+                raise HandoffLedgerError(
+                    "this root task already has a pending child offer",
+                )
             capabilities = tuple(requested_capabilities)
             if not set(capabilities).issubset(run.capability_ceiling):
                 raise HandoffLedgerError("requested capabilities exceed the root ceiling")
@@ -309,6 +359,7 @@ class HandoffLedger:
             opened = self._opened()
             opened[handoff_id] = {
                 "record_id": handoff.meta.id, "record": handoff.to_dict(),
+                "parent_task_id": parent_task_id,
             }
             seq = self.mesh.store.cache_doc_and_outbox_add(
                 self.OPEN_PATH, opened, self.OUTBOX_KIND,
@@ -326,6 +377,12 @@ class HandoffLedger:
             offer = view.events[0]
             if self.mesh.user != offer.destination_agent:
                 raise HandoffLedgerError("only the destination may decide a handoff")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                wanted = HandoffState.ACCEPTED if accept else HandoffState.DECLINED
+                if pending.state is wanted:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending decision")
             if time.time_ns() >= int(offer.meta.expires_ns or 0):
                 raise HandoffLedgerError("handoff offer has expired")
             if not self._parent_open(view):
@@ -346,6 +403,11 @@ class HandoffLedger:
             offer = view.events[0]
             if self.mesh.user != offer.source_agent:
                 raise HandoffLedgerError("only the source may time out a handoff")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.TIMED_OUT:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
             if time.time_ns() < int(offer.meta.expires_ns or 0):
                 raise HandoffLedgerError("handoff offer has not expired")
             if not self._parent_open(view):
@@ -357,6 +419,196 @@ class HandoffLedger:
                 raise HandoffLedgerError("handoff already has a decision")
             return self._decision(offer, HandoffState.TIMED_OUT,
                                   "Destination did not answer before expiry")
+
+    def authorize(self, *, chat_id: str, run_id: str, handoff_id: str,
+                  execution_timeout_s: float = 1800.0) -> HandoffRecord:
+        """Source-authorize one exact in-window destination acceptance."""
+        with self._lock:
+            view = self._exact_offer(chat_id, run_id, handoff_id)
+            offer = view.events[0]
+            if self.mesh.user != offer.source_agent:
+                raise HandoffLedgerError("only the source may authorize a handoff")
+            if offer.handoff_type is not HandoffType.AGENT_TOOL:
+                raise HandoffLedgerError("active execution handoff is not enabled")
+            if offer.requested_capabilities:
+                raise HandoffLedgerError("agent-tool execution requires zero capabilities")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.AUTHORIZED:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
+            if (isinstance(execution_timeout_s, bool)
+                    or not isinstance(execution_timeout_s, (int, float))
+                    or not math.isfinite(execution_timeout_s)
+                    or execution_timeout_s <= 0):
+                raise HandoffLedgerError("execution timeout must be positive")
+            if len(view.events) >= 3:
+                existing = view.events[2]
+                if existing.state is HandoffState.AUTHORIZED:
+                    return existing
+                raise HandoffLedgerError("handoff already has a terminal decision")
+            if len(view.events) != 2 or view.events[1].state is not HandoffState.ACCEPTED:
+                raise HandoffLedgerError("handoff has not been accepted")
+            accepted = view.events[1]
+            if time.time_ns() >= int(offer.meta.expires_ns or 0):
+                raise HandoffLedgerError("handoff acceptance window has expired")
+            if not self._parent_open(view):
+                raise HandoffLedgerError("handoff parent is no longer active")
+            expires_ns = max(time.time_ns(), accepted.meta.ns) + max(
+                1, int(execution_timeout_s * 1_000_000_000),
+            )
+            return self._transition(
+                accepted, HandoffState.AUTHORIZED,
+                _causal_result(accepted.meta.id), expires_ns=expires_ns,
+            )
+
+    def activate(self, *, chat_id: str, run_id: str, handoff_id: str,
+                 manifest: dict) -> HandoffRecord:
+        """Destination-publish the frozen disclosure manifest before work."""
+        with self._lock:
+            view = self._exact_offer(chat_id, run_id, handoff_id)
+            offer = view.events[0]
+            if self.mesh.user != offer.destination_agent:
+                raise HandoffLedgerError("only the destination may activate a handoff")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.ACTIVE:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
+            if len(view.events) >= 4:
+                existing = view.events[3]
+                if existing.state is HandoffState.ACTIVE:
+                    return existing
+                raise HandoffLedgerError("handoff cannot become active")
+            if (len(view.events) != 3
+                    or view.events[1].state is not HandoffState.ACCEPTED
+                    or view.events[2].state is not HandoffState.AUTHORIZED):
+                raise HandoffLedgerError("handoff is not authorized")
+            current = authority(self.mesh, self.mesh.user, chat_id)
+            if (view.events[1].meta.policy_revision
+                    != int(current["policy_revision"])):
+                raise HandoffLedgerError(
+                    "destination policy changed before activation",
+                )
+            authorized = view.events[2]
+            if time.time_ns() >= int(authorized.meta.expires_ns or 0):
+                raise HandoffLedgerError("handoff execution window has expired")
+            if not self._parent_open(view):
+                raise HandoffLedgerError("handoff parent is no longer active")
+            if not isinstance(manifest, dict) or not manifest:
+                raise HandoffLedgerError("handoff disclosure manifest is required")
+            result = _causal_result(authorized.meta.id, manifest=manifest)
+            if len(result.encode("utf-8")) > _MAX_RESULT:
+                raise HandoffLedgerError("handoff disclosure manifest is too large")
+            return self._lifecycle(
+                view, HandoffState.ACTIVE, TaskState.ACTIVE, result,
+                progress=f"@{offer.destination_agent} is working", task_result=None,
+            )
+
+    def return_result(self, *, chat_id: str, run_id: str, handoff_id: str,
+                      contribution: str, prompt_digest: str) -> HandoffRecord:
+        """Destination-publish one bounded, non-posting specialist result."""
+        with self._lock:
+            view = self._exact_offer(chat_id, run_id, handoff_id)
+            offer = view.events[0]
+            if self.mesh.user != offer.destination_agent:
+                raise HandoffLedgerError("only the destination may return a result")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.RETURNED:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
+            if len(view.events) >= 5:
+                existing = view.events[4]
+                if existing.state is HandoffState.RETURNED:
+                    return existing
+                raise HandoffLedgerError("handoff already has a terminal outcome")
+            if len(view.events) != 4 or view.events[3].state is not HandoffState.ACTIVE:
+                raise HandoffLedgerError("handoff is not active")
+            active = view.events[3]
+            current = authority(self.mesh, self.mesh.user, chat_id)
+            if active.meta.policy_revision != int(current["policy_revision"]):
+                raise HandoffLedgerError(
+                    "destination policy changed during execution",
+                )
+            authorized = view.events[2]
+            if time.time_ns() >= int(authorized.meta.expires_ns or 0):
+                raise HandoffLedgerError("handoff execution window has expired")
+            body = str(contribution or "").strip()
+            digest = str(prompt_digest or "").strip()
+            if not body or not digest:
+                raise HandoffLedgerError("handoff result is incomplete")
+            result = _causal_result(active.meta.id, contribution=body,
+                                    prompt_digest=digest)
+            if len(result.encode("utf-8")) > _MAX_RESULT:
+                raise HandoffLedgerError("handoff result is too large")
+            if not self._parent_open(view):
+                raise HandoffLedgerError("handoff parent is no longer active")
+            return self._lifecycle(
+                view, HandoffState.RETURNED, TaskState.RETURNED, result,
+                progress=f"Returned to @{offer.source_agent}", task_result=body,
+            )
+
+    def interrupt(self, *, chat_id: str, run_id: str, handoff_id: str,
+                  reason: str) -> HandoffRecord:
+        """Destination-settle an invocation whose completion is ambiguous."""
+        with self._lock:
+            view = self._exact_offer(chat_id, run_id, handoff_id)
+            offer = view.events[0]
+            if self.mesh.user != offer.destination_agent:
+                raise HandoffLedgerError("only the destination may interrupt a handoff")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.INTERRUPTED:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
+            if (view.events[-1].state in _EXECUTION_TERMINALS
+                    and view.events[-1].state is HandoffState.INTERRUPTED):
+                return view.events[-1]
+            if len(view.events) >= 5:
+                existing = view.events[4]
+                if existing.state is HandoffState.INTERRUPTED:
+                    return existing
+                raise HandoffLedgerError("handoff already has a terminal outcome")
+            if (len(view.events) == 3
+                    and view.events[2].state is HandoffState.AUTHORIZED):
+                predecessor = view.events[2]
+            elif (len(view.events) == 4
+                  and view.events[3].state is HandoffState.ACTIVE):
+                predecessor = view.events[3]
+            else:
+                raise HandoffLedgerError("handoff is not executable")
+            note = " ".join(str(reason or "Interrupted").split())[:500]
+            return self._lifecycle(
+                view, HandoffState.INTERRUPTED, TaskState.INTERRUPTED,
+                _causal_result(predecessor.meta.id, reason=note),
+                progress="Interrupted", task_result="Interrupted",
+            )
+
+    def consume(self, *, chat_id: str, run_id: str,
+                handoff_id: str) -> HandoffRecord:
+        """Source acknowledge that the manager received one returned result."""
+        with self._lock:
+            view = self._exact_offer(chat_id, run_id, handoff_id)
+            offer = view.events[0]
+            if self.mesh.user != offer.source_agent:
+                raise HandoffLedgerError("only the source may consume a result")
+            pending = self._pending_record(handoff_id)
+            if pending is not None:
+                if pending.state is HandoffState.CONSUMED:
+                    return pending
+                raise HandoffLedgerError("handoff already has a pending transition")
+            if len(view.events) >= 6:
+                existing = view.events[5]
+                if existing.state is HandoffState.CONSUMED:
+                    return existing
+                raise HandoffLedgerError("handoff result cannot be consumed")
+            if len(view.events) != 5 or view.events[4].state is not HandoffState.RETURNED:
+                raise HandoffLedgerError("handoff has no returned result")
+            return self._transition(
+                view.events[4], HandoffState.CONSUMED,
+                _causal_result(view.events[4].meta.id), expires_ns=None,
+            )
 
     def _decision(self, offer: HandoffRecord, state: HandoffState,
                   result: str) -> HandoffRecord:
@@ -402,9 +654,119 @@ class HandoffLedger:
         ), payload)
         return record
 
+    def _transition(self, predecessor: HandoffRecord, state: HandoffState,
+                    result: str, *, expires_ns: int | None) -> HandoffRecord:
+        auth = authority(self.mesh, self.mesh.user, predecessor.meta.chat_id)
+        ns = max(next_ns(), predecessor.meta.ns + 1)
+        epoch, _key = self.mesh.keys.ensure(
+            predecessor.meta.chat_id,
+            self.mesh.snapshot(predecessor.meta.chat_id),
+        )
+        record = replace(
+            predecessor,
+            meta=replace(
+                predecessor.meta, id=new_id("handoff-event", ns), ns=ns,
+                actor=self.mesh.user, signer=self.mesh.user, key_epoch=epoch,
+                policy_revision=int(auth["policy_revision"]),
+                membership_epoch=int(auth["membership_epoch"]),
+                ownership_epoch=int(auth["ownership_epoch"]),
+                expires_ns=expires_ns,
+            ),
+            state=state, result=result,
+        )
+        self._publish_records(predecessor, [record], phase="transition")
+        return record
+
+    def _lifecycle(self, view: HandoffView, handoff_state: HandoffState,
+                   task_state: TaskState, result: str, *, progress: str,
+                   task_result: str | None) -> HandoffRecord:
+        offer = view.events[0]
+        auth = authority(self.mesh, self.mesh.user, offer.meta.chat_id)
+        ns = max(next_ns(), view.events[-1].meta.ns + 1)
+        epoch, _key = self.mesh.keys.ensure(
+            offer.meta.chat_id, self.mesh.snapshot(offer.meta.chat_id),
+        )
+        expires_ns = view.events[2].meta.expires_ns
+        if (handoff_state is HandoffState.INTERRUPTED
+                and ns >= int(expires_ns or 0)):
+            expires_ns = None
+        common_meta = dict(
+            id=new_id("handoff-event", ns), ns=ns,
+            actor=self.mesh.user, signer=self.mesh.user, key_epoch=epoch,
+            policy_revision=int(auth["policy_revision"]),
+            membership_epoch=int(auth["membership_epoch"]),
+            ownership_epoch=int(auth["ownership_epoch"]),
+            expires_ns=expires_ns,
+        )
+        handoff = replace(
+            offer, meta=replace(offer.meta, **common_meta),
+            state=handoff_state, result=result,
+        )
+        task_meta = replace(
+            view.task.meta, **{**common_meta,
+                              "id": new_id("task-event", ns)},
+        )
+        task = replace(
+            view.task, meta=task_meta, state=task_state,
+            progress=progress, result=task_result,
+        )
+        self._publish_records(offer, [task, handoff], phase="lifecycle")
+        return handoff
+
+    def _publish_records(self, offer: HandoffRecord, records: list,
+                         *, phase: str) -> None:
+        docs = []
+        handoff_record = next(
+            record for record in records if isinstance(record, HandoffRecord)
+        )
+        for record in records:
+            if isinstance(record, TaskRecord):
+                path = task_event_path(
+                    record.meta.chat_id, record.meta.run_id or "",
+                    record.meta.task_id or "", record.meta.id,
+                )
+            else:
+                path = handoff_event_path(
+                    record.meta.chat_id, record.meta.run_id or "",
+                    record.meta.call_id or "", record.meta.id,
+                )
+            docs.append({"path": path, "doc": self._sealed(record)})
+        payload = {
+            "docs": docs, "chat_id": offer.meta.chat_id,
+            "run_id": offer.meta.run_id, "handoff_id": offer.meta.call_id,
+            "record_id": handoff_record.meta.id, "phase": phase,
+        }
+        opened = self._opened()
+        opened[offer.meta.call_id or ""] = {
+            "record_id": handoff_record.meta.id,
+            "record": handoff_record.to_dict(),
+        }
+        target = handoff_prefix(
+            offer.meta.chat_id, offer.meta.run_id or "",
+            offer.meta.call_id or "",
+        )
+        seq = self.mesh.store.cache_doc_and_outbox_add(
+            self.OPEN_PATH, opened, self.OUTBOX_KIND, target, payload,
+        )
+        self._attempt(seq, target, payload)
+
     def _opened(self) -> dict[str, dict]:
         value = self.mesh.store.cached_doc(self.OPEN_PATH, default={})
         return dict(value) if isinstance(value, dict) else {}
+
+    def _pending_record(self, handoff_id: str) -> HandoffRecord | None:
+        entry = self._opened().get(handoff_id)
+        if not isinstance(entry, dict) or not isinstance(entry.get("record"), dict):
+            return None
+        try:
+            record = HandoffRecord.from_dict(entry["record"])
+        except (RuntimeContractError, TypeError, ValueError):
+            return None
+        if (record.meta.call_id != handoff_id
+                or record.meta.actor != self.mesh.user
+                or record.meta.signer != self.mesh.user):
+            return None
+        return record
 
     def retry_open(self) -> int:
         self.mesh.outbox.notify()
@@ -480,20 +842,29 @@ class HandoffLedger:
                 actor_auth = (source_auth if meta.actor == record.source_agent
                               else destination_auth)
                 expected_actor = (record.source_agent
-                                  if record.state in {HandoffState.OFFERED,
-                                                      HandoffState.TIMED_OUT}
+                                  if record.state in _SOURCE_STATES
                                   else record.destination_agent)
                 if meta.actor != expected_actor:
                     raise HandoffLedgerError("handoff state has the wrong signer")
+                if record.state not in _SOURCE_STATES | _DESTINATION_STATES:
+                    raise HandoffLedgerError("handoff state is not executable")
                 if (record.state is HandoffState.OFFERED) != (record.result is None):
                     raise HandoffLedgerError("handoff result does not match its state")
                 latest_key = self.mesh.keys.latest(chat_id)
                 if latest_key is None or meta.key_epoch != latest_key[0]:
                     raise HandoffLedgerError("handoff key_epoch is stale")
-                for name in ("policy_revision", "membership_epoch",
-                             "ownership_epoch"):
+                for name in ("membership_epoch", "ownership_epoch"):
                     if getattr(meta, name) != int(actor_auth[name]):
                         raise HandoffLedgerError(f"handoff {name} is stale")
+                # A destination policy change after acceptance must remain
+                # visible long enough to settle the authorized branch with a
+                # signed INTERRUPTED event. The offer digest below binds the
+                # destination's frozen decision policy; source policy remains
+                # current because it owns the still-open parent run.
+                if (meta.actor == record.source_agent
+                        and meta.policy_revision
+                            != int(source_auth["policy_revision"])):
+                    raise HandoffLedgerError("handoff policy_revision is stale")
                 records.append(record)
             except (AuthorityError, HandoffLedgerError, RuntimeContractError,
                     TypeError, ValueError):
@@ -545,6 +916,19 @@ class HandoffLedger:
                     or not set(offer.requested_capabilities).issubset(
                         run_starts[0].capability_ceiling)):
                 continue
+            decisions = [
+                record for record in group
+                if record.state in {HandoffState.ACCEPTED,
+                                    HandoffState.DECLINED}
+                and record.meta.actor == offer.destination_agent
+                and record.meta.ns > offer.meta.ns
+                and self._same_offer(offer, record)
+            ]
+            frozen_destination_auth = dict(destination_auth)
+            if len(decisions) == 1:
+                frozen_destination_auth["policy_revision"] = (
+                    decisions[0].meta.policy_revision
+                )
             expected_digest = _digest(
                 chat_id=chat_id, run_id=offer.meta.run_id or "",
                 parent_task_id=task.parent_task_id or "",
@@ -552,40 +936,203 @@ class HandoffLedger:
                 handoff_id=offer.meta.call_id or "",
                 handoff_type=offer.handoff_type, source=offer.source_agent,
                 destination=offer.destination_agent, source_auth=source_auth,
-                destination_auth=destination_auth,
+                destination_auth=frozen_destination_auth,
                 capabilities=offer.requested_capabilities,
             )
             if offer.context_digest != expected_digest:
                 continue
-            decisions = [record for record in group
-                         if record.state in {HandoffState.ACCEPTED,
-                                             HandoffState.DECLINED,
-                                             HandoffState.TIMED_OUT}
-                         and record.meta.ns > offer.meta.ns
-                         and self._same_offer(offer, record)]
-            if self._parent_has_terminal(offer, task.parent_task_id or ""):
-                decisions = []
-            if len(decisions) > 1:
-                views.append(HandoffView(task, (offer,)))
-            elif len(decisions) == 1:
-                decision = decisions[0]
-                if (decision.state is HandoffState.TIMED_OUT
-                        and (decision.meta.ns < int(offer.meta.expires_ns or 0)
-                             or time.time_ns()
-                                < int(offer.meta.expires_ns or 0))):
-                    views.append(HandoffView(task, (offer,)))
-                elif (decision.state is not HandoffState.TIMED_OUT
-                      and (decision.meta.ns >= int(offer.meta.expires_ns or 0)
-                           or time.time_ns()
-                              >= int(offer.meta.expires_ns or 0))):
-                    views.append(HandoffView(task, (offer,)))
-                else:
-                    views.append(HandoffView(task, (offer, decision)))
-            else:
-                views.append(HandoffView(task, (offer,)))
+            events = self._fold_events(offer, task, group)
+            if (self._parent_has_terminal(offer, task.parent_task_id or "")
+                    and not any(record.state is HandoffState.AUTHORIZED
+                                for record in events)):
+                events = (offer,)
+            views.append(HandoffView(task, events))
         views.sort(key=lambda view: (view.events[0].meta.ns,
                                     view.events[0].meta.id))
         return views
+
+    def _fold_events(self, offer: HandoffRecord, task: TaskRecord,
+                     group: list[HandoffRecord]) -> tuple[HandoffRecord, ...]:
+        decisions = [
+            record for record in group
+            if record.state in {HandoffState.ACCEPTED, HandoffState.DECLINED,
+                                HandoffState.TIMED_OUT}
+            and record.meta.ns > offer.meta.ns
+            and self._same_offer(offer, record)
+        ]
+        if len(decisions) != 1:
+            return (offer,)
+        decision = decisions[0]
+        acceptance_deadline = int(offer.meta.expires_ns or 0)
+        if decision.state is HandoffState.TIMED_OUT:
+            if (decision.meta.ns < acceptance_deadline
+                    or time.time_ns() < acceptance_deadline):
+                return (offer,)
+            return (offer, decision)
+        if decision.meta.ns >= acceptance_deadline:
+            return (offer,)
+        if decision.state is HandoffState.DECLINED:
+            return ((offer, decision) if time.time_ns() < acceptance_deadline
+                    else (offer,))
+
+        authorizations = [
+            record for record in group
+            if record.state is HandoffState.AUTHORIZED
+            and record.meta.ns > decision.meta.ns
+            and self._same_offer(offer, record)
+        ]
+        if (len(authorizations) != 1
+                or _result_payload(authorizations[0]).get("after")
+                   != decision.meta.id
+                or int(authorizations[0].meta.expires_ns or 0)
+                   <= authorizations[0].meta.ns):
+            if authorizations or time.time_ns() < acceptance_deadline:
+                return (offer, decision)
+            return (offer,)
+        authorized = authorizations[0]
+        chain: list[HandoffRecord] = [offer, decision, authorized]
+
+        preflight_terminals = [
+            record for record in group
+            if record.state in {HandoffState.STOPPED, HandoffState.INTERRUPTED}
+            and record.meta.ns > authorized.meta.ns
+            and self._same_offer(offer, record)
+            and _result_payload(record).get("after") == authorized.meta.id
+        ]
+        if preflight_terminals:
+            if (len(preflight_terminals) == 1
+                    and (preflight_terminals[0].meta.expires_ns
+                         == authorized.meta.expires_ns
+                         or (preflight_terminals[0].state
+                             is HandoffState.INTERRUPTED
+                             and preflight_terminals[0].meta.expires_ns is None))
+                    and _result_payload(preflight_terminals[0]).get("after")
+                        == authorized.meta.id
+                    and self._paired_lifecycle(
+                        task, preflight_terminals[0], {
+                            HandoffState.STOPPED: TaskState.STOPPED,
+                            HandoffState.INTERRUPTED: TaskState.INTERRUPTED,
+                        }[preflight_terminals[0].state])):
+                chain.append(preflight_terminals[0])
+            return tuple(chain)
+
+        active = [
+            record for record in group
+            if record.state is HandoffState.ACTIVE
+            and record.meta.ns > authorized.meta.ns
+            and self._same_offer(offer, record)
+        ]
+        if (len(active) != 1
+                or active[0].meta.expires_ns != authorized.meta.expires_ns
+                or active[0].meta.policy_revision
+                    != decision.meta.policy_revision
+                or _result_payload(active[0]).get("after") != authorized.meta.id
+                or not self._paired_lifecycle(
+                    task, active[0], TaskState.ACTIVE)):
+            return tuple(chain)
+        chain.append(active[0])
+
+        terminals = [
+            record for record in group
+            if record.state in _EXECUTION_TERMINALS
+            and record.meta.ns > active[0].meta.ns
+            and self._same_offer(offer, record)
+        ]
+        if (len(terminals) != 1
+                or not (terminals[0].meta.expires_ns
+                        == authorized.meta.expires_ns
+                        or (terminals[0].state is HandoffState.INTERRUPTED
+                            and terminals[0].meta.expires_ns is None))
+                or _result_payload(terminals[0]).get("after")
+                   != active[0].meta.id
+                or (terminals[0].state is HandoffState.RETURNED
+                    and terminals[0].meta.policy_revision
+                        != active[0].meta.policy_revision)
+                or not self._paired_lifecycle(
+                    task, terminals[0], {
+                        HandoffState.RETURNED: TaskState.RETURNED,
+                        HandoffState.STOPPED: TaskState.STOPPED,
+                        HandoffState.INTERRUPTED: TaskState.INTERRUPTED,
+                    }[terminals[0].state])):
+            return tuple(chain)
+        terminal = terminals[0]
+        chain.append(terminal)
+        if terminal.state is not HandoffState.RETURNED:
+            return tuple(chain)
+
+        consumed = [
+            record for record in group
+            if record.state is HandoffState.CONSUMED
+            and record.meta.ns > terminal.meta.ns
+            and self._same_offer(offer, record)
+        ]
+        if (len(consumed) == 1 and consumed[0].meta.expires_ns is None
+                and _result_payload(consumed[0]).get("after")
+                    == terminal.meta.id):
+            chain.append(consumed[0])
+        return tuple(chain)
+
+    def _paired_lifecycle(self, offered: TaskRecord,
+                          handoff: HandoffRecord,
+                          state: TaskState) -> bool:
+        snap = self.mesh.snapshot(handoff.meta.chat_id)
+        matches = []
+        prefix = task_prefix(
+            handoff.meta.chat_id, handoff.meta.run_id or "",
+            handoff.meta.task_id or "",
+        ) + "/"
+        for path in self.mesh.tx.list_docs(prefix):
+            try:
+                task = open_record(
+                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    RecordKind.TASK, TaskRecord.from_dict,
+                )
+                expected_result = {
+                    TaskState.ACTIVE: None,
+                    TaskState.RETURNED:
+                        _result_payload(handoff).get("contribution"),
+                    TaskState.INTERRUPTED: "Interrupted",
+                    TaskState.STOPPED: "Stopped",
+                }.get(state)
+                if (path == task_event_path(
+                        task.meta.chat_id, task.meta.run_id or "",
+                        task.meta.task_id or "", task.meta.id)
+                        and task.state is state
+                        and task.meta.ns == handoff.meta.ns
+                        and task.meta.actor == handoff.destination_agent
+                        and task.meta.signer == handoff.destination_agent
+                        and task.meta.chat_id == offered.meta.chat_id
+                        and task.meta.run_id == offered.meta.run_id
+                        and task.meta.root_run_id == offered.meta.root_run_id
+                        and task.meta.task_id == offered.meta.task_id
+                        and task.meta.call_id == offered.meta.call_id
+                        and task.meta.expires_ns == handoff.meta.expires_ns
+                        and task.meta.key_epoch == handoff.meta.key_epoch
+                        and task.meta.policy_revision
+                            == handoff.meta.policy_revision
+                        and task.meta.membership_epoch
+                            == handoff.meta.membership_epoch
+                        and task.meta.ownership_epoch
+                            == handoff.meta.ownership_epoch
+                        and task.objective == offered.objective
+                        and task.assigned_agent == offered.assigned_agent
+                        and task.assigning_agent == offered.assigning_agent
+                        and task.responsible_member == offered.responsible_member
+                        and task.parent_task_id == offered.parent_task_id
+                        and task.success_criteria == offered.success_criteria
+                        and task.context_digest == offered.context_digest
+                        and task.grant_ids == offered.grant_ids
+                        and task.dependency_ids == offered.dependency_ids
+                        and task.return_to_agent == offered.return_to_agent
+                        and task.result == expected_result
+                        and (state is not TaskState.ACTIVE
+                             or task.progress.startswith("@"))
+                        and (state is not TaskState.INTERRUPTED
+                             or task.progress == "Interrupted")):
+                    matches.append(task)
+            except (RuntimeContractError, TypeError, ValueError):
+                continue
+        return len(matches) == 1
 
     def _parent_has_terminal(self, offer: HandoffRecord,
                              parent_task_id: str) -> bool:
@@ -691,11 +1238,16 @@ class HandoffLedger:
             "context_digest", "requested_capabilities", "transferred_grant_ids",
             "return_to_agent",
         )
-        expiry_matches = (
-            decision.meta.expires_ns is None
-            if decision.state is HandoffState.TIMED_OUT
-            else decision.meta.expires_ns == offer.meta.expires_ns
-        )
+        if decision.state in {HandoffState.TIMED_OUT, HandoffState.CONSUMED}:
+            expiry_matches = decision.meta.expires_ns is None
+        elif decision.state is HandoffState.AUTHORIZED:
+            expiry_matches = int(decision.meta.expires_ns or 0) > decision.meta.ns
+        elif decision.state in {
+                HandoffState.ACTIVE, HandoffState.RETURNED,
+                HandoffState.STOPPED, HandoffState.INTERRUPTED}:
+            expiry_matches = bool(decision.meta.expires_ns)
+        else:
+            expiry_matches = decision.meta.expires_ns == offer.meta.expires_ns
         return (expiry_matches
                 and decision.meta.chat_id == offer.meta.chat_id
                 and decision.meta.run_id == offer.meta.run_id

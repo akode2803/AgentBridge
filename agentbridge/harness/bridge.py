@@ -92,7 +92,7 @@ class BridgeServer:
                  mesh=None, timers_out: list[dict] | None = None,
                  memory=None, chat_kind: str = "",
                  global_memory: str = "dm", docs=None,
-                 timer_svc=None) -> None:
+                 timer_svc=None, delegate=None) -> None:
         self.broker = broker
         self.chat_id = chat_id
         self.run_id = run_id
@@ -111,6 +111,7 @@ class BridgeServer:
         self.chat_kind = chat_kind
         self.global_memory = global_memory
         self.docs = docs                 # ToolDocs (R43); None = no read_docs
+        self.delegate = delegate         # V157 bounded same-room agent tool
         self._creates = 0
         # V53 (leave_chat): the leave is DEFERRED — the tool only requests
         # it (owner-approved); the runner executes it after the reply posts,
@@ -120,6 +121,7 @@ class BridgeServer:
         self._token = ""
         self._server = None
         self._thread: threading.Thread | None = None
+        self._closed = threading.Event()
 
     # ------------------------------------------------------------- lifecycle
     def __enter__(self) -> "BridgeServer":
@@ -129,6 +131,7 @@ class BridgeServer:
         # One unguessable credential per server entry. It exists only in
         # memory and in the child CLI's per-run MCP config, then is cleared at
         # teardown. A sibling local process that finds the port cannot use it.
+        self._closed.clear()
         self._token = secrets.token_urlsafe(32)
         mcp = FastMCP("ab")
 
@@ -181,6 +184,37 @@ class BridgeServer:
                 return text
             return ("no answer within the waiting window — decide "
                     "reasonably yourself or say you'll follow up")
+
+        if self.delegate is not None:
+            delegate = self.delegate
+
+            @mcp.tool(structured_output=False)
+            def delegate_agent(destination_agent: str = "",
+                               objective: str = "",
+                               success_criteria: list[str] | None = None,
+                               reason: str = "Specialist contribution") -> str:
+                """Ask one opted-in agent already in this room for a bounded
+                text-only contribution. This call waits for the result; you
+                remain responsible for the final room response."""
+                destination = str(destination_agent or "").strip().lstrip("@")
+                goal = " ".join(str(objective or "").split())[:500]
+                why = " ".join(str(reason or "").split())[:500]
+                criteria = tuple(
+                    " ".join(str(item or "").split())[:300]
+                    for item in (success_criteria or [])[:8]
+                    if " ".join(str(item or "").split())
+                )
+                if not destination or not goal or not criteria:
+                    return ("could not delegate: destination_agent, objective, "
+                            "and success_criteria are required")
+                try:
+                    return delegate(
+                        destination_agent=destination, objective=goal,
+                        success_criteria=criteria, reason=why or "Contribution",
+                        cancelled=self._closed.is_set,
+                    )
+                except Exception as exc:  # refusal is a tool result, not a crash
+                    return f"could not delegate: {exc}"
 
         @mcp.tool(structured_output=False)
         def tidy_workspace(paths: list | None = None) -> str:
@@ -873,6 +907,7 @@ class BridgeServer:
         # V85/V109: the run is over (posted, stopped, or crashed) — take its
         # pending asks with it, so the owner's popup dies with the run and
         # any thread still blocked in broker.ask() returns promptly.
+        self._closed.set()
         try:
             self.broker.withdraw(self.chat_id)
         except Exception:  # noqa: BLE001 — teardown never raises
@@ -894,6 +929,11 @@ class BridgeServer:
     def auth_headers(self) -> dict[str, str]:
         """Headers for protocol tests and provider MCP configuration."""
         return {"Authorization": f"Bearer {self._token}"}
+
+    @property
+    def bearer_token(self) -> str:
+        """Per-run token for providers that consume bearer auth via env."""
+        return self._token
 
     def mcp_config(self) -> str:
         """The authenticated inline --mcp-config an inner CLI consumes."""

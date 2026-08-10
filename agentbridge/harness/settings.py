@@ -14,7 +14,7 @@ from ..core.models import Account
 from ..core.jsonkit import canonical_json_bytes
 
 __all__ = ["HarnessSettings", "Route", "RULES", "CATCHUP_POLICIES",
-           "CATEGORIES", "MAX_CONCURRENCY"]
+           "CATEGORIES", "MAX_CONCURRENCY", "runtime_policy_revision"]
 
 RULES = ("all", "tagged", "humans")
 CATCHUP_POLICIES = ("recent", "none", "all")
@@ -25,6 +25,18 @@ CATEGORIES = ("owner", "humans", "agents")
 MAX_CONCURRENCY = 4
 
 _MODEL_RE_MAX = 64  # model ids ride argv; keep them short and sane
+
+
+def runtime_policy_revision(harness: dict | None) -> int:
+    """Hash execution policy while excluding admission-only feature flags."""
+    policy = dict(harness or {})
+    # Turning this off blocks new offers/acceptance. It deliberately does not
+    # revoke already-authorized work, whose authority remains independently
+    # bound to membership, ownership, host and the rest of this policy.
+    policy.pop("agent_tools_enabled", None)
+    return int.from_bytes(
+        hashlib.sha256(canonical_json_bytes(policy)).digest()[:8], "big",
+    ) & ((1 << 63) - 1)
 
 
 def _int(value, default: int, lo: int, hi: int) -> int:
@@ -94,6 +106,10 @@ class HarnessSettings:
     peer_access: str = "off"
     peer_auto: list[str] = field(default_factory=list)
     peer_repair: bool = False
+    # V157: opt-in for the bounded same-room text-only agent-tool path. The
+    # destination also needs this enabled; turning it off stops new offers but
+    # does not erase already-authorized work or its audit trail.
+    agent_tools_enabled: bool = False
     # ----- model selection (R16): the owner's picker writes these
     adapter: str = ""               # preset family id; "" = the sole install
     model: str = ""                 # override-all "current model"
@@ -103,9 +119,7 @@ class HarnessSettings:
     @classmethod
     def from_account(cls, acc: Account | None) -> "HarnessSettings":
         h = dict(acc.agent.harness) if (acc and acc.agent) else {}
-        policy_revision = int.from_bytes(
-            hashlib.sha256(canonical_json_bytes(h)).digest()[:8], "big",
-        ) & ((1 << 63) - 1)
+        policy_revision = runtime_policy_revision(h)
         rule = str(h.get("default_rule") or "tagged").lower()
         rules = {
             str(k): str(v).lower()
@@ -163,6 +177,7 @@ class HarnessSettings:
                          == "ask" else "off"),
             peer_auto=[str(n) for n in (h.get("peer_auto") or []) if n],
             peer_repair=bool(h.get("peer_repair", False)),
+            agent_tools_enabled=bool(h.get("agent_tools_enabled", False)),
             adapter=str(h.get("adapter") or "").strip().lower(),
             model=_model(h.get("model")),
             reasoning=str(h.get("reasoning") or "").strip().lower(),

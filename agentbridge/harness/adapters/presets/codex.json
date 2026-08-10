@@ -5,7 +5,15 @@
   "args": ["exec", "--json", "--skip-git-repo-check", "-C", "{workdir}",
            "{prompt}"],
   "args_minimal": ["exec", "--json", "{prompt}"],
-  "safety_args": ["--sandbox", "read-only"],
+  "safety_args": ["--sandbox", "read-only", "--ignore-user-config"],
+  "permission_args": [
+    "-c", "approval_policy=\"never\"",
+    "-c", "mcp_servers.ab.url=\"{mcp_url}\"",
+    "-c", "mcp_servers.ab.bearer_token_env_var=\"AGENTBRIDGE_MCP_TOKEN\"",
+    "-c", "mcp_servers.ab.default_tools_approval_mode=\"prompt\"",
+    "-c", "mcp_servers.ab.tools.delegate_agent.approval_mode=\"approve\"",
+    "-c", "mcp_servers.ab.tool_timeout_sec=960"
+  ],
   "env_allow": ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME",
                 "CODEX_EVERYWHERE_API_KEY"],
   "model_args": ["-m", "{model}"],

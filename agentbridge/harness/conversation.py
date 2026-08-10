@@ -71,6 +71,7 @@ class Delivery:
     # warns the agent to re-check relevance instead of acting on stale plans
     late_s: float = 0.0
     run_id: str = ""              # bound by Runner to the live RunFeed id
+    task_id: str = ""             # canonical root task for delegation lineage
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation
 

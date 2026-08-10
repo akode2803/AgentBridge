@@ -1722,18 +1722,32 @@ frozen mappings; smaller model maintains parity fixtures.
 
 Estimate: **3-4.5 weeks**. Text only; no new shell/network power.
 
-- [ ] Add manager-retained agent-as-tool and active-execution handoff paths.
-- [ ] Require destination room membership and preserve every agent's responsible
+- [x] Add one manager-retained, depth-one, text-only agent-as-tool path.
+- [ ] Add the distinct active-execution handoff path.
+- [x] Require destination room membership and preserve every agent's responsible
   owner.
-- [ ] Implement offered/accepted/active/returned/declined/timed-out/stopped
-  states and visible authorship rules.
-- [ ] Add context disclosure manifest and model-facing history policy with
+- [~] Implement offered/accepted/authorized/active/returned/consumed/declined/
+  timed-out/interrupted states. The manager-retained path is live; branch stop
+  and true-handoff authorship remain.
+- [~] Add context disclosure manifest and model-facing history policy with
   source anchors and summary provenance.
 - [ ] Add visible contributor breadcrumb/task row, branch/root stop and final
   contribution summary.
-- [ ] Use separate child continuation state; recheck membership/ownership on
-  each turn and resume.
-- [ ] Keep same-room only and ordinary-code orchestration.
+- [~] Use separate child continuation state; C3.2 rechecks membership,
+  ownership, policy, host and parent authority before and during one child
+  invocation. Multi-turn resume remains.
+- [x] Keep same-room only and ordinary-code orchestration.
+
+**C3.2 live slice (R129):** v0.24.216 completed a real Codex -> Ollama ->
+Codex manager-retained call through the scoped `delegate_agent` MCP tool. The
+room ledger folded all six causal states, its six wire documents remained
+ciphertext-only, the child emitted no room message, and Codex alone authored
+the resumed reply. Codex's run ignores broader user configuration while
+retaining authentication, and only `delegate_agent` is pre-approved on the
+ephemeral bridge. Feature-flag disable drains authorized work; substantive
+destination-policy drift publishes an encrypted `interrupted` terminal before
+model invocation. The contributor/task GUI projection and broader handoff
+surface remain deferred as listed above.
 
 Affected: runtime/orchestration records, runner/queue/feed/conversation, mesh
 membership projections, GUI task endpoints/SSE, frontend state/chat/new task

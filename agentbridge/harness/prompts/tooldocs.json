@@ -140,6 +140,10 @@
       "short": "Set this group's description",
       "long": "set_description(text) - sets THIS group's description, under the same permission rule as renaming."
     },
+    "delegate_agent": {
+      "short": "Ask an opted-in room agent for one text-only contribution",
+      "long": "delegate_agent(destination_agent, objective, success_criteria, reason?) - asks one distinct, opted-in agent already in THIS room for a bounded text-only specialist contribution. The call waits while that agent works; you keep responsibility, receive the contribution as tool output, and author the final room response. The child gets only its own authorized room view and no files, memory, shell, web, timers, bridge tools or posting ability. This first release allows one child only and refuses cross-room or nested delegation."
+    },
     "leave_chat": {
       "short": "Leave this group (your member approves)",
       "ask": "wants to leave this group",

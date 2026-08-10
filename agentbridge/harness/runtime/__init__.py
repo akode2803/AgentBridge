@@ -5,8 +5,10 @@ permission lane with pairwise encryption, signatures, epoch validation, and
 durable one-use decisions. C1.4 adds canonical room-encrypted run events while
 preserving the old run feed as a compatibility projection. C3.1 adds canonical
 same-room child-task offers and destination-authored handoff decisions without
-claiming execution routing. Other runtime records remain dormant until their
-complete vertical slices land.
+claiming execution routing. C3.2 adds one manager-retained, depth-one,
+zero-capability text-only child execution path with durable causal recovery;
+true execution handoff and broader capability records remain dormant until
+their complete vertical slices land.
 """
 
 from .models import (
