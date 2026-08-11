@@ -306,8 +306,20 @@ class UserState:
             self._merge(hidden=[m for m in self.get().get("hidden", [])
                                 if m not in drop])
 
-    def clear(self, up_to_ns: int, *, keep_starred: bool = False) -> None:
-        self._merge(cleared={"ns": up_to_ns, "keep_starred": keep_starred, "at": utcnow_iso()})
+    def clear(self, up_to_ns: int, *, keep_starred: bool = False,
+              runtime_ids: tuple[str, ...] = ()) -> None:
+        with self._lock:
+            state = self.get()
+            hidden_runtime = list(dict.fromkeys([
+                *state.get("hidden_runtime", []), *runtime_ids,
+            ]))
+            changes: dict[str, Any] = {"hidden_runtime": hidden_runtime}
+            if up_to_ns:
+                changes["cleared"] = {
+                    "ns": up_to_ns, "keep_starred": keep_starred,
+                    "at": utcnow_iso(),
+                }
+            self._merge(**changes)
 
     # -------------------------------------------------- chat-list overlays
     def set_flag(self, name: str, value: Any) -> None:

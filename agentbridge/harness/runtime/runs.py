@@ -59,10 +59,15 @@ class RunLedger:
 
     OUTBOX_KIND = "runtime-run-event"
 
-    def __init__(self, mesh) -> None:
+    def __init__(self, mesh, *, fresh_reads: bool = True,
+                 register_outbox: bool = True,
+                 read_snapshot: dict | None = None) -> None:
         self.mesh = mesh
+        self.fresh_reads = fresh_reads
+        self.read_snapshot = read_snapshot
         self._lock = threading.RLock()
-        mesh.outbox.handlers[self.OUTBOX_KIND] = self._deliver
+        if register_outbox:
+            mesh.outbox.handlers[self.OUTBOX_KIND] = self._deliver
 
     def _deliver(self, _target: str, payload: dict) -> None:
         path = payload.get("path")
@@ -301,9 +306,16 @@ class RunLedger:
             raise AuthorityError("viewer is not a current room member")
         records: list[RunRecord] = []
         prefix = run_prefix(chat_id, run_id) + "/"
-        for path in self.mesh.tx.list_docs(prefix):
+        paths = (sorted(path for path in self.read_snapshot
+                        if path.startswith(prefix))
+                 if self.read_snapshot is not None else
+                 self.mesh.tx.list_docs(prefix) if self.fresh_reads else
+                 self.mesh.tx.list_cached_docs(prefix))
+        for path in paths:
             try:
-                doc = self.mesh.tx.get_doc(path)
+                doc = (self.read_snapshot.get(path)
+                       if self.read_snapshot is not None
+                       else self.mesh.tx.get_doc(path))
                 record = open_record(
                     self.mesh, snap, doc, RecordKind.RUN, RunRecord.from_dict,
                 )

@@ -103,8 +103,16 @@ def restore_message(app, req, mesh) -> dict:
 
 @authed
 def clear_chat(app, req, mesh) -> dict:
-    mesh.clear_chat(req.data.get("chat_id") or "",
-                    keep_starred=bool(req.data.get("keep_starred")))
+    from .api_runtime import contributor_rows
+
+    chat_id = req.data.get("chat_id") or ""
+    runtime_ids = tuple(
+        row["id"] for row in contributor_rows(mesh, chat_id, limit=None)
+    )
+    mesh.clear_chat(
+        chat_id, keep_starred=bool(req.data.get("keep_starred")),
+        runtime_ids=runtime_ids,
+    )
     return {"ok": True}
 
 

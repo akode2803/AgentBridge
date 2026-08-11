@@ -1043,6 +1043,23 @@ select, textarea {
   padding: 3px 0; font-size: 12.3px;
 }
 .feed-step-text { min-width: 0; overflow-wrap: anywhere; }
+/* R130: compact canonical agent-tool lineage. This is a room event, not a
+   message bubble or a provider step log, and deliberately has no controls. */
+.runtime-task {
+  align-self: center; display: flex; align-items: center; justify-content: center;
+  gap: 8px; max-width: 88%; padding: 4px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel); color: var(--text-dim);
+  font-size: 11.5px; line-height: 1.35; text-align: center;
+}
+.runtime-lineage { min-width: 0; overflow-wrap: anywhere; }
+.runtime-lineage b { color: var(--text); font-weight: 600; }
+.runtime-arrow { margin: 0 3px; color: var(--text-faint); }
+.runtime-state { flex: none; font-weight: 600; color: var(--accent); }
+.runtime-task.done .runtime-state { color: #16883f; }
+.runtime-task.problem .runtime-state { color: var(--bad); }
+@media (max-width: 620px) {
+  .runtime-task { max-width: 96%; flex-wrap: wrap; gap: 2px 7px; }
+}
 /* R36: the completed-runs list in Settings -> My agents */
 .ag-run { display: flex; gap: 8px; align-items: baseline;
   font-size: 12.3px; margin-bottom: 3px; }

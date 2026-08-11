@@ -110,13 +110,42 @@ class HandoffLedger:
     OUTBOX_KIND = "runtime-handoff-event"
     OPEN_PATH = "runtime/handoff-open"
 
-    def __init__(self, mesh, task_ledger: TaskLedger) -> None:
+    def __init__(self, mesh, task_ledger: TaskLedger, *,
+                 fresh_reads: bool = True, register_outbox: bool = True,
+                 read_snapshot: dict | None = None) -> None:
         self.mesh = mesh
         self.task_ledger = task_ledger
         self.run_ledger = task_ledger.run_ledger
+        self.fresh_reads = fresh_reads
+        self.read_snapshot = read_snapshot
         self._lock = threading.RLock()
-        mesh.outbox.handlers[self.OUTBOX_KIND] = self._deliver
-        mesh.outbox.dead_hooks[self.OUTBOX_KIND] = self._dead
+        if register_outbox:
+            mesh.outbox.handlers[self.OUTBOX_KIND] = self._deliver
+            mesh.outbox.dead_hooks[self.OUTBOX_KIND] = self._dead
+
+    def _paths(self, prefix: str, *, max_docs: int | None = None) -> list[str]:
+        if self.read_snapshot is not None:
+            return sorted(
+                path for path in self.read_snapshot if path.startswith(prefix)
+            )
+        try:
+            if not self.fresh_reads and max_docs is not None:
+                return self.mesh.tx.list_cached_docs_bounded(prefix, max_docs)
+            paths = (self.mesh.tx.list_docs(prefix) if self.fresh_reads else
+                     self.mesh.tx.list_cached_docs(prefix))
+        except OverflowError as exc:
+            raise HandoffLedgerError(
+                "runtime task history exceeds the bounded GUI projection",
+            ) from exc
+        if max_docs is not None and len(paths) > max_docs:
+            raise HandoffLedgerError(
+                "runtime task history exceeds the bounded GUI projection",
+            )
+        return paths
+
+    def _doc(self, path: str):
+        return (self.read_snapshot.get(path) if self.read_snapshot is not None
+                else self.mesh.tx.get_doc(path))
 
     def _dead(self, _target: str, payload: dict) -> None:
         self._discard_open(payload)
@@ -803,18 +832,28 @@ class HandoffLedger:
                 and len(run_starts) == 1 and not run_terminals)
 
     def read(self, chat_id: str, run_id: str = "",
-             handoff_id: str = "") -> list[HandoffView]:
+             handoff_id: str = "", *, historical: bool = False,
+             max_docs: int | None = None) -> list[HandoffView]:
         if handoff_id and not run_id:
             raise HandoffLedgerError("exact handoff lookup requires its run id")
         snap = self.mesh.snapshot(chat_id)
         if not snap.is_member(self.mesh.user):
             raise AuthorityError("viewer is not a current room member")
-        records: list[HandoffRecord] = []
         prefix = handoff_prefix(chat_id, run_id, handoff_id) + "/"
-        for path in self.mesh.tx.list_docs(prefix):
+        paths = self._paths(prefix, max_docs=max_docs)
+        return self._read_paths(
+            chat_id, run_id, handoff_id, paths, snap=snap,
+            historical=historical,
+        )
+
+    def _read_paths(self, chat_id: str, run_id: str, handoff_id: str,
+                    paths: list[str], *, snap,
+                    historical: bool) -> list[HandoffView]:
+        records: list[HandoffRecord] = []
+        for path in paths:
             try:
                 record = open_record(
-                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    self.mesh, snap, self._doc(path),
                     RecordKind.HANDOFF, HandoffRecord.from_dict,
                 )
                 meta = record.meta
@@ -869,10 +908,11 @@ class HandoffLedger:
             except (AuthorityError, HandoffLedgerError, RuntimeContractError,
                     TypeError, ValueError):
                 continue
-        return self._fold(chat_id, records)
+        return self._fold(chat_id, records, historical=historical)
 
     def _fold(self, chat_id: str,
-              records: list[HandoffRecord]) -> list[HandoffView]:
+              records: list[HandoffRecord], *,
+              historical: bool = False) -> list[HandoffView]:
         views: list[HandoffView] = []
         grouped: dict[str, list[HandoffRecord]] = {}
         for record in records:
@@ -941,8 +981,11 @@ class HandoffLedger:
             )
             if offer.context_digest != expected_digest:
                 continue
-            events = self._fold_events(offer, task, group)
-            if (self._parent_has_terminal(offer, task.parent_task_id or "")
+            events = self._fold_events(
+                offer, task, group, historical=historical,
+            )
+            if (not historical
+                    and self._parent_has_terminal(offer, task.parent_task_id or "")
                     and not any(record.state is HandoffState.AUTHORIZED
                                 for record in events)):
                 events = (offer,)
@@ -952,7 +995,8 @@ class HandoffLedger:
         return views
 
     def _fold_events(self, offer: HandoffRecord, task: TaskRecord,
-                     group: list[HandoffRecord]) -> tuple[HandoffRecord, ...]:
+                     group: list[HandoffRecord], *,
+                     historical: bool = False) -> tuple[HandoffRecord, ...]:
         decisions = [
             record for record in group
             if record.state in {HandoffState.ACCEPTED, HandoffState.DECLINED,
@@ -972,8 +1016,10 @@ class HandoffLedger:
         if decision.meta.ns >= acceptance_deadline:
             return (offer,)
         if decision.state is HandoffState.DECLINED:
-            return ((offer, decision) if time.time_ns() < acceptance_deadline
-                    else (offer,))
+            return (offer, decision) if historical else (
+                (offer, decision) if time.time_ns() < acceptance_deadline
+                else (offer,)
+            )
 
         authorizations = [
             record for record in group
@@ -986,7 +1032,8 @@ class HandoffLedger:
                    != decision.meta.id
                 or int(authorizations[0].meta.expires_ns or 0)
                    <= authorizations[0].meta.ns):
-            if authorizations or time.time_ns() < acceptance_deadline:
+            if (historical or authorizations
+                    or time.time_ns() < acceptance_deadline):
                 return (offer, decision)
             return (offer,)
         authorized = authorizations[0]
@@ -1081,10 +1128,10 @@ class HandoffLedger:
             handoff.meta.chat_id, handoff.meta.run_id or "",
             handoff.meta.task_id or "",
         ) + "/"
-        for path in self.mesh.tx.list_docs(prefix):
+        for path in self._paths(prefix):
             try:
                 task = open_record(
-                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    self.mesh, snap, self._doc(path),
                     RecordKind.TASK, TaskRecord.from_dict,
                 )
                 expected_result = {
@@ -1145,11 +1192,11 @@ class HandoffLedger:
         """
         snap = self.mesh.snapshot(offer.meta.chat_id)
         run_id = offer.meta.run_id or ""
-        for path in self.mesh.tx.list_docs(
+        for path in self._paths(
                 task_prefix(offer.meta.chat_id, run_id, parent_task_id) + "/"):
             try:
                 record = open_record(
-                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    self.mesh, snap, self._doc(path),
                     RecordKind.TASK, TaskRecord.from_dict,
                 )
                 if (path == task_event_path(
@@ -1163,11 +1210,11 @@ class HandoffLedger:
                     return True
             except (RuntimeContractError, TypeError, ValueError):
                 continue
-        for path in self.mesh.tx.list_docs(
+        for path in self._paths(
                 run_prefix(offer.meta.chat_id, run_id) + "/"):
             try:
                 record = open_record(
-                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    self.mesh, snap, self._doc(path),
                     RecordKind.RUN, RunRecord.from_dict,
                 )
                 if (path == run_event_path(
@@ -1185,10 +1232,10 @@ class HandoffLedger:
         prefix = (f"chats/{offer.meta.chat_id}/runtime/tasks/"
                   f"{offer.meta.run_id}/{offer.meta.task_id}/")
         matches: list[TaskRecord] = []
-        for path in self.mesh.tx.list_docs(prefix):
+        for path in self._paths(prefix):
             try:
                 task = open_record(
-                    self.mesh, snap, self.mesh.tx.get_doc(path),
+                    self.mesh, snap, self._doc(path),
                     RecordKind.TASK, TaskRecord.from_dict,
                 )
                 source_auth = authority(

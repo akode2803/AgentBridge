@@ -126,6 +126,22 @@ def test_reads_served_from_the_warm_mirror(mirror):
     assert inner.reads["list_chat_ids"] == 1
 
 
+def test_bounded_cached_snapshot_is_atomic_and_never_reads_through(mirror):
+    inner, tx = mirror
+    inner.put_doc("chats/c1/runtime/runs/a.json", {"value": 1})
+    inner.put_doc("chats/c1/runtime/tasks/b.json", {"value": 2})
+    tx.refresh()
+    inner.reset_reads()
+
+    snapshot = tx.cached_docs_bounded("chats/c1/runtime/", 2)
+    snapshot["chats/c1/runtime/runs/a.json"]["value"] = 99
+    assert tx.get_doc("chats/c1/runtime/runs/a.json")["value"] == 1
+    assert all(value == 0 for value in inner.reads.values())
+    with pytest.raises(OverflowError):
+        tx.cached_docs_bounded("chats/c1/runtime/", 1)
+    assert all(value == 0 for value in inner.reads.values())
+
+
 def test_missing_doc_is_default_without_refetch(mirror):
     inner, tx = mirror
     # users/ is a READ-THROUGH domain (R66): the FIRST miss verifies with

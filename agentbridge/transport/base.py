@@ -134,6 +134,30 @@ class Transport(ABC):
     def list_docs(self, prefix: str) -> list[str]:
         """Paths of ``.json`` documents under ``prefix`` (recursive)."""
 
+    def list_cached_docs(self, prefix: str) -> list[str]:
+        """Best available local snapshot of a document prefix.
+
+        Local transports are already authoritative and may use ``list_docs``.
+        Mirror transports override this to guarantee no network read-through.
+        """
+        return self.list_docs(prefix)
+
+    def list_cached_docs_bounded(self, prefix: str, limit: int) -> list[str]:
+        """Local snapshot listing that fails instead of exceeding ``limit``."""
+        paths = self.list_cached_docs(prefix)
+        if len(paths) > limit:
+            raise OverflowError("cached document prefix exceeds its read budget")
+        return paths
+
+    def cached_docs_bounded(self, prefix: str, limit: int) -> dict[str, Any]:
+        """One bounded local snapshot of paths and document values."""
+        out = {}
+        for path in self.list_cached_docs_bounded(prefix, limit):
+            value = self.get_doc(path)
+            if value is not None:
+                out[path] = value
+        return out
+
     def get_docs(self, prefix: str = "") -> dict[str, Any]:
         """OPTIONAL fast path: every doc under ``prefix`` at once. This
         default loops the required methods (fine on a local driver); a cloud

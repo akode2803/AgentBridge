@@ -15,6 +15,8 @@ import { notifyAsk } from "./notify.js";
 import { rxBadge, openReactionsPopup, captureRxSigs, animateRxChanges } from "./reactions.js";
 import { V } from "./views.js";
 
+let chatRenderSeq = 0;
+
 // V32 (R51): advance the read cursor AND settle the badge NOW. The server
 // recomputes unread on the next state fetch — up to 20s away under SSE —
 // which was exactly the "unread counter while I'm using the chat" report.
@@ -292,9 +294,11 @@ function nextClamp(cur) {
 }
 
 async function renderMeshChat(force) {
+  const renderSeq = ++chatRenderSeq;
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
+  if (renderSeq !== chatRenderSeq) return;
   if (data.error) {
     // a deleted chat vanishing under an open view is expected, not an error —
     // slip back to the list quietly (was a scary "No such chat" toast when a
@@ -302,7 +306,13 @@ async function renderMeshChat(force) {
     if (data.error !== "No such chat") toast(data.error, true);
     location.hash = "#/chats"; return;
   }
-  const feeds = (await api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`)).feeds || [];
+  const [feedData, runtimeData] = await Promise.all([
+    api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
+    api(`/api/mesh/runtime_tasks?id=${encodeURIComponent(chatId)}`),
+  ]);
+  if (renderSeq !== chatRenderSeq) return;
+  const feeds = feedData.feeds || [];
+  const runtimeTasks = runtimeData.tasks || [];
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
@@ -333,7 +343,8 @@ async function renderMeshChat(force) {
     pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig,
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
       (f.draft || "").length, (f.steps || []).map((s) =>
-        `${s.ts || ""}:${s.text || ""}`).join("|")])]);
+        `${s.ts || ""}:${s.text || ""}`).join("|")]),
+    runtimeTasks.map((t) => [t.id, t.state, t.updated_ns])]);
   // structural signature — drives the FULL rebuild (incl. the header). name
   // rides here so a rename (local or from another client) repaints the header;
   // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
@@ -503,6 +514,34 @@ async function renderMeshChat(force) {
       parts.push(["gone", '<div class="info-pill">This account was deleted</div>']);
     }
   }
+  // R130: canonical orchestration is room-visible even though an agent-as-tool
+  // child does not post. Keep this projection compact and content-free: the
+  // server deliberately sends identity + lifecycle only.
+  const runtimeLabels = {
+    offered: "Requested", accepted: "Accepted", authorized: "Starting",
+    active: "Working", returned: "Contribution ready",
+    consumed: "Contribution used", declined: "Declined",
+    timed_out: "Timed out", stopped: "Stopped", interrupted: "Interrupted",
+  };
+  const runtimeProblem = new Set(["declined", "timed_out", "stopped", "interrupted"]);
+  const runtimeDone = new Set(["returned", "consumed"]);
+  for (const task of runtimeTasks) {
+    const state = runtimeLabels[task.state] ? task.state : "interrupted";
+    const label = runtimeLabels[state];
+    const manager = meshDn(task.manager);
+    const contributor = meshDn(task.contributor);
+    const stateClass = runtimeProblem.has(state) ? " problem"
+      : runtimeDone.has(state) ? " done" : " active";
+    parts.push(["runtime:" + task.id, `
+      <div class="runtime-task${stateClass}" data-runtime-task="${esc(task.id)}"
+           role="status" aria-live="polite" aria-atomic="true"
+           aria-label="${esc(`${manager} delegated to ${contributor}: ${label}`)}">
+        <span class="runtime-lineage"><b>${esc(manager)}</b>
+          <span class="runtime-arrow" aria-hidden="true">→</span>
+          <b>${esc(contributor)}</b></span>
+        <span class="runtime-state">${esc(label)}</span>
+      </div>`]);
+  }
   // live presence: agents working (dots + label + forming draft) and
   // humans typing (dots only). Styled like a regular incoming message —
   // avatar in the gutter, name inside the bubble, none of either in DMs.
@@ -606,7 +645,7 @@ async function renderMeshChat(force) {
     // the moment the transcript empties and re-enables the moment the first
     // message lands (was stale until the chat was reopened)
     const clrBtn = $('#chat-menu [data-act="clear"]');
-    if (clrBtn) clrBtn.disabled = data.messages.length === 0;
+    if (clrBtn) clrBtn.disabled = data.messages.length === 0 && runtimeTasks.length === 0;
     if (grew) {   // the newest bubble slides in
       const last = tr.querySelector(".msg:last-of-type");
       if (last) last.classList.add("msg-in");
@@ -648,7 +687,7 @@ async function renderMeshChat(force) {
   // Clear chat greys out once there's nothing visible left to clear (an
   // already-cleared or brand-new chat) — messages_for has applied the
   // per-user clear cursor, so an empty transcript means nothing to clear
-  const canClear = (data.messages || []).length > 0;
+  const canClear = (data.messages || []).length > 0 || runtimeTasks.length > 0;
   const title = chatDisplay(meta, ms.user);
   // a DM with an agent carries the agent tag in the header — inside a DM the
   // bubbles have no sender line, so the header is the only place it can show

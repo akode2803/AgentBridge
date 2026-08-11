@@ -5,6 +5,7 @@ other identity syncs -> reads through the choke point. Membership gates on
 EVERY operation (the v0.24.1 lesson).
 """
 
+import threading
 import time
 
 import pytest
@@ -360,6 +361,24 @@ def test_clear_chat_keep_starred(world):
     later = ann.post(CHAT, "after the clear")
     flush_and_sync(ann, bob)
     assert later.id in [m.id for m in bob.messages_for(CHAT)]
+
+
+def test_concurrent_runtime_clears_merge_exact_hidden_ids(world):
+    bob = world["bob"]
+    ids = [f"handoff-{i}" for i in range(20)]
+    threads = [
+        threading.Thread(
+            target=bob.clear_chat, args=(CHAT,),
+            kwargs={"runtime_ids": (handoff_id,)},
+        )
+        for handoff_id in ids
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert set(bob.my_state(CHAT)["hidden_runtime"]) == set(ids)
 
 
 def test_delete_chat_for_me_hides_then_reappears(world):

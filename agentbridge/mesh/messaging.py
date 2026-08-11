@@ -374,12 +374,15 @@ class MessagingService:
         self._require_member(chat_id)
         self._state(chat_id).unhide(msg_ids)
 
-    def clear_chat(self, chat_id: str, *, keep_starred: bool = False) -> None:
+    def clear_chat(self, chat_id: str, *, keep_starred: bool = False,
+                   runtime_ids: tuple[str, ...] = ()) -> None:
         self._require_member(chat_id)
         msgs = self.store.messages(chat_id)
         cut = max((m.get("ns", 0) for m in msgs), default=0)
-        if cut:
-            self._state(chat_id).clear(cut, keep_starred=keep_starred)
+        if cut or runtime_ids:
+            self._state(chat_id).clear(
+                cut, keep_starred=keep_starred, runtime_ids=runtime_ids,
+            )
 
     def mark_read(self, chat_id: str) -> None:
         self._require_member(chat_id)
@@ -587,6 +590,7 @@ class MessagingService:
         return {
             "starred": list(state.get("starred", [])),
             "read_ns": int(state.get("read_ns", 0)),
+            "hidden_runtime": list(state.get("hidden_runtime", [])),
             "archived": bool(state.get("archived")),
             "pinned": bool(state.get("pinned")),
             "forced_unread": bool(state.get("forced_unread")),

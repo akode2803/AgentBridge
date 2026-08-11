@@ -746,6 +746,39 @@ Live: one throwaway room, two existing agents, handoff and agent-as-tool runs.
 Exit: AgentBridge's core visible-handoff narrative is proven before broad power
 is added.
 
+R130 implementation boundary (2026-08-11): the first GUI projection is a
+privacy-minimized, current-room-member read model over the canonical handoff
+fold. It shows stable lineage, agent identities and lifecycle state, but not
+objectives, criteria, reasons, contribution bodies, owners, context digests,
+grants or raw records. It does not add stop authority before canonical control
+events, and it does not claim the later nested/full graph inspector.
+The historical display fold preserves an already-validated terminal after its
+parent closes without changing the stricter execution-authority fold. GUI
+reads are cached-mirror-only, register no outbox handlers and fail closed when
+the local runtime prefix exceeds its explicit document budget; response limits
+apply only after canonical validation and sort by latest event `ns`. Clear chat
+stores the exact visible handoff ids in the signed per-user overlay, so later
+events cannot resurrect a cleared row and no cross-machine clock cutoff is
+invented. Browser render generations prevent an older overlapping response
+from repainting a newer lifecycle state.
+
+R130 release evidence (v0.24.217): focused runtime/frontend/transport tests and
+the final 764-test suite passed with 4 platform skips; frontend structure was
+24/24 and changed-file Ruff/diff checks were clean. The strongest independent
+review found no P0/P1 issue. A disposable live Codex -> Ollama -> Codex run
+rendered one consumed contributor row at normal and desktop widths with clean
+browser logs and no horizontal overflow. Clear hid the exact row across reload,
+then the room was deleted and its former-member read was rejected.
+
+R131 candidate boundary: R129's Codex `--ignore-user-config` plus one explicit
+tool pre-approval is a conservative integration workaround, not the final
+cross-provider design. A later adapter round must declare authenticated bridge
+attachment, tool filtering, approval enforcement locus, isolated configuration
+overlays and continuation support as provider-neutral data for Codex, Claude,
+Gemini and future adapters. The compiler must reduce capability or fail closed
+when equivalent enforcement is unavailable; it must never fall back to blanket
+auto-approval.
+
 ### WP2 - Capability registry and policy compiler
 
 Estimate: **2 weeks**. Dependency: WP0-WP1.

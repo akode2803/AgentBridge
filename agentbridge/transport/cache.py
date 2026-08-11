@@ -596,6 +596,46 @@ class CachingTransport(Transport):
             return []
         return self.inner.list_docs(prefix)
 
+    def list_cached_docs(self, prefix: str) -> list[str]:
+        """List only the synchronized mirror; never trigger live read-through."""
+        if not self._ensure_warm():
+            return []
+        with self._lock:
+            return sorted(
+                path for path in self._docs
+                if path.startswith(prefix) and path.endswith(".json")
+            )
+
+    def list_cached_docs_bounded(self, prefix: str, limit: int) -> list[str]:
+        """Stop scanning once a local projection's explicit budget is full."""
+        out = []
+        if not self._ensure_warm():
+            return out
+        with self._lock:
+            for path in self._docs:
+                if path.startswith(prefix) and path.endswith(".json"):
+                    out.append(path)
+                    if len(out) > limit:
+                        raise OverflowError(
+                            "cached document prefix exceeds its read budget",
+                        )
+        return sorted(out)
+
+    def cached_docs_bounded(self, prefix: str, limit: int) -> dict[str, Any]:
+        """Copy one bounded prefix under one lock, with no read-through race."""
+        out = {}
+        if not self._ensure_warm():
+            return out
+        with self._lock:
+            for path, value in self._docs.items():
+                if path.startswith(prefix) and path.endswith(".json"):
+                    out[path] = copy.deepcopy(value)
+                    if len(out) > limit:
+                        raise OverflowError(
+                            "cached document prefix exceeds its read budget",
+                        )
+        return out
+
     # ----------------------------------------------------------- chats / logs
     def list_chat_ids(self) -> list[str]:
         if self._ensure_warm():

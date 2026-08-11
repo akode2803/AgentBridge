@@ -500,7 +500,7 @@ function openChatRowMenu(chatId, x, y) {
   // grey out Clear when there's nothing visible left to clear (empty or already
   // cleared). c.last is viewer-scoped, so it's null in exactly the cases where
   // the header menu disables Clear (data.messages empty) — keeps them matched.
-  const canClear = !!c.last;
+    const canClear = true;
   const items = [
     `<button data-act="pin">${isPinned ? ICONS.pinOff : ICONS.pin} ${isPinned ? "Unpin chat" : "Pin chat"}</button>`,
     `<button data-act="unread">${ICONS.unread} ${isUnread ? "Mark as read" : "Mark as unread"}</button>`,
