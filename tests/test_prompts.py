@@ -113,6 +113,21 @@ def test_bridge_guidance_encourages_asking_not_refusing(tmp_path):
     assert "never conclude from a success" in low
 
 
+def test_compiled_delegate_prompt_advertises_only_actual_authority(tmp_path):
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    p = pack.prompt(
+        delivery(), acc(), context_file="c", outbox="o",
+        workspace_only=True, bridge_capabilities=("delegate_agent",),
+    )
+    low = p.lower()
+    assert "host files outside it are not available" in low
+    assert "only agentbridge bridge tool" in low
+    assert "delegate_agent" in p
+    assert "no other agentbridge chat, memory, timer, file" in low
+    assert "call ask_member" not in low
+    assert "tidy_workspace" not in low
+
+
 def test_prompt_timer_task(tmp_path):
     pm = PromptManager(tmp_path / "nohome")
     pack = pm.for_agent(acc())

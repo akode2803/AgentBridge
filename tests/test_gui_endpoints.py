@@ -475,6 +475,26 @@ def test_agents_create_patch_standdown_delete(rig):
     assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False
 
 
+def test_harness_options_reports_bridge_facts_without_secrets(rig):
+    rig.signup()
+    out = rig.get("/api/mesh/harness_options")
+    families = {family["id"]: family for family in out["families"]}
+    codex = families["codex"]["bridge"]
+    assert codex == {
+        "declared": True,
+        "provider": "codex",
+        "transport": "streamable-http-bearer",
+        "enforcement_locus": "provider-filter+server-authority",
+        "config_isolation": "ignore-user-config",
+        "continuation": "fresh-only",
+        "capabilities": ["delegate_agent"],
+    }
+    assert families["claude"]["bridge"]["declared"] is False
+    serialized = json.dumps(out)
+    assert "AGENTBRIDGE_MCP_TOKEN" not in serialized
+    assert "bearer_token" not in serialized
+
+
 def test_asks_surface_and_answer_roundtrip(rig):
     """R18: the owner sees their agents' pending asks and answers them; an
     'always' verdict persists a standing approval rule."""

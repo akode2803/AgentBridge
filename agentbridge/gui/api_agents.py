@@ -109,7 +109,12 @@ def harness_options(app, req, mesh) -> dict:
         "requires_model": p.requires_model,
         # H2/R43: does this family support the "web access, asks first"
         # toggle? Needs both the governed tools AND the live ask gate.
-        "aux_web": bool(p.aux_web and p.permission_args),
+        "aux_web": bool(p.aux_web and p.bridge_profile),
+        "bridge": (p.bridge_profile.public_facts() if p.bridge_profile else {
+            "declared": False,
+            "reason": p.bridge_unavailable_reason or
+                      "no trusted bridge profile ships for this provider",
+        }),
     } for p in reg.presets.values()]
     families.sort(key=lambda f: (not f["available"], f["id"]))
     return {"ok": True, "machine": mesh.machine, "families": families}

@@ -80,7 +80,10 @@ class PromptPack:
 
     # ------------------------------------------------------------ the prompt
     def prompt(self, delivery: Delivery, acc, *, context_file, outbox,
-               bridge: bool = False, file_limit: str = "configured limit",
+               bridge: bool = False,
+               bridge_capabilities: tuple[str, ...] | list[str] = (),
+               workspace_only: bool = False,
+               file_limit: str = "configured limit",
                recovery_notice: str = "") -> str:
         roster = "; ".join(
             f"@{r['name']} ({r.get('desc', '')})" for r in delivery.roster)
@@ -115,7 +118,13 @@ class PromptPack:
         # V78: the break marker is injected like the sentinel; a pack that
         # drops this block simply degrades to single-message replies
         parts.append(self.text("multi_message", delimiter=MESSAGE_BREAK))
-        if bridge:  # only when the run really has the harness channel
+        if workspace_only:
+            parts.append(self.text("workspace_only"))
+        if bridge_capabilities:
+            if tuple(bridge_capabilities) != ("delegate_agent",):
+                raise ValueError("unknown compiled bridge prompt capability")
+            parts.append(self.text("bridge_delegate"))
+        elif bridge:  # legacy full-bridge fixtures only
             parts.append(self.text("bridge"))
         parts.append(self.text("etiquette"))
         silence = self.text("silence", sentinel=SILENCE) \

@@ -779,6 +779,52 @@ Gemini and future adapters. The compiler must reduce capability or fail closed
 when equivalent enforcement is unavailable; it must never fall back to blanket
 auto-approval.
 
+R131 corrected design boundary (2026-08-11): a provider permission prompt, an
+AgentBridge owner decision and a native sandbox decision are three different
+enforcement events and must be reported separately. A trusted shipped preset
+may declare one strict bridge attachment contract; an owner adapter overlay can
+configure an ordinary CLI but cannot self-certify bridge enforcement. Unknown
+fields, enforcement modes, placeholders, wildcard pre-approvals, blanket allow
+defaults and host-controlled AgentBridge credentials fail closed.
+
+The per-run compiler freezes native enforcement, configuration isolation,
+bridge transport, bearer delivery, exact model capabilities, continuation
+support and timeouts before starting a bridge. The bridge server itself removes
+every tool outside that frozen set; a bearer proves which process is calling,
+not what it may call. `approve` remains future control-plane plumbing for a
+provider that delegates native permission questions and is not exposed to the
+model in the Codex slice. `delegate_agent` is the only published bridge
+capability, and only when the current run actually exposes it. Rejection of a
+compiled security flag terminates that launch rather than entering the ordinary
+usage-error fallback.
+
+Codex retains its authentication home but ignores broad user configuration and
+reapplies only typed values from a shipped allowlist of inert preferences. MCP
+servers, plugins, hooks, project trust, permission profiles, shell/network
+policy, endpoints and credentials are never overlaid. A generated permission
+profile denies host reads, reopens only Codex's minimal runtime paths and makes
+the exact per-chat workspace writable; it does not claim a separate host or VM
+sandbox. Native escalation and command network access remain disabled, the run
+is fresh/ephemeral, and only the bearer-authenticated `ab` bridge is attached.
+The declaration is bound to a resolved executable and verified version before
+the bearer exists. Claude, Gemini and future CLIs must prove equivalent
+settings/MCP/hook isolation and exact server-side tool filtering on an
+installed version before bridge enablement; until then V159 remains partial and
+those adapters report reduced capability rather than inheriting ambient
+authority.
+
+R131 release evidence (v0.24.218): installed `codex-cli 0.144.5` accepted the
+strict generated profile. Synthetic containment proved the run could write its
+workspace but could not read an AgentBridge host-data sentinel. A hostile
+project-local required MCP server, startup hook and contradictory AGENTS file
+were ignored. A disposable live Codex -> Deepseek run returned the requested
+manager and child proof tokens through the sole published `delegate_agent`
+tool, then the room and synthetic files were deleted. The final suite passed
+773 tests with 4 platform skips; focused provider/prompt/bridge coverage passed
+93 tests, frontend structure was 24/24, Ruff/diff checks were clean, and the
+strongest adversarial re-review found no remaining P0/P1 issue. This closes the
+trusted Codex slice only; V159 remains open for installed Claude/Gemini parity.
+
 ### WP2 - Capability registry and policy compiler
 
 Estimate: **2 weeks**. Dependency: WP0-WP1.

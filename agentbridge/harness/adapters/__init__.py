@@ -8,8 +8,10 @@ agent's owner-set config into a concrete invocation per audience.
 
 from .cli import CliResponder, extract_step, provider_env, reply_from_output
 from .registry import Invocation, ModelRegistry, Preset
+from .policy import BridgeProfile, CompiledBridgePolicy, compile_bridge_policy
 
 __all__ = [
-    "CliResponder", "Invocation", "ModelRegistry", "Preset",
+    "BridgeProfile", "CliResponder", "CompiledBridgePolicy", "Invocation",
+    "ModelRegistry", "Preset", "compile_bridge_policy",
     "extract_step", "provider_env", "reply_from_output",
 ]

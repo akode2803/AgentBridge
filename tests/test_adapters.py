@@ -252,11 +252,10 @@ def test_aux_flags_shape_the_gates():
     blocklist — and the web relax NEVER applies without the ask gate."""
     from agentbridge.harness.adapters.registry import effective_gates
 
-    gated = Preset(id="p", command="x",
-                   permission_args=["--mcp-config", "{mcp_config}"],
-                   auto_allow=["Read", "Grep"],
-                   blocklist=["Bash", "WebFetch", "WebSearch"],
-                   aux_web=["WebFetch", "WebSearch"])
+    gated = ModelRegistry.load().presets["codex"]
+    gated.auto_allow = ["Read", "Grep"]
+    gated.blocklist = ["Bash", "WebFetch", "WebSearch"]
+    gated.aux_web = ["WebFetch", "WebSearch"]
     # defaults: reads free, web hard-blocked
     auto, block = effective_gates(gated, settings())
     assert auto == ["Read", "Grep"]
@@ -268,7 +267,7 @@ def test_aux_flags_shape_the_gates():
     # Bash stays hard-blocked regardless
     auto, block = effective_gates(gated, settings(aux={"web": True}))
     assert block == ["Bash"] and auto == ["Read", "Grep"]
-    # no ask gate (no permission_args): the toggle is inert
+    # no trusted bridge profile: the toggle is inert
     bare = Preset(id="b", command="x",
                   blocklist=["web_fetch"], aux_web=["web_fetch"])
     _, block = effective_gates(bare, settings(aux={"web": True}))

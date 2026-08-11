@@ -45,6 +45,7 @@ from ..responder import MESSAGE_BREAK, SILENCE, OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..settings import HarnessSettings
 from .registry import Invocation, ModelRegistry, effective_gates
+from .policy import compile_bridge_policy
 
 __all__ = ["ChildInvocation", "ChildRequest", "ChildResult", "CliResponder",
            "extract_step", "provider_env", "reply_from_output",
@@ -407,7 +408,6 @@ class CliResponder:
                        else prepared.model),
                 effort=prepared.effort,
                 minimal=minimal,
-                mcp_config="",
                 blocklist=[],
             )
             env = provider_env(preset)
@@ -425,7 +425,6 @@ class CliResponder:
                            else prepared.model),
                     effort=prepared.effort,
                     minimal=True,
-                    mcp_config="",
                     blocklist=[],
                 )
                 rc, lines, err = self._run_child_process(
@@ -563,12 +562,23 @@ class CliResponder:
                     parent_task_id=delivery.task_id, **values,
                 )
         with contextlib.ExitStack() as stack:
-            mcp_config = ""
+            bridge_args: tuple[str, ...] = ()
             injected_env: dict[str, str] = {
                 "AGENTBRIDGE_OUTBOX": str(outbox),
             }
             bridge = None
-            if inv.preset.permission_args:
+            bridge_policy = None
+            if inv.preset.bridge_profile is not None:
+                bridge_policy = compile_bridge_policy(
+                    inv.preset.bridge_profile,
+                    command=inv.preset.command,
+                    workspace=workdir,
+                    timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
+                    requested_capabilities=(
+                        {"delegate_agent"} if delegate_tool is not None else set()),
+                )
+                bridge_args = bridge_policy.launch_args
+            if bridge_policy is not None and bridge_policy.capabilities:
                 bridge = stack.enter_context(BridgeServer(
                     self.broker, chat_id=delivery.chat_id,
                     run_id=delivery.run_id,
@@ -583,36 +593,46 @@ class CliResponder:
                     global_memory=settings.global_memory_for(delivery.chat_id),
                     docs=self.docs, timer_svc=self.timer_svc,
                     delegate=delegate_tool,
+                    enabled_capabilities=set(bridge_policy.capabilities),
                 ))
-                mcp_config = bridge.mcp_config()
+                bridge_args = bridge_policy.attachment_args(url=bridge.url)
                 injected_env["AGENTBRIDGE_MCP_TOKEN"] = bridge.bearer_token
                 # the inner CLI must out-wait the owner-answer window
                 injected_env["MCP_TOOL_TIMEOUT"] = str(
                     int((max(settings.ask_timeout_s, settings.timeout_s) + 60)
                         * 1000))
-            if not mcp_config:
+            bridge_attached = bridge is not None
+            if not bridge_attached:
                 # no live ask gate on this run — the web relax never applies
                 blocklist = list(inv.preset.blocklist)
             cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
             file_limit = (f"{max(1, cap // (1024 * 1024))} MB per file"
                           if cap else "the configured per-file limit")
             prompt = pack.prompt(delivery, acc, context_file=context_file,
-                                 outbox=outbox, bridge=bool(mcp_config),
+                                 outbox=outbox,
+                                 workspace_only=bridge_policy is not None,
+                                 bridge_capabilities=(
+                                     bridge_policy.capabilities
+                                     if bridge_attached else ()),
                                  file_limit=file_limit,
                                  recovery_notice=recovery.prompt_text())
             argv = inv.preset.build_argv(
                 prompt=prompt, workdir=str(workdir),
                 reply_file=str(reply_file), model=inv.model,
                 effort=inv.effort, minimal=inv.preset.id in self._minimal,
-                mcp_config=mcp_config,
-                mcp_url=(bridge.url if bridge is not None else ""),
+                bridge_args=bridge_args,
+                command=(bridge_policy.executable if bridge_policy else ""),
+                include_safety=bridge_policy is None,
                 blocklist=blocklist,
             )
             env = provider_env(inv.preset, injected=injected_env)
+            if bridge_policy is not None:
+                env = bridge_policy.sanitize_environment(env)
             rc, lines, err = self._run(
                 argv, workdir, settings.timeout_s, inv, pack, step,
                 env=env, chat_id=delivery.chat_id)
-            if self._usage_error(rc, err) and inv.preset.id not in self._minimal:
+            if (self._usage_error(rc, err) and bridge_policy is None
+                    and inv.preset.id not in self._minimal):
                 # a CLI update rejected our flags — drop conveniences, keep
                 # safety args AND the permission plumbing
                 step("Flags rejected — retrying with the minimal set")
@@ -620,8 +640,7 @@ class CliResponder:
                 argv = inv.preset.build_argv(
                     prompt=prompt, workdir=str(workdir),
                     reply_file=str(reply_file), model=inv.model,
-                    effort=inv.effort, minimal=True, mcp_config=mcp_config,
-                    mcp_url=(bridge.url if bridge is not None else ""),
+                    effort=inv.effort, minimal=True,
                     blocklist=blocklist,
                 )
                 rc, lines, err = self._run(

@@ -937,44 +937,70 @@ def test_capability_creates_are_gated_and_capped(tmp_path):
 
 # ------------------------------------------------------------- argv plumbing
 
-def test_permission_args_ride_both_argv_modes():
+def test_compiled_bridge_args_ride_both_argv_modes():
     p = Preset.from_dict({
         "id": "x", "command": "x",
         "args": ["--nice", "{prompt}"], "args_minimal": ["{prompt}"],
-        "permission_args": ["--mcp-config", "{mcp_config}",
-                            "--permission-prompt-tool", "mcp__ab__approve"],
     })
+    bridge_args = ("--mcp-config", '{"u":1}',
+                   "--allowedTools", "mcp__ab__delegate_agent")
     full = p.build_argv(prompt="p", workdir="w", reply_file="r",
-                        mcp_config='{"u":1}')
+                        bridge_args=bridge_args)
     slim = p.build_argv(prompt="p", workdir="w", reply_file="r",
-                        mcp_config='{"u":1}', minimal=True)
+                        bridge_args=bridge_args, minimal=True)
     for argv in (full, slim):                     # plumbing is never dropped
         assert argv[argv.index("--mcp-config") + 1] == '{"u":1}'
-        assert "--permission-prompt-tool" in argv
+        assert "mcp__ab__delegate_agent" in argv
     bare = p.build_argv(prompt="p", workdir="w", reply_file="r")
     assert "--mcp-config" not in bare             # no bridge, no flags
 
 
-def test_shipped_codex_preset_receives_authenticated_bridge_config():
+def test_shipped_codex_preset_declares_strict_bridge_profile():
     preset = Preset.from_dict(json.loads(
         (PRESET_DIR / "codex.json").read_text(encoding="utf-8"),
-    ))
+    ), trusted=True)
+    assert preset.bridge_profile is not None
+    assert preset.bridge_profile.capabilities == ("delegate_agent",)
+    bridge_args = (
+        "--ignore-user-config", "--ignore-rules", "--ephemeral",
+        "-c", 'mcp_servers.ab.url="http://127.0.0.1:8123/mcp"',
+        "-c", 'mcp_servers.ab.enabled_tools=["delegate_agent"]',
+    )
     for minimal in (False, True):
         argv = preset.build_argv(
             prompt="p", workdir="/tmp/work", reply_file="",
-            mcp_config='{"mcpServers":{}}',
-            mcp_url="http://127.0.0.1:8123/mcp", minimal=minimal,
+            bridge_args=bridge_args, minimal=minimal, include_safety=False,
         )
-        assert 'approval_policy="never"' in argv
+        assert "--ignore-rules" in argv
+        assert "--ephemeral" in argv
         assert 'mcp_servers.ab.url="http://127.0.0.1:8123/mcp"' in argv
-        assert ('mcp_servers.ab.bearer_token_env_var='
-                '"AGENTBRIDGE_MCP_TOKEN"') in argv
-        assert ('mcp_servers.ab.default_tools_approval_mode="prompt"') in argv
-        assert ('mcp_servers.ab.tools.delegate_agent.approval_mode="approve"') \
-            in argv
-        assert "mcp_servers.ab.tool_timeout_sec=960" in argv
-        assert "--sandbox" in argv and "read-only" in argv
         assert "--ignore-user-config" in argv
+        assert "--sandbox" not in argv
+
+
+def test_compiled_bridge_publishes_only_delegate_agent(tmp_path):
+    tx, broker, workspace = make(tmp_path)
+
+    def delegate(**values):
+        return f"delegated to {values['destination_agent']}"
+
+    with BridgeServer(
+        broker, chat_id="c1", workspace=workspace, auto_allow=[],
+        approvals=[], ask_timeout_s=0.2, delegate=delegate,
+        enabled_capabilities={"delegate_agent"},
+    ) as bridge:
+        result = call_tool(bridge, "delegate_agent", {
+            "destination_agent": "helper",
+            "objective": "check",
+            "success_criteria": ["return evidence"],
+        })
+        assert result == "delegated to helper"
+        blocked = call_tool(bridge, "approve", {
+            "tool_name": "Read", "input": {},
+        })
+        assert blocked == "Unknown tool: approve"
+        blocked = call_tool(bridge, "tidy_workspace", {})
+        assert blocked == "Unknown tool: tidy_workspace"
 
 # ------------------------------------------- chat-level member tools (V53)
 

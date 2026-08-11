@@ -106,7 +106,7 @@ claim was independently proven on this platform.
 | Family | macOS evidence | Provider tool loop | AgentBridge hook | Provider sandbox claim | C0 environment | Honest current track |
 |---|---|---|---|---|---|---|
 | Claude Code | CLI not found on current host; preset previously marked verified | Provider-owned | MCP permission prompt plus AgentBridge blocklist | No AgentBridge-enforced process sandbox | Explicit Anthropic/Bedrock/Vertex names | Broker-integrated native, pending live macOS recheck |
-| Codex CLI | `codex-cli 0.144.5` installed | Provider-owned | No AgentBridge per-tool hook | `--sandbox read-only` retained in full and minimal argv | Explicit OpenAI/Codex names | Provider-sandboxed native; provider flag is the enforcement locus |
+| Codex CLI | `codex-cli 0.144.5` installed | Provider-owned | Server-filtered per-run `delegate_agent` only | Generated permission profile denies host reads, allows the run workspace, and disables command network | Authentication home only; API keys, endpoints, and proxy credentials stripped | Trusted R131 slice; exact executable/version bound, fresh-only, no security-flag fallback |
 | Cortex Code | CLI not found | Provider-owned | No AgentBridge per-tool hook | `--sql-read-only` plus configured tool blocklist | Explicit Snowflake/Cortex names | Provider-restricted native, unverified here |
 | Grok CLI | CLI not found | Unknown/text-only preset | None | None | Explicit xAI/Grok names | Text-only native; no tool-control claim |
 | Ollama | Client `0.32.1`; daemon unavailable | Text generation | None | None | Explicit Ollama names | Local text-only native |

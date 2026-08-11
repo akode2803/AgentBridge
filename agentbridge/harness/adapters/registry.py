@@ -26,6 +26,7 @@ from pathlib import Path
 from ...core.config import DEFAULT_HOME
 from ...core.errors import ValidationError
 from ..settings import HarnessSettings
+from .policy import BridgeProfile
 
 __all__ = ["Preset", "Invocation", "ModelRegistry", "effective_gates"]
 
@@ -55,9 +56,10 @@ class Preset:
     # instead. A family without this key simply has no web toggle.
     aux_web: list[str] = field(default_factory=list)
     reply_file_arg: list[str] = field(default_factory=list)  # {reply_file}
-    # R18 broker plumbing — {mcp_config} rides argv when a bridge is active;
-    # safety-class: applied in BOTH full and minimal argv, never dropped
-    permission_args: list[str] = field(default_factory=list)
+    # Package-trusted only. Owner overlays may configure a CLI, but cannot
+    # self-certify bridge authority.
+    bridge_profile: BridgeProfile | None = None
+    bridge_unavailable_reason: str = ""
     auto_allow: list[str] = field(default_factory=list)    # read-class tools
     # Explicit host variables this provider process may inherit. The adapter
     # supplies a small cross-platform process baseline separately; credentials
@@ -74,8 +76,15 @@ class Preset:
     child_text_only: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Preset":
-        known = {f: d[f] for f in cls.__dataclass_fields__ if f in d}
+    def from_dict(cls, d: dict, *, trusted: bool = False) -> "Preset":
+        known = {f: d[f] for f in cls.__dataclass_fields__ if f in d
+                 and f != "bridge_profile"}
+        raw_bridge = d.get("bridge_profile")
+        if trusted and raw_bridge is not None:
+            known["bridge_profile"] = BridgeProfile.from_dict(raw_bridge)
+        elif raw_bridge is not None:
+            known["bridge_unavailable_reason"] = (
+                "owner adapter declarations cannot attach the trusted bridge")
         # JSON booleans only. In particular, the string "true" must not turn
         # an owner overlay into an executable child preset.
         known["child_text_only"] = d.get("child_text_only") is True
@@ -84,7 +93,9 @@ class Preset:
             raise ValidationError("a preset needs at least id and command")
         if p.format not in FORMATS:
             raise ValidationError(f"unknown preset format {p.format!r}")
-        if p.child_text_only and not p.is_child_text_only_safe():
+        if p.child_text_only and (raw_bridge is not None
+                                  or d.get("permission_args") is not None
+                                  or not p.is_child_text_only_safe()):
             raise ValidationError(
                 f"preset {p.id!r} declares child_text_only but exposes "
                 "non-text invocation features")
@@ -101,7 +112,7 @@ class Preset:
         return bool(
             self.child_text_only is True
             and self.format == "text"
-            and not self.permission_args
+            and self.bridge_profile is None
             and not self.auto_allow
             and not self.aux_web
             and not self.blocklist_args
@@ -126,22 +137,22 @@ class Preset:
         effort: str = "",
         blocklist: list[str] | None = None,
         minimal: bool = False,
-        mcp_config: str = "",
-        mcp_url: str = "",
+        bridge_args: tuple[str, ...] | list[str] = (),
+        command: str = "",
+        include_safety: bool = True,
     ) -> list[str]:
         """The run's argv — a LIST, never a shell string (v1 quoted prompts
         into a shell; argv removes that whole class). The minimal variant
         drops conveniences only — safety args, the blocklist and the
-        permission plumbing are kept."""
+        compiled bridge policy are kept."""
         fill = {"prompt": prompt, "workdir": workdir, "reply_file": reply_file,
-                "mcp_config": mcp_config, "mcp_url": mcp_url,
                 "model": model, "effort": effort}
         base = self.args_minimal if (minimal and self.args_minimal) else self.args
-        argv = [self.command]
+        argv = [command or self.command]
         argv += [a.format(**fill) for a in base]
-        argv += [a.format(**fill) for a in self.safety_args]
-        if mcp_config and self.permission_args:
-            argv += [a.format(**fill) for a in self.permission_args]
+        if include_safety:
+            argv += [a.format(**fill) for a in self.safety_args]
+        argv += list(bridge_args)
         if not minimal and reply_file and self.reply_file_arg:
             argv += [a.format(**fill) for a in self.reply_file_arg]
         if model and self.model_args:
@@ -165,12 +176,12 @@ def effective_gates(preset: Preset,
     """The run's (auto_allow, blocklist) after the owner's aux flags (H2/R43).
     ``read`` off empties auto_allow — even reads outside the workspace ask.
     ``web`` on releases the preset's aux_web tools from the blocklist INTO
-    the ask gate — and only for presets that HAVE the gate (permission_args);
+    the ask gate — and only for presets that HAVE a trusted bridge profile;
     a family without the ask plumbing keeps its full blocklist regardless,
     so the toggle can never trade a hard block for nothing."""
     auto = list(preset.auto_allow) if settings.aux.get("read", True) else []
     block = list(preset.blocklist)
-    if settings.aux.get("web") and preset.permission_args and preset.aux_web:
+    if settings.aux.get("web") and preset.bridge_profile and preset.aux_web:
         block = [t for t in block if t not in preset.aux_web]
     return auto, block
 
@@ -192,7 +203,10 @@ class ModelRegistry:
             shipped = d.resolve() == PRESET_DIR.resolve()
             for f in sorted(d.glob("*.json")):
                 try:
-                    p = Preset.from_dict(json.loads(f.read_text(encoding="utf-8")))
+                    p = Preset.from_dict(
+                        json.loads(f.read_text(encoding="utf-8")),
+                        trusted=shipped,
+                    )
                     # Owner overlays may configure ordinary providers, but
                     # cannot self-certify an arbitrary host command as the
                     # zero-capability child ABI. That trust bit ships only

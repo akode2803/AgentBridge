@@ -92,7 +92,8 @@ class BridgeServer:
                  mesh=None, timers_out: list[dict] | None = None,
                  memory=None, chat_kind: str = "",
                  global_memory: str = "dm", docs=None,
-                 timer_svc=None, delegate=None) -> None:
+                 timer_svc=None, delegate=None,
+                 enabled_capabilities: set[str] | frozenset[str] | None = None) -> None:
         self.broker = broker
         self.chat_id = chat_id
         self.run_id = run_id
@@ -112,6 +113,8 @@ class BridgeServer:
         self.global_memory = global_memory
         self.docs = docs                 # ToolDocs (R43); None = no read_docs
         self.delegate = delegate         # V157 bounded same-room agent tool
+        self.enabled_capabilities = (None if enabled_capabilities is None else
+                                     frozenset(enabled_capabilities))
         self._creates = 0
         # V53 (leave_chat): the leave is DEFERRED — the tool only requests
         # it (owner-approved); the runner executes it after the reply posts,
@@ -287,6 +290,25 @@ class BridgeServer:
             self._capability_tools(mcp)
         if self.memory is not None:
             self._memory_tools(mcp)
+
+        # The bearer authenticates the process; this filter authorizes the
+        # process. Production passes the compiler's exact per-run set, so a
+        # leaked token or direct MCP call cannot reach any other registered
+        # bridge tool. None is retained only for isolated legacy fixtures.
+        if self.enabled_capabilities is not None:
+            manager = getattr(mcp, "_tool_manager", None)
+            if manager is None or not callable(getattr(manager, "list_tools", None)):
+                raise RuntimeError("bridge tool filtering is unavailable")
+            installed = {tool.name for tool in manager.list_tools()}
+            unknown = self.enabled_capabilities - installed
+            if unknown:
+                raise RuntimeError(
+                    f"compiled bridge capability is unavailable: {sorted(unknown)}")
+            for name in installed - self.enabled_capabilities:
+                mcp.remove_tool(name)
+            remaining = {tool.name for tool in manager.list_tools()}
+            if remaining != self.enabled_capabilities:
+                raise RuntimeError("bridge capability filter did not converge")
 
         app = _BearerAuthApp(mcp.streamable_http_app(), self._token)
         config = uvicorn.Config(app, host="127.0.0.1",
