@@ -765,8 +765,8 @@ async function renderSettings() {
           <input type="text" id="new-agent-display" placeholder="Display name">
           <button class="primary" id="new-agent-btn">Create</button>
         </div>
-        <p class="hint" style="margin-bottom:0">You become its responsible member;
-        it runs on this machine's harness.</p>
+        <p class="hint" style="margin-bottom:0">You become its responsible member.
+        It starts with no local runner; choose a reviewed CLI in its settings.</p>
       </div>
       <div class="card">
         <h2>Emergency stand-down</h2>

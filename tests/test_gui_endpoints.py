@@ -414,6 +414,10 @@ def test_agents_create_patch_standdown_delete(rig):
     out = rig.post("/api/mesh/create_agent", username="helper",
                    display="Helper")
     assert out["ok"] and out["agent"]["owner"] == "aryan"
+    assert out["agent"]["settings"] == {"adapter": "none"}
+    assert rig.get("/api/mesh/me")["my_agents"][0]["harness"] == {
+        "adapter": "none",
+    }
 
     # model-picker scaffold: harness config is an owner-set dict
     out = rig.post("/api/mesh/agent", username="helper",
@@ -473,6 +477,36 @@ def test_agents_create_patch_standdown_delete(rig):
 
     rig.post("/api/mesh/delete_agent", username="helper")
     assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False
+
+
+def test_create_agent_normalizes_partial_harness_and_preserves_choice(rig):
+    from agentbridge.harness.runner import hosted_agents
+
+    rig.signup()
+    cases = (
+        ("null_harness", None, {}),
+        ("empty_harness", {}, {}),
+        ("null_adapter", {"adapter": None}, {}),
+        ("model_only", {"model": "owner-choice"},
+         {"model": "owner-choice"}),
+    )
+    for username, supplied, preserved in cases:
+        out = rig.post(
+            "/api/mesh/create_agent", username=username,
+            display=username, harness=supplied,
+        )
+        assert out["agent"]["settings"] == {
+            **preserved, "adapter": "none",
+        }
+
+    runnable = rig.post(
+        "/api/mesh/create_agent", username="configured", display="Configured",
+        harness={"adapter": "codex", "model": "owner-choice"},
+    )
+    assert runnable["agent"]["settings"] == {
+        "adapter": "codex", "model": "owner-choice",
+    }
+    assert hosted_agents(rig.root, "guibox") == ["configured"]
 
 
 def test_harness_options_reports_bridge_facts_without_secrets(rig):

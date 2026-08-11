@@ -5,6 +5,7 @@ formalizes its schema (model, reasoning effort, per-purpose routing).
 
 from __future__ import annotations
 
+from ..core.errors import ValidationError
 from .routing import authed
 from .serialize import user_json
 
@@ -14,9 +15,18 @@ __all__ = ["GET", "POST"]
 @authed
 def create_agent(app, req, mesh) -> dict:
     d = req.data
+    # A new identity must not become runnable merely because one or more CLIs
+    # happen to be installed. The owner chooses a reviewed provider explicitly.
+    raw_harness = d.get("harness")
+    if raw_harness is not None and not isinstance(raw_harness, dict):
+        raise ValidationError("agent harness must be an object")
+    harness = dict(raw_harness or {})
+    if not isinstance(harness.get("adapter"), str) \
+            or not harness["adapter"].strip():
+        harness["adapter"] = "none"
     acc = mesh.create_agent((d.get("username") or d.get("name") or "").strip().lower(),
                             display=(d.get("display") or "").strip(),
-                            harness=d.get("harness") or None)
+                            harness=harness)
     return {"ok": True, "agent": user_json(acc, mesh.visible_profile(acc.name),
                                            me=mesh.user)}
 
