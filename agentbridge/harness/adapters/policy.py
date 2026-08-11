@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...core.errors import ValidationError
+from ..capabilities import BRIDGE_CAPABILITIES, compile_capability_ceiling
 
 __all__ = ["BridgeProfile", "CompiledBridgePolicy", "compile_bridge_policy"]
 
@@ -27,7 +28,10 @@ _PROFILE_FIELDS = {
     "continuation", "capabilities", "safe_overlay_keys",
     "blocked_env",
 }
-_CAPABILITIES = {"delegate_agent"}
+_CAPABILITIES = {
+    name for name, spec in BRIDGE_CAPABILITIES.items()
+    if spec.surface == "model-capability"
+}
 _SAFE_OVERLAY_KEYS = {
     "model_context_window", "model_auto_compact_token_limit", "personality",
     "service_tier",
@@ -176,10 +180,7 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
     if result.returncode or not re.fullmatch(profile.version_pattern, version):
         raise ValidationError(
             f"bridge disabled for unverified provider version {version or 'unknown'!r}")
-    requested = set(requested_capabilities)
-    if requested - set(profile.capabilities):
-        raise ValidationError("run requested an undeclared bridge capability")
-    capabilities = tuple(c for c in profile.capabilities if c in requested)
+    capabilities = compile_capability_ceiling(profile, requested_capabilities)
     overlay = _safe_codex_overlay(profile, source_env)
     launch = [
         "--ignore-user-config", "--ignore-rules", "--ephemeral", "--strict-config",

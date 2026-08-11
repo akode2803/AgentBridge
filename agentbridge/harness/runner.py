@@ -41,6 +41,7 @@ from ..mesh import authz
 from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
+from .capabilities import validate_model_capability_ceiling
 from .conversation import ConversationManager
 from .feed import (RunFeed, reap_orphan_run, record_tasks,
                    write_harness_doc, write_waiting)
@@ -523,6 +524,7 @@ class AgentRunner:
             )
             delivery.run_id = feed.run_id
             delivery.task_id = feed.task_id
+            delivery.canonical_run = feed.run_record
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
                 # message — the livefeed/sidebar say what the run is about
@@ -582,26 +584,32 @@ class AgentRunner:
                         "error", "Run failed repeatedly — giving up on this trigger")
                     self.publish_status()
 
-    def _prepare_invocation(self, delivery, settings: HarnessSettings) -> dict[str, str]:
+    def _prepare_invocation(self, delivery, settings: HarnessSettings) -> dict:
         prepare = getattr(self.responder, "prepare", None)
         if callable(prepare):
             value = prepare(delivery, settings)
             if isinstance(value, dict) and value.get("provider") and value.get("model"):
+                ceiling = validate_model_capability_ceiling(
+                    value.get("capability_ceiling", ()))
                 return {"provider": str(value["provider"]),
-                        "model": str(value["model"])}
+                        "model": str(value["model"]),
+                        "capability_ceiling": ceiling}
             raise ValidationError("responder returned invalid invocation metadata")
         return {"provider": type(self.responder).__name__ or "injected",
                 "model": "injected"}
 
     def _new_feed(self, group: WorkGroup, *, provider: str = "not-invoked",
                   model: str = "not-invoked",
+                  capability_ceiling: tuple[str, ...] = (),
                   policy_revision: int | None = None) -> RunFeed:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
             self.mesh.tx, self.agent, group.chat_id, ledger=self.run_ledger,
             task_ledger=self.task_ledger,
             trigger_id=trigger_id,
-            provider=provider, model=model, policy_revision=policy_revision,
+            provider=provider, model=model,
+            capability_ceiling=capability_ceiling,
+            policy_revision=policy_revision,
         )
 
     # ------------------------------------------------- claim-time guards (R55)

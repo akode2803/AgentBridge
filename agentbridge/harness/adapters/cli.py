@@ -36,6 +36,7 @@ from ...core.errors import ValidationError
 from ...core.timekit import new_id, utcnow_iso
 from ..bridge import BridgeServer
 from ..broker import PermissionBroker
+from ..capabilities import compile_capability_ceiling
 from ..conversation import Delivery
 from ..docs import ToolDocs
 from ..memory import MemoryStore
@@ -43,6 +44,7 @@ from ..prompt import PromptManager, PromptPack, TRANSCRIPT_TAIL
 from ..recovery import archive_outbox, prepare_outbox
 from ..responder import MESSAGE_BREAK, SILENCE, OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
+from ..runtime.models import RunRecord, RunState
 from ..settings import HarnessSettings
 from .registry import Invocation, ModelRegistry, effective_gates
 from .policy import compile_bridge_policy
@@ -326,11 +328,17 @@ class CliResponder:
         self.delegation = None       # runner-owned V157 coordinator
 
     # ------------------------------------------------------------- the run
-    def prepare(self, delivery: Delivery, settings: HarnessSettings) -> dict[str, str]:
+    def prepare(self, delivery: Delivery, settings: HarnessSettings) -> dict:
         """Resolve once before the canonical run start; respond reuses it."""
         acc = self.mesh.directory.get(self.agent)
         category = self._category(delivery, acc)
         invocation = self.registry.resolve(settings, category, delivery.chat_id)
+        requested = ({"delegate_agent"}
+                     if settings.agent_tools_enabled
+                     and self.delegation is not None
+                     and invocation.preset.bridge_profile is not None else set())
+        delivery.capability_ceiling = compile_capability_ceiling(
+            invocation.preset.bridge_profile, requested)
         delivery.invocation = invocation
         delivery.harness_settings = settings
         return {
@@ -338,6 +346,7 @@ class CliResponder:
             # An empty model delegates to mutable external CLI configuration;
             # record that honestly instead of pretending it is an exact model.
             "model": invocation.model or "provider-default-unattested",
+            "capability_ceiling": delivery.capability_ceiling,
         }
 
     # ------------------------------------------------------ child sidecar
@@ -504,6 +513,7 @@ class CliResponder:
             category = self._category(delivery, acc)
             inv = self.registry.resolve(settings, category,
                                         delivery.chat_id)  # direct-call fallback
+        capability_ceiling = self._canonical_capability_ceiling(delivery)
         pack = self.prompts.for_agent(acc)
 
         # per-chat context ceiling (Q30): the owner caps how many DAYS of
@@ -555,7 +565,8 @@ class CliResponder:
         # effective_gates). Both argv builds below use THIS blocklist.
         auto_allow, blocklist = effective_gates(inv.preset, settings)
         delegate_tool = None
-        if self.delegation is not None and settings.agent_tools_enabled:
+        if (self.delegation is not None
+                and "delegate_agent" in capability_ceiling):
             def delegate_tool(**values):
                 return self.delegation.delegate(
                     chat_id=delivery.chat_id, run_id=delivery.run_id,
@@ -574,8 +585,7 @@ class CliResponder:
                     command=inv.preset.command,
                     workspace=workdir,
                     timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
-                    requested_capabilities=(
-                        {"delegate_agent"} if delegate_tool is not None else set()),
+                    requested_capabilities=set(capability_ceiling),
                 )
                 bridge_args = bridge_policy.launch_args
             if bridge_policy is not None and bridge_policy.capabilities:
@@ -673,6 +683,23 @@ class CliResponder:
         return Reply(body=text, steps=steps, files=files, timers=timers,
                      artifact_outbox=str(outbox),
                      leave_chat=bool(bridge and bridge.leave_requested))
+
+    @staticmethod
+    def _canonical_capability_ceiling(delivery: Delivery) -> tuple[str, ...]:
+        """Use the signed start record, never the mutable prepared copy."""
+        if not delivery.run_id:
+            return ()  # direct-call fixtures have no bridge authority
+        run = delivery.canonical_run
+        if (not isinstance(run, RunRecord)
+                or run.state is not RunState.RUNNING
+                or run.meta.run_id != delivery.run_id
+                or run.meta.chat_id != delivery.chat_id
+                or run.manager_agent != delivery.agent
+                or delivery.task_id not in run.active_task_ids):
+            raise ValidationError("canonical run authority is unavailable")
+        if delivery.capability_ceiling != run.capability_ceiling:
+            raise ValidationError("prepared capability ceiling changed after signing")
+        return run.capability_ceiling
 
     def close(self) -> None:
         """Release process-held resources (the qdrant path lock above all)."""

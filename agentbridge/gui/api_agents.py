@@ -106,6 +106,7 @@ def harness_options(app, req, mesh) -> dict:
     GUI runs on the machine that hosts the owner's agents (account model),
     so probing locally is probing the right box."""
     from ..harness.adapters import ModelRegistry
+    from ..harness.capabilities import bridge_capability_report
 
     reg = ModelRegistry.load(app.home)
     families = [{
@@ -127,7 +128,8 @@ def harness_options(app, req, mesh) -> dict:
         }),
     } for p in reg.presets.values()]
     families.sort(key=lambda f: (not f["available"], f["id"]))
-    return {"ok": True, "machine": mesh.machine, "families": families}
+    return {"ok": True, "machine": mesh.machine, "families": families,
+            "bridge_capability_registry": bridge_capability_report()}
 
 
 @authed

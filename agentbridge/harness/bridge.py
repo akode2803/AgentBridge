@@ -37,6 +37,7 @@ from pathlib import Path
 
 from ..core.models import MsgKind
 from .broker import PermissionBroker
+from .capabilities import BRIDGE_CAPABILITIES, validate_bridge_tools
 
 __all__ = ["BridgeServer"]
 
@@ -295,15 +296,23 @@ class BridgeServer:
         # process. Production passes the compiler's exact per-run set, so a
         # leaked token or direct MCP call cannot reach any other registered
         # bridge tool. None is retained only for isolated legacy fixtures.
+        manager = getattr(mcp, "_tool_manager", None)
+        if manager is None or not callable(getattr(manager, "list_tools", None)):
+            raise RuntimeError("bridge tool inventory is unavailable")
+        installed = validate_bridge_tools(
+            tool.name for tool in manager.list_tools())
         if self.enabled_capabilities is not None:
-            manager = getattr(mcp, "_tool_manager", None)
-            if manager is None or not callable(getattr(manager, "list_tools", None)):
-                raise RuntimeError("bridge tool filtering is unavailable")
-            installed = {tool.name for tool in manager.list_tools()}
             unknown = self.enabled_capabilities - installed
             if unknown:
                 raise RuntimeError(
                     f"compiled bridge capability is unavailable: {sorted(unknown)}")
+            wrong_surface = {
+                name for name in self.enabled_capabilities
+                if BRIDGE_CAPABILITIES[name].surface != "model-capability"
+            }
+            if wrong_surface:
+                raise RuntimeError(
+                    f"bridge exposed non-capabilities: {sorted(wrong_surface)}")
             for name in installed - self.enabled_capabilities:
                 mcp.remove_tool(name)
             remaining = {tool.name for tool in manager.list_tools()}

@@ -524,6 +524,12 @@ def test_harness_options_reports_bridge_facts_without_secrets(rig):
         "capabilities": ["delegate_agent"],
     }
     assert families["claude"]["bridge"]["declared"] is False
+    registry = out["bridge_capability_registry"]
+    assert registry["schema_version"] == 1
+    by_id = {item["id"]: item for item in registry["tools"]}
+    assert by_id["delegate_agent"]["surface"] == "model-capability"
+    assert by_id["approve"]["surface"] == "control-plane"
+    assert by_id["delete_message"]["effect"] == "shared-content-delete"
     serialized = json.dumps(out)
     assert "AGENTBRIDGE_MCP_TOKEN" not in serialized
     assert "bearer_token" not in serialized

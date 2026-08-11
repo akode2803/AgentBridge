@@ -791,6 +791,18 @@ def test_clean_reply_sentinel_and_narration():
     assert clean_reply("NO_REPLY") == ("NO_REPLY", False)
 
 
+@pytest.mark.parametrize("ceiling", [("approve",), ("future_tool",)])
+def test_runner_rejects_unreviewed_capability_ceiling(hrig, ceiling):
+    class Prepared(Scripted):
+        def prepare(self, _delivery, _settings):
+            return {"provider": "stub", "model": "model",
+                    "capability_ceiling": ceiling}
+
+    runner = hrig.make_runner(Prepared())
+    with pytest.raises(ValidationError, match="capability"):
+        runner._prepare_invocation(SimpleNamespace(), HarnessSettings())
+
+
 def test_split_reply_contract():
     # no marker: one message, untouched
     assert split_reply("just one message") == ["just one message"]

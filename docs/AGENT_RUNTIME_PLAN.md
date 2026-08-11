@@ -1843,15 +1843,23 @@ UI after event contract freezes.
 
 Estimate: **2.5-3.5 weeks**.
 
-- [ ] Register every existing bridge/provider tool with schemas, effect/risk,
-  enforcement locus, evidence, backend minimum and failure mode.
-- [ ] Compile an immutable per-run capability ceiling.
+- [~] Register every existing bridge/provider tool with schemas, effect/risk,
+  enforcement locus, evidence, backend minimum and failure mode. R133 catalogs
+  all 35 AgentBridge MCP tools and fail-closes bridge startup on drift;
+  provider-native inventories remain open.
+- [x] Compile an immutable per-run capability ceiling. R133 freezes the
+  reviewed provider subset before canonical run creation, persists it in the
+  signed/E2EE run start, and makes later bridge attachment consume that tuple.
 - [ ] Re-resolve effective authority before every call/resume/handoff against
   current membership, owner, policy, revocation, backend and argument digest.
 - [ ] Generate provider-native allow/block flags from the canonical registry.
-- [ ] Publish a member-readable report distinguishing advertised, enabled,
-  approval-gated, unsupported and unenforceable.
-- [ ] Deny unknown ids, versions and provider capabilities.
+- [~] Publish a member-readable report distinguishing advertised, enabled,
+  approval-gated, unsupported and unenforceable. R133 exposes the versioned,
+  non-secret bridge catalog through the authenticated harness-options API;
+  per-agent/per-run effective-state projection remains open.
+- [~] Deny unknown ids, versions and provider capabilities. R133 denies unknown
+  bridge IDs and non-capability surfaces; provider-native/version parity beyond
+  the trusted Codex profile remains V159 work.
 
 Affected: capabilities registry, bridge/broker/docs/settings, adapter presets,
 Settings API/frontend.  

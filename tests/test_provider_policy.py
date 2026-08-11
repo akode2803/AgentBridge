@@ -12,6 +12,7 @@ from agentbridge.harness.adapters.policy import (
     BridgeProfile, compile_bridge_policy,
 )
 from agentbridge.harness.adapters.registry import PRESET_DIR
+from agentbridge.harness.capabilities import compile_capability_ceiling
 
 
 def codex_profile() -> BridgeProfile:
@@ -28,6 +29,18 @@ def test_bridge_profile_schema_is_strict():
         BridgeProfile.from_dict({**raw, "capabilities": ["*"]})
     with pytest.raises(ValidationError, match="anchored"):
         BridgeProfile.from_dict({**raw, "version_pattern": "codex"})
+
+
+def test_capability_ceiling_rejects_unknown_control_and_undeclared_ids():
+    profile = codex_profile()
+    assert compile_capability_ceiling(
+        profile, {"delegate_agent"}) == ("delegate_agent",)
+    with pytest.raises(ValidationError, match="unknown bridge capability"):
+        compile_capability_ceiling(profile, {"future_tool"})
+    with pytest.raises(ValidationError, match="not a model capability"):
+        compile_capability_ceiling(profile, {"approve"})
+    with pytest.raises(ValidationError, match="no trusted bridge profile"):
+        compile_capability_ceiling(None, {"delegate_agent"})
 
 
 def test_owner_overlay_cannot_claim_trusted_bridge(tmp_path):

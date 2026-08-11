@@ -110,11 +110,11 @@
     },
     "create_dm": {
       "short": "Open a direct chat with a member",
-      "long": "create_dm(username) - opens (or returns) a direct chat with that member, gated by their public messaging setting. Your responsible member automatically joins chats you create. Creations are capped per run."
+      "long": "create_dm(user, message?) - opens (or returns) a direct chat with that member, gated by their public messaging setting. Your responsible member automatically joins chats you create. The optional message posts an opening message. Creations are capped per run."
     },
     "create_group": {
       "short": "Create a group with members",
-      "long": "create_group(name, members) - creates a group; adding people is gated by each member's add-to-group setting, and your responsible member always joins what you create. Creations are capped per run."
+      "long": "create_group(name, members, message?) - creates a group; adding people is gated by each member's add-to-group setting, and your responsible member always joins what you create. The optional message posts an opening message. Creations are capped per run."
     },
     "message_info": {
       "short": "Delivery + read receipts on your own message",
@@ -156,7 +156,7 @@
     },
     "schedule_timer": {
       "short": "Remember a task for later (relative or at a time)",
-      "long": "schedule_timer(minutes | at, note) - your 'remember to do this later'. A human messages when a notification arrives OR when they remember a task; the timer is your second half. Relative: minutes=90. Absolute time: at='15:00' (its next occurrence), at='2026-07-16 09:30', or ISO. A bare 'HH:MM' is read in YOUR MACHINE's timezone, which may differ from the person you're helping (V74) - the confirmation states the exact local time it will fire, so relay that when a member asked for a wall-clock time. Write the note as a FULL brief for your future self - it starts a fresh run and sees only this note plus the chat, so spell out what to do, for whom, and what done looks like (up to ~2000 chars, line breaks kept). The wake-up run may post proactively, reply to the chat, or answer with silence if nothing is needed. Every timer is visible to your responsible member as a chip in the chat, and this chat's pending wake-ups are listed in your context with their ids - cancel_timer removes one."
+      "long": "schedule_timer(minutes | at, note, repeat?) - your 'remember to do this later'. A human messages when a notification arrives OR when they remember a task; the timer is your second half. Relative: minutes=90. Absolute time: at='15:00' (its next occurrence), at='2026-07-16 09:30', or ISO. Optional repeat accepts daily, weekly:mon,wed, or monthly:15. A bare 'HH:MM' is read in YOUR MACHINE's timezone, which may differ from the person you're helping (V74) - the confirmation states the exact local time it will fire, so relay that when a member asked for a wall-clock time. Write the note as a FULL brief for your future self - it starts a fresh run and sees only this note plus the chat, so spell out what to do, for whom, and what done looks like (up to ~2000 chars, line breaks kept). The wake-up run may post proactively, reply to the chat, or answer with silence if nothing is needed. Every timer is visible to your responsible member as a chip in the chat, and this chat's pending wake-ups are listed in your context with their ids - cancel_timer removes one."
     },
     "tidy_workspace": {
       "short": "Delete scratch files from your workspace",
@@ -166,17 +166,21 @@
       "short": "Cancel one of this chat's pending wake-ups",
       "long": "cancel_timer(timer_id) - removes one of YOUR pending wake-ups for THIS chat; the ids are in your context's wake-up list ((id t-...) fires ...). Cancel a wake-up whose job is already done or no longer wanted - a member asking you to drop a follow-up is exactly this. Wake-ups for other chats don't cancel from here, and one scheduled earlier in this same run has no id yet."
     },
+    "peer_diagnose": {
+      "short": "Ask another agent's harness for approved diagnostics or repair",
+      "long": "peer_diagnose(agent, command) - asks another agent's harness for ping, status or run-feed diagnostics, or for an explicitly enabled repair command. The target agent's responsible member controls access; repair is separately gated and a pending or declined request does not grant authority."
+    },
     "remember": {
       "short": "Save a durable note across runs",
       "long": "remember(text, scope) - saves a durable memory: scope 'chat' stays in this chat's memory, 'global' spans your chats. Whether 'global' is available follows your member's standing policy (default: allowed in direct chats, refused with a note in groups) - the policy is applied INSTANTLY by rule, no approval popup fires, so a global save that goes through in a DM is normal, not a missed gate. Remember sparingly - only what genuinely matters later (decisions, preferences, standing facts), never transcripts. MEMORY.md in your workspace is your free-form notepad for anything looser."
     },
     "recall": {
       "short": "Search your saved memories",
-      "long": "recall(query, scope?) - semantic search over your saved memories; each hit shows its id. Recall before asking a member something you may already know."
+      "long": "recall(query, scope?, limit?) - semantic search over your saved memories; scope is chat or global and limit caps returned hits (default 5). Each hit shows its id. Recall before asking a member something you may already know."
     },
     "forget": {
       "short": "Delete a wrong or stale memory",
-      "long": "forget(memory_id) - removes one saved memory by id (recall shows ids). Use it when a note turns out wrong or goes stale - bad memory is worse than none."
+      "long": "forget(memory_id?, query?, scope?) - removes one saved memory in chat or global scope. Prefer the exact id shown by recall; a query deletes only one confident closest match. Use it when a note turns out wrong or goes stale - bad memory is worse than none."
     }
   },
 

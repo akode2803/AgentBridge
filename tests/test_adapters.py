@@ -406,7 +406,11 @@ def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path
                      "agents": {"model": "wrong-model"}},
         )
         metadata = responder.prepare(delivery, snap)
-        assert metadata == {"provider": "stub", "model": "owner-model"}
+        assert metadata == {
+            "provider": "stub", "model": "owner-model",
+            "capability_ceiling": (),
+        }
+        assert delivery.capability_ceiling == ()
         assert delivery.invocation.model == "owner-model"
         assert delivery.harness_settings is snap
     finally:

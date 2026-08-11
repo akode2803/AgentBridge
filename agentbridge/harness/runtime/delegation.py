@@ -15,7 +15,7 @@ from ..prompt import TRANSCRIPT_TAIL, render_message
 from ..settings import HarnessSettings
 from .authority import authority
 from .handoffs import HandoffLedger, HandoffLedgerError, HandoffView
-from .models import HandoffState, HandoffType
+from .models import HandoffState, HandoffType, RunState
 
 __all__ = ["ChildWork", "DelegationCoordinator", "DelegationError"]
 
@@ -67,6 +67,11 @@ class DelegationCoordinator:
         source_settings = HarnessSettings.from_account(
             self.mesh.directory.get(self.mesh.user),
         )
+        runs = self.ledger.run_ledger.read(chat_id, run_id)
+        if (len(runs) != 1 or runs[0].state is not RunState.RUNNING
+                or "delegate_agent" not in runs[0].capability_ceiling):
+            raise DelegationError(
+                "this canonical run is not authorized to delegate")
         destination = self.mesh.directory.get(destination_agent)
         destination_settings = HarnessSettings.from_account(destination)
         if not source_settings.agent_tools_enabled:

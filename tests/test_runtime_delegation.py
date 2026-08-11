@@ -87,6 +87,7 @@ def _authorized_work(manager, specialist, chat_id, suffix):
     tasks.start_with_run(
         run_id=run_id, task_id=task_id, chat_id=chat_id,
         trigger_id=f"message-{suffix}", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
     )
     offered = source_handoffs.offer(
         chat_id=chat_id, run_id=run_id, parent_task_id=task_id,
@@ -122,6 +123,7 @@ def test_manager_retained_agent_tool_returns_once_without_room_post(
     source_tasks.start_with_run(
         run_id="run-1", task_id="task-1", chat_id=chat_id,
         trigger_id="message-1", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
     )
     _dr, _dt, destination_handoffs, destination = _coordinator(specialist)
     before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
@@ -183,11 +185,29 @@ def test_destination_flag_off_refuses_offer(delegation_meshes):
     tasks.start_with_run(
         run_id="run-flag", task_id="task-flag", chat_id=chat_id,
         trigger_id="message-flag", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
     )
     with pytest.raises(DelegationError, match="not accepting"):
         source.delegate(
             chat_id=chat_id, run_id="run-flag", parent_task_id="task-flag",
             destination_agent="specialist", objective="Review", reason="Review",
+            success_criteria=("Return a finding",),
+        )
+
+
+def test_manager_tool_requires_delegate_capability_on_canonical_run(
+        delegation_meshes):
+    _owner, manager, _specialist, chat_id = delegation_meshes
+    _runs, tasks, _handoffs, source = _coordinator(manager)
+    tasks.start_with_run(
+        run_id="run-no-cap", task_id="task-no-cap", chat_id=chat_id,
+        trigger_id="message-no-cap", provider="codex", model="gpt-test",
+    )
+    with pytest.raises(DelegationError, match="not authorized to delegate"):
+        source.delegate(
+            chat_id=chat_id, run_id="run-no-cap",
+            parent_task_id="task-no-cap", destination_agent="specialist",
+            objective="Review", reason="Review",
             success_criteria=("Return a finding",),
         )
 
@@ -529,6 +549,7 @@ def test_source_shutdown_releases_blocking_delegation(delegation_meshes):
     tasks.start_with_run(
         run_id="run-source-stop", task_id="task-source-stop", chat_id=chat_id,
         trigger_id="message-source-stop", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
     )
     stopping = threading.Event()
     source = DelegationCoordinator(
@@ -681,6 +702,7 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
     tasks.start_with_run(
         run_id="run-late", task_id="task-late", chat_id=chat_id,
         trigger_id="message-late", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
     )
     source.ACCEPTANCE_S = 2.0
     source.POLL_S = 0.01

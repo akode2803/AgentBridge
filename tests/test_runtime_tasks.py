@@ -8,6 +8,9 @@ from dataclasses import replace
 
 import pytest
 
+from agentbridge.core.errors import ValidationError
+from agentbridge.harness.adapters.cli import CliResponder
+from agentbridge.harness.conversation import Delivery
 from agentbridge.harness.runtime.authority import AuthorityError
 from agentbridge.harness.runtime.models import RunState, TaskState
 from agentbridge.harness.runtime.runs import RunLedger
@@ -70,6 +73,30 @@ def test_atomic_root_task_is_encrypted_signed_and_bound_to_run(task_meshes):
     owner_tasks = TaskLedger(owner, owner_runs)
     assert tasks.read(chat_id, "run-1", "task-1") == [started, finished]
     assert owner_tasks.read(chat_id, "run-1", "task-1") == [started, finished]
+
+
+def test_atomic_root_task_freezes_run_capability_ceiling(task_meshes):
+    owner, agent, chat_id = task_meshes
+    _runs, tasks = _ledgers(agent)
+    run, _task = tasks.start_with_run(
+        run_id="run-cap", task_id="task-cap", chat_id=chat_id,
+        trigger_id="message-cap", provider="codex", model="gpt-test",
+        capability_ceiling=("delegate_agent",),
+    )
+    assert run.capability_ceiling == ("delegate_agent",)
+    owner_run = RunLedger(owner).read(chat_id, "run-cap")[0]
+    assert owner_run.capability_ceiling == ("delegate_agent",)
+    delivery = Delivery(
+        agent="helper", chat_id=chat_id, chat_name="Runtime tasks",
+        chat_kind="group", kind="message", rule="tagged",
+        run_id="run-cap", task_id="task-cap",
+        capability_ceiling=("delegate_agent",), canonical_run=run,
+    )
+    assert CliResponder._canonical_capability_ceiling(delivery) == (
+        "delegate_agent",)
+    delivery.capability_ceiling = ()
+    with pytest.raises(ValidationError, match="changed after signing"):
+        CliResponder._canonical_capability_ceiling(delivery)
 
 
 def test_run_and_task_recovery_intents_commit_atomically(task_meshes, monkeypatch):

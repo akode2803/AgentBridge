@@ -108,6 +108,7 @@ class RunFeed:
     def __init__(self, tx: Transport, agent: str, chat_id: str, *,
                  ledger=None, trigger_id: str = "", provider: str = "",
                  model: str = "", policy_revision: int | None = None,
+                 capability_ceiling: tuple[str, ...] = (),
                  task_ledger=None) -> None:
         self.tx = tx
         self.agent = agent
@@ -125,24 +126,28 @@ class RunFeed:
         self._ledger = ledger
         self._task_ledger = task_ledger
         self.task_id = new_id("t") if task_ledger is not None else ""
+        self.run_record = None
+        self.task_record = None
         # A real claim supersedes the attachment-wait placeholder for this
         # chat. Only that stable waiting entry is removed; parallel runs stay.
         with self._coord.lock:
             self._coord.runs.pop(_waiting_id(chat_id), None)
         if self._task_ledger is not None:
-            self._task_ledger.start_with_run(
+            self.run_record, self.task_record = self._task_ledger.start_with_run(
                 run_id=self.run_id, task_id=self.task_id, chat_id=chat_id,
                 trigger_id=trigger_id or "unknown-trigger",
                 provider=provider or "configured-adapter",
                 model=model or "configured-model",
+                capability_ceiling=capability_ceiling,
                 policy_revision=policy_revision,
             )
         elif self._ledger is not None:
-            self._ledger.start(
+            self.run_record = self._ledger.start(
                 run_id=self.run_id, chat_id=chat_id,
                 trigger_id=trigger_id or "unknown-trigger",
                 provider=provider or "configured-adapter",
                 model=model or "configured-model",
+                capability_ceiling=capability_ceiling,
                 policy_revision=policy_revision,
             )
         self.write("running", force=True)

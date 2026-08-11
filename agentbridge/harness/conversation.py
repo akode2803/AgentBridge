@@ -72,6 +72,8 @@ class Delivery:
     late_s: float = 0.0
     run_id: str = ""              # bound by Runner to the live RunFeed id
     task_id: str = ""             # canonical root task for delegation lineage
+    capability_ceiling: tuple[str, ...] = ()  # immutable run upper bound
+    canonical_run: Any = None      # signed start returned by the run ledger
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation
 
