@@ -15,6 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 from agentbridge.core.errors import ValidationError
+from agentbridge.core.lock import SingleInstance
+from agentbridge.harness import runner as runner_module
 from agentbridge.harness import (
     AgentRunner, HarnessSettings, MESSAGE_BREAK, Reply, SILENCE, clean_reply,
     split_reply,
@@ -39,6 +41,70 @@ class Scripted:
     def respond(self, delivery, on_step=None):
         self.calls.append(delivery)
         return self.fn(delivery)
+
+
+def test_all_fleet_master_is_single_instance_per_home(tmp_path):
+    lock = SingleInstance(tmp_path / "harness-all.lock")
+    assert lock.acquire() is True
+    try:
+        assert runner_module.main([
+            "--all", "--home", str(tmp_path),
+            "--root", str(tmp_path / "mesh"),
+        ]) == runner_module.EXIT_ALREADY_RUNNING
+    finally:
+        lock.release()
+
+
+def test_posix_supervisor_shutdown_targets_entire_process_group(monkeypatch):
+    if runner_module.os.name == "nt":
+        pytest.skip("POSIX process-group contract")
+
+    seen = []
+    child = SimpleNamespace(pid=123, poll=lambda: None)
+    monkeypatch.setattr(
+        runner_module.os, "killpg",
+        lambda pid, sig: seen.append((pid, sig)),
+    )
+    runner_module._terminate_supervisor_tree(child)
+    assert seen == [(123, runner_module.signal.SIGTERM)]
+
+
+def test_windows_supervisor_shutdown_targets_entire_process_tree(monkeypatch):
+    seen = {}
+    child = SimpleNamespace(pid=123, poll=lambda: None)
+    monkeypatch.setattr(
+        runner_module.subprocess, "run",
+        lambda command, **kwargs: seen.update(command=command, kwargs=kwargs),
+    )
+    monkeypatch.setattr(
+        "agentbridge.core.spawn.windowless_kwargs", lambda: {"creationflags": 8})
+    runner_module._terminate_supervisor_tree(child, platform="nt")
+    assert seen["command"] == ["taskkill", "/PID", "123", "/T", "/F"]
+    assert seen["kwargs"]["creationflags"] == 8
+
+
+def test_standalone_supervisor_starts_runner_in_own_posix_session(monkeypatch):
+    if runner_module.os.name == "nt":
+        pytest.skip("POSIX process-group contract")
+
+    seen = {}
+
+    class Child:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        runner_module.subprocess, "Popen",
+        lambda command, **kwargs: (seen.update(command=command, kwargs=kwargs)
+                                   or Child()),
+    )
+    runner_module.supervise("codex", ["codex", "--supervise"])
+    assert seen["kwargs"]["start_new_session"] is True
 
 
 @pytest.fixture

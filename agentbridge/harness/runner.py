@@ -24,6 +24,7 @@ import contextlib
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ from pathlib import Path
 from .. import __version__
 from ..core.config import DEFAULT_HOME, load_app_config
 from ..core.errors import ValidationError
+from ..core.lock import SingleInstance as FleetInstance
 from ..core.models import ChatKind, UserKind
 from ..core.runstate import clear_beat, write_beat
 from ..mesh import authz
@@ -1135,6 +1137,27 @@ class AgentRunner:
 
 
 # --------------------------------------------------------------- resilience
+def _terminate_supervisor_tree(child: subprocess.Popen,
+                               sig=signal.SIGTERM,
+                               *, platform: str | None = None) -> None:
+    """Stop one supervisor and its inherited provider descendants."""
+    if child.poll() is not None:
+        return
+    platform = platform or os.name
+    try:
+        if platform != "nt":
+            os.killpg(child.pid, sig)
+        else:
+            from ..core.spawn import windowless_kwargs
+
+            subprocess.run(
+                ["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30, check=False, **windowless_kwargs())
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 class SingleInstance:
     """Per-agent run lock (ported from v1): a second harness for the SAME
     agent on this machine exits fast instead of double-replying; the OS frees
@@ -1200,25 +1223,48 @@ def supervise(agent: str, argv: list[str]) -> None:
              *[a for a in argv if a != "--supervise"]]
     print(f"[supervisor] @{agent}: keeping the harness up — Ctrl+C to stop")
     backoff = 2.0
-    while True:
-        started = time.time()
-        try:
-            rc = subprocess.call(child, **windowless_kwargs())
-        except KeyboardInterrupt:
-            return
-        if rc == 0:
-            return
-        if rc == EXIT_ALREADY_RUNNING:
-            print(f"[supervisor] @{agent}: already running — standing aside")
-            return
-        ran = time.time() - started
-        backoff = 2.0 if ran > 60 else min(backoff * 2, 60.0)
-        print(f"[supervisor] @{agent}: harness exited (rc={rc}) after "
-              f"{ran:.0f}s — restarting in {backoff:.0f}s")
-        try:
-            time.sleep(backoff)
-        except KeyboardInterrupt:
-            return
+    stopping = threading.Event()
+    current: subprocess.Popen | None = None
+    old_handlers = {}
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        stopping.set()
+        if current is not None and current.poll() is None:
+            _terminate_supervisor_tree(current)
+
+    if os.name != "nt":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            old_handlers[sig] = signal.signal(sig, request_stop)
+    try:
+        while not stopping.is_set():
+            started = time.time()
+            spawn = windowless_kwargs()
+            if os.name != "nt":
+                spawn["start_new_session"] = True
+            current = subprocess.Popen(child, **spawn)
+            try:
+                rc = current.wait()
+            except KeyboardInterrupt:
+                request_stop()
+                current.wait()
+                return
+            finally:
+                current = None
+            if stopping.is_set() or rc == 0:
+                return
+            if rc == EXIT_ALREADY_RUNNING:
+                print(f"[supervisor] @{agent}: already running — standing aside")
+                return
+            ran = time.time() - started
+            backoff = 2.0 if ran > 60 else min(backoff * 2, 60.0)
+            print(f"[supervisor] @{agent}: harness exited (rc={rc}) after "
+                  f"{ran:.0f}s — restarting in {backoff:.0f}s")
+            stopping.wait(backoff)
+    finally:
+        request_stop()
+        if os.name != "nt":
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
 
 
 def hosted_agents(root, machine: str, *, tx=None) -> list[str]:
@@ -1265,11 +1311,24 @@ def supervise_all(root, machine: str, argv: list[str],
     children: dict[str, subprocess.Popen] = {}
     cooldown: dict[str, float] = {}      # name -> not-before (monotonic)
     first = True
+    stopping = threading.Event()
+    old_handlers = {}
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        stopping.set()
+        for child in tuple(children.values()):
+            # Each POSIX supervisor is a session/process-group leader below;
+            # its runner and any active provider CLI inherit that group.
+            _terminate_supervisor_tree(child)
+
+    if os.name != "nt":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            old_handlers[sig] = signal.signal(sig, request_stop)
     # ONE transport for every rescan (R76): the per-call construction here
     # leaked a mirror + realtime socket every 30s — the V84 egress fire
     tx = make_transport(root)
     try:
-        while True:
+        while not stopping.is_set():
             try:
                 agents = hosted_agents(root, machine, tx=tx)
             except Exception:  # noqa: BLE001 — cloud blip: keep supervising
@@ -1296,17 +1355,30 @@ def supervise_all(root, machine: str, argv: list[str],
                 children[name] = subprocess.Popen(
                     [sys.executable, "-m", "agentbridge.harness",
                      name, "--supervise", *passthru],
-                    **windowless_kwargs())
+                    **({"start_new_session": True} if os.name != "nt"
+                       else windowless_kwargs()))
                 spawned.append(name)
             if spawned:
                 print(f"[harness] supervising {len(children)} agent(s): "
                       + ", ".join(f"@{a}" for a in sorted(children)), flush=True)
             first = False
-            time.sleep(rescan_s)
+            stopping.wait(rescan_s)
     except KeyboardInterrupt:
-        for c in children.values():
-            c.terminate()
+        request_stop()
     finally:
+        request_stop()
+        for child in tuple(children.values()):
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    _terminate_supervisor_tree(child, signal.SIGKILL)
+                    child.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if os.name != "nt":
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
         close = getattr(tx, "close", None)
         if callable(close):
             close()
@@ -1341,8 +1413,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.all:
         machine = args.machine or platform.node() or "harness"
-        return supervise_all(root, machine,
-                             [a for a in (argv or sys.argv[1:])])
+        fleet_lock = FleetInstance(
+            (home or DEFAULT_HOME) / "harness-all.lock", fail_open=False)
+        if not fleet_lock.acquire():
+            print("AgentBridge harness fleet is already running")
+            return EXIT_ALREADY_RUNNING
+        try:
+            return supervise_all(root, machine,
+                                 [a for a in (argv or sys.argv[1:])])
+        finally:
+            fleet_lock.release()
     if not args.agent:
         ap.error("an agent name is required (or use --all)")
     if args.supervise:

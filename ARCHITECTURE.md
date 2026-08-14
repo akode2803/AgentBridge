@@ -345,6 +345,12 @@ live only in an adapter preset.
   runner (it stands aside with rc 3). The loop: sync → scan triggers → dispatch
   → post. Honors the global stand-down (`control.json`) and a persisted local
   peer-hold. Calls `mesh.harden_startup()` on start.
+  R136 gives `--all` a strict home-scoped master lock and makes every supervisor
+  an owned process-tree boundary: POSIX uses process groups and Windows uses
+  tree termination. The detached GUI restart helper revalidates exact commands
+  before signalling, treats failed enumeration as unknown, verifies the new
+  GUI generation through `/api/state`, requires a validated lock-owning fleet,
+  and captures relaunch output in the local launcher log.
 - **`feed.py`** (R108) — concurrent run visibility is one bounded
   `status/<agent>_live.json` document containing independently keyed run
   entries. A process-local coordinator serializes worker-thread updates, so

@@ -193,14 +193,32 @@ def test_git_apply_refuses_non_default_branch(gitworld):
 
 # ------------------------------------------------------- restarter (V113)
 def test_restarter_scope_home_parsing():
-    from agentbridge.gui.restarter import _scope_home
+    from agentbridge.gui.restarter import _canonical_home, _scope_home
 
     assert _scope_home([]) == ""
     assert _scope_home(["--no-browser"]) == ""
     assert _scope_home(["--home", r"C:\t\ab66\h1", "--port", "7788"]) \
-        == r"C:\t\ab66\h1"
-    assert _scope_home([r"--home=C:\t\ab66\h1"]) == r"C:\t\ab66\h1"
+        == _canonical_home(r"C:\t\ab66\h1")
+    assert _scope_home([r"--home=C:\t\ab66\h1"]) \
+        == _canonical_home(r"C:\t\ab66\h1")
+    assert _scope_home([
+        "--home", "old", "--home=new",
+    ]) == _canonical_home("new")
     assert _scope_home(["--home"]) == ""          # dangling flag: no scope
+
+
+def test_restarter_scope_home_canonicalizes_symlinks(tmp_path):
+    from agentbridge.gui.restarter import _has_scope, _scope_home
+
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    assert _scope_home(["--home", str(alias)]) == str(actual.resolve())
+    assert _has_scope(
+        f"python -m agentbridge.harness --all --home {alias}",
+        str(actual),
+    )
 
 
 def test_restarter_fleet_scoping(monkeypatch):
@@ -215,8 +233,340 @@ def test_restarter_fleet_scoping(monkeypatch):
         (4, r"python.exe -m agentbridge.harness scout --home C:\t\ab78\h1"),
         (5, r"python.exe -m agentbridge.gui.restarter --gui-pid 1"),
         (6, r"python.exe -m hermes_cli.main gateway run"),
+        (7, r'''python.exe -c "print('-m agentbridge.gui')"'''),
+        (8, r"python.exe -m agentbridge.guix --home C:\t\ab66\h1"),
+        (9, r"/bin/sh -c python -m agentbridge.gui"),
+        (10, r"python.exe -m agentbridge.gui --home C:\t\ab66\h1 "
+             r"--home C:\t\ab78\h1"),
+        (11, r"python.exe -m agentbridge.harness --all --home="),
+        (12, r"python.exe -m another_tool -m agentbridge.harness --all"),
     ]
     monkeypatch.setattr(restarter, "_list_python_procs", lambda: procs)
-    assert [p for p, _ in restarter._fleet_procs()] == [1, 2]
+    monkeypatch.setattr(restarter, "locked_pid", lambda _path: None)
+    assert [p for p, _ in restarter._fleet_procs()] == [1, 2, 11]
     assert [p for p, _ in restarter._fleet_procs(r"C:\t\ab66\h1")] == [3]
-    assert [p for p, _ in restarter._fleet_procs(r"C:\t\ab78\h1")] == [4]
+    assert [p for p, _ in restarter._fleet_procs(r"C:\t\ab78\h1")] == [4, 10]
+
+
+def test_restarter_requires_command_validation_for_held_master(monkeypatch,
+                                                                tmp_path):
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(restarter, "DEFAULT_HOME", tmp_path)
+    monkeypatch.setattr(restarter, "locked_pid", lambda _path: 41)
+    monkeypatch.setattr(restarter, "_list_python_procs", lambda: [
+        (41, "python -m unrelated --all"),
+        (42, "python -m agentbridge.harness --all"),
+    ])
+    assert [pid for pid, _ in restarter._fleet_procs()] == [42]
+
+
+def test_restarter_process_scan_failure_is_not_an_empty_success(monkeypatch):
+    from types import SimpleNamespace
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(
+        restarter.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="operation not permitted"),
+    )
+    monkeypatch.setattr(restarter, "_log", lambda _message: None)
+    assert restarter._fleet_scan() == ([], False)
+
+
+def test_restarter_endpoint_and_readiness(monkeypatch, tmp_path):
+    from agentbridge.gui import restarter
+
+    assert restarter._gui_endpoint([]) == ("127.0.0.1", 7787)
+    assert restarter._gui_endpoint(
+        ["--host=localhost", "--port", "8899"],
+    ) == ("localhost", 8899)
+    assert restarter._gui_endpoint(
+        ["--host", "0.0.0.0", "--port=7788"],
+    ) == ("127.0.0.1", 7788)
+    assert restarter._gui_endpoint(
+        ["--host=::", "--port", "7789"],
+    ) == ("::1", 7789)
+
+    class Proc:
+        pid = 73
+
+        def poll(self):
+            return None
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"instance_id":"new-generation","server_pid":73}'
+
+    proc = Proc()
+    monkeypatch.setattr(
+        restarter.urllib.request, "urlopen",
+        lambda *_args, **_kw: Response())
+    assert restarter._wait_gui_ready(
+        proc, "127.0.0.1", 7787, "old-generation", 0.5)
+    monkeypatch.setattr(restarter, "locked_pid", lambda _path: 74)
+    monkeypatch.setattr(
+        restarter, "_command_for_pid",
+        lambda _pid: "python -m agentbridge.harness --all")
+    monkeypatch.setattr(
+        restarter, "_is_descendant_or_self",
+        lambda pid, ancestor: (pid, ancestor) == (74, 73))
+    assert restarter._wait_harness_ready(
+        proc, tmp_path / "harness-all.lock", timeout_s=0.1)
+
+
+def test_restarter_spawn_captures_output_and_detaches(monkeypatch, tmp_path):
+    from agentbridge.gui import restarter
+
+    seen = {}
+
+    class Proc:
+        pid = 88
+
+    def fake_popen(command, **kwargs):
+        seen.update(command=command, kwargs=kwargs)
+        return Proc()
+
+    monkeypatch.setattr(restarter.sys, "platform", "darwin")
+    monkeypatch.setattr(restarter.subprocess, "Popen", fake_popen)
+    output = tmp_path / "launcher.log"
+    proc = restarter._spawn(["python", "-m", "agentbridge.gui"],
+                            str(tmp_path), output)
+    assert proc.pid == 88
+    assert seen["kwargs"]["start_new_session"] is True
+    assert seen["kwargs"]["stderr"] is restarter.subprocess.STDOUT
+    assert seen["kwargs"]["stdout"].name == str(output)
+
+
+def test_restarter_spawn_survives_unavailable_launch_log(monkeypatch,
+                                                          tmp_path):
+    from agentbridge.gui import restarter
+
+    seen = {}
+
+    class Proc:
+        pid = 89
+
+    monkeypatch.setattr(restarter.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        restarter.Path, "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("denied")),
+    )
+    monkeypatch.setattr(restarter, "_log", lambda _message: None)
+    monkeypatch.setattr(
+        restarter.subprocess, "Popen",
+        lambda command, **kwargs: (seen.update(command=command, kwargs=kwargs)
+                                   or Proc()),
+    )
+    proc = restarter._spawn(
+        ["python", "-m", "agentbridge.gui"], str(tmp_path),
+        tmp_path / "launcher.log",
+    )
+    assert proc.pid == 89
+    assert seen["kwargs"]["stdout"] is restarter.subprocess.DEVNULL
+
+
+def test_restart_endpoint_detaches_posix_helper(monkeypatch):
+    import sys
+    import threading
+
+    seen = {}
+
+    class Server:
+        def shutdown(self):
+            pass
+
+    class App:
+        mesh = object()
+        server = Server()
+        instance_id = "old-generation"
+
+    class Timer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(threading, "Timer", Timer)
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda command, **kwargs: seen.update(command=command, kwargs=kwargs),
+    )
+    result = api_updates.app_restart(App(), None)
+    assert result["ok"] is True
+    assert seen["kwargs"]["start_new_session"] is True
+    assert seen["command"][1:3] == ["-m", "agentbridge.gui.restarter"]
+    old_id_index = seen["command"].index("--old-instance-id")
+    assert seen["command"][old_id_index + 1] == "old-generation"
+
+
+def test_restart_endpoint_pins_ephemeral_port_to_actual_server():
+    server = type("Server", (), {"server_address": ("127.0.0.1", 43210)})()
+    assert api_updates._restart_gui_args(
+        ["--port", "0", "--host", "0.0.0.0"], server,
+    ) == ["--host", "0.0.0.0", "--port", "43210"]
+    assert api_updates._restart_gui_args(
+        ["--port=0", "--no-browser"], server,
+    ) == ["--no-browser", "--port", "43210"]
+
+
+def test_restarter_reused_pid_is_not_signalled_and_original_counts_gone(
+        monkeypatch):
+    from agentbridge.gui import restarter
+
+    calls = []
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: "changed")
+    monkeypatch.setattr(restarter.os, "kill", lambda *_args: calls.append(_args))
+    assert restarter._terminate_validated(
+        45, "python -m agentbridge.gui") is True
+    assert calls == []
+
+
+def test_restarter_treats_already_reaped_fleet_member_as_terminated(
+        monkeypatch):
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        restarter, "_command_for_pid",
+        lambda _pid: (_ for _ in ()).throw(AssertionError("must not rescan")),
+    )
+    assert restarter._terminate_validated(
+        45, "python -m agentbridge.harness codex") is True
+
+
+def test_restarter_treats_pid_absent_from_trusted_scan_as_terminated(
+        monkeypatch):
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: "")
+    assert restarter._terminate_validated(
+        45, "python -m agentbridge.harness codex") is True
+
+
+def test_restarter_wait_treats_zombie_absent_from_scan_as_gone(monkeypatch):
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: "")
+    assert restarter._wait_gone(
+        45, 0.1, "python -m agentbridge.harness codex") is True
+
+
+def test_restarter_never_treats_unknown_scan_as_terminated(monkeypatch):
+    from agentbridge.gui import restarter
+
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: None)
+    assert restarter._terminate_validated(
+        45, "python -m agentbridge.harness codex") is False
+
+
+def test_restarter_posix_master_termination_uses_owned_process_group(
+        monkeypatch):
+    from agentbridge.gui import restarter
+
+    command = "python3 -m agentbridge.harness --all"
+    seen = []
+    monkeypatch.setattr(restarter.sys, "platform", "darwin")
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: command)
+    monkeypatch.setattr(restarter.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        restarter.os, "killpg", lambda pid, sig: seen.append((pid, sig)))
+    assert restarter._terminate_validated(46, command) is True
+    assert seen == [(46, restarter.signal.SIGTERM)]
+
+
+def test_restarter_windows_harness_termination_uses_task_tree(monkeypatch):
+    from types import SimpleNamespace
+    from agentbridge.gui import restarter
+
+    command = "python.exe -m agentbridge.harness --all"
+    seen = {}
+    monkeypatch.setattr(restarter.sys, "platform", "win32")
+    monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: command)
+    monkeypatch.setattr(restarter, "_hidden_startupinfo", lambda: None)
+    monkeypatch.setattr(
+        restarter.subprocess, "run",
+        lambda args, **kwargs: (seen.update(args=args, kwargs=kwargs)
+                                or SimpleNamespace(
+                                    returncode=0, stdout="", stderr="")),
+    )
+    assert restarter._terminate_validated(47, command) is True
+    assert seen["args"] == ["taskkill", "/PID", "47", "/T", "/F"]
+
+
+def test_restarter_unknown_scan_never_spawns_duplicate_harness(monkeypatch,
+                                                               tmp_path):
+    from agentbridge.gui import restarter
+
+    commands = []
+
+    class Proc:
+        pid = 91
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(restarter, "_wait_gone", lambda *_args: True)
+    monkeypatch.setattr(restarter, "_fleet_scan", lambda _scope: ([], False))
+    monkeypatch.setattr(restarter, "_pick_exe", lambda _cwd, fallback: fallback)
+    monkeypatch.setattr(
+        restarter, "_spawn",
+        lambda command, _cwd, _output: (commands.append(command) or Proc()),
+    )
+    monkeypatch.setattr(restarter, "_wait_gui_ready", lambda *_args: True)
+    monkeypatch.setattr(restarter, "_log", lambda _message: None)
+
+    result = restarter.main([
+        "--gui-pid", "90", "--exe", "python", "--cwd", str(tmp_path),
+    ])
+    assert result == 1
+    assert len(commands) == 1
+    assert commands[0][1:3] == ["-m", "agentbridge.gui"]
+
+
+def test_restarter_gui_spawn_failure_still_recovers_harness(monkeypatch,
+                                                             tmp_path):
+    from agentbridge.gui import restarter
+
+    commands = []
+
+    class Proc:
+        pid = 92
+
+        def poll(self):
+            return None
+
+    def spawn(command, _cwd, _output):
+        commands.append(command)
+        if command[2] == "agentbridge.gui":
+            raise OSError("gui spawn failed")
+        return Proc()
+
+    monkeypatch.setattr(restarter, "_wait_gone", lambda *_args: True)
+    monkeypatch.setattr(restarter, "_fleet_scan", lambda _scope: ([], True))
+    monkeypatch.setattr(restarter, "_pick_exe", lambda _cwd, fallback: fallback)
+    monkeypatch.setattr(restarter, "_spawn", spawn)
+    monkeypatch.setattr(restarter, "_wait_harness_ready", lambda *_args: True)
+    monkeypatch.setattr(restarter, "_log", lambda _message: None)
+
+    result = restarter.main([
+        "--gui-pid", "90", "--exe", "python", "--cwd", str(tmp_path),
+    ])
+    assert result == 1
+    assert [command[2] for command in commands] == [
+        "agentbridge.gui", "agentbridge.gui", "agentbridge.harness",
+    ]

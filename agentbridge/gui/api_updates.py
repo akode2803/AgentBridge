@@ -34,6 +34,27 @@ GIT_TIMEOUT_S = 12.0
 _VER_RE = re.compile(r'__version__\s*=\s*"([^"]+)"')
 
 
+def _restart_gui_args(argv: list[str], server) -> list[str]:
+    """Preserve the server's actual endpoint, including a former port 0."""
+    out = []
+    skip = False
+    for value in argv:
+        if skip:
+            skip = False
+            continue
+        if value == "--port":
+            skip = True
+            continue
+        if value.startswith("--port="):
+            continue
+        out.append(value)
+    try:
+        port = int(server.server_address[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        port = 7787
+    return [*out, "--port", str(port)]
+
+
 def ver_tuple(v: str) -> tuple[int, ...]:
     """Dotted version -> comparable int tuple; tolerant of a v prefix and
     trailing junk ("v0.25.1-beta" -> (0, 25, 1))."""
@@ -230,11 +251,13 @@ def app_restart(app, req, mesh) -> dict:
     server = getattr(app, "server", None)
     if server is None:
         return {"ok": False, "note": "no live server to restart (test rig?)"}
-    gui_args = [str(a) for a in sys.argv[1:]]
+    gui_args = _restart_gui_args(
+        [str(a) for a in sys.argv[1:]], server)
     cmd = [sys.executable, "-m", "agentbridge.gui.restarter",
            "--gui-pid", str(os.getpid()),
            "--exe", sys.executable,
            "--cwd", os.getcwd(),
+           "--old-instance-id", str(getattr(app, "instance_id", "")),
            "--gui-args", _json.dumps(gui_args)]
     flags = 0
     if sys.platform == "win32":
@@ -262,7 +285,7 @@ def app_restart(app, req, mesh) -> dict:
         except OSError:
             subprocess.Popen(cmd, creationflags=flags, **spawn)
     else:
-        subprocess.Popen(cmd, **spawn)
+        subprocess.Popen(cmd, start_new_session=True, **spawn)
     # shut down AFTER this response has flushed to the client
     threading.Timer(0.8, server.shutdown).start()
     return {"ok": True, "note": "Restarting — back in a few seconds"}

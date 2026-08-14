@@ -1,6 +1,8 @@
+import sys
 from types import SimpleNamespace
 
 from agentbridge.core import launcher
+from agentbridge.core.lock import SingleInstance, locked_pid
 
 
 def test_project_python_is_platform_aware(tmp_path):
@@ -19,6 +21,106 @@ def test_project_python_falls_back_to_current_interpreter(tmp_path):
     fallback = tmp_path / "fallback-python"
     assert launcher.find_project_python(
         tmp_path, platform="darwin", fallback=str(fallback)) == fallback
+
+
+def test_locked_pid_requires_a_live_advisory_owner(tmp_path):
+    path = tmp_path / "fleet.lock"
+    path.write_text("999999", encoding="ascii")
+    assert locked_pid(path) is None
+
+    lock = SingleInstance(path)
+    assert lock.acquire() is True
+    try:
+        assert locked_pid(path) == __import__("os").getpid()
+    finally:
+        lock.release()
+    assert locked_pid(path) is None
+
+
+def test_strict_single_instance_fails_closed_when_lock_cannot_open(
+        tmp_path, monkeypatch):
+    import builtins
+
+    monkeypatch.setattr(
+        builtins, "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("denied")),
+    )
+    assert SingleInstance(
+        tmp_path / "fleet.lock", fail_open=False).acquire() is False
+
+
+def test_strict_single_instance_releases_when_pid_publish_fails(
+        tmp_path, monkeypatch):
+    import builtins
+    from agentbridge.core import lock as lock_module
+
+    class File:
+        closed = False
+
+        def seek(self, _position):
+            pass
+
+        def truncate(self):
+            pass
+
+        def write(self, _value):
+            raise OSError("publication failed")
+
+        def close(self):
+            self.closed = True
+
+    file = File()
+    monkeypatch.setattr(builtins, "open", lambda *_args, **_kwargs: file)
+    monkeypatch.setattr(lock_module, "_try_lock", lambda _fh: True)
+    assert SingleInstance(
+        tmp_path / "fleet.lock", fail_open=False).acquire() is False
+    assert file.closed is True
+
+
+def test_windows_lock_preserves_legacy_byte_zero(monkeypatch):
+    from agentbridge.core import lock as lock_module
+
+    positions = []
+
+    class File:
+        def seek(self, position):
+            self.position = position
+
+        def fileno(self):
+            return 5
+
+    fake_msvcrt = SimpleNamespace(
+        LK_NBLCK=1,
+        locking=lambda _fd, _mode, _length: positions.append(file.position),
+    )
+    file = File()
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert lock_module._try_lock(file, platform="nt") is True
+    assert positions == [0]
+
+
+def test_lock_attempt_distinguishes_contention_from_io_failure(monkeypatch):
+    from agentbridge.core import lock as lock_module
+
+    class File:
+        def seek(self, _position):
+            pass
+
+        def fileno(self):
+            return 5
+
+    def denied(_fd, _mode, _length):
+        raise OSError(13, "held")
+
+    fake_msvcrt = SimpleNamespace(LK_NBLCK=1, locking=denied)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert lock_module._try_lock(File(), platform="nt") is False
+
+    def broken(_fd, _mode, _length):
+        raise OSError(5, "device error")
+
+    fake_msvcrt.locking = broken
+    assert lock_module._try_lock(File(), platform="nt") is None
 
 
 def test_launch_module_uses_repo_venv_and_log(tmp_path, monkeypatch):
