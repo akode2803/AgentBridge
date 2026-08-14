@@ -3,14 +3,24 @@
 
 import { toast } from "./util.js";
 
-export async function api(path, body) {
+export async function api(path, body, options = {}) {
   const opts = body === undefined ? {} : {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   };
-  const r = await fetch(path, opts);
-  const out = await r.json();
+  const timeoutMs = Number(options.timeoutMs) || 0;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  if (controller) opts.signal = controller.signal;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let out;
+  try {
+    const r = await fetch(path, opts);
+    out = await r.json();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   // V111: ANY endpoint refusing because the app is locked raises the lock
   // screen — a DOM event, so this leaf module never imports a view
   if (out && out.locked && out.error) {

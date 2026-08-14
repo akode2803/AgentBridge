@@ -9,7 +9,10 @@ from agentbridge.harness.runtime.handoffs import (
 from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import TaskLedger
 from agentbridge.harness.adapters.native import codex_native_policy
+from agentbridge.gui.api_runtime import authority_rows
 from agentbridge.mesh.service import Mesh
+from agentbridge.transport.cache import CachingTransport
+from agentbridge.transport.folder import FolderTransport
 
 
 def _ledgers(mesh):
@@ -31,7 +34,8 @@ def test_runtime_tasks_requires_auth_and_current_room_membership(rig):
     assert "error" in rig.get("/api/mesh/runtime_authority", id=private.id)
 
 
-def test_runtime_authority_projects_only_signed_nonsecret_facts(rig):
+def test_runtime_authority_projects_only_signed_nonsecret_facts(
+        rig, monkeypatch):
     rig.signup()
     rig.app.mesh.accounts.create_agent("manager")
     chat_id = rig.post(
@@ -45,8 +49,9 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(rig):
     try:
         manager.sync.sync_once([chat_id])
         policy = codex_native_policy(bridge_attached=True)
-        RunLedger(manager).start(
-            run_id="run-authority", chat_id=chat_id,
+        ledger = RunLedger(manager)
+        ledger.start(
+            run_id="r-1-abcdef12", chat_id=chat_id,
             trigger_id="message-authority", provider="codex", model="gpt-test",
             capability_ceiling=("delegate_agent",),
             native_policy_digest=policy.authority_digest("codex-cli 0.144.5"),
@@ -68,19 +73,99 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(rig):
             native_approval_gated=policy.approval_gated,
             native_blocked=policy.blocked[:-1],
         )
+        RunLedger(manager).start(
+            run_id="run-old", chat_id=chat_id,
+            trigger_id="message-old", provider="codex", model="gpt-test",
+        )
+        RunLedger(manager).start(
+            run_id="run-claude", chat_id=chat_id,
+            trigger_id="message-claude", provider="claude", model="gpt-test",
+        )
+        handlers = dict(rig.app.mesh.outbox.handlers)
+        dead_hooks = dict(rig.app.mesh.outbox.dead_hooks)
         rows = rig.get(
             "/api/mesh/runtime_authority", id=chat_id,
         )["runs"]
         assert len(rows) == 1
         row = rows[0]
-        assert row["run_id"] == "run-authority"
+        assert row["run_id"] == "r-1-abcdef12"
         assert row["provider_version"] == "codex-cli 0.144.5"
         assert row["authority_digest"] == "b" * 64
         assert row["approval_gated"] == ["codex.agentbridge_mcp"]
+        assert {tuple(item) for item in row["capabilities"]} == {
+            ("id", "label", "state", "surface", "effect", "risk"),
+        }
+        capability = next(
+            item for item in row["capabilities"]
+            if item["id"] == "codex.agentbridge_mcp"
+        )
+        assert capability == {
+            "id": "codex.agentbridge_mcp",
+            "label": "Use AgentBridge tools",
+            "state": "approval_gated",
+            "surface": "provider-tool-transport",
+            "effect": "agentbridge-broker-tools",
+            "risk": "high",
+        }
         encoded = str(row).lower()
         assert "/users/" not in encoded and "token" not in encoded
         assert "launch_args" not in row and "workspace" not in row
         assert "executable" not in row and "environment" not in row
+        assert all(
+            "controls" not in item and "evidence" not in item
+            for item in row["capabilities"]
+        )
+        assert rig.app.mesh.outbox.handlers == handlers
+        assert rig.app.mesh.outbox.dead_hooks == dead_hooks
+
+        current = rig.post(
+            "/api/mesh/runtime_authority", chat_id=chat_id,
+            run_ids=["r-1-abcdef12"],
+        )["runs"]
+        assert [(item["run_id"], item["manager"], item["state"])
+                for item in current] == [
+            ("r-1-abcdef12", "manager", "running"),
+        ]
+        assert "error" in rig.post(
+            "/api/mesh/runtime_authority", chat_id=chat_id,
+            run_ids=["run-authority"],
+        )
+
+        # The exact active projection lists only the requested local-mirror
+        # prefix. A cloud driver's live read methods are never touched.
+        cached = CachingTransport(
+            FolderTransport(rig.root), auto_refresh=False,
+        )
+        cached.refresh()
+        viewer = Mesh(
+            cached, "aryan", "guibox", encrypt=True, home=rig.home,
+            store_path=rig.home / "authority-cache-viewer.sqlite",
+        )
+        try:
+            monkeypatch.setattr(
+                cached.inner, "list_docs",
+                lambda _prefix: (_ for _ in ()).throw(
+                    AssertionError("authority GUI projection read through"),
+                ),
+            )
+            monkeypatch.setattr(
+                cached.inner, "get_doc",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("authority GUI document read through"),
+                ),
+            )
+            assert [item["run_id"] for item in authority_rows(
+                viewer, chat_id, run_ids=("r-1-abcdef12",),
+                current_only=True,
+            )] == ["r-1-abcdef12"]
+        finally:
+            viewer.close()
+
+        ledger.finish("r-1-abcdef12", "done", "Reply posted")
+        assert rig.post(
+            "/api/mesh/runtime_authority", chat_id=chat_id,
+            run_ids=["r-1-abcdef12"],
+        )["runs"] == []
     finally:
         manager.close()
 

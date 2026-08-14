@@ -17,6 +17,90 @@ import { V } from "./views.js";
 
 let chatRenderSeq = 0;
 
+function runAccessLabel(capability) {
+  return capability.label || "Provider capability";
+}
+
+function currentRunAuthority(chatId, feeds) {
+  const runIds = [...new Set(feeds
+    .filter((feed) => !feed.human && /^r-[0-9]+-[0-9a-f]{8}$/.test(feed.run_id || ""))
+    .map((feed) => feed.run_id))].sort();
+  Mesh.authorityCache = Mesh.authorityCache || {};
+  Mesh.authorityPoll = Mesh.authorityPoll || {};
+  if (!runIds.length) {
+    delete Mesh.authorityCache[chatId];
+    delete Mesh.authorityPoll[chatId];
+    return [];
+  }
+  const key = runIds.join("|");
+  const now = Date.now();
+  const cached = Mesh.authorityCache[chatId];
+  const poll = Mesh.authorityPoll[chatId];
+  if (!poll || poll.key !== key || (!poll.pending && now - poll.at > 2000)) {
+    const request = { key, at: now, pending: true };
+    Mesh.authorityPoll[chatId] = request;
+    const batches = [];
+    for (let i = 0; i < runIds.length; i += 20) batches.push(runIds.slice(i, i + 20));
+    Promise.all(batches.map((ids) =>
+      api("/api/mesh/runtime_authority", { chat_id: chatId, run_ids: ids },
+        { timeoutMs: 4000 }).catch(() => null)))
+      .then((outputs) => {
+        if (Mesh.authorityPoll?.[chatId] !== request) return;
+        const valid = outputs.filter((out) => out && !out.error);
+        if (!valid.length) {
+          delete Mesh.authorityCache[chatId];
+          return;
+        }
+        Mesh.authorityCache[chatId] = {
+          key, at: Date.now(), runs: valid.flatMap((out) =>
+            Array.isArray(out.runs) ? out.runs : []),
+        };
+        if (App.page === "chats" && Mesh.chatId === chatId) {
+          Mesh.chatKey = "";
+          renderMeshChat(false);
+        }
+      })
+      .finally(() => {
+        if (Mesh.authorityPoll?.[chatId] === request) request.pending = false;
+      });
+  }
+  return cached && cached.key === key && now - cached.at < 5000
+    ? cached.runs : [];
+}
+
+function runAccessDetails(run, open) {
+  if (!run) return "";
+  const panelId = `run-access-${run.run_id}`;
+  const groups = [
+    ["enabled", "Allowed"],
+    ["approval_gated", "Controlled"],
+    ["blocked", "Blocked"],
+  ];
+  const capabilities = Array.isArray(run.capabilities) ? run.capabilities : [];
+  const counts = Object.fromEntries(groups.map(([state]) => [state,
+    capabilities.filter((item) => item.state === state).length]));
+  const summary = groups.map(([state, label]) => `${label} ${counts[state]}`)
+    .join(" · ");
+  const sections = groups.map(([state, label]) => {
+    const items = capabilities.filter((item) => item.state === state);
+    if (!items.length) return "";
+    return `<section class="feed-access-group ${state.replace("_", "-")}">
+      <h4>${esc(label)} <span>${items.length}</span></h4>
+      <ul>${items.map((item) => `<li>${esc(runAccessLabel(item))}</li>`).join("")}</ul>
+    </section>`;
+  }).join("");
+  return `<button class="feed-access-toggle" type="button"
+      aria-expanded="${open}" aria-controls="${esc(panelId)}"
+      aria-label="${open ? "Hide" : "Show"} access for this run">
+      ${ICONS.key}<span>Access for this run</span><span class="feed-access-counts">${esc(summary)}</span>
+    </button>
+    <div class="feed-access-panel" id="${esc(panelId)}" role="region"
+         aria-label="Access for this run" ${open ? "" : "hidden"}>
+      <div class="feed-access-version">${esc(run.provider_version || "Codex")}</div>
+      <div class="feed-access-groups">${sections}</div>
+    </div>`;
+}
+
 // V32 (R51): advance the read cursor AND settle the badge NOW. The server
 // recomputes unread on the next state fetch — up to 20s away under SSE —
 // which was exactly the "unread counter while I'm using the chat" report.
@@ -313,6 +397,7 @@ async function renderMeshChat(force) {
   if (renderSeq !== chatRenderSeq) return;
   const feeds = feedData.feeds || [];
   const runtimeTasks = runtimeData.tasks || [];
+  const authorityRuns = currentRunAuthority(chatId, feeds);
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
@@ -344,7 +429,9 @@ async function renderMeshChat(force) {
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
       (f.draft || "").length, (f.steps || []).map((s) =>
         `${s.ts || ""}:${s.text || ""}`).join("|")]),
-    runtimeTasks.map((t) => [t.id, t.state, t.updated_ns])]);
+    runtimeTasks.map((t) => [t.id, t.state, t.updated_ns]),
+    authorityRuns.map((run) => [run.run_id, run.state, run.updated_ns,
+      (run.capabilities || []).map((item) => `${item.id}:${item.state}`).join("|")])]);
   // structural signature — drives the FULL rebuild (incl. the header). name
   // rides here so a rename (local or from another client) repaints the header;
   // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
@@ -578,9 +665,14 @@ async function renderMeshChat(force) {
     if (stale) line += ` (no updates for ${Math.round(f.age_s / 60)} min)`;
     const isOwner = (ms.users?.[f.agent]?.owners || []).includes(ms.user);
     const runId = f.run_id || `legacy-${f.agent}`;
+    const authority = f.run_id ? authorityRuns.find((run) =>
+      run.run_id === f.run_id && run.manager === f.agent
+      && run.state === "running") : null;
     const steps = f.steps || [];
     Mesh.feedExpand = Mesh.feedExpand || {};
+    Mesh.authorityExpand = Mesh.authorityExpand || {};
     const tasksOpen = !!Mesh.feedExpand[runId];
+    const accessOpen = !!Mesh.authorityExpand[runId];
     const taskRows = steps.map((s) => `
       <div class="feed-step"><span class="feed-step-text">${esc(s.text || "")}</span>
         <span class="mi-time">${esc(timeOnly(s.ts || ""))}</span></div>`).join("");
@@ -597,6 +689,7 @@ async function renderMeshChat(force) {
           ${steps.length ? `<button class="feed-details" aria-expanded="${tasksOpen}"
             type="button">${tasksOpen ? "Hide tasks" : "Show tasks"} (${steps.length})</button>
             <div class="feed-task-list" ${tasksOpen ? "" : "hidden"}>${taskRows}</div>` : ""}
+          ${runAccessDetails(authority, accessOpen)}
           ${draft ? `<div class="typing-draft">${md(draft)}<span class="caret">▍</span></div>` : ""}
         </div>
       </div>`]);
@@ -1321,6 +1414,20 @@ function bindTranscript(tr, chatId, data, ctx) {
       taskBtn.textContent = `${open ? "Hide tasks" : "Show tasks"} (${count})`;
       const list = row.querySelector(".feed-task-list");
       if (list) list.hidden = !open;
+      return;
+    }
+    const accessBtn = e.target.closest(".feed-access-toggle");
+    if (accessBtn) {
+      const row = accessBtn.closest(".feed-msg");
+      const runId = row?.dataset.feedRun;
+      if (!runId) return;
+      Mesh.authorityExpand = Mesh.authorityExpand || {};
+      const open = !Mesh.authorityExpand[runId];
+      Mesh.authorityExpand[runId] = open;
+      accessBtn.setAttribute("aria-expanded", String(open));
+      accessBtn.setAttribute("aria-label", `${open ? "Hide" : "Show"} access for this run`);
+      const panel = row.querySelector(".feed-access-panel");
+      if (panel) panel.hidden = !open;
       return;
     }
     // the reaction badge opens the who-reacted popup (R50) — the write

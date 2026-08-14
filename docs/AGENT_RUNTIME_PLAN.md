@@ -1849,8 +1849,9 @@ Estimate: **2.5-3.5 weeks**.
   adds package-authoritative entries for every known configured Claude/Cortex
   native tool spelling, including current documented Cortex surfaces plus old
   aliases. Both inventories remain explicitly non-exhaustive and unbound to an
-  installed version, so R134 quarantines both providers before invocation;
-  Codex native tool IDs and future provider surfaces remain open.
+  installed version, so R134 quarantines both providers before invocation.
+  R135 adds the exact Codex 0.144.5 provider, configuration, transport and host
+  surfaces; future provider parity remains open.
 - [x] Compile an immutable per-run capability ceiling. R133 freezes the
   reviewed provider subset before canonical run creation, persists it in the
   signed/E2EE run start, and makes later bridge attachment consume that tuple.
@@ -1869,13 +1870,16 @@ Estimate: **2.5-3.5 weeks**.
   turns every broker-dependent known tool into a hard deny whenever no verified
   callback exists. It does not mistake that partial denylist for containment:
   incomplete inventories are quarantined. Codex remains enforced by its
-  separate exact-version native policy compiler.
+  exact-version native policy compiler, whose frozen policy is signed into the
+  canonical run before execution.
 - [~] Publish a member-readable report distinguishing advertised, enabled,
   approval-gated, unsupported and unenforceable. R133 exposes the versioned,
   non-secret bridge catalog through the authenticated harness-options API.
   R134 adds the native registry and per-family default effective states,
-  callback absence, evidence and quarantine reason; per-agent/per-run
-  effective-state projection remains open.
+  callback absence, evidence and quarantine reason. R135 adds a member-only,
+  local-mirror canonical run projection. R137 displays only exact active run
+  IDs in the working bubble, with package-owned labels and no path, argv,
+  environment, credential, digest or completed-history exposure.
 - [~] Deny unknown ids, versions and provider capabilities. R133 denies unknown
   bridge IDs and non-capability surfaces. R134 rejects unknown native IDs in
   shipped declarations, exact deny-template drift, same-ID authority overlays,

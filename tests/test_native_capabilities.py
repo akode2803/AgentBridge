@@ -140,6 +140,17 @@ def test_native_registry_report_is_versioned_and_secret_free():
     assert "/users/" not in encoded and "127.0.0.1:" not in encoded
 
 
+def test_codex_presentation_labels_are_catalog_owned_but_not_authority():
+    codex = [
+        spec for spec in NATIVE_CAPABILITIES.values()
+        if spec.provider == "codex"
+    ]
+    assert codex and all(spec.presentation_label.strip() for spec in codex)
+    assert len({spec.presentation_label for spec in codex}) == len(codex)
+    assert all("presentation_label" not in spec.public_facts()
+               for spec in codex)
+
+
 def test_canonical_call_digest_binds_provider_tool_and_structured_input():
     first = capability_call_digest("claude", "Read", {"file_path": "a"})
     reordered = capability_call_digest("claude", "Read", {"file_path": "a"})
