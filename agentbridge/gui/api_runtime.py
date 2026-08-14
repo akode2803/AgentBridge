@@ -8,8 +8,12 @@ content, results, policy material, grants, or raw wire records.
 from __future__ import annotations
 
 from ..harness.runtime.handoffs import HandoffLedger
-from ..harness.runtime.runs import RunLedger
+from ..harness.runtime.runs import RunLedger, RunLedgerError
 from ..harness.runtime.tasks import TaskLedger
+from ..harness.adapters.native import (
+    codex_native_policy, validate_native_authority_facts,
+)
+from ..core.errors import ValidationError
 from .routing import authed
 
 __all__ = ["GET", "POST"]
@@ -65,6 +69,69 @@ def contributor_rows(mesh, chat_id: str, *,
     return rows if limit is None else rows[-limit:]
 
 
+def authority_rows(mesh, chat_id: str, *, limit: int = 50) -> list[dict]:
+    """Project non-secret effective authority from canonical signed runs."""
+    hidden = set(mesh.my_state(chat_id)["hidden_runtime"])
+    try:
+        snapshot = mesh.tx.cached_docs_bounded(
+            f"chats/{chat_id}/runtime/", 10_000,
+        )
+    except OverflowError as exc:
+        raise RunLedgerError(
+            "runtime run history exceeds the bounded GUI projection",
+        ) from exc
+    records = RunLedger(
+        mesh, fresh_reads=False, register_outbox=False,
+        read_snapshot=snapshot,
+    ).read(chat_id)
+    grouped = {}
+    for record in records:
+        grouped.setdefault(record.meta.run_id or "", []).append(record)
+    rows = []
+    for run_id, events in grouped.items():
+        if not run_id or run_id in hidden:
+            continue
+        events.sort(key=lambda item: (item.meta.ns, item.meta.id))
+        start, latest = events[0], events[-1]
+        if not start.native_policy_digest or start.provider != "codex":
+            continue
+        try:
+            validate_native_authority_facts(
+                provider=start.provider,
+                provider_version=start.native_provider_version,
+                authority_digest=start.native_policy_digest,
+                enabled=start.native_enabled,
+                approval_gated=start.native_approval_gated,
+                blocked=start.native_blocked,
+            )
+        except ValidationError:
+            continue
+        policy = codex_native_policy(
+            bridge_attached="codex.agentbridge_mcp"
+            in start.native_approval_gated,
+        )
+        rows.append({
+            "run_id": run_id,
+            "manager": start.manager_agent,
+            "provider": start.provider,
+            "provider_version": start.native_provider_version,
+            "state": latest.state.value,
+            "started_ns": start.meta.ns,
+            "updated_ns": latest.meta.ns,
+            "native_policy_digest": start.native_policy_digest,
+            "authority_digest": start.provider_policy_digest,
+            "schema_version": policy.schema_version,
+            "inventory_complete": policy.inventory_complete,
+            "enforcement_locus": policy.enforcement_locus,
+            "evidence": policy.evidence,
+            "enabled": list(start.native_enabled),
+            "approval_gated": list(start.native_approval_gated),
+            "blocked": list(start.native_blocked),
+        })
+    rows.sort(key=lambda row: (row["updated_ns"], row["run_id"]))
+    return rows[-limit:]
+
+
 @authed
 def runtime_tasks(app, req, mesh) -> dict:
     chat_id = str(req.params.get("id") or "")
@@ -72,5 +139,15 @@ def runtime_tasks(app, req, mesh) -> dict:
     return {"tasks": contributor_rows(mesh, chat_id, limit=limit)}
 
 
-GET = {"/api/mesh/runtime_tasks": runtime_tasks}
+@authed
+def runtime_authority(app, req, mesh) -> dict:
+    chat_id = str(req.params.get("id") or "")
+    limit = req.int_param("limit", 50, 1, 100)
+    return {"runs": authority_rows(mesh, chat_id, limit=limit)}
+
+
+GET = {
+    "/api/mesh/runtime_tasks": runtime_tasks,
+    "/api/mesh/runtime_authority": runtime_authority,
+}
 POST = {}

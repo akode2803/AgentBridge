@@ -295,6 +295,11 @@ class RunRecord(_Record):
     status: str
     outcome: str | None
     native_policy_digest: str = ""
+    provider_policy_digest: str = ""
+    native_provider_version: str = ""
+    native_enabled: tuple[str, ...] = ()
+    native_approval_gated: tuple[str, ...] = ()
+    native_blocked: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         super(RunRecord, self).__post_init__()
@@ -306,25 +311,54 @@ class RunRecord(_Record):
                      "provider", "model", "status"):
             _text(getattr(self, name), name)
         _optional_text(self.outcome, "outcome")
-        if not isinstance(self.native_policy_digest, str):
-            raise RuntimeContractError("native_policy_digest must be text")
-        if (self.native_policy_digest
-                and (len(self.native_policy_digest) != 64
+        for name in ("native_policy_digest", "provider_policy_digest"):
+            digest = getattr(self, name)
+            if not isinstance(digest, str):
+                raise RuntimeContractError(f"{name} must be text")
+            if (digest and (len(digest) != 64
                      or any(c not in "0123456789abcdef"
-                            for c in self.native_policy_digest))):
-            raise RuntimeContractError("native_policy_digest must be sha256 hex")
+                            for c in digest))):
+                raise RuntimeContractError(f"{name} must be sha256 hex")
         _frozen_texts(self.capability_ceiling, "capability_ceiling")
         _frozen_texts(self.active_task_ids, "active_task_ids")
+        for name in ("native_enabled", "native_approval_gated", "native_blocked"):
+            _frozen_texts(getattr(self, name), name)
+        if self.native_policy_digest:
+            _text(self.native_provider_version, "native_provider_version")
+        elif (self.native_provider_version or self.native_enabled
+              or self.native_approval_gated or self.native_blocked):
+            raise RuntimeContractError("native authority facts need a policy digest")
+        if self.provider_policy_digest and not self.native_policy_digest:
+            raise RuntimeContractError("provider policy needs native authority")
+        groups = (self.native_enabled, self.native_approval_gated,
+                  self.native_blocked)
+        if len(set().union(*map(set, groups))) != sum(map(len, groups)):
+            raise RuntimeContractError("native capability states overlap")
 
     @classmethod
     def from_dict(cls, value: Any) -> RunRecord:
-        # R134 adds a signed native-policy ceiling. Existing signed records do
-        # not gain authority by omission; they parse with an empty ceiling so
-        # recovery can terminate them, while native callbacks still reject it.
-        if isinstance(value, dict) and "native_policy_digest" not in value:
-            value = {**value, "native_policy_digest": ""}
+        # R135 expands the signed native-policy ceiling. Existing signed
+        # records do not gain authority by omission; they parse with an empty
+        # ceiling so recovery can terminate them while native calls reject it.
+        if isinstance(value, dict):
+            defaults = {
+                "native_policy_digest": "", "provider_policy_digest": "",
+                "native_provider_version": "",
+                "native_enabled": [], "native_approval_gated": [],
+                "native_blocked": [],
+            }
+            new_fields = set(defaults) - {"native_policy_digest"}
+            if not new_fields.issubset(value):
+                # Pre-R135 records may carry R134's digest without the facts
+                # needed to interpret it. Preserve recoverability but strip
+                # that incomplete authority rather than inventing new power.
+                value = {**value, **defaults}
+            else:
+                value = {**defaults, **value}
         return _parse_record(cls, value, enums={"state": RunState},
-                             tuples={"capability_ceiling", "active_task_ids"})  # type: ignore[return-value]
+                             tuples={"capability_ceiling", "active_task_ids",
+                                     "native_enabled", "native_approval_gated",
+                                     "native_blocked"})  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,10 +90,27 @@ def test_runtime_records_are_immutable_strict_canonical_and_round_trip(record):
 
 def test_pre_r134_run_record_defaults_to_no_native_authority():
     encoded = next(records()).to_dict()
-    encoded.pop("native_policy_digest")
+    for name in ("native_policy_digest", "provider_policy_digest",
+                 "native_provider_version",
+                 "native_enabled", "native_approval_gated", "native_blocked"):
+        encoded.pop(name)
     parsed = record_from_dict(encoded)
     assert isinstance(parsed, RunRecord)
     assert parsed.native_policy_digest == ""
+    assert parsed.native_provider_version == ""
+    assert parsed.native_enabled == ()
+
+
+def test_r134_digest_without_effective_facts_migrates_fail_closed():
+    encoded = next(records()).to_dict()
+    encoded["native_policy_digest"] = "a" * 64
+    for name in ("provider_policy_digest", "native_provider_version", "native_enabled",
+                 "native_approval_gated", "native_blocked"):
+        encoded.pop(name)
+    parsed = record_from_dict(encoded)
+    assert isinstance(parsed, RunRecord)
+    assert parsed.native_policy_digest == ""
+    assert parsed.native_enabled == parsed.native_blocked == ()
 
 
 def test_runtime_envelope_binds_metadata_ciphertext_and_signature_spelling():

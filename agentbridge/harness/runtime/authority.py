@@ -38,6 +38,7 @@ def validate_run_authority(mesh, run: RunRecord, *, agent: str, chat_id: str,
             or run.execution_level != "brokered_native"):
         raise AuthorityError("provider-native run binding is invalid")
     if (native_policy is None
+            or run.native_provider_version != provider_version
             or run.native_policy_digest
             != native_policy.authority_digest(provider_version)):
         raise AuthorityError("provider-native policy ceiling is invalid")

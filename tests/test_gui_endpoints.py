@@ -538,9 +538,10 @@ def test_harness_options_reports_bridge_facts_without_secrets(rig):
     assert by_id["approve"]["surface"] == "control-plane"
     assert by_id["delete_message"]["effect"] == "shared-content-delete"
     provider_registry = out["provider_native_registry"]
-    assert provider_registry["schema_version"] == 1
+    assert provider_registry["schema_version"] == 2
     provider_ids = {item["id"] for item in provider_registry["capabilities"]}
-    assert {"claude.file_read", "cortex.send_message"} <= provider_ids
+    assert {"claude.file_read", "cortex.send_message",
+            "codex.workspace_read", "codex.agentbridge_mcp"} <= provider_ids
     serialized = json.dumps(out)
     assert "AGENTBRIDGE_MCP_TOKEN" not in serialized
     assert "bearer_token" not in serialized

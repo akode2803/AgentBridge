@@ -131,6 +131,11 @@ class RunLedger:
               execution_level: str = "brokered_native",
               capability_ceiling: tuple[str, ...] = (),
               native_policy_digest: str = "",
+              provider_policy_digest: str = "",
+              native_provider_version: str = "",
+              native_enabled: tuple[str, ...] = (),
+              native_approval_gated: tuple[str, ...] = (),
+              native_blocked: tuple[str, ...] = (),
               active_task_ids: tuple[str, ...] = (),
               policy_revision: int | None = None) -> RunRecord:
         with self._lock:
@@ -139,6 +144,11 @@ class RunLedger:
                 provider=provider, model=model, execution_level=execution_level,
                 capability_ceiling=capability_ceiling,
                 native_policy_digest=native_policy_digest,
+                provider_policy_digest=provider_policy_digest,
+                native_provider_version=native_provider_version,
+                native_enabled=native_enabled,
+                native_approval_gated=native_approval_gated,
+                native_blocked=native_blocked,
                 active_task_ids=active_task_ids,
                 policy_revision=policy_revision,
             )
@@ -153,6 +163,11 @@ class RunLedger:
                        execution_level: str = "brokered_native",
                        capability_ceiling: tuple[str, ...] = (),
                        native_policy_digest: str = "",
+                       provider_policy_digest: str = "",
+                       native_provider_version: str = "",
+                       native_enabled: tuple[str, ...] = (),
+                       native_approval_gated: tuple[str, ...] = (),
+                       native_blocked: tuple[str, ...] = (),
                        active_task_ids: tuple[str, ...] = (),
                        policy_revision: int | None = None,
                        ) -> tuple[RunRecord, str, dict, dict]:
@@ -180,6 +195,11 @@ class RunLedger:
             capability_ceiling=capability_ceiling, active_task_ids=active_task_ids,
             status="Starting up", outcome=None,
             native_policy_digest=native_policy_digest,
+            provider_policy_digest=provider_policy_digest,
+            native_provider_version=native_provider_version,
+            native_enabled=native_enabled,
+            native_approval_gated=native_approval_gated,
+            native_blocked=native_blocked,
         )
         target, payload = self._payload(record, terminal=False)
         opened = self._opened()
@@ -368,7 +388,10 @@ class RunLedger:
             static = (
                 "trigger_id", "manager_agent", "responsible_member",
                 "execution_level", "provider", "model", "capability_ceiling",
-                "active_task_ids",
+                "active_task_ids", "native_policy_digest",
+                "provider_policy_digest",
+                "native_provider_version", "native_enabled",
+                "native_approval_gated", "native_blocked",
             )
             terminals = [
                 record for record in group

@@ -16,12 +16,15 @@ from types import MappingProxyType
 from ...core.errors import ValidationError
 
 __all__ = [
+    "CODEX_PROVIDER_VERSION",
     "NATIVE_CAPABILITIES", "NATIVE_CAPABILITY_SCHEMA",
     "NATIVE_DENY_ARG_TEMPLATES", "NativeCapabilitySpec", "NativeProfile",
-    "EffectiveNativePolicy", "native_capability_report",
+    "EffectiveNativePolicy", "codex_native_policy", "native_capability_report",
+    "validate_native_authority_facts",
 ]
 
-NATIVE_CAPABILITY_SCHEMA = 1
+NATIVE_CAPABILITY_SCHEMA = 2
+CODEX_PROVIDER_VERSION = "codex-cli 0.144.5"
 NATIVE_DENY_ARG_TEMPLATES = MappingProxyType({
     "claude": ("--disallowedTools", "{tool}"),
     "cortex": ("--disallowed-tools", "{tool}"),
@@ -37,6 +40,8 @@ class NativeCapabilitySpec:
     id: str
     provider: str
     tools: tuple[str, ...]
+    controls: tuple[str, ...]
+    surface: str
     effect: str
     risk: str
     approval: str
@@ -53,6 +58,8 @@ class NativeCapabilitySpec:
             "id": self.id,
             "provider": self.provider,
             "tools": list(self.tools),
+            "controls": list(self.controls),
+            "surface": self.surface,
             "effect": self.effect,
             "risk": self.risk,
             "approval": self.approval,
@@ -78,6 +85,8 @@ def _native(capability_id: str, provider: str, *tools: str,
         id=capability_id,
         provider=provider,
         tools=tuple(tools),
+        controls=(),
+        surface="provider-tool",
         effect=effect,
         risk=risk,
         approval=approval,
@@ -92,7 +101,82 @@ def _native(capability_id: str, provider: str, *tools: str,
     )
 
 
+def _codex(capability_id: str, *controls: str, effect: str,
+           risk: str = "high", surface: str = "provider-feature",
+           approval: str = "package-compiled-provider-policy",
+           enforcement_locus: str = "codex-0.144-config") \
+        -> NativeCapabilitySpec:
+    return NativeCapabilitySpec(
+        id=capability_id, provider="codex", tools=(),
+        controls=tuple(controls), surface=surface, effect=effect, risk=risk,
+        approval=approval, enforcement_locus=enforcement_locus,
+        evidence="https://developers.openai.com/codex/config-reference/",
+        backend_minimum="brokered_native", failure_mode="deny",
+    )
+
+
 _SPECS = (
+    _codex("codex.workspace_read", "permissions.agentbridge-run.filesystem",
+           effect="host-file-read", surface="host-boundary"),
+    _codex("codex.workspace_write", "permissions.agentbridge-run.filesystem",
+           effect="host-file-write", risk="critical", surface="host-boundary"),
+    _codex("codex.process_exec", "default_permissions",
+           effect="host-process-exec", risk="critical", surface="host-boundary"),
+    _codex("codex.workspace_binding", "-C", "projects",
+           effect="workspace-scope-binding", risk="critical",
+           surface="host-boundary"),
+    _codex("codex.provider_prompts", "approval_policy",
+           effect="provider-native-approval", risk="critical"),
+    _codex("codex.session_persistence", "--ephemeral",
+           effect="provider-persistent-state", risk="high"),
+    _codex("codex.strict_config", "--strict-config",
+           effect="provider-config-validation", risk="high",
+           surface="configuration-source"),
+    _codex("codex.project_trust", "projects.*.trust_level",
+           effect="trusted-project-authority", risk="critical",
+           surface="configuration-source"),
+    _codex("codex.safe_overlay", "model_context_window",
+           "model_auto_compact_token_limit", "personality", "service_tier",
+           effect="reviewed-model-config-overlay", risk="medium",
+           surface="configuration-source"),
+    _codex("codex.network", "permissions.agentbridge-run.network.enabled",
+           effect="network-read-or-write", risk="critical", surface="host-boundary"),
+    _codex("codex.web_search", "web_search", effect="network-read"),
+    _codex("codex.agentbridge_mcp", "mcp_servers.ab",
+           effect="agentbridge-broker-tools", risk="high",
+           surface="provider-tool-transport",
+           approval="signed-bridge-ceiling+server-authority",
+           enforcement_locus="codex-mcp-filter+agentbridge-server"),
+    _codex("codex.external_mcp", "--ignore-user-config", "mcp_servers",
+           effect="external-tool-access", risk="critical",
+           surface="configuration-source"),
+    _codex("codex.user_config", "--ignore-user-config",
+           effect="provider-config-inheritance", risk="critical",
+           surface="configuration-source"),
+    _codex("codex.rules", "--ignore-rules", "project_doc_max_bytes",
+           effect="instruction-inheritance", surface="configuration-source"),
+    _codex("codex.apps", "features.apps", effect="external-tool-access"),
+    _codex("codex.plugins", "features.plugins", effect="external-tool-access"),
+    _codex("codex.hooks", "features.hooks", effect="host-process-exec",
+           risk="critical"),
+    _codex("codex.multi_agent", "features.multi_agent",
+           effect="provider-delegation"),
+    _codex("codex.browser", "features.browser_use",
+           "features.browser_use_external", "features.browser_use_full_cdp_access",
+           "features.in_app_browser", effect="browser-control", risk="critical"),
+    _codex("codex.computer_use", "features.computer_use",
+           effect="computer-control", risk="critical"),
+    _codex("codex.image_generation", "features.image_generation",
+           effect="external-service-use"),
+    _codex("codex.workspace_dependencies", "features.workspace_dependencies",
+           "features.skill_mcp_dependency_install", effect="dependency-install",
+           risk="critical"),
+    _codex("codex.memories", "features.memories", "memories.use_memories",
+           effect="provider-persistent-state"),
+    _codex("codex.endpoint_override", "OPENAI_BASE_URL",
+           "CODEX_EVERYWHERE_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+           effect="credential-or-endpoint-redirection", risk="critical",
+           surface="environment-boundary"),
     _native("claude.file_read", "claude", "Read", effect="host-file-read",
             risk="high"),
     _native("claude.file_glob", "claude", "Glob", "LS",
@@ -213,6 +297,7 @@ class EffectiveNativePolicy:
     auto_allow_tools: tuple[str, ...]
     blocked_tools: tuple[str, ...]
     permission_callback: bool
+    enforcement_contract: tuple[str, ...]
 
     def authority_digest(self, provider_version: str = "unattested") -> str:
         """Digest every fact that can broaden one native provider run."""
@@ -229,7 +314,7 @@ class EffectiveNativePolicy:
             "enabled": self.enabled,
             "approval_gated": self.approval_gated,
             "blocked": self.blocked,
-            "deny_arg_template": NATIVE_DENY_ARG_TEMPLATES[self.provider],
+            "enforcement_contract": self.enforcement_contract,
             "catalog": {
                 capability_id: NATIVE_CAPABILITIES[capability_id].public_facts()
                 for capability_id in sorted(capability_ids)
@@ -272,6 +357,69 @@ class EffectiveNativePolicy:
             "approval_gated": list(self.approval_gated),
             "blocked": list(self.blocked),
         }
+
+
+_CODEX_ENABLED = (
+    "codex.workspace_read", "codex.workspace_write", "codex.process_exec",
+    "codex.workspace_binding", "codex.strict_config", "codex.safe_overlay",
+)
+_CODEX_BLOCKED = tuple(
+    spec.id for spec in _SPECS
+    if spec.provider == "codex" and spec.id not in _CODEX_ENABLED
+    and spec.id != "codex.agentbridge_mcp"
+)
+
+
+def codex_native_policy(*, bridge_attached: bool) -> EffectiveNativePolicy:
+    """Return the reviewed effective authority of the exact Codex renderer."""
+    enabled = _CODEX_ENABLED
+    approval_gated = (("codex.agentbridge_mcp",) if bridge_attached else ())
+    blocked = (*_CODEX_BLOCKED,
+               *(("codex.agentbridge_mcp",) if not bridge_attached else ()))
+    return EffectiveNativePolicy(
+        schema_version=NATIVE_CAPABILITY_SCHEMA, provider="codex",
+        inventory_complete=True,
+        enforcement_locus="codex-0.144-config+agentbridge-server-authority",
+        evidence="https://developers.openai.com/codex/config-reference/",
+        enabled=tuple(enabled), approval_gated=approval_gated,
+        blocked=tuple(blocked),
+        auto_allow_tools=(), blocked_tools=(), permission_callback=False,
+        enforcement_contract=(
+            "codex-0.144-exact-version", "ignore-user-config", "ignore-rules",
+            "strict-config", "fresh-ephemeral-run", "agentbridge-run-permissions",
+            "credential-endpoint-env-filter", "optional-signed-mcp-ceiling",
+        ),
+    )
+
+
+def validate_native_authority_facts(
+    *, provider: str, provider_version: str, authority_digest: str,
+    enabled: tuple[str, ...], approval_gated: tuple[str, ...],
+    blocked: tuple[str, ...],
+) -> None:
+    """Reject unknown, cross-provider or non-canonical signed state facts."""
+    groups = (enabled, approval_gated, blocked)
+    ids = tuple(item for group in groups for item in group)
+    if len(set(ids)) != len(ids):
+        raise ValidationError("native capability states overlap")
+    unknown = {
+        item for item in ids
+        if item not in NATIVE_CAPABILITIES
+        or NATIVE_CAPABILITIES[item].provider != provider
+    }
+    if unknown:
+        raise ValidationError(f"unknown native capability: {sorted(unknown)}")
+    if provider == "codex":
+        expected = codex_native_policy(
+            bridge_attached="codex.agentbridge_mcp" in approval_gated,
+        )
+        if (provider_version != CODEX_PROVIDER_VERSION
+                or enabled != expected.enabled
+                or approval_gated != expected.approval_gated
+                or blocked != expected.blocked
+                or authority_digest
+                != expected.authority_digest(provider_version)):
+            raise ValidationError("non-canonical Codex native authority facts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +507,7 @@ class NativeProfile:
             auto_allow_tools=_tools(enabled),
             blocked_tools=_tools(blocked),
             permission_callback=permission_callback,
+            enforcement_contract=NATIVE_DENY_ARG_TEMPLATES[self.provider],
         )
 
     def public_facts(self) -> dict:

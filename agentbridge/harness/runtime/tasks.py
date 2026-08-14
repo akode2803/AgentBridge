@@ -158,6 +158,11 @@ class TaskLedger:
                        trigger_id: str, provider: str, model: str,
                        capability_ceiling: tuple[str, ...] = (),
                        native_policy_digest: str = "",
+                       provider_policy_digest: str = "",
+                       native_provider_version: str = "",
+                       native_enabled: tuple[str, ...] = (),
+                       native_approval_gated: tuple[str, ...] = (),
+                       native_blocked: tuple[str, ...] = (),
                        policy_revision: int | None = None,
                        ) -> tuple[RunRecord, TaskRecord]:
         """Atomically commit one canonical run and its promised root task."""
@@ -168,6 +173,11 @@ class TaskLedger:
                     provider=provider, model=model,
                     capability_ceiling=capability_ceiling,
                     native_policy_digest=native_policy_digest,
+                    provider_policy_digest=provider_policy_digest,
+                    native_provider_version=native_provider_version,
+                    native_enabled=native_enabled,
+                    native_approval_gated=native_approval_gated,
+                    native_blocked=native_blocked,
                     active_task_ids=(task_id,),
                     policy_revision=policy_revision,
                 )

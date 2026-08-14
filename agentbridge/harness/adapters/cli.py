@@ -49,7 +49,7 @@ from ..settings import HarnessSettings
 from .registry import (
     Invocation, ModelRegistry, effective_gates, effective_native_policy,
 )
-from .policy import compile_bridge_policy
+from .policy import CompiledBridgePolicy, compile_bridge_policy
 
 __all__ = ["ChildInvocation", "ChildRequest", "ChildResult", "CliResponder",
            "extract_step", "provider_env", "reply_from_output",
@@ -341,11 +341,30 @@ class CliResponder:
                      and invocation.preset.bridge_profile is not None else set())
         delivery.capability_ceiling = compile_capability_ceiling(
             invocation.preset.bridge_profile, requested)
-        native_policy = effective_native_policy(
-            invocation.preset, settings, permission_callback=False)
+        bridge_policy = None
+        if invocation.preset.bridge_profile is not None:
+            workdir = (self.home / "harness" / self.agent / "workspaces"
+                       / delivery.chat_id)
+            bridge_policy = compile_bridge_policy(
+                invocation.preset.bridge_profile,
+                command=invocation.preset.command, workspace=workdir,
+                timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
+                requested_capabilities=set(delivery.capability_ceiling),
+            )
+        delivery.compiled_bridge_policy = bridge_policy
+        native_policy = (bridge_policy.native_policy() if bridge_policy else
+                         effective_native_policy(
+                             invocation.preset, settings,
+                             permission_callback=False))
         delivery.native_policy = native_policy
+        delivery.native_provider_version = (
+            bridge_policy.executable_version if bridge_policy else
+            "unattested" if native_policy is not None else "")
         delivery.native_policy_digest = (
-            native_policy.authority_digest() if native_policy is not None else "")
+            native_policy.authority_digest(delivery.native_provider_version)
+            if native_policy is not None else "")
+        delivery.provider_policy_digest = (
+            bridge_policy.authority_digest() if bridge_policy is not None else "")
         delivery.invocation = invocation
         delivery.harness_settings = settings
         metadata = {
@@ -357,6 +376,13 @@ class CliResponder:
         }
         if delivery.native_policy_digest:
             metadata["native_policy_digest"] = delivery.native_policy_digest
+            metadata["provider_policy_digest"] = delivery.provider_policy_digest
+            metadata.update({
+                "native_provider_version": delivery.native_provider_version,
+                "native_enabled": native_policy.enabled,
+                "native_approval_gated": native_policy.approval_gated,
+                "native_blocked": native_policy.blocked,
+            })
         return metadata
 
     # ------------------------------------------------------ child sidecar
@@ -524,6 +550,12 @@ class CliResponder:
             inv = self.registry.resolve(settings, category,
                                         delivery.chat_id)  # direct-call fallback
         capability_ceiling = self._canonical_capability_ceiling(delivery)
+        if delivery.run_id:
+            run = delivery.canonical_run
+            model = inv.model or "provider-default-unattested"
+            if (run.provider != inv.preset.id or run.model != model):
+                raise ValidationError(
+                    "prepared provider invocation changed after signing")
         pack = self.prompts.for_agent(acc)
 
         # per-chat context ceiling (Q30): the owner caps how many DAYS of
@@ -573,13 +605,44 @@ class CliResponder:
         # Broker-dependent native tools therefore compile to provider deny
         # flags instead of inheriting ambient CLI authority. A later verified
         # callback can change this bit without changing the policy model.
-        native_policy = effective_native_policy(
-            inv.preset, settings, permission_callback=False)
+        bridge_policy = delivery.compiled_bridge_policy
+        if bridge_policy is not None and (
+                not isinstance(bridge_policy, CompiledBridgePolicy)
+                or bridge_policy.workspace != str(workdir.resolve())):
+            raise ValidationError("prepared bridge authority is invalid")
+        if inv.preset.bridge_profile is not None and bridge_policy is None:
+            if delivery.run_id:
+                raise ValidationError("signed bridge authority is unavailable")
+            bridge_policy = compile_bridge_policy(
+                inv.preset.bridge_profile, command=inv.preset.command,
+                workspace=workdir,
+                timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
+                requested_capabilities=set(capability_ceiling),
+            )
+        native_policy = (bridge_policy.native_policy() if bridge_policy else
+                         effective_native_policy(
+                             inv.preset, settings, permission_callback=False))
         if native_policy is not None:
-            if (delivery.native_policy_digest != native_policy.authority_digest()
+            provider_version = (bridge_policy.executable_version
+                                if bridge_policy else "unattested")
+            run = delivery.canonical_run
+            authority_digest = (bridge_policy.authority_digest()
+                                if bridge_policy else
+                                native_policy.authority_digest(provider_version))
+            if (delivery.native_policy_digest
+                    != native_policy.authority_digest(provider_version)
                     or delivery.native_policy_digest
-                    != getattr(delivery.canonical_run,
-                               "native_policy_digest", "")):
+                    != getattr(run, "native_policy_digest", "")
+                    or delivery.provider_policy_digest
+                    != (authority_digest if bridge_policy else "")
+                    or delivery.provider_policy_digest
+                    != getattr(run, "provider_policy_digest", "")
+                    or provider_version
+                    != getattr(run, "native_provider_version", "")
+                    or native_policy.enabled != getattr(run, "native_enabled", ())
+                    or native_policy.approval_gated
+                    != getattr(run, "native_approval_gated", ())
+                    or native_policy.blocked != getattr(run, "native_blocked", ())):
                 raise ValidationError(
                     "prepared native authority changed after signing")
         auto_allow, blocklist = effective_gates(
@@ -598,15 +661,10 @@ class CliResponder:
                 "AGENTBRIDGE_OUTBOX": str(outbox),
             }
             bridge = None
-            bridge_policy = None
-            if inv.preset.bridge_profile is not None:
-                bridge_policy = compile_bridge_policy(
-                    inv.preset.bridge_profile,
-                    command=inv.preset.command,
-                    workspace=workdir,
-                    timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
-                    requested_capabilities=set(capability_ceiling),
-                )
+            # The exact provider policy was compiled before the signed run.
+            # Invocation consumes that same frozen object; it never re-probes
+            # the executable or re-reads mutable owner configuration here.
+            if bridge_policy is not None:
                 bridge_args = bridge_policy.launch_args
             if bridge_policy is not None and bridge_policy.capabilities:
                 bridge = stack.enter_context(BridgeServer(

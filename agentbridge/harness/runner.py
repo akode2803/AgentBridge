@@ -42,6 +42,7 @@ from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
 from .capabilities import validate_model_capability_ceiling
+from .adapters.native import validate_native_authority_facts
 from .conversation import ConversationManager
 from .feed import (RunFeed, reap_orphan_run, record_tasks,
                    write_harness_doc, write_waiting)
@@ -592,16 +593,47 @@ class AgentRunner:
                 ceiling = validate_model_capability_ceiling(
                     value.get("capability_ceiling", ()))
                 native_digest = value.get("native_policy_digest", "")
+                provider_digest = value.get("provider_policy_digest", "")
                 if (not isinstance(native_digest, str)
                         or (native_digest and (
                             len(native_digest) != 64
                             or any(c not in "0123456789abcdef"
                                    for c in native_digest)))):
                     raise ValidationError("invalid native policy digest")
+                if (not isinstance(provider_digest, str)
+                        or (provider_digest and (
+                            len(provider_digest) != 64
+                            or any(c not in "0123456789abcdef"
+                                   for c in provider_digest)))):
+                    raise ValidationError("invalid provider policy digest")
+                native_version = value.get("native_provider_version", "")
+                native_groups = {}
+                for name in ("native_enabled", "native_approval_gated",
+                             "native_blocked"):
+                    group = value.get(name, ())
+                    if (not isinstance(group, (tuple, list))
+                            or any(not isinstance(item, str) or not item
+                                   for item in group)):
+                        raise ValidationError(f"invalid {name}")
+                    native_groups[name] = tuple(group)
+                if native_digest and not isinstance(native_version, str):
+                    raise ValidationError("invalid native provider version")
+                if native_digest:
+                    validate_native_authority_facts(
+                        provider=str(value["provider"]),
+                        provider_version=native_version,
+                        authority_digest=native_digest,
+                        enabled=native_groups["native_enabled"],
+                        approval_gated=native_groups["native_approval_gated"],
+                        blocked=native_groups["native_blocked"],
+                    )
                 return {"provider": str(value["provider"]),
                         "model": str(value["model"]),
                         "capability_ceiling": ceiling,
-                        "native_policy_digest": native_digest}
+                        "native_policy_digest": native_digest,
+                        "provider_policy_digest": provider_digest,
+                        "native_provider_version": native_version,
+                        **native_groups}
             raise ValidationError("responder returned invalid invocation metadata")
         return {"provider": type(self.responder).__name__ or "injected",
                 "model": "injected"}
@@ -610,6 +642,11 @@ class AgentRunner:
                   model: str = "not-invoked",
                   capability_ceiling: tuple[str, ...] = (),
                   native_policy_digest: str = "",
+                  provider_policy_digest: str = "",
+                  native_provider_version: str = "",
+                  native_enabled: tuple[str, ...] = (),
+                  native_approval_gated: tuple[str, ...] = (),
+                  native_blocked: tuple[str, ...] = (),
                   policy_revision: int | None = None) -> RunFeed:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
@@ -619,6 +656,11 @@ class AgentRunner:
             provider=provider, model=model,
             capability_ceiling=capability_ceiling,
             native_policy_digest=native_policy_digest,
+            provider_policy_digest=provider_policy_digest,
+            native_provider_version=native_provider_version,
+            native_enabled=native_enabled,
+            native_approval_gated=native_approval_gated,
+            native_blocked=native_blocked,
             policy_revision=policy_revision,
         )
 

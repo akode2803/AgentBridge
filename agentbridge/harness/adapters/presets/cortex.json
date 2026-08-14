@@ -15,7 +15,7 @@
   "model_args": ["--model", "{model}"],
   "blocklist_args": ["--disallowed-tools", "{tool}"],
   "native_profile": {
-    "schema": 1,
+    "schema": 2,
     "provider": "cortex",
     "inventory_complete": false,
     "enforcement_locus": "provider-deny-flags+optional-agentbridge-broker",

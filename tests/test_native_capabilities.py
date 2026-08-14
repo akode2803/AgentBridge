@@ -136,7 +136,8 @@ def test_native_registry_report_is_versioned_and_secret_free():
     assert report["schema_version"] == NATIVE_CAPABILITY_SCHEMA
     assert {row["id"] for row in report["capabilities"]} == set(NATIVE_CAPABILITIES)
     encoded = json.dumps(report).lower()
-    assert "token" not in encoded and "credential" not in encoded
+    assert "bearer " not in encoded and "secret=" not in encoded
+    assert "/users/" not in encoded and "127.0.0.1:" not in encoded
 
 
 def test_canonical_call_digest_binds_provider_tool_and_structured_input():
@@ -180,7 +181,11 @@ def test_native_authority_digest_binds_catalog_and_deny_template(
         native_module, "NATIVE_DENY_ARG_TEMPLATES",
         MappingProxyType(changed_templates),
     )
-    assert policy.authority_digest() != baseline
+    # The compiled contract is frozen; mutating the module-level template
+    # after compilation cannot rewrite the signed run's meaning.
+    assert policy.authority_digest() == baseline
+    assert replace(policy, enforcement_contract=("--future-deny", "{tool}")) \
+        .authority_digest() != baseline
 
 
 @pytest.fixture()
@@ -207,6 +212,10 @@ def native_run(tmp_path):
         run_id="run-native", chat_id=chat.id, trigger_id="message-native",
         provider="claude", model="provider-default-unattested",
         native_policy_digest=policy.authority_digest(),
+        native_provider_version="unattested",
+        native_enabled=policy.enabled,
+        native_approval_gated=policy.approval_gated,
+        native_blocked=policy.blocked,
     )
     try:
         yield owner, agent, chat.id, workspace, run, policy
@@ -264,6 +273,10 @@ def test_approval_gated_native_read_does_not_bypass_on_workspace_or_file_key(
         trigger_id="message-native-gated", provider="claude",
         model="provider-default-unattested",
         native_policy_digest=gated.authority_digest(),
+        native_provider_version="unattested",
+        native_enabled=gated.enabled,
+        native_approval_gated=gated.approval_gated,
+        native_blocked=gated.blocked,
     )
     broker = PermissionBroker(agent, "helper")
     broker.ask = lambda **_values: ("deny", "owner denied")

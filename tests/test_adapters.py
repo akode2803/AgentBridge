@@ -417,6 +417,45 @@ def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path
         mesh.close()
 
 
+def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
+        arig, tmp_path, monkeypatch):
+    import agentbridge.harness.adapters.policy as policy_module
+
+    calls = []
+    monkeypatch.setattr(policy_module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        policy_module.subprocess, "run",
+        lambda *args, **kwargs: (
+            calls.append((args, kwargs)) or
+            SimpleNamespace(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+        ),
+    )
+    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+                store_path=tmp_path / "codex-prepare.sqlite")
+    try:
+        registry = ModelRegistry.load(arig.home)
+        registry._which["codex"] = True
+        responder = CliResponder(registry, mesh, arig.home)
+        delivery = SimpleNamespace(
+            kind="message", triggers=[], chat_id="codex-chat",
+            invocation=None, harness_settings=None,
+        )
+        metadata = responder.prepare(delivery, settings(adapter="codex"))
+        assert len(calls) == 1
+        assert metadata["provider"] == "codex"
+        assert metadata["native_provider_version"] == "codex-cli 0.144.5"
+        assert metadata["native_policy_digest"] == \
+            delivery.native_policy.authority_digest("codex-cli 0.144.5")
+        assert metadata["provider_policy_digest"] == \
+            delivery.compiled_bridge_policy.authority_digest()
+        assert metadata["native_enabled"] == delivery.native_policy.enabled
+        assert metadata["native_blocked"] == delivery.native_policy.blocked
+        assert delivery.compiled_bridge_policy.executable_version == \
+            "codex-cli 0.144.5"
+    finally:
+        mesh.close()
+
+
 def test_owner_stop_kills_the_run_cleanly(tmp_path):
     """R36: the owner's stop doc kills the in-flight subprocess; the outcome
     is a deliberate stop — no reply, no error notice, feed state 'stopped',

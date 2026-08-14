@@ -110,6 +110,11 @@ class RunFeed:
                  model: str = "", policy_revision: int | None = None,
                  capability_ceiling: tuple[str, ...] = (),
                  native_policy_digest: str = "",
+                 provider_policy_digest: str = "",
+                 native_provider_version: str = "",
+                 native_enabled: tuple[str, ...] = (),
+                 native_approval_gated: tuple[str, ...] = (),
+                 native_blocked: tuple[str, ...] = (),
                  task_ledger=None) -> None:
         self.tx = tx
         self.agent = agent
@@ -141,6 +146,11 @@ class RunFeed:
                 model=model or "configured-model",
                 capability_ceiling=capability_ceiling,
                 native_policy_digest=native_policy_digest,
+                provider_policy_digest=provider_policy_digest,
+                native_provider_version=native_provider_version,
+                native_enabled=native_enabled,
+                native_approval_gated=native_approval_gated,
+                native_blocked=native_blocked,
                 policy_revision=policy_revision,
             )
         elif self._ledger is not None:
@@ -151,6 +161,11 @@ class RunFeed:
                 model=model or "configured-model",
                 capability_ceiling=capability_ceiling,
                 native_policy_digest=native_policy_digest,
+                provider_policy_digest=provider_policy_digest,
+                native_provider_version=native_provider_version,
+                native_enabled=native_enabled,
+                native_approval_gated=native_approval_gated,
+                native_blocked=native_blocked,
                 policy_revision=policy_revision,
             )
         self.write("running", force=True)

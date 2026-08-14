@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 
@@ -11,6 +12,7 @@ from agentbridge.harness.adapters import ModelRegistry, Preset
 from agentbridge.harness.adapters.policy import (
     BridgeProfile, compile_bridge_policy,
 )
+from agentbridge.harness.adapters.native import NATIVE_CAPABILITIES
 from agentbridge.harness.adapters.registry import PRESET_DIR
 from agentbridge.harness.capabilities import compile_capability_ceiling
 
@@ -29,6 +31,10 @@ def test_bridge_profile_schema_is_strict():
         BridgeProfile.from_dict({**raw, "capabilities": ["*"]})
     with pytest.raises(ValidationError, match="anchored"):
         BridgeProfile.from_dict({**raw, "version_pattern": "codex"})
+    with pytest.raises(ValidationError, match="reviewed version"):
+        BridgeProfile.from_dict({
+            **raw, "version_pattern": "^codex-cli 0\\.144\\.6$",
+        })
 
 
 def test_capability_ceiling_rejects_unknown_control_and_undeclared_ids():
@@ -37,6 +43,8 @@ def test_capability_ceiling_rejects_unknown_control_and_undeclared_ids():
         profile, {"delegate_agent"}) == ("delegate_agent",)
     with pytest.raises(ValidationError, match="unknown bridge capability"):
         compile_capability_ceiling(profile, {"future_tool"})
+    with pytest.raises(ValidationError, match="unknown bridge capability"):
+        compile_capability_ceiling(profile, {"codex.process_exec"})
     with pytest.raises(ValidationError, match="not a model capability"):
         compile_capability_ceiling(profile, {"approve"})
     with pytest.raises(ValidationError, match="no trusted bridge profile"):
@@ -107,6 +115,43 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
         "OPENAI_API_KEY": "secret", "AGENTBRIDGE_MCP_TOKEN": "run-token",
     })
     assert clean == {"PATH": "/bin", "AGENTBRIDGE_MCP_TOKEN": "run-token"}
+    native = policy.native_policy()
+    assert native.inventory_complete is True
+    assert native.provider == "codex"
+    assert native.approval_gated == ("codex.agentbridge_mcp",)
+    assert {"codex.workspace_read", "codex.workspace_write",
+            "codex.process_exec", "codex.workspace_binding"} \
+        <= set(native.enabled)
+    assert {"codex.network", "codex.web_search", "codex.external_mcp",
+            "codex.user_config", "codex.rules", "codex.provider_prompts",
+            "codex.session_persistence", "codex.project_trust",
+            "codex.apps", "codex.plugins", "codex.hooks",
+            "codex.multi_agent", "codex.browser", "codex.computer_use",
+            "codex.image_generation", "codex.workspace_dependencies",
+            "codex.memories", "codex.endpoint_override"} <= set(native.blocked)
+    assert native.authority_digest(policy.executable_version) != \
+        native.authority_digest("codex-cli 0.144.6")
+    assert policy.authority_digest() != replace(
+        policy, launch_args=(*policy.launch_args, "--dangerously-broaden"),
+    ).authority_digest()
+    assert policy.authority_digest() != replace(
+        policy, workspace=str(tmp_path / "other-workspace"),
+    ).authority_digest()
+
+
+def test_codex_catalog_controls_are_not_misreported_as_callback_tools():
+    codex = [spec for spec in NATIVE_CAPABILITIES.values()
+             if spec.provider == "codex"]
+    assert codex and all(not spec.tools and spec.controls for spec in codex)
+    controls = {control for spec in codex for control in spec.controls}
+    assert {"--ignore-user-config", "--ignore-rules", "--ephemeral",
+            "--strict-config", "approval_policy", "default_permissions",
+            "permissions.agentbridge-run.filesystem",
+            "permissions.agentbridge-run.network.enabled", "web_search",
+            "features.apps", "features.plugins", "features.hooks",
+            "features.multi_agent", "features.computer_use",
+            "features.image_generation", "features.workspace_dependencies",
+            "features.memories", "mcp_servers.ab"} <= controls
 
 
 def test_compiler_rejects_unverified_version(monkeypatch, tmp_path):

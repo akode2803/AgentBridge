@@ -430,7 +430,7 @@ live only in an adapter preset.
   (ping/status/run_feed), and a stricter second gate `peer_repair` for
   mutations (pause/resume/clear_queue/clear_timers — always re-prompt, injected
   by the runner, touch only harness-local runtime state). Every outcome audited.
-- **`capabilities.py` + `adapters/native.py`** (R133-R134/C4.1-C4.2) — separate
+- **`capabilities.py` + `adapters/native.py`** (R133-R135/C4.1-C4.2) — separate
   immutable package catalogs own AgentBridge MCP and provider-native authority.
   The bridge catalog covers all conditionally registered MCP tools and rejects
   inventory/exposure drift. The native catalog maps every known configured
@@ -443,11 +443,20 @@ live only in an adapter preset.
   classification and approval state precede workspace shortcuts. The exact
   effective policy is digested into the signed run, and each call rechecks that
   ceiling plus current membership, owner, policy, provider and execution level.
-  The digest includes catalog semantics, path schema and exact deny templates;
-  older run records migrate with an empty native ceiling for safe recovery.
-  Claude/Cortex inventories remain unbound to an installed version; Codex
-  native tool IDs, effective per-run GUI
-  state, durable grants and effect receipts remain later C4/C5 work.
+  The digest includes catalog semantics, path schema and the frozen enforcement
+  contract; older run records migrate with an empty native ceiling for safe
+  recovery. R135 adds non-tool Codex surfaces (provider features,
+  configuration sources, host boundaries and the AgentBridge MCP transport),
+  compiles the exact 0.144.5 policy before signed run creation, then reuses that
+  same immutable object for invocation. Signed runs carry the exact provider
+  version and enabled/gated/blocked IDs. A recomputable native-policy digest
+  binds those catalog facts; a separate provider-policy digest binds the
+  resolved executable, workspace, launch arguments, bridge ceiling, timeout and
+  blocked environment without exposing them. `/api/mesh/runtime_authority` projects
+  only those canonical, membership-gated, secret-free facts from the local
+  mirror; executable paths, workspace paths, argv, environment and credentials
+  never cross the API. Claude/Cortex inventories remain unbound to an installed
+  version; GUI rendering, durable grants and effect receipts remain later work.
 - **`adapters/`** — the ModelRegistry + preset engine. A preset (`presets/*.json`)
   declares the CLI family, model list, effort support, canonical native profile
   where reviewed, bridge profile and provider-specific `env_allow`. Provider

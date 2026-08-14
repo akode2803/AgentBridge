@@ -8,6 +8,7 @@ resolved executable/version before any bearer credential exists.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -19,6 +20,9 @@ from pathlib import Path
 
 from ...core.errors import ValidationError
 from ..capabilities import BRIDGE_CAPABILITIES, compile_capability_ceiling
+from .native import (
+    CODEX_PROVIDER_VERSION, EffectiveNativePolicy, codex_native_policy,
+)
 
 __all__ = ["BridgeProfile", "CompiledBridgePolicy", "compile_bridge_policy"]
 
@@ -101,6 +105,9 @@ class BridgeProfile:
             re.compile(pattern)
         except re.error as exc:
             raise ValidationError("invalid bridge version pattern") from exc
+        reviewed_pattern = "^" + CODEX_PROVIDER_VERSION.replace(".", r"\.") + "$"
+        if pattern != reviewed_pattern:
+            raise ValidationError("bridge version pattern is not the reviewed version")
         return cls(
             schema=1, provider="codex", renderer="codex-0.144",
             transport="streamable-http-bearer", version_args=version_args,
@@ -133,6 +140,30 @@ class CompiledBridgePolicy:
     launch_args: tuple[str, ...]
     tool_timeout_s: int
     blocked_env: tuple[str, ...]
+
+    def native_policy(self) -> EffectiveNativePolicy:
+        return codex_native_policy(bridge_attached=bool(self.capabilities))
+
+    def authority_digest(self) -> str:
+        """Bind the complete non-token launch authority used by this run."""
+        native = self.native_policy()
+        payload = {
+            "schema_version": native.schema_version,
+            "native_policy_digest": native.authority_digest(
+                self.executable_version),
+            "executable": self.executable,
+            "executable_version": self.executable_version,
+            "workspace": self.workspace,
+            "renderer": self.renderer,
+            "capabilities": self.capabilities,
+            "launch_args": self.launch_args,
+            "tool_timeout_s": self.tool_timeout_s,
+            "blocked_env": self.blocked_env,
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
 
     def attachment_args(self, *, url: str) -> tuple[str, ...]:
         if not re.fullmatch(r"http://127\.0\.0\.1:\d+/mcp", url):

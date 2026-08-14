@@ -75,6 +75,9 @@ class Delivery:
     capability_ceiling: tuple[str, ...] = ()  # immutable run upper bound
     native_policy: Any = None       # adapter policy paired with signed digest
     native_policy_digest: str = ""  # immutable native authority upper bound
+    provider_policy_digest: str = ""  # exact compiled provider launch policy
+    native_provider_version: str = ""
+    compiled_bridge_policy: Any = None  # exact pre-sign provider policy
     canonical_run: Any = None      # signed start returned by the run ledger
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation

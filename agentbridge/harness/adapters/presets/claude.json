@@ -8,7 +8,7 @@
                    "--verbose"],
   "bridge_unavailable_reason": "bridge isolation is not verified for this installed provider",
   "native_profile": {
-    "schema": 1,
+    "schema": 2,
     "provider": "claude",
     "inventory_complete": false,
     "enforcement_locus": "provider-deny-flags+optional-agentbridge-broker",

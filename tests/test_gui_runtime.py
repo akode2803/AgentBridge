@@ -8,6 +8,7 @@ from agentbridge.harness.runtime.handoffs import (
 )
 from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import TaskLedger
+from agentbridge.harness.adapters.native import codex_native_policy
 from agentbridge.mesh.service import Mesh
 
 
@@ -27,6 +28,61 @@ def test_runtime_tasks_requires_auth_and_current_room_membership(rig):
         private = fable.create_chat("Private", members=[])
     out = rig.get("/api/mesh/runtime_tasks", id=private.id)
     assert "error" in out
+    assert "error" in rig.get("/api/mesh/runtime_authority", id=private.id)
+
+
+def test_runtime_authority_projects_only_signed_nonsecret_facts(rig):
+    rig.signup()
+    rig.app.mesh.accounts.create_agent("manager")
+    chat_id = rig.post(
+        "/api/mesh/create_chat", name="Authority projection",
+        members=["manager"],
+    )["chat"]["id"]
+    manager = Mesh(
+        rig.root, "manager", "guibox", encrypt=True, home=rig.home,
+        store_path=rig.home / "manager-authority.sqlite",
+    )
+    try:
+        manager.sync.sync_once([chat_id])
+        policy = codex_native_policy(bridge_attached=True)
+        RunLedger(manager).start(
+            run_id="run-authority", chat_id=chat_id,
+            trigger_id="message-authority", provider="codex", model="gpt-test",
+            capability_ceiling=("delegate_agent",),
+            native_policy_digest=policy.authority_digest("codex-cli 0.144.5"),
+            provider_policy_digest="b" * 64,
+            native_provider_version="codex-cli 0.144.5",
+            native_enabled=policy.enabled,
+            native_approval_gated=policy.approval_gated,
+            native_blocked=policy.blocked,
+        )
+        # A correctly signed manager record with internally inconsistent
+        # effective facts is still not a reportable authority attestation.
+        RunLedger(manager).start(
+            run_id="run-forged-authority", chat_id=chat_id,
+            trigger_id="message-forged", provider="codex", model="gpt-test",
+            native_policy_digest=policy.authority_digest("codex-cli 0.144.5"),
+            provider_policy_digest="b" * 64,
+            native_provider_version="codex-cli 0.144.5",
+            native_enabled=policy.enabled,
+            native_approval_gated=policy.approval_gated,
+            native_blocked=policy.blocked[:-1],
+        )
+        rows = rig.get(
+            "/api/mesh/runtime_authority", id=chat_id,
+        )["runs"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["run_id"] == "run-authority"
+        assert row["provider_version"] == "codex-cli 0.144.5"
+        assert row["authority_digest"] == "b" * 64
+        assert row["approval_gated"] == ["codex.agentbridge_mcp"]
+        encoded = str(row).lower()
+        assert "/users/" not in encoded and "token" not in encoded
+        assert "launch_args" not in row and "workspace" not in row
+        assert "executable" not in row and "environment" not in row
+    finally:
+        manager.close()
 
 
 def test_runtime_tasks_fail_closed_when_room_snapshot_exceeds_budget(
@@ -40,6 +96,8 @@ def test_runtime_tasks_fail_closed_when_room_snapshot_exceeds_budget(
         lambda _prefix, _limit: (_ for _ in ()).throw(OverflowError("full")),
     )
     out = rig.get("/api/mesh/runtime_tasks", id=chat_id)
+    assert "bounded GUI projection" in out["error"]
+    out = rig.get("/api/mesh/runtime_authority", id=chat_id)
     assert "bounded GUI projection" in out["error"]
 
 
