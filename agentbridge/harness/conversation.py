@@ -73,6 +73,8 @@ class Delivery:
     run_id: str = ""              # bound by Runner to the live RunFeed id
     task_id: str = ""             # canonical root task for delegation lineage
     capability_ceiling: tuple[str, ...] = ()  # immutable run upper bound
+    native_policy: Any = None       # adapter policy paired with signed digest
+    native_policy_digest: str = ""  # immutable native authority upper bound
     canonical_run: Any = None      # signed start returned by the run ledger
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation

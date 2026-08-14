@@ -430,22 +430,38 @@ live only in an adapter preset.
   (ping/status/run_feed), and a stricter second gate `peer_repair` for
   mutations (pause/resume/clear_queue/clear_timers — always re-prompt, injected
   by the runner, touch only harness-local runtime state). Every outcome audited.
+- **`capabilities.py` + `adapters/native.py`** (R133-R134/C4.1-C4.2) — separate
+  immutable package catalogs own AgentBridge MCP and provider-native authority.
+  The bridge catalog covers all conditionally registered MCP tools and rejects
+  inventory/exposure drift. The native catalog maps every known configured
+  Claude/Cortex spelling and alias to effect, risk, approval, enforcement,
+  evidence, backend floor and deny failure mode. Shipped presets select IDs;
+  same-ID owner overlays cannot replace package authority. Known broker-
+  dependent tools compile to provider deny flags whenever no verified callback
+  exists, but partial denylists are not treated as containment: non-exhaustive
+  profiles are quarantined before invocation. On the callback seam,
+  classification and approval state precede workspace shortcuts. The exact
+  effective policy is digested into the signed run, and each call rechecks that
+  ceiling plus current membership, owner, policy, provider and execution level.
+  The digest includes catalog semantics, path schema and exact deny templates;
+  older run records migrate with an empty native ceiling for safe recovery.
+  Claude/Cortex inventories remain unbound to an installed version; Codex
+  native tool IDs, effective per-run GUI
+  state, durable grants and effect receipts remain later C4/C5 work.
 - **`adapters/`** — the ModelRegistry + preset engine. A preset (`presets/*.json`)
-  declares the CLI family, model list, effort support, blocklist, `auto_allow`,
-  `aux_web`, `permission_args` and the provider-specific `env_allow`. Provider
+  declares the CLI family, model list, effort support, canonical native profile
+  where reviewed, bridge profile and provider-specific `env_allow`. Provider
   subprocesses receive only a cross-platform process/login baseline, those
   declared names, and explicit harness injections — never the complete host
   environment. `HOME`/`USERPROFILE` remains a native-CLI login compatibility
-  allowance, so this is minimization rather than process containment. The
-  `claude` preset wires the broker;
-  `codex`/`cortex` rely on their own sandbox (`--sandbox read-only` /
-  `--sql-read-only`); others are pure text generators. Safety flags (blocklist,
-  sandbox) are **never** dropped, even on the minimal-flags fallback retry.
-  H2/R43: the owner's aux toggles resolve per run via `effective_gates` —
-  "Reads don't ask" empties `auto_allow`; "Web access" moves the preset's
-  `aux_web` tools from the blocklist INTO the ask gate, and only while that
-  gate is live (a family without `permission_args` keeps its full blocklist
-  no matter the toggle, and a run whose bridge fails keeps it too).
+  allowance, so this is minimization rather than process containment. Codex
+  has the sole version-bound trusted bridge/native policy. Claude and
+  Cortex have no verified AgentBridge callback here, so every cataloged native
+  tool is denied; text adapters expose no declared tool protocol. Safety flags
+  (blocklist, sandbox) are **never** dropped, even on the minimal-flags fallback
+  retry. H2/R43 auxiliary read/web choices can shape a native policy only while
+  a verified permission callback is live; without one, they cannot remove a
+  tool from the deny set.
 
 ---
 

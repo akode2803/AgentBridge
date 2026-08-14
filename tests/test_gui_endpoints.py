@@ -524,12 +524,23 @@ def test_harness_options_reports_bridge_facts_without_secrets(rig):
         "capabilities": ["delegate_agent"],
     }
     assert families["claude"]["bridge"]["declared"] is False
+    native = families["claude"]["native"]
+    assert native["declared"] is True
+    assert native["permission_callback"] is False
+    assert "claude.file_read" in native["blocked"]
+    assert native["inventory_complete"] is False
+    assert native["execution_ready"] is False
+    assert "not version-bound" in native["quarantine_reason"]
     registry = out["bridge_capability_registry"]
     assert registry["schema_version"] == 1
     by_id = {item["id"]: item for item in registry["tools"]}
     assert by_id["delegate_agent"]["surface"] == "model-capability"
     assert by_id["approve"]["surface"] == "control-plane"
     assert by_id["delete_message"]["effect"] == "shared-content-delete"
+    provider_registry = out["provider_native_registry"]
+    assert provider_registry["schema_version"] == 1
+    provider_ids = {item["id"] for item in provider_registry["capabilities"]}
+    assert {"claude.file_read", "cortex.send_message"} <= provider_ids
     serialized = json.dumps(out)
     assert "AGENTBRIDGE_MCP_TOKEN" not in serialized
     assert "bearer_token" not in serialized

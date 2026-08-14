@@ -591,9 +591,17 @@ class AgentRunner:
             if isinstance(value, dict) and value.get("provider") and value.get("model"):
                 ceiling = validate_model_capability_ceiling(
                     value.get("capability_ceiling", ()))
+                native_digest = value.get("native_policy_digest", "")
+                if (not isinstance(native_digest, str)
+                        or (native_digest and (
+                            len(native_digest) != 64
+                            or any(c not in "0123456789abcdef"
+                                   for c in native_digest)))):
+                    raise ValidationError("invalid native policy digest")
                 return {"provider": str(value["provider"]),
                         "model": str(value["model"]),
-                        "capability_ceiling": ceiling}
+                        "capability_ceiling": ceiling,
+                        "native_policy_digest": native_digest}
             raise ValidationError("responder returned invalid invocation metadata")
         return {"provider": type(self.responder).__name__ or "injected",
                 "model": "injected"}
@@ -601,6 +609,7 @@ class AgentRunner:
     def _new_feed(self, group: WorkGroup, *, provider: str = "not-invoked",
                   model: str = "not-invoked",
                   capability_ceiling: tuple[str, ...] = (),
+                  native_policy_digest: str = "",
                   policy_revision: int | None = None) -> RunFeed:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
@@ -609,6 +618,7 @@ class AgentRunner:
             trigger_id=trigger_id,
             provider=provider, model=model,
             capability_ceiling=capability_ceiling,
+            native_policy_digest=native_policy_digest,
             policy_revision=policy_revision,
         )
 

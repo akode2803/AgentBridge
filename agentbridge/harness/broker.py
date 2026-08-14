@@ -51,7 +51,11 @@ import threading
 import time
 from pathlib import Path
 
+from ..core.errors import ValidationError
 from ..core.timekit import new_id, utcnow_iso
+from .runtime.authority import (
+    AuthorityError, capability_call_digest, validate_run_authority,
+)
 
 __all__ = ["PermissionBroker", "Ask", "path_of"]
 
@@ -62,13 +66,18 @@ MAX_DETAIL = 200
 POLL_S = 1.0
 
 
-def path_of(tool_input: dict) -> str:
+def path_of(tool_input: dict, keys=PATH_KEYS, *, required: bool = False) -> str:
     """The filesystem target of a tool call, if it names one."""
-    for k in PATH_KEYS:
-        v = (tool_input or {}).get(k)
-        if v:
-            return str(v)
-    return ""
+    values = [str((tool_input or {})[key]) for key in keys
+              if (tool_input or {}).get(key)]
+    distinct = tuple(dict.fromkeys(values))
+    if len(distinct) > 1:
+        raise ValidationError("conflicting provider-native path fields")
+    if not distinct:
+        if required:
+            raise ValidationError("provider-native file target is missing")
+        return ""
+    return distinct[0]
 
 
 def _inside(target: str, workspace: Path) -> bool:
@@ -156,13 +165,48 @@ class PermissionBroker:
                tool_input: dict, auto_allow: tuple[str, ...] | list[str],
                approvals: list[dict], timeout_s: float,
                deny_roots: list[Path] | None = None, run_id: str = "",
-               call_id: str = "") -> tuple[bool, str]:
+               call_id: str = "", native_policy=None,
+               run_record=None) -> tuple[bool, str]:
         """Returns ``(allowed, message)``; blocks while the owner decides."""
-        target = path_of(tool_input)
+        if native_policy is not None:
+            try:
+                capability_id = native_policy.capability_for_tool(tool)
+            except (KeyError, ValidationError):
+                return False, "unknown provider-native tool — denied"
+            if capability_id in native_policy.blocked:
+                return False, "this provider-native capability is blocked"
+            if self.mesh is None:
+                return False, "current provider-native authority is unavailable"
+            try:
+                validate_run_authority(
+                    self.mesh, run_record, agent=self.agent, chat_id=chat_id,
+                    run_id=run_id, provider=native_policy.provider,
+                    native_policy=native_policy,
+                )
+                digest = capability_call_digest(
+                    native_policy.provider, tool, tool_input)
+            except (AuthorityError, TypeError, ValueError):
+                return False, "current provider-native authority is unavailable"
+            auto_allow = native_policy.auto_allow_tools
+            try:
+                target = path_of(
+                    tool_input,
+                    native_policy.path_keys_for_tool(tool) or PATH_KEYS,
+                    required=native_policy.path_required_for_tool(tool),
+                )
+            except ValidationError:
+                return False, "provider-native path input is invalid"
+        else:
+            digest = hashlib.sha256(
+                f"{chat_id}|{tool}|{json.dumps(tool_input, sort_keys=True, default=str)}"
+                .encode()).hexdigest()
+            target = path_of(tool_input)
         outside = False
         if target:
             if _inside(target, workspace):
-                return True, ""
+                if (native_policy is None
+                        or capability_id in native_policy.enabled):
+                    return True, ""
             if any(_inside(target, root) for root in deny_roots or []):
                 return False, ("that path is the platform's own storage "
                                "(keys, caches, the shared mesh) — off limits")
@@ -174,6 +218,11 @@ class PermissionBroker:
             # fresh, per-path owner decision (approve / deny), never blanket.
             outside = True
         if not outside:
+            if native_policy is not None:
+                if capability_id in native_policy.enabled:
+                    return True, ""
+                if capability_id not in native_policy.approval_gated:
+                    return False, "provider-native capability has no valid state"
             if tool in (auto_allow or ()):
                 return True, ""
             with self._lock:
@@ -185,9 +234,6 @@ class PermissionBroker:
                 if rule.get("tool") == tool and \
                         rule.get("chat") in ("*", chat_id):
                     return True, ""
-        digest = hashlib.sha256(
-            f"{chat_id}|{tool}|{json.dumps(tool_input, sort_keys=True, default=str)}"
-            .encode()).hexdigest()
         with self._lock:
             if digest in self._denied:   # a retry of a denied intent
                 return False, self._denied[digest]

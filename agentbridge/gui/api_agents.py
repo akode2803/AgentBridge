@@ -107,12 +107,13 @@ def harness_options(app, req, mesh) -> dict:
     so probing locally is probing the right box."""
     from ..harness.adapters import ModelRegistry
     from ..harness.capabilities import bridge_capability_report
+    from ..harness.adapters.native import native_capability_report
 
     reg = ModelRegistry.load(app.home)
     families = [{
         "id": p.id,
         "label": p.label or p.id,
-        "available": reg.available(p),
+        "available": reg.runnable(p),
         "models": p.models,
         "default_model": p.default_model,
         "efforts": p.efforts,
@@ -126,10 +127,16 @@ def harness_options(app, req, mesh) -> dict:
             "reason": p.bridge_unavailable_reason or
                       "no trusted bridge profile ships for this provider",
         }),
+        "native": (p.native_profile.public_facts() if p.native_profile else {
+            "declared": False,
+            "reason": p.native_unavailable_reason or
+                      "no canonical provider-native inventory ships for this provider",
+        }),
     } for p in reg.presets.values()]
     families.sort(key=lambda f: (not f["available"], f["id"]))
     return {"ok": True, "machine": mesh.machine, "families": families,
-            "bridge_capability_registry": bridge_capability_report()}
+            "bridge_capability_registry": bridge_capability_report(),
+            "provider_native_registry": native_capability_report()}
 
 
 @authed

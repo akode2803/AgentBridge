@@ -4,12 +4,54 @@ from __future__ import annotations
 
 import hashlib
 
-from .models import canonical_json_bytes
+from .models import RunRecord, RunState, canonical_json_bytes
 from ..settings import runtime_policy_revision
 
 
 class AuthorityError(PermissionError):
     """The agent/owner/chat relationship is not currently authoritative."""
+
+
+def capability_call_digest(provider: str, tool: str, tool_input: dict) -> str:
+    """Canonical provider/tool/input binding for one native call decision."""
+    if not isinstance(tool_input, dict):
+        raise AuthorityError("provider-native tool input must be an object")
+    return hashlib.sha256(canonical_json_bytes({
+        "schema_version": 1,
+        "provider": provider,
+        "tool": tool,
+        "input": tool_input,
+    })).hexdigest()
+
+
+def validate_run_authority(mesh, run: RunRecord, *, agent: str, chat_id: str,
+                           run_id: str, provider: str, native_policy=None,
+                           provider_version: str = "unattested") \
+        -> dict[str, int | str]:
+    """Re-resolve one signed run against current authority before a call."""
+    if (not isinstance(run, RunRecord)
+            or run.state is not RunState.RUNNING
+            or run.meta.run_id != run_id
+            or run.meta.chat_id != chat_id
+            or run.manager_agent != agent
+            or run.provider != provider
+            or run.execution_level != "brokered_native"):
+        raise AuthorityError("provider-native run binding is invalid")
+    if (native_policy is None
+            or run.native_policy_digest
+            != native_policy.authority_digest(provider_version)):
+        raise AuthorityError("provider-native policy ceiling is invalid")
+    current = authority(mesh, agent, chat_id)
+    if current["owner"] != run.responsible_member:
+        raise AuthorityError("responsible member changed")
+    # Key rotation protects record confidentiality; it is not a capability
+    # revocation by itself. Membership, ownership and policy are the current
+    # authorization epochs. A freshly ensured room key can also precede the
+    # local materialized snapshot during the same run start.
+    for name in ("membership_epoch", "ownership_epoch", "policy_revision"):
+        if int(current[name]) != int(getattr(run.meta, name)):
+            raise AuthorityError(f"stale {name}")
+    return current
 
 
 def _revision(value) -> int:

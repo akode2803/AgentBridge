@@ -130,6 +130,7 @@ class RunLedger:
               provider: str, model: str,
               execution_level: str = "brokered_native",
               capability_ceiling: tuple[str, ...] = (),
+              native_policy_digest: str = "",
               active_task_ids: tuple[str, ...] = (),
               policy_revision: int | None = None) -> RunRecord:
         with self._lock:
@@ -137,6 +138,7 @@ class RunLedger:
                 run_id=run_id, chat_id=chat_id, trigger_id=trigger_id,
                 provider=provider, model=model, execution_level=execution_level,
                 capability_ceiling=capability_ceiling,
+                native_policy_digest=native_policy_digest,
                 active_task_ids=active_task_ids,
                 policy_revision=policy_revision,
             )
@@ -150,6 +152,7 @@ class RunLedger:
                        provider: str, model: str,
                        execution_level: str = "brokered_native",
                        capability_ceiling: tuple[str, ...] = (),
+                       native_policy_digest: str = "",
                        active_task_ids: tuple[str, ...] = (),
                        policy_revision: int | None = None,
                        ) -> tuple[RunRecord, str, dict, dict]:
@@ -176,6 +179,7 @@ class RunLedger:
             execution_level=execution_level, provider=provider, model=model,
             capability_ceiling=capability_ceiling, active_task_ids=active_task_ids,
             status="Starting up", outcome=None,
+            native_policy_digest=native_policy_digest,
         )
         target, payload = self._payload(record, terminal=False)
         opened = self._opened()

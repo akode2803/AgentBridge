@@ -157,6 +157,7 @@ class TaskLedger:
     def start_with_run(self, *, run_id: str, task_id: str, chat_id: str,
                        trigger_id: str, provider: str, model: str,
                        capability_ceiling: tuple[str, ...] = (),
+                       native_policy_digest: str = "",
                        policy_revision: int | None = None,
                        ) -> tuple[RunRecord, TaskRecord]:
         """Atomically commit one canonical run and its promised root task."""
@@ -166,6 +167,7 @@ class TaskLedger:
                     run_id=run_id, chat_id=chat_id, trigger_id=trigger_id,
                     provider=provider, model=model,
                     capability_ceiling=capability_ceiling,
+                    native_policy_digest=native_policy_digest,
                     active_task_ids=(task_id,),
                     policy_revision=policy_revision,
                 )

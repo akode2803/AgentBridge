@@ -294,6 +294,7 @@ class RunRecord(_Record):
     active_task_ids: tuple[str, ...]
     status: str
     outcome: str | None
+    native_policy_digest: str = ""
 
     def __post_init__(self) -> None:
         super(RunRecord, self).__post_init__()
@@ -305,11 +306,23 @@ class RunRecord(_Record):
                      "provider", "model", "status"):
             _text(getattr(self, name), name)
         _optional_text(self.outcome, "outcome")
+        if not isinstance(self.native_policy_digest, str):
+            raise RuntimeContractError("native_policy_digest must be text")
+        if (self.native_policy_digest
+                and (len(self.native_policy_digest) != 64
+                     or any(c not in "0123456789abcdef"
+                            for c in self.native_policy_digest))):
+            raise RuntimeContractError("native_policy_digest must be sha256 hex")
         _frozen_texts(self.capability_ceiling, "capability_ceiling")
         _frozen_texts(self.active_task_ids, "active_task_ids")
 
     @classmethod
     def from_dict(cls, value: Any) -> RunRecord:
+        # R134 adds a signed native-policy ceiling. Existing signed records do
+        # not gain authority by omission; they parse with an empty ceiling so
+        # recovery can terminate them, while native callbacks still reject it.
+        if isinstance(value, dict) and "native_policy_digest" not in value:
+            value = {**value, "native_policy_digest": ""}
         return _parse_record(cls, value, enums={"state": RunState},
                              tuples={"capability_ceiling", "active_task_ids"})  # type: ignore[return-value]
 

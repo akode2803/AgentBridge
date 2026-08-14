@@ -46,7 +46,9 @@ from ..responder import MESSAGE_BREAK, SILENCE, OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..runtime.models import RunRecord, RunState
 from ..settings import HarnessSettings
-from .registry import Invocation, ModelRegistry, effective_gates
+from .registry import (
+    Invocation, ModelRegistry, effective_gates, effective_native_policy,
+)
 from .policy import compile_bridge_policy
 
 __all__ = ["ChildInvocation", "ChildRequest", "ChildResult", "CliResponder",
@@ -339,15 +341,23 @@ class CliResponder:
                      and invocation.preset.bridge_profile is not None else set())
         delivery.capability_ceiling = compile_capability_ceiling(
             invocation.preset.bridge_profile, requested)
+        native_policy = effective_native_policy(
+            invocation.preset, settings, permission_callback=False)
+        delivery.native_policy = native_policy
+        delivery.native_policy_digest = (
+            native_policy.authority_digest() if native_policy is not None else "")
         delivery.invocation = invocation
         delivery.harness_settings = settings
-        return {
+        metadata = {
             "provider": invocation.preset.id,
             # An empty model delegates to mutable external CLI configuration;
             # record that honestly instead of pretending it is an exact model.
             "model": invocation.model or "provider-default-unattested",
             "capability_ceiling": delivery.capability_ceiling,
         }
+        if delivery.native_policy_digest:
+            metadata["native_policy_digest"] = delivery.native_policy_digest
+        return metadata
 
     # ------------------------------------------------------ child sidecar
     def prepare_child(self, request: ChildRequest, *,
@@ -559,11 +569,21 @@ class CliResponder:
                 on_step(line)
 
         timers: list[dict] = []          # the bridge's schedule_timer fills it
-        # H2/R43: the owner's aux flags shape the run's gates — auto_allow
-        # may empty (reads ask too) and web tools may move from the hard
-        # blocklist into the ask gate (never without the gate; see
-        # effective_gates). Both argv builds below use THIS blocklist.
-        auto_allow, blocklist = effective_gates(inv.preset, settings)
+        # No shipped provider currently proves a native permission callback.
+        # Broker-dependent native tools therefore compile to provider deny
+        # flags instead of inheriting ambient CLI authority. A later verified
+        # callback can change this bit without changing the policy model.
+        native_policy = effective_native_policy(
+            inv.preset, settings, permission_callback=False)
+        if native_policy is not None:
+            if (delivery.native_policy_digest != native_policy.authority_digest()
+                    or delivery.native_policy_digest
+                    != getattr(delivery.canonical_run,
+                               "native_policy_digest", "")):
+                raise ValidationError(
+                    "prepared native authority changed after signing")
+        auto_allow, blocklist = effective_gates(
+            inv.preset, settings, permission_callback=False)
         delegate_tool = None
         if (self.delegation is not None
                 and "delegate_agent" in capability_ceiling):
@@ -604,6 +624,8 @@ class CliResponder:
                     docs=self.docs, timer_svc=self.timer_svc,
                     delegate=delegate_tool,
                     enabled_capabilities=set(bridge_policy.capabilities),
+                    native_policy=native_policy,
+                    run_record=delivery.canonical_run,
                 ))
                 bridge_args = bridge_policy.attachment_args(url=bridge.url)
                 injected_env["AGENTBRIDGE_MCP_TOKEN"] = bridge.bearer_token
@@ -613,8 +635,11 @@ class CliResponder:
                         * 1000))
             bridge_attached = bridge is not None
             if not bridge_attached:
-                # no live ask gate on this run — the web relax never applies
-                blocklist = list(inv.preset.blocklist)
+                # Legacy presets retain their old fail-closed web behavior.
+                # Canonical native profiles were already compiled with every
+                # broker-dependent tool in the deny set above.
+                if native_policy is None:
+                    blocklist = list(inv.preset.blocklist)
             cap = int(getattr(self.mesh.tx, "max_upload_bytes", 0) or 0)
             file_limit = (f"{max(1, cap // (1024 * 1024))} MB per file"
                           if cap else "the configured per-file limit")

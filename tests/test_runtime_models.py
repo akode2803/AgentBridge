@@ -88,6 +88,14 @@ def test_runtime_records_are_immutable_strict_canonical_and_round_trip(record):
         record_from_dict({**encoded, "unexpected": True})
 
 
+def test_pre_r134_run_record_defaults_to_no_native_authority():
+    encoded = next(records()).to_dict()
+    encoded.pop("native_policy_digest")
+    parsed = record_from_dict(encoded)
+    assert isinstance(parsed, RunRecord)
+    assert parsed.native_policy_digest == ""
+
+
 def test_runtime_envelope_binds_metadata_ciphertext_and_signature_spelling():
     envelope = RuntimeEnvelope(meta(RecordKind.CONTROL, task=True, call=True),
                                "base64-nonce", "base64-ciphertext", "base64-signature")

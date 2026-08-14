@@ -26,9 +26,16 @@ from pathlib import Path
 from ...core.config import DEFAULT_HOME
 from ...core.errors import ValidationError
 from ..settings import HarnessSettings
+from .native import (
+    NATIVE_CAPABILITIES, NATIVE_DENY_ARG_TEMPLATES, EffectiveNativePolicy,
+    NativeProfile,
+)
 from .policy import BridgeProfile
 
-__all__ = ["Preset", "Invocation", "ModelRegistry", "effective_gates"]
+__all__ = [
+    "Preset", "Invocation", "ModelRegistry", "effective_gates",
+    "effective_native_policy",
+]
 
 PRESET_DIR = Path(__file__).resolve().parent / "presets"
 FORMATS = ("claude-stream", "codex-jsonl", "text")
@@ -60,6 +67,11 @@ class Preset:
     # self-certify bridge authority.
     bridge_profile: BridgeProfile | None = None
     bridge_unavailable_reason: str = ""
+    # Package-trusted classification of provider-native tools. Raw legacy
+    # strings remain readable for owner overlays, but are never reported as a
+    # canonical inventory.
+    native_profile: NativeProfile | None = None
+    native_unavailable_reason: str = ""
     auto_allow: list[str] = field(default_factory=list)    # read-class tools
     # Explicit host variables this provider process may inherit. The adapter
     # supplies a small cross-platform process baseline separately; credentials
@@ -78,13 +90,43 @@ class Preset:
     @classmethod
     def from_dict(cls, d: dict, *, trusted: bool = False) -> "Preset":
         known = {f: d[f] for f in cls.__dataclass_fields__ if f in d
-                 and f != "bridge_profile"}
+                 and f not in ("bridge_profile", "native_profile")}
         raw_bridge = d.get("bridge_profile")
         if trusted and raw_bridge is not None:
             known["bridge_profile"] = BridgeProfile.from_dict(raw_bridge)
         elif raw_bridge is not None:
             known["bridge_unavailable_reason"] = (
                 "owner adapter declarations cannot attach the trusted bridge")
+        raw_native = d.get("native_profile")
+        if trusted and raw_native is not None:
+            if any(name in d for name in ("auto_allow", "blocklist", "aux_web")):
+                raise ValidationError(
+                    "canonical native profiles cannot mix raw tool lists")
+            provider = str(d.get("id") or "")
+            native = NativeProfile.from_dict(
+                raw_native, expected_provider=provider)
+            blocklist_args = d.get("blocklist_args")
+            expected_deny = NATIVE_DENY_ARG_TEMPLATES.get(provider)
+            if (not isinstance(blocklist_args, list)
+                    or tuple(blocklist_args) != expected_deny):
+                raise ValidationError(
+                    "native deny flags do not match the reviewed provider template")
+            compiled = native.compile(
+                allow_read=True, allow_web=False, permission_callback=False)
+            known["native_profile"] = native
+            known["auto_allow"] = list(
+                native.compile(
+                    allow_read=True, allow_web=False,
+                    permission_callback=True,
+                ).auto_allow_tools)
+            known["blocklist"] = list(compiled.blocked_tools)
+            known["aux_web"] = [
+                tool for capability_id in native.aux_web
+                for tool in NATIVE_CAPABILITIES[capability_id].tools
+            ]
+        elif raw_native is not None:
+            known["native_unavailable_reason"] = (
+                "owner adapter declarations cannot certify native authority")
         # JSON booleans only. In particular, the string "true" must not turn
         # an owner overlay into an executable child preset.
         known["child_text_only"] = d.get("child_text_only") is True
@@ -94,6 +136,7 @@ class Preset:
         if p.format not in FORMATS:
             raise ValidationError(f"unknown preset format {p.format!r}")
         if p.child_text_only and (raw_bridge is not None
+                                  or raw_native is not None
                                   or d.get("permission_args") is not None
                                   or not p.is_child_text_only_safe()):
             raise ValidationError(
@@ -113,6 +156,7 @@ class Preset:
             self.child_text_only is True
             and self.format == "text"
             and self.bridge_profile is None
+            and self.native_profile is None
             and not self.auto_allow
             and not self.aux_web
             and not self.blocklist_args
@@ -171,14 +215,38 @@ class Invocation:
     effort: str = ""
 
 
-def effective_gates(preset: Preset,
-                    settings: HarnessSettings) -> tuple[list[str], list[str]]:
+def effective_native_policy(
+    preset: Preset,
+    settings: HarnessSettings,
+    *,
+    permission_callback: bool,
+) -> EffectiveNativePolicy | None:
+    """Compile package-declared native authority for one invocation.
+
+    ``None`` is an honest legacy/unclassified preset, not an empty tool set.
+    """
+    if preset.native_profile is None:
+        return None
+    return preset.native_profile.compile(
+        allow_read=settings.aux.get("read", True),
+        allow_web=settings.aux.get("web", False),
+        permission_callback=permission_callback,
+    )
+
+
+def effective_gates(preset: Preset, settings: HarnessSettings,
+                    *, permission_callback: bool = False) \
+        -> tuple[list[str], list[str]]:
     """The run's (auto_allow, blocklist) after the owner's aux flags (H2/R43).
     ``read`` off empties auto_allow — even reads outside the workspace ask.
     ``web`` on releases the preset's aux_web tools from the blocklist INTO
     the ask gate — and only for presets that HAVE a trusted bridge profile;
     a family without the ask plumbing keeps its full blocklist regardless,
     so the toggle can never trade a hard block for nothing."""
+    native = effective_native_policy(
+        preset, settings, permission_callback=permission_callback)
+    if native is not None:
+        return list(native.auto_allow_tools), list(native.blocked_tools)
     auto = list(preset.auto_allow) if settings.aux.get("read", True) else []
     block = list(preset.blocklist)
     if settings.aux.get("web") and preset.bridge_profile and preset.aux_web:
@@ -213,6 +281,15 @@ class ModelRegistry:
                     # with reviewed package presets.
                     if not shipped:
                         p.child_text_only = False
+                        existing = presets.get(p.id)
+                        if existing is not None and (
+                                existing.bridge_profile is not None
+                                or existing.native_profile is not None):
+                            # A same-id overlay can otherwise replace a reviewed
+                            # command/profile with ordinary untrusted CLI data.
+                            # Keep the package preset; custom providers use a
+                            # distinct id and remain honestly unclassified.
+                            continue
                     presets[p.id] = p
                 except (OSError, ValueError, ValidationError):
                     continue  # one bad preset never blocks the rest
@@ -231,7 +308,15 @@ class ModelRegistry:
         return ok
 
     def installed(self) -> list[Preset]:
-        return [p for p in self.presets.values() if self.available(p)]
+        return [p for p in self.presets.values() if self.runnable(p)]
+
+    def runnable(self, preset: Preset) -> bool:
+        """Whether selection may lead to a provider invocation right now."""
+        return bool(
+            self.available(preset)
+            and (preset.native_profile is None
+                 or preset.native_profile.inventory_complete)
+        )
 
     # ----------------------------------------------------------- resolution
     def resolve(self, settings: HarnessSettings, category: str,
@@ -262,6 +347,11 @@ class ModelRegistry:
                 raise ValidationError(
                     "several agent CLIs are installed — pick one in the "
                     "agent's settings")
+        if (preset.native_profile is not None
+                and not preset.native_profile.inventory_complete):
+            raise ValidationError(
+                f"{preset.label or preset.id} is quarantined: its native tool "
+                "inventory is not version-bound and exhaustive")
         model = settings.model_for(category, chat_id) or preset.default_model
         if preset.requires_model and not model:
             raise ValidationError(

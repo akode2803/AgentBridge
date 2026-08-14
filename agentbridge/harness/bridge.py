@@ -94,7 +94,8 @@ class BridgeServer:
                  memory=None, chat_kind: str = "",
                  global_memory: str = "dm", docs=None,
                  timer_svc=None, delegate=None,
-                 enabled_capabilities: set[str] | frozenset[str] | None = None) -> None:
+                 enabled_capabilities: set[str] | frozenset[str] | None = None,
+                 native_policy=None, run_record=None) -> None:
         self.broker = broker
         self.chat_id = chat_id
         self.run_id = run_id
@@ -116,6 +117,8 @@ class BridgeServer:
         self.delegate = delegate         # V157 bounded same-room agent tool
         self.enabled_capabilities = (None if enabled_capabilities is None else
                                      frozenset(enabled_capabilities))
+        self.native_policy = native_policy
+        self.run_record = run_record
         self._creates = 0
         # V53 (leave_chat): the leave is DEFERRED — the tool only requests
         # it (owner-approved); the runner executes it after the reply posts,
@@ -149,7 +152,8 @@ class BridgeServer:
                 tool=tool_name, tool_input=input or {},
                 run_id=self.run_id, call_id=tool_use_id,
                 auto_allow=self.auto_allow, approvals=self.approvals,
-                timeout_s=self.ask_timeout_s, deny_roots=self.deny_roots)
+                timeout_s=self.ask_timeout_s, deny_roots=self.deny_roots,
+                native_policy=self.native_policy, run_record=self.run_record)
             if allowed:
                 return json.dumps({"behavior": "allow",
                                    "updatedInput": input or {}})

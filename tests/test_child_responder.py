@@ -123,9 +123,12 @@ def test_shipped_deepseek_formats_required_model_in_base_argv(tmp_path):
     assert argv == ["ollama", "run", "deepseek-coder:latest", "Return proof"]
 
 
-@pytest.mark.parametrize("preset_id", ["codex", "claude"])
+@pytest.mark.parametrize(
+    ("preset_id", "reason"),
+    [("codex", "not approved"), ("claude", "quarantined")],
+)
 def test_tool_capable_presets_are_refused_before_launch(
-        tmp_path, monkeypatch, preset_id):
+        tmp_path, monkeypatch, preset_id, reason):
     shipped = ModelRegistry.load(tmp_path / "empty-home").presets[preset_id]
     responder = _responder(tmp_path, shipped, account=_account(preset_id))
     monkeypatch.setattr(
@@ -133,7 +136,7 @@ def test_tool_capable_presets_are_refused_before_launch(
         lambda *_args, **_kwargs: pytest.fail("unsafe preset was launched"),
     )
 
-    with pytest.raises(ValidationError, match="not approved"):
+    with pytest.raises(ValidationError, match=reason):
         responder.prepare_child(_request(), chat_id="room-1")
 
 

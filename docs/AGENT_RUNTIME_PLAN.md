@@ -1845,21 +1845,42 @@ Estimate: **2.5-3.5 weeks**.
 
 - [~] Register every existing bridge/provider tool with schemas, effect/risk,
   enforcement locus, evidence, backend minimum and failure mode. R133 catalogs
-  all 35 AgentBridge MCP tools and fail-closes bridge startup on drift;
-  provider-native inventories remain open.
+  all 35 AgentBridge MCP tools and fail-closes bridge startup on drift. R134
+  adds package-authoritative entries for every known configured Claude/Cortex
+  native tool spelling, including current documented Cortex surfaces plus old
+  aliases. Both inventories remain explicitly non-exhaustive and unbound to an
+  installed version, so R134 quarantines both providers before invocation;
+  Codex native tool IDs and future provider surfaces remain open.
 - [x] Compile an immutable per-run capability ceiling. R133 freezes the
   reviewed provider subset before canonical run creation, persists it in the
   signed/E2EE run start, and makes later bridge attachment consume that tuple.
-- [ ] Re-resolve effective authority before every call/resume/handoff against
+- [~] Re-resolve effective authority before every call/resume/handoff against
   current membership, owner, policy, revocation, backend and argument digest.
-- [ ] Generate provider-native allow/block flags from the canonical registry.
+  R134 does this before every catalog-backed broker callback, binding provider,
+  exact tool/input and effective native-policy digest into the signed running
+  record before rechecking current authority. The digest covers catalog aliases,
+  path schema, capability metadata and exact provider deny templates. Pre-R134
+  records migrate with an empty native ceiling, retaining recovery without
+  gaining callback authority. No shipped provider
+  currently proves that callback, and resume/handoff-wide re-resolution remains
+  open.
+- [~] Generate provider-native allow/block flags from the canonical registry.
+  R134 generates all shipped Claude/Cortex deny flags from capability IDs and
+  turns every broker-dependent known tool into a hard deny whenever no verified
+  callback exists. It does not mistake that partial denylist for containment:
+  incomplete inventories are quarantined. Codex remains enforced by its
+  separate exact-version native policy compiler.
 - [~] Publish a member-readable report distinguishing advertised, enabled,
   approval-gated, unsupported and unenforceable. R133 exposes the versioned,
-  non-secret bridge catalog through the authenticated harness-options API;
-  per-agent/per-run effective-state projection remains open.
+  non-secret bridge catalog through the authenticated harness-options API.
+  R134 adds the native registry and per-family default effective states,
+  callback absence, evidence and quarantine reason; per-agent/per-run
+  effective-state projection remains open.
 - [~] Deny unknown ids, versions and provider capabilities. R133 denies unknown
-  bridge IDs and non-capability surfaces; provider-native/version parity beyond
-  the trusted Codex profile remains V159 work.
+  bridge IDs and non-capability surfaces. R134 rejects unknown native IDs in
+  shipped declarations, exact deny-template drift, same-ID authority overlays,
+  and unknown callback tool names before workspace/path shortcuts; provider-
+  native version parity beyond the trusted Codex profile remains V159 work.
 
 Affected: capabilities registry, bridge/broker/docs/settings, adapter presets,
 Settings API/frontend.  
