@@ -346,6 +346,7 @@ class CliResponder:
         if invocation.preset.bridge_profile is not None:
             workdir = (self.home / "harness" / self.agent / "workspaces"
                        / delivery.chat_id)
+            workdir.mkdir(parents=True, exist_ok=True)
             bridge_policy = compile_bridge_policy(
                 invocation.preset.bridge_profile,
                 command=invocation.preset.command, workspace=workdir,
@@ -666,6 +667,8 @@ class CliResponder:
                     or native_policy.blocked != getattr(run, "native_blocked", ())):
                 raise ValidationError(
                     "prepared native authority changed after signing")
+        if bridge_policy is not None:
+            bridge_policy.verify_unchanged()
         auto_allow, blocklist = effective_gates(
             inv.preset, settings, permission_callback=False)
         delegate_tool = None

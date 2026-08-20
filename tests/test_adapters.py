@@ -489,8 +489,21 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
         policy_module.subprocess, "run",
         lambda *args, **kwargs: (
             calls.append((args, kwargs)) or
-            SimpleNamespace(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+            SimpleNamespace(returncode=0, stdout="codex-cli 0.147.0\n", stderr="")
         ),
+    )
+    monkeypatch.setattr(
+        policy_module, "_codex_binary_identity",
+        lambda _path: (
+            "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2",
+        ),
+    )
+    def inspect_layers(_executable, workspace, _source_env):
+        assert workspace.is_dir()
+        return ("system:sha256:" + "c" * 64,)
+
+    monkeypatch.setattr(
+        policy_module, "_codex_non_user_config_layers", inspect_layers,
     )
     mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
                 store_path=tmp_path / "codex-prepare.sqlite")
@@ -498,6 +511,8 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
         registry = ModelRegistry.load(arig.home)
         registry._which["codex"] = True
         responder = CliResponder(registry, mesh, arig.home)
+        assert not (arig.home / "harness" / "helper" / "workspaces"
+                    / "codex-chat").exists()
         delivery = SimpleNamespace(
             kind="message", triggers=[], chat_id="codex-chat",
             invocation=None, harness_settings=None,
@@ -505,15 +520,15 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
         metadata = responder.prepare(delivery, settings(adapter="codex"))
         assert len(calls) == 1
         assert metadata["provider"] == "codex"
-        assert metadata["native_provider_version"] == "codex-cli 0.144.5"
+        assert metadata["native_provider_version"] == "codex-cli 0.147.0"
         assert metadata["native_policy_digest"] == \
-            delivery.native_policy.authority_digest("codex-cli 0.144.5")
+            delivery.native_policy.authority_digest("codex-cli 0.147.0")
         assert metadata["provider_policy_digest"] == \
             delivery.compiled_bridge_policy.authority_digest()
         assert metadata["native_enabled"] == delivery.native_policy.enabled
         assert metadata["native_blocked"] == delivery.native_policy.blocked
         assert delivery.compiled_bridge_policy.executable_version == \
-            "codex-cli 0.144.5"
+            "codex-cli 0.147.0"
     finally:
         mesh.close()
 

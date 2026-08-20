@@ -12,8 +12,11 @@ import hashlib
 import math
 import os
 import re
+import select
 import shutil
 import subprocess
+import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,7 +71,7 @@ class BridgeProfile:
             raise ValidationError(f"invalid bridge profile fields: {detail}")
         if raw["schema"] != 1 or raw["provider"] != "codex":
             raise ValidationError("unsupported bridge profile schema/provider")
-        if raw["renderer"] != "codex-0.144":
+        if raw["renderer"] != "codex-0.147":
             raise ValidationError("unsupported bridge profile renderer")
         if raw["transport"] != "streamable-http-bearer":
             raise ValidationError("unsupported bridge transport")
@@ -109,7 +112,7 @@ class BridgeProfile:
         if pattern != reviewed_pattern:
             raise ValidationError("bridge version pattern is not the reviewed version")
         return cls(
-            schema=1, provider="codex", renderer="codex-0.144",
+            schema=1, provider="codex", renderer="codex-0.147",
             transport="streamable-http-bearer", version_args=version_args,
             version_pattern=pattern,
             enforcement_locus="provider-filter+server-authority",
@@ -134,6 +137,11 @@ class BridgeProfile:
 class CompiledBridgePolicy:
     executable: str
     executable_version: str
+    executable_sha256: str
+    code_mode_host: str
+    code_mode_host_sha256: str
+    signing_team: str
+    config_layers: tuple[str, ...]
     workspace: str
     renderer: str
     capabilities: tuple[str, ...]
@@ -153,6 +161,11 @@ class CompiledBridgePolicy:
                 self.executable_version),
             "executable": self.executable,
             "executable_version": self.executable_version,
+            "executable_sha256": self.executable_sha256,
+            "code_mode_host": self.code_mode_host,
+            "code_mode_host_sha256": self.code_mode_host_sha256,
+            "signing_team": self.signing_team,
+            "config_layers": self.config_layers,
             "workspace": self.workspace,
             "renderer": self.renderer,
             "capabilities": self.capabilities,
@@ -188,6 +201,18 @@ class CompiledBridgePolicy:
         return {key: value for key, value in env.items()
                 if key not in self.blocked_env}
 
+    def verify_unchanged(self, source_env=None) -> None:
+        """Recheck mutable executable and lower-layer facts before launch."""
+        if (_sha256_file(Path(self.executable)) != self.executable_sha256
+                or _sha256_file(Path(self.code_mode_host))
+                != self.code_mode_host_sha256):
+            raise ValidationError("Codex executable identity changed after signing")
+        current_layers = _codex_non_user_config_layers(
+            self.executable, Path(self.workspace), source_env,
+        )
+        if current_layers != self.config_layers:
+            raise ValidationError("Codex config authority changed after signing")
+
 
 def compile_bridge_policy(profile: BridgeProfile, *, command: str,
                           workspace: Path, timeout_s: float,
@@ -211,46 +236,246 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
     if result.returncode or not re.fullmatch(profile.version_pattern, version):
         raise ValidationError(
             f"bridge disabled for unverified provider version {version or 'unknown'!r}")
+    executable_sha256, code_mode_host, code_mode_host_sha256, signing_team = \
+        _codex_binary_identity(executable)
+    config_layers = _codex_non_user_config_layers(
+        executable, Path(resolved_workspace), source_env,
+    )
     capabilities = compile_capability_ceiling(profile, requested_capabilities)
     overlay = _safe_codex_overlay(profile, source_env)
+    disabled_skills = _disabled_codex_skill_config(
+        source_env, Path(resolved_workspace),
+    )
     launch = [
         "--ignore-user-config", "--ignore-rules", "--ephemeral", "--strict-config",
         "-c", 'approval_policy="never"',
         "-c", 'default_permissions="agentbridge-run"',
         "-c", 'permissions.agentbridge-run.description="AgentBridge workspace only"',
         "-c", ('permissions.agentbridge-run.filesystem={":root" = "deny", '
-               '":minimal" = "read", ":workspace_roots" = '
-               '{"." = "write"}}'),
+               '":minimal" = "read", %s = "write"}' %
+               _toml_literal(resolved_workspace)),
         "-c", 'permissions.agentbridge-run.network.enabled=false',
         "-c", ('projects={%s = {trust_level = "untrusted"}}' %
                _toml_literal(resolved_workspace)),
         "-c", 'project_doc_max_bytes=0',
         "-c", 'web_search="disabled"',
+        "-c", 'features.tool_registry.error_on_tool_collisions=true',
+        "-c", 'features.shell_tool=true',
+        "-c", 'features.unified_exec=true',
+        "-c", 'features.code_mode_host.enabled=true',
+        "-c", 'features.code_mode_host.disable_in_process_fallback=true',
+        "-c", 'features.shell_snapshot=false',
+        "-c", 'features.view_image=false',
         "-c", 'features.apps=false',
+        "-c", 'features.tool_suggest=false',
         "-c", 'features.plugins=false',
+        "-c", 'features.remote_plugin=false',
+        "-c", 'features.plugin_sharing=false',
+        "-c", 'features.recommended_plugins=false',
         "-c", 'features.hooks=false',
         "-c", 'features.multi_agent=false',
+        "-c", 'features.multi_agent_v2=false',
         "-c", 'features.browser_use=false',
         "-c", 'features.browser_use_external=false',
         "-c", 'features.browser_use_full_cdp_access=false',
         "-c", 'features.computer_use=false',
         "-c", 'features.image_generation=false',
         "-c", 'features.in_app_browser=false',
+        "-c", 'features.in_app_updates=false',
         "-c", 'features.workspace_dependencies=false',
+        "-c", 'features.executor_capability_discovery=false',
         "-c", 'features.skill_mcp_dependency_install=false',
+        "-c", 'features.skill_search=false',
+        "-c", 'skills.include_instructions=false',
+        "-c", 'skills.bundled.enabled=false',
+        "-c", f'skills.config={disabled_skills}',
         "-c", 'features.memories=false',
         "-c", 'memories.use_memories=false',
+        "-c", 'features.guardian_approval=false',
+        "-c", 'features.guardianv2=false',
+        "-c", 'features.request_permissions_tool=false',
+        "-c", 'features.exec_permission_approvals=false',
+        "-c", 'features.tool_call_mcp_elicitation=false',
+        "-c", 'features.auth_elicitation=false',
+        "-c", 'features.enable_mcp_apps=false',
+        "-c", 'features.mcp_2026_07_28=false',
+        "-c", 'features.non_prefixed_mcp_tool_names=false',
+        "-c", 'features.goals=false',
+        "-c", 'features.network_proxy=false',
+        "-c", 'features.respect_system_proxy=false',
     ]
     for key, value in overlay.items():
         launch.extend(("-c", f"{key}={_toml_literal(value)}"))
     return CompiledBridgePolicy(
         executable=executable, executable_version=version,
+        executable_sha256=executable_sha256,
+        code_mode_host=code_mode_host,
+        code_mode_host_sha256=code_mode_host_sha256,
+        signing_team=signing_team, config_layers=config_layers,
         workspace=resolved_workspace,
         renderer=profile.renderer, capabilities=capabilities,
         launch_args=tuple(launch),
         tool_timeout_s=max(30, min(3600, int(max(timeout_s, 1) + 60))),
         blocked_env=profile.blocked_env,
     )
+
+
+def _codex_binary_identity(executable: str) -> tuple[str, str, str, str]:
+    """Bind the two OpenAI-signed macOS executables used by code-mode runs."""
+    if sys.platform != "darwin":
+        raise ValidationError(
+            "the exact Codex bridge is currently admitted only on macOS")
+    executable_path = Path(executable)
+    package_root = executable_path.parent.parent
+    host_candidates: list[Path] = []
+    metadata_path = package_root / "codex-package.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        metadata = {}
+    resources_dir = metadata.get("resourcesDir")
+    if isinstance(resources_dir, str) and resources_dir:
+        host_candidates.append(package_root / resources_dir / "codex-code-mode-host")
+    host_candidates.append(executable_path.with_name("codex-code-mode-host"))
+    host_path = next((path.resolve() for path in host_candidates if path.is_file()), None)
+    if host_path is None:
+        raise ValidationError("could not resolve the Codex code-mode host")
+
+    team = "2DC432GLL2"
+    for path, identifier in (
+        (executable_path, "codex"), (host_path, "codex-code-mode-host"),
+    ):
+        try:
+            verify = subprocess.run(
+                ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            details = subprocess.run(
+                ["/usr/bin/codesign", "-dv", "--verbose=4", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValidationError("could not verify the Codex code signature") from exc
+        signed = "\n".join((details.stdout, details.stderr))
+        if (verify.returncode or details.returncode
+                or f"Identifier={identifier}" not in signed
+                or f"TeamIdentifier={team}" not in signed
+                or "Authority=Developer ID Application: OpenAI OpCo, LLC" not in signed):
+            raise ValidationError("Codex executable is not signed by the reviewed publisher")
+    return (
+        _sha256_file(executable_path), str(host_path), _sha256_file(host_path), team,
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ValidationError("could not fingerprint a Codex executable") from exc
+    return digest.hexdigest()
+
+
+def _codex_non_user_config_layers(
+        executable: str, workspace: Path, source_env) -> tuple[str, ...]:
+    """Inspect resolved project, cloud, system, and managed config layers.
+
+    ``--ignore-user-config`` excludes only the user layer.  The remaining
+    layers are admitted only when empty, except for the two project settings
+    that this launch overrides with higher-precedence session flags.
+    """
+    process = None
+    try:
+        process = subprocess.Popen(
+            [executable, "app-server"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            cwd=str(workspace), env=_probe_env(source_env),
+        )
+        assert process.stdin is not None and process.stdout is not None
+        _write_rpc(process, {
+            "method": "initialize", "id": 1,
+            "params": {"clientInfo": {
+                "name": "agentbridge", "title": "AgentBridge", "version": "0.24",
+            }},
+        })
+        _read_rpc_response(process, 1, timeout_s=15)
+        _write_rpc(process, {"method": "initialized", "params": {}})
+        _write_rpc(process, {
+            "method": "config/read", "id": 2,
+            "params": {"includeLayers": True, "cwd": str(workspace)},
+        })
+        response = _read_rpc_response(process, 2, timeout_s=20)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ValidationError("could not inspect the effective Codex config layers") from exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    result = response.get("result")
+    layers = result.get("layers") if isinstance(result, dict) else None
+    if not isinstance(layers, list):
+        raise ValidationError("Codex did not return inspectable config layers")
+    return _validate_codex_config_layers(layers)
+
+
+def _validate_codex_config_layers(layers: list) -> tuple[str, ...]:
+    admitted: list[str] = []
+    for layer in layers:
+        if not isinstance(layer, dict) or not isinstance(layer.get("name"), dict):
+            raise ValidationError("Codex returned an invalid config layer")
+        layer_type = layer["name"].get("type")
+        if layer_type == "user":
+            continue
+        config = layer.get("config") or {}
+        if not isinstance(config, dict):
+            raise ValidationError("Codex returned an invalid config layer")
+        allowed = {"default_permissions", "approval_policy"} \
+            if layer_type == "project" else set()
+        if set(config) - allowed:
+            raise ValidationError(
+                f"Codex {layer_type or 'unknown'} config adds unreviewed authority")
+        version = layer.get("version")
+        if not isinstance(version, str) or not version.startswith("sha256:"):
+            raise ValidationError("Codex config layer has no stable fingerprint")
+        admitted.append(f"{layer_type}:{version}")
+    return tuple(sorted(admitted))
+
+
+def _write_rpc(process: subprocess.Popen, payload: dict) -> None:
+    assert process.stdin is not None
+    process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+
+
+def _read_rpc_response(
+        process: subprocess.Popen, request_id: int, *, timeout_s: float) -> dict:
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        ready, _, _ = select.select(
+            [process.stdout], [], [], min(0.25, deadline - time.monotonic()),
+        )
+        if not ready:
+            continue
+        line = process.stdout.readline()
+        if not line:
+            break
+        payload = json.loads(line)
+        if payload.get("id") == request_id:
+            if "error" in payload:
+                raise ValueError("Codex config RPC failed")
+            return payload
+    raise ValueError("Codex config RPC timed out")
 
 
 def _string_tuple(value: object, name: str) -> tuple[str, ...]:
@@ -287,6 +512,54 @@ def _safe_codex_overlay(profile: BridgeProfile, source_env) -> dict:
                 and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", value):
             out[key] = value
     return out
+
+
+def _disabled_codex_skill_config(source_env, workspace: Path) -> str:
+    """Disable every currently discoverable host skill by canonical path.
+
+    Codex 0.147 has no global skill-disable switch: hiding the catalog does not
+    stop an explicit ``$skill`` mention.  Compile all fixed discovery roots
+    into the signed launch policy and fail closed if their inventory cannot be
+    bounded.  A fresh policy is compiled for every run.
+    """
+    source = os.environ if source_env is None else source_env
+    user_home = Path(source.get("HOME") or "~").expanduser()
+    codex_home = Path(
+        source.get("CODEX_HOME") or user_home / ".codex"
+    ).expanduser()
+    roots = (
+        codex_home / "skills",
+        user_home / ".agents" / "skills",
+        workspace / ".agents" / "skills",
+        workspace / ".codex" / "skills",
+    )
+    paths: set[str] = set()
+    seen_dirs: set[tuple[int, int]] = set()
+    stack = [root for root in roots if root.exists()]
+    try:
+        while stack:
+            current = stack.pop()
+            stat = current.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            if identity in seen_dirs:
+                continue
+            seen_dirs.add(identity)
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=True):
+                        stack.append(Path(entry.path))
+                    elif entry.name == "SKILL.md" and entry.is_file(
+                            follow_symlinks=True):
+                        paths.add(str(Path(entry.path).resolve()))
+                        if len(paths) > 4096:
+                            raise ValidationError(
+                                "Codex skill inventory exceeds the safe bound")
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError("could not inventory Codex skill roots") from exc
+    return "[" + ",".join(
+        "{path=%s,enabled=false}" % _toml_literal(path)
+        for path in sorted(paths)
+    ) + "]"
 
 
 def _toml_literal(value: object) -> str:

@@ -10,10 +10,10 @@
   "bridge_profile": {
     "schema": 1,
     "provider": "codex",
-    "renderer": "codex-0.144",
+    "renderer": "codex-0.147",
     "transport": "streamable-http-bearer",
     "version_args": ["--version"],
-    "version_pattern": "^codex-cli 0\\.144\\.5$",
+    "version_pattern": "^codex-cli 0\\.147\\.0$",
     "enforcement_locus": "provider-filter+server-authority",
     "config_isolation": "ignore-user-config",
     "continuation": "fresh-only",
@@ -28,8 +28,15 @@
   "env_allow": ["CODEX_HOME"],
   "model_args": ["-m", "{model}"],
   "effort_args": ["-c", "model_reasoning_effort={effort}"],
-  "efforts": ["minimal", "low", "medium", "high"],
+  "efforts": ["low", "medium", "high", "xhigh"],
+  "model_efforts": {
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"]
+  },
   "format": "codex-jsonl",
-  "models": ["gpt-5.1-codex", "gpt-5.1-codex-mini"],
-  "verified": false
+  "default_model": "gpt-5.6-luna",
+  "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+             "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+  "verified": true
 }

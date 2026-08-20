@@ -825,6 +825,26 @@ tool, then the room and synthetic files were deleted. The final suite passed
 strongest adversarial re-review found no remaining P0/P1 issue. This closes the
 trusted Codex slice only; V159 remains open for installed Claude/Gemini parity.
 
+R140 refreshes that slice for exact `codex-cli 0.147.0`. The official tagged
+schema and feature registry added or exposed code-mode hosting, portable
+plugins, skill discovery, elicitation, automatic approval, updates and other
+default-on extension surfaces. The package profile now classifies them all,
+uses an absolute workspace permission entry, rejects tool-name collisions,
+prevents code-mode in-process fallback, suppresses skill instructions and
+bundled skills, and explicitly disables every ungranted authority surface.
+Literal skill mentions are blocked by disabling every discovered canonical
+skill path. The compiler verifies the OpenAI macOS signatures and hashes of the
+CLI and standalone code-mode host, rejects unreviewed project/cloud/system/MDM
+configuration, binds those layer fingerprints into the signed policy, and
+rechecks mutable facts immediately before launch. The preset exposes the
+reviewed current selectable model subset with per-model effort ceilings;
+stale model or effort settings fail before launch instead of becoming an opaque
+provider failure. Family default resolves to reviewed low-cost Luna rather than
+a mutable provider default. A restarted first-ever-room proof completed through
+the signed profile, and the canonical terminal record exposed its exact
+provider/model and authority groups. Future Codex versions remain rejected
+pending a new audit.
+
 ### WP2 - Capability registry and policy compiler
 
 Estimate: **2 weeks**. Dependency: WP0-WP1.
@@ -1883,8 +1903,10 @@ Estimate: **2.5-3.5 weeks**.
   native tool spelling, including current documented Cortex surfaces plus old
   aliases. Both inventories remain explicitly non-exhaustive and unbound to an
   installed version, so R134 quarantines both providers before invocation.
-  R135 adds the exact Codex 0.144.5 provider, configuration, transport and host
-  surfaces; future provider parity remains open.
+  R135 added the exact Codex 0.144.5 provider, configuration, transport and host
+  surfaces. R140 refreshes the exhaustive package-owned Codex slice for exact
+  0.147.0, including its expanded host, plugin, skill, elicitation and model
+  surfaces; future provider versions and other-provider parity remain open.
 - [x] Compile an immutable per-run capability ceiling. R133 freezes the
   reviewed provider subset before canonical run creation, persists it in the
   signed/E2EE run start, and makes later bridge attachment consume that tuple.

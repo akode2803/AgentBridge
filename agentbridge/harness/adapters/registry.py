@@ -357,6 +357,20 @@ class ModelRegistry:
             raise ValidationError(
                 f"{preset.label or preset.id} needs a model picked in the "
                 f"agent's settings")
+        if preset.bridge_profile is not None and not model:
+            raise ValidationError(
+                f"{preset.label or preset.id} exact profile has no reviewed "
+                "default model")
+        if preset.bridge_profile is not None and model and model not in preset.models:
+            raise ValidationError(
+                f"{preset.label or preset.id} does not support configured model "
+                f"{model!r} in its exact reviewed profile — pick a current model "
+                "in the agent's settings")
+        if (preset.bridge_profile is not None and settings.reasoning
+                and settings.reasoning not in preset.efforts_for(model)):
+            raise ValidationError(
+                f"{preset.label or preset.id} does not support configured reasoning "
+                f"level {settings.reasoning!r} for {model or 'the default model'}")
         effort = (settings.reasoning
                   if settings.reasoning in preset.efforts_for(model) else "")
         return Invocation(preset=preset, model=model, effort=effort)

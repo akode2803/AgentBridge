@@ -99,14 +99,14 @@ connections, or narrowly scoped short-lived leases.
 
 ## Provider capability and enforcement matrix
 
-Evidence date: 2026-07-23. Only the current macOS host was available. "Preset"
+Evidence date: 2026-08-21. Only the current macOS host was available. "Preset"
 means repository configuration was inspected; it does not mean the provider's
 claim was independently proven on this platform.
 
 | Family | macOS evidence | Provider tool loop | AgentBridge hook | Provider sandbox claim | C0 environment | Honest current track |
 |---|---|---|---|---|---|---|
 | Claude Code | CLI not found on current host; preset previously marked verified | Provider-owned | MCP permission prompt plus AgentBridge blocklist | No AgentBridge-enforced process sandbox | Explicit Anthropic/Bedrock/Vertex names | Broker-integrated native, pending live macOS recheck |
-| Codex CLI | `codex-cli 0.144.5` installed | Provider-owned | Server-filtered per-run `delegate_agent` only | Generated permission profile denies host reads, allows the run workspace, and disables command network | Authentication home only; API keys, endpoints, and proxy credentials stripped | Trusted R131 slice; exact executable/version bound, fresh-only, no security-flag fallback |
+| Codex CLI | `codex-cli 0.147.0` installed; CLI and code-mode host carry valid OpenAI macOS signatures | Provider-owned direct shell or standalone code-mode host | Server-filtered per-run `delegate_agent` only | Generated permission profile denies the host root, writes only the absolute run workspace, and disables command network | Authentication home only; API keys, endpoints, and proxy credentials stripped | Trusted R140 slice; signed executable pair, byte hashes, version, and non-user config layers bound; fresh-only; no security-flag fallback |
 | Cortex Code | CLI not found | Provider-owned | No AgentBridge per-tool hook | `--sql-read-only` plus configured tool blocklist | Explicit Snowflake/Cortex names | Provider-restricted native, unverified here |
 | Grok CLI | CLI not found | Unknown/text-only preset | None | None | Explicit xAI/Grok names | Text-only native; no tool-control claim |
 | Ollama | Client `0.32.1`; daemon unavailable | Text generation | None | None | Explicit Ollama names | Local text-only native |
@@ -116,6 +116,28 @@ Windows and Linux evidence remains open. No release may generalize the macOS
 results into a three-platform claim. Each platform row must record executable
 version, actual argv, working directory, environment, permission/tool hook,
 fallback, stop behavior, and a real smoke result.
+
+R140 re-audits the tagged 0.147.0 schema, feature registry and release surface.
+The policy explicitly disables hooks, skills, apps/plugins, browser/computer
+control, image generation, delegation, persistence, automatic approvals,
+elicitation, updates and proxy features. It keeps only provider inference,
+workspace-scoped files, sandboxed process execution and the optional signed
+loopback AgentBridge MCP ceiling. Code-mode models use the package's standalone
+host with in-process fallback disabled; nested tools remain subject to the same
+permission profile. An absolute workspace permission avoids 0.147.0's reported
+relative `:workspace_roots` growth path. Every discovered skill path is also
+disabled explicitly because hiding skill instructions alone does not block a
+literal skill mention. Before signing and again immediately before launch,
+AgentBridge inspects Codex's effective project, cloud, system and managed
+configuration layers. Any non-user authority outside the two project settings
+that session flags replace is rejected; layer fingerprints and both executable
+SHA-256 values are part of the signed provider-policy digest.
+
+The reviewed Family default resolves to `gpt-5.6-luna`, so an exact run never
+falls through to a mutable provider default. A restarted first-ever room proved
+workspace creation precedes policy inspection and completed with that exact
+model; its canonical terminal record carried the provider version, model,
+policy digests, capability ceiling and all enabled/controlled/blocked groups.
 
 ## Adversarial cases and expected result
 

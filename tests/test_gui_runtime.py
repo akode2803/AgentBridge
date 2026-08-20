@@ -54,9 +54,9 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
             run_id="r-1-abcdef12", chat_id=chat_id,
             trigger_id="message-authority", provider="codex", model="gpt-test",
             capability_ceiling=("delegate_agent",),
-            native_policy_digest=policy.authority_digest("codex-cli 0.144.5"),
+            native_policy_digest=policy.authority_digest("codex-cli 0.147.0"),
             provider_policy_digest="b" * 64,
-            native_provider_version="codex-cli 0.144.5",
+            native_provider_version="codex-cli 0.147.0",
             native_enabled=policy.enabled,
             native_approval_gated=policy.approval_gated,
             native_blocked=policy.blocked,
@@ -66,9 +66,9 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
         RunLedger(manager).start(
             run_id="run-forged-authority", chat_id=chat_id,
             trigger_id="message-forged", provider="codex", model="gpt-test",
-            native_policy_digest=policy.authority_digest("codex-cli 0.144.5"),
+            native_policy_digest=policy.authority_digest("codex-cli 0.147.0"),
             provider_policy_digest="b" * 64,
-            native_provider_version="codex-cli 0.144.5",
+            native_provider_version="codex-cli 0.147.0",
             native_enabled=policy.enabled,
             native_approval_gated=policy.approval_gated,
             native_blocked=policy.blocked[:-1],
@@ -89,7 +89,7 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
         assert len(rows) == 1
         row = rows[0]
         assert row["run_id"] == "r-1-abcdef12"
-        assert row["provider_version"] == "codex-cli 0.144.5"
+        assert row["provider_version"] == "codex-cli 0.147.0"
         assert row["authority_digest"] == "b" * 64
         assert row["approval_gated"] == ["codex.agentbridge_mcp"]
         assert {tuple(item) for item in row["capabilities"]} == {

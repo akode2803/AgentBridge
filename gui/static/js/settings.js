@@ -1110,7 +1110,13 @@ async function renderSettings() {
       const remount = (slot, options, disabled) => {
         slot.innerHTML = "";
         slot.appendChild(csel({ options, value: slot.dataset.value || "",
-          disabled, onChange: (v) => { slot.dataset.value = v; } }));
+          disabled, onChange: (v) => {
+            slot.dataset.value = v;
+            if (slot.classList.contains("ag-model")) {
+              refreshEfforts(slot.dataset.agent);
+            }
+            agConfigSave(slot.dataset.agent);
+          } }));
       };
       const refreshModels = (agent) => {
         const fam = famFor(agent);

@@ -32,3 +32,13 @@ def test_mobile_agent_routes_can_shrink_inside_settings_grid():
     assert "overflow: visible; text-overflow: clip; white-space: normal;" in style
     assert ".settings-body .ag-route .csel { width: 100%; }" in style
     assert ".settings-body .ag-head h2 { min-width: 0; }" in style
+
+
+def test_remounted_agent_model_controls_still_autosave():
+    settings = (ROOT / "settings.js").read_text(encoding="utf-8")
+    remount = settings[settings.index("const remount ="):
+                       settings.index("const refreshModels =")]
+
+    assert 'slot.classList.contains("ag-model")' in remount
+    assert "refreshEfforts(slot.dataset.agent)" in remount
+    assert "agConfigSave(slot.dataset.agent)" in remount

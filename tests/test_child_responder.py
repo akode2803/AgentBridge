@@ -130,7 +130,10 @@ def test_shipped_deepseek_formats_required_model_in_base_argv(tmp_path):
 def test_tool_capable_presets_are_refused_before_launch(
         tmp_path, monkeypatch, preset_id, reason):
     shipped = ModelRegistry.load(tmp_path / "empty-home").presets[preset_id]
-    responder = _responder(tmp_path, shipped, account=_account(preset_id))
+    model = "gpt-5.6-luna" if preset_id == "codex" else "model-a"
+    responder = _responder(
+        tmp_path, shipped, account=_account(preset_id, model=model),
+    )
     monkeypatch.setattr(
         responder, "_run_child_process",
         lambda *_args, **_kwargs: pytest.fail("unsafe preset was launched"),
