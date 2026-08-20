@@ -34,6 +34,9 @@ def runtime_policy_revision(harness: dict | None) -> int:
     # revoke already-authorized work, whose authority remains independently
     # bound to membership, ownership, host and the rest of this policy.
     policy.pop("agent_tools_enabled", None)
+    # This controls an observer/validator around the existing CLI call. It
+    # grants no capability and cannot alter an already-prepared invocation.
+    policy.pop("contract_cli_enabled", None)
     return int.from_bytes(
         hashlib.sha256(canonical_json_bytes(policy)).digest()[:8], "big",
     ) & ((1 << 63) - 1)
@@ -110,6 +113,10 @@ class HarnessSettings:
     # destination also needs this enabled; turning it off stops new offers but
     # does not erase already-authorized work or its audit trail.
     agent_tools_enabled: bool = False
+    # C2.2 rollback lever: validate/observe the current CLI through the frozen
+    # provider-neutral contracts. Exact True only; malformed truthy values stay
+    # off. The settings object is captured once when a run is prepared.
+    contract_cli_enabled: bool = False
     # ----- model selection (R16): the owner's picker writes these
     adapter: str = ""               # preset family id; "" = the sole install
     model: str = ""                 # override-all "current model"
@@ -178,6 +185,7 @@ class HarnessSettings:
             peer_auto=[str(n) for n in (h.get("peer_auto") or []) if n],
             peer_repair=bool(h.get("peer_repair", False)),
             agent_tools_enabled=bool(h.get("agent_tools_enabled", False)),
+            contract_cli_enabled=h.get("contract_cli_enabled") is True,
             adapter=str(h.get("adapter") or "").strip().lower(),
             model=_model(h.get("model")),
             reasoning=str(h.get("reasoning") or "").strip().lower(),

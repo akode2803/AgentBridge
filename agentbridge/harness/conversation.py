@@ -79,6 +79,9 @@ class Delivery:
     native_provider_version: str = ""
     compiled_bridge_policy: Any = None  # exact pre-sign provider policy
     canonical_run: Any = None      # signed start returned by the run ledger
+    canonical_task: Any = None     # signed root task paired with canonical_run
+    cli_contract_trace: Any = None  # immutable, adapter-local observation only
+    contract_cli_enabled: bool = False  # sampled before this run is signed
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation
 

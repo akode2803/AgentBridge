@@ -45,6 +45,7 @@ from ..recovery import archive_outbox, prepare_outbox
 from ..responder import MESSAGE_BREAK, SILENCE, OnStep, Reply, RunStopped
 from ..retrieval import HistoryIndex, plan_query
 from ..runtime.models import RunRecord, RunState
+from ..runtime.cli_compat import CliContractSession, prepare_cli_contract
 from ..settings import HarnessSettings
 from .registry import (
     Invocation, ModelRegistry, effective_gates, effective_native_policy,
@@ -367,6 +368,7 @@ class CliResponder:
             bridge_policy.authority_digest() if bridge_policy is not None else "")
         delivery.invocation = invocation
         delivery.harness_settings = settings
+        delivery.contract_cli_enabled = settings.contract_cli_enabled
         metadata = {
             "provider": invocation.preset.id,
             # An empty model delegates to mutable external CLI configuration;
@@ -529,6 +531,20 @@ class CliResponder:
         try:
             return self._respond(delivery, on_step=on_step)
         except BaseException as err:
+            contract = getattr(self._run_local, "cli_contract", None)
+            if isinstance(contract, CliContractSession):
+                if isinstance(err, RunStopped):
+                    delivery.cli_contract_trace = contract.stop()
+                else:
+                    message = str(err).lower()
+                    delivery.cli_contract_trace = contract.fail(
+                        err,
+                        timeout="timed out" in message,
+                        output_error=(isinstance(err, RuntimeError)
+                                      and "run failed" in message
+                                      and "(rc=0)" in message
+                                      and "timed out" not in message),
+                    )
             outbox = getattr(self._run_local, "outbox", None)
             if outbox is not None:
                 archive_outbox(
@@ -537,6 +553,8 @@ class CliResponder:
         finally:
             with contextlib.suppress(AttributeError):
                 del self._run_local.outbox
+            with contextlib.suppress(AttributeError):
+                del self._run_local.cli_contract
 
     def _respond(self, delivery: Delivery,
                  on_step: OnStep | None = None) -> Reply:
@@ -594,9 +612,12 @@ class CliResponder:
         reply_file.unlink(missing_ok=True)
 
         steps: list[dict] = []
+        contract: CliContractSession | None = None
 
         def step(line: str) -> None:
             steps.append({"text": line[:200], "ts": utcnow_iso()})
+            if contract is not None:
+                contract.activity(line)
             if on_step:
                 on_step(line)
 
@@ -721,24 +742,49 @@ class CliResponder:
             env = provider_env(inv.preset, injected=injected_env)
             if bridge_policy is not None:
                 env = bridge_policy.sanitize_environment(env)
+            fallback_argv = None
+            if (delivery.contract_cli_enabled and bridge_policy is None
+                    and inv.preset.id not in self._minimal):
+                fallback_argv = inv.preset.build_argv(
+                    prompt=prompt, workdir=str(workdir),
+                    reply_file=str(reply_file), model=inv.model,
+                    effort=inv.effort, minimal=True,
+                    blocklist=blocklist,
+                )
+            if delivery.contract_cli_enabled:
+                contract = prepare_cli_contract(
+                    delivery=delivery,
+                    provider=inv.preset.id,
+                    model=inv.model or "provider-default-unattested",
+                    effort=inv.effort,
+                    timeout_s=settings.timeout_s,
+                    minimal=inv.preset.id in self._minimal,
+                    bridge_attached=bridge_attached,
+                    prompt=prompt,
+                    argv=argv,
+                    fallback_argv=fallback_argv,
+                    env=env,
+                )
+                self._run_local.cli_contract = contract
+                contract.launch(argv)
             rc, lines, err = self._run(
                 argv, workdir, settings.timeout_s, inv, pack, step,
-                env=env, chat_id=delivery.chat_id)
+                env=env, chat_id=delivery.chat_id, run_id=delivery.run_id)
             if (self._usage_error(rc, err) and bridge_policy is None
                     and inv.preset.id not in self._minimal):
                 # a CLI update rejected our flags — drop conveniences, keep
                 # safety args AND the permission plumbing
                 step("Flags rejected — retrying with the minimal set")
                 self._minimal.add(inv.preset.id)
-                argv = inv.preset.build_argv(
+                argv = fallback_argv or inv.preset.build_argv(
                     prompt=prompt, workdir=str(workdir),
                     reply_file=str(reply_file), model=inv.model,
-                    effort=inv.effort, minimal=True,
-                    blocklist=blocklist,
-                )
+                    effort=inv.effort, minimal=True, blocklist=blocklist)
+                if contract is not None:
+                    contract.launch(argv)
                 rc, lines, err = self._run(
                     argv, workdir, settings.timeout_s, inv, pack, step,
-                    env=env, chat_id=delivery.chat_id)
+                    env=env, chat_id=delivery.chat_id, run_id=delivery.run_id)
 
         text = reply_from_output(lines, inv.preset.format)
         if not text and reply_file.is_file():
@@ -763,9 +809,12 @@ class CliResponder:
             if (empty.is_file() and not empty.is_symlink()
                     and empty.stat().st_size == 0):
                 empty.unlink(missing_ok=True)
-        return Reply(body=text, steps=steps, files=files, timers=timers,
-                     artifact_outbox=str(outbox),
-                     leave_chat=bool(bridge and bridge.leave_requested))
+        reply = Reply(body=text, steps=steps, files=files, timers=timers,
+                      artifact_outbox=str(outbox),
+                      leave_chat=bool(bridge and bridge.leave_requested))
+        if contract is not None:
+            delivery.cli_contract_trace = contract.complete(text)
+        return reply
 
     @staticmethod
     def _canonical_capability_ceiling(delivery: Delivery) -> tuple[str, ...]:
@@ -834,7 +883,8 @@ class CliResponder:
     def _run(self, argv: list[str], workdir: Path, timeout_s: float,
              inv: Invocation, pack: PromptPack, step,
              env: dict | None = None,
-             chat_id: str = "") -> tuple[int | None, list[str], str]:
+             chat_id: str = "", run_id: str = "") \
+            -> tuple[int | None, list[str], str]:
         kwargs: dict = {}
         if os.name == "nt":  # no console flash under pythonw (v1 lesson)
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -864,7 +914,7 @@ class CliResponder:
 
                     command = consume_owner_command(
                         self.mesh, target=self.mesh.user, action="stop",
-                        chat_id=chat_id,
+                        chat_id=chat_id, run_id=run_id,
                     )
                     if command is not None:
                         stop_req.set()

@@ -1379,6 +1379,7 @@ function bindTranscript(tr, chatId, data, ctx) {
     // owner stops an in-flight agent run (R36) — this chat's run only
     const stopBtn = e.target.closest(".feed-stop");
     if (stopBtn) {
+      const stopRunId = stopBtn.closest(".feed-msg")?.dataset.feedRun || "";
       // V105: immediate feedback — the button becomes a spinner and the
       // activity line flips to "Stopping…" the instant it's clicked, so the
       // wait for the harness to actually halt never reads as a dead click.
@@ -1389,7 +1390,7 @@ function bindTranscript(tr, chatId, data, ctx) {
       const label = stopBtn.closest(".bubble")?.querySelector(".typing-label");
       if (label) label.textContent = "Stopping…";
       api("/api/mesh/agent_stop", { agent: stopBtn.dataset.agent,
-                                    chat_id: chatId })
+                                    chat_id: chatId, run_id: stopRunId })
         .then((r) => {
           if (r.error) {
             toast(r.error, true);

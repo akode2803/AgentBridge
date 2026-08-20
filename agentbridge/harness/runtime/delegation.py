@@ -448,7 +448,7 @@ class DelegationCoordinator:
 
             stopped = consume_owner_command(
                 self.mesh, target=self.mesh.user, action="stop",
-                chat_id=work.chat_id,
+                chat_id=work.chat_id, run_id=work.run_id,
             )
             if stopped is not None:
                 with self._lock:

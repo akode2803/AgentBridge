@@ -454,15 +454,6 @@ class AgentRunner:
                 # pause waits too (slot-free), and runs when it's lifted
                 self.queue.release(group, retry_in_s=self.poll_s * 4)
                 return
-            if self._owner_stop_requested(chat_id):
-                # R55 (V35): a Stop pressed while nothing was running used to
-                # evaporate — the in-run poller was the only consumer. Honor
-                # it at claim time: the owner already refused this run.
-                self.queue.finish(group, "stopped-by-owner")
-                self._new_feed(group).finish(
-                    "stopped", "Stopped by your member")
-                self.publish_status()
-                return
             # breadcrumbs ride along so a reaction trigger can find its
             # own event in the transcript (render drops them from context)
             transcript = self.mesh.messages_for(chat_id, breadcrumbs=True)
@@ -528,6 +519,7 @@ class AgentRunner:
             delivery.run_id = feed.run_id
             delivery.task_id = feed.task_id
             delivery.canonical_run = feed.run_record
+            delivery.canonical_task = feed.task_record
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
                 # message — the livefeed/sidebar say what the run is about
@@ -675,17 +667,6 @@ class AgentRunner:
             return authz.can_send(snap, self.agent)
         except Exception:  # noqa: BLE001
             return True
-
-    def _owner_stop_requested(self, chat_id: str) -> bool:
-        """Consume one valid owner stop for this agent and matching chat."""
-        try:
-            from .runtime.controls import consume_owner_command
-
-            return consume_owner_command(
-                self.mesh, target=self.agent, action="stop", chat_id=chat_id,
-            ) is not None
-        except Exception:  # noqa: BLE001 — a transport blip never stops a run
-            return False
 
     def _blob_syncing(self, chat_id: str, transcript) -> str | None:
         """The name of a RECENT attachment whose blob is not fetchable yet

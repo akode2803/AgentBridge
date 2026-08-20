@@ -160,16 +160,35 @@ def agent_harness_status(app, req, mesh) -> dict:
 def agent_stop(app, req, mesh) -> dict:
     """Stop the agent's in-flight run (R36): the owner drops a stop doc the
     adapter polls; the run's subprocess is killed and the outcome is recorded
-    as a deliberate stop (no error notice, slot refunded). ``chat_id`` limits
-    the stop to one chat's run; empty stops whatever is running."""
+    as a deliberate stop (no error notice, slot refunded). Every new stop binds
+    one exact active run; the chat supplies it directly and Settings may resolve
+    it only when one response is unambiguously active."""
     name = (req.data.get("agent") or "").strip().lower()
     if mesh.directory.owner_of(name) != mesh.user:
         return {"error": "only the agent's responsible member can stop it"}
+    live = mesh.tx.get_doc(f"status/{name}_live.json")
+    rows = live.get("runs") if isinstance(live, dict) else None
+    active = [row for row in (rows or []) if isinstance(row, dict)
+              and row.get("state") == "running" and row.get("run_id")
+              and not row.get("waiting")]
+    requested = str(req.data.get("run_id") or "").strip()
+    chat_id = str(req.data.get("chat_id") or "").strip()
+    if requested:
+        matches = [row for row in active if row.get("run_id") == requested
+                   and (not chat_id or row.get("chat_id") == chat_id)]
+    else:
+        matches = [row for row in active
+                   if not chat_id or row.get("chat_id") == chat_id]
+    if len(matches) != 1:
+        return {"error": ("that run is no longer active" if requested
+                          else "choose one active response to stop")}
+    run = matches[0]
     from ..harness.runtime.controls import publish_owner_command
 
     publish_owner_command(
         mesh, target=name, action="stop",
-        chat_id=(req.data.get("chat_id") or "").strip(), timeout_s=60,
+        chat_id=str(run.get("chat_id") or ""),
+        run_id=str(run["run_id"]), timeout_s=60,
     )
     return {"ok": True}
 

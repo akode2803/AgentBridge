@@ -17,14 +17,16 @@ class ControlError(RuntimeContractError):
     """A runtime control is malformed, forged, stale, or unauthorized."""
 
 
-OWNER_FIELDS = {
+OWNER_FIELDS_V1 = {
     "v", "id", "ns", "target", "owner", "action", "chat_id", "timer_id",
     "timer_at_ns", "expires_ns", "ownership_epoch", "policy_revision",
 }
-OWNER_HEADER_FIELDS = {
+OWNER_FIELDS = OWNER_FIELDS_V1 | {"run_id"}
+OWNER_HEADER_FIELDS_V1 = {
     "v", "kind", "id", "ns", "sender", "recipient", "target", "action",
     "expires_ns", "ownership_epoch", "policy_revision",
 }
+OWNER_HEADER_FIELDS = OWNER_HEADER_FIELDS_V1 | {"run_id"}
 PAUSE_FIELDS = {
     "v", "id", "ns", "scope", "actor", "chat_id", "paused",
     "actor_epoch",
@@ -53,19 +55,26 @@ def _strict(value: object, fields: set[str], label: str) -> dict:
 
 
 def _owner_header(record: dict) -> dict:
-    return {
-        "v": 1, "kind": "owner_command", "id": record["id"],
+    header = {
+        "v": record["v"], "kind": "owner_command", "id": record["id"],
         "ns": record["ns"], "sender": record["owner"],
         "recipient": record["target"], "target": record["target"],
         "action": record["action"], "expires_ns": record["expires_ns"],
         "ownership_epoch": record["ownership_epoch"],
         "policy_revision": record["policy_revision"],
     }
+    if record["v"] >= 2:
+        header["run_id"] = record["run_id"]
+    return header
 
 
 def _validate_owner(record: object) -> dict:
-    r = _strict(record, OWNER_FIELDS, "owner command")
-    if r["v"] != 1 or r["action"] not in {"stop", "timer_cancel"}:
+    if not isinstance(record, dict):
+        raise ControlError("invalid owner command fields")
+    version = record.get("v")
+    expected = OWNER_FIELDS if version == 2 else OWNER_FIELDS_V1
+    r = _strict(record, expected, "owner command")
+    if version not in {1, 2} or r["action"] not in {"stop", "timer_cancel"}:
         raise ControlError("unsupported owner command")
     for name in ("id", "target", "owner", "action"):
         if not isinstance(r[name], str) or not r[name]:
@@ -73,13 +82,19 @@ def _validate_owner(record: object) -> dict:
     for name in ("chat_id", "timer_id"):
         if not isinstance(r[name], str):
             raise ControlError(f"invalid owner command {name}")
+    run_id = r.get("run_id", "")
+    if not isinstance(run_id, str):
+        raise ControlError("invalid owner command run_id")
     for name in ("ns", "timer_at_ns", "expires_ns", "ownership_epoch",
                  "policy_revision"):
         if isinstance(r[name], bool) or not isinstance(r[name], int):
             raise ControlError(f"invalid owner command {name}")
-    if r["action"] == "stop" and (r["timer_id"] or r["timer_at_ns"]):
-        raise ControlError("stop command cannot carry timer fields")
-    if r["action"] == "timer_cancel" and (not r["timer_id"]
+    if r["action"] == "stop":
+        if version != 2 or not run_id:
+            raise ControlError("stop command must bind an active run")
+        if r["timer_id"] or r["timer_at_ns"]:
+            raise ControlError("stop command cannot carry timer fields")
+    if r["action"] == "timer_cancel" and (run_id or not r["timer_id"]
                                              or r["timer_at_ns"] <= 0):
         raise ControlError("timer cancel must bind a live timer")
     return r
@@ -98,21 +113,25 @@ def _current_owner_authority(mesh, record: dict) -> None:
 
 def publish_owner_command(mesh, *, target: str, action: str,
                           chat_id: str = "", timer_id: str = "",
-                          timer_at_ns: int = 0,
+                          timer_at_ns: int = 0, run_id: str = "",
                           timeout_s: float = 30.0) -> dict:
     """Create one immutable owner-to-agent command from server-owned fields."""
     auth = responsible_authority(mesh, target)
     if auth["owner"] != mesh.user:
         raise ControlError("only the responsible member can control this agent")
     ns = next_ns()
+    version = 2 if action == "stop" else 1
     record = {
-        "v": 1, "id": new_id("control", ns), "ns": ns, "target": target,
+        "v": version, "id": new_id("control", ns), "ns": ns,
+        "target": target,
         "owner": mesh.user, "action": action, "chat_id": str(chat_id),
         "timer_id": str(timer_id), "timer_at_ns": int(timer_at_ns),
         "expires_ns": ns + max(1, int(timeout_s * 1e9)),
         "ownership_epoch": int(auth["ownership_epoch"]),
         "policy_revision": int(auth["policy_revision"]),
     }
+    if version >= 2:
+        record["run_id"] = str(run_id)
     _validate_owner(record)
     envelope = seal_pairwise(
         mesh, header=_owner_header(record), sender=mesh.user,
@@ -124,9 +143,13 @@ def publish_owner_command(mesh, *, target: str, action: str,
 
 def _open_owner_command(mesh, path: str, target: str) -> dict:
     owner = mesh.directory.owner_of(target)
+    raw = mesh.tx.get_doc(path)
+    header = raw.get("header") if isinstance(raw, dict) else None
+    version = header.get("v") if isinstance(header, dict) else None
+    header_fields = OWNER_HEADER_FIELDS if version == 2 else OWNER_HEADER_FIELDS_V1
     opened = open_pairwise(
-        mesh, mesh.tx.get_doc(path), header_fields=OWNER_HEADER_FIELDS,
-        expected={"v": 1, "kind": "owner_command", "sender": owner,
+        mesh, raw, header_fields=header_fields,
+        expected={"v": version, "kind": "owner_command", "sender": owner,
                   "recipient": target, "target": target},
         sender=owner, recipient=target, viewer=target,
     )
@@ -136,6 +159,8 @@ def _open_owner_command(mesh, path: str, target: str) -> dict:
                  "ownership_epoch", "policy_revision"):
         if header[name] != record[name]:
             raise ControlError(f"owner command header {name} mismatch")
+    if record.get("run_id", "") != header.get("run_id", ""):
+        raise ControlError("owner command header run_id mismatch")
     if path != owner_command_path(target, record["id"]):
         raise ControlError("owner command path mismatch")
     _current_owner_authority(mesh, record)
@@ -156,10 +181,15 @@ def owner_commands(mesh, *, target: str, action: str = "") -> list[dict]:
 
 
 def consume_owner_command(mesh, *, target: str, action: str,
-                          chat_id: str | None = None) -> dict | None:
+                          chat_id: str | None = None,
+                          run_id: str | None = None) -> dict | None:
     """Durably claim the first matching valid command and remove it best-effort."""
+    if action == "stop" and not run_id:
+        raise ControlError("stop consumption requires an exact run id")
     for record in owner_commands(mesh, target=target, action=action):
         if chat_id is not None and record["chat_id"] not in ("", chat_id):
+            continue
+        if run_id is not None and record.get("run_id", "") != run_id:
             continue
         if not mesh.store.claim_once("runtime-control", record["id"],
                                      time.time_ns()):

@@ -1783,7 +1783,7 @@ Estimate: **2-3 weeks**. No new end-user power.
 - [x] **C2.1:** record reuse/wrap/adapt/build decisions for every parity family
   and keep SDK/provider objects adapter-local. See
   `docs/AGENT_RUNTIME_C2_DECISIONS.md`.
-- [ ] **C2.2:** map the current CLI adapter into the contracts and the shared
+- [x] **C2.2:** map the current CLI adapter into the contracts and the shared
   fake task/effect/result fixtures behind a rollback flag.
 - [ ] **C2.3:** pin the optional SDK dependency, isolate beta/provider APIs,
   map one OpenAI Agents SDK adapter into the same fixtures and run a read-only
@@ -1806,6 +1806,20 @@ non-authoritative. Provider errors persist only code-owned public text plus an
 optional evidence digest, and cancellation shares one lock with terminal event
 selection/append. No runner, GUI, provider launch or dependency changed, so live
 execution verification is intentionally deferred to C2.2/C2.3.
+
+**C2.2 (R139):** the default-off current-CLI wrapper validates one immutable
+provider-neutral definition/invocation against the exact signed running run and
+canonical root task immediately before the existing subprocess path. It binds
+the exact prompt, effective settings, authority digests/epochs, ceiling/grants,
+and digest-checks each actual normal or minimal-fallback launch. Existing
+sanitized activity maps to bounded non-authoritative events and success,
+timeout, invalid output, provider failure or in-flight owner stop settles one
+immutable adapter-local result. No second runner, provider dependency,
+authority source, GUI/API/storage trace or usage estimate was introduced.
+The exact-boolean account-local rollback flag is sampled per prepared run and
+excluded from policy revision because it grants no authority.
+Signed stop controls now bind the exact active run end to end; stale, ambiguous
+and unbound stops fail closed instead of becoming commands for a future run.
 
 Affected: new runtime/provider contracts, adapter registry, optional dependency
 extra, tests/spikes, `docs/DECISIONS.md`.  

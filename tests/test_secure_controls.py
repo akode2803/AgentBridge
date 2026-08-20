@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from agentbridge.harness.runtime.controls import (
+    ControlError,
     consume_owner_command,
     owner_command_path,
     owner_commands,
@@ -53,15 +55,50 @@ def test_owner_command_is_pairwise_encrypted_bound_and_one_use(controls):
     ) is None
 
 
+def test_version_one_timer_cancel_remains_readable(controls):
+    owner, agent = controls
+    from agentbridge.core.timekit import new_id, next_ns
+    from agentbridge.harness.runtime.authority import responsible_authority
+    from agentbridge.harness.runtime.envelope import seal_pairwise
+
+    auth = responsible_authority(owner, "helper")
+    ns = next_ns()
+    record = {
+        "v": 1, "id": new_id("control", ns), "ns": ns,
+        "target": "helper", "owner": "aryan", "action": "timer_cancel",
+        "chat_id": "c1", "timer_id": "timer-1", "timer_at_ns": 123,
+        "expires_ns": ns + int(60e9),
+        "ownership_epoch": int(auth["ownership_epoch"]),
+        "policy_revision": int(auth["policy_revision"]),
+    }
+    header = {
+        "v": 1, "kind": "owner_command", "id": record["id"], "ns": ns,
+        "sender": "aryan", "recipient": "helper", "target": "helper",
+        "action": "timer_cancel", "expires_ns": record["expires_ns"],
+        "ownership_epoch": record["ownership_epoch"],
+        "policy_revision": record["policy_revision"],
+    }
+    owner.tx.create_doc(
+        owner_command_path("helper", record["id"]),
+        seal_pairwise(
+            owner, header=header, sender="aryan", recipient="helper",
+            payload=record,
+        ),
+    )
+    opened = owner_commands(agent, target="helper", action="timer_cancel")
+    assert len(opened) == 1 and opened[0]["id"] == record["id"]
+
+
 def test_forged_legacy_and_tampered_owner_controls_are_inert(controls):
     owner, agent = controls
     owner.tx.put_doc("status/helper_stop.json", {
         "ns": 2**62, "by": "aryan", "chat_id": "",
     })
-    assert consume_owner_command(agent, target="helper", action="stop") is None
+    assert consume_owner_command(
+        agent, target="helper", action="stop", run_id="run-1") is None
 
     record = publish_owner_command(
-        owner, target="helper", action="stop", timeout_s=60,
+        owner, target="helper", action="stop", run_id="run-1", timeout_s=60,
     )
     path = owner_command_path("helper", record["id"])
     raw = owner.tx.get_doc(path)
@@ -72,7 +109,8 @@ def test_forged_legacy_and_tampered_owner_controls_are_inert(controls):
 
 def test_owner_command_invalidates_when_policy_changes(controls):
     owner, agent = controls
-    publish_owner_command(owner, target="helper", action="stop", timeout_s=60)
+    publish_owner_command(
+        owner, target="helper", action="stop", run_id="run-1", timeout_s=60)
     owner.directory.patch(
         "helper",
         lambda doc: doc.setdefault("agent", {}).setdefault("harness", {}).update(
@@ -85,7 +123,7 @@ def test_owner_command_invalidates_when_policy_changes(controls):
 def test_expired_owner_command_is_inert(controls, monkeypatch):
     owner, agent = controls
     record = publish_owner_command(
-        owner, target="helper", action="stop", timeout_s=1,
+        owner, target="helper", action="stop", run_id="run-1", timeout_s=1,
     )
     import agentbridge.harness.runtime.controls as controls_module
 
@@ -98,14 +136,66 @@ def test_expired_owner_command_is_inert(controls, monkeypatch):
 def test_stop_chat_binding_does_not_consume_other_room(controls):
     owner, agent = controls
     record = publish_owner_command(
-        owner, target="helper", action="stop", chat_id="c1", timeout_s=60,
+        owner, target="helper", action="stop", chat_id="c1",
+        run_id="run-1", timeout_s=60,
     )
     assert consume_owner_command(
-        agent, target="helper", action="stop", chat_id="c2",
+        agent, target="helper", action="stop", chat_id="c2", run_id="run-1",
     ) is None
     assert consume_owner_command(
-        agent, target="helper", action="stop", chat_id="c1",
+        agent, target="helper", action="stop", chat_id="c1", run_id="run-1",
     )["id"] == record["id"]
+
+
+def test_stop_requires_exact_run_binding(controls):
+    owner, agent = controls
+    with pytest.raises(ControlError, match="active run"):
+        publish_owner_command(
+            owner, target="helper", action="stop", timeout_s=60)
+    publish_owner_command(
+        owner, target="helper", action="stop", run_id="run-1", timeout_s=60)
+    assert consume_owner_command(
+        agent, target="helper", action="stop", run_id="run-2") is None
+    assert consume_owner_command(
+        agent, target="helper", action="stop", run_id="run-1")["run_id"] \
+        == "run-1"
+
+
+def test_agent_stop_api_resolves_one_exact_active_run(controls):
+    owner, agent = controls
+    from agentbridge.gui.api_agents import agent_stop
+
+    owner.tx.put_doc("status/helper_live.json", {
+        "runs": [{"run_id": "run-1", "chat_id": "c1",
+                  "state": "running"}],
+    })
+    result = agent_stop(
+        SimpleNamespace(mesh=owner, lock=None),
+        SimpleNamespace(data={"agent": "helper", "chat_id": "c1"}),
+    )
+    assert result == {"ok": True}
+    command = consume_owner_command(
+        agent, target="helper", action="stop", chat_id="c1", run_id="run-1")
+    assert command and command["run_id"] == "run-1"
+
+
+def test_agent_stop_api_rejects_stale_or_ambiguous_runs(controls):
+    owner, _agent = controls
+    from agentbridge.gui.api_agents import agent_stop
+
+    owner.tx.put_doc("status/helper_live.json", {
+        "runs": [
+            {"run_id": "run-1", "chat_id": "c1", "state": "running"},
+            {"run_id": "run-2", "chat_id": "c2", "state": "running"},
+        ],
+    })
+    app = SimpleNamespace(mesh=owner, lock=None)
+    assert "choose one" in agent_stop(
+        app, SimpleNamespace(data={"agent": "helper"}))["error"]
+    assert "no longer active" in agent_stop(
+        app, SimpleNamespace(data={
+            "agent": "helper", "chat_id": "c1", "run_id": "run-2",
+        }))["error"]
 
 
 def test_signed_global_pause_resume_and_legacy_inert(controls):

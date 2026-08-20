@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import threading
 import time
 from types import SimpleNamespace
 
@@ -370,7 +371,8 @@ def test_cli_responder_end_to_end_through_the_runner(arig):
         replies = [m for m in arig.owner.messages_for(snap.id)
                    if m.from_ == "helper"]
         assert len(replies) == 1
-        assert replies[0].body.startswith("stub reply")
+        assert replies[0].body == \
+            "stub reply model= blocked=shell recovery=no"
         assert "blocked=shell" in replies[0].body     # the blocklist rode argv
         assert (replies[0].reply_to or {}).get("id") == trig.id
         # the streamed tool line became a recorded task step
@@ -387,6 +389,48 @@ def test_cli_responder_end_to_end_through_the_runner(arig):
             "active", "active", "completed",
         ]
         assert events[0].active_task_ids == (tasks[0].meta.task_id,)
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cli_contract_rollout_preserves_runner_reply(arig, monkeypatch, enabled):
+    import agentbridge.harness.adapters.cli as cli_module
+
+    arig.owner.accounts.set_agent_harness("helper", {
+        "adapter": "stub", "contract_cli_enabled": enabled,
+    })
+    captured = []
+    original = cli_module.prepare_cli_contract
+
+    def observe(**values):
+        captured.append(values["delivery"])
+        return original(**values)
+
+    monkeypatch.setattr(cli_module, "prepare_cli_contract", observe)
+    snap = arig.owner.create_chat(f"Contract {enabled}", members=["helper"])
+    arig.owner.post(snap.id, "@helper contract check")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        runner.mesh.outbox.flush_once()
+        arig.owner.sync.sync_once([snap.id])
+        replies = [m for m in arig.owner.messages_for(snap.id)
+                   if m.from_ == "helper"]
+        assert len(replies) == 1
+        assert replies[0].body == \
+            "stub reply model= blocked=shell recovery=no"
+        assert bool(captured) is enabled
+        if enabled:
+            trace = captured[0].cli_contract_trace
+            assert trace.result.status.value == "completed"
+            assert trace.result.final_text == replies[0].body
+            assert trace.events[-1].kind.value == "completed"
     finally:
         runner.close()
 
@@ -413,6 +457,24 @@ def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path
         assert delivery.capability_ceiling == ()
         assert delivery.invocation.model == "owner-model"
         assert delivery.harness_settings is snap
+        assert delivery.contract_cli_enabled is False
+    finally:
+        mesh.close()
+
+
+def test_cli_contract_flag_is_sampled_when_invocation_is_prepared(arig, tmp_path):
+    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+                store_path=tmp_path / "contract-snapshot.sqlite")
+    try:
+        responder = CliResponder(ModelRegistry.load(arig.home), mesh, arig.home)
+        delivery = SimpleNamespace(
+            kind="message", triggers=[], chat_id="snapshot-chat",
+            invocation=None, harness_settings=None,
+        )
+        snapshot = settings(adapter="stub", contract_cli_enabled=True)
+        responder.prepare(delivery, snapshot)
+        snapshot.contract_cli_enabled = False
+        assert delivery.contract_cli_enabled is True
     finally:
         mesh.close()
 
@@ -456,7 +518,7 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
         mesh.close()
 
 
-def test_owner_stop_kills_the_run_cleanly(tmp_path):
+def test_owner_stop_kills_the_run_cleanly(tmp_path, monkeypatch):
     """R36: the owner's stop doc kills the in-flight subprocess; the outcome
     is a deliberate stop — no reply, no error notice, feed state 'stopped',
     the trigger recorded handled so it never re-fires."""
@@ -471,7 +533,9 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
                                                  encoding="utf-8")
     owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
-    owner.accounts.create_agent("helper", harness={"adapter": "stub"})
+    owner.accounts.create_agent("helper", harness={
+        "adapter": "stub", "contract_cli_enabled": True,
+    })
     snap = owner.create_chat("Slow", members=["helper"])
     owner.post(snap.id, "@helper take your time")
     owner.outbox.flush_once()
@@ -479,16 +543,29 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
     runner = AgentRunner(root, "helper", home=home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
+    import agentbridge.harness.adapters.cli as cli_module
+
+    captured = []
+    started = threading.Event()
+    original = cli_module.prepare_cli_contract
+
+    def observe(**values):
+        captured.append(values["delivery"])
+        started.set()
+        return original(**values)
+
+    monkeypatch.setattr(cli_module, "prepare_cli_contract", observe)
     try:
         runner.mesh.sync.sync_once([snap.id])
-        # the stop request lands just before dispatch — the poller's first
-        # check catches it and kills the subprocess long before 30s
         from agentbridge.harness.runtime.controls import publish_owner_command
 
-        publish_owner_command(
-            owner, target="helper", action="stop", timeout_s=60,
-        )
         runner.tick()
+        assert started.wait(10), "CLI contract was not prepared"
+        # The subprocess now owns the run; its signed stop poll kills it.
+        publish_owner_command(
+            owner, target="helper", action="stop",
+            run_id=captured[0].run_id, timeout_s=60,
+        )
         runner.drain(timeout=60)
         runner.mesh.outbox.flush_once()
         owner.sync.sync_once([snap.id])
@@ -502,6 +579,10 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path):
         assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
             "active", "stopped",
         ]
+        assert len(captured) == 1
+        trace = captured[0].cli_contract_trace
+        assert trace.result.status.value == "stopped"
+        assert trace.events[-1].kind.value == "stopped"
         # handled: a second pass never re-runs the same trigger
         runner.tick()
         runner.drain(timeout=30)
@@ -534,12 +615,26 @@ def test_routing_gates_at_scan(arig):
         runner.close()
 
 
-def test_usage_error_falls_back_to_minimal_args(arig, tmp_path):
+def test_usage_error_falls_back_to_minimal_args(arig, tmp_path, monkeypatch):
     # a preset whose full argv the stub rejects; the minimal one works
     bad = stub_preset(tmp_path, id="stub")
     bad["args"] = [str(tmp_path / "stub_cli.py"), "--bogus-flag", "{prompt}"]
     (arig.home / "adapters" / "stub.json").write_text(
         json.dumps(bad), encoding="utf-8")
+    arig.owner.accounts.set_agent_harness("helper", {
+        "adapter": "stub", "contract_cli_enabled": True,
+    })
+
+    import agentbridge.harness.adapters.cli as cli_module
+
+    captured = []
+    original = cli_module.prepare_cli_contract
+
+    def observe(**values):
+        captured.append(values["delivery"])
+        return original(**values)
+
+    monkeypatch.setattr(cli_module, "prepare_cli_contract", observe)
 
     snap = arig.owner.create_chat("Fallback", members=["helper"])
     arig.owner.post(snap.id, "@helper still works?")
@@ -556,6 +651,84 @@ def test_usage_error_falls_back_to_minimal_args(arig, tmp_path):
         replies = [m for m in arig.owner.messages_for(snap.id)
                    if m.from_ == "helper"]
         assert len(replies) == 1 and replies[0].body.startswith("stub reply")
+        trace = captured[0].cli_contract_trace
+        launches = [event.payload.to_value()["launch_digest"]
+                    for event in trace.events
+                    if "launch_digest" in event.payload.to_value()]
+        assert len(launches) == 2 and launches[0] != launches[1]
+        assert trace.invocation.model_settings.to_value()["initial_minimal"] is False
+    finally:
+        runner.close()
+
+
+def test_flag_off_does_not_build_unused_minimal_fallback(arig):
+    preset = stub_preset(arig.home)
+    preset["args_minimal"] = [str(arig.home / "stub_cli.py"), "{unknown}"]
+    (arig.home / "adapters" / "stub.json").write_text(
+        json.dumps(preset), encoding="utf-8")
+    arig.owner.accounts.set_agent_harness("helper", {
+        "adapter": "stub", "contract_cli_enabled": False,
+    })
+    snap = arig.owner.create_chat("No contract fallback", members=["helper"])
+    arig.owner.post(snap.id, "@helper normal path only")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        runner.mesh.outbox.flush_once()
+        arig.owner.sync.sync_once([snap.id])
+        replies = [m for m in arig.owner.messages_for(snap.id)
+                   if m.from_ == "helper"]
+        assert len(replies) == 1
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize(
+    ("process_result", "category", "code"),
+    [
+        ((None, [], "timed out"), "timeout", "timeout"),
+        ((0, [], ""), "output", "invalid_output"),
+        ((2, [], "raw provider credential failure"), "internal", "internal"),
+    ],
+)
+def test_cli_contract_normalizes_failure_without_raw_provider_detail(
+        arig, monkeypatch, process_result, category, code):
+    import agentbridge.harness.adapters.cli as cli_module
+
+    arig.owner.accounts.set_agent_harness("helper", {
+        "adapter": "stub", "contract_cli_enabled": True,
+    })
+    captured = []
+    original = cli_module.prepare_cli_contract
+
+    def observe(**values):
+        captured.append(values["delivery"])
+        return original(**values)
+
+    monkeypatch.setattr(cli_module, "prepare_cli_contract", observe)
+    monkeypatch.setattr(
+        CliResponder, "_run", lambda self, *args, **kwargs: process_result)
+    snap = arig.owner.create_chat(f"Contract failure {code}", members=["helper"])
+    arig.owner.post(snap.id, "@helper fail deterministically")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        trace = captured[0].cli_contract_trace
+        assert trace.result.status.value == "failed"
+        assert trace.result.error.category.value == category
+        assert trace.result.error.code == code
+        assert "raw provider credential failure" not in str(
+            [event.payload.to_value() for event in trace.events])
     finally:
         runner.close()
 

@@ -1,7 +1,7 @@
 # C2.1 canonical agent/runtime contract decisions
 
-Status: accepted for the dormant v1 contract spike (R138). Production CLI
-mapping is C2.2; the optional OpenAI Agents SDK adapter and real smoke are C2.3.
+Status: C2.1 contracts shipped in R138 and the production CLI mapping shipped
+in R139. The optional OpenAI Agents SDK adapter and real smoke are C2.3.
 
 This document records the boundary between AgentBridge orchestration and any
 execution provider. It is intentionally more specific than the parity table in
@@ -153,6 +153,34 @@ Current feed words `done` and `error` are compatibility spellings only; they
 map to canonical `completed` and `failed`. Current CLI activity is throttled,
 best-effort presentation state, not the future durable event spine.
 
+**C2.2 landed in R139.** `runtime/cli_compat.py` is a validation and
+observation wrapper around the one existing `CliResponder`; it does not launch
+a provider itself. The exact-boolean account-local `contract_cli_enabled`
+switch defaults off and is sampled when the invocation is prepared. It is not
+part of the execution-policy revision because it grants no authority, and a
+toggle affects future runs without rewriting an active run.
+
+The wrapper builds one immutable definition/invocation after the exact prompt,
+effective provider/model/settings, final launch alternatives and signed running
+run/root-task records exist. `verify_invocation()` independently revalidates
+the signed record identities, digests, epochs, capability ceiling and grants;
+the adapter then digest-checks every actual normal or minimal-fallback argv
+immediately before launch. Prompt, argv and environment-name facts are
+adapter-observed execution evidence bound to that signed authority, not newly
+signed room authority. Environment values, raw stdout/stderr and provider
+objects never enter the trace.
+
+Only bounded existing activity lines and normalized terminal state enter the
+immutable in-process trace. The durable encrypted `RunLedger`/`TaskLedger`
+remain the sole canonical terminal truth, and no GUI, API or storage surface
+was added. Current CLIs expose no reliable token accounting, so usage remains
+zero rather than estimated. New signed stop controls bind one exact active
+`run_id`; the chat button sends its visible feed run, while the settings
+button resolves only when exactly one response is active. Unbound/legacy stops
+are inert, so a command arriving after process exit cannot stop the next run.
+In-flight owner stops settle the observer once while the signed stop path
+terminates the subprocess and canonical ledgers.
+
 ## 7. Fake runtime and proof obligations
 
 `runtime/fakes.py` supplies a deterministic monotonic clock, strict event sink
@@ -190,7 +218,8 @@ Required C2.2/C2.3 equivalence fixture:
 
 ## 8. Deliberate deferrals
 
-- Production CLI cutover: C2.2.
+- Provider-specific structured error/usage extraction beyond the current CLI's
+  reliable timeout/output distinction.
 - Optional pinned `openai-agents` dependency and SDK smoke: C2.3.
 - Authenticated grants and effect receipts: C5.
 - True handoff transfer and nested/fan-out orchestration: C3/C11.

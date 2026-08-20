@@ -1433,27 +1433,24 @@ def test_attachment_barrier_grace_expires(hrig, monkeypatch):
     assert len(agent_msgs(hrig.owner, snap.id)) == 1
 
 
-def test_claim_time_stop_doc_consumed(hrig):
-    """V35 ('won't even stop'): a Stop pressed while nothing was running
-    used to evaporate — the in-run poller was its only consumer. A fresh
-    stop doc now resolves the next claimed group as stopped-by-owner."""
+def test_unbound_stop_cannot_poison_the_next_run(hrig):
+    """A stop is an exact active-run command, never a future-run command."""
     snap = hrig.owner.create_chat("StopMe", members=["helper"])
     trigger = hrig.owner.post(snap.id, "hey @helper, don't answer")
-    publish_owner_command(
-        hrig.owner, target="helper", action="stop", timeout_s=60,
-    )
+    from agentbridge.harness.runtime.controls import ControlError
+
+    with pytest.raises(ControlError, match="active run"):
+        publish_owner_command(
+            hrig.owner, target="helper", action="stop", timeout_s=60)
     responder = Scripted()
     runner = hrig.make_runner(responder)
     ripple(hrig, runner, snap.id)
 
     turn(hrig, runner, snap.id)
 
-    assert responder.calls == []
-    assert agent_msgs(hrig.owner, snap.id) == []
+    assert len(responder.calls) == 1
+    assert len(agent_msgs(hrig.owner, snap.id)) == 1
     assert runner.queue.answered(snap.id, trigger.id)
-    assert runner._owner_stop_requested(snap.id) is False
-    runs = runner.mesh.tx.get_doc("status/helper_runs.json")
-    assert runs["runs"][-1]["state"] == "stopped"
 
 
 def test_deleted_agent_runner_stands_down(hrig):
