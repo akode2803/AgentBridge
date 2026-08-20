@@ -8,8 +8,34 @@ same-room child-task offers and destination-authored handoff decisions without
 claiming execution routing. C3.2 adds one manager-retained, depth-one,
 zero-capability text-only child execution path with durable causal recovery;
 true execution handoff and broader capability records remain dormant until
-their complete vertical slices land.
+their complete vertical slices land. C2.1 freezes a separate provider-neutral
+adapter contract; it points back to signed runtime truth and is not itself an
+authorization source.
 """
+
+from .contracts import (
+    AGENT_CONTRACT_VERSION,
+    AgentContractError,
+    AgentDefinition,
+    AgentInterruption,
+    AgentInvocationSpec,
+    AgentResult,
+    AgentResultStatus,
+    AgentStreamEvent,
+    AuthorityBinding,
+    CanonicalValue,
+    ContinuationBinding,
+    ContinuationMode,
+    InterruptionKind,
+    PromptSpec,
+    ProviderError,
+    ProviderErrorCategory,
+    StreamEventKind,
+    UsageRecord,
+    contract_digest,
+    invocation_context_digest,
+    verify_invocation,
+)
 
 from .models import (
     ContinuationRecord,
@@ -38,11 +64,18 @@ from .tasks import TaskLedger, TaskLedgerError
 from .handoffs import HandoffLedger, HandoffLedgerError, HandoffView
 
 __all__ = [
+    "AGENT_CONTRACT_VERSION", "AgentContractError", "AgentDefinition",
+    "AgentInterruption", "AgentInvocationSpec", "AgentResult",
+    "AgentResultStatus", "AgentStreamEvent", "AuthorityBinding",
+    "CanonicalValue", "ContinuationBinding", "ContinuationMode",
     "ContinuationRecord", "ContinuationState", "ControlRecord", "ControlState",
     "ControlType", "EffectRecord", "EffectState", "HandoffRecord", "HandoffState",
-    "HandoffType", "RecordKind", "RecordMeta", "RunRecord", "RunState",
+    "HandoffType", "InterruptionKind", "PromptSpec", "ProviderError",
+    "ProviderErrorCategory", "RecordKind", "RecordMeta", "RunRecord", "RunState",
     "RuntimeContractError", "RuntimeEnvelope", "TaskRecord", "TaskState",
     "RunLedger", "RunLedgerError", "canonical_json_bytes", "record_from_dict",
-    "TaskLedger", "TaskLedgerError", "HandoffLedger", "HandoffLedgerError",
-    "HandoffView",
+    "StreamEventKind", "TaskLedger", "TaskLedgerError", "UsageRecord",
+    "HandoffLedger", "HandoffLedgerError", "HandoffView", "contract_digest",
+    "invocation_context_digest",
+    "verify_invocation",
 ]

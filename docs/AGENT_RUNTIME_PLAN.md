@@ -1777,16 +1777,35 @@ mid-tier can implement frozen projections under review.
 
 Estimate: **2-3 weeks**. No new end-user power.
 
-- [ ] Implement `AgentDefinition`, `AgentInvocationSpec`, streamed event,
-  interruption and `AgentResult` contracts.
-- [ ] Cover dynamic instructions, prompt templates, structured input/output,
+- [x] **C2.1:** freeze immutable `AgentDefinition`, `AgentInvocationSpec`,
+  streamed event, interruption, provider error/usage and `AgentResult`
+  contracts, plus deterministic fake clock/provider/event-store fixtures.
+- [x] **C2.1:** record reuse/wrap/adapt/build decisions for every parity family
+  and keep SDK/provider objects adapter-local. See
+  `docs/AGENT_RUNTIME_C2_DECISIONS.md`.
+- [ ] **C2.2:** map the current CLI adapter into the contracts and the shared
+  fake task/effect/result fixtures behind a rollback flag.
+- [ ] **C2.3:** pin the optional SDK dependency, isolate beta/provider APIs,
+  map one OpenAI Agents SDK adapter into the same fixtures and run a read-only
+  provider smoke.
+- [~] Cover dynamic instructions, prompt templates, structured input/output,
   model settings, max turns, hooks, sessions, tools/handoffs, approval policy,
-  streaming, errors, usage and output extraction.
-- [ ] Map one current CLI adapter and one OpenAI Agents SDK adapter into the
-  same fake task/effect/result fixtures.
-- [ ] Record reuse/wrap/build decisions for every parity row in 14.1.
-- [ ] Pin optional SDK dependency and isolate beta APIs behind adapters.
-- [ ] Add fault-injection fake provider, backend, clock and event store.
+  streaming, errors, usage and output extraction. C2.1 freezes the vocabulary;
+  C2.2/C2.3 prove both adapters, while C5/C10/C12/C13 own live authority,
+  tools, persisted sessions and accounting.
+
+**C2.1 (R138):** the dormant schema is separate from signed room-ledger truth.
+Definitions cannot contain run authority; invocations bind the exact signed run
+and task evidence, provider/model, authority epochs, ceiling and grants;
+authenticated one-use continuations bind every execution-context field and use
+authenticated generation watermarks plus consumed tombstones to reject
+snapshot rollback.
+Arbitrary JSON is deeply immutable canonical bytes; unknown top-level
+fields/versions/states fail closed; bounded `x.*` extensions are explicitly
+non-authoritative. Provider errors persist only code-owned public text plus an
+optional evidence digest, and cancellation shares one lock with terminal event
+selection/append. No runner, GUI, provider launch or dependency changed, so live
+execution verification is intentionally deferred to C2.2/C2.3.
 
 Affected: new runtime/provider contracts, adapter registry, optional dependency
 extra, tests/spikes, `docs/DECISIONS.md`.  
