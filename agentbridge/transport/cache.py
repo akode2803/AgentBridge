@@ -548,6 +548,31 @@ class CachingTransport(Transport):
         self.inner.create_doc(path, data)
         self._remember_doc_write(path, data)
 
+    @property
+    def supports_exclusive_create(self) -> bool:
+        return bool(getattr(self.inner, "supports_exclusive_create", False))
+
+    def effect_claims_ready(self) -> bool:
+        probe = getattr(self.inner, "effect_claims_ready", None)
+        return bool(callable(probe) and probe())
+
+    def create_effect_doc(self, path: str, data: Any, *,
+                          ask_envelope: Any = None,
+                          decision_envelope: Any = None) -> None:
+        self.inner.create_effect_doc(
+            path, data, ask_envelope=ask_envelope,
+            decision_envelope=decision_envelope,
+        )
+        self._remember_doc_write(path, data)
+        if ask_envelope is not None:
+            self._remember_doc_write(
+                f"{path.rsplit('/', 1)[0]}/grant-ask.json", ask_envelope)
+        if decision_envelope is not None:
+            self._remember_doc_write(
+                f"{path.rsplit('/', 1)[0]}/grant-decision.json",
+                decision_envelope,
+            )
+
     def _remember_doc_write(self, path: str, data: Any) -> None:
         with self._lock:
             self._docs[path] = copy.deepcopy(data)

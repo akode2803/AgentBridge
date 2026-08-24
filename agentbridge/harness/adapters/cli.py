@@ -708,6 +708,7 @@ class CliResponder:
                     enabled_capabilities=set(bridge_policy.capabilities),
                     native_policy=native_policy,
                     run_record=delivery.canonical_run,
+                    task_record=delivery.canonical_task,
                 ))
                 bridge_args = bridge_policy.attachment_args(url=bridge.url)
                 injected_env["AGENTBRIDGE_MCP_TOKEN"] = bridge.bearer_token

@@ -36,8 +36,11 @@ import time
 from pathlib import Path
 
 from ..core.models import MsgKind
+from ..core.timekit import new_id
 from .broker import PermissionBroker
 from .capabilities import BRIDGE_CAPABILITIES, validate_bridge_tools
+from .runtime.effects import EffectLedger
+from .runtime.permissions import digest as permission_digest
 
 __all__ = ["BridgeServer"]
 
@@ -95,7 +98,7 @@ class BridgeServer:
                  global_memory: str = "dm", docs=None,
                  timer_svc=None, delegate=None,
                  enabled_capabilities: set[str] | frozenset[str] | None = None,
-                 native_policy=None, run_record=None) -> None:
+                 native_policy=None, run_record=None, task_record=None) -> None:
         self.broker = broker
         self.chat_id = chat_id
         self.run_id = run_id
@@ -119,6 +122,13 @@ class BridgeServer:
                                      frozenset(enabled_capabilities))
         self.native_policy = native_policy
         self.run_record = run_record
+        self.task_record = task_record
+        if (run_record is None) != (task_record is None):
+            raise ValueError(
+                "effect authority requires both canonical run and root task")
+        self.effects = (EffectLedger(mesh) if mesh is not None
+                        and run_record is not None and task_record is not None
+                        else None)
         self._creates = 0
         # V53 (leave_chat): the leave is DEFERRED — the tool only requests
         # it (owner-approved); the runner executes it after the reply posts,
@@ -710,6 +720,48 @@ class BridgeServer:
             return ("your responsible member did not approve in time — "
                     "leave things as they are")
 
+        def _owner_effect(tool: str, arguments: dict, detail: str, fn):
+            """Authorize and receipt one AgentBridge-owned immediate effect."""
+            if self.effects is None:
+                refusal = _owner_approved(tool, detail)
+                return refusal if refusal else fn()
+            if not self.effects.available:
+                return "one-use effect grants are unavailable on this transport"
+            call_id = new_id("call")
+            argument_digest = permission_digest({
+                "schema_version": 1, "capability_id": tool,
+                "arguments": arguments,
+            })
+            claimed = {}
+
+            def claim(ask, ask_envelope, decision, decision_envelope):
+                claimed["value"] = self.effects.claim(
+                    ask=ask, ask_envelope=ask_envelope,
+                    decision=decision, decision_envelope=decision_envelope,
+                    run=self.run_record,
+                    task=self.task_record, capability_id=tool,
+                    argument_digest=argument_digest,
+                )
+                return True
+
+            authorization = self.broker.authorize_effect(
+                chat_id=self.chat_id, tool=tool, detail=detail,
+                input_hash=argument_digest, timeout_s=self.ask_timeout_s,
+                run_id=self.run_id, call_id=call_id, claim=claim,
+            )
+            if not authorization.allowed:
+                if authorization.verdict == "deny":
+                    return ("your responsible member declined"
+                            + (f": {authorization.text}"
+                               if authorization.text else ""))
+                return ("your responsible member did not approve in time — "
+                        "leave things as they are")
+            effect_claim = claimed.get("value")
+            if effect_claim is None:
+                raise RuntimeError("approved effect has no authoritative claim")
+            return self.effects.execute(
+                effect_claim, self.run_record, self.task_record, fn)
+
         @mcp.tool(structured_output=False)
         def leave_chat(reason: str = "") -> str:
             """Leave THIS group. Your responsible member is asked to approve
@@ -732,12 +784,16 @@ class BridgeServer:
             theirs; starred messages survive by default). Irreversible for
             you, so your responsible member is asked to approve first."""
             def do():
-                refusal = _owner_approved(
-                    "clear_chat", "clear its own view of this chat's history")
-                if refusal:
-                    return refusal
-                mesh.clear_chat(chat, keep_starred=bool(keep_starred))
-                return "cleared — your view of this chat starts fresh"
+                return _owner_effect(
+                    "clear_chat", {"keep_starred": bool(keep_starred)},
+                    ("clear its own view of this chat's history while keeping "
+                     "starred messages" if keep_starred else
+                     "clear its own view including starred messages"),
+                    lambda: (
+                        mesh.clear_chat(chat, keep_starred=bool(keep_starred)),
+                        "cleared — your view of this chat starts fresh",
+                    )[1],
+                )
             return guarded(do)
 
         @mcp.tool(structured_output=False)

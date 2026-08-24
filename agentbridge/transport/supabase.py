@@ -128,6 +128,7 @@ def _check(path: str) -> str:
 
 
 class SupabaseTransport(Transport):
+    supports_exclusive_create = True
     scheme = "supabase"
     max_upload_bytes = 50 * 1024 * 1024   # storage free-tier per-object cap
     has_change_feed = True                # ab_logs row ids are the feed
@@ -159,6 +160,8 @@ class SupabaseTransport(Transport):
         self._delta: bool | None = None
         self._delta_reprobe = 0.0
         self._ret_min: bool | None = None  # library accepts returning="minimal"?
+        self._effects_ready: bool | None = None
+        self._effects_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -496,6 +499,46 @@ class SupabaseTransport(Transport):
             else:
                 raise
         self._count()
+        self._hint_for(path)
+
+    def effect_claims_ready(self) -> bool:
+        """Probe the exact member-authenticated R142 transition protocol."""
+        now = time.monotonic()
+        if self._effects_ready is True:
+            return True
+        if self._effects_ready is False and now < self._effects_reprobe:
+            return False
+        try:
+            client = self._sb()
+            if not self.auth_mode.startswith("member:"):
+                self._effects_ready = False
+            else:
+                response = self._retry(
+                    lambda: client.rpc("ab_effects_ready").execute())
+                self._effects_ready = getattr(response, "data", None) == 1
+                self._count()
+        except Exception:
+            self._effects_ready = False
+        if not self._effects_ready:
+            self._effects_reprobe = now + 60.0
+        return bool(self._effects_ready)
+
+    def create_effect_doc(self, path: str, data: Any, *,
+                          ask_envelope: Any = None,
+                          decision_envelope: Any = None) -> None:
+        path = _check(path)
+        if not self.effect_claims_ready():
+            raise ValidationError(
+                "Supabase effect transition protocol is unavailable")
+        response = self._retry(lambda: self._sb().rpc(
+            "ab_effect_transition", {
+                "p_root": self.root, "p_path": path, "p_data": data,
+                "p_grant_ask": ask_envelope,
+                "p_grant_decision": decision_envelope,
+            }).execute())
+        self._count()
+        if getattr(response, "data", None) is not True:
+            raise ValidationError("Supabase rejected the effect transition")
         self._hint_for(path)
 
     def delete_doc(self, path: str) -> None:

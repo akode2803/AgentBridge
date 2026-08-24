@@ -436,6 +436,13 @@ class HandoffRecord(_Record):
 
 @dataclass(frozen=True, slots=True)
 class EffectRecord(_Record):
+    """One effect attempt.
+
+    PREPARED is the exclusive grant claim; EXECUTING is dispatch committed;
+    COMMITTED is known success; REJECTED means the callback was provably never
+    entered; UNKNOWN means dispatch began but no authoritative outcome exists.
+    """
+
     KIND: ClassVar[RecordKind] = RecordKind.EFFECT
     state: EffectState
     capability_id: str

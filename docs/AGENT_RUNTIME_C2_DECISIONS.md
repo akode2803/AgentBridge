@@ -1,7 +1,8 @@
 # C2.1 canonical agent/runtime contract decisions
 
 Status: C2.1 contracts shipped in R138 and the production CLI mapping shipped
-in R139. The optional OpenAI Agents SDK adapter and real smoke are C2.3.
+in R139. Aryan skipped the optional OpenAI Agents SDK adapter and real smoke on
+2026-08-24; C2.3 is preserved as research, not active implementation scope.
 
 This document records the boundary between AgentBridge orchestration and any
 execution provider. It is intentionally more specific than the parity table in
@@ -205,7 +206,7 @@ and produces `stopped`; once terminal commit owns it, a later cancellation
 cannot rewrite the canonical result. Production adapters must preserve this
 atomic arbitration rather than copying only the fake's event spelling.
 
-Required C2.2/C2.3 equivalence fixture:
+Required equivalence fixture if another provider adapter is revisited:
 
 1. Build the same definition, invocation and signed-authority binding.
 2. Run one current CLI adapter and one optional SDK adapter against equivalent
@@ -220,7 +221,8 @@ Required C2.2/C2.3 equivalence fixture:
 
 - Provider-specific structured error/usage extraction beyond the current CLI's
   reliable timeout/output distinction.
-- Optional pinned `openai-agents` dependency and SDK smoke: C2.3.
+- Optional pinned `openai-agents` dependency and SDK smoke: C2.3, skipped by
+  product decision on 2026-08-24.
 - Authenticated grants and effect receipts: C5.
 - True handoff transfer and nested/fan-out orchestration: C3/C11.
 - Tool schemas and general MCP adapters: C10.

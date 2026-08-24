@@ -107,6 +107,30 @@ def test_standalone_supervisor_starts_runner_in_own_posix_session(monkeypatch):
     assert seen["kwargs"]["start_new_session"] is True
 
 
+def test_fleet_forwards_stable_configured_machine(tmp_path, monkeypatch):
+    from agentbridge.harness import runner as runner_module
+
+    root = tmp_path / "mesh"
+    root.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    from agentbridge.core.config import save_app_config
+
+    save_app_config({
+        "mesh_root": str(root), "machine_name": "stable-host.local",
+    }, home)
+    seen = {}
+
+    def fake_supervise(root_value, machine, argv, **_kwargs):
+        seen.update(root=root_value, machine=machine, argv=argv)
+        return 0
+
+    monkeypatch.setattr(runner_module, "supervise_all", fake_supervise)
+    assert runner_module.main(["--all", "--home", str(home)]) == 0
+    assert seen["machine"] == "stable-host.local"
+    assert seen["argv"][-2:] == ["--machine", "stable-host.local"]
+
+
 @pytest.fixture
 def hrig(tmp_path):
     """A human owner + an agent on ONE machine sharing one home (exactly the
@@ -1468,6 +1492,21 @@ def test_deleted_agent_runner_stands_down(hrig):
     with pytest.raises(SystemExit) as e:
         runner.tick()
     assert e.value.code == 0
+
+
+def test_effect_recovery_retries_only_when_no_worker_is_live(hrig):
+    """R142: safe idle retries recover startup network failures."""
+    from concurrent.futures import Future
+
+    runner = hrig.make_runner(Scripted())
+    calls = []
+    runner.effect_ledger.recover_incomplete = lambda: calls.append(True)
+    runner._inflight[("chat", "sender")] = Future()
+    runner.tick()
+    assert calls == []
+    runner._inflight.clear()
+    runner.tick()
+    assert calls == [True]
 
 
 def test_chat_stand_down_holds_and_resumes(hrig):

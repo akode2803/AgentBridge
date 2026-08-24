@@ -244,7 +244,8 @@ class FakeClient:
     def table(self, name):
         return FakeQuery(self.db, name)
 
-    def rpc(self, fn, params):
+    def rpc(self, fn, params=None):
+        params = params or {}
         if fn == "ab_list_logs":
             heads = {}
             for r in self.db.get("ab_logs", []):
@@ -260,6 +261,22 @@ class FakeClient:
                         and not r.get("deleted"):
                     ids.add(r["path"].split("/")[1])
             rows = [{"chat_id": c} for c in ids]
+        elif fn == "ab_effects_ready":
+            rows = 1
+        elif fn == "ab_effect_transition":
+            path = params["p_path"]
+            existing = next((row for row in self.db.get("ab_docs", [])
+                             if row["root"] == params["p_root"]
+                             and row["path"] == path), None)
+            if existing is not None:
+                rows = existing["data"] == params["p_data"]
+            else:
+                self.db.setdefault("ab_docs", []).append({
+                    "root": params["p_root"], "path": path,
+                    "data": params["p_data"], "deleted": False,
+                    "seq": len(self.db.get("ab_docs", [])) + 1,
+                })
+                rows = True
         else:  # pragma: no cover
             rows = []
         return FakeExec(rows)
@@ -304,6 +321,7 @@ def test_create_doc_uses_insert_when_genesis_upsert_is_denied(tx, monkeypatch):
 
     monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0)
     tx._client.db["_deny_genesis_upsert"] = True
+    assert tx.supports_exclusive_create is True
     path = "chats/new-g123/meta.json"
     doc = {"members": {"aryan": {"role": "admin"}}}
 
@@ -316,6 +334,17 @@ def test_create_doc_uses_insert_when_genesis_upsert_is_denied(tx, monkeypatch):
     tx.create_doc(path, doc)
     with pytest.raises(RuntimeError, match="23505"):
         tx.create_doc(path, {"members": {"mallory": {"role": "admin"}}})
+
+
+def test_effect_protocol_requires_member_auth_and_exact_rpc(tx):
+    assert tx.effect_claims_ready() is False
+    tx.auth_mode = "member:aryan"
+    tx._effects_reprobe = 0
+    assert tx.effect_claims_ready() is True
+    path = "chats/c1/runtime/effects/run-1/call-1/claim.json"
+    doc = {"meta": {"kind": "effect"}, "nonce": "n", "ct": "c", "sig": "s"}
+    tx.create_effect_doc(path, doc)
+    assert tx.get_doc(path) == doc
 
 
 def test_get_docs_bulk_read(tx):

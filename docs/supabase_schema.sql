@@ -245,6 +245,7 @@ for insert to authenticated with check (
       and data->'members' ? public.ab_member(root)
     )
   )
+  and path not like 'chats/%/runtime/effects/%'
 );
 
 drop policy if exists ab_docs_member_update on public.ab_docs;
@@ -254,7 +255,11 @@ for update to authenticated using (
     path not like 'chats/%'
     or public.ab_is_member(root, public.ab_chat_of(path))
   )
-) with check (public.ab_root_ok(root));
+  and path not like 'chats/%/runtime/effects/%'
+) with check (
+  public.ab_root_ok(root)
+  and path not like 'chats/%/runtime/effects/%'
+);
 
 drop policy if exists ab_docs_member_delete on public.ab_docs;
 create policy ab_docs_member_delete on public.ab_docs
@@ -263,7 +268,141 @@ for delete to authenticated using (
     path not like 'chats/%'
     or public.ab_can_read_chat(root, public.ab_chat_of(path))
   )
+  and path not like 'chats/%/runtime/effects/%'
 );
+
+-- R142: versioned, authenticated append-only effect transitions. Direct
+-- member writes to the lane are denied above. This definer function is the
+-- sole writer and validates caller identity, current room membership, routing,
+-- predecessor existence and one fixed path per state version.
+create or replace function public.ab_effects_ready()
+returns integer
+language sql stable security invoker set search_path = public as $$
+  select 1
+$$;
+revoke all on function public.ab_effects_ready() from public, anon;
+grant execute on function public.ab_effects_ready() to authenticated;
+
+drop function if exists public.ab_effect_transition(text, text, jsonb);
+create or replace function public.ab_effect_transition(
+  p_root text, p_path text, p_data jsonb,
+  p_grant_ask jsonb, p_grant_decision jsonb
+) returns boolean
+language plpgsql security definer set search_path = public as $$
+declare
+  v_member text := public.ab_member(p_root);
+  v_chat text := split_part(p_path, '/', 2);
+  v_run text := split_part(p_path, '/', 5);
+  v_call text := split_part(p_path, '/', 6);
+  v_file text := split_part(p_path, '/', 7);
+  v_meta jsonb := p_data->'meta';
+  v_actor text := v_meta->>'actor';
+  v_previous text;
+  v_existing jsonb;
+  v_base text := left(p_path, length(p_path) - length(v_file));
+  v_grant_ask_path text := v_base || 'grant-ask.json';
+  v_grant_decision_path text := v_base || 'grant-decision.json';
+begin
+  if v_member = '' or not public.ab_is_member(p_root, v_chat)
+     or not exists (
+       select 1 from public.ab_docs u
+       where u.root = p_root and u.path = 'users/' || v_actor || '.json'
+         and not u.deleted and u.data->>'kind' = 'agent'
+         and (u.data->>'active')::boolean is true
+         and u.data->'agent'->>'owner' = v_member
+     )
+     or not exists (
+       select 1 from public.ab_docs m
+       where m.root = p_root
+         and m.path = 'chats/' || v_chat || '/meta.json'
+         and not m.deleted
+         and m.data->'members' ? v_member
+         and m.data->'members' ? v_actor
+     ) then
+    return false;
+  end if;
+  if p_path !~ '^chats/[^/]+/runtime/effects/[^/]+/[^/]+/(claim|state-[23])\.json$'
+     or jsonb_typeof(p_data) <> 'object'
+     or jsonb_typeof(v_meta) <> 'object'
+     or v_meta->>'kind' <> 'effect'
+     or coalesce(v_actor, '') = ''
+     or v_meta->>'signer' <> v_actor
+     or v_meta->>'chat_id' <> v_chat
+     or v_meta->>'run_id' <> v_run
+     or v_meta->>'root_run_id' <> v_run
+     or v_meta->>'call_id' <> v_call then
+    return false;
+  end if;
+
+  if v_file = 'claim.json' then
+    v_previous := null;
+    if jsonb_typeof(p_grant_ask) <> 'object'
+       or jsonb_typeof(p_grant_decision) <> 'object'
+       or p_grant_ask->'header'->>'kind' <> 'permission_ask'
+       or p_grant_ask->'header'->>'sender' <> v_actor
+       or p_grant_ask->'header'->>'recipient' <> v_member
+       or p_grant_ask->'header'->>'agent' <> v_actor
+       or p_grant_ask->'header'->>'chat_id' <> v_chat
+       or p_grant_decision->'header'->>'kind' <> 'permission_decision'
+       or p_grant_decision->'header'->>'sender' <> v_member
+       or p_grant_decision->'header'->>'recipient' <> v_actor
+       or p_grant_decision->'header'->>'agent' <> v_actor
+       or p_grant_decision->'header'->>'chat_id' <> v_chat then
+      return false;
+    end if;
+  elsif v_file = 'state-2.json' then
+    v_previous := 'chats/' || v_chat || '/runtime/effects/' ||
+                  v_run || '/' || v_call || '/claim.json';
+  elsif v_file = 'state-3.json' then
+    v_previous := 'chats/' || v_chat || '/runtime/effects/' ||
+                  v_run || '/' || v_call || '/state-2.json';
+  else
+    return false;
+  end if;
+
+  if v_previous is not null and not exists (
+    select 1 from public.ab_docs d
+    where d.root = p_root and d.path = v_previous and not d.deleted
+      and d.data->'meta'->>'actor' = v_actor
+      and d.data->'meta'->>'chat_id' = v_chat
+      and d.data->'meta'->>'run_id' = v_run
+      and d.data->'meta'->>'call_id' = v_call
+  ) then
+    return false;
+  end if;
+
+  begin
+    if v_file = 'claim.json' then
+      insert into public.ab_docs(root, path, data, deleted) values
+        (p_root, v_grant_ask_path, p_grant_ask, false),
+        (p_root, v_grant_decision_path, p_grant_decision, false);
+    end if;
+    insert into public.ab_docs(root, path, data, deleted)
+    values (p_root, p_path, p_data, false);
+    return true;
+  exception when unique_violation then
+    select data into v_existing from public.ab_docs
+    where root = p_root and path = p_path and not deleted;
+    if v_existing <> p_data then
+      return false;
+    end if;
+    if v_file = 'claim.json' then
+      return exists (
+        select 1 from public.ab_docs a, public.ab_docs d
+        where a.root = p_root and a.path = v_grant_ask_path
+          and a.data = p_grant_ask and not a.deleted
+          and d.root = p_root and d.path = v_grant_decision_path
+          and d.data = p_grant_decision and not d.deleted
+      );
+    end if;
+    return true;
+  end;
+end
+$$;
+revoke all on function public.ab_effect_transition(text, text, jsonb, jsonb, jsonb)
+  from public, anon;
+grant execute on function public.ab_effect_transition(text, text, jsonb, jsonb, jsonb)
+  to authenticated;
 
 -- ab_logs: members only, both ways; deletes cover the janitor's purge of a
 -- deleted chat's logs. Genesis is safe by ordering: meta.json lands before

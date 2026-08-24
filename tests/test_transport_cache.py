@@ -126,6 +126,24 @@ def test_reads_served_from_the_warm_mirror(mirror):
     assert inner.reads["list_chat_ids"] == 1
 
 
+def test_exclusive_create_capability_is_explicitly_delegated(mirror):
+    inner, tx = mirror
+    assert tx.supports_exclusive_create is False
+    inner.supports_exclusive_create = True
+    assert tx.supports_exclusive_create is True
+
+
+def test_effect_protocol_capability_is_probed_and_delegated(mirror):
+    inner, tx = mirror
+    assert tx.effect_claims_ready() is False
+    inner.effect_claims_ready = lambda: True
+    seen = []
+    inner.create_effect_doc = lambda path, data, **_kwargs: seen.append((path, data))
+    assert tx.effect_claims_ready() is True
+    tx.create_effect_doc("chats/c/runtime/effects/r/call/claim.json", {"v": 1})
+    assert seen == [("chats/c/runtime/effects/r/call/claim.json", {"v": 1})]
+
+
 def test_bounded_cached_snapshot_is_atomic_and_never_reads_through(mirror):
     inner, tx = mirror
     inner.put_doc("chats/c1/runtime/runs/a.json", {"value": 1})

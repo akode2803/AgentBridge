@@ -34,6 +34,14 @@ def test_deleted_chat_rls_is_read_delete_only_for_former_members():
         )
     assert "ab_is_member" in _policy(sql, "ab_docs_member_update")
     assert "ab_is_member" in _policy(sql, "ab_blobs_member_update")
+    effect_path = "path not like 'chats/%/runtime/effects/%'"
+    assert effect_path in _policy(sql, "ab_docs_member_update")
+    assert effect_path in _policy(sql, "ab_docs_member_delete")
+    assert effect_path in _policy(sql, "ab_docs_member_insert")
+    assert "ab_effect_transition" in sql
+    assert "security definer set search_path = public" in sql
+    assert "grant-ask.json" in sql and "grant-decision.json" in sql
+    assert "drop function if exists public.ab_effect_transition" in sql
 
 
 class _Table:

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import __version__
-from ..core.config import DEFAULT_HOME, load_app_config
+from ..core.config import DEFAULT_HOME, configured_machine, load_app_config
 from ..core.errors import ValidationError
 from ..core.lock import SingleInstance as FleetInstance
 from ..core.models import ChatKind, UserKind
@@ -122,6 +122,8 @@ class AgentRunner:
                          home=self.home, app_version=__version__)
         self.run_ledger = RunLedger(self.mesh)
         self.task_ledger = TaskLedger(self.mesh, self.run_ledger)
+        from .runtime.effects import EffectLedger
+        self.effect_ledger = EffectLedger(self.mesh)
         # Register the handoff outbox handler before Mesh starts its worker so
         # a crash cannot turn a durable pending offer/decision into dead mail.
         self.handoff_ledger = HandoffLedger(self.mesh, self.task_ledger)
@@ -994,6 +996,13 @@ class AgentRunner:
         self.peer.serve_once(settings)
         with contextlib.suppress(Exception):
             self.delegation.retry_consumptions()
+        # Retry startup recovery only while no root/child worker can be inside
+        # a live callback. EffectLedger also requires a stale-record grace.
+        with self._inflight_lock:
+            effect_recovery_safe = not self._inflight and not self._child_inflight
+        if effect_recovery_safe:
+            with contextlib.suppress(Exception):
+                self.effect_ledger.recover_incomplete()
         if self.standing_down():
             self.publish_status()
             return 0
@@ -1045,6 +1054,10 @@ class AgentRunner:
             self.handoff_ledger.retry_open()
         with contextlib.suppress(Exception):
             self.delegation.retry_consumptions()
+        # R142: recovery runs once before any worker can dispatch. Running it
+        # in tick() could race a live EXECUTING effect in another pool thread.
+        with contextlib.suppress(Exception):
+            self.effect_ledger.recover_incomplete()
         # V51: advertise this machine's app version on the R11 registry so
         # peers' update checks can hint at it (records age out at STALE_S,
         # so a long-lived harness re-announces below)
@@ -1386,6 +1399,9 @@ def main(argv: list[str] | None = None) -> int:
 
     home = Path(args.home) if args.home else None
     cfg = load_app_config(home)
+    if not args.machine:
+        args.machine = configured_machine(
+            cfg, platform.node() or "harness")
     root = args.root or cfg.get("mesh_root")
     if not root:
         ap.error("no --root given and none remembered in config.json")
@@ -1393,15 +1409,17 @@ def main(argv: list[str] | None = None) -> int:
     root = root if "://" in str(root) else Path(root)
 
     if args.all:
-        machine = args.machine or platform.node() or "harness"
+        machine = args.machine
         fleet_lock = FleetInstance(
             (home or DEFAULT_HOME) / "harness-all.lock", fail_open=False)
         if not fleet_lock.acquire():
             print("AgentBridge harness fleet is already running")
             return EXIT_ALREADY_RUNNING
         try:
-            return supervise_all(root, machine,
-                                 [a for a in (argv or sys.argv[1:])])
+            forwarded = [a for a in (argv or sys.argv[1:])]
+            if "--machine" not in forwarded:
+                forwarded.extend(("--machine", machine))
+            return supervise_all(root, machine, forwarded)
         finally:
             fleet_lock.release()
     if not args.agent:

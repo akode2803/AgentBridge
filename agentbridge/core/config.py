@@ -28,6 +28,7 @@ __all__ = [
     "atomic_write_json",
     "load_app_config",
     "save_app_config",
+    "configured_machine",
 ]
 
 DEFAULT_HOME = Path(os.environ.get("AGENTBRIDGE_HOME", "")) if os.environ.get(
@@ -127,3 +128,12 @@ def load_app_config(home: Path | None = None) -> dict[str, Any]:
 
 def save_app_config(cfg: dict[str, Any], home: Path | None = None) -> None:
     atomic_write_json((home or DEFAULT_HOME) / _CONFIG_NAME, cfg)
+
+
+def configured_machine(cfg: dict[str, Any], fallback: str) -> str:
+    """Return a stable local machine alias when one is explicitly saved."""
+    value = cfg.get("machine_name") if isinstance(cfg, dict) else None
+    if (isinstance(value, str) and value.strip() == value and value
+            and len(value) <= 255 and not any(ord(char) < 32 for char in value)):
+        return value
+    return fallback

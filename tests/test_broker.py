@@ -1143,6 +1143,130 @@ def test_leave_and_clear_are_owner_gated(tmp_path):
         owner.close()
 
 
+@pytest.mark.parametrize(("keep_starred", "expected_detail"), (
+    (True, "while keeping starred messages"),
+    (False, "including starred messages"),
+))
+def test_secure_clear_chat_binds_grant_to_canonical_effect(
+        tmp_path, monkeypatch, keep_starred, expected_detail):
+    """R142: an AgentBridge-owned clear has one global claim and receipt."""
+    from agentbridge.harness.runtime.effects import EffectLedger
+    from agentbridge.harness.runtime.models import EffectState
+    from agentbridge.harness.runtime.permissions import (
+        answer as answer_permission, list_owner_asks,
+    )
+    from agentbridge.harness.runtime.runs import RunLedger
+    from agentbridge.harness.runtime.tasks import TaskLedger
+
+    root = tmp_path / "mesh2"
+    root.mkdir()
+    home = tmp_path / "home"
+    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    original_create = agent.tx.create_doc
+    claim_lock = threading.Lock()
+
+    def exclusive(path, data, *, ask_envelope=None, decision_envelope=None):
+        if "/runtime/effects/" not in path:
+            return original_create(path, data)
+        with claim_lock:
+            current = agent.tx.get_doc(path, default=None)
+            if current is not None:
+                if current == data:
+                    return None
+                raise FileExistsError(path)
+            base = path.rsplit("/", 1)[0]
+            if ask_envelope is not None:
+                original_create(f"{base}/grant-ask.json", ask_envelope)
+            if decision_envelope is not None:
+                original_create(
+                    f"{base}/grant-decision.json", decision_envelope)
+            return original_create(path, data)
+
+    monkeypatch.setattr(agent.tx, "effect_claims_ready", lambda: True)
+    monkeypatch.setattr(agent.tx, "create_effect_doc", exclusive)
+    try:
+        chat = owner.create_chat("Effect clear", members=["helper"])
+        owner.post(chat.id, "history line")
+        owner.outbox.flush_once()
+        agent.sync.sync_once([chat.id])
+        runs = RunLedger(agent)
+        tasks = TaskLedger(agent, runs)
+        run, task = tasks.start_with_run(
+            run_id="run-clear", task_id="task-clear", chat_id=chat.id,
+            trigger_id="message-clear", provider="codex", model="gpt-test",
+            capability_ceiling=("clear_chat",),
+        )
+
+        def approve():
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                asks = list_owner_asks(owner, chat_id=chat.id)
+                if asks:
+                    ask = asks[0]
+                    assert expected_detail in ask["detail"]
+                    answer_permission(
+                        owner, chat_id=chat.id, agent="helper",
+                        ask_id=ask["id"], verdict="allow",
+                    )
+                    return
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=approve)
+        thread.start()
+        broker = PermissionBroker(agent, "helper")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        with BridgeServer(
+            broker, chat_id=chat.id, run_id="run-clear", workspace=ws,
+            auto_allow=[], approvals=[], ask_timeout_s=5, mesh=agent,
+            run_record=run, task_record=task,
+        ) as bridge:
+            out = call_tool(bridge, "clear_chat", {
+                "keep_starred": keep_starred,
+            })
+        thread.join()
+        assert "cleared" in out
+        assert [m for m in agent.messages_for(chat.id)
+                if m.kind.value == "message"] == []
+
+        paths = agent.tx.list_docs(
+            f"chats/{chat.id}/runtime/effects/run-clear")
+        call_id = next(path.split("/")[5] for path in paths
+                       if path.endswith("/claim.json"))
+        history = EffectLedger(agent).read(chat.id, "run-clear", call_id)
+        assert EffectLedger(owner).read(chat.id, "run-clear", call_id) == history
+        assert [event.state for event in history] == [
+            EffectState.PREPARED, EffectState.EXECUTING,
+            EffectState.COMMITTED,
+        ]
+        assert history[0].grant_id
+        decisions = agent.tx.list_docs(
+            f"chats/{chat.id}/runtime/owner-control/helper/decisions")
+        assert len(decisions) == 1
+        assert history[0].grant_id in decisions[0]
+        asks = agent.tx.list_docs(
+            f"chats/{chat.id}/runtime/owner-control/helper/asks")
+        assert len(asks) == 1
+    finally:
+        agent.close()
+        owner.close()
+
+
+def test_partial_effect_authority_never_downgrades_to_legacy(tmp_path):
+    from types import SimpleNamespace
+
+    _tx, broker, workspace = make(tmp_path)
+    with pytest.raises(ValueError, match="both canonical run and root task"):
+        BridgeServer(
+            broker, chat_id="c1", run_id="run-1", workspace=workspace,
+            auto_allow=[], approvals=[], ask_timeout_s=1,
+            run_record=SimpleNamespace(), task_record=None,
+        )
+
+
 def test_context_and_files_parity_c(tmp_path):
     """V54 (parity c): list_chats carries unread + own flags; list_files
     inventories the chat; fetch_file decrypts an older blob into the

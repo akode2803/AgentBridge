@@ -82,6 +82,23 @@ class Watcher:
 class Transport(ABC):
     scheme: str = "abstract"
 
+    # True only when create_doc is a globally exclusive compare-and-create.
+    # Effect grants must never infer this from an implementation detail: the
+    # synced-folder implementation is atomic per file but not a cross-machine
+    # claim primitive.
+    supports_exclusive_create: bool = False
+
+    def effect_claims_ready(self) -> bool:
+        """Whether the versioned authoritative effect-transition API exists."""
+        return False
+
+    def create_effect_doc(self, path: str, data: Any, *,
+                          ask_envelope: Any = None,
+                          decision_envelope: Any = None) -> None:
+        """Create one ordered append-only effect record, or fail closed."""
+        del ask_envelope, decision_envelope
+        raise RuntimeError("authoritative effect claims are unavailable")
+
     # Ceiling is a property of the TRANSPORT, not the app: a synced folder
     # pushes every attachment to each member's machine; an API store has its
     # own service limits. The GUI names this limit in the too-large dialog.

@@ -3,7 +3,10 @@
 Depends on nothing else in the package; every other layer depends on it.
 """
 
-from .config import DEFAULT_HOME, atomic_write_json, load_app_config, read_json, save_app_config
+from .config import (
+    DEFAULT_HOME, atomic_write_json, configured_machine, load_app_config,
+    read_json, save_app_config,
+)
 from .errors import (
     AgentBridgeError,
     ConfigError,
@@ -40,7 +43,8 @@ from .timekit import new_id, next_ns, utcnow, utcnow_iso
 
 __all__ = [
     # config
-    "DEFAULT_HOME", "read_json", "atomic_write_json", "load_app_config", "save_app_config",
+    "DEFAULT_HOME", "read_json", "atomic_write_json", "load_app_config",
+    "save_app_config", "configured_machine",
     # errors
     "AgentBridgeError", "ConfigError", "TransportError", "StoreError", "CryptoError",
     "ValidationError", "PermissionDenied", "NotAMember",

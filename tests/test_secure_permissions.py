@@ -148,3 +148,15 @@ def test_outside_scope_never_becomes_standing_grant(secure_meshes):
         answer(owner, chat_id=chat_id, agent="helper", ask_id=ask.id,
                verdict="always")
     assert owner.directory.get("helper").agent.harness.get("approvals") in (None, [])
+
+
+def test_denial_is_consumed_without_preparing_an_effect(secure_meshes):
+    owner, agent, chat_id, _other_id = secure_meshes
+    ask = publish(agent, chat_id)
+    answer(owner, chat_id=chat_id, agent="helper", ask_id=ask.id,
+           verdict="deny", text="not this time")
+    decision = PermissionLane(agent, "helper").read_decision(
+        ask, claim=lambda *_args: pytest.fail("denial prepared an effect"),
+    )
+    assert decision["verdict"] == "deny"
+    assert decision["text"] == "not this time"

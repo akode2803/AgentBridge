@@ -143,6 +143,17 @@ def test_app_config_roundtrip(tmp_path):
     assert json.loads((tmp_path / "config.json").read_text("utf-8"))
 
 
+@pytest.mark.parametrize(("value", "expected"), (
+    ("stable-host.local", "stable-host.local"),
+    ("", "fallback.local"),
+    (" padded ", "fallback.local"),
+    (123, "fallback.local"),
+))
+def test_configured_machine_requires_a_clean_explicit_alias(value, expected):
+    assert config.configured_machine(
+        {"machine_name": value}, "fallback.local") == expected
+
+
 # --- single-instance lock (R32.2: the GUI's stray-second-instance guard) ---
 
 def test_single_instance_blocks_a_second_holder(tmp_path):

@@ -6,10 +6,11 @@ import hashlib
 import secrets
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 from ...core.timekit import new_id
 from .authority import AuthorityError, authority
-from .envelope import EnvelopeError, open_envelope, seal
+from .envelope import EnvelopeError, open_envelope, open_pairwise, seal
 from .models import RuntimeContractError, canonical_json_bytes
 
 
@@ -113,14 +114,20 @@ class PermissionLane:
         self.mesh.tx.create_doc(ask_path(chat_id, self.agent, ask_id), envelope)
         return PermissionAsk(record, envelope)
 
-    def read_decision(self, ask: PermissionAsk) -> dict | None:
-        valid: list[dict] = []
+    def read_decision(
+        self,
+        ask: PermissionAsk,
+        *,
+        claim: Callable[[dict, dict, dict, dict], bool] | None = None,
+    ) -> dict | None:
+        valid: list[tuple[dict, dict]] = []
         owner = ask.record["owner"]
         prefix = decision_prefix(ask.record["chat_id"], self.agent, ask.id)
         for path in self.mesh.tx.list_docs(prefix):
             try:
+                raw = self.mesh.tx.get_doc(path)
                 opened = open_envelope(
-                    self.mesh, self.mesh.tx.get_doc(path),
+                    self.mesh, raw,
                     expected_kind="permission_decision", expected_sender=owner,
                     expected_recipient=self.agent, expected_agent=self.agent,
                     expected_chat=ask.record["chat_id"],
@@ -133,34 +140,89 @@ class PermissionLane:
                 for name in ("run_id", "call_id", "chat_id", "agent", "owner"):
                     if decision[name] != ask.record[name]:
                         raise PermissionRecordError(f"decision {name} mismatch")
-                valid.append(decision)
+                valid.append((decision, raw))
             except (EnvelopeError, PermissionRecordError, AuthorityError, OSError):
                 continue
         if not valid:
             return None
-        semantics = {(d["verdict"], d["text"]) for d in valid}
+        semantics = {(d["verdict"], d["text"]) for d, _raw in valid}
         if len(semantics) != 1:
             return {"verdict": "deny", "text": "conflicting owner decisions; denied"}
-        decision = min(valid, key=lambda d: (d["ns"], d["id"]))
-        if not self.mesh.store.claim_once("permission-decision", ask.id, time.time_ns()):
+        decision, decision_envelope = min(
+            valid, key=lambda item: (item[0]["ns"], item[0]["id"]))
+        claimed = (claim(
+                       ask.record, ask.envelope, decision, decision_envelope)
+                   if claim is not None
+                   and decision["verdict"] in ("allow", "always") else
+                   self.mesh.store.claim_once(
+                       "permission-decision", ask.id, time.time_ns()))
+        if not claimed:
             return {"verdict": "deny", "text": "permission decision was already consumed"}
         return decision
 
-    def withdraw(self, ask: PermissionAsk) -> None:
-        try:
-            self.mesh.tx.delete_doc(ask_path(ask.record["chat_id"], self.agent, ask.id))
-        except Exception:
-            pass
+    def withdraw(self, ask: PermissionAsk, *, keep_decision_id: str = "",
+                 keep_ask: bool = False) -> None:
+        if not keep_ask:
+            try:
+                self.mesh.tx.delete_doc(
+                    ask_path(ask.record["chat_id"], self.agent, ask.id))
+            except Exception:
+                pass
         prefix = decision_prefix(ask.record["chat_id"], self.agent, ask.id)
         try:
             paths = self.mesh.tx.list_docs(prefix)
         except Exception:
             paths = []
         for path in paths:
+            if keep_decision_id and path.endswith(f"/{keep_decision_id}.json"):
+                continue
             try:
                 self.mesh.tx.delete_doc(path)
             except Exception:
                 pass
+
+
+def open_effect_grant(mesh, *, chat_id: str, agent: str, grant_id: str,
+                      ask_raw: dict, decision_raw: dict) -> tuple[dict, dict]:
+    """Open retained owner-signed ask+decision evidence for one effect."""
+    snap = mesh.snapshot(chat_id)
+    if not snap.is_member(mesh.user) or mesh.user not in {
+            agent, mesh.directory.owner_of(agent)}:
+        raise PermissionRecordError("viewer is outside the effect grant audience")
+    header = decision_raw.get("header") if isinstance(decision_raw, dict) else None
+    owner = header.get("sender") if isinstance(header, dict) else ""
+    header_fields = {
+        "v", "kind", "id", "ns", "sender", "recipient", "agent",
+        "chat_id", "expires_ns", "membership_epoch", "ownership_epoch",
+        "policy_revision", "key_epoch",
+    }
+    opened = open_pairwise(
+        mesh, decision_raw, header_fields=header_fields,
+        expected={
+            "v": 1, "kind": "permission_decision", "id": grant_id,
+            "sender": owner, "recipient": agent, "agent": agent,
+            "chat_id": chat_id,
+        }, sender=owner, recipient=agent, viewer=mesh.user,
+    )
+    decision = _validate_decision(opened.payload)
+    _match_header(opened.header, decision)
+    ask_id = decision["ask_id"]
+    ask_opened = open_pairwise(
+        mesh, ask_raw, header_fields=header_fields,
+        expected={
+            "v": 1, "kind": "permission_ask", "id": ask_id,
+            "sender": agent, "recipient": owner, "agent": agent,
+            "chat_id": chat_id,
+        }, sender=agent, recipient=owner, viewer=mesh.user,
+    )
+    ask = _validate_ask(ask_opened.payload)
+    _match_header(ask_opened.header, ask)
+    if decision["ask_digest"] != digest(ask):
+        raise PermissionRecordError("effect grant does not bind its ask")
+    for name in ("run_id", "call_id", "chat_id", "agent", "owner"):
+        if decision[name] != ask[name]:
+            raise PermissionRecordError(f"effect grant {name} mismatch")
+    return ask, decision
 
 
 def open_ask(mesh, *, chat_id: str, agent: str, ask_id: str) -> PermissionAsk:

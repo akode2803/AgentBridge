@@ -49,7 +49,9 @@ import hashlib
 import json
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from ..core.errors import ValidationError
 from ..core.timekit import new_id, utcnow_iso
@@ -57,13 +59,25 @@ from .runtime.authority import (
     AuthorityError, capability_call_digest, validate_run_authority,
 )
 
-__all__ = ["PermissionBroker", "Ask", "path_of"]
+__all__ = ["PermissionAuthorization", "PermissionBroker", "Ask", "path_of"]
 
 ASK_DOC = "status/asks/{agent}.json"
 ANSWER_DOC = "status/asks/{agent}_answers.json"
 PATH_KEYS = ("file_path", "path", "notebook_path")
 MAX_DETAIL = 200
 POLL_S = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionAuthorization:
+    verdict: str
+    text: str
+    ask: dict | None = None
+    decision: dict | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.verdict in ("allow", "always")
 
 
 def path_of(tool_input: dict, keys=PATH_KEYS, *, required: bool = False) -> str:
@@ -261,6 +275,88 @@ class PermissionBroker:
         return False, note
 
     # ----------------------------------------------------------- the pipe
+    def authorize_effect(
+        self, *, chat_id: str, tool: str, detail: str, input_hash: str,
+        timeout_s: float, run_id: str, call_id: str,
+        claim: Callable[[dict, dict, dict, dict], bool],
+    ) -> PermissionAuthorization:
+        """Ask and atomically bind one decision to an effect PREPARED claim."""
+        if self._lane is None:
+            return PermissionAuthorization(
+                "timeout", "one-use effect grants need the secure permission lane")
+        verdict, text, ask, decision = self._secure_ask(
+            chat_id=chat_id, kind="permission", tool=tool, detail=detail,
+            input_hash=input_hash, timeout_s=timeout_s, options=None,
+            scope="effect",
+            run_id=run_id, call_id=call_id, claim=claim,
+            preserve_claimed_decision=True,
+        )
+        return PermissionAuthorization(verdict, text, ask, decision)
+
+    def _secure_ask(
+        self, *, chat_id: str, kind: str, tool: str, detail: str,
+        input_hash: str, timeout_s: float, options: list | None, scope: str,
+        run_id: str, call_id: str,
+        claim: Callable[[dict, dict, dict, dict], bool] | None = None,
+        preserve_claimed_decision: bool = False,
+    ) -> tuple[str, str, dict | None, dict | None]:
+        from .runtime.permissions import digest
+
+        label = (self.docs.ask_phrase(tool)
+                 if self.docs is not None and kind == "permission" else "")
+        full_digest = input_hash or digest({
+            "chat_id": chat_id, "kind": kind, "tool": tool,
+            "detail": detail, "options": options or [], "scope": scope,
+        })
+        try:
+            secure = self._lane.publish_ask(
+                chat_id=chat_id, kind=kind, tool=tool, detail=detail,
+                input_digest=full_digest, timeout_s=timeout_s,
+                run_id=run_id, call_id=call_id, label=label,
+                options=options, scope=scope,
+            )
+        except Exception as exc:
+            return ("timeout", f"secure owner approval unavailable: {exc}",
+                    None, None)
+        with self._lock:
+            self._secure_pending[secure.id] = secure
+        selected = None
+        try:
+            deadline = secure.record["expires_ns"]
+            while time.time_ns() < deadline:
+                with self._lock:
+                    if secure.id in self._withdrawn:
+                        return ("timeout", "the run ended before an answer arrived",
+                                secure.record, None)
+                ans = self._lane.read_decision(secure, claim=claim)
+                if ans is not None:
+                    verdict = str(ans.get("verdict") or "deny")
+                    text = str(ans.get("text") or "")
+                    if kind == "question":
+                        verdict = "answer" if verdict == "answer" else "timeout"
+                    elif verdict not in ("allow", "always", "deny"):
+                        verdict = "deny"
+                    if verdict in ("allow", "always", "answer"):
+                        selected = ans
+                    default = ("the responsible member denied this"
+                               if verdict == "deny" else "")
+                    return verdict, text or default, secure.record, selected
+                time.sleep(POLL_S)
+            return ("timeout", "no answer from the responsible member "
+                    f"within {int(timeout_s)}s — denied", secure.record, None)
+        finally:
+            with self._lock:
+                self._secure_pending.pop(secure.id, None)
+                self._withdrawn.discard(secure.id)
+            self._lane.withdraw(
+                secure,
+                keep_decision_id=(str(selected.get("id"))
+                                  if preserve_claimed_decision
+                                  and isinstance(selected, dict) else ""),
+                keep_ask=bool(preserve_claimed_decision
+                              and isinstance(selected, dict)),
+            )
+
     def ask(self, *, chat_id: str, kind: str, tool: str, detail: str,
             input_hash: str = "", timeout_s: float = 120.0,
             options: list | None = None, scope: str = "", run_id: str = "",
@@ -274,46 +370,12 @@ class PermissionBroker:
         label = (self.docs.ask_phrase(tool)
                  if self.docs is not None and kind == "permission" else "")
         if self._lane is not None:
-            from .runtime.permissions import digest
-            full_digest = input_hash or digest({
-                "chat_id": chat_id, "kind": kind, "tool": tool,
-                "detail": detail, "options": options or [], "scope": scope,
-            })
-            try:
-                secure = self._lane.publish_ask(
-                    chat_id=chat_id, kind=kind, tool=tool, detail=detail,
-                    input_digest=full_digest, timeout_s=timeout_s,
-                    run_id=run_id, call_id=call_id, label=label,
-                    options=options, scope=scope,
-                )
-            except Exception as exc:  # fail closed; never downgrade to plaintext
-                return "timeout", f"secure owner approval unavailable: {exc}"
-            with self._lock:
-                self._secure_pending[secure.id] = secure
-            try:
-                deadline = secure.record["expires_ns"]
-                while time.time_ns() < deadline:
-                    with self._lock:
-                        if secure.id in self._withdrawn:
-                            return "timeout", "the run ended before an answer arrived"
-                    ans = self._lane.read_decision(secure)
-                    if ans is not None:
-                        verdict = str(ans.get("verdict") or "deny")
-                        text = str(ans.get("text") or "")
-                        if kind == "question":
-                            return ("answer" if verdict == "answer" else "timeout", text)
-                        if verdict not in ("allow", "always", "deny"):
-                            verdict = "deny"
-                        return verdict, text or (
-                            "the responsible member denied this" if verdict == "deny" else "")
-                    time.sleep(POLL_S)
-                return "timeout", ("no answer from the responsible member "
-                                   f"within {int(timeout_s)}s — denied")
-            finally:
-                with self._lock:
-                    self._secure_pending.pop(secure.id, None)
-                    self._withdrawn.discard(secure.id)
-                self._lane.withdraw(secure)
+            verdict, text, _ask, _decision = self._secure_ask(
+                chat_id=chat_id, kind=kind, tool=tool, detail=detail,
+                input_hash=input_hash, timeout_s=timeout_s, options=options,
+                scope=scope, run_id=run_id, call_id=call_id,
+            )
+            return verdict, text
 
         a = Ask(self.agent, chat_id, kind, tool, detail, input_hash,
                 timeout_s, label=label, options=options, scope=scope)

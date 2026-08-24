@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import argparse
 import socket
-import sys
 from pathlib import Path
 
-from ..core.config import DEFAULT_HOME, load_app_config, save_app_config
+from ..core.config import (
+    DEFAULT_HOME, configured_machine, load_app_config, save_app_config,
+)
 
 __all__ = ["main", "build_parser"]
 
@@ -53,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     # root: CLI wins and is REMEMBERED (merged into config, never clobbering
     # other keys); a bare launch reuses the saved one — the R14 cutover flip
     cfg = load_app_config(home)
+    if not args.machine:
+        import platform
+
+        args.machine = configured_machine(
+            cfg, platform.node() or "gui")
 
     def as_root(text: str):
         # a scheme spec (supabase://…) must stay a STRING — Path() collapses

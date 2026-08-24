@@ -1805,14 +1805,14 @@ Estimate: **2-3 weeks**. No new end-user power.
   `docs/AGENT_RUNTIME_C2_DECISIONS.md`.
 - [x] **C2.2:** map the current CLI adapter into the contracts and the shared
   fake task/effect/result fixtures behind a rollback flag.
-- [ ] **C2.3:** pin the optional SDK dependency, isolate beta/provider APIs,
-  map one OpenAI Agents SDK adapter into the same fixtures and run a read-only
-  provider smoke.
+- [~] **C2.3 (skipped by product decision, 2026-08-24):** no SDK dependency,
+  adapter, credential or provider smoke will be added. The frozen C2 contracts
+  remain available for future adapters, but C2.3 is not on the active path.
 - [~] Cover dynamic instructions, prompt templates, structured input/output,
   model settings, max turns, hooks, sessions, tools/handoffs, approval policy,
   streaming, errors, usage and output extraction. C2.1 freezes the vocabulary;
-  C2.2/C2.3 prove both adapters, while C5/C10/C12/C13 own live authority,
-  tools, persisted sessions and accounting.
+  C2.2 proves the production CLI mapping; C2.3 was skipped. C5/C10/C12/C13 own
+  live authority, tools, persisted sessions and accounting.
 
 **C2.1 (R138):** the dormant schema is separate from signed room-ledger truth.
 Definitions cannot contain run authority; invocations bind the exact signed run
@@ -1825,7 +1825,8 @@ fields/versions/states fail closed; bounded `x.*` extensions are explicitly
 non-authoritative. Provider errors persist only code-owned public text plus an
 optional evidence digest, and cancellation shares one lock with terminal event
 selection/append. No runner, GUI, provider launch or dependency changed, so live
-execution verification is intentionally deferred to C2.2/C2.3.
+execution verification was intentionally deferred to adapter rounds; C2.2
+landed and the optional C2.3 SDK adapter was later skipped.
 
 **C2.2 (R139):** the default-off current-CLI wrapper validates one immutable
 provider-neutral definition/invocation against the exact signed running run and
@@ -1965,6 +1966,21 @@ Estimate: **3-4.5 weeks**.
 - [ ] Add root-visible nested approval while child continuation remains paused.
 - [ ] Add active grant/expiry/use/revoke UI and migrate legacy rules.
 - [ ] Connect effect receipts so allow-once cannot replay after crash.
+
+**C5.1 (R142):** the existing signed pairwise owner decision is the one-use
+grant for the first AgentBridge-owned effect; it is not duplicated into a
+second competing authority. Supabase member clients claim and advance strict
+append-only `EffectRecord` paths through a versioned authenticated RPC. Direct
+member writes are denied, folder/service-key/missing-schema modes fail closed,
+and atomically copied ask+decision evidence is required when reading the effect.
+Ordinary permission records retain normal cleanup. The
+first integrated mutation is `clear_chat`; provider-native actions remain
+excluded because their post-approval outcome is not observable. Recovery never
+reinvokes: abandoned prepared work is rejected, dispatched ambiguity is
+unknown, and post-dispatch exceptions are unknown. See
+`docs/AGENT_RUNTIME_C5_EFFECTS.md`. Standing-rule migration, grant UI, explicit
+revocation records, nested approvals and external idempotency remain later C5
+slices.
 
 Affected: broker/bridge/settings/account docs, runtime ledger, GUI agent/ask
 APIs, chat/settings/state frontend.  
