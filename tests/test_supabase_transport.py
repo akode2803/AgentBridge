@@ -518,11 +518,15 @@ def test_dead_realtime_thread_is_replaced(monkeypatch):
         def __init__(self, *_args):
             self.live = True
             self.closed = False
+            self.metric = _args[-1]
             made.append(self)
+            self.metric("rt_ready")
 
         def alive(self): return self.live
         def status(self): return "ready" if self.live else "disconnected"
-        def close(self): self.closed = True
+        def close(self):
+            self.closed = True
+            self.metric("rt_socket_closes")
 
     monkeypatch.setattr(mod, "_RealtimeThread", FakeRealtime)
     t = SupabaseTransport(
@@ -530,10 +534,53 @@ def test_dead_realtime_thread_is_replaced(monkeypatch):
                      "SUPABASE_SECRET_KEY": "sb_secret_x"}, client=FakeClient())
     first = t._ensure_rt()
     assert t._ensure_rt() is first and len(made) == 1
+    assert t.transfer_stats()["rt_open_attempts"] == 1
     first.live = False
     second = t._ensure_rt()
-    assert second is not first and first.closed and len(made) == 2
+    assert second is None and first.closed and len(made) == 1
+    stats = t.transfer_stats()
+    assert stats["rt_disconnects"] == 1 and stats["rt_retry_in_s"] > 0
+    t._rt_retry_at = 0.0
+    second = t._ensure_rt()
+    assert second is not first and len(made) == 2
     assert t.realtime_status() == "ready"
+    stats = t.transfer_stats()
+    assert stats["rt_open_attempts"] == 2
+    assert stats["rt_active"] == 1 and stats["rt_active_peak"] == 1
+
+
+def test_short_lived_realtime_flaps_increase_backoff(monkeypatch):
+    from agentbridge.transport import supabase as mod
+
+    now = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(mod.random, "random", lambda: 0.5)
+
+    class FakeRealtime:
+        def __init__(self, *_args):
+            self.live = True
+            self.metric = _args[-1]
+            self.metric("rt_ready")
+        def alive(self): return self.live
+        def status(self): return "ready" if self.live else "disconnected"
+        def close(self): self.metric("rt_socket_closes")
+
+    monkeypatch.setattr(mod, "_RealtimeThread", FakeRealtime)
+    tx = SupabaseTransport(
+        "team", env={"SUPABASE_URL": "https://x.test",
+                     "SUPABASE_SECRET_KEY": "sb_secret_x"}, client=FakeClient())
+    first = tx._ensure_rt()
+    first.live = False
+    now[0] += 1
+    assert tx._ensure_rt() is None
+    first_delay = tx._rt_retry_at - now[0]
+    tx._rt_retry_at = 0
+    second = tx._ensure_rt()
+    second.live = False
+    now[0] += 1
+    assert tx._ensure_rt() is None
+    second_delay = tx._rt_retry_at - now[0]
+    assert first_delay == 1.0 and second_delay == 2.0
 
 
 def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
@@ -568,6 +615,7 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
         def channel(self, *_args): return self.ch
 
     client = Client()
+    metrics = []
 
     async def create_client(*_args): return client
 
@@ -578,17 +626,20 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
         types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
     rt = _RealtimeThread(
         {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
-        "team", lambda: None)
+        "team", lambda: None, metrics.append)
     deadline = time.monotonic() + 2.0
     while rt.status() != "ready" and time.monotonic() < deadline:
         time.sleep(0.01)
     assert rt.status() == "ready"
+    rt._subscription_status("SUBSCRIBED", None)
+    assert metrics.count("rt_ready") == 1
     client.ch.is_joined = False
     deadline = time.monotonic() + 2.5
     while rt.alive() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert rt.status() == "disconnected"
     assert client.ch.unsubscribed and client.realtime.closed
+    assert metrics.count("rt_socket_closes") == 1
     rt.close()
 
 

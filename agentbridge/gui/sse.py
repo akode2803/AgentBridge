@@ -26,7 +26,7 @@ from .context import GuiApp
 __all__ = ["frame", "stream"]
 
 
-def frame(ev: Event, notifier: Notifier | None = None) -> dict:
+def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
     out = {"type": ev.type, "chat_id": ev.chat_id, "ns": ev.ns,
            "server_ns": time.time_ns()}
     if ev.type == eventbus.MESSAGE:
@@ -36,6 +36,7 @@ def frame(ev: Event, notifier: Notifier | None = None) -> dict:
         out["event"] = (ev.data.get("event") or {}).get("type", "")
     elif ev.type == eventbus.ADDED_TO_CHAT:
         out["by"] = ev.data.get("by", "")
+    out["trace_ref"] = str(out.get("id") or f"{ev.type}-{ev.ns}")
     if notifier is not None and ev.type in (
         eventbus.MESSAGE, eventbus.ADDED_TO_CHAT, eventbus.REACTION,
     ):
@@ -50,6 +51,9 @@ def frame(ev: Event, notifier: Notifier | None = None) -> dict:
                 "from": note.from_, "preview": note.preview, "ns": note.ns,
                 "emoji": note.emoji,
             }
+    if latency is not None:
+        latency.observe(
+            "sse_frame", out["trace_ref"], lane="local")
     return out
 
 
@@ -66,4 +70,4 @@ def stream(app: GuiApp, sub: Subscription, ping_s: float) -> Iterator[bytes]:
         if ev is None:
             yield b": ping\n\n"
             continue
-        yield f"data: {json.dumps(frame(ev, mesh.notifier))}\n\n".encode()
+        yield f"data: {json.dumps(frame(ev, mesh.notifier, app.latency))}\n\n".encode()

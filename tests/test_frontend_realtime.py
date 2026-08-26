@@ -12,13 +12,20 @@ def test_realtime_refresh_is_coalesced_and_visibility_scoped():
 
     assert "if (refreshPromise)" in main
     assert "refreshDirty = true" in main
-    assert "queueMicrotask" in main
+    assert "while (refreshDirty)" in main
+    assert "queueMicrotask" not in main
     assert "await V.renderChats(false)" in main
     assert "document.hidden || !document.hasFocus()" in main
     assert 'api("/api/mesh/activity", { active })' in realtime
     assert 'setTimeout(reportActivity, 10000)' in realtime
     assert realtime.index("reportActivity();") < realtime.index("typeof EventSource")
     assert "V.renderMeshChat(false)" not in realtime
+    assert "performance.now()" in realtime
+    assert 'observe("browser_received"' in realtime
+    assert 'observe("refetch_completed"' in realtime
+    assert 'observe("render_completed"' in realtime
+    assert "window.agentBridgeRealtimeMetrics = realtimeMetrics" in realtime
+    assert "Date.now() - Math.round(Number(frame.server_ns)" not in realtime
     assert "if (document.hidden || !document.hasFocus()) return;" in chat
     assert "fetchSeq !== chatsFetchSeq" in chat
     assert "routeSeq !== App.routeSeq" in chat

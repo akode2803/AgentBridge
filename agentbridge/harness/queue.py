@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..core.models import Message
+from ..core.latency import clock_id, sink_for_store
 from ..store.db import Store
 
 __all__ = ["WorkItem", "WorkGroup", "WorkQueue"]
@@ -52,8 +53,14 @@ class WorkItem:
     next_ns: int = 0    # earliest dispatch time (rate-cap backoff)
     lease_ns: int = 0
     observed_ns: int = 0
+    observed_mono: int = 0
+    observed_clock: str = ""
     enqueued_ns: int = 0
+    enqueued_mono: int = 0
+    enqueued_clock: str = ""
     claimed_ns: int = 0
+    claimed_mono: int = 0
+    claimed_clock: str = ""
     provider_started: bool = False
     attempts: int = 0   # FAILURE releases only (retry_or_fail); never legit defers
 
@@ -88,6 +95,7 @@ class WorkQueue:
         self.store = store
         self.agent = agent
         self._lock = threading.RLock()
+        self.latency = sink_for_store(store)
 
     # ------------------------------------------------------------- pending
     def _pending(self) -> dict[str, dict]:
@@ -108,9 +116,14 @@ class WorkQueue:
             now = time.time_ns()
             if not item.observed_ns:
                 item.observed_ns = now
+                item.observed_clock = clock_id()
             item.enqueued_ns = now
+            item.enqueued_mono = time.perf_counter_ns()
+            item.enqueued_clock = clock_id()
             items[item.key] = item.to_dict()
             self._save_pending(items)
+            self.latency.observe(
+                "queue_enqueued", item.msg_id or item.key, lane="local")
             return True
 
     def claim_groups(
@@ -124,10 +137,21 @@ class WorkQueue:
         with self._lock:
             items = self._pending()
             groups: dict[tuple[str, str], WorkGroup] = {}
+            transitioned_unknown = False
             for d in sorted(items.values(), key=lambda d: d.get("ns", 0)):
                 it = WorkItem.from_dict(d)
+                if it.status == "unknown":
+                    continue  # provider effects may have happened; manual only
+                if it.status == "running" and it.provider_started:
+                    # Expiry is not proof that provider/tool effects did not
+                    # happen. Settle ambiguity durably; never auto-dispatch.
+                    if it.lease_ns <= now:
+                        it.status, it.lease_ns = "unknown", 0
+                        items[it.key] = it.to_dict()
+                        transitioned_unknown = True
+                    continue
                 if it.status == "running" and it.lease_ns > now:
-                    continue  # genuinely in flight
+                    continue  # genuinely in flight before provider start
                 if it.next_ns > now:
                     continue  # backing off (rate cap)
                 gkey = (it.chat_id, it.sender if it.kind == "message" else it.key)
@@ -140,8 +164,12 @@ class WorkQueue:
                 for it in g.items:
                     it.status, it.lease_ns = "running", lease
                     it.claimed_ns = now
+                    it.claimed_mono = time.perf_counter_ns()
+                    it.claimed_clock = clock_id()
                     items[it.key] = it.to_dict()
-            if groups:
+                    self.latency.observe(
+                        "queue_claimed", it.msg_id or it.key, lane="local")
+            if groups or transitioned_unknown:
                 self._save_pending(items)
             return list(groups.values())
 
@@ -164,16 +192,21 @@ class WorkQueue:
         with self._lock:
             items = self._pending()
             recovered = 0
+            changed = False
             for data in items.values():
-                if (data.get("status") != "running"
-                        or data.get("kind") != "message"
-                        or data.get("provider_started")):
+                if data.get("status") != "running":
+                    continue
+                if data.get("provider_started"):
+                    data["status"] = "unknown"
+                    data["lease_ns"] = 0
+                    changed = True
                     continue
                 data["status"] = "pending"
                 data["lease_ns"] = 0
                 data["claimed_ns"] = 0
                 recovered += 1
-            if recovered:
+                changed = True
+            if changed:
                 self._save_pending(items)
             return recovered
 
@@ -200,6 +233,17 @@ class WorkQueue:
         Returns True when released for retry, False when given up."""
         with self._lock:
             items = self._pending()
+            ambiguous = any(
+                bool((items.get(item.key) or {}).get("provider_started"))
+                for item in group.items)
+            if ambiguous:
+                for item in group.items:
+                    data = items.get(item.key)
+                    if data is not None:
+                        data["status"] = "unknown"
+                        data["lease_ns"] = 0
+                self._save_pending(items)
+                return False
             give_up = False
             for it in group.items:
                 d = items.get(it.key)
@@ -214,6 +258,11 @@ class WorkQueue:
                 return False
             self.release(group, retry_in_s=retry_in_s)
             return True
+
+    def group_unknown(self, group: WorkGroup) -> bool:
+        items = self._pending()
+        return any((items.get(item.key) or {}).get("status") == "unknown"
+                   for item in group.items)
 
     def finish(self, group: WorkGroup, result: str) -> None:
         """Resolve a claimed group: drop from pending, write the ledger."""

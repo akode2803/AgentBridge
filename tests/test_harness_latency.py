@@ -33,11 +33,15 @@ def test_run_timings_reports_content_free_propagation_breakdown(monkeypatch):
     monkeypatch.setattr("agentbridge.harness.perf.time.time_ns", lambda: 9_000_000_000)
     timings = RunTimings(
         1_000_000_000, observed_ns=3_000_000_000,
-        enqueued_ns=4_000_000_000, claimed_ns=7_000_000_000,
+        observed_mono=30_000_000_000,
+        observed_clock="same", enqueued_ns=4_000_000_000,
+        enqueued_mono=31_000_000_000,
+        enqueued_clock="same", claimed_ns=7_000_000_000,
+        claimed_mono=34_000_000_000,
+        claimed_clock="same",
     )
     record = timings.record(agent="helper", chat_id="c1", kind="message",
                             outcome="posted")
-    assert record["trigger_to_scan_s"] == 2.0
     assert record["enqueue_s"] == 1.0
     assert record["queue_s"] == 3.0
     assert "body" not in record and "prompt" not in record and "draft" not in record
@@ -86,7 +90,50 @@ def test_claim_recovery_never_replays_a_timer(tmp_path):
         )
         assert queue.offer(timer)
         assert queue.claim_groups(limit=1)[0].kind == "timer"
+        assert queue.recover_claims() == 1
+        assert WorkItem.from_dict(queue._pending()[timer.key]).status == "pending"
+        group = queue.claim_groups(limit=1)[0]
+        queue.mark_provider_started(group)
         assert queue.recover_claims() == 0
-        assert WorkItem.from_dict(queue._pending()[timer.key]).status == "running"
+        unknown = WorkItem.from_dict(queue._pending()[timer.key])
+        assert unknown.status == "unknown" and queue.claim_groups(limit=1) == []
+    finally:
+        store.close()
+
+
+def test_expired_provider_started_claim_becomes_unknown(tmp_path):
+    store = Store(tmp_path / "unknown.sqlite")
+    try:
+        queue = WorkQueue(store, "helper")
+        item = WorkItem(
+            key="c1|m1@0", chat_id="c1", kind="message", msg_id="m1",
+            sender="human", ns=1,
+        )
+        queue.offer(item)
+        group = queue.claim_groups(limit=1)[0]
+        queue.mark_provider_started(group)
+        pending = queue._pending()
+        pending[item.key]["lease_ns"] = 0
+        queue._save_pending(pending)
+        assert queue.claim_groups(limit=1) == []
+        assert WorkItem.from_dict(queue._pending()[item.key]).status == "unknown"
+    finally:
+        store.close()
+
+
+def test_provider_started_failure_never_enters_retry(tmp_path):
+    store = Store(tmp_path / "failed-provider.sqlite")
+    try:
+        queue = WorkQueue(store, "helper")
+        item = WorkItem(
+            key="c1|m1@0", chat_id="c1", kind="message", msg_id="m1",
+            sender="human", ns=1,
+        )
+        queue.offer(item)
+        group = queue.claim_groups(limit=1)[0]
+        queue.mark_provider_started(group)
+        assert queue.retry_or_fail(group, retry_in_s=0) is False
+        assert queue.group_unknown(group)
+        assert queue.claim_groups(limit=1) == []
     finally:
         store.close()

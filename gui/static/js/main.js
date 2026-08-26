@@ -52,22 +52,23 @@ let refreshDirty = false;
 let refreshNeedsRender = false;
 
 async function refresh(rerender) {
+  refreshDirty = true;
+  refreshNeedsRender = refreshNeedsRender || !!rerender;
   if (refreshPromise) {
-    refreshDirty = true;
-    refreshNeedsRender = refreshNeedsRender || !!rerender;
     return refreshPromise;
   }
-  refreshPromise = refreshOnce(rerender);
+  refreshPromise = (async () => {
+    while (refreshDirty) {
+      const nextRender = refreshNeedsRender;
+      refreshDirty = false;
+      refreshNeedsRender = false;
+      await refreshOnce(nextRender);
+    }
+  })();
   try {
     return await refreshPromise;
   } finally {
     refreshPromise = null;
-    if (refreshDirty) {
-      const nextRender = refreshNeedsRender;
-      refreshDirty = false;
-      refreshNeedsRender = false;
-      queueMicrotask(() => { Promise.resolve(refresh(nextRender)).catch(() => {}); });
-    }
   }
 }
 

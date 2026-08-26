@@ -3,6 +3,7 @@ and the R30 change-feed fast path (one query per tick on cloud drivers)."""
 
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.store.db import Store
+from agentbridge.core.latency import sink_for_store
 from agentbridge.transport.base import Transport, Watcher
 from agentbridge.transport.folder import FolderTransport
 
@@ -51,6 +52,22 @@ def test_incremental_appends_only_new(tmp_path):
     seed(tx, "c1", "bob", 1, start=100)  # a second per-device log appears
     assert eng.sync_chat("c1") == 3
     assert store.message_count("c1") == 8
+    store.close()
+
+
+def test_sync_observation_is_once_and_names_discovery_lane(tmp_path):
+    tx = FolderTransport(tmp_path / "mesh2")
+    seed(tx, "c1", "ann", 1)
+    store = Store(tmp_path / "cache.sqlite")
+    eng = SyncEngine(tx, store)
+    assert eng.sync_chat("c1", lane="hint") == 1
+    assert eng.sync_chat("c1", lane="poll") == 0
+    rows = [row for row in sink_for_store(store).read()
+            if row["stage"] == "sync_observed"]
+    assert len(rows) == 1 and rows[0]["lane"] == "hint"
+    observed_ns, observed_mono, observed_clock = store.message_observation(
+        "c1", "c1-m1")
+    assert observed_ns > 0 and observed_mono > 0 and observed_clock
     store.close()
 
 

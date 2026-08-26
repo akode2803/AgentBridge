@@ -30,6 +30,17 @@ def test_upsert_idempotent_and_ordered(store):
     assert store.message_count("c1") == 2
 
 
+def test_message_observation_is_first_ingestion_evidence(store):
+    rec = {"id": "m1", "ns": 10, "from": "a", "kind": "message"}
+    assert store.upsert_messages(
+        "c1", [rec], observed_ns=123, observed_mono=456,
+        observed_clock="clock-a") == [rec]
+    assert store.message_observation("c1", "m1") == (123, 456, "clock-a")
+    assert store.upsert_messages(
+        "c1", [rec], observed_ns=999, observed_clock="clock-b") == []
+    assert store.message_observation("c1", "m1") == (123, 456, "clock-a")
+
+
 def test_state_events_after_ignores_messages_and_reaction_breadcrumbs(store):
     store.upsert_messages("c1", [
         {"id": "i1", "ns": 10, "kind": "info", "event": {"type": "created"}},
@@ -148,3 +159,33 @@ def test_store_multithreaded_writes(store):
     for t in threads:
         t.join()
     assert store.message_count("mt") == 200
+
+
+def test_message_column_migration_is_concurrent_start_safe(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE messages(chat_id TEXT NOT NULL,id TEXT NOT NULL,"
+            "ns INTEGER NOT NULL,sender TEXT NOT NULL DEFAULT '',"
+            "kind TEXT NOT NULL DEFAULT 'message',payload TEXT NOT NULL,"
+            "PRIMARY KEY(chat_id,id))")
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def open_store():
+        try:
+            barrier.wait()
+            opened = Store(path)
+            opened.close()
+        except Exception as exc:  # pragma: no cover - assertion reports detail
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_store) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    assert {"observed_ns", "observed_mono", "observed_clock"} <= columns

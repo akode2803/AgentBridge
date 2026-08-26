@@ -50,6 +50,7 @@ from .feed import (RunFeed, reap_orphan_run, record_tasks,
                    write_harness_doc, write_waiting, clear_waiting)
 from .peer import PeerService
 from .perf import RunTimings
+from ..core.latency import clock_id
 from .queue import WorkGroup, WorkItem, WorkQueue
 from .recovery import archive_outbox, discard_delivered, retain_paths
 from .responder import Reply, Responder, RunStopped, clean_reply, split_reply
@@ -279,6 +280,7 @@ class AgentRunner:
                 sender=self.agent, ns=int(t.get("at_ns", 0)),
                 reason="timer", note=t.get("note", ""),
                 observed_ns=time.time_ns(),
+                observed_mono=time.perf_counter_ns(), observed_clock=clock_id(),
             )
             if collect is not None:
                 collect.append(item)
@@ -357,11 +359,16 @@ class AgentRunner:
                 if collect is None:
                     self.queue.record_skip(chat_id, c.message.id, c.edit_ns, skip)
                 continue
+            observed_ns, observed_mono, observed_clock = \
+                self.mesh.store.message_observation(
+                chat_id, c.message.id)
             item = WorkItem(
                 key=f"{chat_id}|{c.key}", chat_id=chat_id, kind="message",
                 msg_id=c.message.id, edit_ns=c.edit_ns, sender=c.message.from_,
                 ns=c.trigger_ns, reason=c.reason,
-                observed_ns=time.time_ns(),
+                observed_ns=observed_ns or time.time_ns(),
+                observed_mono=observed_mono or time.perf_counter_ns(),
+                observed_clock=observed_clock or clock_id(),
             )
             if collect is not None:
                 collect.append(item)
@@ -455,8 +462,17 @@ class AgentRunner:
         waiting_token = latest.key
         timings = RunTimings(
             latest.ns, observed_ns=latest.observed_ns,
-            enqueued_ns=latest.enqueued_ns, claimed_ns=latest.claimed_ns,
+            observed_mono=latest.observed_mono,
+            observed_clock=latest.observed_clock,
+            enqueued_ns=latest.enqueued_ns,
+            enqueued_mono=latest.enqueued_mono,
+            enqueued_clock=latest.enqueued_clock,
+            claimed_ns=latest.claimed_ns,
+            claimed_mono=latest.claimed_mono,
+            claimed_clock=latest.claimed_clock,
         )
+        trace_ref = latest.msg_id or latest.key
+        latency = self.queue.latency
         slot = False  # a rate slot is held (the failure paths must refund it)
         keep_waiting = False
         try:
@@ -532,9 +548,12 @@ class AgentRunner:
                 self.queue.finish(group, "gone")  # trigger deleted meanwhile
                 return
             self.mesh.messaging.mark_read(chat_id)  # context read = read
+            latency.observe("preparation_started", trace_ref, lane="local")
             timings.start("prepare")
             invocation = self._prepare_invocation(delivery, settings)
             timings.stop()
+            for name, seconds in delivery.preparation_timings.items():
+                timings.detail(name, seconds)
             clear_waiting(
                 self.mesh.tx, self.agent, chat_id, token=waiting_token)
             feed = self._new_feed(
@@ -545,19 +564,36 @@ class AgentRunner:
             delivery.task_id = feed.task_id
             delivery.canonical_run = feed.run_record
             delivery.canonical_task = feed.task_record
+            latency.observe(
+                "feed_started", trace_ref, run_ref=feed.run_id, lane="local")
             if _reaction_only(group):
                 # V92: a reaction nudge reads differently from reading a new
                 # message — the livefeed/sidebar say what the run is about
                 feed.step("Noticing a reaction")
             timings.start("model")
             self.queue.mark_provider_started(group)
+            latency.observe(
+                "provider_started", trace_ref, run_ref=feed.run_id, lane="local")
+            first_activity = False
+
+            def provider_step(line: str) -> None:
+                nonlocal first_activity
+                if not first_activity:
+                    first_activity = True
+                    latency.observe(
+                        "provider_first_activity", trace_ref,
+                        run_ref=feed.run_id, lane="local")
+                feed.step(line)
             try:
-                reply = self.responder.respond(delivery, on_step=feed.step)
+                reply = self.responder.respond(delivery, on_step=provider_step)
             except RunStopped:
                 # the owner pressed Stop (R36): a deliberate outcome, not a
                 # failure — no error notice, the slot is refunded, and the
                 # triggers are recorded handled so they never re-fire
                 timings.stop()
+                latency.observe(
+                    "provider_finished", trace_ref, run_ref=feed.run_id,
+                    lane="local", outcome="stopped")
                 self._log_perf(timings, group, "stopped")
                 self.queue.rate_refund(chat_id)
                 self.queue.finish(group, "stopped-by-owner")
@@ -571,10 +607,16 @@ class AgentRunner:
                 return
             except Exception as e:  # noqa: BLE001 — a run dies, the loop lives
                 timings.stop()
+                latency.observe(
+                    "provider_finished", trace_ref, run_ref=feed.run_id,
+                    lane="local", outcome="error")
                 self._log_perf(timings, group, f"error:{type(e).__name__}")
                 self._run_failed(group, feed, settings, delivery, e)
                 return
             timings.stop()
+            latency.observe(
+                "provider_finished", trace_ref, run_ref=feed.run_id,
+                lane="local", outcome="returned")
             feed.phase("Writing reply")
             # A returned child contribution is canonically consumed only now:
             # the manager provider has received the MCP result and resumed to
@@ -602,8 +644,12 @@ class AgentRunner:
             # resolves as an error instead of retrying forever
             if not self.queue.retry_or_fail(group, retry_in_s=self.poll_s * 4):
                 with contextlib.suppress(Exception):
+                    note = ("Run outcome is unknown - provider effects may have "
+                            "occurred, so it will not retry"
+                            if self.queue.group_unknown(group) else
+                            "Run failed repeatedly - giving up on this trigger")
                     self._new_feed(group).finish(
-                        "error", "Run failed repeatedly — giving up on this trigger")
+                        "error", note)
                     self.publish_status()
         finally:
             if not keep_waiting:
@@ -805,6 +851,9 @@ class AgentRunner:
                     attachments=(batch.prepared
                                  if i == len(parts) - 1 else None))
                 posted_ids.append(posted.id)
+                self.queue.latency.observe(
+                    "reply_local_commit", group.last.msg_id or group.last.key,
+                    run_ref=feed.run_id, reply_ref=posted.id, lane="local")
         except Exception:
             self.mesh.cancel_attachments(batch.prepared)
             if reply.artifact_outbox:

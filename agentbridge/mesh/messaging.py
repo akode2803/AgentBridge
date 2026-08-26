@@ -17,6 +17,7 @@ import time
 from .. import crypto
 from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from ..core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Message, MsgKind
+from ..core.latency import clock_id, sink_for_store
 from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..store.db import Store
 from ..transport.base import Transport
@@ -64,6 +65,7 @@ class MessagingService:
         self._sign_event = event_signer
         self.directory = directory
         self.attachments = attachments
+        self.latency = sink_for_store(store)
 
     # ------------------------------------------------------------- membership
     def _materialized_snapshot(self, chat_id: str) -> ChatSnapshot:
@@ -132,6 +134,7 @@ class MessagingService:
             id=env_id, ns=ns, ts=utcnow_iso(), from_=self.user,
             kind=MsgKind.MESSAGE, **self.sealer.seal(chat_id, env_id, ns, record),
         )
+        self.latency.observe("origin_minted", env.id)
         self.commit_envelope(chat_id, env, attachments=prepared)
         return env
 
@@ -208,6 +211,7 @@ class MessagingService:
             kind=MsgKind.INFO, event=event,
         )
         env.sig = self._sign_event(signing_bytes(chat_id, env.to_dict()))
+        self.latency.observe("origin_minted", env.id)
         return env
 
     def post_event(self, chat_id: str, event: dict) -> Envelope:
@@ -230,13 +234,18 @@ class MessagingService:
                 "attachments": [dict(item.manifest) for item in attachments],
             }
         try:
+            observed = time.time_ns()
+            observed_mono = time.perf_counter_ns()
             self.store.cache_and_outbox_add(
                 chat_id, payload, OUTBOX_APPEND,
-                f"{chat_id}|{P.log_name(self.user, self.machine)}", outbox_payload)
+                f"{chat_id}|{P.log_name(self.user, self.machine)}", outbox_payload,
+                observed_ns=observed, observed_mono=observed_mono,
+                observed_clock=clock_id())
         except Exception:
             if attachments and self.attachments is not None:
                 self.attachments.cancel(attachments)
             raise
+        self.latency.observe("local_commit", env.id, at_ns=time.time_ns())
         self._notify_outbox()
 
     def _acts_for(self, author: str) -> bool:

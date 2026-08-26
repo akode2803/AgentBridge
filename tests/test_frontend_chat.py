@@ -47,11 +47,19 @@ def test_current_run_authority_is_exact_matched_minimized_and_responsive():
     assert 'run.state === "running"' in chat
     assert "Mesh.authorityPoll?.[chatId] !== request" in chat
     assert "const valid = outputs.filter" in chat
+    assert "const verified = valid.flatMap" in chat
+    assert "valid.length === outputs.length && verified.length" in chat
+    assert "const merged = new Map" in chat
+    assert "verified.forEach((run) => merged.set(run.run_id, run))" in chat
+    assert "cached && cached.key === key ? cached.runs : []" in chat
+    assert "now - cached.at < 5000" not in chat
     assert "(!poll.pending && now - poll.at > 2000)" in chat
     authority_fn = chat[
         chat.index("function currentRunAuthority"):
         chat.index("function runAccessDetails")
     ]
+    assert "delete Mesh.authorityCache[chatId]" in authority_fn
+    assert authority_fn.count("delete Mesh.authorityCache[chatId]") == 1
     assert "await" not in authority_fn
     assert 'Mesh.authorityExpand[runId]' in chat
     assert 'aria-label="${open ? "Hide" : "Show"} access for this run"' in chat

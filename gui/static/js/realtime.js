@@ -15,7 +15,14 @@ let connected = false;
 let retryTimer = null;
 let lastKick = 0;   // V125: cooldown for the poll kicks below
 let activityTimer = null;
-let lastEventLagMs = null;
+let lastRefreshMs = null;
+let eventCount = 0;
+const observations = [];
+
+function observe(stage, ref, at = performance.now()) {
+  observations.push({ stage, ref, at_ms: at });
+  if (observations.length > 100) observations.splice(0, observations.length - 100);
+}
 
 function reportActivity() {
   if (activityTimer) clearTimeout(activityTimer);
@@ -34,23 +41,32 @@ export function realtimeActive() {
 }
 
 export function realtimeMetrics() {
-  return { connected, last_event_lag_ms: lastEventLagMs };
+  return { connected, event_count: eventCount,
+           last_refresh_ms: lastRefreshMs,
+           observations: observations.slice() };
 }
+window.agentBridgeRealtimeMetrics = realtimeMetrics;
 
 // a stream frame names a chat + change type but carries NO body (the client
 // refetches through the read model). Repaint the sidebar always; repaint the
 // open transcript when the event is for the chat currently on screen.
 function onEvent(frame) {
   if (!frame || !frame.type) return;
-  if (Number.isFinite(Number(frame.server_ns))) {
-    lastEventLagMs = Math.max(
-      0, Date.now() - Math.round(Number(frame.server_ns) / 1000000));
-  }
+  const ref = String(frame.trace_ref || frame.id || `${frame.type}-${frame.ns || 0}`);
+  const received = performance.now();
+  eventCount += 1;
+  observe("browser_received", ref, received);
   // desktop ping (R42): the server attached a notify lane when the R10 rules
   // said this deserves one; the module applies this window's prefs + focus
   handleNotifyFrame(frame);
   // refresh the app shell + sidebar (unread counts, last-message, new chats)
-  V.refresh(false);
+  Promise.resolve(V.refresh(false)).then(() => {
+    const refreshed = performance.now();
+    lastRefreshMs = Math.max(0, refreshed - received);
+    observe("refetch_completed", ref, refreshed);
+    requestAnimationFrame(() => requestAnimationFrame(
+      () => observe("render_completed", ref)));
+  }).catch(() => {});
 }
 
 export function startRealtime() {

@@ -21,6 +21,16 @@ def _ledgers(mesh):
     return runs, tasks, HandoffLedger(mesh, tasks)
 
 
+def test_latency_diagnostics_are_bounded_local_metadata(rig):
+    rig.signup()
+    out = rig.get("/api/mesh/latency", limit=5)
+    assert out["clock_scope"] == "per-process"
+    assert len(out["runner"]) <= 5 and len(out["gui"]) <= 5
+    assert set(out["stats"]) == {"runner", "gui", "transport"}
+    assert isinstance(out["agents"], dict)
+    assert "chat_id" not in str(out["runner"])
+
+
 def test_runtime_tasks_requires_auth_and_current_room_membership(rig):
     assert rig.get("/api/mesh/runtime_tasks", id="missing")["error"] == (
         "Sign in first"

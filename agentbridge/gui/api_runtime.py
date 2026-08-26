@@ -17,6 +17,7 @@ from ..harness.adapters.native import (
     validate_native_authority_facts,
 )
 from ..core.errors import ValidationError
+from ..core.latency import LatencySink, sink_for_store, sink_path_for_store_path
 from .routing import authed
 
 __all__ = ["GET", "POST"]
@@ -189,6 +190,34 @@ def runtime_authority(app, req, mesh) -> dict:
 
 
 @authed
+def latency_diagnostics(app, req, mesh) -> dict:
+    """Bounded machine-local timing evidence; never shared room content."""
+    limit = req.int_param("limit", 200, 1, 1000)
+    runner = sink_for_store(mesh.store)
+    agents = {}
+    store_name = mesh.store.path.name
+    suffix = store_name.split("@", 1)[1] if "@" in store_name else ""
+    if suffix:
+        for name in mesh.directory.names():
+            account = mesh.directory.get(name)
+            if (not account or not account.agent
+                    or account.agent.owner != mesh.user
+                    or account.agent.machine != app.machine):
+                continue
+            path = mesh.store.path.with_name(f"{name}@{suffix}")
+            agents[name] = LatencySink(sink_path_for_store_path(path)).read(limit)
+    transfer = getattr(mesh.tx, "transfer_stats", None)
+    return {
+        "clock_scope": "per-process",
+        "runner": runner.read(limit),
+        "agents": agents,
+        "gui": app.latency.read(limit),
+        "stats": {"runner": runner.stats(), "gui": app.latency.stats(),
+                  "transport": transfer() if callable(transfer) else None},
+    }
+
+
+@authed
 def runtime_authority_current(app, req, mesh) -> dict:
     chat_id = str(req.data.get("chat_id") or "")
     raw_ids = req.data.get("run_ids")
@@ -208,6 +237,7 @@ def runtime_authority_current(app, req, mesh) -> dict:
 GET = {
     "/api/mesh/runtime_tasks": runtime_tasks,
     "/api/mesh/runtime_authority": runtime_authority,
+    "/api/mesh/latency": latency_diagnostics,
 }
 POST = {
     "/api/mesh/runtime_authority": runtime_authority_current,

@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -153,7 +154,11 @@ class SupabaseTransport(Transport):
         self._client_lock = threading.Lock()
         self._rt = None                    # the realtime hint thread
         self._rt_lock = threading.Lock()
+        self._rt_state_lock = threading.Lock()
         self._closed = False
+        self._rt_failures = 0
+        self._rt_retry_at = 0.0
+        self._rt_ready_since = 0.0
         self._watchers: list[_HintWatcher] = []
         self._bucket_ready = False
         # R76: does ab_docs carry the delta columns (seq/deleted)? None =
@@ -167,6 +172,11 @@ class SupabaseTransport(Transport):
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
+                       "rt_open_attempts": 0, "rt_ready": 0,
+                       "rt_disconnects": 0, "rt_socket_closes": 0,
+                       "rt_active": 0, "rt_active_peak": 0,
+                       "broadcast_sent": 0, "broadcast_failures": 0,
+                       "broadcast_skipped": 0,
                        "since": time.time()}
 
     @property
@@ -311,6 +321,10 @@ class SupabaseTransport(Transport):
             out = dict(self._stats)
         out["mode"] = ("delta" if self._delta
                        else "legacy" if self._delta is False else "unprobed")
+        out["realtime"] = self.realtime_status()
+        with self._rt_state_lock:
+            retry_at = self._rt_retry_at
+        out["rt_retry_in_s"] = max(0.0, retry_at - time.monotonic())
         return out
 
     # ------------------------------------------------------------ delta probe
@@ -801,6 +815,21 @@ class SupabaseTransport(Transport):
         rt = self._rt
         return rt.status() if rt is not None else "disconnected"
 
+    def _rt_metric(self, name: str) -> None:
+        with self._stats_lock:
+            if name in self._stats:
+                self._stats[name] += 1
+            if name == "rt_ready":
+                self._stats["rt_active"] += 1
+                self._stats["rt_active_peak"] = max(
+                    self._stats["rt_active_peak"], self._stats["rt_active"])
+            elif name == "rt_socket_closes":
+                self._stats["rt_active"] = max(
+                    0, self._stats["rt_active"] - 1)
+        if name == "rt_ready":
+            with self._rt_state_lock:
+                self._rt_ready_since = time.monotonic()
+
     def _ensure_rt(self):
         with self._rt_lock:
             if self._closed:
@@ -809,14 +838,37 @@ class SupabaseTransport(Transport):
                 return self._rt if self._rt.status() in {"connecting", "ready"} else None
             old, self._rt = self._rt, None
             if old is not None:
+                failed = old.status() == "disconnected"
                 old.close()
                 if old.alive():
                     self._rt = old
                     return None
+                if failed:
+                    now = time.monotonic()
+                    with self._rt_state_lock:
+                        if (self._rt_ready_since
+                                and now - self._rt_ready_since >= 30.0):
+                            self._rt_failures = 0
+                        self._rt_failures += 1
+                        delay = min(2 ** min(self._rt_failures - 1, 6), 60.0)
+                        self._rt_retry_at = now + delay * (
+                            0.85 + random.random() * 0.3)
+                        self._rt_ready_since = 0.0
+                    self._rt_metric("rt_disconnects")
+            with self._rt_state_lock:
+                retry_at = self._rt_retry_at
+            if time.monotonic() < retry_at:
+                return None
             try:
-                self._rt = _RealtimeThread(self._env, self.root, self._on_hint)
+                self._rt_metric("rt_open_attempts")
+                self._rt = _RealtimeThread(
+                    self._env, self.root, self._on_hint, self._rt_metric)
             except Exception:  # noqa: BLE001 — no realtime = poll-only
                 self._rt = None
+                with self._rt_state_lock:
+                    self._rt_failures += 1
+                    self._rt_retry_at = time.monotonic() + min(
+                        2 ** min(self._rt_failures - 1, 6), 60.0)
             return self._rt
 
     def close(self) -> None:
@@ -912,10 +964,12 @@ class _RealtimeThread:
     """One daemon thread owning the async realtime channel for a root.
     Sends and receives change hints; any failure just goes quiet."""
 
-    def __init__(self, env: dict[str, str], root: str, on_hint) -> None:
+    def __init__(self, env: dict[str, str], root: str, on_hint,
+                 on_metric=lambda _name: None) -> None:
         self._env = env
         self._root = root
         self._on_hint = on_hint
+        self._on_metric = on_metric
         self._loop = asyncio.new_event_loop()
         self._channel = None
         self._ready = threading.Event()
@@ -924,6 +978,7 @@ class _RealtimeThread:
         self._closing = False
         self._task = None
         self._started = threading.Event()
+        self._counted_ready = False
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="ab-supabase-rt")
         self._thread.start()
@@ -951,6 +1006,9 @@ class _RealtimeThread:
             if value == "SUBSCRIBED":
                 self._state = "ready"
                 self._ready.set()
+                if not self._counted_ready:
+                    self._counted_ready = True
+                    self._on_metric("rt_ready")
             elif value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
                 self._state = "disconnected"
                 self._ready.clear()
@@ -1005,6 +1063,8 @@ class _RealtimeThread:
                     await asyncio.wait_for(close(), timeout=2.0)
                 except Exception:  # noqa: BLE001 - loop still must terminate
                     pass
+            if self._counted_ready:
+                self._on_metric("rt_socket_closes")
 
     def status(self) -> str:
         with self._state_lock:
@@ -1015,18 +1075,20 @@ class _RealtimeThread:
 
     def send(self) -> None:
         if not self._ready.is_set() or self._channel is None:
+            self._on_metric("broadcast_skipped")
             return
 
         async def _send():
             try:
                 await self._channel.send_broadcast("change", {"r": 1})
+                self._on_metric("broadcast_sent")
             except Exception:  # noqa: BLE001
-                pass
+                self._on_metric("broadcast_failures")
 
         try:
             asyncio.run_coroutine_threadsafe(_send(), self._loop)
         except Exception:  # noqa: BLE001
-            pass
+            self._on_metric("broadcast_failures")
 
     def close(self) -> None:
         with self._state_lock:

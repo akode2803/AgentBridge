@@ -14,6 +14,7 @@ import threading
 from typing import Any, Callable
 
 from ..core.errors import ValidationError
+from ..core.latency import sink_for_store
 from .db import OutboxItem, Store
 
 __all__ = ["OutboxWorker"]
@@ -48,6 +49,7 @@ class OutboxWorker:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self.latency = sink_for_store(store)
 
     # ---------------------------------------------------------------- control
     def start(self) -> None:
@@ -97,6 +99,13 @@ class OutboxWorker:
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")
             return 0
+        payload = item.payload.get("envelope") \
+            if isinstance(item.payload.get("envelope"), dict) else item.payload
+        trace_ref = str(payload.get("id") or "") if isinstance(payload, dict) else ""
+        if trace_ref:
+            self.latency.observe(
+                "outbox_attempt", trace_ref, lane="local",
+                outcome=f"attempt-{item.attempts + 1}")
         try:
             handler(item.target, item.payload)
         except ValidationError as e:
@@ -110,6 +119,10 @@ class OutboxWorker:
             self.store.outbox_retry(item.seq, f"{type(e).__name__}: {e}", delay)
             return 0
         self.store.outbox_done(item.seq)
+        if trace_ref:
+            self.latency.observe(
+                "append_ack_observed", trace_ref, lane="local",
+                outcome="transport-returned")
         self._hook(self.success_hooks, item)
         return 1
 

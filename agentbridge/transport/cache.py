@@ -288,6 +288,19 @@ class CachingTransport(Transport):
         status = getattr(self.inner, "realtime_status", None)
         return str(status()) if callable(status) else "unsupported"
 
+    def latency_lane(self, hinted: bool | None) -> str:
+        if hinted is None:
+            return "startup"
+        if hinted:
+            return "hint"
+        if self._health_state != "online":
+            return "cache"
+        if (time.monotonic() < self._interactive_until
+                or time.monotonic() < self._suspect_until
+                or self.realtime_status() == "disconnected"):
+            return "fallback"
+        return "poll"
+
     def set_interactive(self, active: bool, *, lease_s: float = _INTERACTIVE_LEASE_S) -> None:
         """Hold a short foreground lease; expiry makes crashes self-healing."""
         self._interactive_until = (
@@ -351,7 +364,7 @@ class CachingTransport(Transport):
             self._start_thread()
             return True
 
-    def _refresh_once(self) -> None:
+    def _refresh_once(self) -> bool:
         t0 = time.monotonic()
         # snapshot_docs = full pull + the delta cursor it is current at
         # (base default wraps get_docs with cursor 0 for feed-less drivers)
@@ -399,6 +412,7 @@ class CachingTransport(Transport):
         self._persist_snapshot()
         if foreign:
             self._notify_changes()
+        return foreign
 
     def _prune_guards_locked(self) -> None:
         floor = time.monotonic() - _WRITE_GUARD_S
@@ -561,8 +575,7 @@ class CachingTransport(Transport):
         if (prof.metered and self._warm and
                 time.monotonic() - self._last_full < prof.fallback_poll_s):
             return False
-        self._refresh_once()
-        return False   # a full pull can't tell "changed" — never trip the watchdog
+        return self._refresh_once()
 
     # ------------------------------------------------------------------ docs
     @staticmethod

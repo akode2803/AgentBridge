@@ -343,6 +343,10 @@ class CliResponder:
         delivery.capability_ceiling = compile_capability_ceiling(
             invocation.preset.bridge_profile, requested)
         bridge_policy = None
+        preparation_timings = getattr(delivery, "preparation_timings", None)
+        if not isinstance(preparation_timings, dict):
+            preparation_timings = {}
+            delivery.preparation_timings = preparation_timings
         if invocation.preset.bridge_profile is not None:
             workdir = (self.home / "harness" / self.agent / "workspaces"
                        / delivery.chat_id)
@@ -352,6 +356,8 @@ class CliResponder:
                 command=invocation.preset.command, workspace=workdir,
                 timeout_s=max(settings.ask_timeout_s, settings.timeout_s),
                 requested_capabilities=set(delivery.capability_ceiling),
+                observe=lambda name, seconds: preparation_timings.__setitem__(
+                    name, seconds),
             )
         delivery.compiled_bridge_policy = bridge_policy
         native_policy = (bridge_policy.native_policy() if bridge_policy else

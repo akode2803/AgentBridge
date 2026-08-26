@@ -32,20 +32,26 @@ _MAX_LOG_BYTES = 2 * 1024 * 1024   # ~2 MB, then the log restarts
 
 
 class RunTimings:
-    """Stopwatch for one run. ``stage(...)`` wraps each phase; ``pickup_s``
-    is derived from the trigger's mint time (ns since epoch)."""
+    """Stopwatch for one run with explicit pre-run clock domains."""
 
     def __init__(self, trigger_ns: int, *, observed_ns: int = 0,
-                 enqueued_ns: int = 0, claimed_ns: int = 0) -> None:
+                 observed_mono: int = 0, observed_clock: str = "",
+                 enqueued_ns: int = 0, enqueued_mono: int = 0,
+                 enqueued_clock: str = "", claimed_ns: int = 0,
+                 claimed_mono: int = 0,
+                 claimed_clock: str = "") -> None:
         self.trigger_ns = int(trigger_ns or 0)
         self.observed_ns = int(observed_ns or 0)
+        self.observed_mono = int(observed_mono or 0)
+        self.observed_clock = str(observed_clock or "")
         self.enqueued_ns = int(enqueued_ns or 0)
+        self.enqueued_mono = int(enqueued_mono or 0)
+        self.enqueued_clock = str(enqueued_clock or "")
         self.claimed_ns = int(claimed_ns or 0)
-        self.pickup_s = (
-            max(0.0, (time.time_ns() - self.trigger_ns) / 1e9)
-            if self.trigger_ns else 0.0
-        )
+        self.claimed_mono = int(claimed_mono or 0)
+        self.claimed_clock = str(claimed_clock or "")
         self.stages: dict[str, float] = {}
+        self.details: dict[str, float] = {}
         self._t0: float | None = None
         self._name = ""
 
@@ -54,12 +60,15 @@ class RunTimings:
         return max(0.0, (end_ns - start_ns) / 1e9) if start_ns and end_ns else 0.0
 
     def propagation(self) -> dict[str, float]:
-        """Content-free wall-clock handoff breakdown before runner startup."""
-        return {
-            "trigger_to_scan_s": self._between(self.trigger_ns, self.observed_ns),
-            "enqueue_s": self._between(self.observed_ns, self.enqueued_ns),
-            "queue_s": self._between(self.enqueued_ns, self.claimed_ns),
-        }
+        """Content-free same-clock monotonic pre-run breakdown."""
+        out = {}
+        if self.observed_clock and self.observed_clock == self.enqueued_clock:
+            out["enqueue_s"] = self._between(
+                self.observed_mono, self.enqueued_mono)
+        if self.enqueued_clock and self.enqueued_clock == self.claimed_clock:
+            out["queue_s"] = self._between(
+                self.enqueued_mono, self.claimed_mono)
+        return out
 
     # ------------------------------------------------------------- stopwatch
     def start(self, name: str) -> None:
@@ -72,15 +81,18 @@ class RunTimings:
         self._t0 = None
         self._name = ""
 
+    def detail(self, name: str, seconds: float) -> None:
+        if name and seconds >= 0:
+            self.details[name] = float(seconds)
+
     # -------------------------------------------------------------- reporting
     def total_s(self) -> float:
-        return self.pickup_s + sum(self.stages.values())
+        """Same-process measured work only; never add remote wall clocks."""
+        return sum(self.stages.values())
 
     def summary(self) -> str:
-        """`44.6s total · pickup 2.1s · context 0.3s · model 41.8s · post 0.4s`"""
-        parts = [f"{self.total_s():.1f}s total"]
-        if self.trigger_ns:
-            parts.append(f"pickup {self.pickup_s:.1f}s")
+        """`42.5s local work · context 0.3s · model 41.8s · post 0.4s`"""
+        parts = [f"{self.total_s():.1f}s local work"]
         parts += [f"{k} {v:.1f}s" for k, v in self.stages.items()]
         return " · ".join(parts)
 
@@ -90,9 +102,9 @@ class RunTimings:
             "ts": utcnow_iso(), "agent": agent, "chat_id": chat_id,
             "kind": kind, "outcome": outcome,
             "total_s": round(self.total_s(), 3),
-            "pickup_s": round(self.pickup_s, 3),
             **{k: round(v, 3) for k, v in self.propagation().items()},
             **{f"{k}_s": round(v, 3) for k, v in self.stages.items()},
+            **{f"detail_{k}_s": round(v, 3) for k, v in self.details.items()},
         }
 
     def log(self, home: Path, *, agent: str, chat_id: str, kind: str,

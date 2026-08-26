@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS messages(
   sender  TEXT NOT NULL DEFAULT '',
   kind    TEXT NOT NULL DEFAULT 'message',
   payload TEXT NOT NULL,
+  observed_ns INTEGER NOT NULL DEFAULT 0,
+  observed_mono INTEGER NOT NULL DEFAULT 0,
+  observed_clock TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(chat_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat_ns ON messages(chat_id, ns);
@@ -92,6 +95,27 @@ class Store:
         self._local = threading.local()
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            additions = {
+                "observed_ns": "INTEGER NOT NULL DEFAULT 0",
+                "observed_mono": "INTEGER NOT NULL DEFAULT 0",
+                "observed_clock": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, declaration in additions.items():
+                columns = {row[1] for row in c.execute(
+                    "PRAGMA table_info(messages)")}
+                if name in columns:
+                    continue
+                try:
+                    c.execute(
+                        f"ALTER TABLE messages ADD COLUMN {name} {declaration}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+                columns = {row[1] for row in c.execute(
+                    "PRAGMA table_info(messages)")}
+                if name not in columns:
+                    raise sqlite3.OperationalError(
+                        f"message schema migration did not create {name}")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -148,27 +172,45 @@ class Store:
         return cur.rowcount
 
     # -------------------------------------------------------- message cache
-    def upsert_messages(self, chat_id: str, records: Iterable[dict]) -> list[dict]:
+    def upsert_messages(self, chat_id: str, records: Iterable[dict], *,
+                        observed_ns: int | None = None,
+                        observed_mono: int | None = None,
+                        observed_clock: str = "") -> list[dict]:
         """Idempotent by (chat_id, id) — replayed/duplicated transport records
         (shrunk-file re-reads, at-least-once outbox, own-message echoes)
         collapse here. Returns the records that were ACTUALLY NEW — the event
         pump publishes exactly these, so nothing ever notifies twice."""
         c = self._conn()
         inserted: list[dict] = []
+        observed = int(observed_ns if observed_ns is not None else time.time_ns())
+        observed_tick = int(
+            observed_mono if observed_mono is not None else time.perf_counter_ns())
         with c:
             for rec in records:
                 rid, ns = rec.get("id"), rec.get("ns")
                 if not rid or not isinstance(ns, int):
                     continue  # malformed record: transport-level tolerance
                 cur = c.execute(
-                    "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload)"
-                    " VALUES(?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload,"
+                    "observed_ns,observed_mono,observed_clock) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (chat_id, rid, ns, rec.get("from", ""), rec.get("kind", "message"),
-                     json.dumps(rec, ensure_ascii=False)),
+                     json.dumps(rec, ensure_ascii=False), observed, observed_tick,
+                     str(observed_clock or "")[:80]),
                 )
                 if cur.rowcount:
                     inserted.append(rec)
         return inserted
+
+    def message_observation(
+        self, chat_id: str, message_id: str,
+    ) -> tuple[int, int, str]:
+        row = self._conn().execute(
+            "SELECT observed_ns,observed_mono,observed_clock FROM messages "
+            "WHERE chat_id=? AND id=?",
+            (chat_id, message_id),
+        ).fetchone()
+        return (int(row[0]), int(row[1]), str(row[2])) if row else (0, 0, "")
 
     def messages(self, chat_id: str, after_ns: int = 0, limit: int | None = None) -> list[dict]:
         q = "SELECT payload FROM messages WHERE chat_id=? AND ns>? ORDER BY ns"
@@ -290,18 +332,27 @@ class Store:
     def cache_and_outbox_add(
         self, chat_id: str, record: dict[str, Any],
         kind: str, target: str, outbox_payload: dict[str, Any],
+        *, observed_ns: int | None = None, observed_clock: str = "",
+        observed_mono: int | None = None,
     ) -> int:
         """Atomically publish the optimistic cache row and durable send intent."""
         rid, ns = record.get("id"), record.get("ns")
         if not rid or not isinstance(ns, int):
             raise ValueError("message record needs id and integer ns")
         with self._conn() as c:
+            observed = int(
+                observed_ns if observed_ns is not None else time.time_ns())
+            observed_tick = int(
+                observed_mono if observed_mono is not None
+                else time.perf_counter_ns())
             c.execute(
-                "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload)"
-                " VALUES(?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload,"
+                "observed_ns,observed_mono,observed_clock) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (chat_id, rid, ns, record.get("from", ""),
                  record.get("kind", "message"),
-                 json.dumps(record, ensure_ascii=False)),
+                 json.dumps(record, ensure_ascii=False), observed, observed_tick,
+                 str(observed_clock or "")[:80]),
             )
             cur = c.execute(
                 "INSERT INTO outbox(kind,target,payload,created_ns) VALUES(?,?,?,?)",

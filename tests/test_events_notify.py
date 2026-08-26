@@ -199,7 +199,8 @@ def test_mirror_wake_frame_is_content_free():
     out = frame(Event(eventbus.MIRROR_UPDATE, ns=123))
     assert out["type"] == eventbus.MIRROR_UPDATE
     assert out["chat_id"] == "" and out["ns"] == 123
-    assert set(out) == {"type", "chat_id", "ns", "server_ns"}
+    assert out["trace_ref"] == f"{eventbus.MIRROR_UPDATE}-123"
+    assert set(out) == {"type", "chat_id", "ns", "server_ns", "trace_ref"}
 
 def test_watch_line_formats():
     """The CLI watch stream speaks the CommandHook's field names (M3/R42)."""

@@ -217,19 +217,24 @@ class CompiledBridgePolicy:
 def compile_bridge_policy(profile: BridgeProfile, *, command: str,
                           workspace: Path, timeout_s: float,
                           requested_capabilities: set[str] | frozenset[str],
-                          source_env=None) -> CompiledBridgePolicy:
+                          source_env=None, observe=None) -> CompiledBridgePolicy:
     """Validate the installed provider and freeze one fresh-run policy."""
+    def measured(name: str, fn):
+        started = time.perf_counter()
+        value = fn()
+        if callable(observe):
+            observe(name, time.perf_counter() - started)
+        return value
+
     executable = shutil.which(command) or (command if Path(command).is_file() else "")
     if not executable:
         raise ValidationError("trusted bridge provider is not installed")
     executable = str(Path(executable).resolve())
     resolved_workspace = str(workspace.resolve())
     try:
-        result = subprocess.run(
+        result = measured("provider_version", lambda: subprocess.run(
             [executable, *profile.version_args], capture_output=True, text=True,
-            timeout=5, check=False,
-            env=_probe_env(source_env),
-        )
+            timeout=5, check=False, env=_probe_env(source_env)))
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValidationError("could not verify the bridge provider version") from exc
     version = " ".join((result.stdout or result.stderr).split())
@@ -237,15 +242,18 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
         raise ValidationError(
             f"bridge disabled for unverified provider version {version or 'unknown'!r}")
     executable_sha256, code_mode_host, code_mode_host_sha256, signing_team = \
-        _codex_binary_identity(executable)
-    config_layers = _codex_non_user_config_layers(
-        executable, Path(resolved_workspace), source_env,
-    )
-    capabilities = compile_capability_ceiling(profile, requested_capabilities)
-    overlay = _safe_codex_overlay(profile, source_env)
-    disabled_skills = _disabled_codex_skill_config(
-        source_env, Path(resolved_workspace),
-    )
+        measured("provider_identity", lambda: _codex_binary_identity(executable))
+    config_layers = measured(
+        "config_layers", lambda: _codex_non_user_config_layers(
+            executable, Path(resolved_workspace), source_env))
+    capabilities = measured(
+        "capability_inventory", lambda: compile_capability_ceiling(
+            profile, requested_capabilities))
+    overlay = measured("safe_overlay", lambda: _safe_codex_overlay(
+        profile, source_env))
+    disabled_skills = measured(
+        "skill_inventory", lambda: _disabled_codex_skill_config(
+            source_env, Path(resolved_workspace)))
     launch = [
         "--ignore-user-config", "--ignore-rules", "--ephemeral", "--strict-config",
         "-c", 'approval_policy="never"',

@@ -10,11 +10,13 @@ local keystore, so restoring a session never needs the password again.
 from __future__ import annotations
 
 import platform
+import hashlib
 import secrets
 import threading
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
+from ..core.latency import LatencySink
 from ..core.errors import ValidationError
 from ..core.timekit import utcnow_iso
 from ..mesh.directory import Directory
@@ -76,6 +78,7 @@ class GuiApp:
         self.instance_id = secrets.token_hex(8)
         self.poll_s = poll_s
         self.sse_ping_s = sse_ping_s
+        self._latency_sinks: dict[str, LatencySink] = {}
         # repo layout default: agentbridge/gui/context.py -> <repo>/gui/static
         self.static_dir = (
             Path(static_dir)
@@ -110,6 +113,18 @@ class GuiApp:
         """The ONE shared transport — the Mesh rides the pre-auth instance
         (R29), so this is valid signed in or out."""
         return self._tx0
+
+    @property
+    def latency(self) -> LatencySink:
+        """Current account + process scoped GUI observations."""
+        identity = self.user or "signed-out"
+        tag = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        key = f"{tag}-{self.instance_id}"
+        sink = self._latency_sinks.get(key)
+        if sink is None:
+            sink = LatencySink(self.home / "latency" / f"gui-{key}.jsonl")
+            self._latency_sinks[key] = sink
+        return sink
 
     @property
     def _session_path(self) -> Path:

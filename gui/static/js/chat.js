@@ -48,14 +48,29 @@ function currentRunAuthority(chatId, feeds) {
       .then((outputs) => {
         if (Mesh.authorityPoll?.[chatId] !== request) return;
         const valid = outputs.filter((out) => out && !out.error);
-        if (!valid.length) {
-          delete Mesh.authorityCache[chatId];
-          return;
+        const verified = valid.flatMap((out) =>
+          Array.isArray(out.runs) ? out.runs : []).map((run) => ({
+            run_id: run.run_id,
+            manager: run.manager,
+            state: run.state,
+            updated_ns: run.updated_ns,
+            provider_version: run.provider_version,
+            capabilities: Array.isArray(run.capabilities)
+              ? run.capabilities.map((item) => ({
+                  label: item.label, state: item.state,
+                })) : [],
+          }));
+        // Authority is immutable for this exact active run-id set. A timeout,
+        // transient error, or mirror-lagged empty projection must not blank a
+        // previously verified card; a changed/ended run set invalidates by key.
+        if (valid.length === outputs.length && verified.length) {
+          const prior = cached && cached.key === key ? cached.runs : [];
+          const merged = new Map(prior.map((run) => [run.run_id, run]));
+          verified.forEach((run) => merged.set(run.run_id, run));
+          Mesh.authorityCache[chatId] = {
+            key, at: Date.now(), runs: [...merged.values()],
+          };
         }
-        Mesh.authorityCache[chatId] = {
-          key, at: Date.now(), runs: valid.flatMap((out) =>
-            Array.isArray(out.runs) ? out.runs : []),
-        };
         if (App.page === "chats" && Mesh.chatId === chatId) {
           Mesh.chatKey = "";
           renderMeshChat(false);
@@ -65,8 +80,7 @@ function currentRunAuthority(chatId, feeds) {
         if (Mesh.authorityPoll?.[chatId] === request) request.pending = false;
       });
   }
-  return cached && cached.key === key && now - cached.at < 5000
-    ? cached.runs : [];
+  return cached && cached.key === key ? cached.runs : [];
 }
 
 function runAccessDetails(run, open) {

@@ -269,11 +269,12 @@ def test_reply_timings_are_profiled(hrig):
     assert log.is_file()
     rec = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
     assert rec["outcome"] == "posted" and rec["chat_id"] == snap.id
-    for key in ("total_s", "pickup_s", "context_s", "model_s", "post_s"):
+    for key in ("total_s", "context_s", "model_s", "post_s"):
         assert key in rec and rec[key] >= 0
+    assert "pickup_s" not in rec
     # the run feed carries the human summary…
     feed = latest_run(runner.mesh.tx)
-    assert "total" in feed["note"] and "model" in feed["note"]
+    assert "local work" in feed["note"] and "model" in feed["note"]
     # …and so does the reply's Message-info task doc
     reply = agent_msgs(hrig.owner, snap.id)[0]
     tasks = runner.mesh.tx.get_doc(f"chats/{snap.id}/tasks/{reply.id}.json")

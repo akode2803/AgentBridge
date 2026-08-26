@@ -108,6 +108,7 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
                         SimpleNamespace(returncode=0, stdout="codex-cli 0.147.0\n",
                                         stderr=""))
     mock_codex_admission(monkeypatch)
+    observed = []
     policy = compile_bridge_policy(
         codex_profile(), command="codex", workspace=tmp_path / "work",
         timeout_s=900, requested_capabilities={"delegate_agent"},
@@ -115,7 +116,13 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
             "PATH": "/bin", "HOME": str(tmp_path / "home"),
             "CODEX_HOME": str(codex_home),
         },
+        observe=lambda name, seconds: observed.append((name, seconds)),
     )
+    assert {name for name, _seconds in observed} == {
+        "provider_version", "provider_identity", "config_layers",
+        "capability_inventory", "safe_overlay", "skill_inventory",
+    }
+    assert all(seconds >= 0 for _name, seconds in observed)
     assert policy.executable == str(Path("/tmp/codex").resolve())
     assert policy.executable_version == "codex-cli 0.147.0"
     assert policy.executable_sha256 == "a" * 64

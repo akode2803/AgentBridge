@@ -84,6 +84,7 @@ class Delivery:
     contract_cli_enabled: bool = False  # sampled before this run is signed
     invocation: Any = None        # adapter-owned immutable resolved invocation
     harness_settings: Any = None  # settings snapshot paired with invocation
+    preparation_timings: dict[str, float] = field(default_factory=dict)
 
 
 class ConversationManager:
