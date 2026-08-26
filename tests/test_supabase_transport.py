@@ -6,6 +6,8 @@ and the factory. The real project is exercised by the live smoke run
 from __future__ import annotations
 
 import time
+import sys
+import types
 
 import pytest
 
@@ -505,6 +507,133 @@ def test_missing_credentials_fail_loud(tmp_path):
     with pytest.raises(ValidationError):
         t.get_doc            # noqa: B018 — attribute is fine...
         t.put_doc("x.json", {})
+
+
+def test_dead_realtime_thread_is_replaced(monkeypatch):
+    from agentbridge.transport import supabase as mod
+
+    made = []
+
+    class FakeRealtime:
+        def __init__(self, *_args):
+            self.live = True
+            self.closed = False
+            made.append(self)
+
+        def alive(self): return self.live
+        def status(self): return "ready" if self.live else "disconnected"
+        def close(self): self.closed = True
+
+    monkeypatch.setattr(mod, "_RealtimeThread", FakeRealtime)
+    t = SupabaseTransport(
+        "team", env={"SUPABASE_URL": "https://x.test",
+                     "SUPABASE_SECRET_KEY": "sb_secret_x"}, client=FakeClient())
+    first = t._ensure_rt()
+    assert t._ensure_rt() is first and len(made) == 1
+    first.live = False
+    second = t._ensure_rt()
+    assert second is not first and first.closed and len(made) == 2
+    assert t.realtime_status() == "ready"
+
+
+def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
+    from agentbridge.transport.supabase import _RealtimeThread
+
+    class Channel:
+        def __init__(self):
+            self.is_joined = True
+            self.is_errored = False
+            self.unsubscribed = False
+
+        def on_broadcast(self, *_args): return self
+
+        async def subscribe(self, callback):
+            callback("SUBSCRIBED", None)
+            return self
+
+        async def unsubscribe(self):
+            self.unsubscribed = True
+
+        async def send_broadcast(self, *_args): pass
+
+    class RealtimeClient:
+        def __init__(self): self.closed = False
+        async def close(self): self.closed = True
+
+    class Client:
+        def __init__(self):
+            self.ch = Channel()
+            self.realtime = RealtimeClient()
+
+        def channel(self, *_args): return self.ch
+
+    client = Client()
+
+    async def create_client(*_args): return client
+
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=create_client))
+    monkeypatch.setitem(
+        sys.modules, "realtime",
+        types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
+    rt = _RealtimeThread(
+        {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
+        "team", lambda: None)
+    deadline = time.monotonic() + 2.0
+    while rt.status() != "ready" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert rt.status() == "ready"
+    client.ch.is_joined = False
+    deadline = time.monotonic() + 2.5
+    while rt.alive() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert rt.status() == "disconnected"
+    assert client.ch.unsubscribed and client.realtime.closed
+    rt.close()
+
+
+def test_realtime_close_cancels_initial_connection(monkeypatch):
+    import asyncio
+    from agentbridge.transport.supabase import _RealtimeThread
+
+    async def never_connect(*_args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=never_connect))
+    monkeypatch.setitem(
+        sys.modules, "realtime",
+        types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
+    rt = _RealtimeThread(
+        {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
+        "team", lambda: None)
+    deadline = time.monotonic() + 1.0
+    while rt._task is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    rt.close()
+    assert not rt._thread.is_alive()
+
+
+def test_realtime_immediate_close_cannot_start_late_connection(monkeypatch):
+    import asyncio
+    from agentbridge.transport.supabase import _RealtimeThread
+
+    entered = []
+
+    async def connect(*_args):
+        entered.append(True)
+        await asyncio.sleep(30)
+
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=connect))
+    monkeypatch.setitem(
+        sys.modules, "realtime",
+        types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
+    rt = _RealtimeThread(
+        {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
+        "team", lambda: None)
+    rt.close()
+    assert not rt._thread.is_alive()
 
 
 # ------------------------------------------------- doc delta feed (R76/V84)

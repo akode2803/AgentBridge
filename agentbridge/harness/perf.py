@@ -1,8 +1,10 @@
 """Per-run response timing (R30) — where does an agent reply's time go?
 
 Stages of one run, as the sender experiences them:
-- ``pickup``  — trigger message posted -> this runner claimed the group
-  (transport sync + scan cadence + queue wait; poll_s bounds it)
+- ``pickup``  — trigger ordinal -> this runner began processing (an
+  approximate cross-machine wall-clock interval, retained for compatibility)
+- ``trigger_to_scan`` / ``enqueue`` / ``queue`` — the explicit pre-run
+  handoffs as observed by this runner; these do not claim transport commit time
 - ``context`` — building the delivery (transcript, retrieval, memory, prompt)
 - ``model``   — the responder run (the CLI/model actually generating)
 - ``post``    — sealing + committing the reply to the outbox
@@ -33,8 +35,12 @@ class RunTimings:
     """Stopwatch for one run. ``stage(...)`` wraps each phase; ``pickup_s``
     is derived from the trigger's mint time (ns since epoch)."""
 
-    def __init__(self, trigger_ns: int) -> None:
+    def __init__(self, trigger_ns: int, *, observed_ns: int = 0,
+                 enqueued_ns: int = 0, claimed_ns: int = 0) -> None:
         self.trigger_ns = int(trigger_ns or 0)
+        self.observed_ns = int(observed_ns or 0)
+        self.enqueued_ns = int(enqueued_ns or 0)
+        self.claimed_ns = int(claimed_ns or 0)
         self.pickup_s = (
             max(0.0, (time.time_ns() - self.trigger_ns) / 1e9)
             if self.trigger_ns else 0.0
@@ -42,6 +48,18 @@ class RunTimings:
         self.stages: dict[str, float] = {}
         self._t0: float | None = None
         self._name = ""
+
+    @staticmethod
+    def _between(start_ns: int, end_ns: int) -> float:
+        return max(0.0, (end_ns - start_ns) / 1e9) if start_ns and end_ns else 0.0
+
+    def propagation(self) -> dict[str, float]:
+        """Content-free wall-clock handoff breakdown before runner startup."""
+        return {
+            "trigger_to_scan_s": self._between(self.trigger_ns, self.observed_ns),
+            "enqueue_s": self._between(self.observed_ns, self.enqueued_ns),
+            "queue_s": self._between(self.enqueued_ns, self.claimed_ns),
+        }
 
     # ------------------------------------------------------------- stopwatch
     def start(self, name: str) -> None:
@@ -73,6 +91,7 @@ class RunTimings:
             "kind": kind, "outcome": outcome,
             "total_s": round(self.total_s(), 3),
             "pickup_s": round(self.pickup_s, 3),
+            **{k: round(v, 3) for k, v in self.propagation().items()},
             **{f"{k}_s": round(v, 3) for k, v in self.stages.items()},
         }
 

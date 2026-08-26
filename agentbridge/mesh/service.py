@@ -7,6 +7,7 @@ reach past it to the transport.
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 from .. import crypto
@@ -123,6 +124,11 @@ class Mesh:
             dead_hooks=self.messaging.outbox_dead_hooks(),
             prune_hooks=self.messaging.outbox_prune_hooks())
         self.bus = EventBus()
+        subscribe_changes = getattr(self.tx, "subscribe_changes", None)
+        self._mirror_unsubscribe = (
+            subscribe_changes(self._mirror_changed)
+            if callable(subscribe_changes) else None
+        )
         self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
         self.applink = AppLink(
             self.tx, self.store, self.directory, self.keystore, machine,
@@ -133,6 +139,10 @@ class Mesh:
             workers=sync_workers,
             on_records=self._pump,
         )
+
+    def _mirror_changed(self) -> None:
+        """Wake local read-model consumers without exposing changed paths."""
+        self.bus.publish(Event(eventbus.MIRROR_UPDATE, ns=time.time_ns()))
 
     def _sign_event(self, data: bytes) -> str:
         """Sign an info event / overlay with this identity's key (R13.5, R31).
@@ -417,6 +427,9 @@ class Mesh:
             self.presence.start()
 
     def close(self) -> None:
+        if self._mirror_unsubscribe is not None:
+            self._mirror_unsubscribe()
+            self._mirror_unsubscribe = None
         self.sync.stop()
         self.notifier.stop()
         self.presence.stop()  # writes the clean offline marker

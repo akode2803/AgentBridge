@@ -23,6 +23,7 @@ MESSAGE = "message"            # a new message envelope landed
 CHAT_UPDATE = "chat_update"    # info event: membership/name/permissions moved
 ADDED_TO_CHAT = "added_to_chat"  # this identity was added to a chat
 REACTION = "reaction"          # someone reacted (V50 breadcrumb, not state)
+MIRROR_UPDATE = "mirror_update"  # content-free cloud-doc convergence wake
 
 
 @dataclass

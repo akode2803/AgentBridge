@@ -15,6 +15,7 @@ to refetch just to ping.
 from __future__ import annotations
 
 import json
+import time
 from typing import Iterator
 
 from ..mesh import eventbus
@@ -26,7 +27,8 @@ __all__ = ["frame", "stream"]
 
 
 def frame(ev: Event, notifier: Notifier | None = None) -> dict:
-    out = {"type": ev.type, "chat_id": ev.chat_id, "ns": ev.ns}
+    out = {"type": ev.type, "chat_id": ev.chat_id, "ns": ev.ns,
+           "server_ns": time.time_ns()}
     if ev.type == eventbus.MESSAGE:
         out["id"] = ev.data.get("id", "")
         out["from"] = ev.data.get("from", "")

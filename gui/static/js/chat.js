@@ -16,6 +16,7 @@ import { rxBadge, openReactionsPopup, captureRxSigs, animateRxChanges } from "./
 import { V } from "./views.js";
 
 let chatRenderSeq = 0;
+let chatsFetchSeq = 0;
 
 function runAccessLabel(capability) {
   return capability.label || "Provider capability";
@@ -133,6 +134,8 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
+  const fetchSeq = ++chatsFetchSeq;
+  const routeSeq = App.routeSeq;
   // leaving a chat for the no-chat home: paint the empty state NOW (from the
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
@@ -147,9 +150,13 @@ async function renderChats(force) {
   // V122: a fetch that dies mid-restart must neither clobber the cached
   // state nor surface as an unhandled rejection — keep what we have and
   // let the next poll retry (the boot cover / skeleton stays up)
+  let fresh;
   try {
-    Mesh.state = await api("/api/mesh/state");
+    fresh = await api("/api/mesh/state");
   } catch { return; }
+  if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
+      || routeSeq !== App.routeSeq) return;
+  Mesh.state = fresh;
   // V111: locked is not signed-out — never cache the refusal as state or
   // paint "Start the mesh" over it (api.js already raised the lock screen)
   if (Mesh.state && Mesh.state.locked) {
@@ -1013,6 +1020,7 @@ function startAskPoll() {
       syncAskDots([]);
       return;
     }
+    if (document.hidden || !document.hasFocus()) return;
     try {
       const r = await api("/api/mesh/asks");
       const timers = r.timers || [];
@@ -1848,6 +1856,7 @@ function jumpToMessage() {
 }
 
 async function renderNewChat() {
+  const routeSeq = App.routeSeq;
   // the form lives in the sidebar (renderNewChatSidebar); the main pane keeps
   // the resting state. Paint it (and drop the info pane) SYNCHRONOUSLY, before
   // the state fetch — otherwise the previous chat's transcript lingers through
@@ -1860,7 +1869,9 @@ async function renderNewChat() {
         <p><b>New chat</b> — name it in the sidebar and pick the agents.</p>
       </div>
     </div>`;
-  Mesh.state = await api("/api/mesh/state");
+  const fresh = await api("/api/mesh/state");
+  if (App.page !== "new" || routeSeq !== App.routeSeq) return;
+  Mesh.state = fresh;
   const ms = Mesh.state;
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
   renderSidebar();

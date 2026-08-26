@@ -6,6 +6,7 @@
    off to a slow safety-net tick (the stream carries the news). */
 
 import { Mesh, isV2, meshCaps } from "./state.js";
+import { api } from "./api.js";
 import { handleNotifyFrame } from "./notify.js";
 import { V } from "./views.js";
 
@@ -13,9 +14,27 @@ let source = null;
 let connected = false;
 let retryTimer = null;
 let lastKick = 0;   // V125: cooldown for the poll kicks below
+let activityTimer = null;
+let lastEventLagMs = null;
+
+function reportActivity() {
+  if (activityTimer) clearTimeout(activityTimer);
+  activityTimer = null;
+  const active = !document.hidden && document.hasFocus() && !!Mesh.state?.user;
+  api("/api/mesh/activity", { active }).catch(() => {});
+  if (active) activityTimer = setTimeout(reportActivity, 10000);
+}
+
+document.addEventListener("visibilitychange", reportActivity);
+window.addEventListener("focus", reportActivity);
+window.addEventListener("blur", reportActivity);
 
 export function realtimeActive() {
   return connected;
+}
+
+export function realtimeMetrics() {
+  return { connected, last_event_lag_ms: lastEventLagMs };
 }
 
 // a stream frame names a chat + change type but carries NO body (the client
@@ -23,17 +42,19 @@ export function realtimeActive() {
 // open transcript when the event is for the chat currently on screen.
 function onEvent(frame) {
   if (!frame || !frame.type) return;
+  if (Number.isFinite(Number(frame.server_ns))) {
+    lastEventLagMs = Math.max(
+      0, Date.now() - Math.round(Number(frame.server_ns) / 1000000));
+  }
   // desktop ping (R42): the server attached a notify lane when the R10 rules
   // said this deserves one; the module applies this window's prefs + focus
   handleNotifyFrame(frame);
   // refresh the app shell + sidebar (unread counts, last-message, new chats)
   V.refresh(false);
-  if (frame.chat_id && frame.chat_id === Mesh.chatId && V.renderMeshChat) {
-    V.renderMeshChat(false);
-  }
 }
 
 export function startRealtime() {
+  reportActivity();
   if (source || !isV2() || !meshCaps().sse) return;   // v1 / unsupported: poll only
   if (typeof EventSource === "undefined") return;
   try {
@@ -42,7 +63,7 @@ export function startRealtime() {
     source = null;
     return;
   }
-  source.onopen = () => { connected = true; };
+  source.onopen = () => { connected = true; reportActivity(); };
   source.onmessage = (e) => {
     let frame = null;
     try { frame = JSON.parse(e.data); } catch { return; }
@@ -78,6 +99,7 @@ export function stopRealtime() {
   if (source) { try { source.close(); } catch { /* already gone */ } }
   source = null;
   connected = false;
+  reportActivity();
 }
 
 // re-evaluate after auth changes: a fresh login opens the stream, a logout

@@ -270,7 +270,7 @@ def typing(app, req, mesh) -> dict:
 @authed
 def livefeed(app, req, mesh) -> dict:
     """Concurrent agent runs plus humans typing, for one chat or all mine."""
-    from .livefeed import expand_runs
+    from .livefeed import expand_runs, suppress_superseded_preparing
 
     chat_id = req.params.get("id", "")
     if chat_id and not mesh.snapshot(chat_id).is_member(mesh.user):
@@ -328,6 +328,7 @@ def livefeed(app, req, mesh) -> dict:
                 continue  # heartbeat every ~3s while typing; stale = stopped
             feeds.append({"agent": doc["user"], "human": True,
                           "typing": True, "age_s": age})
+    feeds = suppress_superseded_preparing(feeds)
     feeds.sort(key=lambda item: (not item.get("human"), item.get("agent", ""),
                                  item.get("run_id", "")))
     return {"feeds": feeds}

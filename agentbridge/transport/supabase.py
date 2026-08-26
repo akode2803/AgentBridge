@@ -152,6 +152,8 @@ class SupabaseTransport(Transport):
         self.auth_mode = "injected" if client is not None else ""
         self._client_lock = threading.Lock()
         self._rt = None                    # the realtime hint thread
+        self._rt_lock = threading.Lock()
+        self._closed = False
         self._watchers: list[_HintWatcher] = []
         self._bucket_ready = False
         # R76: does ab_docs carry the delta columns (seq/deleted)? None =
@@ -791,19 +793,39 @@ class SupabaseTransport(Transport):
         for w in list(self._watchers):
             w.poke()
 
+    def wake_local(self) -> None:
+        """Wake this process's watchers without spending a cloud broadcast."""
+        self._on_hint()
+
+    def realtime_status(self) -> str:
+        rt = self._rt
+        return rt.status() if rt is not None else "disconnected"
+
     def _ensure_rt(self):
-        if self._rt is None:
+        with self._rt_lock:
+            if self._closed:
+                return None
+            if self._rt is not None and self._rt.alive():
+                return self._rt if self._rt.status() in {"connecting", "ready"} else None
+            old, self._rt = self._rt, None
+            if old is not None:
+                old.close()
+                if old.alive():
+                    self._rt = old
+                    return None
             try:
                 self._rt = _RealtimeThread(self._env, self.root, self._on_hint)
             except Exception:  # noqa: BLE001 — no realtime = poll-only
                 self._rt = None
-        return self._rt
+            return self._rt
 
     def close(self) -> None:
         self._hints.close()
-        if self._rt is not None:
-            self._rt.close()
-            self._rt = None
+        with self._rt_lock:
+            self._closed = True
+            if self._rt is not None:
+                self._rt.close()
+                self._rt = None
 
 
 class _HintCoalescer:
@@ -874,6 +896,7 @@ class _HintWatcher(Watcher):
         self._event.set()
 
     def wait(self, timeout: float) -> bool:
+        self._tx._ensure_rt()
         hit = self._event.wait(timeout)
         self._event.clear()
         return hit
@@ -896,6 +919,11 @@ class _RealtimeThread:
         self._loop = asyncio.new_event_loop()
         self._channel = None
         self._ready = threading.Event()
+        self._state_lock = threading.Lock()
+        self._state = "connecting"
+        self._closing = False
+        self._task = None
+        self._started = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="ab-supabase-rt")
         self._thread.start()
@@ -903,9 +931,29 @@ class _RealtimeThread:
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._main())
-        except Exception:  # noqa: BLE001 — hint channel death is silent
+            self._task = self._loop.create_task(self._main())
+            self._started.set()
+            if self._closing:
+                self._task.cancel()
+            self._loop.run_until_complete(self._task)
+        except BaseException:  # cancellation/failure falls back to polling
             pass
+        finally:
+            with self._state_lock:
+                if not self._closing:
+                    self._state = "disconnected"
+            self._loop.close()
+
+    def _subscription_status(self, status, _error=None) -> None:
+        value = getattr(status, "value", status)
+        value = str(value or "").upper()
+        with self._state_lock:
+            if value == "SUBSCRIBED":
+                self._state = "ready"
+                self._ready.set()
+            elif value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
+                self._state = "disconnected"
+                self._ready.clear()
 
     async def _main(self) -> None:
         from realtime import RealtimeChannelOptions
@@ -916,15 +964,54 @@ class _RealtimeThread:
         # suffices; the secret key only rides here on a pre-R84 machine.
         key = (self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
                or self._env.get("SUPABASE_SECRET_KEY", ""))
-        sb = await acreate_client(self._env.get("SUPABASE_URL", ""), key)
-        self._channel = sb.channel(
-            f"ab-{self._root}",
-            RealtimeChannelOptions(config={"broadcast": {"self": False}}))
-        self._channel.on_broadcast("change", lambda _p: self._on_hint())
-        await self._channel.subscribe()
-        self._ready.set()
-        while True:                       # parked; sends ride this loop
-            await asyncio.sleep(3600)
+        sb = None
+        try:
+            sb = await asyncio.wait_for(
+                acreate_client(self._env.get("SUPABASE_URL", ""), key),
+                timeout=10.0,
+            )
+            self._channel = sb.channel(
+                f"ab-{self._root}",
+                RealtimeChannelOptions(config={"broadcast": {"self": False}}))
+            self._channel.on_broadcast("change", lambda _p: self._on_hint())
+            await asyncio.wait_for(
+                self._channel.subscribe(self._subscription_status),
+                timeout=10.0,
+            )
+            while not self._closing:
+                await asyncio.sleep(1.0)
+                if self.status() == "disconnected":
+                    return
+                joined = getattr(self._channel, "is_joined", False)
+                joined = joined() if callable(joined) else bool(joined)
+                errored = getattr(self._channel, "is_errored", False)
+                errored = errored() if callable(errored) else bool(errored)
+                if self._ready.is_set() and (not joined or errored):
+                    with self._state_lock:
+                        self._state = "disconnected"
+                        self._ready.clear()
+                    return
+        finally:
+            channel, self._channel = self._channel, None
+            try:
+                if channel is not None:
+                    await asyncio.wait_for(channel.unsubscribe(), timeout=2.0)
+            except Exception:  # noqa: BLE001 - shutdown remains best effort
+                pass
+            rt_client = getattr(sb, "realtime", None) if sb is not None else None
+            close = getattr(rt_client, "close", None)
+            if callable(close):
+                try:
+                    await asyncio.wait_for(close(), timeout=2.0)
+                except Exception:  # noqa: BLE001 - loop still must terminate
+                    pass
+
+    def status(self) -> str:
+        with self._state_lock:
+            return self._state
+
+    def alive(self) -> bool:
+        return self._thread.is_alive()
 
     def send(self) -> None:
         if not self._ready.is_set() or self._channel is None:
@@ -942,7 +1029,16 @@ class _RealtimeThread:
             pass
 
     def close(self) -> None:
+        with self._state_lock:
+            self._closing = True
+            self._state = "closed"
+        self._ready.clear()
         try:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._started.wait(timeout=0.25)
+            task = self._task
+            if task is not None:
+                self._loop.call_soon_threadsafe(task.cancel)
         except Exception:  # noqa: BLE001
             pass
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=5.0)

@@ -51,7 +51,10 @@ class WorkItem:
     status: str = "pending"   # pending | running
     next_ns: int = 0    # earliest dispatch time (rate-cap backoff)
     lease_ns: int = 0
+    observed_ns: int = 0
     enqueued_ns: int = 0
+    claimed_ns: int = 0
+    provider_started: bool = False
     attempts: int = 0   # FAILURE releases only (retry_or_fail); never legit defers
 
     def to_dict(self) -> dict:
@@ -102,7 +105,10 @@ class WorkQueue:
             items = self._pending()
             if item.key in items:
                 return False
-            item.enqueued_ns = time.time_ns()
+            now = time.time_ns()
+            if not item.observed_ns:
+                item.observed_ns = now
+            item.enqueued_ns = now
             items[item.key] = item.to_dict()
             self._save_pending(items)
             return True
@@ -133,6 +139,7 @@ class WorkQueue:
             for g in groups.values():
                 for it in g.items:
                     it.status, it.lease_ns = "running", lease
+                    it.claimed_ns = now
                     items[it.key] = it.to_dict()
             if groups:
                 self._save_pending(items)
@@ -151,6 +158,37 @@ class WorkQueue:
                 if retry_in_s is not None:
                     d["next_ns"] = time.time_ns() + int(retry_in_s * 1e9)
             self._save_pending(items)
+
+    def recover_claims(self) -> int:
+        """Return this runner's crash-left claims immediately to pending."""
+        with self._lock:
+            items = self._pending()
+            recovered = 0
+            for data in items.values():
+                if (data.get("status") != "running"
+                        or data.get("kind") != "message"
+                        or data.get("provider_started")):
+                    continue
+                data["status"] = "pending"
+                data["lease_ns"] = 0
+                data["claimed_ns"] = 0
+                recovered += 1
+            if recovered:
+                self._save_pending(items)
+            return recovered
+
+    def mark_provider_started(self, group: WorkGroup) -> None:
+        """Persist the no-auto-retry boundary before provider tool effects."""
+        with self._lock:
+            items = self._pending()
+            changed = False
+            for item in group.items:
+                data = items.get(item.key)
+                if data is not None and not data.get("provider_started"):
+                    data["provider_started"] = True
+                    changed = True
+            if changed:
+                self._save_pending(items)
 
     def retry_or_fail(self, group: WorkGroup, *, max_attempts: int = 3,
                       retry_in_s: float = 20.0) -> bool:

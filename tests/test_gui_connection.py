@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from agentbridge.gui import api_chats, desktop
+from agentbridge.gui.routing import Request
 from agentbridge.transport import FolderTransport
 
 
@@ -42,3 +43,15 @@ def test_cloud_state_promotes_normalized_mirror_failure():
     conn = api_chats._connection(app)
     assert conn["state"] == "restricted"
     assert conn["mirror"]["cached"] is True
+
+
+def test_activity_endpoint_only_sets_the_local_transport_lease():
+    calls = []
+    tx = SimpleNamespace(set_interactive=lambda active: calls.append(active))
+    mesh = SimpleNamespace(tx=tx)
+    app = SimpleNamespace(mesh=mesh, lock=None)
+    assert api_chats.activity(app, Request(data={"active": True})) == {
+        "ok": True, "active": True,
+    }
+    assert api_chats.activity(app, Request(data={"active": False}))["ok"]
+    assert calls == [True, False]

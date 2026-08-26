@@ -183,7 +183,10 @@ def latest_run(tx, agent="helper"):
 
 
 def active_runs(tx, agent="helper"):
-    return (tx.get_doc(f"status/{agent}_live.json") or {}).get("runs") or []
+    out = []
+    for suffix in ("live", "preparing"):
+        out += (tx.get_doc(f"status/{agent}_{suffix}.json") or {}).get("runs") or []
+    return out
 
 
 def test_child_dispatch_has_reserved_capacity_when_root_pool_is_full(hrig):
@@ -925,7 +928,7 @@ def test_feed_first_steps_bypass_the_throttle():
     for i in range(5):
         feed.step(f"step {i}")                  # all within the throttle
     activities = [w["runs"][0]["activity"] for w in writes]
-    assert activities[:4] == ["Starting up…", "step 0", "step 1", "step 2"]
+    assert activities[:4] == ["Working", "step 0", "step 1", "step 2"]
     assert len(writes) == 4                     # step 3/4 throttled as before
     feed.finish("done", "finished")
 
@@ -1007,6 +1010,20 @@ def test_reap_orphan_run():
     docs["status/helper_run.json"] = {
         "state": "running", "chat_id": "c3", "waiting": True, "updated": "x"}
     assert reap_orphan_run(tx, "helper") is False
+    # A pre-run queued/preparing placeholder is process-owned and must not
+    # survive a crash; only the durable attachment barrier is preserved.
+    docs["status/helper_run.json"] = {
+        "state": "running", "chat_id": "c3", "waiting": True,
+        "waiting_kind": "pre_run", "updated": "x"}
+    assert reap_orphan_run(tx, "helper") is True
+    assert docs["status/helper_run.json"]["state"] == "interrupted"
+    docs["status/helper_preparing.json"] = {
+        "kind": "run-set", "agent": "helper", "runs": [{
+            "run_id": "waiting-active", "state": "running", "chat_id": "c5",
+            "waiting": True, "waiting_kind": "pre_run",
+        }]}
+    assert reap_orphan_run(tx, "helper", {"c5"}) is False
+    assert docs["status/helper_preparing.json"]["runs"]
     # V107: the orphan's last activity rides the history entry as "doing"
     docs["status/helper_run.json"] = {
         "state": "running", "chat_id": "c4", "updated": "x",
@@ -1425,7 +1442,12 @@ def test_attachment_sync_barrier_defers_until_blob_lands(hrig):
     assert runner.queue._pending()                    # still queued
     # V71: the wait is VISIBLE — a running feed with a "waiting" activity so
     # the requester sees the agent is waiting on the file, not frozen
-    feed = active_runs(runner.mesh.tx)[0]
+    deadline = time.monotonic() + 1.0
+    feeds = active_runs(runner.mesh.tx)
+    while not feeds and time.monotonic() < deadline:
+        time.sleep(0.005)
+        feeds = active_runs(runner.mesh.tx)
+    feed = feeds[0]
     assert feed.get("state") == "running" and feed.get("waiting")
     assert "syncing" in feed.get("activity", "") and "report.bin" in feed["activity"]
 

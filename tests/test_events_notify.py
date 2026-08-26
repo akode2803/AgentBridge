@@ -181,6 +181,7 @@ def test_sse_frame_carries_notify_lane(world):
 
     ev = next_msg_event("ping me on stream")
     out = frame(ev, fable.notifier)
+    assert out["server_ns"] >= ev.ns
     assert out["notify"]["from"] == "aryan"
     assert "ping me" in out["notify"]["preview"]
     assert out["notify"]["chat_name"] == "Streamed"
@@ -191,6 +192,14 @@ def test_sse_frame_carries_notify_lane(world):
     fable.set_chat_flag(chat.id, "mute", True)
     assert "notify" not in frame(next_msg_event("silent on stream"), fable.notifier)
 
+
+def test_mirror_wake_frame_is_content_free():
+    from agentbridge.gui.sse import frame
+
+    out = frame(Event(eventbus.MIRROR_UPDATE, ns=123))
+    assert out["type"] == eventbus.MIRROR_UPDATE
+    assert out["chat_id"] == "" and out["ns"] == 123
+    assert set(out) == {"type", "chat_id", "ns", "server_ns"}
 
 def test_watch_line_formats():
     """The CLI watch stream speaks the CommandHook's field names (M3/R42)."""

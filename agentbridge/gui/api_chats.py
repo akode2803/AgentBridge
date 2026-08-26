@@ -104,7 +104,7 @@ def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
     in ten minutes — process truth beats the stale doc."""
     from .api_agents import runner_state
     from .api_messages import _age_s
-    from .livefeed import expand_runs
+    from .livefeed import expand_runs, suppress_superseded_preparing
 
     live: dict[str, list[dict]] = {}
     try:
@@ -140,9 +140,12 @@ def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
                 continue
             live.setdefault(cid, []).append(
                 {"user": who, "run_id": run.get("run_id") or "",
+                 "transition_id": run.get("transition_id") or "",
+                 "preparing": bool(run.get("preparing")),
                  "activity": " ".join(
                      str(run.get("activity") or "").split())[:80]})
     for entries in live.values():
+        entries[:] = suppress_superseded_preparing(entries)
         entries.sort(key=lambda item: (not item.get("typing"),
                                        item.get("user", ""),
                                        item.get("run_id", "")))
@@ -398,6 +401,16 @@ def key_verify(app: GuiApp, req, mesh) -> dict:
     return {"ok": True, **mesh.key_fingerprint(name)}
 
 
+@authed
+def activity(app: GuiApp, req, mesh) -> dict:
+    """Renew or release the foreground mirror lease from this local GUI."""
+    active = bool(req.data.get("active"))
+    setter = getattr(mesh.tx, "set_interactive", None)
+    if callable(setter):
+        setter(active)
+    return {"ok": True, "active": active}
+
+
 GET = {
     "/api/state": bridge_state,
     "/api/mesh/state": state,
@@ -411,4 +424,5 @@ POST = {
     "/api/mesh/create_self": create_self,
     "/api/mesh/key_alert_ack": key_alert_ack,
     "/api/mesh/key_verify": key_verify,
+    "/api/mesh/activity": activity,
 }

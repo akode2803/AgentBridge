@@ -47,6 +47,29 @@ let downTicks = 0;
 let bootVersion = "";
 let reloadArmed = false;
 let restartWatchActive = false;
+let refreshPromise = null;
+let refreshDirty = false;
+let refreshNeedsRender = false;
+
+async function refresh(rerender) {
+  if (refreshPromise) {
+    refreshDirty = true;
+    refreshNeedsRender = refreshNeedsRender || !!rerender;
+    return refreshPromise;
+  }
+  refreshPromise = refreshOnce(rerender);
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+    if (refreshDirty) {
+      const nextRender = refreshNeedsRender;
+      refreshDirty = false;
+      refreshNeedsRender = false;
+      queueMicrotask(() => { Promise.resolve(refresh(nextRender)).catch(() => {}); });
+    }
+  }
+}
 
 function watchRestartGeneration() {
   if (restartWatchActive) return;
@@ -83,7 +106,7 @@ window.addEventListener("storage", (e) => {
   }
 });
 
-async function refresh(rerender) {
+async function refreshOnce(rerender) {
   try {
     App.state = await api("/api/state");
   } catch {
@@ -160,13 +183,13 @@ async function refresh(rerender) {
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
     if (App.state.user) V.closeConnectingPage();
   }
-  else if (App.page === "chats" && Mesh.state?.user) V.renderChats(false);
+  else if (App.page === "chats" && Mesh.state?.user) await V.renderChats(false);
   // V122: the server came back (App.state just fetched fine) but this page
   // never got a mesh state — a reload that landed during a restart's down
   // window used to sit on the dropped boot cover forever, reading as a
   // sign-out. Kick a full chats render; its own fetch fills Mesh.state.
   else if (!Mesh.state && PAGES[App.page]) {
-    Promise.resolve(PAGES[App.page]()).catch(() => {});
+    try { await PAGES[App.page](); } catch { /* the next poll heals */ }
   }
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
   // another window, setup assist, the CLI. Never re-render the auth page
@@ -219,6 +242,7 @@ const PAGES = {
 };
 
 function route() {
+  App.routeSeq = (App.routeSeq || 0) + 1;
   const hash = location.hash.replace("#/", "");
   const [page0, sub, sub2] = hash.split("/");
   let page = page0 || "chats";
@@ -419,7 +443,8 @@ window.addEventListener("hashchange", route);
   // When the SSE stream is live (v2) the stream carries the news, so the poll
   // drops to a slow safety-net tick that heals any dropped frame.
   (function poll() {
-    const ms = realtimeActive() ? 20000 : 2500;
+    const background = document.hidden || !document.hasFocus();
+    const ms = background ? 20000 : (realtimeActive() ? 20000 : 2500);
     setTimeout(async () => {
       try { await refresh(false); } catch { /* next tick retries */ }
       poll();

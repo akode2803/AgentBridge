@@ -63,6 +63,8 @@ _WRITE_GUARD_S = 60.0
 _MAX_BACKOFF_S = 60.0
 # how long the hint watchdog distrusts pokes after a silent change (R76)
 _SUSPECT_S = 600.0
+_INTERACTIVE_LEASE_S = 15.0
+_INTERACTIVE_POLL_S = 3.0
 # read-through miss sentinel: tells "doc absent/unreachable" apart from a
 # stored None (inner.get_doc reports both as its default)
 _MISS = object()
@@ -95,6 +97,7 @@ class CachingTransport(Transport):
         self._cursor = 0                       # doc delta cursor (R76)
         self._last_full = 0.0                  # monotonic of last full pull
         self._suspect_until = 0.0              # hint watchdog (monotonic)
+        self._interactive_until = 0.0          # foreground GUI lease
         self._silent_strikes = 0               # consecutive unannounced doc polls
         self._log_silent_strikes = 0           # same, for message-log polls
         self._doc_writes: dict[str, float] = {}   # path -> monotonic of write
@@ -111,6 +114,7 @@ class CachingTransport(Transport):
         self._last_error_kind: str | None = None
         self._last_error_message: str | None = None
         self._last_attempt = 0.0
+        self._change_listeners: list = []
         self._load_snapshot()
 
     # delegate unknown attributes (root, cache_key, …) to the inner transport
@@ -260,6 +264,8 @@ class CachingTransport(Transport):
                 "mode": ("delta" if cursor and self.profile.supports_doc_delta
                          else "full"),
                 "hints_suspect": time.monotonic() < self._suspect_until,
+                "realtime": self.realtime_status(),
+                "interactive": time.monotonic() < self._interactive_until,
                 # R84: how this machine authenticates ("member:<name>" vs
                 # "service") — the Connection panel's honest surface
                 "auth": getattr(self.inner, "auth_mode", "") or None,
@@ -272,9 +278,45 @@ class CachingTransport(Transport):
         the caller's cadence."""
         if not self.profile.metered:
             return default
+        if time.monotonic() < self._interactive_until:
+            return min(_INTERACTIVE_POLL_S, self.profile.fallback_poll_s)
         if time.monotonic() < self._suspect_until:
             return self.profile.fallback_poll_s
         return self.profile.idle_poll_s
+
+    def realtime_status(self) -> str:
+        status = getattr(self.inner, "realtime_status", None)
+        return str(status()) if callable(status) else "unsupported"
+
+    def set_interactive(self, active: bool, *, lease_s: float = _INTERACTIVE_LEASE_S) -> None:
+        """Hold a short foreground lease; expiry makes crashes self-healing."""
+        self._interactive_until = (
+            time.monotonic() + max(1.0, float(lease_s)) if active else 0.0
+        )
+        wake = getattr(self.inner, "wake_local", None)
+        if callable(wake):
+            wake()
+
+    def subscribe_changes(self, callback):
+        """Observe foreign mirror movement locally; payloads never leave here."""
+        with self._lock:
+            self._change_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                if callback in self._change_listeners:
+                    self._change_listeners.remove(callback)
+
+        return unsubscribe
+
+    def _notify_changes(self) -> None:
+        with self._lock:
+            listeners = list(self._change_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - a UI wake never breaks refresh
+                pass
 
     def note_log_poll(self, *, changed: bool, hinted: bool) -> None:
         """Feed message-log safety polls into the same hint-health window.
@@ -323,6 +365,9 @@ class CachingTransport(Transport):
             self._record_failure(exc)
             raise
         with self._lock:
+            was_warm = self._warm
+            previous_docs = self._docs
+            previous_ids = set(self._chat_ids)
             # local writes newer than the snapshot query win until the next
             # cycle (present = keep ours; absent = we deleted it, keep it gone)
             for path, wrote in self._doc_writes.items():
@@ -341,9 +386,19 @@ class CachingTransport(Transport):
             self._cursor = cursor
             self._last_refresh = time.time()
             self._last_full = time.monotonic()
+            silent = self.profile.silent_prefixes
+            foreign = was_warm and (
+                previous_ids != ids or any(
+                    previous_docs.get(path, _MISS) != docs.get(path, _MISS)
+                    and not (silent and path.startswith(silent))
+                    for path in set(previous_docs) | set(docs)
+                )
+            )
             self._prune_guards_locked()
         self._record_success()
         self._persist_snapshot()
+        if foreign:
+            self._notify_changes()
 
     def _prune_guards_locked(self) -> None:
         floor = time.monotonic() - _WRITE_GUARD_S
@@ -385,15 +440,22 @@ class CachingTransport(Transport):
                 if wrote >= t0
             }
             revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
+            foreign = bool(revoked_ids)
             for path, val in changed.items():
                 wrote = self._doc_writes.get(path)
                 if wrote is not None and wrote >= t0:
                     continue           # our newer local write wins this cycle
+                if (self._docs.get(path, _MISS) != val
+                        and not (silent and path.startswith(silent))):
+                    foreign = True
                 self._docs[path] = val
             for path in deleted:
                 wrote = self._doc_writes.get(path)
                 if wrote is not None and wrote >= t0:
                     continue
+                if (path in self._docs
+                        and not (silent and path.startswith(silent))):
+                    foreign = True
                 self._docs.pop(path, None)
                 if path.startswith("chats/") and path.endswith("/meta.json"):
                     # a tombstoned meta = the chat is gone; stop listing it
@@ -412,14 +474,12 @@ class CachingTransport(Transport):
                 self._neg.clear()      # the world moved: re-answer misses
             self._cursor = max(self._cursor, cursor)
             self._last_refresh = time.time()
-            foreign = bool(revoked_ids) or any(
-                p not in self._doc_writes
-                and not (silent and p.startswith(silent))
-                for p in (*changed, *deleted))
             self._prune_guards_locked()
         self._record_success()
         if changed or deleted or revoked_ids:
             self._persist_snapshot()
+        if foreign:
+            self._notify_changes()
         return foreign
 
     def _start_thread(self) -> None:

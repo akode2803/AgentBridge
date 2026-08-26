@@ -783,6 +783,57 @@ def test_suggest_poll_adapts_to_hint_health(delta_mirror):
     assert free.suggest_poll_s(4.0) == 4.0         # free transports keep it
 
 
+def test_foreground_lease_is_fast_bounded_and_releases(delta_mirror, monkeypatch):
+    _inner, tx = delta_mirror
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    tx.set_interactive(True, lease_s=15.0)
+    assert tx.suggest_poll_s(4.0) == 3.0
+    now[0] = 116.0
+    assert tx.suggest_poll_s(4.0) == 45.0
+    tx.set_interactive(True)
+    tx.set_interactive(False)
+    assert tx.suggest_poll_s(4.0) == 45.0
+
+
+def test_foreign_delta_emits_one_content_free_local_wake(delta_mirror):
+    inner, tx = delta_mirror
+    inner.put_doc("status/helper_live.json", {"activity": "private detail"})
+    tx.refresh()
+    wakes = []
+    unsubscribe = tx.subscribe_changes(lambda: wakes.append(True))
+    inner.put_doc("status/helper_live.json", {"activity": "new private detail"})
+    assert tx._refresh_tick() is True
+    assert wakes == [True]
+    unsubscribe()
+    inner.put_doc("status/helper_live.json", {"activity": "third detail"})
+    tx._refresh_tick()
+    assert wakes == [True]
+
+
+def test_full_reconcile_emits_one_content_free_local_wake(mirror):
+    inner, tx = mirror
+    inner.put_doc("status/helper_live.json", {"v": 1})
+    tx.refresh()
+    wakes = []
+    tx.subscribe_changes(lambda: wakes.append(True))
+    inner.put_doc("status/helper_live.json", {"v": 2})
+    tx.refresh()
+    assert wakes == [True]
+
+
+def test_remote_overwrite_of_recent_local_path_still_wakes(delta_mirror):
+    inner, tx = delta_mirror
+    tx.refresh()
+    tx.put_doc("users/a.json", {"v": "local"})
+    wakes = []
+    tx.subscribe_changes(lambda: wakes.append(True))
+    inner.put_doc("users/a.json", {"v": "remote"})
+    assert tx._refresh_tick() is True
+    assert tx.get_doc("users/a.json")["v"] == "remote"
+    assert wakes == [True]
+
+
 def test_mirror_status_reports_the_sync_mode(delta_mirror):
     inner, tx = delta_mirror
     inner.put_doc("users/a.json", {"v": 1})

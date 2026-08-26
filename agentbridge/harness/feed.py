@@ -18,26 +18,29 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from ..core.timekit import new_id, utcnow_iso
 from ..transport.base import Transport
 
 __all__ = ["RunFeed", "write_harness_doc", "record_tasks", "write_waiting",
-           "reap_orphan_run"]
+           "clear_waiting", "reap_orphan_run"]
 
 _THROTTLE_S = 1.5
-_HEARTBEAT_S = 60.0
+_HEARTBEAT_S = 15.0
 
 
-def _live_path(agent: str) -> str:
-    return f"status/{agent}_live.json"
+def _live_path(agent: str, lane: str = "live") -> str:
+    suffix = "live" if lane == "live" else "preparing"
+    return f"status/{agent}_{suffix}.json"
 
 
-def _waiting_id(chat_id: str) -> str:
+def _waiting_id(chat_id: str, token: str = "") -> str:
     import hashlib
 
-    return "waiting-" + hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+    raw = f"{chat_id}|{token}" if token else chat_id
+    return "waiting-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -52,31 +55,51 @@ class _FeedCoordinator:
 
     tx: Transport
     agent: str
+    lane: str = "live"
     runs: dict[str, dict] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def write(self) -> None:
-        self.tx.put_doc(_live_path(self.agent), {
-            "kind": "run-set", "agent": self.agent, "updated": utcnow_iso(),
-            "runs": list(self.runs.values()),
-        })
+        with self.lock:
+            doc = {
+                "kind": "run-set", "agent": self.agent,
+                "updated": utcnow_iso(), "runs": list(self.runs.values()),
+            }
+        self.tx.put_doc(_live_path(self.agent, self.lane), doc)
 
 
-_COORDINATORS: dict[tuple[int, str], _FeedCoordinator] = {}
+_COORDINATORS: dict[tuple[int, str, str], _FeedCoordinator] = {}
 _COORDINATORS_LOCK = threading.RLock()
+_STATUS_WRITES = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ab-status")
 
 
-def _coordinator(tx: Transport, agent: str) -> _FeedCoordinator:
-    key = (id(tx), agent)
+def _coordinator(tx: Transport, agent: str, lane: str = "live") -> _FeedCoordinator:
+    key = (id(tx), agent, lane)
     with _COORDINATORS_LOCK:
         coord = _COORDINATORS.get(key)
         if coord is None or coord.tx is not tx:
-            coord = _FeedCoordinator(tx, agent)
+            coord = _FeedCoordinator(tx, agent, lane)
             _COORDINATORS[key] = coord
         return coord
 
 
-def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> None:
+def _write_status_async(coord: _FeedCoordinator, *, hint: bool = False) -> None:
+    """Flush current coordinator state without blocking dispatch/model work."""
+    def flush() -> None:
+        try:
+            coord.write()
+            if hint:
+                poke = getattr(coord.tx, "hint_now", None)
+                if callable(poke):
+                    poke()
+        except Exception:  # noqa: BLE001 - status never blocks execution
+            pass
+
+    _STATUS_WRITES.submit(flush)
+
+
+def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str,
+                  *, token: str = "", barrier: bool = False) -> None:
     """V71: surface that a run is HELD on the attachment sync barrier — the
     message line synced ahead of its blob, so the run is deferred until the
     bytes arrive. Written as a normal ``running`` run-feed doc so the GUI
@@ -85,8 +108,8 @@ def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> Non
     real run overwrites this the moment the blob lands (or the grace expires
     and it proceeds); a stale one ages out with every other run feed."""
     try:
-        coord = _coordinator(tx, agent)
-        run_id = _waiting_id(chat_id)
+        coord = _coordinator(tx, agent, "preparing")
+        run_id = _waiting_id(chat_id, token)
         now = utcnow_iso()
         with coord.lock:
             previous = coord.runs.get(run_id) or {}
@@ -96,9 +119,23 @@ def write_waiting(tx: Transport, agent: str, chat_id: str, activity: str) -> Non
                 "updated": now, "turns": 0,
                 "activity": " ".join((activity or "").split())[:120],
                 "recent": [], "draft": "", "steps": [], "waiting": True,
+                "waiting_kind": "barrier" if barrier else "pre_run",
+                "transition_id": token,
             }
-            coord.write()
+        _write_status_async(coord, hint=True)
     except Exception:  # noqa: BLE001 — a status write never blocks handling
+        pass
+
+
+def clear_waiting(tx: Transport, agent: str, chat_id: str, *, token: str = "") -> None:
+    """Remove only the stable pre-run placeholder for one chat."""
+    try:
+        coord = _coordinator(tx, agent, "preparing")
+        with coord.lock:
+            removed = coord.runs.pop(_waiting_id(chat_id, token), None) is not None
+        if removed:
+            _write_status_async(coord)
+    except Exception:  # noqa: BLE001 - status cleanup never blocks handling
         pass
 
 
@@ -115,16 +152,18 @@ class RunFeed:
                  native_enabled: tuple[str, ...] = (),
                  native_approval_gated: tuple[str, ...] = (),
                  native_blocked: tuple[str, ...] = (),
+                 transition_id: str = "",
                  task_ledger=None) -> None:
         self.tx = tx
         self.agent = agent
         self.chat_id = chat_id
         self.run_id = new_id("r")
         self.turns = 0
-        self.activity = "Starting up…"
+        self.activity = "Working"
         self.recent: list[str] = []
         self.tasks: list[dict] = []
         self.started = utcnow_iso()
+        self.transition_id = transition_id
         self._last_write = 0.0
         self._finished = False
         self._stop = threading.Event()
@@ -134,10 +173,6 @@ class RunFeed:
         self.task_id = new_id("t") if task_ledger is not None else ""
         self.run_record = None
         self.task_record = None
-        # A real claim supersedes the attachment-wait placeholder for this
-        # chat. Only that stable waiting entry is removed; parallel runs stay.
-        with self._coord.lock:
-            self._coord.runs.pop(_waiting_id(chat_id), None)
         if self._task_ledger is not None:
             self.run_record, self.task_record = self._task_ledger.start_with_run(
                 run_id=self.run_id, task_id=self.task_id, chat_id=chat_id,
@@ -169,6 +204,9 @@ class RunFeed:
                 policy_revision=policy_revision,
             )
         self.write("running", force=True)
+        hint = getattr(self.tx, "hint_now", None)
+        if callable(hint):
+            hint()
         self._heartbeat = threading.Thread(
             target=self._heartbeat_loop, name=f"ab-feed-{agent}-{self.run_id}",
             daemon=True,
@@ -195,6 +233,15 @@ class RunFeed:
         except Exception:  # noqa: BLE001 — the feed must never break a run
             pass
 
+    def phase(self, activity: str) -> None:
+        """Publish a lifecycle phase without fabricating a provider step."""
+        try:
+            with self._coord.lock:
+                self.activity = " ".join((activity or "").split())[:120]
+                self.write("running", force=True)
+        except Exception:  # noqa: BLE001 - feed decoration never breaks a run
+            pass
+
     def checkpoint(self) -> None:
         """Record one safe canonical milestone outside the model callback."""
         if self._task_ledger is None or not self.turns:
@@ -216,6 +263,7 @@ class RunFeed:
                     "agent": self.agent, "chat_id": self.chat_id,
                     "started": self.started, "updated": utcnow_iso(),
                     "turns": self.turns, "activity": self.activity,
+                    "transition_id": self.transition_id,
                     "recent": self.recent, "draft": "",
                     # timestamped steps for the in-progress task disclosure
                     "steps": self.tasks[-12:],
@@ -300,19 +348,40 @@ def reap_orphan_run(tx: Transport, agent: str,
     while the RELAUNCHED harness was honestly alive (V109's process truth
     checks the RUNNER, not the RUN; live screenshot report). Called at
     boot (a starting runner runs nothing by definition) and every loop
-    tick (self-heals an in-process finish-less death too). A V71
-    ``waiting`` doc is deliberately spared — the deferred run it
-    advertises lives in the durable queue, not in ``running_chats``, and
-    the queue rewrites it on its own cadence. Returns True when reaped."""
+    tick (self-heals an in-process finish-less death too). Only a V71
+    attachment-barrier placeholder is spared; queued/preparing placeholders
+    are process-owned and reaped after a crash. Returns True when reaped."""
     try:
+        preparing = _coordinator(tx, agent, "preparing")
+        with preparing.lock:
+            pdoc = tx.get_doc(_live_path(agent, "preparing"), default=None)
+            saved_preparing = (
+                pdoc.get("runs") if isinstance(pdoc, dict) else None)
+            saved_preparing = (
+                saved_preparing if isinstance(saved_preparing, list) else [])
+            kept_preparing = {
+                str(run.get("run_id")): run for run in saved_preparing
+                if isinstance(run, dict) and run.get("run_id")
+                and (running_chats is not None
+                     or run.get("waiting_kind", "barrier") == "barrier")
+            }
+            preparing_changed = len(kept_preparing) != len(saved_preparing)
+            preparing.runs = kept_preparing
+            if preparing_changed:
+                preparing.write()
         coord = _coordinator(tx, agent)
         with coord.lock:
             doc = tx.get_doc(_live_path(agent), default=None)
             saved = doc.get("runs") if isinstance(doc, dict) else None
             saved = saved if isinstance(saved, list) else []
             active = set(coord.runs)
+            def preserved_waiting(run: dict) -> bool:
+                return bool(run.get("waiting")) and run.get(
+                    "waiting_kind", "barrier") == "barrier"
+
             orphans = [r for r in saved if isinstance(r, dict)
-                       and r.get("state") == "running" and not r.get("waiting")
+                       and r.get("state") == "running"
+                       and not preserved_waiting(r)
                        and r.get("run_id") not in active
                        and (not running_chats
                             or r.get("chat_id") not in running_chats)]
@@ -321,7 +390,7 @@ def reap_orphan_run(tx: Transport, agent: str,
             legacy_path = f"status/{agent}_run.json"
             legacy = tx.get_doc(legacy_path, default=None)
             if (isinstance(legacy, dict) and legacy.get("state") == "running"
-                    and not legacy.get("waiting")
+                    and not preserved_waiting(legacy)
                     and (not running_chats
                          or legacy.get("chat_id") not in running_chats)):
                 orphans.append(legacy)
@@ -330,7 +399,7 @@ def reap_orphan_run(tx: Transport, agent: str,
                     "activity": "Interrupted — the run never finished",
                 })
             if not orphans:
-                return False
+                return preparing_changed
             for orphan in orphans:
                 _append_interrupted_history(tx, agent, orphan)
             # Rebuild from process truth. Waiting placeholders and all active
@@ -338,7 +407,7 @@ def reap_orphan_run(tx: Transport, agent: str,
             coord.runs = {
                 str(r.get("run_id")): r for r in saved
                 if isinstance(r, dict) and r.get("run_id")
-                and (r.get("run_id") in active or r.get("waiting"))
+                and (r.get("run_id") in active or preserved_waiting(r))
             }
             coord.write()
             return True

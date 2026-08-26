@@ -304,6 +304,7 @@ function connKvRows(s) {
 }
 
 async function renderSettings() {
+  const routeSeq = App.routeSeq;
   const s = App.state;   // the About section renders connection/version from it
   // V56: arriving from another page paints the EMPTY settings shell in the
   // same frame as the route change — the /api/mesh/me await below otherwise
@@ -315,7 +316,13 @@ async function renderSettings() {
   // route change — awaiting a fresh fetch here left the previous chat on
   // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
   // background refresh keeps a long-lived settings page current.
-  const ms = Mesh.state || (Mesh.state = await api("/api/mesh/state"));
+  let ms = Mesh.state;
+  if (!ms) {
+    const fresh = await api("/api/mesh/state");
+    if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
+    Mesh.state = fresh;
+    ms = fresh;
+  }
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
   api("/api/mesh/state").then((fresh) => {
     if (fresh && !fresh.error && App.page === "settings") Mesh.state = fresh;
@@ -338,6 +345,7 @@ async function renderSettings() {
     // agents section needs the owner-only my_agents view too (raw privacy
     // matrix per agent, R36); privacy needs the matrix + blocked list (R40)
     const r = await api("/api/mesh/me");
+    if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
     if (!r.error) me = r;
   }
 
@@ -827,6 +835,7 @@ async function renderSettings() {
         nothing readable is ever touched.</p>
       </div>`;
   }
+  if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
   $("#content").innerHTML = `<div class="settings-body">${html}</div>`;
   // R51 (V25): baseline what this render shows; the poller re-renders only
   // when a fresh fetch of the same slices differs (the async harness fills

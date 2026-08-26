@@ -47,7 +47,7 @@ from .capabilities import validate_model_capability_ceiling
 from .adapters.native import validate_native_authority_facts
 from .conversation import ConversationManager
 from .feed import (RunFeed, reap_orphan_run, record_tasks,
-                   write_harness_doc, write_waiting)
+                   write_harness_doc, write_waiting, clear_waiting)
 from .peer import PeerService
 from .perf import RunTimings
 from .queue import WorkGroup, WorkItem, WorkQueue
@@ -278,6 +278,7 @@ class AgentRunner:
                 chat_id=t["chat_id"], kind="timer", msg_id=f"timer:{t['id']}",
                 sender=self.agent, ns=int(t.get("at_ns", 0)),
                 reason="timer", note=t.get("note", ""),
+                observed_ns=time.time_ns(),
             )
             if collect is not None:
                 collect.append(item)
@@ -360,6 +361,7 @@ class AgentRunner:
                 key=f"{chat_id}|{c.key}", chat_id=chat_id, kind="message",
                 msg_id=c.message.id, edit_ns=c.edit_ns, sender=c.message.from_,
                 ns=c.trigger_ns, reason=c.reason,
+                observed_ns=time.time_ns(),
             )
             if collect is not None:
                 collect.append(item)
@@ -401,6 +403,10 @@ class AgentRunner:
             for g in groups:
                 gkey = (g.chat_id, g.sender if g.kind == "message" else
                         g.items[0].key)
+                write_waiting(
+                    self.mesh.tx, self.agent, g.chat_id, "Queued",
+                    token=g.last.key,
+                )
                 fut = self._pool.submit(self._process_group, g, settings)
                 self._inflight[gkey] = fut
                 fut.add_done_callback(lambda _f, k=gkey: self._done(k))
@@ -445,8 +451,14 @@ class AgentRunner:
     def _process_group(self, group: WorkGroup, settings: HarnessSettings) -> None:
         chat_id = group.chat_id
         # response-time profile (R30): pickup = trigger posted -> claimed here
-        timings = RunTimings(max((it.ns for it in group.items), default=0))
+        latest = max(group.items, key=lambda it: it.ns)
+        waiting_token = latest.key
+        timings = RunTimings(
+            latest.ns, observed_ns=latest.observed_ns,
+            enqueued_ns=latest.enqueued_ns, claimed_ns=latest.claimed_ns,
+        )
         slot = False  # a rate slot is held (the failure paths must refund it)
+        keep_waiting = False
         try:
             if self.standing_down():
                 self.queue.release(group, retry_in_s=self.poll_s * 2)
@@ -456,6 +468,10 @@ class AgentRunner:
                 # pause waits too (slot-free), and runs when it's lifted
                 self.queue.release(group, retry_in_s=self.poll_s * 4)
                 return
+            write_waiting(
+                self.mesh.tx, self.agent, chat_id, "Preparing secure runtime",
+                token=waiting_token,
+            )
             # breadcrumbs ride along so a reaction trigger can find its
             # own event in the transcript (render drops them from context)
             transcript = self.mesh.messages_for(chat_id, breadcrumbs=True)
@@ -497,7 +513,9 @@ class AgentRunner:
                 # the attachment", not a frozen agent, while the blob syncs
                 write_waiting(
                     self.mesh.tx, self.agent, chat_id,
-                    f"Waiting for the attachment '{waiting}' to finish syncing")
+                    f"Waiting for the attachment '{waiting}' to finish syncing",
+                    token=waiting_token, barrier=True)
+                keep_waiting = True
                 self.queue.release(group, retry_in_s=self.poll_s * 3)
                 return
             # the reply slot is claimed ATOMICALLY before the run (parallel
@@ -514,9 +532,14 @@ class AgentRunner:
                 self.queue.finish(group, "gone")  # trigger deleted meanwhile
                 return
             self.mesh.messaging.mark_read(chat_id)  # context read = read
+            timings.start("prepare")
             invocation = self._prepare_invocation(delivery, settings)
+            timings.stop()
+            clear_waiting(
+                self.mesh.tx, self.agent, chat_id, token=waiting_token)
             feed = self._new_feed(
                 group, **invocation, policy_revision=settings.policy_revision,
+                transition_id=waiting_token,
             )
             delivery.run_id = feed.run_id
             delivery.task_id = feed.task_id
@@ -527,6 +550,7 @@ class AgentRunner:
                 # message — the livefeed/sidebar say what the run is about
                 feed.step("Noticing a reaction")
             timings.start("model")
+            self.queue.mark_provider_started(group)
             try:
                 reply = self.responder.respond(delivery, on_step=feed.step)
             except RunStopped:
@@ -551,6 +575,7 @@ class AgentRunner:
                 self._run_failed(group, feed, settings, delivery, e)
                 return
             timings.stop()
+            feed.phase("Writing reply")
             # A returned child contribution is canonically consumed only now:
             # the manager provider has received the MCP result and resumed to
             # completion. A crash inside the tool call leaves it RETURNED.
@@ -580,6 +605,10 @@ class AgentRunner:
                     self._new_feed(group).finish(
                         "error", "Run failed repeatedly — giving up on this trigger")
                     self.publish_status()
+        finally:
+            if not keep_waiting:
+                clear_waiting(
+                    self.mesh.tx, self.agent, chat_id, token=waiting_token)
 
     def _prepare_invocation(self, delivery, settings: HarnessSettings) -> dict:
         prepare = getattr(self.responder, "prepare", None)
@@ -643,6 +672,7 @@ class AgentRunner:
                   native_enabled: tuple[str, ...] = (),
                   native_approval_gated: tuple[str, ...] = (),
                   native_blocked: tuple[str, ...] = (),
+                  transition_id: str = "",
                   policy_revision: int | None = None) -> RunFeed:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
@@ -657,6 +687,7 @@ class AgentRunner:
             native_enabled=native_enabled,
             native_approval_gated=native_approval_gated,
             native_blocked=native_blocked,
+            transition_id=transition_id,
             policy_revision=policy_revision,
         )
 
@@ -1034,6 +1065,7 @@ class AgentRunner:
         from .broker import PermissionBroker
 
         PermissionBroker.clear_stale(self.mesh, self.agent)
+        self.queue.recover_claims()
         # V129: same rationale for the run feed — a previous process that
         # died MID-RUN never wrote its finish, and the doc haunted the chat
         # as a working bubble (the fresh beat below makes the runner look
