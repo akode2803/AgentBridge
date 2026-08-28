@@ -52,7 +52,7 @@ def load_state(path: Path, *, base: str, agent: str, samples: int,
         return state
     return {
         "v": 2, "base": base.rstrip("/"), "agent": agent, "mode": mode,
-        "target": samples, "completed": [], "failures": [],
+        "target": samples, "completed": [], "warmups": [], "failures": [],
         "pending": None, "shared_room": None, "attempt_seq": 0,
         "finished": False,
     }
@@ -129,6 +129,11 @@ def create_room(base: str, agent: str, label: str) -> dict:
     })["chat"]
 
 
+def matching_feeds(feeds: list[dict], message_id: str) -> list[dict]:
+    return [item for item in feeds
+            if message_id in str(item.get("transition_id", ""))]
+
+
 def run_sample(base: str, agent: str, index: int, timeout_s: float,
                state: dict, state_path: Path, *, room: dict | None = None,
                delete_room: bool = True) -> tuple[dict | None, str | None]:
@@ -160,9 +165,10 @@ def run_sample(base: str, agent: str, index: int, timeout_s: float,
             feed = request_json(
                 base, "/api/mesh/livefeed?id=" + urllib.parse.quote(chat_id)
             ).get("feeds", [])
-            if feed and first_feed_ms is None:
+            matching_feed = matching_feeds(feed, message_id)
+            if matching_feed and first_feed_ms is None:
                 first_feed_ms = round((now - started) * 1000, 1)
-            run_ids = [item["run_id"] for item in feed
+            run_ids = [item["run_id"] for item in matching_feed
                        if str(item.get("run_id", "")).startswith("r-")]
             if run_ids:
                 authority = request_json(base, "/api/mesh/runtime_authority", {
@@ -208,10 +214,14 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--mode", choices=("shared", "fresh"), default="shared")
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--settle", type=float, default=50.0,
+                        help="shared-room membership settle time before sample 1")
     parser.add_argument("--state", type=Path)
     args = parser.parse_args()
     if args.samples < 20:
         parser.error("--samples must be at least 20 for p95")
+    if not 0 <= args.settle <= 300:
+        parser.error("--settle must be between 0 and 300 seconds")
     state_path = args.state or STATE_DIR / f"{args.agent}-p95-{args.mode}.json"
     state = load_state(
         state_path, base=args.base, agent=args.agent, samples=args.samples,
@@ -224,6 +234,7 @@ def main() -> int:
         shared_room = create_room(args.base, args.agent, "shared")
         state["shared_room"] = shared_room
         save_state(state_path, state)
+        time.sleep(args.settle)
     while len(state["completed"]) < args.samples:
         index = len(state["completed"]) + 1
         row, error = run_sample(

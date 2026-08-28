@@ -46,3 +46,13 @@ def test_fresh_and_shared_state_cannot_be_mixed(tmp_path):
         benchmark.load_state(
             path, base="http://local", agent="codex", samples=20,
             mode="shared")
+
+
+def test_feed_match_requires_current_message_transition_id():
+    message_id = "m-current"
+    feeds = [
+        {"run_id": "r-old", "transition_id": "chat|m-old@0"},
+        {"run_id": "r-current", "transition_id": f"chat|{message_id}@0"},
+    ]
+    matching = benchmark.matching_feeds(feeds, message_id)
+    assert [item["run_id"] for item in matching] == ["r-current"]
