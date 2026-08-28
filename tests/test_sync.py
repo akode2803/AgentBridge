@@ -71,6 +71,35 @@ def test_sync_observation_is_once_and_names_discovery_lane(tmp_path):
     store.close()
 
 
+def test_progress_wakes_after_first_log_before_later_log_finishes(tmp_path):
+    import threading
+
+    tx = FolderTransport(tmp_path / "mesh2")
+    seed(tx, "c1", "ann", 1)
+    seed(tx, "c1", "bob", 1, start=2)
+    store = Store(tmp_path / "cache.sqlite")
+    first_progress = threading.Event()
+    release_second = threading.Event()
+    original = tx.read_log
+
+    def read_log(chat_id, log_name, offset=0):
+        if log_name.startswith("bob@"):
+            release_second.wait(2.0)
+        return original(chat_id, log_name, offset)
+
+    tx.read_log = read_log
+    engine = SyncEngine(
+        tx, store, on_progress=lambda _count: first_progress.set())
+    thread = threading.Thread(target=lambda: engine.sync_chat("c1"), daemon=True)
+    thread.start()
+    assert first_progress.wait(1.0)
+    assert thread.is_alive()
+    release_second.set()
+    thread.join(2.0)
+    assert not thread.is_alive() and store.message_count("c1") == 2
+    store.close()
+
+
 def test_shrunken_log_heals_via_dedup(tmp_path):
     tx = FolderTransport(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 5)

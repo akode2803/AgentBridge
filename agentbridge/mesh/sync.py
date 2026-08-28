@@ -44,12 +44,14 @@ class SyncEngine:
         is_member: Callable[[str], bool] = lambda chat_id: True,
         workers: int = 4,
         on_records: Callable[[str, list[dict]], None] | None = None,
+        on_progress: Callable[[int], None] | None = None,
     ) -> None:
         self.tx = tx
         self.store = store
         self.is_member = is_member
         self.workers = workers
         self.on_records = on_records  # fed ONLY actually-new records (R10 bus)
+        self.on_progress = on_progress  # per-log wake after local insertion
         self.latency = sink_for_store(store)
         self._stop = threading.Event()
         # membership as of the last feed tick — a chat that APPEARS here gets
@@ -87,6 +89,11 @@ class SyncEngine:
                 try:
                     self.on_records(chat_id, inserted)
                 except Exception:  # noqa: BLE001 — pump can't break sync
+                    pass
+            if inserted and self.on_progress is not None:
+                try:
+                    self.on_progress(len(inserted))
+                except Exception:  # noqa: BLE001 — a wake can't break sync
                     pass
         if new_offset != offset:
             self.store.set_offset(chat_id, log_name, new_offset)

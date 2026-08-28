@@ -162,6 +162,9 @@ class AgentRunner:
         # the submitting thread, which still holds this lock
         self._inflight_lock = threading.RLock()
         self._wake = threading.Event()
+        # Wake on EACH locally inserted log batch. Waiting until SyncEngine's
+        # whole multi-log pass completed cost seconds in the R146 p95 trace.
+        self.mesh.sync.on_progress = lambda _count: self._wake.set()
         self._started_ns = time.time_ns()
         self._last_doc: tuple | None = None
         self._blobs_ok: set[str] = set()  # sync-barrier verified blob ids
