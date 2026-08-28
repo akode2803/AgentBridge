@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Resumable isolated-room provider latency p95 benchmark.
+"""Resumable provider latency p95 benchmark.
 
-Twenty completed samples are required for a p95 result. Each sample gets a
-fresh disposable room, and local state is saved after every completion. A
-process interruption abandons that partial timing sample on resume rather than
-mixing clock domains.
+Twenty completed samples are required. ``shared`` mode measures normal repeated
+use of one disposable room; ``fresh`` mode measures cold-room discovery. Local
+state is saved after every completion, and interrupted samples are abandoned
+rather than mixed across process clocks.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DEFAULT_STATE = Path.home() / ".agentbridge" / "benchmarks" / "codex-p95.json"
+STATE_DIR = Path.home() / ".agentbridge" / "benchmarks"
 
 
 def request_json(base: str, path: str, body: dict | None = None) -> dict:
@@ -40,18 +40,21 @@ def save_state(path: Path, state: dict) -> None:
     os.replace(tmp, path)
 
 
-def load_state(path: Path, *, base: str, agent: str, samples: int) -> dict:
+def load_state(path: Path, *, base: str, agent: str, samples: int,
+               mode: str = "shared") -> dict:
     if path.exists():
         state = json.loads(path.read_text(encoding="utf-8"))
-        expected = (base.rstrip("/"), agent, samples)
-        actual = (state.get("base"), state.get("agent"), state.get("target"))
-        if state.get("v") != 1 or actual != expected:
+        expected = (base.rstrip("/"), agent, samples, mode)
+        actual = (state.get("base"), state.get("agent"), state.get("target"),
+                  state.get("mode", "fresh"))
+        if state.get("v") not in (1, 2) or actual != expected:
             raise ValueError("saved benchmark does not match base/agent/sample target")
         return state
     return {
-        "v": 1, "base": base.rstrip("/"), "agent": agent,
+        "v": 2, "base": base.rstrip("/"), "agent": agent, "mode": mode,
         "target": samples, "completed": [], "failures": [],
-        "pending": None, "finished": False,
+        "pending": None, "shared_room": None, "attempt_seq": 0,
+        "finished": False,
     }
 
 
@@ -111,7 +114,7 @@ def trace_segments(base: str, agent: str, message_id: str) -> dict:
 def cleanup_pending(base: str, state: dict) -> None:
     pending = state.get("pending") or {}
     chat_id = pending.get("chat_id")
-    if chat_id:
+    if chat_id and state.get("mode", "fresh") == "fresh":
         try:
             request_json(base, "/api/mesh/delete_chat", {"chat_id": chat_id})
         except Exception:
@@ -119,15 +122,25 @@ def cleanup_pending(base: str, state: dict) -> None:
     state["pending"] = None
 
 
-def run_sample(base: str, agent: str, index: int, timeout_s: float,
-               state: dict, state_path: Path) -> tuple[dict | None, str | None]:
-    expected = f"benchmark-ok-{index}"
-    name = f"p95-{agent}-{index:02d}-{secrets.token_hex(3)}"
-    room = request_json(base, "/api/mesh/create_chat", {
-        "name": name, "members": [agent],
+def create_room(base: str, agent: str, label: str) -> dict:
+    return request_json(base, "/api/mesh/create_chat", {
+        "name": f"p95-{agent}-{label}-{secrets.token_hex(3)}",
+        "members": [agent],
     })["chat"]
+
+
+def run_sample(base: str, agent: str, index: int, timeout_s: float,
+               state: dict, state_path: Path, *, room: dict | None = None,
+               delete_room: bool = True) -> tuple[dict | None, str | None]:
+    state["attempt_seq"] = int(state.get("attempt_seq", 0)) + 1
+    attempt = state["attempt_seq"]
+    expected = f"benchmark-ok-{index}-{attempt}"
+    room = room or create_room(base, agent, f"fresh-{index:02d}")
     chat_id = room["id"]
-    state["pending"] = {"chat_id": chat_id, "name": name, "index": index}
+    state["pending"] = {
+        "chat_id": chat_id, "name": room.get("name", ""),
+        "index": index, "attempt": attempt, "expected": expected,
+    }
     save_state(state_path, state)
     started = time.perf_counter()
     message_id = ""
@@ -177,15 +190,15 @@ def run_sample(base: str, agent: str, index: int, timeout_s: float,
         }
         return row, None
     finally:
-        try:
-            request_json(base, "/api/mesh/delete_chat", {"chat_id": chat_id})
-        except Exception:
-            # Keep the room id durable so the next invocation can clean it.
-            save_state(state_path, state)
-            raise
-        else:
-            state["pending"] = None
-            save_state(state_path, state)
+        if delete_room:
+            try:
+                request_json(base, "/api/mesh/delete_chat", {"chat_id": chat_id})
+            except Exception:
+                # Keep the room id durable so the next invocation can clean it.
+                save_state(state_path, state)
+                raise
+        state["pending"] = None
+        save_state(state_path, state)
 
 
 def main() -> int:
@@ -193,30 +206,44 @@ def main() -> int:
     parser.add_argument("--base", default="http://127.0.0.1:7787")
     parser.add_argument("--agent", default="codex")
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--mode", choices=("shared", "fresh"), default="shared")
     parser.add_argument("--timeout", type=float, default=180.0)
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--state", type=Path)
     args = parser.parse_args()
     if args.samples < 20:
         parser.error("--samples must be at least 20 for p95")
+    state_path = args.state or STATE_DIR / f"{args.agent}-p95-{args.mode}.json"
     state = load_state(
-        args.state, base=args.base, agent=args.agent, samples=args.samples)
+        state_path, base=args.base, agent=args.agent, samples=args.samples,
+        mode=args.mode)
     if state.get("pending"):
         cleanup_pending(args.base, state)
-        save_state(args.state, state)
+        save_state(state_path, state)
+    shared_room = state.get("shared_room")
+    if args.mode == "shared" and not shared_room:
+        shared_room = create_room(args.base, args.agent, "shared")
+        state["shared_room"] = shared_room
+        save_state(state_path, state)
     while len(state["completed"]) < args.samples:
         index = len(state["completed"]) + 1
         row, error = run_sample(
-            args.base, args.agent, index, args.timeout, state, args.state)
+            args.base, args.agent, index, args.timeout, state, state_path,
+            room=shared_room, delete_room=args.mode == "fresh")
         if error:
             state["failures"].append({"index": index, "error": error})
-            save_state(args.state, state)
+            save_state(state_path, state)
             print(json.dumps({"error": error, **summary(state)}, indent=2))
             return 2
         state["completed"].append(row)
-        save_state(args.state, state)
+        save_state(state_path, state)
         print(json.dumps({"latest": row, **summary(state)}, indent=2), flush=True)
     state["finished"] = True
-    save_state(args.state, state)
+    if shared_room:
+        request_json(args.base, "/api/mesh/delete_chat", {
+            "chat_id": shared_room["id"],
+        })
+        state["shared_room"] = None
+    save_state(state_path, state)
     print(json.dumps(summary(state), indent=2, sort_keys=True))
     return 0
 

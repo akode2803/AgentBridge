@@ -28,9 +28,21 @@ def test_summary_refuses_to_call_partial_run_p95():
 def test_saved_state_must_match_requested_benchmark(tmp_path):
     path = tmp_path / "state.json"
     state = benchmark.load_state(
-        path, base="http://local", agent="codex", samples=20)
+        path, base="http://local", agent="codex", samples=20, mode="shared")
     benchmark.save_state(path, state)
     assert json.loads(path.read_text())["target"] == 20
     with pytest.raises(ValueError, match="does not match"):
         benchmark.load_state(
-            path, base="http://other", agent="codex", samples=20)
+            path, base="http://other", agent="codex", samples=20,
+            mode="shared")
+
+
+def test_fresh_and_shared_state_cannot_be_mixed(tmp_path):
+    path = tmp_path / "state.json"
+    state = benchmark.load_state(
+        path, base="http://local", agent="codex", samples=20, mode="fresh")
+    benchmark.save_state(path, state)
+    with pytest.raises(ValueError, match="does not match"):
+        benchmark.load_state(
+            path, base="http://local", agent="codex", samples=20,
+            mode="shared")
