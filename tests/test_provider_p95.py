@@ -56,3 +56,10 @@ def test_feed_match_requires_current_message_transition_id():
     ]
     matching = benchmark.matching_feeds(feeds, message_id)
     assert [item["run_id"] for item in matching] == ["r-current"]
+
+
+def test_summary_omits_incomplete_metric_instead_of_fabricating_p95():
+    rows = [{"reply_ms": i, "access_seen": True} for i in range(20)]
+    rows[0]["reply_ms"] = None
+    out = benchmark.summary({"target": 20, "completed": rows})
+    assert "reply_ms" not in out["metrics"]

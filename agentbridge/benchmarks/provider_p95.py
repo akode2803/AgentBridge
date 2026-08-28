@@ -186,6 +186,9 @@ def run_sample(base: str, agent: str, index: int, timeout_s: float,
             time.sleep(0.2)
         if reply is None:
             return None, f"sample {index} timed out after {timeout_s:.0f}s"
+        if first_feed_ms is None or not access_seen:
+            missing = "feed" if first_feed_ms is None else "access"
+            return None, f"sample {index} reply completed without observed {missing}"
         row = {
             "index": index, "message_id": message_id,
             "reply_id": reply.get("id", ""), "post_return_ms": post_return_ms,
