@@ -100,6 +100,33 @@ def test_progress_wakes_after_first_log_before_later_log_finishes(tmp_path):
     store.close()
 
 
+def test_progress_wake_precedes_slow_record_pump(tmp_path):
+    import threading
+
+    tx = FolderTransport(tmp_path / "mesh2")
+    seed(tx, "c1", "ann", 1)
+    store = Store(tmp_path / "cache.sqlite")
+    progress = threading.Event()
+    pump_entered = threading.Event()
+    release_pump = threading.Event()
+
+    def slow_pump(_chat_id, _records):
+        pump_entered.set()
+        release_pump.wait(2.0)
+
+    engine = SyncEngine(
+        tx, store, on_records=slow_pump,
+        on_progress=lambda _count: progress.set())
+    thread = threading.Thread(target=lambda: engine.sync_chat("c1"), daemon=True)
+    thread.start()
+    assert progress.wait(1.0)
+    assert pump_entered.wait(1.0) and thread.is_alive()
+    release_pump.set()
+    thread.join(2.0)
+    assert not thread.is_alive()
+    store.close()
+
+
 def test_shrunken_log_heals_via_dedup(tmp_path):
     tx = FolderTransport(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 5)

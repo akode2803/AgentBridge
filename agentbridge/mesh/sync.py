@@ -81,6 +81,11 @@ class SyncEngine:
                 observed_mono=observed_mono,
                 observed_clock=clock_id())
             new = len(inserted)
+            if inserted and self.on_progress is not None:
+                try:
+                    self.on_progress(len(inserted))
+                except Exception:  # noqa: BLE001 — a wake can't break sync
+                    pass
             for record in inserted:
                 self.latency.observe(
                     "sync_observed", str(record.get("id") or ""),
@@ -89,11 +94,6 @@ class SyncEngine:
                 try:
                     self.on_records(chat_id, inserted)
                 except Exception:  # noqa: BLE001 — pump can't break sync
-                    pass
-            if inserted and self.on_progress is not None:
-                try:
-                    self.on_progress(len(inserted))
-                except Exception:  # noqa: BLE001 — a wake can't break sync
                     pass
         if new_offset != offset:
             self.store.set_offset(chat_id, log_name, new_offset)
