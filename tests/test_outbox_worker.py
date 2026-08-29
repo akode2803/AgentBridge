@@ -103,6 +103,26 @@ def test_transient_failure_never_dies(store):
     assert counts == {"pending": 1}  # retrying forever, never dead, never lost
 
 
+def test_extreme_retry_count_cannot_starve_claimed_batch(store):
+    sent = []
+
+    def handler(target, payload):
+        if target == "poison":
+            raise OSError("still denied")
+        sent.append(payload["id"])
+
+    worker = OutboxWorker(store, {"post": handler})
+    seq = store.outbox_add("post", "poison", {"id": "old"})
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE outbox SET attempts=1024 WHERE seq=?", (seq,))
+    store.outbox_add("post", "healthy", {"id": "new"})
+
+    assert worker.flush_once() == 1
+    assert sent == ["new"]
+    assert store.outbox_counts() == {"pending": 1}
+
+
 def test_worker_thread_start_notify_stop(store):
     sent = []
     w = OutboxWorker(store, {"post": lambda t, p: sent.append(p["id"])}, poll_s=30.0)

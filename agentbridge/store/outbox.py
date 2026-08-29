@@ -114,7 +114,13 @@ class OutboxWorker:
             self._hook(self.dead_hooks, item)
             return 0
         except Exception as e:  # noqa: BLE001 — transient: retry forever
-            delay = min(self.base_delay * (2**item.attempts), self.max_delay)
+            # Cap the exponent BEFORE converting to float. A poison row that
+            # retried 1024 times used to raise OverflowError here and abort the
+            # whole claimed batch, starving every newer unrelated message.
+            delay = min(
+                self.base_delay * (2 ** min(item.attempts, 16)),
+                self.max_delay,
+            )
             delay *= 1 + random.uniform(0, 0.1)  # jitter
             self.store.outbox_retry(item.seq, f"{type(e).__name__}: {e}", delay)
             return 0
