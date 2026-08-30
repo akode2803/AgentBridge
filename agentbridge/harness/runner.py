@@ -562,6 +562,7 @@ class AgentRunner:
             feed = self._new_feed(
                 group, **invocation, policy_revision=settings.policy_revision,
                 transition_id=waiting_token,
+                observe=timings.detail,
             )
             delivery.run_id = feed.run_id
             delivery.task_id = feed.task_id
@@ -722,6 +723,7 @@ class AgentRunner:
                   native_approval_gated: tuple[str, ...] = (),
                   native_blocked: tuple[str, ...] = (),
                   transition_id: str = "",
+                  observe=None,
                   policy_revision: int | None = None) -> RunFeed:
         trigger_id = group.last.msg_id or group.last.key
         return RunFeed(
@@ -737,6 +739,7 @@ class AgentRunner:
             native_approval_gated=native_approval_gated,
             native_blocked=native_blocked,
             transition_id=transition_id,
+            observe=observe,
             policy_revision=policy_revision,
         )
 

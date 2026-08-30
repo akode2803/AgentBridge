@@ -271,6 +271,8 @@ def test_reply_timings_are_profiled(hrig):
     assert rec["outcome"] == "posted" and rec["chat_id"] == snap.id
     for key in ("total_s", "context_s", "model_s", "post_s"):
         assert key in rec and rec[key] >= 0
+    for key in ("detail_feed_ledger_start_s", "detail_feed_status_publish_s"):
+        assert key in rec and rec[key] >= 0
     assert "pickup_s" not in rec
     # the run feed carries the human summary…
     feed = latest_run(runner.mesh.tx)

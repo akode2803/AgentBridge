@@ -153,6 +153,7 @@ class RunFeed:
                  native_approval_gated: tuple[str, ...] = (),
                  native_blocked: tuple[str, ...] = (),
                  transition_id: str = "",
+                 observe=None,
                  task_ledger=None) -> None:
         self.tx = tx
         self.agent = agent
@@ -173,23 +174,33 @@ class RunFeed:
         self.task_id = new_id("t") if task_ledger is not None else ""
         self.run_record = None
         self.task_record = None
+
+        def measured(name: str, fn):
+            started = time.perf_counter()
+            value = fn()
+            if callable(observe):
+                observe(name, time.perf_counter() - started)
+            return value
+
         if self._task_ledger is not None:
-            self.run_record, self.task_record = self._task_ledger.start_with_run(
-                run_id=self.run_id, task_id=self.task_id, chat_id=chat_id,
-                trigger_id=trigger_id or "unknown-trigger",
-                provider=provider or "configured-adapter",
-                model=model or "configured-model",
-                capability_ceiling=capability_ceiling,
-                native_policy_digest=native_policy_digest,
-                provider_policy_digest=provider_policy_digest,
-                native_provider_version=native_provider_version,
-                native_enabled=native_enabled,
-                native_approval_gated=native_approval_gated,
-                native_blocked=native_blocked,
-                policy_revision=policy_revision,
+            self.run_record, self.task_record = measured(
+                "feed_ledger_start", lambda: self._task_ledger.start_with_run(
+                    run_id=self.run_id, task_id=self.task_id, chat_id=chat_id,
+                    trigger_id=trigger_id or "unknown-trigger",
+                    provider=provider or "configured-adapter",
+                    model=model or "configured-model",
+                    capability_ceiling=capability_ceiling,
+                    native_policy_digest=native_policy_digest,
+                    provider_policy_digest=provider_policy_digest,
+                    native_provider_version=native_provider_version,
+                    native_enabled=native_enabled,
+                    native_approval_gated=native_approval_gated,
+                    native_blocked=native_blocked,
+                    policy_revision=policy_revision,
+                ),
             )
         elif self._ledger is not None:
-            self.run_record = self._ledger.start(
+            self.run_record = measured("feed_ledger_start", lambda: self._ledger.start(
                 run_id=self.run_id, chat_id=chat_id,
                 trigger_id=trigger_id or "unknown-trigger",
                 provider=provider or "configured-adapter",
@@ -202,11 +213,11 @@ class RunFeed:
                 native_approval_gated=native_approval_gated,
                 native_blocked=native_blocked,
                 policy_revision=policy_revision,
-            )
-        self.write("running", force=True)
+            ))
+        measured("feed_status_publish", lambda: self.write("running", force=True))
         hint = getattr(self.tx, "hint_now", None)
         if callable(hint):
-            hint()
+            measured("feed_hint", hint)
         self._heartbeat = threading.Thread(
             target=self._heartbeat_loop, name=f"ab-feed-{agent}-{self.run_id}",
             daemon=True,
