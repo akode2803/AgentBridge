@@ -11,6 +11,7 @@ import json
 import hashlib
 import math
 import os
+import platform
 import re
 import select
 import shutil
@@ -203,15 +204,17 @@ class CompiledBridgePolicy:
 
     def verify_unchanged(self, source_env=None) -> None:
         """Recheck mutable executable and lower-layer facts before launch."""
-        if (_sha256_file(Path(self.executable)) != self.executable_sha256
-                or _sha256_file(Path(self.code_mode_host))
-                != self.code_mode_host_sha256):
-            raise ValidationError("Codex executable identity changed after signing")
+        _assert_binary_identity(
+            self.executable, self.executable_sha256,
+            self.code_mode_host, self.code_mode_host_sha256)
         current_layers = _codex_non_user_config_layers(
             self.executable, Path(self.workspace), source_env,
         )
         if current_layers != self.config_layers:
             raise ValidationError("Codex config authority changed after signing")
+        _assert_binary_identity(
+            self.executable, self.executable_sha256,
+            self.code_mode_host, self.code_mode_host_sha256)
 
 
 def compile_bridge_policy(profile: BridgeProfile, *, command: str,
@@ -231,6 +234,8 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
         raise ValidationError("trusted bridge provider is not installed")
     executable = str(Path(executable).resolve())
     resolved_workspace = str(workspace.resolve())
+    executable_sha256, code_mode_host, code_mode_host_sha256, signing_team = \
+        measured("provider_identity", lambda: _codex_binary_identity(executable))
     try:
         result = measured("provider_version", lambda: subprocess.run(
             [executable, *profile.version_args], capture_output=True, text=True,
@@ -241,11 +246,13 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
     if result.returncode or not re.fullmatch(profile.version_pattern, version):
         raise ValidationError(
             f"bridge disabled for unverified provider version {version or 'unknown'!r}")
-    executable_sha256, code_mode_host, code_mode_host_sha256, signing_team = \
-        measured("provider_identity", lambda: _codex_binary_identity(executable))
+    _assert_binary_identity(
+        executable, executable_sha256, code_mode_host, code_mode_host_sha256)
     config_layers = measured(
         "config_layers", lambda: _codex_non_user_config_layers(
             executable, Path(resolved_workspace), source_env))
+    _assert_binary_identity(
+        executable, executable_sha256, code_mode_host, code_mode_host_sha256)
     capabilities = measured(
         "capability_inventory", lambda: compile_capability_ceiling(
             profile, requested_capabilities))
@@ -333,22 +340,10 @@ def _codex_binary_identity(executable: str) -> tuple[str, str, str, str]:
     if sys.platform != "darwin":
         raise ValidationError(
             "the exact Codex bridge is currently admitted only on macOS")
-    executable_path = Path(executable)
-    package_root = executable_path.parent.parent
-    host_candidates: list[Path] = []
-    metadata_path = package_root / "codex-package.json"
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        metadata = {}
-    resources_dir = metadata.get("resourcesDir")
-    if isinstance(resources_dir, str) and resources_dir:
-        host_candidates.append(package_root / resources_dir / "codex-code-mode-host")
-    host_candidates.append(executable_path.with_name("codex-code-mode-host"))
-    host_path = next((path.resolve() for path in host_candidates if path.is_file()), None)
-    if host_path is None:
-        raise ValidationError("could not resolve the Codex code-mode host")
-
+    executable_path = Path(executable).resolve()
+    host_path = _resolve_codex_host(executable_path)
+    before_executable = _file_snapshot(executable_path)
+    before_host = _file_snapshot(host_path)
     team = "2DC432GLL2"
     for path, identifier in (
         (executable_path, "codex"), (host_path, "codex-code-mode-host"),
@@ -370,9 +365,86 @@ def _codex_binary_identity(executable: str) -> tuple[str, str, str, str]:
                 or f"TeamIdentifier={team}" not in signed
                 or "Authority=Developer ID Application: OpenAI OpCo, LLC" not in signed):
             raise ValidationError("Codex executable is not signed by the reviewed publisher")
+    after_executable = _file_snapshot(executable_path)
+    after_host = _file_snapshot(host_path)
+    if before_executable != after_executable or before_host != after_host:
+        raise ValidationError(
+            "Codex executable changed during signature verification")
     return (
-        _sha256_file(executable_path), str(host_path), _sha256_file(host_path), team,
+        after_executable[-1], str(host_path), after_host[-1], team,
     )
+
+
+def _resolve_codex_host(executable_path: Path) -> Path:
+    """Resolve only the helper selected inside this Codex package root."""
+    executable_path = executable_path.resolve()
+    package_root = executable_path.parent.parent.resolve()
+    metadata_path = package_root / "codex-package.json"
+    metadata = {}
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValidationError("Codex package metadata is unreadable") from exc
+        if not isinstance(metadata, dict):
+            raise ValidationError("Codex package metadata is invalid")
+        machine = platform.machine().lower()
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else machine
+        expected = {
+            "layoutVersion": 1,
+            "version": CODEX_PROVIDER_VERSION.rsplit(" ", 1)[-1],
+            "target": f"{arch}-apple-darwin",
+            "variant": "codex",
+            "entrypoint": "bin/codex",
+        }
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise ValidationError("Codex package metadata does not match this build")
+        entrypoint = Path(str(metadata["entrypoint"]))
+        if (entrypoint.is_absolute() or ".." in entrypoint.parts
+                or (package_root / entrypoint).resolve() != executable_path):
+            raise ValidationError("Codex package entrypoint is unsafe")
+    resources_dir = metadata.get("resourcesDir")
+    host_candidates: list[Path] = []
+    if resources_dir is not None:
+        if (not isinstance(resources_dir, str) or not resources_dir
+                or Path(resources_dir).is_absolute()
+                or ".." in Path(resources_dir).parts):
+            raise ValidationError("Codex package resourcesDir is unsafe")
+        host_candidates.append(
+            package_root / resources_dir / "codex-code-mode-host")
+    host_candidates.append(executable_path.with_name("codex-code-mode-host"))
+    host_path = None
+    for candidate in host_candidates:
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(package_root)
+        except ValueError as exc:
+            raise ValidationError("Codex code-mode host escapes its package") from exc
+        if resolved.is_file():
+            host_path = resolved
+            break
+    if host_path is None:
+        raise ValidationError("could not resolve the Codex code-mode host")
+    return host_path
+
+
+def _file_snapshot(path: Path) -> tuple[int, int, int, int, str]:
+    try:
+        stat = path.stat()
+        digest = _sha256_file(path)
+    except OSError as exc:
+        raise ValidationError("could not snapshot a Codex executable") from exc
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, digest)
+
+
+def _assert_binary_identity(executable: str, executable_sha256: str,
+                            code_mode_host: str,
+                            code_mode_host_sha256: str) -> None:
+    current_host = _resolve_codex_host(Path(executable))
+    if (str(current_host) != str(Path(code_mode_host).resolve())
+            or _sha256_file(Path(executable)) != executable_sha256
+            or _sha256_file(current_host) != code_mode_host_sha256):
+        raise ValidationError("Codex executable identity changed after signing")
 
 
 def _sha256_file(path: Path) -> str:

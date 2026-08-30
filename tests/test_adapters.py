@@ -498,6 +498,8 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
             "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2",
         ),
     )
+    monkeypatch.setattr(
+        policy_module, "_assert_binary_identity", lambda *_args: None)
     def inspect_layers(_executable, workspace, _source_env):
         assert workspace.is_dir()
         return ("system:sha256:" + "c" * 64,)
@@ -531,6 +533,35 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
             "codex-cli 0.147.0"
     finally:
         mesh.close()
+
+
+def test_verified_popen_checks_policy_immediately_before_spawn(monkeypatch):
+    from agentbridge.harness.adapters import cli as module
+
+    events = []
+    policy = SimpleNamespace(
+        verify_unchanged=lambda: events.append("verify"))
+    sentinel = object()
+    monkeypatch.setattr(
+        module.subprocess, "Popen",
+        lambda argv, **kwargs: (events.append("popen") or sentinel))
+    assert module._verified_popen(["codex"], launch_policy=policy) is sentinel
+    assert events == ["verify", "popen"]
+
+
+def test_verified_popen_never_spawns_after_failed_check(monkeypatch):
+    from agentbridge.harness.adapters import cli as module
+
+    spawned = []
+    policy = SimpleNamespace(
+        verify_unchanged=lambda: (_ for _ in ()).throw(
+            ValidationError("drifted")))
+    monkeypatch.setattr(
+        module.subprocess, "Popen",
+        lambda *_args, **_kwargs: spawned.append(True))
+    with pytest.raises(ValidationError, match="drifted"):
+        module._verified_popen(["codex"], launch_policy=policy)
+    assert spawned == []
 
 
 def test_owner_stop_kills_the_run_cleanly(tmp_path, monkeypatch):

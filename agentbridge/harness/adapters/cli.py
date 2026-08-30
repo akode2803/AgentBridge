@@ -307,6 +307,13 @@ def _prune_tmp(workdir: Path, max_age_s: float = TMP_MAX_AGE_S) -> int:
     return pruned
 
 
+def _verified_popen(argv, *, launch_policy=None, **kwargs):
+    """Perform the final authority check immediately before process creation."""
+    if launch_policy is not None:
+        launch_policy.verify_unchanged()
+    return subprocess.Popen(argv, **kwargs)
+
+
 class CliResponder:
     """Resolve (owner config, audience) -> one CLI run -> a Reply."""
 
@@ -673,8 +680,6 @@ class CliResponder:
                     or native_policy.blocked != getattr(run, "native_blocked", ())):
                 raise ValidationError(
                     "prepared native authority changed after signing")
-        if bridge_policy is not None:
-            bridge_policy.verify_unchanged()
         auto_allow, blocklist = effective_gates(
             inv.preset, settings, permission_callback=False)
         delegate_tool = None
@@ -779,7 +784,8 @@ class CliResponder:
                 contract.launch(argv)
             rc, lines, err = self._run(
                 argv, workdir, settings.timeout_s, inv, pack, step,
-                env=env, chat_id=delivery.chat_id, run_id=delivery.run_id)
+                env=env, chat_id=delivery.chat_id, run_id=delivery.run_id,
+                launch_policy=bridge_policy)
             if (self._usage_error(rc, err) and bridge_policy is None
                     and inv.preset.id not in self._minimal):
                 # a CLI update rejected our flags — drop conveniences, keep
@@ -794,7 +800,8 @@ class CliResponder:
                     contract.launch(argv)
                 rc, lines, err = self._run(
                     argv, workdir, settings.timeout_s, inv, pack, step,
-                    env=env, chat_id=delivery.chat_id, run_id=delivery.run_id)
+                    env=env, chat_id=delivery.chat_id, run_id=delivery.run_id,
+                    launch_policy=bridge_policy)
 
         text = reply_from_output(lines, inv.preset.format)
         if not text and reply_file.is_file():
@@ -893,17 +900,19 @@ class CliResponder:
     def _run(self, argv: list[str], workdir: Path, timeout_s: float,
              inv: Invocation, pack: PromptPack, step,
              env: dict | None = None,
-             chat_id: str = "", run_id: str = "") \
+             chat_id: str = "", run_id: str = "",
+             launch_policy: CompiledBridgePolicy | None = None) \
             -> tuple[int | None, list[str], str]:
         kwargs: dict = {}
         if os.name == "nt":  # no console flash under pythonw (v1 lesson)
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         if env is not None:
             kwargs["env"] = env
-        proc = subprocess.Popen(
+        proc = _verified_popen(
             argv, cwd=str(workdir), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", **kwargs,
+            launch_policy=launch_policy,
         )
         timed_out = threading.Event()
         watchdog = threading.Timer(

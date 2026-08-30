@@ -36,6 +36,8 @@ def mock_codex_admission(monkeypatch, *, executable="/tmp/codex"):
         lambda *_args: ("project:sha256:" + "c" * 64,
                         "system:sha256:" + "d" * 64),
     )
+    monkeypatch.setattr(
+        policy_module, "_assert_binary_identity", lambda *_args: None)
 
 
 def test_bridge_profile_schema_is_strict():
@@ -51,6 +53,153 @@ def test_bridge_profile_schema_is_strict():
         BridgeProfile.from_dict({
             **raw, "version_pattern": "^codex-cli 0\\.147\\.1$",
         })
+
+
+def test_identity_is_admitted_before_any_provider_process(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(policy_module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        policy_module, "_codex_binary_identity",
+        lambda _path: (events.append("identity") or (
+            "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2")))
+    monkeypatch.setattr(
+        policy_module, "_assert_binary_identity", lambda *_args: None)
+    monkeypatch.setattr(
+        policy_module, "_codex_non_user_config_layers", lambda *_args: ())
+    monkeypatch.setattr(
+        policy_module.subprocess, "run",
+        lambda *_args, **_kwargs: (
+            events.append("process") or
+            SimpleNamespace(returncode=0, stdout="codex-cli 0.147.0", stderr="")))
+    compile_bridge_policy(
+        codex_profile(), command="codex", workspace=tmp_path,
+        timeout_s=30, requested_capabilities=set())
+    assert events[:2] == ["identity", "process"]
+
+
+def test_signature_verification_rejects_file_swap(tmp_path, monkeypatch):
+    executable = tmp_path / "pkg" / "bin" / "codex"
+    host = executable.with_name("codex-code-mode-host")
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"codex")
+    host.write_bytes(b"host")
+    monkeypatch.setattr(policy_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        policy_module, "_resolve_codex_host", lambda _path: host.resolve())
+    snapshots = iter([
+        (1, 1, 5, 1, "a" * 64), (1, 2, 4, 1, "b" * 64),
+        (1, 1, 5, 2, "c" * 64), (1, 2, 4, 1, "b" * 64),
+    ])
+    monkeypatch.setattr(policy_module, "_file_snapshot", lambda _path: next(snapshots))
+
+    def codesign(args, **_kwargs):
+        identifier = "codex-code-mode-host" if "mode-host" in args[-1] else "codex"
+        return SimpleNamespace(
+            returncode=0, stdout="", stderr=(
+                f"Identifier={identifier}\nTeamIdentifier=2DC432GLL2\n"
+                "Authority=Developer ID Application: OpenAI OpCo, LLC"))
+
+    monkeypatch.setattr(policy_module.subprocess, "run", codesign)
+    with pytest.raises(ValidationError, match="changed during signature"):
+        policy_module._codex_binary_identity(str(executable))
+
+
+@pytest.mark.parametrize("resources", ["/tmp/escape", "../escape"])
+def test_code_mode_host_metadata_cannot_escape_package(
+        tmp_path, resources):
+    executable = tmp_path / "pkg" / "bin" / "codex"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"codex")
+    machine = policy_module.platform.machine().lower()
+    arch = "aarch64" if machine in {"arm64", "aarch64"} else machine
+    (tmp_path / "pkg" / "codex-package.json").write_text(
+        json.dumps({
+            "layoutVersion": 1, "version": "0.147.0",
+            "target": f"{arch}-apple-darwin", "variant": "codex",
+            "entrypoint": "bin/codex", "resourcesDir": resources,
+        }), encoding="utf-8")
+    with pytest.raises(ValidationError, match="resourcesDir is unsafe"):
+        policy_module._resolve_codex_host(executable)
+
+
+@pytest.mark.parametrize("content,error", [
+    ("{", "metadata is unreadable"),
+    ("[]", "metadata is invalid"),
+    (json.dumps({"layoutVersion": 99}), "does not match"),
+])
+def test_codex_package_metadata_fails_closed(tmp_path, content, error):
+    executable = tmp_path / "pkg" / "bin" / "codex"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"codex")
+    (tmp_path / "pkg" / "codex-package.json").write_text(
+        content, encoding="utf-8")
+    with pytest.raises(ValidationError, match=error):
+        policy_module._resolve_codex_host(executable)
+
+
+def test_code_mode_host_symlink_cannot_escape_package(tmp_path):
+    package = tmp_path / "pkg"
+    executable = package / "bin" / "codex"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"codex")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "codex-code-mode-host").write_bytes(b"host")
+    (package / "resources").symlink_to(outside, target_is_directory=True)
+    machine = policy_module.platform.machine().lower()
+    arch = "aarch64" if machine in {"arm64", "aarch64"} else machine
+    (package / "codex-package.json").write_text(json.dumps({
+        "layoutVersion": 1, "version": "0.147.0",
+        "target": f"{arch}-apple-darwin", "variant": "codex",
+        "entrypoint": "bin/codex", "resourcesDir": "resources",
+    }), encoding="utf-8")
+    with pytest.raises(ValidationError, match="escapes its package"):
+        policy_module._resolve_codex_host(executable)
+
+
+def test_version_probe_replacement_is_rejected_before_config(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(policy_module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        policy_module, "_codex_binary_identity", lambda _path: (
+            "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2"))
+    monkeypatch.setattr(
+        policy_module.subprocess, "run", lambda *_args, **_kwargs:
+        SimpleNamespace(returncode=0, stdout="codex-cli 0.147.0", stderr=""))
+    monkeypatch.setattr(
+        policy_module, "_assert_binary_identity",
+        lambda *_args: (_ for _ in ()).throw(
+            ValidationError("identity changed during version")))
+    monkeypatch.setattr(
+        policy_module, "_codex_non_user_config_layers",
+        lambda *_args: events.append("config") or ())
+    with pytest.raises(ValidationError, match="during version"):
+        compile_bridge_policy(
+            codex_profile(), command="codex", workspace=tmp_path,
+            timeout_s=30, requested_capabilities=set())
+    assert events == []
+
+
+def test_config_probe_replacement_is_rejected(tmp_path, monkeypatch):
+    checks = []
+    monkeypatch.setattr(policy_module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        policy_module, "_codex_binary_identity", lambda _path: (
+            "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2"))
+    monkeypatch.setattr(
+        policy_module.subprocess, "run", lambda *_args, **_kwargs:
+        SimpleNamespace(returncode=0, stdout="codex-cli 0.147.0", stderr=""))
+    def check(*_args):
+        checks.append(True)
+        if len(checks) == 2:
+            raise ValidationError("identity changed during config")
+    monkeypatch.setattr(policy_module, "_assert_binary_identity", check)
+    monkeypatch.setattr(
+        policy_module, "_codex_non_user_config_layers", lambda *_args: ())
+    with pytest.raises(ValidationError, match="during config"):
+        compile_bridge_policy(
+            codex_profile(), command="codex", workspace=tmp_path,
+            timeout_s=30, requested_capabilities=set())
 
 
 def test_capability_ceiling_rejects_unknown_control_and_undeclared_ids():
@@ -222,6 +371,14 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
         executable_sha256=policy_module._sha256_file(executable),
         code_mode_host_sha256=policy_module._sha256_file(host),
     )
+    def assert_test_identity(executable_path, executable_digest,
+                             host_path, host_digest):
+        if (policy_module._sha256_file(Path(executable_path)) != executable_digest
+                or policy_module._sha256_file(Path(host_path)) != host_digest):
+            raise ValidationError("Codex executable identity changed after signing")
+
+    monkeypatch.setattr(
+        policy_module, "_assert_binary_identity", assert_test_identity)
     launch_policy.verify_unchanged(source_env={})
     host.write_bytes(b"changed")
     with pytest.raises(ValidationError, match="identity changed"):
@@ -284,6 +441,10 @@ def test_codex_catalog_controls_are_not_misreported_as_callback_tools():
 def test_compiler_rejects_unverified_version(monkeypatch, tmp_path):
     import agentbridge.harness.adapters.policy as module
     monkeypatch.setattr(module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        module, "_codex_binary_identity", lambda _path: (
+            "a" * 64, "/tmp/codex-code-mode-host", "b" * 64, "2DC432GLL2"))
+    monkeypatch.setattr(module, "_assert_binary_identity", lambda *_args: None)
     monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs:
                         SimpleNamespace(returncode=0, stdout="codex-cli 9.9.9\n",
                                         stderr=""))
