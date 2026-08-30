@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from dataclasses import replace
 
 from ...core.errors import ValidationError
@@ -164,11 +165,20 @@ class TaskLedger:
                        native_approval_gated: tuple[str, ...] = (),
                        native_blocked: tuple[str, ...] = (),
                        policy_revision: int | None = None,
+                       observe=None,
                        ) -> tuple[RunRecord, TaskRecord]:
         """Atomically commit one canonical run and its promised root task."""
+
+        def measured(name: str, fn):
+            started = time.perf_counter()
+            value = fn()
+            if callable(observe):
+                observe(name, time.perf_counter() - started)
+            return value
+
         with self.run_ledger._lock, self._lock:
             run, run_target, run_payload, run_opened = (
-                self.run_ledger._prepare_start(
+                measured("ledger_run_prepare", lambda: self.run_ledger._prepare_start(
                     run_id=run_id, chat_id=chat_id, trigger_id=trigger_id,
                     provider=provider, model=model,
                     capability_ceiling=capability_ceiling,
@@ -180,23 +190,32 @@ class TaskLedger:
                     native_blocked=native_blocked,
                     active_task_ids=(task_id,),
                     policy_revision=policy_revision,
-                )
+                ))
             )
-            task, task_target, task_payload, task_opened = self._prepare_start(
-                run, task_id,
+            task, task_target, task_payload, task_opened = measured(
+                "ledger_task_prepare", lambda: self._prepare_start(run, task_id),
             )
-            run_seq, task_seq = self.mesh.store.cache_docs_and_outbox_add_many(
-                {
-                    "runtime/run-open": run_opened,
-                    self.OPEN_PATH: task_opened,
-                },
-                [
-                    (self.run_ledger.OUTBOX_KIND, run_target, run_payload),
-                    (self.OUTBOX_KIND, task_target, task_payload),
-                ],
+            run_seq, task_seq = measured(
+                "ledger_local_commit",
+                lambda: self.mesh.store.cache_docs_and_outbox_add_many(
+                    {
+                        "runtime/run-open": run_opened,
+                        self.OPEN_PATH: task_opened,
+                    },
+                    [
+                        (self.run_ledger.OUTBOX_KIND, run_target, run_payload),
+                        (self.OUTBOX_KIND, task_target, task_payload),
+                    ],
+                ),
             )
-        self.run_ledger._attempt(run_seq, run_target, run_payload)
-        self._attempt(task_seq, task_target, task_payload)
+        measured(
+            "ledger_run_delivery",
+            lambda: self.run_ledger._attempt(run_seq, run_target, run_payload),
+        )
+        measured(
+            "ledger_task_delivery",
+            lambda: self._attempt(task_seq, task_target, task_payload),
+        )
         return run, task
 
     def _prepare_start(

@@ -12,6 +12,7 @@ from agentbridge.core.errors import ValidationError
 from agentbridge.harness.adapters.cli import CliResponder
 from agentbridge.harness.conversation import Delivery
 from agentbridge.harness.runtime.authority import AuthorityError
+from agentbridge.harness.runtime.eventio import deliver_immutable
 from agentbridge.harness.runtime.models import RunState, TaskState
 from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import (
@@ -51,6 +52,67 @@ def _start(tasks, chat_id, suffix="1"):
         run_id=f"run-{suffix}", task_id=f"task-{suffix}", chat_id=chat_id,
         trigger_id=f"message-{suffix}", provider="codex", model="gpt-test",
     )
+
+
+def test_immutable_delivery_skips_preflight_only_for_exclusive_transport():
+    class Exclusive:
+        supports_exclusive_create = True
+
+        def __init__(self):
+            self.created = []
+
+        def get_doc(self, *_args, **_kwargs):
+            raise AssertionError("exclusive create must not preflight")
+
+        def create_doc(self, path, doc):
+            self.created.append((path, doc))
+
+    tx = Exclusive()
+    deliver_immutable(tx, "runtime/run.json", {"signed": True})
+    assert tx.created == [("runtime/run.json", {"signed": True})]
+
+    class ResponseLost(Exclusive):
+        def __init__(self, current):
+            super().__init__()
+            self.current = current
+
+        def get_doc(self, _path, default=None):
+            return self.current if self.current is not None else default
+
+        def create_doc(self, path, doc):
+            self.created.append((path, doc))
+            raise OSError("response lost")
+
+    same = ResponseLost({"signed": True})
+    deliver_immutable(same, "runtime/run.json", {"signed": True})
+
+    conflict = ResponseLost({"signed": False})
+    with pytest.raises(OSError, match="response lost"):
+        deliver_immutable(conflict, "runtime/run.json", {"signed": True})
+
+
+def test_immutable_delivery_retains_nonexclusive_conflict_check():
+    class NonExclusive:
+        supports_exclusive_create = False
+
+        def __init__(self, current):
+            self.current = current
+            self.created = []
+
+        def get_doc(self, _path, default=None):
+            return self.current if self.current is not None else default
+
+        def create_doc(self, path, doc):
+            self.created.append((path, doc))
+
+    same = NonExclusive({"signed": True})
+    deliver_immutable(same, "runtime/run.json", {"signed": True})
+    assert same.created == []
+
+    conflict = NonExclusive({"signed": False})
+    with pytest.raises(ValidationError, match="already differs"):
+        deliver_immutable(conflict, "runtime/run.json", {"signed": True})
+    assert conflict.created == []
 
 
 def test_atomic_root_task_is_encrypted_signed_and_bound_to_run(task_meshes):

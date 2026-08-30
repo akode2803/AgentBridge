@@ -197,6 +197,7 @@ class RunFeed:
                     native_approval_gated=native_approval_gated,
                     native_blocked=native_blocked,
                     policy_revision=policy_revision,
+                    observe=observe,
                 ),
             )
         elif self._ledger is not None:

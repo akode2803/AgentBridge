@@ -50,6 +50,17 @@ def seal_record(mesh, record) -> dict:
 
 def deliver_immutable(tx, path: str, doc: dict) -> None:
     """Create an immutable document idempotently; conflicts are structural."""
+    if bool(getattr(tx, "supports_exclusive_create", False)):
+        # An exclusive transport owns idempotent retry/conflict detection.
+        # Avoid a redundant cloud read before every globally unique event.
+        try:
+            tx.create_doc(path, doc)
+        except Exception:
+            # A response may be lost after the create committed. Accept only
+            # exact bytes; conflicting or unavailable readback stays failed.
+            if tx.get_doc(path, default=None) != doc:
+                raise
+        return
     current = tx.get_doc(path, default=None)
     if current is not None and current != doc:
         raise ValidationError("immutable runtime path already differs")

@@ -273,6 +273,12 @@ def test_reply_timings_are_profiled(hrig):
         assert key in rec and rec[key] >= 0
     for key in ("detail_feed_ledger_start_s", "detail_feed_status_publish_s"):
         assert key in rec and rec[key] >= 0
+    for key in (
+        "detail_ledger_run_prepare_s", "detail_ledger_task_prepare_s",
+        "detail_ledger_local_commit_s", "detail_ledger_run_delivery_s",
+        "detail_ledger_task_delivery_s",
+    ):
+        assert key in rec and rec[key] >= 0
     assert "pickup_s" not in rec
     # the run feed carries the human summary…
     feed = latest_run(runner.mesh.tx)
