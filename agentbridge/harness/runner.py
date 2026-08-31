@@ -162,9 +162,11 @@ class AgentRunner:
         # the submitting thread, which still holds this lock
         self._inflight_lock = threading.RLock()
         self._wake = threading.Event()
+        self._priority_lock = threading.Lock()
+        self._priority_chats: dict[str, None] = {}
         # Wake on EACH locally inserted log batch. Waiting until SyncEngine's
         # whole multi-log pass completed cost seconds in the R146 p95 trace.
-        self.mesh.sync.on_progress = lambda _count: self._wake.set()
+        self.mesh.sync.on_chat_progress = self._prioritize_chat
         self._started_ns = time.time_ns()
         self._last_doc: tuple | None = None
         self._blobs_ok: set[str] = set()  # sync-barrier verified blob ids
@@ -262,6 +264,19 @@ class AgentRunner:
         return HarnessSettings.from_account(self.mesh.directory.get(self.agent))
 
     # ----------------------------------------------------------------- scan
+    def _prioritize_chat(self, chat_id: str, _count: int = 0) -> None:
+        if not chat_id:
+            return
+        with self._priority_lock:
+            self._priority_chats.setdefault(chat_id, None)
+        self._wake.set()
+
+    def _take_priority_chats(self) -> list[str]:
+        with self._priority_lock:
+            chat_ids = list(self._priority_chats)
+            self._priority_chats.clear()
+        return chat_ids
+
     def scan_all(self, *, collect: list | None = None, on_added=None) -> int:
         """One truth pass: new triggers + due timers -> the queue. Returns
         how many items were enqueued. ``collect`` (dry-run) gathers what
@@ -270,12 +285,30 @@ class AgentRunner:
         settings = self.settings()
         owner = self.mesh.directory.owner_of(self.agent)
         added = 0
+
+        def scan_room(snap) -> None:
+            nonlocal added
+            room_added = self._scan_chat(snap, settings, owner, collect)
+            added += room_added
+            if room_added and collect is None and callable(on_added):
+                on_added()
+
+        prioritized = set()
+        if collect is None:
+            for chat_id in self._take_priority_chats():
+                try:
+                    snap = self.mesh.snapshot(chat_id)
+                    if not snap.is_member(self.agent):
+                        continue
+                    scan_room(snap)
+                    prioritized.add(chat_id)
+                except Exception:
+                    continue
         for snap in self.mesh.membership.chats_for():
+            if snap.id in prioritized:
+                continue
             try:
-                room_added = self._scan_chat(snap, settings, owner, collect)
-                added += room_added
-                if room_added and collect is None and callable(on_added):
-                    on_added()
+                scan_room(snap)
             except Exception:  # noqa: BLE001 — one chat never blocks the rest
                 continue
         for t in self.timers.due():

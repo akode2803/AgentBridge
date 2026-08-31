@@ -45,6 +45,7 @@ class SyncEngine:
         workers: int = 4,
         on_records: Callable[[str, list[dict]], None] | None = None,
         on_progress: Callable[[int], None] | None = None,
+        on_chat_progress: Callable[[str, int], None] | None = None,
     ) -> None:
         self.tx = tx
         self.store = store
@@ -52,6 +53,7 @@ class SyncEngine:
         self.workers = workers
         self.on_records = on_records  # fed ONLY actually-new records (R10 bus)
         self.on_progress = on_progress  # per-log wake after local insertion
+        self.on_chat_progress = on_chat_progress
         self.latency = sink_for_store(store)
         self._stop = threading.Event()
         # membership as of the last feed tick — a chat that APPEARS here gets
@@ -81,6 +83,11 @@ class SyncEngine:
                 observed_mono=observed_mono,
                 observed_clock=clock_id())
             new = len(inserted)
+            if inserted and self.on_chat_progress is not None:
+                try:
+                    self.on_chat_progress(chat_id, len(inserted))
+                except Exception:  # noqa: BLE001 — a wake can't break sync
+                    pass
             if inserted and self.on_progress is not None:
                 try:
                     self.on_progress(len(inserted))

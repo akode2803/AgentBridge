@@ -107,6 +107,7 @@ def test_progress_wake_precedes_slow_record_pump(tmp_path):
     seed(tx, "c1", "ann", 1)
     store = Store(tmp_path / "cache.sqlite")
     progress = threading.Event()
+    chat_progress = []
     pump_entered = threading.Event()
     release_pump = threading.Event()
 
@@ -116,10 +117,14 @@ def test_progress_wake_precedes_slow_record_pump(tmp_path):
 
     engine = SyncEngine(
         tx, store, on_records=slow_pump,
-        on_progress=lambda _count: progress.set())
+        on_progress=lambda _count: progress.set(),
+        on_chat_progress=lambda chat_id, count: chat_progress.append(
+            (chat_id, count)),
+    )
     thread = threading.Thread(target=lambda: engine.sync_chat("c1"), daemon=True)
     thread.start()
     assert progress.wait(1.0)
+    assert chat_progress == [("c1", 1)]
     assert pump_entered.wait(1.0) and thread.is_alive()
     release_pump.set()
     thread.join(2.0)

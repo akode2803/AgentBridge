@@ -477,6 +477,68 @@ def test_room_work_is_claimed_before_later_room_scan_finishes(hrig, monkeypatch)
     assert not worker.is_alive()
 
 
+def test_sync_priority_claims_room_before_full_membership_scan(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
+    other = SimpleNamespace(id="other")
+    full_scan_entered = threading.Event()
+    release_full_scan = threading.Event()
+    claimed = threading.Event()
+    scanned = []
+
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda chat_id: priority)
+
+    def all_rooms():
+        full_scan_entered.set()
+        release_full_scan.wait(1.0)
+        return [priority, other]
+
+    monkeypatch.setattr(runner.mesh.membership, "chats_for", all_rooms)
+
+    def scan_room(snap, _settings, _owner, _collect):
+        scanned.append(snap.id)
+        if snap.id == "priority":
+            assert runner.queue.offer(runner_module.WorkItem(
+                key="priority|m1@0", chat_id="priority", kind="message",
+                msg_id="m1", sender="aryan", ns=1,
+            ))
+            return 1
+        return 0
+
+    def claim_priority():
+        if runner.queue.claim_groups(limit=1):
+            claimed.set()
+
+    monkeypatch.setattr(runner, "_scan_chat", scan_room)
+    runner._prioritize_chat("priority", 1)
+    runner._prioritize_chat("priority", 1)
+    worker = threading.Thread(
+        target=lambda: runner.scan_all(on_added=claim_priority), daemon=True,
+    )
+    worker.start()
+    assert full_scan_entered.wait(1.0)
+    assert claimed.wait(0.2)
+    release_full_scan.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert scanned == ["priority", "other"]
+    assert runner._take_priority_chats() == []
+
+
+def test_sync_priority_drops_room_when_membership_was_revoked(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    revoked = SimpleNamespace(id="revoked", is_member=lambda _name: False)
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: revoked)
+    monkeypatch.setattr(runner.mesh.membership, "chats_for", lambda: [])
+    monkeypatch.setattr(
+        runner, "_scan_chat",
+        lambda *_args: pytest.fail("revoked room must not be scanned"),
+    )
+    runner._prioritize_chat("revoked", 1)
+    assert runner.scan_all(on_added=runner.dispatch_fill) == 0
+    assert runner._take_priority_chats() == []
+
+
 def test_no_reply_sentinel_stays_quiet(hrig):
     snap = hrig.owner.create_chat("Silence", members=["helper"])
     trig = hrig.owner.post(snap.id, "@helper fyi only, no answer needed")
