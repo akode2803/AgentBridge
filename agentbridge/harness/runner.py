@@ -262,16 +262,20 @@ class AgentRunner:
         return HarnessSettings.from_account(self.mesh.directory.get(self.agent))
 
     # ----------------------------------------------------------------- scan
-    def scan_all(self, *, collect: list | None = None) -> int:
+    def scan_all(self, *, collect: list | None = None, on_added=None) -> int:
         """One truth pass: new triggers + due timers -> the queue. Returns
         how many items were enqueued. ``collect`` (dry-run) gathers what
-        WOULD be enqueued without persisting anything."""
+        WOULD be enqueued without persisting anything. ``on_added`` runs after
+        each complete room so durable work need not wait for unrelated rooms."""
         settings = self.settings()
         owner = self.mesh.directory.owner_of(self.agent)
         added = 0
         for snap in self.mesh.membership.chats_for():
             try:
-                added += self._scan_chat(snap, settings, owner, collect)
+                room_added = self._scan_chat(snap, settings, owner, collect)
+                added += room_added
+                if room_added and collect is None and callable(on_added):
+                    on_added()
             except Exception:  # noqa: BLE001 — one chat never blocks the rest
                 continue
         for t in self.timers.due():
@@ -289,6 +293,8 @@ class AgentRunner:
                 collect.append(item)
             elif self.queue.offer(item):
                 added += 1
+                if callable(on_added):
+                    on_added()
         return added
 
     # R66: how long an undecryptable message may hold its chat's scan before
@@ -1092,7 +1098,7 @@ class AgentRunner:
         if self.standing_down():
             self.publish_status()
             return 0
-        added = self.scan_all()
+        added = self.scan_all(on_added=self.dispatch_fill)
         self.dispatch_handoffs()
         self.dispatch_fill()
         self.publish_status()

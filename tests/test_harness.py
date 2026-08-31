@@ -437,6 +437,46 @@ def test_queue_survives_restart(hrig):
     assert len(agent_msgs(hrig.owner, snap.id)) == 1
 
 
+def test_room_work_is_claimed_before_later_room_scan_finishes(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    first = SimpleNamespace(id="first")
+    second = SimpleNamespace(id="second")
+    entered_second = threading.Event()
+    release_second = threading.Event()
+    claimed = threading.Event()
+
+    monkeypatch.setattr(
+        runner.mesh.membership, "chats_for", lambda: [first, second],
+    )
+
+    def scan_room(snap, _settings, _owner, _collect):
+        if snap.id == "first":
+            item = runner_module.WorkItem(
+                key="first|m1@0", chat_id="first", kind="message",
+                msg_id="m1", sender="aryan", ns=1,
+            )
+            assert runner.queue.offer(item)
+            return 1
+        entered_second.set()
+        release_second.wait(1.0)
+        return 0
+
+    def claim_first():
+        if runner.queue.claim_groups(limit=1):
+            claimed.set()
+
+    monkeypatch.setattr(runner, "_scan_chat", scan_room)
+    worker = threading.Thread(
+        target=lambda: runner.scan_all(on_added=claim_first), daemon=True,
+    )
+    worker.start()
+    assert entered_second.wait(1.0)
+    assert claimed.wait(0.2)
+    release_second.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+
+
 def test_no_reply_sentinel_stays_quiet(hrig):
     snap = hrig.owner.create_chat("Silence", members=["helper"])
     trig = hrig.owner.post(snap.id, "@helper fyi only, no answer needed")
