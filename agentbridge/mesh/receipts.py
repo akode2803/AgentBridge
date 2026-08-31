@@ -19,6 +19,7 @@ from ..core.models import ChatKind, MsgKind, ReceiptState
 from .messaging import MessagingService
 from .presence import PresenceService
 from .privacy import PrivacyService
+from .projection import ProjectionObserver
 
 __all__ = ["ReceiptsService"]
 
@@ -63,7 +64,8 @@ class ReceiptsService:
             return ReceiptState.DELIVERED
         return ReceiptState.SENT
 
-    def receipts_for(self, chat_id: str) -> dict[str, dict]:
+    def receipts_for(self, chat_id: str,
+                     observer: ProjectionObserver | None = None) -> dict[str, dict]:
         """{msg_id: {state, read_by, delivered_to, pending, total}} for the
         viewer's OWN messages (the tick column). State = the LOWEST tier any
         other member is at (v1: double-accent only when everyone read)."""
@@ -72,7 +74,7 @@ class ReceiptsService:
         cursors = self._cursors_of(chat_id, others)
 
         out: dict[str, dict] = {}
-        for msg in self.messaging.messages_for(chat_id):
+        for msg in self.messaging.messages_for(chat_id, observer=observer):
             if msg.from_ != self.user or msg.kind is not MsgKind.MESSAGE or msg.deleted:
                 continue
             if not others:  # self-chat: your own note is trivially read

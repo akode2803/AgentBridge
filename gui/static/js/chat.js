@@ -17,6 +17,17 @@ import { V } from "./views.js";
 
 let chatRenderSeq = 0;
 let chatsFetchSeq = 0;
+const chatOpenObservations = [];
+
+function recordChatOpen(observation) {
+  chatOpenObservations.push(observation);
+  if (chatOpenObservations.length > 100) chatOpenObservations.shift();
+}
+
+export function chatOpenMetrics() {
+  return chatOpenObservations.slice();
+}
+window.agentBridgeChatOpenMetrics = chatOpenMetrics;
 
 function runAccessLabel(capability) {
   return capability.label || "Provider capability";
@@ -150,6 +161,13 @@ window.addEventListener("focus", () => {
 async function renderChats(force) {
   const fetchSeq = ++chatsFetchSeq;
   const routeSeq = App.routeSeq;
+  const opening = !!Mesh.chatId && !$("#transcript");
+  const openTrace = opening ? {
+    v: 1,
+    request_ref: window.crypto?.randomUUID?.() ||
+      `open-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    started_ms: performance.now(),
+  } : null;
   // leaving a chat for the no-chat home: paint the empty state NOW (from the
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
@@ -168,6 +186,10 @@ async function renderChats(force) {
   try {
     fresh = await api("/api/mesh/state");
   } catch { return; }
+  if (openTrace) {
+    openTrace.sidebar_fetch_ms = Math.max(
+      0, performance.now() - openTrace.started_ms);
+  }
   if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
       || routeSeq !== App.routeSeq) return;
   Mesh.state = fresh;
@@ -234,7 +256,18 @@ async function renderChats(force) {
     if (!Mesh.detailsView && !pane.hidden) {
       pane.hidden = true; pane.innerHTML = ""; Mesh.detailsKey = "";
     }
-    await renderMeshChat(force);
+    await renderMeshChat(force, openTrace);
+    if (openTrace && App.page === "chats" && Mesh.chatId
+        && routeSeq === App.routeSeq) {
+      openTrace.render_completed_ms = Math.max(
+        0, performance.now() - openTrace.started_ms);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        openTrace.first_painted_ms = Math.max(
+          0, performance.now() - openTrace.started_ms);
+        delete openTrace.started_ms;
+        recordChatOpen(openTrace);
+      }));
+    }
     if (Mesh.detailsView) {
       const opening = pane.hidden;
       pane.hidden = false;
@@ -398,11 +431,16 @@ function nextClamp(cur) {
   return Infinity;                    // 3rd click → the rest
 }
 
-async function renderMeshChat(force) {
+async function renderMeshChat(force, openTrace = null) {
   const renderSeq = ++chatRenderSeq;
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
+  if (openTrace) {
+    openTrace.chat_fetch_ms = Math.max(
+      0, performance.now() - openTrace.started_ms
+        - (openTrace.sidebar_fetch_ms || 0));
+  }
   if (renderSeq !== chatRenderSeq) return;
   if (data.error) {
     // a deleted chat vanishing under an open view is expected, not an error —
@@ -415,6 +453,12 @@ async function renderMeshChat(force) {
     api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
     api(`/api/mesh/runtime_tasks?id=${encodeURIComponent(chatId)}`),
   ]);
+  if (openTrace) {
+    openTrace.aux_fetch_ms = Math.max(
+      0, performance.now() - openTrace.started_ms
+        - (openTrace.sidebar_fetch_ms || 0)
+        - (openTrace.chat_fetch_ms || 0));
+  }
   if (renderSeq !== chatRenderSeq) return;
   const feeds = feedData.feeds || [];
   const runtimeTasks = runtimeData.tasks || [];

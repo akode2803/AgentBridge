@@ -14,6 +14,7 @@ from .overlays import ChatOverlays, UserState
 from .paths import P
 from .presence import PresenceService
 from .privacy import PrivacyService
+from .projection import ProjectionObserver
 from .receipts import ReceiptsService
 from .readmodel import build_messages, parse_tags, unread_info
 from .sealer import E2EESealer, PlainSealer, Sealer
@@ -27,5 +28,5 @@ __all__ = [
     "P", "Sealer", "PlainSealer", "E2EESealer", "EventBus", "Event",
     "Notifier", "Notification", "CommandHook", "authz", "events", "eventbus",
     "build_messages", "parse_tags", "unread_info", "AttachmentDelivery",
-    "PreparedAttachment",
+    "PreparedAttachment", "ProjectionObserver",
 ]

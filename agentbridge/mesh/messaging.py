@@ -28,6 +28,7 @@ from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
     signing_bytes, state_signing_bytes, unredaction_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
 from .paths import P
+from .projection import ProjectionObserver, observed, observed_count
 from .readmodel import build_messages, parse_tags, unread_info
 from .sealer import E2EESealer, Sealer
 
@@ -432,34 +433,46 @@ class MessagingService:
         self._state(chat_id).set_flag("deleted", int(cut))
 
     # ------------------------------------------------------------------- read
-    def messages_for(self, chat_id: str, *,
-                     breadcrumbs: bool = False) -> list[Message]:
+    def messages_for(self, chat_id: str, *, breadcrumbs: bool = False,
+                     observer: ProjectionObserver | None = None) -> list[Message]:
         """THE read choke-point: membership + every overlay applied.
         ``breadcrumbs=True`` (the harness's trigger scan, V92) keeps the V50
         reaction info-events in the fold; every viewer surface leaves them
         dropped."""
-        snap = self._require_member(chat_id)
+        snap = observed(observer, "snapshot", lambda: self._require_member(chat_id))
+        observed_count(observer, "fold_calls")
         # history-on-join policy: unless the group shares history, a member
         # sees only messages from their (latest) join onward; info pills stay
         history_from = 0
         if snap.kind is ChatKind.GROUP and not snap.permissions.send_history:
             history_from = snap.members[self.user].joined_ns
         ov = ChatOverlays(self.tx, chat_id)
-        return build_messages(
+        envelopes = observed(
+            observer, "envelope_load", lambda: self.store.messages(chat_id))
+        edits = observed(observer, "edits_load", ov.edits)
+        redactions = observed(observer, "redactions_load", ov.redactions)
+        reactions = observed(
+            observer, "reactions_load",
+            lambda: self._verified_reactions(chat_id, snap, ov),
+        )
+        state = observed(
+            observer, "viewer_state_load", lambda: self._state(chat_id).get())
+        return observed(observer, "readmodel_fold", lambda: build_messages(
             chat_id,
             self.user,
-            self.store.messages(chat_id),
+            envelopes,
             self.sealer,
-            edits=ov.edits(),
-            redactions=ov.redactions(),
-            reactions=self._verified_reactions(chat_id, snap, ov),
-            state=self._state(chat_id).get(),
+            edits=edits,
+            redactions=redactions,
+            reactions=reactions,
+            state=state,
             history_from_ns=history_from,
             tenure=snap.tenure,
             verify_redaction=self._redaction_verifier(chat_id),
             owner_of=self.directory.owner_of if self.directory else None,
             breadcrumbs=breadcrumbs,
-        )
+            observer=observer,
+        ))
 
     def _crypto_boundary(self) -> bool:
         """True when this mesh has a real crypto boundary to enforce overlay
@@ -565,10 +578,11 @@ class MessagingService:
             return ev.get("who") == self.user   # phrased for the subject only
         return etype in self._PREVIEWABLE_EVENTS
 
-    def chat_overview(self, chat_id: str) -> dict:
+    def chat_overview(self, chat_id: str,
+                      observer: ProjectionObserver | None = None) -> dict:
         """One-pass sidebar payload: last visible message + unread info + my
         per-chat flags. Folds the chat once (vs unread()+tail separately)."""
-        msgs = self.messages_for(chat_id)
+        msgs = self.messages_for(chat_id, observer=observer)
         state = self._state(chat_id).get()
         # the preview includes info events (R46 — a fresh group reads "You
         # created this chat", WhatsApp-style; the client phrases the event)

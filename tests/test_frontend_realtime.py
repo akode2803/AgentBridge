@@ -25,6 +25,13 @@ def test_realtime_refresh_is_coalesced_and_visibility_scoped():
     assert 'observe("refetch_completed"' in realtime
     assert 'observe("render_completed"' in realtime
     assert "window.agentBridgeRealtimeMetrics = realtimeMetrics" in realtime
+    assert "window.agentBridgeChatOpenMetrics = chatOpenMetrics" in chat
+    assert "sidebar_fetch_ms" in chat
+    assert "chat_fetch_ms" in chat
+    assert "aux_fetch_ms" in chat
+    assert "first_painted_ms" in chat
+    assert "openTrace.chat_id" not in chat
+    assert "openTrace.body" not in chat
     assert "Date.now() - Math.round(Number(frame.server_ns)" not in realtime
     assert "if (document.hidden || !document.hasFocus()) return;" in chat
     assert "fetchSeq !== chatsFetchSeq" in chat

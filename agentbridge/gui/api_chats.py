@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
 from .context import GuiApp
+from .projection_perf import ProjectionObservation
 from .routing import authed
 from .serialize import chat_json, message_json, user_json
 
@@ -188,7 +190,10 @@ def state(app: GuiApp, req) -> dict:
             if (acc := app.directory0.get(n)) is not None
         }
         return out
+    observation = ProjectionObservation("sidebar")
     users: dict = {}
+    # Keep this loop in its current ownership boundary; P0 only times it.
+    directory_t0 = time.perf_counter()
     for name in mesh.directory.names():
         acc = mesh.directory.get(name)
         if acc is None:
@@ -205,15 +210,24 @@ def state(app: GuiApp, req) -> dict:
                 name, acc.keys.sign_pub, acc.keys.agree_pub)
             entry["key_verified"] = mesh.key_pins.verified(name)
         users[name] = entry
+    observation.stage(
+        "directory_projection", time.perf_counter() - directory_t0)
+    observation.count("serialization_count", len(users))
     out["users"] = users
     chats = []
-    live = _live_by_chat(app, mesh)
-    for snap in mesh.chats_for():
-        overview = mesh.chat_overview(snap.id)
+    live = observation.measure("status_annotation", lambda: _live_by_chat(app, mesh))
+    snapshots = observation.measure("visible_chat_enumeration", mesh.chats_for)
+    observation.count("room_count", len(snapshots))
+    overview_t0 = time.perf_counter()
+    for snap in snapshots:
+        overview = mesh.chat_overview(snap.id, observer=observation)
         entry = chat_json(snap, overview=overview)
         if live.get(snap.id):  # V66: sidebar liveliness — set only when active
             entry["live"] = live[snap.id]
         chats.append(entry)
+    observation.stage(
+        "overview_folds", time.perf_counter() - overview_t0)
+    observation.count("serialization_count", len(chats))
     out["chats"] = chats
     # R27: pin-mismatch alerts (an account's published keys changed) — the
     # sidebar shows a banner until the signed-in human acknowledges
@@ -228,6 +242,7 @@ def state(app: GuiApp, req) -> dict:
              a.get("seen_agree_pub", ""))}
         for a in mesh.key_alerts()
     ]
+    observation.log(app.home, "ok")
     return out
 
 
@@ -237,43 +252,60 @@ def chat(app: GuiApp, req, mesh) -> dict:
     messages, active pins, my starred ids + read cursor."""
     chat_id = req.params.get("id", "")
     tail = req.int_param("tail", 200, 1, 1000)
-    snap = mesh.snapshot(chat_id)
-    msgs = mesh.messages_for(chat_id)  # raises NotAMember for outsiders
-    me = mesh.user
-    receipts = mesh.receipts_for(chat_id)
-    payload = []
-    for m in msgs[-tail:]:
-        d = message_json(m, me)
-        r = receipts.get(m.id)
-        if r:
-            d["receipt"] = r
-        payload.append(d)
-    mine = mesh.my_state(chat_id)
-    meta = chat_json(snap, full=True)
-    meta["created"] = _created_iso(msgs)
-    meta["created_by"] = _created_by(msgs)
-    meta["archived"] = mine["archived"]  # per-user flag; the header menu flips on it
-    meta["pins"] = _pins_list(mesh.pins(chat_id), msgs)
-    # V62: the per-chat agents stand-down flag (shared, any member flips it).
-    meta["agents_paused"] = read_pause(
-        mesh.directory, mesh.tx, chat_id=chat_id, snapshot=snap,
-    )
-    # V102: the blocker's own view of a blocked DM — the frontend swaps the
-    # composer for a "You blocked @X · Unblock" bar. ONLY the viewer's own
-    # block list feeds this; being blocked BY the peer never leaks (the
-    # WhatsApp rule — that side just gets "@X is not available" on send).
-    if meta["kind"] == "dm":
-        other = next((m for m in snap.members if m != me), None)
-        acc = mesh.directory.get(me)
-        meta["blocked"] = bool(other and acc and other in acc.blocked)
-    return {
-        "meta": meta,
-        "messages": payload,
-        "me": me,
-        "starred": mine["starred"],
-        "read_ns": mine["read_ns"],
-        "total": len(msgs),
-    }
+    observation = ProjectionObservation("chat")
+    try:
+        snap = observation.measure("membership_gate", lambda: mesh.snapshot(chat_id))
+        msgs = observation.measure(
+            "transcript_fold",
+            lambda: mesh.messages_for(chat_id, observer=observation),
+        )  # raises NotAMember for outsiders
+        me = mesh.user
+        receipts = observation.measure(
+            "receipts_fold",
+            lambda: mesh.receipts_for(chat_id, observer=observation),
+        )
+        payload = []
+
+        def assemble_payload() -> None:
+            for message in msgs[-tail:]:
+                item = message_json(message, me)
+                receipt = receipts.get(message.id)
+                if receipt:
+                    item["receipt"] = receipt
+                payload.append(item)
+
+        observation.measure("payload_assembly", assemble_payload)
+        observation.count("serialization_count", len(payload))
+        mine = observation.measure("viewer_state", lambda: mesh.my_state(chat_id))
+        meta = chat_json(snap, full=True)
+        meta["created"] = _created_iso(msgs)
+        meta["created_by"] = _created_by(msgs)
+        meta["archived"] = mine["archived"]
+        meta["pins"] = observation.measure(
+            "pins", lambda: _pins_list(mesh.pins(chat_id), msgs))
+        meta["agents_paused"] = observation.measure(
+            "pause_state",
+            lambda: read_pause(
+                mesh.directory, mesh.tx, chat_id=chat_id, snapshot=snap,
+            ),
+        )
+        if meta["kind"] == "dm":
+            other = next((member for member in snap.members if member != me), None)
+            acc = mesh.directory.get(me)
+            meta["blocked"] = bool(other and acc and other in acc.blocked)
+        result = {
+            "meta": meta,
+            "messages": payload,
+            "me": me,
+            "starred": mine["starred"],
+            "read_ns": mine["read_ns"],
+            "total": len(msgs),
+        }
+    except Exception:
+        observation.log(app.home, "denied_or_error")
+        raise
+    observation.log(app.home, "ok")
+    return result
 
 
 def _pins_list(pins: dict, msgs) -> list[dict]:

@@ -16,6 +16,7 @@ import re
 from typing import Any, Callable
 
 from ..core.models import BodyRecord, Envelope, Message, MsgKind
+from .projection import ProjectionObserver, observed_count
 from .sealer import Sealer
 
 __all__ = ["build_messages", "unread_info", "parse_tags", "member_at"]
@@ -56,20 +57,28 @@ def build_messages(
     verify_redaction: Callable[[str, dict, str], bool] | None = None,
     owner_of: Callable[[str], str | None] | None = None,
     breadcrumbs: bool = False,
+    observer: ProjectionObserver | None = None,
 ) -> list[Message]:
     edits = edits or {}
     redactions = redactions or {}
     reactions = reactions or {}
     state = state or {}
     tenure = tenure or {}
+    metrics: dict[str, int] = {}
+
+    def bump(name: str, value: int = 1) -> None:
+        if observer is not None:
+            metrics[name] = metrics.get(name, 0) + value
 
     # dedup by id (at-least-once transport), deterministic order
     by_id: dict[str, dict] = {}
+    bump("raw_messages", len(envelopes))
     for rec in envelopes:
         rid = rec.get("id")
         if rid:
             by_id.setdefault(rid, rec)
     ordered = sorted(by_id.values(), key=lambda r: (r.get("ns", 0), r.get("from", "")))
+    bump("deduplicated_messages", len(ordered))
 
     hidden = set(state.get("hidden", []))
     starred = set(state.get("starred", []))
@@ -94,12 +103,14 @@ def build_messages(
             # the agent's own message can raise its attention; the prompt
             # layer still renders them as nothing.
             if not breadcrumbs:
+                bump("drop_breadcrumb")
                 continue
         if (
             history_from_ns
             and env.kind is MsgKind.MESSAGE
             and env.ns < history_from_ns
         ):
+            bump("drop_history")
             continue  # history-on-join: pre-join messages stay invisible
         # R25: drop a MESSAGE whose sender wasn't a member at its ns — closes
         # the removed-member injection (a departed member who kept the old
@@ -110,6 +121,7 @@ def build_messages(
             and env.from_ in tenure
             and not member_at(tenure.get(env.from_), env.ns)
         ):
+            bump("drop_tenure")
             continue
         msg = Message(
             id=env.id, chat_id=chat_id, from_=env.from_, ns=env.ns, ts=env.ts,
@@ -117,8 +129,10 @@ def build_messages(
         )
 
         if env.kind is MsgKind.MESSAGE:
+            bump("unseal_attempted")
             body = sealer.unseal(chat_id, env)
             if body is None:
+                bump("unseal_failed")
                 # R66: won't open for this reader RIGHT NOW — usually a fresh
                 # key epoch (new chat / rotation) the read mirror hasn't
                 # pulled yet; it heals on the next refresh. Flag it so
@@ -129,6 +143,8 @@ def build_messages(
             msg.reply_to, msg.files, msg.fwd = body.reply_to, body.files, body.fwd
 
             edit = edits.get(env.id)
+            if edit:
+                bump("edit_attempted")
             # enforced on read too: the author, or — for an agent's message —
             # the author's responsible member (R44). The edit body is SEALED
             # AS its editor (AAD + signature bind the sealer), so unsealing
@@ -143,6 +159,7 @@ def build_messages(
                     Envelope.from_dict({**edit, "id": env.id, "from": edit_by}),
                 )
                 if eb is not None:
+                    bump("edit_honored")
                     msg.body, msg.tags = eb.body, eb.tags
                     msg.edited = {"at": edit.get("at", ""), "ns": int(edit.get("ns", 0))}
 
@@ -152,10 +169,13 @@ def build_messages(
             # is ignored and the message stays visible. verify_redaction is None
             # only for plaintext/dev meshes, where there's no crypto boundary.
             red = redactions.get(env.id)
+            if red is not None:
+                bump("redaction_attempted")
             if red is not None and (
                 verify_redaction is None
                 or verify_redaction(env.id, red, env.from_)
             ):
+                bump("redaction_honored")
                 honored.add(env.id)
                 msg.deleted = True
                 msg.body, msg.tags, msg.files = "", [], []
@@ -165,10 +185,13 @@ def build_messages(
 
         # viewer-only drops
         if env.id in hidden:
+            bump("drop_hidden")
             continue
         if cut_ns and env.ns <= cut_ns and not (keep_starred and env.id in starred):
+            bump("drop_clear")
             continue
         if del_ns and env.ns <= del_ns:
+            bump("drop_delete")
             continue
 
         out.append(msg)
@@ -182,6 +205,9 @@ def build_messages(
                 blank["quote"] = False
             msg.reply_to = blank
 
+    bump("visible_messages", len(out))
+    for name, value in metrics.items():
+        observed_count(observer, name, value)
     return out
 
 
