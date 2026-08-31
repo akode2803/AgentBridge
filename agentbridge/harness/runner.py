@@ -294,8 +294,15 @@ class AgentRunner:
                 on_added()
 
         prioritized = set()
-        if collect is None:
+        repeated = set()
+
+        def scan_priorities() -> None:
+            if collect is not None:
+                return
             for chat_id in self._take_priority_chats():
+                if chat_id in prioritized:
+                    repeated.add(chat_id)
+                    continue
                 try:
                     snap = self.mesh.snapshot(chat_id)
                     if not snap.is_member(self.agent):
@@ -304,13 +311,19 @@ class AgentRunner:
                     prioritized.add(chat_id)
                 except Exception:
                     continue
-        for snap in self.mesh.membership.chats_for():
+
+        scan_priorities()
+        for snap in self.mesh.membership.iter_chats_for():
+            scan_priorities()
             if snap.id in prioritized:
                 continue
             try:
                 scan_room(snap)
             except Exception:  # noqa: BLE001 — one chat never blocks the rest
                 continue
+        scan_priorities()
+        for chat_id in repeated:
+            self._prioritize_chat(chat_id)
         for t in self.timers.due():
             if self.chat_standing_down(t["chat_id"]):
                 continue  # V62: held, stays due — fires on resume

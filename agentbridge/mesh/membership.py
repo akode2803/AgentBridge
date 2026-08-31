@@ -441,7 +441,14 @@ class MembershipService:
 
     def chats_for(self) -> list[ChatSnapshot]:
         """Every chat THIS identity is a member of (visibility = membership)."""
-        return [s for s in self._snapshots() if s.is_member(self.user)]
+        return list(self.iter_chats_for())
+
+    def iter_chats_for(self):
+        """Yield visible chats lazily so latency-sensitive consumers can act
+        between complete snapshot folds without weakening membership checks."""
+        for snap in self._snapshots():
+            if snap.is_member(self.user):
+                yield snap
 
     def _snapshots(self):
         for chat_id in self.tx.list_chat_ids():
