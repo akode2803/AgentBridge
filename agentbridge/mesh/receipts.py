@@ -15,7 +15,7 @@ account never advances past Sent for free: it has no fresh heartbeat.
 from __future__ import annotations
 
 from ..core.errors import ValidationError
-from ..core.models import ChatKind, MsgKind, ReceiptState
+from ..core.models import ChatKind, Message, MsgKind, ReceiptState
 from .messaging import MessagingService
 from .presence import PresenceService
 from .privacy import PrivacyService
@@ -64,17 +64,27 @@ class ReceiptsService:
             return ReceiptState.DELIVERED
         return ReceiptState.SENT
 
-    def receipts_for(self, chat_id: str,
-                     observer: ProjectionObserver | None = None) -> dict[str, dict]:
+    def receipts_for(
+        self,
+        chat_id: str,
+        observer: ProjectionObserver | None = None,
+        *,
+        messages: list[Message] | tuple[Message, ...] | None = None,
+    ) -> dict[str, dict]:
         """{msg_id: {state, read_by, delivered_to, pending, total}} for the
         viewer's OWN messages (the tick column). State = the LOWEST tier any
         other member is at (v1: double-accent only when everyone read)."""
         snap = self.messaging._require_member(chat_id)
         others = [m for m in snap.members if m != self.user]
         cursors = self._cursors_of(chat_id, others)
+        projected = (self.messaging.messages_for(chat_id, observer=observer)
+                     if messages is None else list(messages))
+        if any(not isinstance(msg, Message) or msg.chat_id != chat_id
+               for msg in projected):
+            raise ValidationError("receipt projection is bound to another chat")
 
         out: dict[str, dict] = {}
-        for msg in self.messaging.messages_for(chat_id, observer=observer):
+        for msg in projected:
             if msg.from_ != self.user or msg.kind is not MsgKind.MESSAGE or msg.deleted:
                 continue
             if not others:  # self-chat: your own note is trivially read

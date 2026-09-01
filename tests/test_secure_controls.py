@@ -269,3 +269,43 @@ def test_pause_transport_failure_is_not_mistaken_for_resume(controls, monkeypatc
     monkeypatch.setattr(owner.tx, "list_docs", unavailable)
     with pytest.raises(OSError, match="offline"):
         read_pause(owner.directory, owner.tx)
+
+
+def test_cached_pause_projection_never_uses_fresh_listing(controls, monkeypatch):
+    owner, _ = controls
+    snap = owner.create_chat("Cached pause", members=["helper"])
+    record = publish_pause(owner, paused=True, chat_id=snap.id)
+    prefix = pause_prefix(snap.id)
+    paths = owner.tx.list_docs(prefix)
+    assert paths == [f"{prefix}/{record['id']}.json"]
+
+    monkeypatch.setattr(
+        owner.tx, "list_cached_docs_bounded",
+        lambda requested, limit: paths if requested == prefix and limit >= 1 else [],
+    )
+    monkeypatch.setattr(
+        owner.tx, "list_docs",
+        lambda _prefix: (_ for _ in ()).throw(AssertionError("fresh listing")),
+    )
+    assert read_pause(
+        owner.directory, owner.tx, chat_id=snap.id,
+        snapshot=owner.snapshot(snap.id), source="cached",
+    ) is True
+    with pytest.raises(AssertionError, match="fresh listing"):
+        read_pause(
+            owner.directory, owner.tx, chat_id=snap.id,
+            snapshot=owner.snapshot(snap.id),
+        )
+    with pytest.raises(ValueError, match="fresh or cached"):
+        read_pause(owner.directory, owner.tx, source="unknown")
+
+
+def test_cached_pause_projection_refuses_partial_prefix(controls, monkeypatch):
+    owner, _ = controls
+    monkeypatch.setattr(
+        owner.tx, "list_cached_docs_bounded",
+        lambda _prefix, _limit: (_ for _ in ()).throw(
+            OverflowError("projection exceeds budget")),
+    )
+    with pytest.raises(OverflowError, match="exceeds budget"):
+        read_pause(owner.directory, owner.tx, source="cached")

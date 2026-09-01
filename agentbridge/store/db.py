@@ -20,6 +20,16 @@ from typing import Any, Iterable
 
 __all__ = ["Store", "OutboxItem"]
 
+_INIT_LOCKS: dict[Path, threading.Lock] = {}
+_INIT_LOCKS_GUARD = threading.Lock()
+
+
+def _store_init_lock(path: Path) -> threading.Lock:
+    key = path.resolve()
+    with _INIT_LOCKS_GUARD:
+        return _INIT_LOCKS.setdefault(key, threading.Lock())
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages(
   chat_id TEXT NOT NULL,
@@ -93,6 +103,10 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        with _store_init_lock(self.path):
+            self._initialize()
+
+    def _initialize(self) -> None:
         with self._conn() as c:
             c.executescript(_SCHEMA)
             additions = {

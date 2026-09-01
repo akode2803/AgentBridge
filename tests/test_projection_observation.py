@@ -13,7 +13,7 @@ def _records(home):
     return [json.loads(line) for line in path.read_text(encoding="ascii").splitlines()]
 
 
-def test_chat_and_sidebar_observations_are_content_free_and_detect_two_folds(rig):
+def test_chat_and_sidebar_observations_are_content_free_and_detect_one_fold(rig):
     rig.signup()
     cid = rig.post("/api/mesh/create_chat", name="Observed", members=[])["chat"]["id"]
     rig.post("/api/mesh/post", chat_id=cid, body="projection-private-body")
@@ -29,8 +29,8 @@ def test_chat_and_sidebar_observations_are_content_free_and_detect_two_folds(rig
     chat_row = next(row for row in reversed(rows) if row["scope"] == "chat")
     assert sidebar_row["outcome"] == chat_row["outcome"] == "ok"
     assert sidebar_row["counts"]["room_count"] >= 1
-    assert chat_row["counts"]["fold_calls"] == 2
-    assert chat_row["counts"]["raw_messages"] >= chat["total"] * 2
+    assert chat_row["counts"]["fold_calls"] == 1
+    assert chat_row["counts"]["raw_messages"] >= chat["total"]
     assert chat_row["stages_s"]["transcript_fold"] >= 0
     assert chat_row["stages_s"]["receipts_fold"] >= 0
     encoded = json.dumps(rows)

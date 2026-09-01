@@ -176,6 +176,26 @@ def test_delivered_is_a_real_receipt_without_presence(world):
     assert rec["state"] == "delivered" and rec["delivered_to"] == ["fable"]
 
 
+def test_receipts_reuse_membership_filtered_request_projection(world):
+    meshes, _ = world
+    aryan, fable = meshes["aryan"], meshes["fable"]
+    dm = aryan.create_dm("fable")
+    env = aryan.post(dm.id, "reuse this fold")
+    ripple(aryan, dm.id, fable)
+    projected = aryan.messages_for(dm.id)
+    assert aryan.receipts_for(dm.id, messages=projected) == \
+        aryan.receipts_for(dm.id)
+    assert env.id in aryan.receipts_for(dm.id, messages=projected)
+
+    other = aryan.create_chat("Other", members=[])
+    other_message = aryan.post(other.id, "wrong room")
+    aryan.outbox.flush_once()
+    wrong_projection = aryan.messages_for(other.id)
+    assert any(message.id == other_message.id for message in wrong_projection)
+    with pytest.raises(ValidationError, match="bound to another chat"):
+        aryan.receipts_for(dm.id, messages=wrong_projection)
+
+
 def test_group_receipts_lowest_tier_wins(world):
     meshes, _ = world
     aryan, fable, sudhir = meshes["aryan"], meshes["fable"], meshes["sudhir"]

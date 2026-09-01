@@ -161,7 +161,8 @@ def test_store_multithreaded_writes(store):
     assert store.message_count("mt") == 200
 
 
-def test_message_column_migration_is_concurrent_start_safe(tmp_path):
+@pytest.mark.parametrize("_attempt", range(10))
+def test_message_column_migration_is_concurrent_start_safe(tmp_path, _attempt):
     path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(path) as conn:
         conn.execute(

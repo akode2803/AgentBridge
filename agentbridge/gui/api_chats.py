@@ -262,7 +262,8 @@ def chat(app: GuiApp, req, mesh) -> dict:
         me = mesh.user
         receipts = observation.measure(
             "receipts_fold",
-            lambda: mesh.receipts_for(chat_id, observer=observation),
+            lambda: mesh.receipts_for(
+                chat_id, observer=observation, messages=msgs),
         )
         payload = []
 
@@ -287,6 +288,7 @@ def chat(app: GuiApp, req, mesh) -> dict:
             "pause_state",
             lambda: read_pause(
                 mesh.directory, mesh.tx, chat_id=chat_id, snapshot=snap,
+                source="cached",
             ),
         )
         if meta["kind"] == "dm":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from typing import Literal
 
 from ... import crypto
 from ...core.models import UserKind
@@ -32,6 +33,7 @@ PAUSE_FIELDS = {
     "actor_epoch",
 }
 _FUTURE_SKEW_NS = int(5 * 60 * 1e9)
+_PAUSE_READ_LIMIT = 10_000
 
 
 def owner_command_prefix(target: str) -> str:
@@ -257,10 +259,23 @@ def publish_pause(mesh, *, paused: bool, chat_id: str = "") -> dict:
     return record
 
 
-def read_pause(directory, tx, *, chat_id: str = "", snapshot=None) -> bool:
-    """Fold latest valid signed state; malformed and legacy controls are inert."""
+def read_pause(directory, tx, *, chat_id: str = "", snapshot=None,
+               source: Literal["fresh", "cached"] = "fresh") -> bool:
+    """Fold latest valid signed state; malformed and legacy controls are inert.
+
+    ``fresh`` remains the enforcement default and may merge a live runtime
+    listing. ``cached`` is presentation-only: it reads one bounded synchronized
+    mirror snapshot while applying the identical signature/membership rules.
+    """
+    if source == "fresh":
+        paths = tx.list_docs(pause_prefix(chat_id))
+    elif source == "cached":
+        paths = tx.list_cached_docs_bounded(
+            pause_prefix(chat_id), _PAUSE_READ_LIMIT)
+    else:
+        raise ValueError("pause source must be fresh or cached")
     valid = []
-    for path in tx.list_docs(pause_prefix(chat_id)):
+    for path in paths:
         try:
             doc = _strict(tx.get_doc(path), {"record", "sig"}, "pause envelope")
             record = _validate_pause(doc["record"])
