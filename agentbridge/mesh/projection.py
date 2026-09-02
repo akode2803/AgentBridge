@@ -1,8 +1,9 @@
 """Behavior-neutral observation contract for the current message projection.
 
-This is deliberately not a cache revision or alternate read model. P0 observes
-the existing membership-filtered ``messages_for`` choke point; revision
-authority remains deferred until every mutation owner has been inventoried.
+This is deliberately not cache authority or an alternate read model. P0
+observes the existing membership-filtered ``messages_for`` choke point; P2's
+separate input-version contract remains unusable for serving until a trusted
+freshness builder and membership recheck exist.
 """
 
 from __future__ import annotations

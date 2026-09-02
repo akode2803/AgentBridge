@@ -8,6 +8,6 @@ gui connectors.
 PowerShell (it re-encodes to UTF-16+BOM and mangles em-dashes).
 """
 
-__version__ = "0.24.247"
+__version__ = "0.24.248"
 
 __all__ = ["__version__"]
