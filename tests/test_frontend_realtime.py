@@ -45,3 +45,10 @@ def test_realtime_frames_remain_read_model_wakes_not_payloads():
     assert "V.refresh(false)" in realtime
     assert "frame.body" not in realtime
     assert "frame.activity" not in realtime
+
+
+def test_settings_has_no_mesh_global_pause_control():
+    settings = (ROOT / "settings.js").read_text(encoding="utf-8")
+    assert "st-pause" not in settings
+    assert "/api/mesh/pause" not in settings
+    assert "Stand down all agents" not in settings

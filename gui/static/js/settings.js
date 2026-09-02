@@ -776,20 +776,7 @@ async function renderSettings() {
         <p class="hint" style="margin-bottom:0">You become its responsible member.
         It starts with no local runner; choose a reviewed CLI in its settings.</p>
       </div>
-      <div class="card">
-        <h2>Emergency stand-down</h2>
-        <div class="row">
-          <label class="switch">
-            <input type="checkbox" id="st-pause" ${ms.paused ? "checked" : ""}>
-            <span class="slider"></span>
-          </label>
-          <span><b>Stand down all agents</b> — every agent in every chat
-          holds until resumed</span>
-        </div>
-        <p class="hint" style="margin-bottom:0">Any member can flip this.
-        Pending requests get one consolidated reply per chat after
-        resuming.</p>
-      </div>`;
+      `;
   } else if (section === "connection") {
     html = `${back}<h1>About</h1>
       <div class="card">
@@ -1501,14 +1488,6 @@ async function renderSettings() {
     toast(`Agent @${r.agent.username} created`);
     renderSettings();
   });
-  const stPause = $("#st-pause");
-  if (stPause) stPause.addEventListener("change", async (e) => {
-    const r = await api("/api/mesh/pause", { paused: e.target.checked });
-    if (r.error) { toast(r.error, true); return; }
-    Mesh.state.paused = r.paused;
-    renderChrome();
-  });
-
   // ---- profile photo: Edit → menu (Upload photo / Remove) ----
   const pfEdit = $("#pf-edit");
   if (pfEdit) {

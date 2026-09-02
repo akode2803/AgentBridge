@@ -11,10 +11,10 @@ The runner is deliberately model-agnostic: it hands deliveries to an injected
 ``Responder`` (R16's registry provides real ones) and posts what comes back.
 Without a responder it can only ``--dry-run`` — honest about R15's scope.
 
-Stand-down: the signed global pause (any member) and the agent's
-``active`` flag (its owner's explicit switch) both hold scanning and
-dispatch; cursors and the queue keep their place so resume answers the
-backlog under the catch-up policy instead of dropping it.
+Stand-down is deliberately scoped: room pause holds one chat, the agent's
+``active`` flag is its owner's cross-room switch, and the local peer hold is an
+emergency stop for this harness. Cursors and the queue keep their place so
+resume answers the backlog under the catch-up policy instead of dropping it.
 """
 
 from __future__ import annotations
@@ -173,7 +173,6 @@ class AgentRunner:
         # V62 per-chat stand-down reads, cached a few ticks (scan hits every
         # chat every poll): {chat_id: (paused, monotonic_read_at)}
         self._chat_pause: dict[str, tuple[bool, float]] = {}
-        self._global_pause: tuple[bool, float] | None = None
 
     # ------------------------------------------------------------ identity
     def verify_identity(self) -> list[str]:
@@ -206,9 +205,9 @@ class AgentRunner:
 
     def _peer_set_hold(self, held: bool) -> str:
         """A peer-repair pause: a harness-LOCAL hold, distinct from the owner's
-        active flag and the signed global member control. Persisted so it survives a
-        restart — a peer pauses a runaway agent and it STAYS paused until
-        resumed (by the peer or the owner)."""
+        active flag and signed room controls. Persisted so it survives a restart
+        — a peer pauses a runaway agent and it STAYS paused until resumed (by
+        the peer or the owner)."""
         self.mesh.store.cache_doc(self.HOLD_DOC, {"held": bool(held)})
         self._wake.set()
         return "harness held" if held else "harness resumed"
@@ -243,18 +242,6 @@ class AgentRunner:
         return paused
 
     def standing_down(self) -> bool:
-        from .runtime.controls import read_pause
-
-        now = time.monotonic()
-        hit = self._global_pause
-        if hit is None or now - hit[1] >= self.CHAT_PAUSE_TTL_S:
-            try:
-                paused = read_pause(self.mesh.directory, self.mesh.tx)
-            except Exception:  # noqa: BLE001 — retain last truth; unknown fails closed
-                paused = hit[0] if hit is not None else True
-            hit = self._global_pause = (paused, now)
-        if hit[0]:
-            return True
         if self._peer_held():                # a peer-repair hold (R22.5)
             return True
         acc = self.mesh.directory.get(self.agent)

@@ -472,8 +472,8 @@ def test_agents_create_patch_standdown_delete(rig):
     rig.post("/api/mesh/stand_down", down=False)
 
     st = rig.post("/api/mesh/pause", paused=True)
-    assert st["paused"] and rig.get("/api/mesh/state")["paused"] is True
-    rig.post("/api/mesh/pause", paused=False)
+    assert "retired" in st["error"]
+    assert rig.get("/api/mesh/state")["paused"] is False
 
     rig.post("/api/mesh/delete_agent", username="helper")
     assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False

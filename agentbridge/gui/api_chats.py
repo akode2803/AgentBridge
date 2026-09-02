@@ -73,9 +73,6 @@ def bridge_state(app: GuiApp, req) -> dict:
     no bridge/setup wizard, so it always reports configured; the fields the
     frontend actually reads are configured/v/caps/paused/connection
     (+ version)."""
-    mesh = app.mesh
-    directory = mesh.directory if mesh else app.directory0
-    tx = mesh.tx if mesh else app.directory0.tx
     lock = getattr(app, "lock", None)   # V111: the lock page keys off this
     return {
         "configured": True,
@@ -84,7 +81,7 @@ def bridge_state(app: GuiApp, req) -> dict:
         "instance_id": getattr(app, "instance_id", ""),
         "server_pid": os.getpid(),
         "caps": {"sse": True, "receipts": "delivered", "admins": True},
-        "paused": read_pause(directory, tx),
+        "paused": False,  # compatibility field; mesh-global pause is retired
         "user": app.user,
         # V125: a blind session restore in flight — the frontend holds the
         # boot surface instead of flashing the sign-in page
@@ -176,9 +173,7 @@ def state(app: GuiApp, req) -> dict:
         "connection": _connection(app),
     }
     mesh = app.mesh
-    directory = app.directory0 if mesh is None else mesh.directory
-    tx = app.directory0.tx if mesh is None else mesh.tx
-    out["paused"] = read_pause(directory, tx)
+    out["paused"] = False  # compatibility field; mesh-global pause is retired
     if mesh is None:
         # V125: signed-out-with-a-pending-restore is NOT signed-out
         out["restoring"] = bool(getattr(app, "restoring", False))

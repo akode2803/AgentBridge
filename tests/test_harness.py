@@ -720,20 +720,35 @@ def test_reply_can_schedule_a_timer_that_fires(hrig):
 
 # --------------------------------------------------------------- stand-down
 
-def test_global_pause_holds_then_resume_answers(hrig):
-    snap = hrig.owner.create_chat("Paused", members=["helper"])
+def test_legacy_global_pause_does_not_hold_unrelated_agent(hrig):
+    from agentbridge import crypto
+    from agentbridge.core.timekit import new_id, next_ns
+    from agentbridge.harness.runtime import controls as controls_module
+    from agentbridge.harness.runtime.models import canonical_json_bytes
+
+    snap = hrig.owner.create_chat("Legacy global pause", members=["helper"])
     responder = Scripted()
     runner = hrig.make_runner(responder)
-    publish_pause(hrig.owner, paused=True)
+    ns = next_ns()
+    record = {
+        "v": 1, "id": new_id("pause", ns), "ns": ns,
+        "scope": "global", "actor": hrig.owner.user, "chat_id": "",
+        "paused": True,
+        "actor_epoch": controls_module._actor_epoch(
+            hrig.owner.directory, hrig.owner.user),
+    }
+    bundle = hrig.owner.keystore.load(hrig.owner.user)
+    hrig.owner.tx.create_doc(
+        f"{controls_module.pause_prefix()}/{record['id']}.json",
+        {"record": record,
+         "sig": crypto.sign(bundle, canonical_json_bytes(record))},
+    )
+    assert controls_module.read_pause(
+        hrig.owner.directory, hrig.owner.tx) is True
     hrig.owner.post(snap.id, "@helper are you there?")
     ripple(hrig, runner, snap.id)
     turn(hrig, runner, snap.id)
-    assert responder.calls == []                       # standing down
-
-    publish_pause(hrig.owner, paused=False)
-    runner._global_pause = None
-    turn(hrig, runner, snap.id)
-    assert len(agent_msgs(hrig.owner, snap.id)) == 1   # backlog answered
+    assert len(agent_msgs(hrig.owner, snap.id)) == 1
 
 
 def test_owner_stand_down_switch_holds(hrig):

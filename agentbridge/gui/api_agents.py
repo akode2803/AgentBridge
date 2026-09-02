@@ -395,11 +395,11 @@ def stand_down(app, req, mesh) -> dict:
 
 @authed
 def pause(app, req, mesh) -> dict:
-    """Append an authenticated any-human global pause/resume state."""
-    from ..harness.runtime.controls import publish_pause
-
-    record = publish_pause(mesh, paused=bool(req.data.get("paused")))
-    return {"ok": True, "paused": record["paused"]}
+    """Compatibility endpoint for the retired any-member global control."""
+    return {
+        "error": "Mesh-wide pause was retired. Pause agents in one chat, "
+                 "or stand down your own agents.",
+    }
 
 
 @authed

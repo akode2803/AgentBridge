@@ -240,12 +240,15 @@ def _validate_pause(value: object) -> dict:
 
 def publish_pause(mesh, *, paused: bool, chat_id: str = "") -> dict:
     """Append one signed visible pause/resume state from a current human."""
-    if chat_id and not mesh.snapshot(chat_id).is_member(mesh.user):
+    if not chat_id:
+        raise ControlError(
+            "Mesh-wide pause was retired; pause one chat or stand down your own agents")
+    if not mesh.snapshot(chat_id).is_member(mesh.user):
         raise ControlError("pause actor is not a member of this chat")
     ns = next_ns()
     record = {
         "v": 1, "id": new_id("pause", ns), "ns": ns,
-        "scope": "room" if chat_id else "global", "actor": mesh.user,
+        "scope": "room", "actor": mesh.user,
         "chat_id": chat_id, "paused": bool(paused),
         "actor_epoch": _actor_epoch(mesh.directory, mesh.user),
     }

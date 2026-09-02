@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from agentbridge import crypto
+from agentbridge.core.timekit import new_id, next_ns
+from agentbridge.harness.runtime import controls as controls_module
 from agentbridge.harness.runtime.controls import (
     ControlError,
     consume_owner_command,
@@ -17,6 +20,7 @@ from agentbridge.harness.runtime.controls import (
     publish_pause,
     read_pause,
 )
+from agentbridge.harness.runtime.models import canonical_json_bytes
 from agentbridge.mesh.service import Mesh
 
 
@@ -33,6 +37,21 @@ def controls(tmp_path):
     yield owner, agent
     agent.close()
     owner.close()
+
+
+def _legacy_global_pause(mesh, paused=True):
+    ns = next_ns()
+    record = {
+        "v": 1, "id": new_id("pause", ns), "ns": ns,
+        "scope": "global", "actor": mesh.user, "chat_id": "",
+        "paused": bool(paused),
+        "actor_epoch": controls_module._actor_epoch(mesh.directory, mesh.user),
+    }
+    bundle = mesh.keystore.load(mesh.user)
+    doc = {"record": record,
+           "sig": crypto.sign(bundle, canonical_json_bytes(record))}
+    mesh.tx.create_doc(f"{pause_prefix()}/{record['id']}.json", doc)
+    return record
 
 
 def test_owner_command_is_pairwise_encrypted_bound_and_one_use(controls):
@@ -198,42 +217,54 @@ def test_agent_stop_api_rejects_stale_or_ambiguous_runs(controls):
         }))["error"]
 
 
-def test_signed_global_pause_resume_and_legacy_inert(controls):
+def test_new_global_pause_is_rejected_but_legacy_record_remains_auditable(controls):
     owner, _ = controls
     owner.tx.put_doc("control.json", {"paused": True, "by": "mallory"})
     assert read_pause(owner.directory, owner.tx) is False
-    publish_pause(owner, paused=True)
+    with pytest.raises(ControlError, match="retired"):
+        publish_pause(owner, paused=True)
+    _legacy_global_pause(owner, paused=True)
     assert read_pause(owner.directory, owner.tx) is True
-    publish_pause(owner, paused=False)
-    assert read_pause(owner.directory, owner.tx) is False
 
 
 def test_inactive_pause_actor_has_no_authority(controls):
     owner, _ = controls
-    publish_pause(owner, paused=True)
+    snap = owner.create_chat("Inactive pause", members=["helper"])
+    publish_pause(owner, paused=True, chat_id=snap.id)
     from agentbridge.mesh.lifecycle import publish_change
 
     publish_change(
         owner.directory, owner.keystore, "aryan", actor="aryan",
         action="state", active=False,
     )
-    assert read_pause(owner.directory, owner.tx) is False
+    assert read_pause(
+        owner.directory, owner.tx, chat_id=snap.id,
+        snapshot=owner.snapshot(snap.id),
+    ) is False
 
 
 def test_tampered_pause_and_wrong_path_are_inert(controls):
     owner, _ = controls
-    record = publish_pause(owner, paused=True)
-    path = f"{pause_prefix()}/{record['id']}.json"
+    snap = owner.create_chat("Tampered pause", members=["helper"])
+    prefix = pause_prefix(snap.id)
+    record = publish_pause(owner, paused=True, chat_id=snap.id)
+    path = f"{prefix}/{record['id']}.json"
     doc = owner.tx.get_doc(path)
     doc["record"]["paused"] = False
     owner.tx.put_doc(path, doc)
-    assert read_pause(owner.directory, owner.tx) is False
+    assert read_pause(
+        owner.directory, owner.tx, chat_id=snap.id,
+        snapshot=owner.snapshot(snap.id),
+    ) is False
 
-    valid = publish_pause(owner, paused=True)
-    valid_path = f"{pause_prefix()}/{valid['id']}.json"
-    owner.tx.put_doc(f"{pause_prefix()}/wrong.json", owner.tx.get_doc(valid_path))
+    valid = publish_pause(owner, paused=True, chat_id=snap.id)
+    valid_path = f"{prefix}/{valid['id']}.json"
+    owner.tx.put_doc(f"{prefix}/wrong.json", owner.tx.get_doc(valid_path))
     owner.tx.delete_doc(valid_path)
-    assert read_pause(owner.directory, owner.tx) is False
+    assert read_pause(
+        owner.directory, owner.tx, chat_id=snap.id,
+        snapshot=owner.snapshot(snap.id),
+    ) is False
 
 
 def test_room_pause_requires_current_member(controls):
@@ -261,7 +292,6 @@ def test_room_pause_requires_current_member(controls):
 
 def test_pause_transport_failure_is_not_mistaken_for_resume(controls, monkeypatch):
     owner, _ = controls
-    publish_pause(owner, paused=True)
 
     def unavailable(_prefix):
         raise OSError("offline")
