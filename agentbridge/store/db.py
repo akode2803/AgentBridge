@@ -277,6 +277,14 @@ class Store:
                 (chat_id, log_name, offset),
             )
 
+    def log_offsets(self, chat_id: str) -> dict[str, int]:
+        """Content-free local read frontier for every writer log in a chat."""
+        rows = self._conn().execute(
+            "SELECT log_name,offset FROM log_offsets WHERE chat_id=? ORDER BY log_name",
+            (chat_id,),
+        )
+        return {str(name): int(offset) for name, offset in rows}
+
     def get_cursor(self, scope: str, key: str) -> int:
         row = self._conn().execute(
             "SELECT ns FROM cursors WHERE scope=? AND key=?", (scope, key)

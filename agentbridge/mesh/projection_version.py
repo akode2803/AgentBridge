@@ -25,7 +25,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 REQUIRED_COMPONENTS = frozenset({
-    "membership", "messages", "edits", "redactions", "reactions",
+    "membership", "messages", "edits", "redactions", "reactions", "pins",
     "viewer_state", "receipts", "directory", "key_epoch", "key_trust",
     "runtime", "presence", "pause", "replication_frontier", "expiry",
 })

@@ -19,6 +19,9 @@ from .projection_version import (
     ProjectionComponent, ProjectionInputVersion, ProjectionScope,
     ProjectionVersionError, invalidation_scopes,
 )
+from .projection_inputs import (
+    ProjectionInputCollection, ProjectionInputCollector, ProjectionInputError,
+)
 from .receipts import ReceiptsService
 from .readmodel import build_messages, parse_tags, unread_info
 from .sealer import E2EESealer, PlainSealer, Sealer
@@ -34,5 +37,6 @@ __all__ = [
     "build_messages", "parse_tags", "unread_info", "AttachmentDelivery",
     "PreparedAttachment", "ProjectionObserver", "ProjectionComponent",
     "ProjectionInputVersion", "ProjectionScope", "ProjectionVersionError",
-    "invalidation_scopes",
+    "invalidation_scopes", "ProjectionInputCollection",
+    "ProjectionInputCollector", "ProjectionInputError",
 ]

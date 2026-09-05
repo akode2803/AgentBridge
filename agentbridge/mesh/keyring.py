@@ -14,6 +14,7 @@ Epoch model (docs/THREAT_MODEL.md):
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -58,7 +59,7 @@ class KeyStore:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, self._path(name))
 
-    def load(self, name: str) -> bytes | None:
+    def load(self, name: str, *, upgrade: bool = True) -> bytes | None:
         try:
             text = self._path(name).read_text(encoding="utf-8").strip()
         except (FileNotFoundError, OSError):
@@ -70,7 +71,7 @@ class KeyStore:
             bundle = crypto.b64d(text)
         except (ValueError, OSError):
             return None
-        if bundle and dpapi.available():
+        if upgrade and bundle and dpapi.available():
             self.save(name, bundle)  # transparent one-time upgrade to wrapped
         return bundle
 
@@ -89,6 +90,40 @@ class ChatKeyService:
         self._cache: dict[tuple[str, int], bytes] = {}  # (chat, epoch) -> key
 
     # ------------------------------------------------------------- reading
+    def projection_facts(self, chat_id: str, docs: dict) -> dict:
+        """Opaque local key facts without read-through or key-cache mutation."""
+        bundle = self.keystore.load(self.user, upgrade=False)
+        resident = {
+            epoch: key for (room, epoch), key in tuple(self._cache.items())
+            if room == chat_id
+        }
+
+        def fingerprint(key: bytes | None) -> str:
+            return hashlib.sha256(b"ab-projection-key\0" + key).hexdigest() if key else ""
+
+        available = {}
+        epochs = set(resident)
+        for path, doc in docs.items():
+            epoch = doc.get("epoch") if isinstance(doc, dict) else None
+            if (isinstance(epoch, int) and not isinstance(epoch, bool)
+                    and path == P.keys(chat_id, epoch)):
+                epochs.add(epoch)
+        for epoch in sorted(epochs):
+            doc = docs.get(P.keys(chat_id, epoch))
+            wrapped = doc.get("wrapped") if isinstance(doc, dict) else None
+            wrapped = wrapped.get(self.user) if isinstance(wrapped, dict) else None
+            unwrapped = None
+            if bundle and wrapped:
+                try:
+                    unwrapped = crypto.unwrap_key_with(bundle, wrapped)
+                except (crypto.CryptoFail, TypeError, ValueError, KeyError):
+                    pass
+            available[str(epoch)] = {
+                "resident": fingerprint(resident.get(epoch)),
+                "unwrap": fingerprint(unwrapped),
+            }
+        return {"identity": fingerprint(bundle), "epochs": available}
+
     def epochs(self, chat_id: str) -> list[tuple[int, dict]]:
         """Every epoch doc of a chat, oldest→newest by id (id = ns ordinal)."""
         out = []

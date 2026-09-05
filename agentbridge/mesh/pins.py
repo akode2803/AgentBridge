@@ -31,6 +31,7 @@ eventual answer; pinning protects every established relationship.
 from __future__ import annotations
 
 import hashlib
+import copy
 import threading
 from pathlib import Path
 
@@ -165,6 +166,26 @@ class KeyPinStore:
         with self._lock:
             pin = self._pins.get(name) or {}
         return str(pin.get("verified") or "")
+
+    def projection_facts(self, names) -> dict:
+        """Bounded local trust inputs for projection-version hashing.
+
+        These facts are never returned to clients directly. The projection
+        collector digests them immediately so cache keys change when local
+        trust, verification, or a key-change alert changes.
+        """
+        selected = sorted({str(name) for name in names if name})
+        with self._lock:
+            return {
+                "pins": {
+                    name: copy.deepcopy(self._pins.get(name) or {})
+                    for name in selected
+                },
+                "alerts": [
+                    copy.deepcopy(alert) for alert in self._alerts
+                    if str(alert.get("name") or "") in selected
+                ],
+            }
 
     def mark_verified(self, name: str) -> None:
         """Record that the signed-in human compared fingerprints out-of-band.
