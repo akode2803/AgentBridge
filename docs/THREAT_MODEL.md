@@ -39,6 +39,13 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   **nothing**, never a wrong/forged plaintext (`test_..._tamper_detected`).
   This also defeats **replay**: an old ciphertext re-posted under a new id/ns
   fails the AAD bind.
+- **Decrypted-body cache**: reuse is bound to the complete authenticated
+  envelope, current trusted sender signing key and effective epoch key. Hits
+  resolve those keys again and return detached bodies. Removing the identity
+  key file alone does not revoke an already resident historical epoch key;
+  without a resident or recoverable epoch key, cached plaintext is not returned.
+  This cryptographic cache is not an access-control boundary: public reads
+  still enforce current membership and per-user visibility overlays.
 - **Forward membership**: removing a member (or a member leaving) rotates the
   epoch; the departed keeps keys for epochs they already held (history stays
   readable to them — WhatsApp/Signal semantics) but never gets a new one

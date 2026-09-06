@@ -9,7 +9,10 @@ zero caller changes (the whole point of the seam).
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import threading
 from abc import ABC, abstractmethod
 
 from .. import crypto
@@ -114,14 +117,11 @@ class E2EESealer(Sealer):
         self.user = user
         self._bundle = keystore_bundle
         self._snapshot_resolver = None
-        # unseal-result LRU (R24): a sealed envelope is IMMUTABLE for its
-        # (id, ns, epoch, nonce) — the AAD binds them — so re-verifying and
-        # re-decrypting on every read is pure waste. The profile showed the
-        # read model spending ~95% of its time here (one signature verify
-        # plus one account-doc file read PER MESSAGE PER CALL). Successes
-        # only: a failed unseal (key not yet synced) must retry next read.
+        # Cache successful crypto work only, bound to current signer/epoch
+        # keys and the full envelope. Access resolution still runs on hits.
         self._cache: dict[tuple, BodyRecord] = {}
         self._cache_cap = 4096
+        self._cache_lock = threading.Lock()
 
     def set_snapshot_resolver(self, resolver) -> None:
         """Use the same effective membership view as message authorization."""
@@ -150,26 +150,29 @@ class E2EESealer(Sealer):
     def unseal(self, chat_id: str, env: Envelope) -> BodyRecord | None:
         if env.epoch == 0:
             return None  # v2 has no plaintext envelopes (R16.5)
-        # the digest covers ct+sig so a record tampered AT REST misses the
-        # cache and re-verifies (to a blank) — "show nothing rather than lie"
-        # survives the cache; an untouched envelope always hits
-        import hashlib as _h
-
-        digest = _h.sha1(f"{env.ct}|{env.sig}".encode()).digest()
-        ckey = (chat_id, env.id, env.ns, env.epoch, env.nonce, digest)
-        hit = self._cache.get(ckey)
-        if hit is not None:
-            return hit                    # verified + decrypted once already
+        if not all(isinstance(value, str) for value in (env.nonce, env.ct, env.sig)):
+            return None
         sender = self.directory.get(env.from_)
         if sender is None or not sender.keys.sign_pub:
             return None
-        aad = _aad(chat_id, env.id, env.ns, env.from_, env.epoch)
-        signed = aad + b"|" + env.nonce.encode() + b"|" + env.ct.encode()
-        if not crypto.verify(sender.keys.sign_pub, env.sig, signed):
-            return None
+        sign_pub = sender.keys.sign_pub
         key = self.keys.my_key(chat_id, env.epoch)
         if key is None:
-            return None  # not my epoch (removed member / pre-join, no history)
+            return None  # neither a resident epoch key nor a recoverable wrap
+        ckey = (
+            "ab-unseal-v2", chat_id, env.id, env.ns, env.from_, env.epoch,
+            env.nonce, hashlib.sha256(env.ct.encode()).digest(),
+            hashlib.sha256(env.sig.encode()).digest(), sign_pub,
+            hashlib.sha256(key).digest(),
+        )
+        with self._cache_lock:
+            hit = self._cache.get(ckey)
+        if hit is not None:
+            return copy.deepcopy(hit)
+        aad = _aad(chat_id, env.id, env.ns, env.from_, env.epoch)
+        signed = aad + b"|" + env.nonce.encode() + b"|" + env.ct.encode()
+        if not crypto.verify(sign_pub, env.sig, signed):
+            return None
         try:
             raw = crypto.unseal_bytes(key, aad, env.nonce, env.ct)
         except crypto.CryptoFail:
@@ -179,11 +182,14 @@ class E2EESealer(Sealer):
         except json.JSONDecodeError:
             return None
         record = BodyRecord.from_dict(data if isinstance(data, dict) else {})
-        if len(self._cache) >= self._cache_cap:   # drop the oldest half
-            for k in list(self._cache)[: self._cache_cap // 2]:
-                self._cache.pop(k, None)
-        self._cache[ckey] = record        # treated as immutable by readers
-        return record
+        with self._cache_lock:
+            if len(self._cache) >= self._cache_cap:   # drop the oldest half
+                for k in list(self._cache)[: self._cache_cap // 2]:
+                    self._cache.pop(k, None)
+            self._cache[ckey] = record
+        # Nested files/tags/quotes must never alias the cached body, even on
+        # the first read that populated it.
+        return copy.deepcopy(record)
 
     def seal_blob(self, chat_id: str, blob_id: str, data: bytes) -> bytes:
         epoch, key = self.keys.ensure(chat_id, self._snapshot(chat_id))

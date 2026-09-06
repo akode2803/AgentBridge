@@ -142,7 +142,12 @@ class ChatKeyService:
         if cached is not None:
             return cached
         doc = self.tx.get_doc(P.keys(chat_id, epoch))
-        wrapped = (doc or {}).get("wrapped", {}).get(self.user)
+        wraps = doc.get("wrapped") if isinstance(doc, dict) else None
+        wrapped = wraps.get(self.user) if isinstance(wraps, dict) else None
+        if not isinstance(wrapped, dict) or not all(
+            isinstance(wrapped.get(field), str) for field in ("eph", "nonce", "ct")
+        ):
+            return None
         bundle = self.keystore.load(self.user)
         if not wrapped or bundle is None:
             return None
