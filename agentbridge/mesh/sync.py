@@ -74,15 +74,14 @@ class SyncEngine:
             # records attributed to someone else through its own log).
             owner = log_name.split("@", 1)[0]
             records = [r for r in records if r.get("from") == owner]
-        new = 0
-        if records:
-            observed = time.time_ns()
-            observed_mono = time.perf_counter_ns()
-            inserted = self.store.upsert_messages(
-                chat_id, records, observed_ns=observed,
-                observed_mono=observed_mono,
-                observed_clock=clock_id())
-            new = len(inserted)
+        observed = time.time_ns()
+        observed_mono = time.perf_counter_ns()
+        inserted = self.store.ingest_log(
+            chat_id, log_name, offset, new_offset, records,
+            observed_ns=observed, observed_mono=observed_mono,
+            observed_clock=clock_id())
+        new = len(inserted)
+        if inserted:
             if inserted and self.on_chat_progress is not None:
                 try:
                     self.on_chat_progress(chat_id, len(inserted))
@@ -102,8 +101,6 @@ class SyncEngine:
                     self.on_records(chat_id, inserted)
                 except Exception:  # noqa: BLE001 — pump can't break sync
                     pass
-        if new_offset != offset:
-            self.store.set_offset(chat_id, log_name, new_offset)
         return new
 
     # ------------------------------------------------------------- one chat

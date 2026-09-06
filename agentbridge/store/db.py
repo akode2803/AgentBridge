@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-__all__ = ["Store", "OutboxItem"]
+__all__ = ["Store", "OutboxItem", "LogIngestionConflict"]
+
+
+class LogIngestionConflict(RuntimeError):
+    """The local log position changed while transport bytes were being read."""
 
 _INIT_LOCKS: dict[Path, threading.Lock] = {}
 _INIT_LOCKS_GUARD = threading.Lock()
@@ -195,25 +199,66 @@ class Store:
         collapse here. Returns the records that were ACTUALLY NEW — the event
         pump publishes exactly these, so nothing ever notifies twice."""
         c = self._conn()
+        with c:
+            return self._insert_messages(
+                c, chat_id, records, observed_ns=observed_ns,
+                observed_mono=observed_mono, observed_clock=observed_clock)
+
+    @staticmethod
+    def _insert_messages(c: sqlite3.Connection, chat_id: str,
+                         records: Iterable[dict], *,
+                         observed_ns: int | None = None,
+                         observed_mono: int | None = None,
+                         observed_clock: str = "") -> list[dict]:
+        """Insert inside the caller's transaction, without committing it."""
         inserted: list[dict] = []
         observed = int(observed_ns if observed_ns is not None else time.time_ns())
         observed_tick = int(
             observed_mono if observed_mono is not None else time.perf_counter_ns())
+        for rec in records:
+            rid, ns = rec.get("id"), rec.get("ns")
+            if not rid or not isinstance(ns, int):
+                continue  # malformed record: transport-level tolerance
+            cur = c.execute(
+                "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload,"
+                "observed_ns,observed_mono,observed_clock) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (chat_id, rid, ns, rec.get("from", ""), rec.get("kind", "message"),
+                 json.dumps(rec, ensure_ascii=False), observed, observed_tick,
+                 str(observed_clock or "")[:80]),
+            )
+            if cur.rowcount:
+                inserted.append(rec)
+        return inserted
+
+    def ingest_log(self, chat_id: str, log_name: str, expected_offset: int,
+                   new_offset: int, records: Iterable[dict], *,
+                   observed_ns: int | None = None,
+                   observed_mono: int | None = None,
+                   observed_clock: str = "") -> list[dict]:
+        """Commit consumed records and log position together before notifying.
+
+        Offset comparison prevents overwriting a concurrently advanced scan.
+        It is not a reset generation or a complete projection revision.
+        """
+        if any(type(value) is not int or value < 0
+               for value in (expected_offset, new_offset)):
+            raise ValueError("log offsets must be nonnegative integers")
+        c = self._conn()
+        # BEGIN must fail outside the rollback scope if a caller already owns
+        # this connection's transaction; never roll back somebody else's work.
+        c.execute("BEGIN IMMEDIATE")
         with c:
-            for rec in records:
-                rid, ns = rec.get("id"), rec.get("ns")
-                if not rid or not isinstance(ns, int):
-                    continue  # malformed record: transport-level tolerance
-                cur = c.execute(
-                    "INSERT OR IGNORE INTO messages(chat_id,id,ns,sender,kind,payload,"
-                    "observed_ns,observed_mono,observed_clock) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (chat_id, rid, ns, rec.get("from", ""), rec.get("kind", "message"),
-                     json.dumps(rec, ensure_ascii=False), observed, observed_tick,
-                     str(observed_clock or "")[:80]),
-                )
-                if cur.rowcount:
-                    inserted.append(rec)
+            if self.get_offset(chat_id, log_name) != expected_offset:
+                raise LogIngestionConflict("log position changed during read")
+            inserted = self._insert_messages(
+                c, chat_id, records, observed_ns=observed_ns,
+                observed_mono=observed_mono, observed_clock=observed_clock)
+            c.execute(
+                "INSERT INTO log_offsets(chat_id,log_name,offset) VALUES(?,?,?)"
+                " ON CONFLICT(chat_id,log_name) DO UPDATE SET offset=excluded.offset",
+                (chat_id, log_name, new_offset),
+            )
         return inserted
 
     def message_observation(
