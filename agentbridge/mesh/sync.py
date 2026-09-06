@@ -65,7 +65,8 @@ class SyncEngine:
     # -------------------------------------------------------------- one log
     def _sync_log(self, chat_id: str, log_name: str, *, lane: str) -> int:
         """Read one log from its stored offset. Returns how many were new."""
-        offset = self.store.get_offset(chat_id, log_name)
+        position = self.store.capture_log_position(chat_id, log_name)
+        offset = position.offset
         records, new_offset = self.tx.read_log(chat_id, log_name, offset)
         if records:
             # R13.5 ingestion sanity: a per-device log is single-writer, so
@@ -77,7 +78,7 @@ class SyncEngine:
         observed = time.time_ns()
         observed_mono = time.perf_counter_ns()
         inserted = self.store.ingest_log(
-            chat_id, log_name, offset, new_offset, records,
+            chat_id, log_name, position, new_offset, records,
             observed_ns=observed, observed_mono=observed_mono,
             observed_clock=clock_id())
         new = len(inserted)

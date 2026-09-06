@@ -36,15 +36,17 @@ def store(tmp_path):
 
 def test_ingest_log_commits_offset_dedup_and_first_observation(store):
     first = [_record("m1", 1), _record("m2", 2)]
+    first_position = store.capture_log_position("chat", "ann@box")
     assert store.ingest_log(
-        "chat", "ann@box", 0, 20, first,
+        "chat", "ann@box", first_position, 20, first,
         observed_ns=101, observed_mono=202, observed_clock="clock-first",
     ) == first
     assert store.get_offset("chat", "ann@box") == 20
 
     replay_and_new = [first[0], _record("m3", 3)]
+    second_position = store.capture_log_position("chat", "ann@box")
     assert store.ingest_log(
-        "chat", "ann@box", 20, 40, replay_and_new,
+        "chat", "ann@box", second_position, 40, replay_and_new,
         observed_ns=303, observed_mono=404, observed_clock="clock-later",
     ) == [replay_and_new[1]]
 
@@ -55,15 +57,14 @@ def test_ingest_log_commits_offset_dedup_and_first_observation(store):
 
 
 @pytest.mark.parametrize(
-    ("expected_offset", "new_offset"),
-    [(-1, 0), (0, -1), (True, 0), (0, False), (1.5, 2), (0, "2")],
+    "new_offset",
+    [-1, False, 1.5, "2"],
 )
-def test_ingest_log_rejects_non_integer_or_negative_offsets(
-    store, expected_offset, new_offset,
-):
+def test_ingest_log_rejects_non_integer_or_negative_offsets(store, new_offset):
+    position = store.capture_log_position("chat", "ann@box")
     with pytest.raises((TypeError, ValueError)):
         store.ingest_log(
-            "chat", "ann@box", expected_offset, new_offset,
+            "chat", "ann@box", position, new_offset,
             [_record("must-not-land", 1)],
         )
     assert store.message_count("chat") == 0
@@ -72,15 +73,20 @@ def test_ingest_log_rejects_non_integer_or_negative_offsets(
 
 def test_ingest_log_empty_batches_advance_and_current_shrink_is_allowed(store):
     record = _record("retained", 1)
-    assert store.ingest_log("chat", "ann@box", 0, 100, [record]) == [record]
+    position = store.capture_log_position("chat", "ann@box")
+    assert store.ingest_log(
+        "chat", "ann@box", position, 100, [record]) == [record]
 
     # Re-reading a legitimately shrunken log deduplicates old rows but moves
     # its byte frontier backwards when the scan began at the current offset.
-    assert store.ingest_log("chat", "ann@box", 100, 20, [record]) == []
+    position = store.capture_log_position("chat", "ann@box")
+    assert store.ingest_log(
+        "chat", "ann@box", position, 20, [record]) == []
     assert store.get_offset("chat", "ann@box") == 20
     assert store.message_count("chat") == 1
 
-    assert store.ingest_log("chat", "ann@box", 20, 25, []) == []
+    position = store.capture_log_position("chat", "ann@box")
+    assert store.ingest_log("chat", "ann@box", position, 25, []) == []
     assert store.get_offset("chat", "ann@box") == 25
 
 
@@ -89,13 +95,16 @@ def test_ingest_log_stale_separate_connection_conflicts_without_writes(tmp_path)
     winner = Store(path)
     stale = Store(path)
     try:
-        winner.ingest_log("chat", "ann@box", 0, 10, [])
-        stale_expected = stale.get_offset("chat", "ann@box")
-        winner.ingest_log("chat", "ann@box", 10, 20, [_record("winner", 1)])
+        first_position = winner.capture_log_position("chat", "ann@box")
+        winner.ingest_log("chat", "ann@box", first_position, 10, [])
+        stale_position = stale.capture_log_position("chat", "ann@box")
+        winner_position = winner.capture_log_position("chat", "ann@box")
+        winner.ingest_log(
+            "chat", "ann@box", winner_position, 20, [_record("winner", 1)])
 
         with pytest.raises(LogIngestionConflict):
             stale.ingest_log(
-                "chat", "ann@box", stale_expected, 30,
+                "chat", "ann@box", stale_position, 30,
                 [_record("stale-loser", 2)],
             )
 
@@ -109,7 +118,9 @@ def test_ingest_log_stale_separate_connection_conflicts_without_writes(tmp_path)
 def test_overlapping_writer_rechecks_offset_after_acquiring_lock(tmp_path):
     path = tmp_path / "cache.sqlite"
     winner = Store(path)
-    winner.ingest_log("chat", "ann@box", 0, 10, [])
+    initial_position = winner.capture_log_position("chat", "ann@box")
+    winner.ingest_log("chat", "ann@box", initial_position, 10, [])
+    stale_position = winner.capture_log_position("chat", "ann@box")
     ready = threading.Event()
     start = threading.Event()
     attempting_begin = threading.Event()
@@ -124,7 +135,7 @@ def test_overlapping_writer_rechecks_offset_after_acquiring_lock(tmp_path):
             ready.set()
             assert start.wait(5)
             with pytest.raises(LogIngestionConflict):
-                loser.ingest_log("chat", "ann@box", 10, 30,
+                loser.ingest_log("chat", "ann@box", stale_position, 30,
                                  [_record("loser", 2)])
         finally:
             loser.close()
@@ -153,7 +164,9 @@ def test_overlapping_writer_rechecks_offset_after_acquiring_lock(tmp_path):
 
 
 def test_ingest_log_offset_failure_rolls_back_inserted_messages(store):
-    store.ingest_log("chat", "ann@box", 0, 7, [])
+    initial_position = store.capture_log_position("chat", "ann@box")
+    store.ingest_log("chat", "ann@box", initial_position, 7, [])
+    position = store.capture_log_position("chat", "ann@box")
     with store._conn() as conn:
         conn.execute(
             "CREATE TRIGGER reject_ingested_offset BEFORE UPDATE OF offset "
@@ -162,8 +175,10 @@ def test_ingest_log_offset_failure_rolls_back_inserted_messages(store):
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="offset failed"):
-        store.ingest_log("chat", "ann@box", 7, 9, [_record("rolled-back", 1)])
+        store.ingest_log(
+            "chat", "ann@box", position, 9, [_record("rolled-back", 1)])
 
+    assert store.capture_log_position("chat", "ann@box") == position
     assert store.get_offset("chat", "ann@box") == 7
     assert store.message_count("chat") == 0
 
@@ -171,7 +186,8 @@ def test_ingest_log_offset_failure_rolls_back_inserted_messages(store):
 def test_ingest_log_process_exit_rolls_back_record_and_offset(tmp_path):
     path = tmp_path / "cache.sqlite"
     baseline = Store(path)
-    baseline.ingest_log("chat", "ann@box", 0, 7, [])
+    position = baseline.capture_log_position("chat", "ann@box")
+    baseline.ingest_log("chat", "ann@box", position, 7, [])
     outbox_seq = baseline.outbox_add(
         "append_log", "chat|ann@box", {"id": "outbox-kept"})
     baseline.cache_doc("trust/peer.json", {"trusted": True})
@@ -189,9 +205,9 @@ def interrupted_records():
     os._exit(73)
 
 
-Store(sys.argv[1]).ingest_log(
-    "chat", "ann@box", 7, 99, interrupted_records()
-)
+store = Store(sys.argv[1])
+position = store.capture_log_position("chat", "ann@box")
+store.ingest_log("chat", "ann@box", position, 99, interrupted_records())
 """
     child = subprocess.run(
         [sys.executable, "-c", script, str(path)],
@@ -218,6 +234,7 @@ Store(sys.argv[1]).ingest_log(
 
 def test_ingest_log_nested_begin_does_not_rollback_callers_transaction(store):
     conn = store._conn()
+    position = store.capture_log_position("chat", "ann@box")
     conn.execute("BEGIN")
     conn.execute(
         "INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)",
@@ -225,7 +242,8 @@ def test_ingest_log_nested_begin_does_not_rollback_callers_transaction(store):
     )
 
     with pytest.raises(sqlite3.OperationalError, match="within a transaction"):
-        store.ingest_log("chat", "ann@box", 0, 1, [_record("not-ingested", 1)])
+        store.ingest_log(
+            "chat", "ann@box", position, 1, [_record("not-ingested", 1)])
 
     assert conn.in_transaction
     assert conn.execute(
@@ -313,7 +331,9 @@ class _ConflictingFeed(Transport):
         return [("chat", "ann@box")], 5
 
     def read_log(self, chat_id, log_name, offset=0):
-        self.competitor.ingest_log(chat_id, log_name, offset, 1, [])
+        position = self.competitor.capture_log_position(chat_id, log_name)
+        assert position.offset == offset
+        self.competitor.ingest_log(chat_id, log_name, position, 1, [])
         return [_record("loser", 1)], 1
 
     def list_chat_ids(self):
@@ -377,6 +397,42 @@ def test_feed_cursor_and_callbacks_stay_put_on_ingestion_conflict(tmp_path):
         assert store.message_count("chat") == 0
         assert callbacks == []
         assert telemetry == []
+    finally:
+        competitor.close()
+        store.close()
+
+
+def test_reset_during_transport_read_rejects_batch_then_fresh_retry_succeeds(tmp_path):
+    class ResettingFeed(_ConflictingFeed):
+        reset_on_read = True
+
+        def read_log(self, chat_id, log_name, offset=0):
+            assert offset == 0
+            if self.reset_on_read:
+                self.competitor.forget_chat(chat_id)
+                self.reset_on_read = False
+            return [_record("fresh", 1)], 1
+
+    path = tmp_path / "cache.sqlite"
+    store = Store(path)
+    competitor = Store(path)
+    callbacks = []
+    try:
+        store.cache_doc(CURSOR_DOC, {"cursor": 4})
+        engine = SyncEngine(ResettingFeed(competitor), store,
+                            on_records=lambda *_args: callbacks.append("records"))
+        engine._known = {"chat"}
+        assert engine.sync_once(lane="poll") == 0
+        assert store.cached_doc(CURSOR_DOC) == {"cursor": 4}
+        assert store.get_offset("chat", "ann@box") == 0
+        assert store.message_count("chat") == 0
+        assert callbacks == []
+
+        assert engine.sync_once(lane="poll") == 1
+        assert store.cached_doc(CURSOR_DOC) == {"cursor": 5}
+        assert store.get_offset("chat", "ann@box") == 1
+        assert [row["id"] for row in store.messages("chat")] == ["fresh"]
+        assert callbacks == ["records"]
     finally:
         competitor.close()
         store.close()

@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import log_position
+from .log_position import LogPosition
+
 __all__ = ["Store", "OutboxItem", "LogIngestionConflict"]
 
 
@@ -104,7 +107,8 @@ class OutboxItem:
 
 class Store:
     def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
+        # Pin aliases and relative paths before opening any thread's connection.
+        self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         with _store_init_lock(self.path):
@@ -134,6 +138,7 @@ class Store:
                 if name not in columns:
                     raise sqlite3.OperationalError(
                         f"message schema migration did not create {name}")
+        log_position.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -231,25 +236,29 @@ class Store:
                 inserted.append(rec)
         return inserted
 
-    def ingest_log(self, chat_id: str, log_name: str, expected_offset: int,
+    def capture_log_position(self, chat_id: str, log_name: str) -> LogPosition:
+        return log_position.capture(self._conn(), self.path, chat_id, log_name)
+
+    def ingest_log(self, chat_id: str, log_name: str, expected_position: LogPosition,
                    new_offset: int, records: Iterable[dict], *,
                    observed_ns: int | None = None,
                    observed_mono: int | None = None,
                    observed_clock: str = "") -> list[dict]:
         """Commit consumed records and log position together before notifying.
 
-        Offset comparison prevents overwriting a concurrently advanced scan.
-        It is not a reset generation or a complete projection revision.
+        Durable position comparison rejects concurrent scans and chat resets.
+        It is not a complete projection revision or an authorization token.
         """
-        if any(type(value) is not int or value < 0
-               for value in (expected_offset, new_offset)):
+        if type(expected_position) is not LogPosition:
+            raise TypeError("ingestion requires a captured LogPosition")
+        if type(new_offset) is not int or new_offset < 0:
             raise ValueError("log offsets must be nonnegative integers")
         c = self._conn()
         # BEGIN must fail outside the rollback scope if a caller already owns
         # this connection's transaction; never roll back somebody else's work.
         c.execute("BEGIN IMMEDIATE")
         with c:
-            if self.get_offset(chat_id, log_name) != expected_offset:
+            if self.capture_log_position(chat_id, log_name) != expected_position:
                 raise LogIngestionConflict("log position changed during read")
             inserted = self._insert_messages(
                 c, chat_id, records, observed_ns=observed_ns,
@@ -303,6 +312,7 @@ class Store:
 
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:
+            log_position.reset_chat(c, chat_id)
             c.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
             c.execute("DELETE FROM log_offsets WHERE chat_id=?", (chat_id,))
 
