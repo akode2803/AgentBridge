@@ -21,8 +21,17 @@ from typing import Any, Iterable
 from . import log_position
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
+from . import document_observation
+from .document_observation import (
+    DocumentObservation,
+    DocumentObservationConflict,
+    DocumentPosition,
+)
 
-__all__ = ["Store", "OutboxItem", "LogIngestionConflict"]
+__all__ = [
+    "Store", "OutboxItem", "LogIngestionConflict", "DocumentObservation",
+    "DocumentObservationConflict", "DocumentPosition",
+]
 
 
 class LogIngestionConflict(RuntimeError):
@@ -140,6 +149,7 @@ class Store:
                     raise sqlite3.OperationalError(
                         f"message schema migration did not create {name}")
         log_position.initialize(self._conn())
+        document_observation.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -331,6 +341,36 @@ class Store:
         return capture_chat_inputs(
             self.path, chat_id, document_paths=document_paths,
             max_messages=max_messages, max_logs=max_logs, max_bytes=max_bytes)
+
+    def capture_document_position(self, source_id: str) -> DocumentPosition:
+        return document_observation.capture_position(self.path, source_id)
+
+    def publish_document_batch(
+        self, expected_position: DocumentPosition, documents: dict, *,
+        cursor: int, deleted_paths: tuple[str, ...] = (), full: bool = False,
+        max_documents: int = 100_000, max_bytes: int = 64 * 1024 * 1024,
+    ) -> DocumentPosition:
+        return document_observation.publish(
+            self._conn(), self.path, expected_position, documents,
+            cursor=cursor, deleted_paths=deleted_paths, full=full,
+            max_documents=max_documents, max_bytes=max_bytes,
+        )
+
+    def reset_document_observation(
+        self, expected_position: DocumentPosition,
+    ) -> DocumentPosition:
+        return document_observation.reset(
+            self._conn(), self.path, expected_position,
+        )
+
+    def capture_document_observation(
+        self, source_id: str, *, max_documents: int = 100_000,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> DocumentObservation:
+        return document_observation.capture_observation(
+            self.path, source_id, max_documents=max_documents,
+            max_bytes=max_bytes,
+        )
 
     def set_offset(self, chat_id: str, log_name: str, offset: int) -> None:
         with self._conn() as c:
