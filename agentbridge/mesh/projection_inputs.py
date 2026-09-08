@@ -264,14 +264,12 @@ class ProjectionInputCollector:
                 "status/", _GLOBAL_DOC_LIMIT)
         except OverflowError as exc:
             raise ProjectionInputError("projection source exceeds its read budget") from exc
-        message_count = self.mesh.store.message_count(chat_id)
-        if message_count > _MESSAGE_LIMIT:
-            raise ProjectionInputError("projection message source exceeds its read budget")
-        messages = self.mesh.store.messages(chat_id, limit=_MESSAGE_LIMIT + 1)
-        if len(messages) > _MESSAGE_LIMIT:
-            raise ProjectionInputError("projection message source exceeds its read budget")
-        if len(messages) != message_count:
-            raise ProjectionInputError("projection messages changed during collection")
+        try:
+            local = self.mesh.store.capture_chat_inputs(
+                chat_id, document_paths=("sync/log_cursor",), max_messages=_MESSAGE_LIMIT)
+        except OverflowError as exc:
+            raise ProjectionInputError("projection local source exceeds its read budget") from exc
+        messages = local.messages()
 
         state_prefix = P.state_prefix(chat_id)
         runtime_prefix = f"chats/{chat_id}/runtime/"
@@ -285,7 +283,7 @@ class ProjectionInputCollector:
         presence_docs = _presence_facts(presence_docs, members)
         status_docs = _status_facts(status_docs, chat_id)
         trust = self.mesh.key_pins.projection_facts(members)
-        offsets = self.mesh.store.log_offsets(chat_id)
+        offsets = dict(local.offsets)
         origins = {
             component_digest("node", {"writer_log": log_name}): offset
             for log_name, offset in offsets.items()
@@ -297,7 +295,7 @@ class ProjectionInputCollector:
                 "machine": self.mesh.machine,
             })] = 0
         log_frontier = frontier_digest(origins)
-        doc_cursor = self.mesh.store.cached_doc("sync/log_cursor", default={})
+        doc_cursor = local.document("sync/log_cursor", default={})
         now = int(time.time_ns() if now_ns is None else now_ns)
         expiry, valid_until = self._expiry(
             chat_id, room_docs, presence_docs, status_docs, now_ns=now)

@@ -43,6 +43,29 @@ def _parts(collection):
             for component in collection.version.components}
 
 
+def test_collector_uses_one_local_capture_and_still_refuses_cache(projection_mesh, monkeypatch):
+    mesh, chat_id, _ = projection_mesh
+    capture = mesh.store.capture_chat_inputs
+    seen = []
+
+    def captured(*args, **kwargs):
+        seen.append((args, kwargs))
+        return capture(*args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("collector performed split local input reads")
+
+    monkeypatch.setattr(mesh.store, "capture_chat_inputs", captured)
+    monkeypatch.setattr(mesh.store, "message_count", forbidden)
+    monkeypatch.setattr(mesh.store, "messages", forbidden)
+    monkeypatch.setattr(mesh.store, "log_offsets", forbidden)
+    collection = ProjectionInputCollector(mesh, server_generation="test").collect(chat_id)
+    assert len(seen) == 1
+    assert seen[0][1]["document_paths"] == ("sync/log_cursor",)
+    with pytest.raises(ProjectionInputError, match="cannot authorize cache"):
+        collection.require_cache_ready()
+
+
 def test_collector_is_membership_gated_content_free_and_honest(projection_mesh):
     mesh, chat_id, _message_id = projection_mesh
     collection = ProjectionInputCollector(

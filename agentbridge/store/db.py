@@ -20,6 +20,7 @@ from typing import Any, Iterable
 
 from . import log_position
 from .log_position import LogPosition
+from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 
 __all__ = ["Store", "OutboxItem", "LogIngestionConflict"]
 
@@ -323,6 +324,13 @@ class Store:
             (chat_id, log_name),
         ).fetchone()
         return int(row[0]) if row else 0
+
+    def capture_chat_inputs(self, chat_id: str, *, document_paths: tuple[str, ...] = (),
+                            max_messages: int = 100_000, max_logs: int = 10_000,
+                            max_bytes: int = 64 * 1024 * 1024) -> LocalChatInputs:
+        return capture_chat_inputs(
+            self.path, chat_id, document_paths=document_paths,
+            max_messages=max_messages, max_logs=max_logs, max_bytes=max_bytes)
 
     def set_offset(self, chat_id: str, log_name: str, offset: int) -> None:
         with self._conn() as c:
