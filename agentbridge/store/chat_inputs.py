@@ -35,7 +35,10 @@ def capture(path: Path, chat_id: str, *, document_paths: tuple[str, ...] = (),
 
     The read transaction ends before JSON decoding or caller work. Byte limits
     cover serialized message/doc payloads and log/doc names, not Python overhead.
-    Transport docs, trust files and session state are deliberately not included.
+    ``document_paths`` names exact keys in this Store's local ``docs`` table; it
+    is an internal selection API, not an agent authorization boundary or
+    allowlist. Transport docs, private-key files, trust files and GUI session
+    files are deliberately not included.
     """
     if type(chat_id) is not str or not chat_id:
         raise ValueError("chat_id must be a nonempty string")
@@ -80,7 +83,8 @@ def capture(path: Path, chat_id: str, *, document_paths: tuple[str, ...] = (),
             if used > max_bytes:
                 raise OverflowError("local chat inputs exceed byte budget")
         messages = tuple(row[0] for row in conn.execute(
-            "SELECT payload FROM messages WHERE chat_id=? AND ns>0 ORDER BY ns", (chat_id,)
+            "SELECT payload FROM messages WHERE chat_id=? AND ns>0 "
+            "ORDER BY ns,sender,id", (chat_id,)
         ))
         offsets = tuple(conn.execute(
             "SELECT log_name,offset FROM log_offsets WHERE chat_id=? ORDER BY log_name",

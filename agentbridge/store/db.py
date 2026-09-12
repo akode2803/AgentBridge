@@ -292,7 +292,10 @@ class Store:
         return (int(row[0]), int(row[1]), str(row[2])) if row else (0, 0, "")
 
     def messages(self, chat_id: str, after_ns: int = 0, limit: int | None = None) -> list[dict]:
-        q = "SELECT payload FROM messages WHERE chat_id=? AND ns>? ORDER BY ns"
+        q = (
+            "SELECT payload FROM messages WHERE chat_id=? AND ns>? "
+            "ORDER BY ns,sender,id"
+        )
         args: list[Any] = [chat_id, after_ns]
         if limit is not None:
             q += " LIMIT ?"
@@ -316,7 +319,7 @@ class Store:
             "SELECT payload FROM messages"
             " WHERE chat_id=? AND kind='info' AND ns>?"
             " AND coalesce(json_extract(payload, '$.event.type'), '') != 'reaction'"
-            " ORDER BY ns",
+            " ORDER BY ns,sender,id",
             (chat_id, int(ns)),
         )
         return [json.loads(row[0]) for row in rows]

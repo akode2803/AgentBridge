@@ -4,7 +4,7 @@ CLI, harness context builder) goes through ``build_messages``, so nobody ever
 reads a deleted / hidden / pre-clear body.
 
 Fold order (v1 rules, kept):
-  dedup by id -> sort (ns, from) -> unseal -> apply edits -> apply redactions
+  dedup by id -> sort (ns, from, id) -> unseal -> apply edits -> apply redactions
   (redaction WINS over edit) -> blank reply-quotes to redacted parents ->
   viewer's hidden -> viewer's cleared (keep_starred spares their stars) ->
   attach reactions.
@@ -77,7 +77,12 @@ def build_messages(
         rid = rec.get("id")
         if rid:
             by_id.setdefault(rid, rec)
-    ordered = sorted(by_id.values(), key=lambda r: (r.get("ns", 0), r.get("from", "")))
+    ordered = sorted(
+        by_id.values(),
+        # Store ids are TEXT; mirror that order for direct/non-Store callers
+        # without widening this fold into envelope validation.
+        key=lambda r: (r.get("ns", 0), r.get("from", ""), str(r.get("id", ""))),
+    )
     bump("deduplicated_messages", len(ordered))
 
     hidden = set(state.get("hidden", []))

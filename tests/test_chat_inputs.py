@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from agentbridge.store import chat_inputs
+from agentbridge.mesh.projection_version import component_digest
 from agentbridge.store.db import Store
 
 
@@ -110,6 +111,35 @@ def test_only_requested_chat_and_documents_are_captured(store):
     assert [m["id"] for m in snap.messages()] == ["a"]
     assert snap.document("null", "fallback") is None
     assert snap.document("missing", "fallback") == "fallback"
+
+
+def test_equal_ns_capture_store_and_state_events_are_canonical(tmp_path):
+    records = [
+        {"id": "z", "ns": 10, "from": "ann", "kind": "info",
+         "event": {"type": "renamed"}},
+        {"id": "a", "ns": 10, "from": "ann", "kind": "info",
+         "event": {"type": "description_changed"}},
+        {"id": "m", "ns": 10, "from": "bob", "kind": "info",
+         "event": {"type": "member_added"}},
+    ]
+    observed = []
+    for index, inserted in enumerate((records, list(reversed(records)))):
+        candidate = Store(tmp_path / f"ties-{index}.sqlite")
+        try:
+            candidate.upsert_messages("chat", inserted)
+            capture = candidate.capture_chat_inputs("chat")
+            observed.append((
+                [row["id"] for row in capture.messages()],
+                component_digest("messages", capture.messages()),
+                [row["id"] for row in candidate.messages("chat")],
+                [row["id"] for row in candidate.state_events_after("chat", 0)],
+            ))
+        finally:
+            candidate.close()
+
+    assert observed[0] == observed[1]
+    assert observed[0][0] == ["a", "z", "m"]
+    assert observed[0][2:] == (["a", "z", "m"], ["a", "z", "m"])
 
 
 @pytest.mark.parametrize("options", [

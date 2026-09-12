@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
 
 import pytest
 
@@ -16,6 +17,7 @@ from agentbridge.mesh.projection_version import (
     ProjectionVersionError, component_digest, frontier_digest,
 )
 from agentbridge.mesh.service import Mesh
+from agentbridge.transport.cache import CachingTransport
 
 
 @pytest.fixture()
@@ -90,6 +92,7 @@ def test_collector_is_membership_gated_content_free_and_honest(projection_mesh):
     ).collect(chat_id)
     assert complete.external_inputs_supplied
     assert set(complete.coverage_gaps) == {
+        "cross_source_observation",
         "historical_identity_dependencies", "retained_lifecycle_heads",
         "global_privacy_ownership", "future_skew_activation",
         "decrypted_result_cache",
@@ -97,6 +100,58 @@ def test_collector_is_membership_gated_content_free_and_honest(projection_mesh):
     with pytest.raises(ProjectionInputError, match="cannot authorize cache"):
         complete.require_cache_ready()
     assert complete.candidate_digest() != collection.candidate_digest()
+
+
+def test_cross_source_race_stays_diagnostic_and_cannot_admit_cache(
+        projection_mesh, monkeypatch):
+    """An old mirror plus new SQLite cut is possible, but never trusted."""
+    mesh, chat_id, _ = projection_mesh
+    mirror = CachingTransport(mesh.tx, auto_refresh=False)
+    mirror.refresh()
+    monkeypatch.setattr(mesh, "tx", mirror)
+    collector = ProjectionInputCollector(mesh, server_generation="race")
+    before = _parts(collector.collect(chat_id))
+    original = mesh.store.capture_chat_inputs
+    entered, done = threading.Event(), threading.Event()
+    failures = []
+
+    def writer():
+        try:
+            assert entered.wait(5)
+            # This order means old edits + new messages never coexisted.
+            mirror.put_doc(P.edit(chat_id, "race"), {"body": "changed"})
+            first = original(chat_id).messages()[0]
+            mesh.store.upsert_messages(chat_id, [
+                dict(first, id="later-record", ns=first["ns"] + 1),
+            ])
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            mesh.store.close()
+            done.set()
+
+    def paused_capture(*args, **kwargs):
+        entered.set()
+        assert done.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mesh.store, "capture_chat_inputs", paused_capture)
+    worker = threading.Thread(target=writer)
+    worker.start()
+    try:
+        mixed = collector.collect(chat_id)
+    finally:
+        entered.set()
+        worker.join(5)
+    assert not worker.is_alive() and not failures
+    monkeypatch.setattr(mesh.store, "capture_chat_inputs", original)
+    after = _parts(collector.collect(chat_id))
+    parts = _parts(mixed)
+    assert parts["edits"] == before["edits"] != after["edits"]
+    assert parts["messages"] == after["messages"] != before["messages"]
+    assert "cross_source_observation" in mixed.coverage_gaps
+    with pytest.raises(ProjectionInputError, match="cannot authorize cache"):
+        mixed.require_cache_ready()
 
 
 def test_collector_rejects_nonmember_cold_oversized_and_membership_race(

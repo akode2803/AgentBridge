@@ -30,6 +30,7 @@ _ROOM_DOC_LIMIT = 20_000
 _GLOBAL_DOC_LIMIT = 10_000
 _MESSAGE_LIMIT = 100_000
 _COVERAGE_GAPS = (
+    "cross_source_observation",
     "historical_identity_dependencies", "retained_lifecycle_heads",
     "global_privacy_ownership", "future_skew_activation",
     "decrypted_result_cache",
@@ -166,6 +167,9 @@ class ProjectionInputCollector:
 
     This is not a trusted freshness builder. In particular, membership
     reconciliation retains its existing directory read and local-write behavior.
+    Mirror prefixes and SQLite are sampled independently; membership rechecking
+    does not establish a cross-source snapshot. Their digests are diagnostic
+    invalidation candidates only, even when supplied inputs are complete.
     """
 
     def __init__(

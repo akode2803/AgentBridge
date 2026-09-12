@@ -28,10 +28,35 @@ def test_dedup_and_ns_order_with_ties():
         env("m2", 10, "bob", "second"),
         env("m1", 5, "ann", "first"),
         env("m2", 10, "bob", "second"),      # duplicate id (at-least-once)
-        env("m3", 10, "ann", "tie-breaker"),  # ns tie -> (ns, from) order
+        env("m3", 10, "ann", "tie-breaker"),  # ns tie -> sender order
     ]
     out = build_messages("c", "ann", envs, SEALER)
     assert [m.id for m in out] == ["m1", "m3", "m2"]
+
+
+def test_equal_ns_same_sender_uses_id_independent_of_input_order():
+    tied = [
+        env("z", 10, "ann", "last id"),
+        env("a", 10, "ann", "first id"),
+        env("m", 10, "bob", "later sender"),
+    ]
+    assert [m.id for m in build_messages("c", "ann", tied, SEALER)] == ["a", "z", "m"]
+    assert [m.id for m in build_messages(
+        "c", "ann", list(reversed(tied)), SEALER,
+    )] == ["a", "z", "m"]
+
+
+def test_equal_ns_mixed_scalar_ids_follow_store_text_order():
+    tied = [
+        {"id": "a", "ns": 10, "ts": "t", "from": "ann", "kind": "info",
+         "event": {"type": "unknown"}},
+        {"id": 7, "ns": 10, "ts": "t", "from": "ann", "kind": "info",
+         "event": {"type": "unknown"}},
+    ]
+    assert [m.id for m in build_messages("c", "ann", tied, SEALER)] == [7, "a"]
+    assert [m.id for m in build_messages(
+        "c", "ann", list(reversed(tied)), SEALER,
+    )] == [7, "a"]
 
 
 def test_edit_applies_author_only_and_redaction_wins():
