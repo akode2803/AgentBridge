@@ -44,12 +44,22 @@ from __future__ import annotations
 import copy
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from ..core.config import atomic_write_json, read_json
 from .base import Transport, Watcher
 from .health import retry_delay, transport_error_message, classify_transport_error
+from .mirror_observation import (
+    MAX_MIRROR_INTEGER,
+    MirrorCaptureUnavailable,
+    MirrorObservation,
+    capture_mirror_locked,
+    validate_capture_budget,
+    validate_identity,
+)
 
 __all__ = ["CachingTransport"]
 
@@ -86,6 +96,19 @@ class CachingTransport(Transport):
         self.scheme = inner.scheme
         self.max_upload_bytes = inner.max_upload_bytes
         self.profile = prof
+        # Diagnostic identity is pinned before worker activity.  It identifies
+        # only this process-local observation domain and grants no authority.
+        try:
+            root_identity = getattr(inner, "root", None)
+            cache_identity = getattr(inner, "cache_key", None)
+        except Exception:  # an optional capture cannot break serving startup
+            root_identity = cache_identity = None
+        self._mirror_root_identity = validate_identity(root_identity)
+        self._mirror_cache_identity = validate_identity(cache_identity)
+        self._mirror_instance_nonce = uuid.uuid4().hex
+        self._mirror_revision = 0
+        self._mirror_provenance = "bootstrap_unverified"
+        self._mirror_invalid_reason: str | None = None
         self._lock = threading.Lock()
         self._docs: dict[str, Any] = {}        # the mirror
         self._chat_ids: list[str] = []
@@ -117,6 +140,20 @@ class CachingTransport(Transport):
         self._change_listeners: list = []
         self._load_snapshot()
 
+    @contextmanager
+    def _captured_mutation_locked(self):
+        """Advance before mutation and poison capture after interruption."""
+        if self._mirror_invalid_reason is None:
+            if self._mirror_revision == MAX_MIRROR_INTEGER:
+                self._mirror_invalid_reason = "revision_exhausted"
+            else:
+                self._mirror_revision += 1
+        try:
+            yield
+        except BaseException:
+            self._mirror_invalid_reason = "mutation_interrupted"
+            raise
+
     # delegate unknown attributes (root, cache_key, …) to the inner transport
     def __getattr__(self, name: str) -> Any:
         if name == "inner":  # not yet set during __init__ — never recurse
@@ -141,15 +178,19 @@ class CachingTransport(Transport):
             saved = float(doc.get("saved") or 0)
         except (TypeError, ValueError):
             return
+        detached_docs = copy.deepcopy(docs)
+        detached_chat_ids = sorted({str(c) for c in chat_ids if c})
         with self._lock:
-            self._docs = copy.deepcopy(docs)
-            self._chat_ids = sorted({str(c) for c in chat_ids if c})
-            self._cursor = cursor
-            self._last_refresh = saved
-            self._last_full = time.monotonic()
-            self._warm = True
-            self._persisted = True
-            self._health_state = "cached"
+            with self._captured_mutation_locked():
+                self._docs = detached_docs
+                self._chat_ids = detached_chat_ids
+                self._cursor = cursor
+                self._mirror_provenance = "bootstrap_unverified"
+                self._last_refresh = saved
+                self._last_full = time.monotonic()
+                self._warm = True
+                self._persisted = True
+                self._health_state = "cached"
 
     def _persist_snapshot(self) -> None:
         """Best-effort local bootstrap cache; transport success never depends on it."""
@@ -372,42 +413,47 @@ class CachingTransport(Transport):
             self._last_attempt = time.time()
         try:
             docs, cursor = self.inner.snapshot_docs()
-            docs = dict(docs)
+            # Provider-owned nested values must not retain aliases into the
+            # mirror after the pull returns.  Detachment happens outside the
+            # mirror mutex because arbitrary provider values may define hooks.
+            docs = copy.deepcopy(dict(docs))
             ids = set(self.inner.list_chat_ids())
         except Exception as exc:
             self._record_failure(exc)
             raise
         with self._lock:
-            was_warm = self._warm
-            previous_docs = self._docs
-            previous_ids = set(self._chat_ids)
-            # local writes newer than the snapshot query win until the next
-            # cycle (present = keep ours; absent = we deleted it, keep it gone)
-            for path, wrote in self._doc_writes.items():
-                if wrote >= t0:
-                    if path in self._docs:
-                        docs[path] = self._docs[path]
-                    else:
-                        docs.pop(path, None)
-            for chat_id, wrote in self._chat_writes.items():
-                if wrote >= t0:
-                    ids.add(chat_id)
-            self._docs = docs
-            self._chat_ids = sorted(ids)
-            self._neg.clear()  # a fresh snapshot re-answers every miss
-            self._warm = True
-            self._cursor = cursor
-            self._last_refresh = time.time()
-            self._last_full = time.monotonic()
-            silent = self.profile.silent_prefixes
-            foreign = was_warm and (
-                previous_ids != ids or any(
-                    previous_docs.get(path, _MISS) != docs.get(path, _MISS)
-                    and not (silent and path.startswith(silent))
-                    for path in set(previous_docs) | set(docs)
+            with self._captured_mutation_locked():
+                was_warm = self._warm
+                previous_docs = self._docs
+                previous_ids = set(self._chat_ids)
+                # local writes newer than the snapshot query win until the next
+                # cycle (present = keep ours; absent = we deleted it, keep it gone)
+                for path, wrote in self._doc_writes.items():
+                    if wrote >= t0:
+                        if path in self._docs:
+                            docs[path] = self._docs[path]
+                        else:
+                            docs.pop(path, None)
+                for chat_id, wrote in self._chat_writes.items():
+                    if wrote >= t0:
+                        ids.add(chat_id)
+                self._docs = docs
+                self._chat_ids = sorted(ids)
+                self._neg.clear()  # a fresh snapshot re-answers every miss
+                self._warm = True
+                self._cursor = cursor
+                self._mirror_provenance = "provider_observed"
+                self._last_refresh = time.time()
+                self._last_full = time.monotonic()
+                silent = self.profile.silent_prefixes
+                foreign = was_warm and (
+                    previous_ids != ids or any(
+                        previous_docs.get(path, _MISS) != docs.get(path, _MISS)
+                        and not (silent and path.startswith(silent))
+                        for path in set(previous_docs) | set(docs)
+                    )
                 )
-            )
-            self._prune_guards_locked()
+                self._prune_guards_locked()
         self._record_success()
         self._persist_snapshot()
         if foreign:
@@ -437,6 +483,8 @@ class CachingTransport(Transport):
             self._last_attempt = time.time()
         try:
             changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+            changed = copy.deepcopy(dict(changed))
+            deleted = set(deleted)
             # RLS can make a room disappear from this member's view without
             # returning its changed meta row. Reconcile the authoritative
             # visible-id set every delta tick so removals contract the mirror
@@ -449,46 +497,48 @@ class CachingTransport(Transport):
             raise
         silent = self.profile.silent_prefixes
         with self._lock:
-            recent_ids = {
-                chat_id for chat_id, wrote in self._chat_writes.items()
-                if wrote >= t0
-            }
-            revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
-            foreign = bool(revoked_ids)
-            for path, val in changed.items():
-                wrote = self._doc_writes.get(path)
-                if wrote is not None and wrote >= t0:
-                    continue           # our newer local write wins this cycle
-                if (self._docs.get(path, _MISS) != val
-                        and not (silent and path.startswith(silent))):
-                    foreign = True
-                self._docs[path] = val
-            for path in deleted:
-                wrote = self._doc_writes.get(path)
-                if wrote is not None and wrote >= t0:
-                    continue
-                if (path in self._docs
-                        and not (silent and path.startswith(silent))):
-                    foreign = True
-                self._docs.pop(path, None)
-                if path.startswith("chats/") and path.endswith("/meta.json"):
-                    # a tombstoned meta = the chat is gone; stop listing it
-                    cid = path.split("/")[1]
-                    self._chat_ids = [c for c in self._chat_ids if c != cid]
-            if revoked_ids:
-                revoked_prefixes = tuple(
-                    f"chats/{chat_id}/" for chat_id in revoked_ids
-                )
-                self._docs = {
-                    path: value for path, value in self._docs.items()
-                    if not path.startswith(revoked_prefixes)
+            with self._captured_mutation_locked():
+                recent_ids = {
+                    chat_id for chat_id, wrote in self._chat_writes.items()
+                    if wrote >= t0
                 }
-            self._chat_ids = sorted(visible_ids | recent_ids)
-            if changed or deleted:
-                self._neg.clear()      # the world moved: re-answer misses
-            self._cursor = max(self._cursor, cursor)
-            self._last_refresh = time.time()
-            self._prune_guards_locked()
+                revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
+                foreign = bool(revoked_ids)
+                for path, val in changed.items():
+                    wrote = self._doc_writes.get(path)
+                    if wrote is not None and wrote >= t0:
+                        continue           # our newer local write wins this cycle
+                    if (self._docs.get(path, _MISS) != val
+                            and not (silent and path.startswith(silent))):
+                        foreign = True
+                    self._docs[path] = val
+                for path in deleted:
+                    wrote = self._doc_writes.get(path)
+                    if wrote is not None and wrote >= t0:
+                        continue
+                    if (path in self._docs
+                            and not (silent and path.startswith(silent))):
+                        foreign = True
+                    self._docs.pop(path, None)
+                    if path.startswith("chats/") and path.endswith("/meta.json"):
+                        # a tombstoned meta = the chat is gone; stop listing it
+                        cid = path.split("/")[1]
+                        self._chat_ids = [c for c in self._chat_ids if c != cid]
+                if revoked_ids:
+                    revoked_prefixes = tuple(
+                        f"chats/{chat_id}/" for chat_id in revoked_ids
+                    )
+                    self._docs = {
+                        path: value for path, value in self._docs.items()
+                        if not path.startswith(revoked_prefixes)
+                    }
+                self._chat_ids = sorted(visible_ids | recent_ids)
+                if changed or deleted:
+                    self._neg.clear()      # the world moved: re-answer misses
+                self._cursor = max(self._cursor, cursor)
+                self._mirror_provenance = "provider_observed"
+                self._last_refresh = time.time()
+                self._prune_guards_locked()
         self._record_success()
         if changed or deleted or revoked_ids:
             self._persist_snapshot()
@@ -603,10 +653,12 @@ class CachingTransport(Transport):
             if (self._health_state == "online" and self._reads_through(path)
                     and not miss_known):
                 val = self.inner.get_doc(path, _MISS)
+                owned = copy.deepcopy(val) if val is not _MISS else _MISS
                 with self._lock:
-                    if val is not _MISS:
-                        self._docs[path] = copy.deepcopy(val)
-                        return val
+                    if owned is not _MISS:
+                        with self._captured_mutation_locked():
+                            self._docs[path] = owned
+                        return copy.deepcopy(owned)
                     self._neg.add(path)
             return default
         if self.nonblocking_cold:
@@ -647,18 +699,21 @@ class CachingTransport(Transport):
             )
 
     def _remember_doc_write(self, path: str, data: Any) -> None:
+        owned = copy.deepcopy(data)
         with self._lock:
-            self._docs[path] = copy.deepcopy(data)
-            self._doc_writes[path] = time.monotonic()
-            self._neg.discard(path)
-            self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
+            with self._captured_mutation_locked():
+                self._docs[path] = owned
+                self._doc_writes[path] = time.monotonic()
+                self._neg.discard(path)
+                self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
         self._persist_snapshot()
 
     def delete_doc(self, path: str) -> None:
         self.inner.delete_doc(path)
         with self._lock:
-            self._docs.pop(path, None)
-            self._doc_writes[path] = time.monotonic()
+            with self._captured_mutation_locked():
+                self._docs.pop(path, None)
+                self._doc_writes[path] = time.monotonic()
         self._persist_snapshot()
 
     def list_docs(self, prefix: str) -> list[str]:
@@ -767,11 +822,12 @@ class CachingTransport(Transport):
             # a first append can create a new chat — visible to us at once
             is_new = chat_id not in self._chat_ids
             if is_new:
-                self._chat_ids = sorted({*self._chat_ids, chat_id})
-                # Only new-chat publication needs this race guard. For an
-                # established room, authoritative RLS disappearance is a
-                # revocation and must beat a concurrent local append.
-                self._chat_writes[chat_id] = time.monotonic()
+                with self._captured_mutation_locked():
+                    self._chat_ids = sorted({*self._chat_ids, chat_id})
+                    # Only new-chat publication needs this race guard. For an
+                    # established room, authoritative RLS disappearance is a
+                    # revocation and must beat a concurrent local append.
+                    self._chat_writes[chat_id] = time.monotonic()
         self._persist_snapshot()
 
     def read_log(
@@ -783,13 +839,42 @@ class CachingTransport(Transport):
         self.inner.delete_chat(chat_id)
         now = time.monotonic()
         with self._lock:
-            prefix = f"chats/{chat_id}/"
-            for p in [p for p in self._docs if p.startswith(prefix)]:
-                self._docs.pop(p, None)
-                self._doc_writes[p] = now
-            self._chat_ids = [c for c in self._chat_ids if c != chat_id]
-            self._chat_writes.pop(chat_id, None)
+            with self._captured_mutation_locked():
+                prefix = f"chats/{chat_id}/"
+                for p in [p for p in self._docs if p.startswith(prefix)]:
+                    self._docs.pop(p, None)
+                    self._doc_writes[p] = now
+                self._chat_ids = [c for c in self._chat_ids if c != chat_id]
+                self._chat_writes.pop(chat_id, None)
         self._persist_snapshot()
+
+    def capture_mirror(
+        self,
+        *,
+        max_documents: int = 100_000,
+        max_chat_ids: int = 100_000,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> MirrorObservation | MirrorCaptureUnavailable:
+        """Return one bounded cut without warming or touching the provider."""
+        documents = validate_capture_budget(max_documents, "max_documents")
+        chat_ids = validate_capture_budget(max_chat_ids, "max_chat_ids")
+        byte_budget = validate_capture_budget(max_bytes, "max_bytes")
+        with self._lock:
+            return capture_mirror_locked(
+                warm=self._warm,
+                invalid_reason=self._mirror_invalid_reason,
+                instance_nonce=self._mirror_instance_nonce,
+                revision=self._mirror_revision,
+                root_identity=self._mirror_root_identity,
+                cache_identity=self._mirror_cache_identity,
+                provider_cursor=self._cursor,
+                provenance=self._mirror_provenance,
+                chat_ids=self._chat_ids,
+                documents=self._docs,
+                max_documents=documents,
+                max_chat_ids=chat_ids,
+                max_bytes=byte_budget,
+            )
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:

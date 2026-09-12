@@ -39,6 +39,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .mirror_observation import (
+    MirrorCaptureUnavailable,
+    MirrorObservation,
+    validate_capture_budget,
+)
+
 __all__ = ["Transport", "TransportProfile", "Watcher"]
 
 
@@ -174,6 +180,19 @@ class Transport(ABC):
             if value is not None:
                 out[path] = value
         return out
+
+    def capture_mirror(
+        self,
+        *,
+        max_documents: int = 100_000,
+        max_chat_ids: int = 100_000,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> MirrorObservation | MirrorCaptureUnavailable:
+        """Decline process-mirror capture without scanning the transport."""
+        validate_capture_budget(max_documents, "max_documents")
+        validate_capture_budget(max_chat_ids, "max_chat_ids")
+        validate_capture_budget(max_bytes, "max_bytes")
+        return MirrorCaptureUnavailable("unsupported")
 
     def get_docs(self, prefix: str = "") -> dict[str, Any]:
         """OPTIONAL fast path: every doc under ``prefix`` at once. This
