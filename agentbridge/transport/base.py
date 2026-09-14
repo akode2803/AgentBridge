@@ -41,8 +41,11 @@ from typing import Any
 
 from .mirror_observation import (
     MirrorCaptureUnavailable,
+    MirrorExpectedPosition,
     MirrorObservation,
+    MirrorPositionValidation,
     validate_capture_budget,
+    validated_position_fields,
 )
 
 __all__ = ["Transport", "TransportProfile", "Watcher"]
@@ -193,6 +196,13 @@ class Transport(ABC):
         validate_capture_budget(max_chat_ids, "max_chat_ids")
         validate_capture_budget(max_bytes, "max_bytes")
         return MirrorCaptureUnavailable("unsupported")
+
+    def validate_mirror_position(
+        self, expected: MirrorExpectedPosition,
+    ) -> MirrorPositionValidation:
+        """Decline process-mirror validation without touching the transport."""
+        validated_position_fields(expected)
+        return MirrorPositionValidation("unavailable", "unsupported")
 
     def get_docs(self, prefix: str = "") -> dict[str, Any]:
         """OPTIONAL fast path: every doc under ``prefix`` at once. This

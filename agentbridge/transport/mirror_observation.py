@@ -24,6 +24,7 @@ _REASONS = {
     "revision_exhausted",
     "mutation_interrupted",
 }
+_POSITION_STATUSES = {"matched", "changed", "unavailable"}
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,49 @@ class MirrorCaptureUnavailable:
             raise ValueError("unknown mirror capture unavailable reason")
 
 
+@dataclass(frozen=True)
+class MirrorExpectedPosition:
+    """Exact identity of one captured process-mirror cut.
+
+    This is concurrency evidence for the originating transport instance.  It
+    does not order independent mirrors or authorize reads.
+    """
+
+    root_identity: str
+    cache_identity: str
+    instance_nonce: str
+    revision: int
+
+    def __post_init__(self) -> None:
+        validated_position_fields(self)
+
+    @classmethod
+    def from_observation(cls, observation: MirrorObservation) -> MirrorExpectedPosition:
+        if type(observation) is not MirrorObservation:
+            raise ValueError("expected a mirror observation")
+        return cls(
+            observation.root_identity,
+            observation.cache_identity,
+            observation.instance_nonce,
+            observation.revision,
+        )
+
+
+@dataclass(frozen=True)
+class MirrorPositionValidation:
+    status: str
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _POSITION_STATUSES:
+            raise ValueError("unknown mirror position validation status")
+        if self.status == "unavailable":
+            if self.reason not in _REASONS:
+                raise ValueError("unavailable validation requires a known reason")
+        elif self.reason is not None:
+            raise ValueError("matched or changed validation cannot have a reason")
+
+
 def validate_capture_budget(value: int, label: str) -> int:
     if type(value) is not int or value < 0 or value > MAX_MIRROR_INTEGER:
         raise ValueError(f"{label} must be a nonnegative bounded integer")
@@ -74,6 +118,28 @@ def validate_identity(value: Any) -> str | None:
     except UnicodeEncodeError:
         return None
     return value
+
+
+def validated_position_fields(
+    expected: MirrorExpectedPosition,
+) -> tuple[str, str, str, int]:
+    """Copy and validate token fields before an owner acquires its mutex.
+
+    Frozen dataclasses are not a trust boundary: callers can still replace their
+    dictionary fields. Return validated built-ins so subsequent token mutation
+    cannot introduce callbacks into the owner's locked comparison.
+    """
+    if type(expected) is not MirrorExpectedPosition:
+        raise ValueError("expected a mirror position")
+    root, cache, nonce, revision = (
+        expected.root_identity, expected.cache_identity,
+        expected.instance_nonce, expected.revision,
+    )
+    if (validate_identity(root) is None or validate_identity(cache) is None
+            or validate_identity(nonce) is None or type(revision) is not int
+            or not 0 <= revision <= MAX_MIRROR_INTEGER):
+        raise ValueError("invalid expected mirror position")
+    return root, cache, nonce, revision
 
 
 def capture_mirror_locked(
@@ -210,8 +276,11 @@ __all__ = [
     "MAX_MIRROR_INTEGER",
     "MirrorCaptureUnavailable",
     "MirrorDocumentRecord",
+    "MirrorExpectedPosition",
     "MirrorObservation",
+    "MirrorPositionValidation",
     "capture_mirror_locked",
     "validate_capture_budget",
     "validate_identity",
+    "validated_position_fields",
 ]

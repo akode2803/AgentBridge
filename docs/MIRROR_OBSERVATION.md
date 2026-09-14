@@ -20,6 +20,15 @@ JSON; `documents()` and `decoded()` return fresh decoded values. JSON null remai
 a document. Missing paths are simply absent; this capture does not manufacture
 the durable tombstones owned by the separate Store observation APIs.
 
+`MirrorExpectedPosition.from_observation()` extracts the pinned identity, instance
+nonce and revision of one successful capture. `validate_mirror_position()` checks
+that token in constant work under the same mutex and reports `matched`, `changed`,
+or an unavailable reason. It does not serialize a second snapshot, warm the mirror,
+or touch provider, disk, SQLite, watchers or callbacks. Tokens compare cuts from
+one process-mirror instance only; they do not order independent mirrors or grant
+authority. The diagnostic combined mirror/SQLite protocol using this validator is
+documented in `LOCAL_OVERLAP_OBSERVATION.md`.
+
 Provenance distinguishes `bootstrap_unverified` from `provider_observed`. The
 first is a hydrated bootstrap file, while the second means a successful refresh
 has been applied locally. Subsequent local writes may also be present. Neither

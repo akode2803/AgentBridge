@@ -55,10 +55,13 @@ from .health import retry_delay, transport_error_message, classify_transport_err
 from .mirror_observation import (
     MAX_MIRROR_INTEGER,
     MirrorCaptureUnavailable,
+    MirrorExpectedPosition,
     MirrorObservation,
+    MirrorPositionValidation,
     capture_mirror_locked,
     validate_capture_budget,
     validate_identity,
+    validated_position_fields,
 )
 
 __all__ = ["CachingTransport"]
@@ -875,6 +878,29 @@ class CachingTransport(Transport):
                 max_chat_ids=chat_ids,
                 max_bytes=byte_budget,
             )
+
+    def validate_mirror_position(
+        self, expected: MirrorExpectedPosition,
+    ) -> MirrorPositionValidation:
+        """Validate one capture token in constant work under the mirror mutex."""
+        wanted = validated_position_fields(expected)
+        with self._lock:
+            if self._mirror_invalid_reason is not None:
+                return MirrorPositionValidation(
+                    "unavailable", self._mirror_invalid_reason)
+            if not self._warm:
+                return MirrorPositionValidation("unavailable", "cold")
+            if (self._mirror_root_identity is None
+                    or self._mirror_cache_identity is None):
+                return MirrorPositionValidation("unavailable", "invalid_identity")
+            actual = (
+                self._mirror_root_identity,
+                self._mirror_cache_identity,
+                self._mirror_instance_nonce,
+                self._mirror_revision,
+            )
+            return MirrorPositionValidation(
+                "matched" if actual == wanted else "changed")
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:

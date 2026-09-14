@@ -12,6 +12,7 @@ from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.mirror_observation import (
     MAX_MIRROR_INTEGER,
+    MirrorExpectedPosition,
     MirrorObservation,
 )
 
@@ -97,6 +98,87 @@ def test_full_capture_is_immutable_detached_and_instance_scoped(mirror):
     assert cached.capture_mirror().revision == revision
     assert CachingTransport(provider, auto_refresh=False)._mirror_instance_nonce \
         != capture.instance_nonce
+
+
+def test_position_validation_is_constant_work_instance_scoped_and_fail_closed(mirror):
+    provider, cached = mirror
+    provider.docs["users/a.json"] = {"v": 1}
+    cached.refresh()
+    capture = cached.capture_mirror()
+    expected = MirrorExpectedPosition.from_observation(capture)
+    calls = provider.calls
+    assert cached.validate_mirror_position(expected).status == "matched"
+    assert provider.calls == calls
+
+    other = CachingTransport(provider, auto_refresh=False)
+    other.refresh()
+    other_capture = other.capture_mirror()
+    assert other_capture.revision == capture.revision
+    assert other.validate_mirror_position(expected).status == "changed"
+
+    cached.put_doc("users/a.json", {"v": 2})
+    assert cached.validate_mirror_position(expected).status == "changed"
+    with cached._lock:
+        cached._mirror_invalid_reason = "mutation_interrupted"
+    unavailable = cached.validate_mirror_position(expected)
+    assert (unavailable.status, unavailable.reason) == \
+        ("unavailable", "mutation_interrupted")
+
+
+def test_base_and_cold_position_validation_are_explicit(mirror):
+    provider, cached = mirror
+    expected = MirrorExpectedPosition("root", "cache", "nonce", 0)
+    assert provider.validate_mirror_position(expected).reason == "unsupported"
+    assert cached.validate_mirror_position(expected).reason == "cold"
+    with pytest.raises(ValueError):
+        cached.validate_mirror_position(object())
+    with pytest.raises(ValueError):
+        MirrorExpectedPosition("root", "cache", "nonce", True)
+
+
+def test_position_rejects_none_and_equality_hooks_before_lock(mirror):
+    provider, cached = mirror
+    callbacks = []
+
+    class Spoof(str):
+        def __eq__(self, other):
+            callbacks.append("eq")
+            return True
+
+        def __ne__(self, other):
+            callbacks.append("ne")
+            return False
+
+    for field in ("root_identity", "cache_identity", "instance_nonce", "revision"):
+        for invalid in (None, Spoof("spoof")):
+            fields = dict(root_identity="root", cache_identity="cache",
+                          instance_nonce="nonce", revision=0)
+            fields[field] = invalid
+            with pytest.raises(ValueError):
+                MirrorExpectedPosition(**fields)
+            token = MirrorExpectedPosition("root", "cache", "nonce", 0)
+            object.__setattr__(token, field, invalid)
+            # Taking a non-reentrant lock here proves validation rejects before
+            # trying to acquire it, even after frozen-object tampering.
+            with cached._lock:
+                with pytest.raises(ValueError):
+                    cached.validate_mirror_position(token)
+            with pytest.raises(ValueError):
+                provider.validate_mirror_position(token)
+    assert callbacks == []
+
+
+def test_position_validation_never_serializes_or_reads_payloads(mirror, monkeypatch):
+    _provider, cached = mirror
+    cached.refresh()
+    expected = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("position validation performed capture work")
+
+    monkeypatch.setattr(cached, "capture_mirror", forbidden)
+    monkeypatch.setattr("agentbridge.transport.mirror_observation.json.dumps", forbidden)
+    assert cached.validate_mirror_position(expected).status == "matched"
 
 
 def test_capture_does_not_revisit_provider_properties_or_callbacks():
