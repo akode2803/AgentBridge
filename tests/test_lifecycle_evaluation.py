@@ -62,6 +62,35 @@ def _effective(result):
     return None if result.effective_json is None else json.loads(result.effective_json)
 
 
+def _replace_subject(inputs, subject, evidence):
+    return replace(inputs, subjects=tuple(
+        (name, evidence if name == subject else current)
+        for name, current in inputs.subjects
+    ))
+
+
+def _signed_envelope(record, actor_bundle, *, subject_bundle=None, path=None):
+    signed = canonical_json_bytes(record)
+    return (
+        path or f"lifecycle/{record['subject']}/{record['id']}.json",
+        _json({
+            "record": record,
+            "sig": crypto.sign(actor_bundle, signed),
+            "subject_sig": (crypto.sign(subject_bundle, signed)
+                            if subject_bundle is not None else ""),
+        }),
+    )
+
+
+def _clock_after_existing(mesh):
+    latest = max(
+        mesh.tx.get_doc(path)["record"]["ns"]
+        for subject in ("aryan", "fable", "claude")
+        for path in mesh.tx.list_docs(f"lifecycle/{subject}")
+    )
+    return latest + lifecycle._FUTURE_SKEW_NS
+
+
 def test_signed_live_pure_parity_through_all_action_kinds(mesh):
     """Use real signatures so the evaluator cannot pass by accepting raw records."""
     expected = []
@@ -146,6 +175,15 @@ def test_invalid_remote_evidence_skips_but_malformed_retained_is_unavailable(mes
     assert not result.proposals
 
 
+def test_equivalent_noncanonical_retained_head_does_not_propose_rewrite(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    raw = json.dumps(current, ensure_ascii=False, indent=1)
+    captured = _inputs(mesh, retained={"claude": raw})
+    result = evaluate_lifecycle(captured, "claude")
+    assert _effective(result) == current
+    assert all(proposal.subject != "claude" for proposal in result.proposals)
+
+
 def test_bounded_deep_remote_json_skips_but_retained_json_is_unavailable(mesh):
     captured = _inputs(mesh)
     deep = "[" * 2_000 + "]" * 2_000
@@ -212,6 +250,7 @@ def test_evaluation_is_deterministic_proposes_serialized_heads_and_does_no_clock
     second = evaluate_lifecycle(reordered, "claude")
     assert first == second
     assert first.now_ns == captured.now_ns
+    assert first.next_recheck_ns == second.next_recheck_ns
     assert first.consumed_accounts == tuple(sorted(first.consumed_accounts))
     assert first.consumed_subjects == tuple(sorted(first.consumed_subjects))
     assert [proposal.subject for proposal in first.proposals] == sorted(
@@ -291,3 +330,143 @@ def test_equal_ns_signed_branches_sort_by_id_independent_of_envelope_order(mesh)
     backward = evaluate_lifecycle(replace(captured, subjects=reversed_rows), "claude")
     assert _effective(forward)["id"] == "a-branch"
     assert forward == backward
+
+
+def test_future_signed_record_expires_at_the_inclusive_skew_edge(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    now = _clock_after_existing(mesh)
+    future = {
+        **current, "id": "future-state", "ns": now + lifecycle._FUTURE_SKEW_NS + 1,
+        "action": "state", "previous_id": current["id"], "active": False,
+        "deactivated": "",
+    }
+    captured = _inputs(mesh, now_ns=now)
+    _, evidence = next(row for row in captured.subjects if row[0] == "claude")
+    with_future = _replace_subject(
+        captured, "claude", SubjectEvidence(
+            True,
+            evidence.envelopes + (_signed_envelope(
+                future, mesh.keystore.load("aryan")),),
+            None,
+        ),
+    )
+
+    before = evaluate_lifecycle(with_future, "claude")
+    assert _effective(before)["id"] == current["id"]
+    assert before.next_recheck_ns == now + 1
+
+    at_edge = evaluate_lifecycle(replace(with_future, now_ns=now + 1), "claude")
+    assert _effective(at_edge)["id"] == future["id"]
+    assert at_edge.next_recheck_ns is None
+
+
+def test_recursive_owner_future_state_sets_agent_recheck_boundary(mesh):
+    publish_change(mesh.directory, mesh.keystore, "claude", actor="fable",
+                   action="transfer", owner="fable", machine="fable-box")
+    fable = resolve_lifecycle(mesh.directory, "fable", store=mesh.store)
+    now = _clock_after_existing(mesh)
+    future = {
+        **fable, "id": "future-fable-state", "ns": now + lifecycle._FUTURE_SKEW_NS + 3,
+        "action": "state", "previous_id": fable["id"], "active": False,
+        "deactivated": "",
+    }
+    captured = _inputs(mesh, now_ns=now)
+    _, evidence = next(row for row in captured.subjects if row[0] == "fable")
+    result = evaluate_lifecycle(_replace_subject(
+        captured, "fable", SubjectEvidence(
+            True,
+            evidence.envelopes + (_signed_envelope(
+                future, mesh.keystore.load("fable")),),
+            None,
+        ),
+    ), "claude")
+    assert _effective(result)["owner"] == "fable"
+    assert "fable" in result.consumed_subjects
+    assert result.next_recheck_ns == now + 3
+
+
+def test_future_transfer_expires_before_its_new_owner_dependency_is_needed(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    now = _clock_after_existing(mesh)
+    future = {
+        **current, "id": "future-transfer", "ns": now + lifecycle._FUTURE_SKEW_NS + 2,
+        "actor": "fable", "action": "transfer", "owner": "fable",
+        "machine": "fable-box", "previous_id": current["id"],
+    }
+    captured = _inputs(mesh, now_ns=now, accounts=("aryan", "claude"),
+                       subjects=("aryan", "claude"))
+    _, evidence = next(row for row in captured.subjects if row[0] == "claude")
+    inputs = _replace_subject(
+        captured, "claude", SubjectEvidence(
+            True,
+            evidence.envelopes + (_signed_envelope(
+                future, mesh.keystore.load("fable"),
+                subject_bundle=mesh.keystore.load("claude")),),
+            None,
+        ),
+    )
+    before = evaluate_lifecycle(inputs, "claude")
+    assert _effective(before)["id"] == current["id"]
+    assert before.next_recheck_ns == now + 2
+    with pytest.raises(LifecycleInputsIncomplete):
+        evaluate_lifecycle(replace(inputs, now_ns=now + 2), "claude")
+
+
+def test_unavailable_retained_only_ignores_future_envelopes_for_recheck(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    now = _clock_after_existing(mesh)
+    future = {
+        **current, "id": "ignored-future", "ns": now + lifecycle._FUTURE_SKEW_NS + 1,
+        "action": "state", "previous_id": current["id"], "active": False,
+        "deactivated": "",
+    }
+    captured = _inputs(mesh, now_ns=now)
+    _, evidence = next(row for row in captured.subjects if row[0] == "claude")
+    retained_only = _replace_subject(
+        captured, "claude", SubjectEvidence(
+            False,
+            evidence.envelopes + (_signed_envelope(
+                future, mesh.keystore.load("aryan")),),
+            _json(current),
+        ),
+    )
+    result = evaluate_lifecycle(retained_only, "claude")
+    assert _effective(result) == current
+    assert result.next_recheck_ns is None
+
+
+def test_invalid_paths_do_not_expire_but_forged_future_envelopes_are_conservative(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    now = _clock_after_existing(mesh)
+    future = {
+        **current, "id": "future-forged", "ns": now + lifecycle._FUTURE_SKEW_NS + 4,
+        "action": "state", "previous_id": current["id"], "active": False,
+        "deactivated": "",
+    }
+    path_wrong = _signed_envelope(
+        {**future, "id": "future-path-wrong"}, mesh.keystore.load("aryan"),
+        path="lifecycle/fable/future-path-wrong.json",
+    )
+    forged_path, forged_json = _signed_envelope(
+        future, mesh.keystore.load("aryan"),
+    )
+    forged = (forged_path, _json({**json.loads(forged_json), "sig": "forged"}))
+    captured = _inputs(mesh, now_ns=now)
+    _, evidence = next(row for row in captured.subjects if row[0] == "claude")
+    invalid_only = _replace_subject(
+        captured, "claude", SubjectEvidence(
+            True, evidence.envelopes + (("lifecycle/claude/bad.json", "{"), path_wrong), None,
+        ),
+    )
+    assert evaluate_lifecycle(invalid_only, "claude").next_recheck_ns is None
+
+    conservative = _replace_subject(
+        captured, "claude", SubjectEvidence(
+            True, evidence.envelopes + (forged,), None,
+        ),
+    )
+    before = evaluate_lifecycle(conservative, "claude")
+    assert before.next_recheck_ns == now + 4
+    assert _effective(evaluate_lifecycle(
+        replace(conservative, now_ns=now + 4), "claude"
+    )) == current

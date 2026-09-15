@@ -9,7 +9,7 @@ import pytest
 
 from agentbridge import crypto
 from agentbridge.core.timekit import next_ns
-from agentbridge.mesh import pins
+from agentbridge.mesh import pin_storage
 from agentbridge.mesh.pins import (
     KeyPinStore,
     PinDecision,
@@ -42,10 +42,10 @@ def test_evaluate_pin_is_pure_frozen_and_does_not_mutate_observations(monkeypatc
     original_pin, original_history = deepcopy(pin), deepcopy(history)
 
     monkeypatch.setattr(
-        pins, "read_json", lambda *_args, **_kwargs: pytest.fail("unexpected I/O")
+        pin_storage, "strict_read_pin_file", lambda *_args, **_kwargs: pytest.fail("unexpected I/O")
     )
     monkeypatch.setattr(
-        pins, "atomic_write_json", lambda *_args, **_kwargs: pytest.fail("unexpected I/O")
+        pin_storage, "atomic_write_json", lambda *_args, **_kwargs: pytest.fail("unexpected I/O")
     )
 
     decision = evaluate_pin("kim", pin, "old-sign", "old-agree", history)
@@ -109,8 +109,8 @@ def test_evaluate_pin_preserves_malformed_history_and_skipped_branch_behavior():
 
 
 @pytest.mark.parametrize("same_sign", [True, False])
-def test_trusted_first_seen_competitor_rereads_merged_winner(tmp_path, same_sign):
-    """A stale Store returns its caller pair only when the merged sign key agrees."""
+def test_trusted_first_seen_competitor_returns_refreshed_full_durable_pair(tmp_path, same_sign):
+    """A stale Store never combines a caller agree key with durable trust."""
     winner = KeyPinStore(tmp_path, "rootX")
     stale = KeyPinStore(tmp_path, "rootX")
     _, sign, stored_agree = keypair()
@@ -118,9 +118,10 @@ def test_trusted_first_seen_competitor_rereads_merged_winner(tmp_path, same_sign
     caller_sign = sign if same_sign else alternate_sign
 
     assert winner.trusted("kim", sign, stored_agree) == (sign, stored_agree)
-    expected = (caller_sign, caller_agree) if same_sign else (sign, stored_agree)
+    expected = (sign, stored_agree)
     assert stale.trusted("kim", caller_sign, caller_agree) == expected
-    assert bool(stale.alerts()) is not same_sign
+    assert stale.alerts()[0]["pinned_sign_pub"] == sign
+    assert stale.alerts()[0]["seen_sign_pub"] == caller_sign
     assert KeyPinStore(tmp_path, "rootX").trusted("kim", sign, stored_agree) == (
         sign,
         stored_agree,
@@ -135,7 +136,7 @@ def test_trusted_keeps_memory_trust_when_pin_write_fails(tmp_path, monkeypatch):
     def fail_write(*_args, **_kwargs):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(pins, "atomic_write_json", fail_write)
+    monkeypatch.setattr(pin_storage, "atomic_write_json", fail_write)
     assert store.trusted("kim", first_sign, first_agree) == (first_sign, first_agree)
     assert store.trusted("kim", changed_sign, changed_agree) == (first_sign, first_agree)
     assert store.alerts()[0]["pinned_sign_pub"] == first_sign

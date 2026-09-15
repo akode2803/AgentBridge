@@ -2,6 +2,10 @@
 
 The active snapshot is authoritative. The append-only journal is repairable
 diagnostic history and never decides whether work is complete.
+
+Private checkpoint storage requires POSIX permissions and locking. Windows
+mutation is unsupported until private file creation and ACL validation are
+implemented; payload validation and read-only auditing remain portable.
 """
 
 from __future__ import annotations
@@ -360,8 +364,15 @@ def workspace_state_dir(workspace: Path) -> Path:
     return Path.home() / ".agentbridge" / "dev-tasks" / key
 
 
+def _require_private_storage() -> None:
+    if os.name != "posix":
+        raise CheckpointError(
+            "private checkpoint storage requires POSIX; Windows ACL support is not implemented")
+
+
 @contextlib.contextmanager
 def _exclusive_lock(path: Path) -> Iterator[None]:
+    _require_private_storage()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         raise CheckpointError("checkpoint lock cannot be a symlink")
@@ -372,26 +383,18 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
     try:
         if os.fstat(fd).st_mode & 0o077:
             raise CheckpointError("checkpoint lock permissions are too broad")
-        if os.name == "nt":  # pragma: no cover - exercised on Windows CI later
-            import msvcrt
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        if os.name == "nt":  # pragma: no cover
-            import msvcrt
-            with contextlib.suppress(OSError):
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
+        import fcntl
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
 def _prepare_dir(state_dir: Path) -> None:
+    _require_private_storage()
     existed = state_dir.exists()
     state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     if state_dir.is_symlink():
@@ -508,6 +511,7 @@ def write_checkpoint(
 
 
 def repair_journal(state_dir: Path) -> bool:
+    _require_private_storage()
     active_path = state_dir / "active.json"
     if not active_path.exists():
         return False

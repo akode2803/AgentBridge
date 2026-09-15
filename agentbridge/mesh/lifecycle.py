@@ -95,11 +95,8 @@ def _verify_doc(directory, path: str, value: object) -> tuple[dict, str]:
 
 
 def _verify_with_keys(path: str, value: object, keys_of, now_ns: int) -> tuple[dict, str]:
-    if not isinstance(value, dict) or set(value) != {"record", "sig", "subject_sig"}:
-        raise LifecycleError("invalid lifecycle envelope")
-    record = _validate_at(value["record"], now_ns)
-    if path != _path(record["subject"], record["id"]):
-        raise LifecycleError("lifecycle path mismatch")
+    record = _validate_envelope_structure(path, value)
+    record = _validate_at(record, now_ns)
     signed = canonical_json_bytes(record)
     actor_pub = keys_of(record["actor"])
     if not actor_pub or not crypto.verify(actor_pub, str(value["sig"]), signed):
@@ -110,6 +107,15 @@ def _verify_with_keys(path: str, value: object, keys_of, now_ns: int) -> tuple[d
         if not subject_pub or not crypto.verify(subject_pub, subject_sig, signed):
             raise LifecycleError("invalid lifecycle subject signature")
     return record, subject_sig
+
+
+def _validate_envelope_structure(path: str, value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {"record", "sig", "subject_sig"}:
+        raise LifecycleError("invalid lifecycle envelope")
+    record = _validate_structure(value["record"])
+    if path != _path(record["subject"], record["id"]):
+        raise LifecycleError("lifecycle path mismatch")
+    return record
 
 
 def _active_human(directory, name: str) -> bool:

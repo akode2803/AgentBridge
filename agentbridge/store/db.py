@@ -21,7 +21,10 @@ from typing import Any, Iterable
 from . import log_position
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
-from . import document_observation, lifecycle_heads, shadow_chat_inputs, shadow_slot
+from . import (
+    document_observation, lifecycle_heads, membership_input_position,
+    shadow_chat_inputs, shadow_slot,
+)
 from .shadow_chat_inputs import ShadowChatInputs
 from .document_observation import (
     DocumentObservation,
@@ -29,10 +32,12 @@ from .document_observation import (
     DocumentPosition,
 )
 from .lifecycle_heads import LifecycleHeadPosition
+from .membership_input_position import MembershipInputPosition
 
 __all__ = [
     "Store", "OutboxItem", "LogIngestionConflict", "DocumentObservation",
     "DocumentObservationConflict", "DocumentPosition", "LifecycleHeadPosition",
+    "MembershipInputPosition",
 ]
 
 
@@ -151,6 +156,7 @@ class Store:
                     raise sqlite3.OperationalError(
                         f"message schema migration did not create {name}")
         log_position.initialize(self._conn())
+        membership_input_position.initialize(self._conn())
         lifecycle_heads.initialize(self._conn())
         document_observation.initialize(self._conn())
         shadow_slot.initialize(self._conn())
@@ -327,6 +333,16 @@ class Store:
             (chat_id, int(ns)),
         )
         return [json.loads(row[0]) for row in rows]
+
+    def capture_membership_input_position(
+        self, chat_id: str,
+    ) -> MembershipInputPosition:
+        return membership_input_position.observe(self.path, chat_id)
+
+    def membership_input_position_matches(
+        self, expected: MembershipInputPosition,
+    ) -> bool:
+        return membership_input_position.matches(self.path, expected)
 
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:

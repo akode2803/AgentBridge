@@ -1,3 +1,4 @@
+import os
 import sys
 from types import SimpleNamespace
 
@@ -64,7 +65,14 @@ def test_strict_single_instance_releases_when_pid_publish_fails(
             pass
 
         def write(self, _value):
-            raise OSError("publication failed")
+            if os.name != "nt":
+                raise OSError("publication failed")
+
+        def flush(self):
+            pass
+
+        def fileno(self):
+            return -1
 
         def close(self):
             self.closed = True
@@ -72,6 +80,14 @@ def test_strict_single_instance_releases_when_pid_publish_fails(
     file = File()
     monkeypatch.setattr(builtins, "open", lambda *_args, **_kwargs: file)
     monkeypatch.setattr(lock_module, "_try_lock", lambda _fh: True)
+    if os.name == "nt":
+        # Windows publishes PID metadata through a sibling path, so replacing
+        # ``open`` above alone does not exercise publication failure.
+        monkeypatch.setattr(
+            lock_module.Path, "write_text",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("publication failed")),
+        )
     assert SingleInstance(
         tmp_path / "fleet.lock", fail_open=False).acquire() is False
     assert file.closed is True

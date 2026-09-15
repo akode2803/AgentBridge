@@ -10,13 +10,19 @@ proves the folder stays bare and a supabase root gets wrapped.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
 import pytest
 
+from agentbridge.core.models import ChatKind, ChatSnapshot
+import agentbridge.transport.cache as cache_module
 from agentbridge.transport import CachingTransport, FolderTransport, make_transport
 from agentbridge.transport.base import Transport, Watcher
+from agentbridge.transport.mirror_observation import (
+    MirrorCaptureUnavailable, MirrorObservation,
+)
 
 
 class CountingTransport(Transport):
@@ -270,6 +276,50 @@ def test_writer_sees_own_writes_immediately(mirror):
     assert tx.list_docs("users") == ["users/a.json"]   # lists too
     tx.delete_doc("users/a.json")
     assert tx.get_doc("users/a.json", default="gone") == "gone"
+
+
+def test_same_tick_guarded_refresh_normalizes_native_chat_snapshot_for_capture(
+        mirror, monkeypatch):
+    """A same-tick write guard must retain wire JSON, not a str Enum object."""
+    inner, tx = mirror
+    monkeypatch.setattr(cache_module, "_monotonic", lambda: 100.0)
+    path = "chats/room/meta.json"
+    local = ChatSnapshot(id="room", kind=ChatKind.GROUP, name="local").to_dict()
+    tx.put_doc(path, local)
+    # CountingTransport intentionally stores Python objects. Model the actual
+    # provider's durable JSON separately, and make it observably different so
+    # refresh equality proves the guarded local copy won.
+    provider = json.loads(json.dumps(local, ensure_ascii=False, allow_nan=False))
+    provider["name"] = "provider"
+    inner.docs[path] = provider
+    assert type(provider["kind"]) is str
+    tx.refresh()  # equal timestamps force the local-write guard to win
+
+    observed = tx.capture_mirror()
+    assert type(observed) is MirrorObservation
+    record = next(record for record in observed.records if record.path == path)
+    assert record.decoded()["name"] == "local"
+    assert record.decoded()["kind"] == "group"
+    assert type(record.decoded()["kind"]) is str
+
+
+def test_local_write_normalization_detaches_aliases_and_matches_wire_tuples(mirror):
+    _inner, tx = mirror
+    tx.refresh()
+    value = {"nested": {"items": ("one", "two")}}
+    tx.put_doc("users/a.json", value)
+    value["nested"]["items"] = ("changed",)
+
+    assert tx.get_doc("users/a.json") == {"nested": {"items": ["one", "two"]}}
+
+
+def test_non_json_local_write_remains_compatible_but_capture_rejects_it(mirror):
+    _inner, tx = mirror
+    tx.refresh()
+    tx.put_doc("users/a.json", {"unsupported": object()})
+
+    observed = tx.capture_mirror()
+    assert observed == MirrorCaptureUnavailable("invalid_payload")
 
 
 def test_own_chat_visible_after_first_append(mirror):
@@ -835,13 +885,24 @@ def test_full_snapshot_tick_reports_foreign_change_to_hint_watchdog(delta_mirror
     assert tx._refresh_tick() is True
 
 
-def test_remote_overwrite_of_recent_local_path_still_wakes(delta_mirror):
+def test_remote_overwrite_of_recent_local_path_still_wakes(
+        delta_mirror, monkeypatch):
     inner, tx = delta_mirror
+    # The write guard intentionally preserves a write that lands during a
+    # delta query (``wrote >= pull_started``).  Windows can give the local
+    # write and the immediately-following pull the same monotonic tick, which
+    # accidentally tests that race rather than a remote overwrite.  Make the
+    # intended order explicit: local write, foreign overwrite, then pull.
+    now = [100.0]
+    import agentbridge.transport.cache as cache_module
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(cache_module, "_monotonic", lambda: now[0])
     tx.refresh()
     tx.put_doc("users/a.json", {"v": "local"})
     wakes = []
     tx.subscribe_changes(lambda: wakes.append(True))
     inner.put_doc("users/a.json", {"v": "remote"})
+    now[0] = 101.0
     assert tx._refresh_tick() is True
     assert tx.get_doc("users/a.json")["v"] == "remote"
     assert wakes == [True]

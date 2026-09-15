@@ -32,16 +32,32 @@ from __future__ import annotations
 
 import hashlib
 import copy
+import json
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from .. import crypto
-from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
+from ..core.config import DEFAULT_HOME
 from ..core.timekit import utcnow_iso
+from .pin_storage import (
+    PendingAck,
+    PendingAlert,
+    PendingForget,
+    PendingPin,
+    PendingVerify,
+    PinFileCoordinator,
+    PinStoreUnavailable,
+    canonical_json,
+    serialize_history,
+    validate_output,
+)
 
-__all__ = ["KeyPinStore", "rekey_signing_bytes", "key_fingerprint"]
+__all__ = [
+    "KeyPinStore", "PinStoreUnavailable", "rekey_signing_bytes", "key_fingerprint",
+]
 
 
 @dataclass(frozen=True)
@@ -139,9 +155,9 @@ class KeyPinStore:
         tag = hashlib.sha1(str(root_key).encode()).hexdigest()[:12]
         self.path = (home or DEFAULT_HOME) / "pins" / f"{tag}.json"
         self._lock = threading.Lock()
-        doc = read_json(self.path, {}) or {}
-        self._pins: dict[str, dict] = dict(doc.get("pins") or {})
-        self._alerts: list[dict] = list(doc.get("alerts") or [])
+        self._storage = PinFileCoordinator(self.path)
+        with self._lock, self._view():
+            pass
 
     # ------------------------------------------------------------- resolution
     def trusted(
@@ -155,22 +171,50 @@ class KeyPinStore:
         given the currently PUBLISHED pair. Pins on first sight; advances the
         pin along a validly signed history; otherwise the pin wins and a
         mismatch is recorded."""
-        with self._lock:
-            pin = self._pins.get(name)
-            decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name)
+            history_json = None
+            if pin and sign_pub and (
+                pin.get("sign_pub"), pin.get("agree_pub")
+            ) != (sign_pub, agree_pub):
+                history_json = serialize_history(history)
+                decision = evaluate_pin(
+                    name, pin, sign_pub, agree_pub, json.loads(history_json),
+                )
+            else:
+                decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
             if decision.action == "first_seen":
-                # first published keys seen by THIS process — the write merges
-                # with the file, where another process may have pinned already
-                self._write_pin(name, sign_pub, agree_pub)
-                pin = self._pins.get(name) or {}
-                if pin.get("sign_pub", sign_pub) == sign_pub:
-                    return sign_pub, agree_pub
-                self._write_alert(name, sign_pub, agree_pub, pin)
-                return pin.get("sign_pub", ""), pin.get("agree_pub", "")
+                operation = PendingPin(
+                    "first_seen", name, None, None, sign_pub, agree_pub,
+                    utcnow_iso(), "[]",
+                )
+                candidate = copy.deepcopy(doc)
+                self._apply(operation, candidate)
+                self._commit(candidate, operation)
+                return sign_pub, agree_pub
             if decision.action == "rotate":
-                self._write_pin(name, sign_pub, agree_pub, replace=True)
+                operation = PendingPin(
+                    "rotate", name, pin.get("sign_pub", ""),
+                    pin.get("agree_pub", ""), sign_pub, agree_pub,
+                    utcnow_iso(), history_json or "[]",
+                )
+                candidate = copy.deepcopy(doc)
+                self._apply(operation, candidate)
+                self._commit(candidate, operation)
             elif decision.action == "alert":
-                self._write_alert(name, sign_pub, agree_pub, pin)
+                if any(
+                    alert["name"] == name
+                    and alert["seen_sign_pub"] == sign_pub
+                    for alert in doc["alerts"]
+                ):
+                    return decision.sign_pub, decision.agree_pub
+                operation = PendingAlert(
+                    name, pin.get("sign_pub", ""), pin.get("agree_pub", ""),
+                    sign_pub, agree_pub, utcnow_iso(),
+                )
+                candidate = copy.deepcopy(doc)
+                if self._apply(operation, candidate):
+                    self._commit(candidate, operation)
             return decision.sign_pub, decision.agree_pub
 
     def _chain_ok(
@@ -186,16 +230,22 @@ class KeyPinStore:
         """Pin explicitly at provisioning time (signup / key mint) so the
         machine that created the keys trusts them before any read races a
         concurrent doc write. Never moves an existing pin."""
-        with self._lock:
-            if name not in self._pins and sign_pub:
-                self._write_pin(name, sign_pub, agree_pub)
+        with self._lock, self._view() as doc:
+            if name not in doc["pins"] and sign_pub:
+                operation = PendingPin(
+                    "first_seen", name, None, None, sign_pub, agree_pub,
+                    utcnow_iso(), "[]",
+                )
+                candidate = copy.deepcopy(doc)
+                self._apply(operation, candidate)
+                self._commit(candidate, operation)
 
     def fingerprint(self, name: str, sign_pub: str = "", agree_pub: str = "") -> str:
         """The fingerprint of the keys THIS MACHINE trusts for ``name`` — the
         pin when one exists, else the published pair the caller has in hand.
         What you read aloud is what you actually verify against."""
-        with self._lock:
-            pin = self._pins.get(name) or {}
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name) or {}
         sign = pin.get("sign_pub") or sign_pub
         agree = pin.get("agree_pub") or agree_pub
         return key_fingerprint(name, sign, agree)
@@ -204,8 +254,8 @@ class KeyPinStore:
         """ISO timestamp of the out-of-band verification, or '' (R31). Cleared
         automatically if the pin ever moves (a signed-history advance mints a
         fresh entry without the flag)."""
-        with self._lock:
-            pin = self._pins.get(name) or {}
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name) or {}
         return str(pin.get("verified") or "")
 
     def projection_facts(self, names) -> dict:
@@ -216,14 +266,14 @@ class KeyPinStore:
         trust, verification, or a key-change alert changes.
         """
         selected = sorted({str(name) for name in names if name})
-        with self._lock:
+        with self._lock, self._view() as doc:
             return {
                 "pins": {
-                    name: copy.deepcopy(self._pins.get(name) or {})
+                    name: copy.deepcopy(doc["pins"].get(name) or {})
                     for name in selected
                 },
                 "alerts": [
-                    copy.deepcopy(alert) for alert in self._alerts
+                    copy.deepcopy(alert) for alert in doc["alerts"]
                     if str(alert.get("name") or "") in selected
                 ],
             }
@@ -231,16 +281,17 @@ class KeyPinStore:
     def mark_verified(self, name: str) -> None:
         """Record that the signed-in human compared fingerprints out-of-band.
         Machine-local trust metadata, like the pin itself."""
-        with self._lock:
-            if name not in self._pins:
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name)
+            if pin is None:
                 return
-
-            def apply(doc: dict) -> None:
-                pin = doc.setdefault("pins", {}).get(name)
-                if isinstance(pin, dict):
-                    pin["verified"] = utcnow_iso()
-
-            self._mutate(apply)
+            operation = PendingVerify(
+                name, pin["sign_pub"], pin["agree_pub"],
+                str(pin.get("verified") or ""), utcnow_iso(),
+            )
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
 
     def forget(self, name: str) -> None:
         """Remove trust state for an identity that was never published.
@@ -248,15 +299,18 @@ class KeyPinStore:
         Account creation uses this only while rolling back a failed transport
         write. Published or deleted identities keep their pins permanently.
         """
-        with self._lock:
-            def apply(doc: dict) -> None:
-                doc.setdefault("pins", {}).pop(name, None)
-                doc["alerts"] = [
-                    a for a in doc.setdefault("alerts", [])
-                    if a.get("name") != name
-                ]
-
-            self._mutate(apply)
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name)
+            alerts = [a for a in doc["alerts"] if a.get("name") == name]
+            if pin is None and not alerts:
+                return
+            operation = PendingForget(
+                name, None if pin is None else canonical_json(pin),
+                canonical_json(alerts),
+            )
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
 
     def auto_verify_local(self, load_bundle, pubs_of) -> list[str]:
         """R54 (V31): pins whose PRIVATE bundle lives on this machine verify
@@ -267,8 +321,8 @@ class KeyPinStore:
         Marks ONLY when the bundle's public halves match the pin exactly;
         a stale bundle after a key change marks nothing (the key-change
         alert path owns that story). Returns the names marked."""
-        with self._lock:
-            names = [n for n, p in self._pins.items() if not p.get("verified")]
+        with self._lock, self._view() as doc:
+            names = [n for n, p in doc["pins"].items() if not p.get("verified")]
         marked = []
         for name in names:
             bundle = load_bundle(name)
@@ -278,88 +332,193 @@ class KeyPinStore:
                 sign_pub, agree_pub = pubs_of(bundle)
             except Exception:  # noqa: BLE001 — an unreadable bundle proves nothing
                 continue
-            with self._lock:
-                pin = dict(self._pins.get(name) or {})
+            with self._lock, self._view() as doc:
+                pin = dict(doc["pins"].get(name) or {})
             if pin and pin.get("sign_pub") == sign_pub \
                     and pin.get("agree_pub") == agree_pub:
-                self.mark_verified(name)
-                marked.append(name)
+                if self._mark_verified_if(name, sign_pub, agree_pub):
+                    marked.append(name)
         return marked
 
     def alerts(self, *, unacked_only: bool = False) -> list[dict]:
-        with self._lock:
+        with self._lock, self._view() as doc:
             return [
-                dict(a) for a in self._alerts
+                copy.deepcopy(a) for a in doc["alerts"]
                 if not (unacked_only and a.get("ack"))
             ]
 
     def ack(self, name: str, seen_sign_pub: str = "") -> None:
         """Acknowledge alerts for ``name`` (optionally one specific seen key)
         so the GUI banner clears; the pin itself is untouched."""
-        with self._lock:
-            def apply(doc: dict) -> None:
-                for a in doc.setdefault("alerts", []):
-                    if a.get("name") == name and (
-                        not seen_sign_pub or a.get("seen_sign_pub") == seen_sign_pub
-                    ):
-                        a["ack"] = True
-
-            self._mutate(apply)
+        with self._lock, self._view() as doc:
+            targets = tuple(
+                (a["name"], a["seen_sign_pub"], a["first_seen"])
+                for a in doc["alerts"]
+                if a["name"] == name
+                and (not seen_sign_pub or a["seen_sign_pub"] == seen_sign_pub)
+                and not a["ack"]
+            )
+            if not targets:
+                return
+            operation = PendingAck(targets)
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
 
     # --------------------------------------------------------------- storage
-    def _write_pin(
-        self, name: str, sign_pub: str, agree_pub: str, *, replace: bool = False
-    ) -> None:
-        entry = {"sign_pub": sign_pub, "agree_pub": agree_pub,
-                 "pinned": utcnow_iso()}
-
-        def apply(doc: dict) -> None:
-            pins = doc.setdefault("pins", {})
-            if replace:  # only a validly signed history transition gets here
-                pins[name] = entry
+    @contextmanager
+    def _view(self):
+        with self._storage.locked() as (durable, _present):
+            view = copy.deepcopy(durable)
+            changed = False
+            remaining = []
+            for operation in self._storage.pending:
+                try:
+                    applied = self._apply(operation, view)
+                except Exception as exc:
+                    self._storage.conflicted = True
+                    raise PinStoreUnavailable("pin_conflict") from exc
+                if applied:
+                    changed = True
+                    remaining.append(operation)
+                elif changed:
+                    # This no-op may depend on an earlier unpersisted operation.
+                    remaining.append(operation)
+            if changed:
+                try:
+                    self._storage.write(view)
+                except PinStoreUnavailable as exc:
+                    if exc.reason != "write_failed":
+                        raise
+                    self._storage.pending = tuple(remaining)
+                else:
+                    self._storage.pending = ()
             else:
-                pins.setdefault(name, entry)
+                self._storage.pending = ()
+            self._set_view(view)
+            yield view
 
-        self._mutate(apply)
-
-    def _write_alert(
-        self, name: str, sign_pub: str, agree_pub: str, pin: dict
-    ) -> None:
-        for a in self._alerts:  # one record per (name, seen key)
-            if a.get("name") == name and a.get("seen_sign_pub") == sign_pub:
-                return
-
-        def apply(doc: dict) -> None:
-            alerts = doc.setdefault("alerts", [])
-            for a in alerts:
-                if a.get("name") == name and a.get("seen_sign_pub") == sign_pub:
-                    return
-            alerts.append({
-                "name": name,
-                "seen_sign_pub": sign_pub,
-                "seen_agree_pub": agree_pub,
-                "pinned_sign_pub": pin.get("sign_pub", ""),
-                "first_seen": utcnow_iso(),
-                "ack": False,
-            })
-
-        self._mutate(apply)
-
-    def _mutate(self, apply) -> None:
-        """Read-merge-write: re-read the file, fold in what other processes
-        pinned meanwhile (their existing entries win), apply the change, write
-        atomically, refresh memory. Caller holds ``self._lock``. A failed disk
-        write keeps the in-memory state consistent — trust decisions in this
-        process never depend on the write landing."""
-        doc = read_json(self.path, {}) or {}
-        doc.setdefault("pins", {})
-        doc.setdefault("alerts", [])
-        for name, pin in self._pins.items():  # carry my pins into a fresh file
-            doc["pins"].setdefault(name, pin)
-        apply(doc)
+    def _commit(self, candidate: dict, operation) -> None:
+        staged = self._storage.staged(operation)
+        validate_output(candidate)
         try:
-            atomic_write_json(self.path, doc)
-        except Exception:  # noqa: BLE001 — memory stays authoritative this run
-            pass
-        self._pins = dict(doc["pins"])
-        self._alerts = list(doc["alerts"])
+            self._storage.write(candidate)
+        except PinStoreUnavailable as exc:
+            if exc.reason != "write_failed":
+                raise
+            self._storage.pending = staged
+        else:
+            self._storage.pending = ()
+        self._set_view(candidate)
+
+    def _set_view(self, doc: dict) -> None:
+        self._pins = copy.deepcopy(doc["pins"])
+        self._alerts = copy.deepcopy(doc["alerts"])
+
+    def _mark_verified_if(self, name: str, sign_pub: str, agree_pub: str) -> bool:
+        with self._lock, self._view() as doc:
+            pin = doc["pins"].get(name)
+            if not pin or pin["sign_pub"] != sign_pub \
+                    or pin["agree_pub"] != agree_pub or pin.get("verified"):
+                return False
+            operation = PendingVerify(name, sign_pub, agree_pub, "", utcnow_iso())
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
+            return True
+
+    @staticmethod
+    def _apply(operation, doc: dict) -> bool:
+        pins, alerts = doc["pins"], doc["alerts"]
+        if type(operation) is PendingPin:
+            current = pins.get(operation.name)
+            if current and (current["sign_pub"], current["agree_pub"]) == (
+                operation.target_sign, operation.target_agree,
+            ):
+                return False
+            if operation.mode == "first_seen":
+                if current is not None:
+                    raise PinStoreUnavailable("pin_conflict")
+            else:
+                if current is None or (current["sign_pub"], current["agree_pub"]) != (
+                    operation.expected_sign, operation.expected_agree,
+                ):
+                    raise PinStoreUnavailable("pin_conflict")
+                history = json.loads(operation.history_json)
+                if not _history_advances(
+                    operation.name, current["sign_pub"], operation.target_sign,
+                    operation.target_agree, history,
+                ):
+                    raise PinStoreUnavailable("pin_conflict")
+            entry = {} if current is None else copy.deepcopy(current)
+            entry.update(sign_pub=operation.target_sign,
+                         agree_pub=operation.target_agree,
+                         pinned=operation.pinned)
+            entry.pop("verified", None)
+            pins[operation.name] = entry
+            return True
+        if type(operation) is PendingAlert:
+            pin = pins.get(operation.name)
+            if pin is None or (pin["sign_pub"], pin["agree_pub"]) != (
+                operation.expected_sign, operation.expected_agree,
+            ):
+                raise PinStoreUnavailable("pin_conflict")
+            for alert in alerts:
+                if (alert["name"], alert["seen_sign_pub"]) == (
+                    operation.name, operation.seen_sign,
+                ):
+                    immutable = (
+                        alert["seen_agree_pub"], alert["pinned_sign_pub"],
+                        alert["first_seen"],
+                    )
+                    expected = (
+                        operation.seen_agree, operation.expected_sign,
+                        operation.first_seen,
+                    )
+                    if immutable != expected:
+                        raise PinStoreUnavailable("pin_conflict")
+                    return False
+            alerts.append({
+                "name": operation.name, "seen_sign_pub": operation.seen_sign,
+                "seen_agree_pub": operation.seen_agree,
+                "pinned_sign_pub": operation.expected_sign,
+                "first_seen": operation.first_seen, "ack": False,
+            })
+            return True
+        if type(operation) is PendingVerify:
+            pin = pins.get(operation.name)
+            if pin is None or (pin["sign_pub"], pin["agree_pub"]) != (
+                operation.expected_sign, operation.expected_agree,
+            ):
+                raise PinStoreUnavailable("pin_conflict")
+            current = str(pin.get("verified") or "")
+            if current == operation.target_verified:
+                return False
+            if current != operation.expected_verified:
+                raise PinStoreUnavailable("pin_conflict")
+            pin["verified"] = operation.target_verified
+            return True
+        if type(operation) is PendingAck:
+            changed = False
+            for target in operation.targets:
+                found = next((a for a in alerts if (
+                    a["name"], a["seen_sign_pub"], a["first_seen"]
+                ) == target), None)
+                if found is None:
+                    raise PinStoreUnavailable("pin_conflict")
+                if not found["ack"]:
+                    found["ack"] = True
+                    changed = True
+            return changed
+        if type(operation) is PendingForget:
+            current = pins.get(operation.name)
+            selected = [a for a in alerts if a["name"] == operation.name]
+            if current is None and not selected:
+                return False
+            if (None if current is None else canonical_json(current)) != operation.pin_json \
+                    or canonical_json(selected) != operation.alerts_json:
+                raise PinStoreUnavailable("pin_conflict")
+            pins.pop(operation.name, None)
+            doc["alerts"] = [a for a in alerts if a["name"] != operation.name]
+            return True
+        raise PinStoreUnavailable("invalid_pending")

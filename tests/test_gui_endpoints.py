@@ -130,7 +130,11 @@ def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
     staged = stage_dir(rig.app, "aryan") / up["token"]
     assert staged.is_file() and staged.parent.name == "aryan"
     assert not any(p.name.endswith(".tmp") for p in staged.parent.iterdir())
-    assert staged.stat().st_mode & 0o777 == 0o600
+    # Windows does not expose a portable POSIX mode contract through stat().
+    # The account directory and one-shot token isolation below are required
+    # everywhere; assert the 0600 contract only where it is observable.
+    if os.name != "nt":
+        assert staged.stat().st_mode & 0o777 == 0o600
 
     monkeypatch.setattr(
         rig.app.mesh.store, "cache_and_outbox_add",
@@ -819,11 +823,14 @@ def _beat(rig, agent, *, age_s=0.0, pid=None):
     return p
 
 
-def test_asks_are_gated_by_process_truth(rig):
+def test_asks_are_gated_by_process_truth(rig, monkeypatch, request):
     """V109: an ask is only as real as its run. A locally-hosted agent with
     no live runner (no/stale heartbeat, dead pid) contributes NO asks; a
     fresh heartbeat with a live pid revives them; a remote agent falls back
     to the ask's own timeout."""
+    import agentbridge.harness.runtime.permissions as permissions
+    from types import SimpleNamespace
+
     from agentbridge.harness.runtime.permissions import PermissionLane
     from agentbridge.mesh.service import Mesh
 
@@ -833,6 +840,7 @@ def test_asks_are_gated_by_process_truth(rig):
                    members=["helper"])["chat"]["id"]
     helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
                   store_path=rig.home / "helper-liveness.sqlite")
+    request.addfinalizer(helper.close)
     helper.sync.sync_once([cid])
     ask = PermissionLane(helper, "helper").publish_ask(
         chat_id=cid, kind="permission", tool="Read", detail="x",
@@ -863,14 +871,18 @@ def test_asks_are_gated_by_process_truth(rig):
                           members=["farbot"])["chat"]["id"]
     farbot = Mesh(rig.root, "farbot", "elsewhere", encrypt=True, home=rig.home,
                   store_path=rig.home / "farbot-liveness.sqlite")
+    request.addfinalizer(farbot.close)
     farbot.sync.sync_once([remote_cid])
     remote = PermissionLane(farbot, "farbot").publish_ask(
         chat_id=remote_cid, kind="permission", tool="Read", detail="remote",
-        input_digest="d" * 64, timeout_s=0.2, run_id="r2", call_id="c2")
+        input_digest="d" * 64, timeout_s=120, run_id="r2", call_id="c2")
     assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == [remote.id]
-    wait_for(lambda: rig.get("/api/mesh/asks")["asks"] == [], timeout=2)
-    farbot.close()
-    helper.close()
+    # Advance only the permission module's clock for expiry validation; a
+    # sub-second timeout races Windows filesystem and HTTP I/O.
+    with monkeypatch.context() as expires:
+        expires.setattr(permissions, "time", SimpleNamespace(
+            time_ns=lambda: remote.record["expires_ns"] + 1))
+        assert rig.get("/api/mesh/asks")["asks"] == []
 
 
 def test_run_lines_need_a_live_runner(rig):
