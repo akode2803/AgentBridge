@@ -59,10 +59,15 @@ from .mirror_observation import (
     MirrorExpectedPosition,
     MirrorObservation,
     MirrorPositionValidation,
+    MirrorSelection,
+    MirrorSelectionRequest,
     capture_mirror_locked,
+    capture_mirror_selection_locked,
+    _valid_path,
     validate_capture_budget,
     validate_identity,
     validated_position_fields,
+    validated_selection_request,
 )
 
 __all__ = ["CachingTransport"]
@@ -85,6 +90,10 @@ _monotonic = time.monotonic
 # read-through miss sentinel: tells "doc absent/unreachable" apart from a
 # stored None (inner.get_doc reports both as its default)
 _MISS = object()
+
+
+def _selection_keys_valid(documents: dict) -> bool:
+    return all(type(path) is str and _valid_path(path) for path in documents)
 
 
 class CachingTransport(Transport):
@@ -145,6 +154,10 @@ class CachingTransport(Transport):
         self._last_error_message: str | None = None
         self._last_attempt = 0.0
         self._change_listeners: list = []
+        # Selective exact lookup is safe only while every stored key is an
+        # exact validated string; otherwise dict lookup could invoke a hostile
+        # key's equality hook under the mirror mutex.
+        self._mirror_selection_keys_valid = True
         self._load_snapshot()
 
     @contextmanager
@@ -186,10 +199,12 @@ class CachingTransport(Transport):
         except (TypeError, ValueError):
             return
         detached_docs = copy.deepcopy(docs)
+        selection_keys_valid = _selection_keys_valid(detached_docs)
         detached_chat_ids = sorted({str(c) for c in chat_ids if c})
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs = detached_docs
+                self._mirror_selection_keys_valid = selection_keys_valid
                 self._chat_ids = detached_chat_ids
                 self._cursor = cursor
                 self._mirror_provenance = "bootstrap_unverified"
@@ -424,6 +439,7 @@ class CachingTransport(Transport):
             # mirror after the pull returns.  Detachment happens outside the
             # mirror mutex because arbitrary provider values may define hooks.
             docs = copy.deepcopy(dict(docs))
+            selection_keys_valid = _selection_keys_valid(docs)
             ids = set(self.inner.list_chat_ids())
         except Exception as exc:
             self._record_failure(exc)
@@ -445,6 +461,9 @@ class CachingTransport(Transport):
                     if wrote >= t0:
                         ids.add(chat_id)
                 self._docs = docs
+                self._mirror_selection_keys_valid = (
+                    self._mirror_selection_keys_valid and selection_keys_valid
+                )
                 self._chat_ids = sorted(ids)
                 self._neg.clear()  # a fresh snapshot re-answers every miss
                 self._warm = True
@@ -492,6 +511,11 @@ class CachingTransport(Transport):
             changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
             changed = copy.deepcopy(dict(changed))
             deleted = set(deleted)
+            selection_keys_valid = (
+                _selection_keys_valid(changed)
+                and all(type(path) is str and _valid_path(path)
+                        for path in deleted)
+            )
             # RLS can make a room disappear from this member's view without
             # returning its changed meta row. Reconcile the authoritative
             # visible-id set every delta tick so removals contract the mirror
@@ -509,6 +533,9 @@ class CachingTransport(Transport):
                     chat_id for chat_id, wrote in self._chat_writes.items()
                     if wrote >= t0
                 }
+                self._mirror_selection_keys_valid = (
+                    self._mirror_selection_keys_valid and selection_keys_valid
+                )
                 revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
                 foreign = bool(revoked_ids)
                 for path, val in changed.items():
@@ -665,6 +692,11 @@ class CachingTransport(Transport):
                     if owned is not _MISS:
                         with self._captured_mutation_locked():
                             self._docs[path] = owned
+                            self._mirror_selection_keys_valid = (
+                                self._mirror_selection_keys_valid
+                                and type(path) is str
+                                and _valid_path(path)
+                            )
                         return copy.deepcopy(owned)
                     self._neg.add(path)
             return default
@@ -706,6 +738,7 @@ class CachingTransport(Transport):
             )
 
     def _remember_doc_write(self, path: str, data: Any) -> None:
+        selection_key_valid = type(path) is str and _valid_path(path)
         owned = copy.deepcopy(data)
         # The provider has already accepted the write. Mirror storage must
         # retain an independent, wire-equivalent JSON value when possible, but
@@ -721,6 +754,9 @@ class CachingTransport(Transport):
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs[path] = owned
+                self._mirror_selection_keys_valid = (
+                    self._mirror_selection_keys_valid and selection_key_valid
+                )
                 self._doc_writes[path] = _monotonic()
                 self._neg.discard(path)
                 self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
@@ -916,6 +952,23 @@ class CachingTransport(Transport):
             )
             return MirrorPositionValidation(
                 "matched" if actual == wanted else "changed")
+
+    def capture_mirror_selection(
+        self, request: MirrorSelectionRequest,
+    ) -> MirrorSelection | MirrorCaptureUnavailable:
+        """Return selected immutable facts without warming or provider access."""
+        bounded = validated_selection_request(request)
+        with self._lock:
+            return capture_mirror_selection_locked(
+                request=bounded, warm=self._warm,
+                invalid_reason=self._mirror_invalid_reason,
+                instance_nonce=self._mirror_instance_nonce,
+                revision=self._mirror_revision,
+                root_identity=self._mirror_root_identity,
+                cache_identity=self._mirror_cache_identity,
+                provenance=self._mirror_provenance,
+                documents=(self._docs if self._mirror_selection_keys_valid else None),
+            )
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:

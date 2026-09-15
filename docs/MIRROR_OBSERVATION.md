@@ -68,3 +68,34 @@ trust/key/session coordination or cache admission is implemented here. Local
 nonce/revision pairs and provider cursors must not be used as authorization or
 substituted for durable Store generations. Existing transport reads remain the
 serving path; the outer projection cache remains disabled.
+
+## Selective capture
+
+`capture_mirror_selection()` captures bounded exact-path facts and complete
+process-mirror prefixes at one `MirrorExpectedPosition`. Exact results retain a
+distinction between an absent path (`None`) and a present JSON null (`"null"`).
+Prefix records and selectors are sorted and immutable. A supplied expected
+position must match exactly; otherwise the method returns `changed` with no
+records. The base transport declines this optional operation as `unsupported`.
+
+Requests allow at most 128 exact paths, eight nonoverlapping prefixes, 64 KiB of
+selector UTF-8, 4,096 bytes per selector and 100,000 examined paths. Prefixes end
+in `/`. A prefix request first bounds the total mirror path count because complete
+enumeration remains O(total mirror paths); exact-only capture uses direct lookup.
+The result record count includes present records and absent exact facts.
+
+Protocol byte accounting charges 16 scalar bytes, eight framing bytes for each
+position/provenance and request selector string, eight framing bytes plus one
+presence byte per exact fact, plus path and present payload bytes, and eight framing bytes per prefix result
+and prefix record plus their strings. This is a deterministic admission budget,
+not a resident-memory bound. A selected nested value may allocate during JSON
+serialization before the final bound is known.
+
+`CachingTransport` maintains a source-owned exact-key invariant at mirror ingress.
+If provider, bootstrap, delta, read-through or local-write input introduces a
+nonexact or invalid document key, selective capture becomes unavailable for that
+instance. Ordinary serving behavior is unchanged. This conservative state is
+sticky until transport reconstruction, and avoids invoking a hostile dictionary
+key comparison while the mirror mutex is held. Serialization failure during a
+read returns no partial selection and does not poison the mirror; interruption of
+a mirror mutation retains the existing permanent `mutation_interrupted` state.

@@ -44,6 +44,8 @@ from .mirror_observation import (
     MirrorExpectedPosition,
     MirrorObservation,
     MirrorPositionValidation,
+    MirrorSelection,
+    MirrorSelectionRequest,
     validate_capture_budget,
     validated_position_fields,
 )
@@ -203,6 +205,14 @@ class Transport(ABC):
         """Decline process-mirror validation without touching the transport."""
         validated_position_fields(expected)
         return MirrorPositionValidation("unavailable", "unsupported")
+
+    def capture_mirror_selection(
+        self, request: MirrorSelectionRequest,
+    ) -> MirrorSelection | MirrorCaptureUnavailable:
+        """Decline selective process-mirror capture without scanning."""
+        from .mirror_observation import validated_selection_request
+        validated_selection_request(request)
+        return MirrorCaptureUnavailable("unsupported")
 
     def get_docs(self, prefix: str = "") -> dict[str, Any]:
         """OPTIONAL fast path: every doc under ``prefix`` at once. This

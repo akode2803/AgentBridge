@@ -18,8 +18,8 @@ from ..store.membership_input_position import (
 )
 from ..transport.cache import CachingTransport
 from ..transport.mirror_observation import (
-    MirrorCaptureUnavailable, MirrorExpectedPosition, MirrorObservation,
-    MirrorPositionValidation,
+    MirrorCaptureUnavailable, MirrorExpectedPosition, MirrorPositionValidation,
+    MirrorSelection, MirrorSelectionRequest,
 )
 from . import events
 from .lifecycle import LifecycleUnavailable
@@ -103,27 +103,32 @@ def read_membership_snapshot(
             raise ValueError("chat_id exceeds limit")
         if not callable(clock_ns):
             raise TypeError("clock_ns must be callable")
-        captured_now = _clock(clock_ns)
-        mirror, pins_json, pins_present, cut = _capture(
-            mesh, chat_id, bounded, captured_now,
-        )
-        snapshot, consumed_accounts, consumed_subjects, deadline = _derive(
-            chat_id, mirror, pins_json, cut, captured_now, bounded,
-        )
-        validated_now = _validate_final(
-            mesh, mirror, pins_json, pins_present, cut, captured_now,
-            deadline, clock_ns, bounded,
-        )
-        pin_digest = _digest(pins_json)
-        admission = MembershipAdmission(
-            MirrorExpectedPosition.from_observation(mirror), cut.position,
-            pins_present, pin_digest, _heads_digest(cut.heads), captured_now,
-            validated_now, deadline, tuple(sorted(consumed_accounts)),
-            tuple(sorted(consumed_subjects)),
-        )
-        return MembershipSnapshotResult(
-            "admitted_local", _snapshot_json(snapshot), admission, None,
-        )
+        for attempt in (1, 2):
+            try:
+                captured_now = _clock(clock_ns)
+                mirror, pins_json, pins_present, cut = _capture(
+                    mesh, chat_id, bounded, captured_now,
+                )
+                snapshot, consumed_accounts, consumed_subjects, deadline = _derive(
+                    mesh.tx, chat_id, mirror, pins_json, cut, captured_now, bounded,
+                )
+                validated_now = _validate_final(
+                    mesh, mirror, pins_json, pins_present, cut, captured_now,
+                    deadline, clock_ns, bounded,
+                )
+                admission = MembershipAdmission(
+                    mirror.position, cut.position, pins_present, _digest(pins_json),
+                    _heads_digest(cut.heads), captured_now, validated_now, deadline,
+                    tuple(sorted(consumed_accounts)), tuple(sorted(consumed_subjects)),
+                )
+                return MembershipSnapshotResult(
+                    "admitted_local", _snapshot_json(snapshot), admission, None,
+                )
+            except _Reject as exc:
+                reason = str(exc)
+                if reason == "mirror_changed" and attempt == 1:
+                    continue
+                break
     except _Reject as exc:
         reason = str(exc)
     except (PinStoreUnavailable, MembershipInputUnavailable,
@@ -142,53 +147,48 @@ def _capture(mesh, chat_id, limits, captured_now):
     transport = mesh.tx
     if type(transport) is not CachingTransport:
         raise _Reject("unsupported")
-    for attempt in (1, 2):
-        mirror = transport.capture_mirror(
-            max_documents=limits.max_documents, max_chat_ids=100_000,
-            max_bytes=limits.max_bytes,
-        )
-        if isinstance(mirror, MirrorCaptureUnavailable):
-            raise _Reject(f"mirror_{mirror.reason}")
-        if type(mirror) is not MirrorObservation:
-            raise _Reject("mirror_invalid")
-        mirror_used = _mirror_bytes(mirror)
-        pins = mesh.key_pins
-        try:
-            with pins._lock, pins._storage.locked() as (pin_doc, pin_present):
-                if pins._storage.pending:
-                    raise _Reject("pin_pending")
-                pins_json = canonical_json(pin_doc)
-                used = mirror_used + len(pins_json.encode("utf-8"))
-                if used > limits.max_bytes:
-                    raise _Reject("budget_exceeded")
-                conn = _open_reader(mesh.store.path)
-                try:
-                    conn.execute("BEGIN")
-                    cut = membership_read_inputs.capture_cut(
-                        conn, mesh.store.path, chat_id,
-                        max_events=limits.max_events, max_heads=limits.max_heads,
-                        max_bytes=limits.max_bytes - used,
-                    )
-                    validation = transport.validate_mirror_position(
-                        MirrorExpectedPosition.from_observation(mirror),
-                    )
-                finally:
-                    conn.close()
-        except PinStoreUnavailable as exc:
-            raise _Reject("pin_unavailable") from exc
-        if type(validation) is not MirrorPositionValidation:
-            raise _Reject("mirror_invalid")
-        if validation.status == "matched":
-            return mirror, pins_json, pin_present, cut
-        if validation.status == "unavailable":
-            raise _Reject("mirror_unavailable")
-        if attempt == 2:
-            raise _Reject("mirror_changed")
-    raise AssertionError("unreachable")
+    mirror = transport.capture_mirror_selection(MirrorSelectionRequest(
+        None, (f"chats/{chat_id}/meta.json",), (),
+        min(1, limits.max_documents), limits.max_bytes,
+    ))
+    if isinstance(mirror, MirrorCaptureUnavailable):
+        raise _Reject(f"mirror_{mirror.reason}")
+    if type(mirror) is not MirrorSelection:
+        raise _Reject("mirror_invalid")
+    mirror_used = _mirror_bytes(mirror)
+    pins = mesh.key_pins
+    try:
+        with pins._lock, pins._storage.locked() as (pin_doc, pin_present):
+            if pins._storage.pending:
+                raise _Reject("pin_pending")
+            pins_json = canonical_json(pin_doc)
+            used = mirror_used + len(pins_json.encode("utf-8"))
+            if used > limits.max_bytes:
+                raise _Reject("budget_exceeded")
+            conn = _open_reader(mesh.store.path)
+            try:
+                conn.execute("BEGIN")
+                cut = membership_read_inputs.capture_cut(
+                    conn, mesh.store.path, chat_id,
+                    max_events=limits.max_events, max_heads=limits.max_heads,
+                    max_bytes=limits.max_bytes - used,
+                )
+                validation = transport.validate_mirror_position(mirror.position)
+            finally:
+                conn.close()
+    except PinStoreUnavailable as exc:
+        raise _Reject("pin_unavailable") from exc
+    if type(validation) is not MirrorPositionValidation:
+        raise _Reject("mirror_invalid")
+    if validation.status == "matched":
+        return mirror, pins_json, pin_present, cut
+    if validation.status == "unavailable":
+        raise _Reject("mirror_unavailable")
+    raise _Reject("mirror_changed")
 
 
-def _derive(chat_id, mirror, pins_json, cut, now_ns, limits):
-    records = {record.path: record.payload_json for record in mirror.records}
+def _derive(transport, chat_id, mirror, pins_json, cut, now_ns, limits):
+    records = dict(mirror.exact_records)
     raw_meta = records.get(f"chats/{chat_id}/meta.json")
     if raw_meta is None:
         raise _Reject("missing_meta")
@@ -214,14 +214,18 @@ def _derive(chat_id, mirror, pins_json, cut, now_ns, limits):
             newer.append(value)
     if not newer:
         return materialized, set(), set(), None
-    resolver = _CapturedResolver(records, pins_json, cut.heads, now_ns, limits)
+    resolver = _CapturedResolver(
+        records, pins_json, cut.heads, now_ns, limits, mirror.position,
+        mirror.serialized_bytes + len(pins_json.encode("utf-8")) + cut.serialized_bytes,
+    ).bind_transport(transport)
     result = events.advance(materialized, newer, resolver)
     return result, resolver.consumed_accounts, resolver.consumed_subjects, resolver.deadline
 
 
 class _CapturedResolver:
-    def __init__(self, records, pins_json, heads, now_ns, limits):
+    def __init__(self, records, pins_json, heads, now_ns, limits, position, used):
         self.records = records
+        self.transport = None
         self.pins = json.loads(pins_json).get("pins", {})
         self.heads = {name: payload for name, _generation, payload in heads}
         self.now_ns = now_ns
@@ -232,11 +236,41 @@ class _CapturedResolver:
         self.consumed_subjects = set()
         self.deadline = None
         self.dependency_steps = 0
+        self.position = position
+        self.used = used
+        self.selected_records = len(records)
+        self.lifecycle_loaded = False
+
+    def bind_transport(self, transport):
+        self.transport = transport
+        return self
+
+    def _selection(self, exact=(), prefixes=()):
+        if self.transport is None:
+            raise _Reject("mirror_invalid")
+        value = self.transport.capture_mirror_selection(MirrorSelectionRequest(
+            self.position, tuple(exact), tuple(prefixes),
+            self.limits.max_documents - self.selected_records,
+            self.limits.max_bytes - self.used,
+        ))
+        if isinstance(value, MirrorCaptureUnavailable):
+            raise _Reject("mirror_changed" if value.reason == "changed"
+                          else f"mirror_{value.reason}")
+        if type(value) is not MirrorSelection:
+            raise _Reject("mirror_invalid")
+        self.used += value.serialized_bytes
+        self.selected_records += len(value.exact_records) + sum(
+            len(item.records) for item in value.complete_prefixes)
+        return value
 
     def _raw_account(self, name):
         if name in self.accounts:
             return self.accounts[name]
-        raw = self.records.get(f"users/{name}.json")
+        path = f"users/{name}.json"
+        if path not in self.records:
+            selected = self._selection(exact=(path,))
+            self.records.update(selected.exact_records)
+        raw = self.records.get(path)
         if raw is None:
             raise _Reject("account_unknown")
         value = json.loads(raw)
@@ -297,6 +331,11 @@ class _CapturedResolver:
         raise _Reject("dependency_limit")
 
     def _evidence(self, subject):
+        if not self.lifecycle_loaded:
+            selected = self._selection(prefixes=("lifecycle/",))
+            for group in selected.complete_prefixes:
+                self.records.update((row.path, row.payload_json) for row in group.records)
+            self.lifecycle_loaded = True
         prefix = f"lifecycle/{subject}/"
         envelopes = tuple(sorted(
             (path, raw) for path, raw in self.records.items() if path.startswith(prefix)
@@ -319,7 +358,7 @@ class _CapturedResolver:
 
 def _validate_final(mesh, mirror, pins_json, pin_present, cut, captured_now,
                     deadline, clock_ns, limits):
-    expected_mirror = MirrorExpectedPosition.from_observation(mirror)
+    expected_mirror = mirror.position
     pins = mesh.key_pins
     try:
         with pins._lock, pins._storage.locked() as (doc, present):
@@ -421,10 +460,7 @@ def _open_writer(path):
 
 
 def _mirror_bytes(value):
-    strings = [value.instance_nonce, value.root_identity, value.cache_identity,
-               value.provenance, *value.chat_ids]
-    strings.extend(item for record in value.records for item in (record.path, record.payload_json))
-    return sum(8 + len(item.encode("utf-8")) for item in strings) + 16
+    return value.serialized_bytes
 
 
 def _snapshot_json(value):
