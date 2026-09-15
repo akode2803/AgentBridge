@@ -88,6 +88,29 @@ def inspect_position(path: Path) -> ShadowPosition:
         conn.close()
 
 
+def validate_shadow_position(expected: ShadowPosition, path: Path, *,
+                             owned: bool = False) -> ShadowPosition:
+    """Return a detached, Store-validated copy of a shadow position token."""
+    return _expected(expected, path, owned=owned)
+
+
+def validate_shadow_budgets(*, max_documents: int, max_chat_ids: int,
+                            max_bytes: int) -> None:
+    """Validate one budget set against the supported shadow-slot ceilings."""
+    _budgets(max_documents, max_chat_ids, max_bytes)
+
+
+def validate_shadow_snapshot(
+    snapshot: ShadowSnapshot,
+    *,
+    max_documents: int = MAX_RECORDS,
+    max_chat_ids: int = MAX_RECORDS,
+    max_bytes: int = MAX_BYTES,
+) -> None:
+    """Validate a snapshot with the same rules used by publication."""
+    _prepare(snapshot, max_documents, max_chat_ids, max_bytes)
+
+
 def acquire(conn: sqlite3.Connection, path: Path, expected: ShadowPosition,
             publisher_nonce: str, source: ShadowSource) -> ShadowPosition:
     wanted = _expected(expected, path)
