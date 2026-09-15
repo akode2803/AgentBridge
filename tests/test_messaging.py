@@ -6,6 +6,7 @@ EVERY operation (the v0.24.1 lesson).
 """
 
 import threading
+from types import SimpleNamespace
 import time
 
 import pytest
@@ -122,19 +123,23 @@ def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
     monkeypatch.setattr(ann.tx, "put_blob", track_put)
     monkeypatch.setattr(ann.tx, "append_log", fail_append)
     ann.outbox.base_delay = ann.outbox.max_delay = 0.001
+    clock = SimpleNamespace(now_ns=time.time_ns())
+    monkeypatch.setattr("agentbridge.store.db.time",
+                        SimpleNamespace(time_ns=lambda: clock.now_ns))
     assert ann.outbox.flush_once() == 0
     assert ann.store.outbox_counts() == {"pending": 1}
     assert ann.tx.get_blob(P.file(CHAT, blob_id)) is not None
     assert (ann.attachments.root / blob_id).is_file()
 
     monkeypatch.setattr(ann.tx, "append_log", original_append)
-    deadline = time.monotonic() + 2.0
-    delivered = 0
-    while not delivered and time.monotonic() < deadline:
-        delivered = ann.outbox.flush_once()
-        if not delivered:
-            time.sleep(0.002)
-    assert delivered == 1
+    with ann.store._conn() as conn:
+        attempts, retry_at = conn.execute(
+            "SELECT attempts,next_ns FROM outbox WHERE state='pending'",
+        ).fetchone()
+    assert attempts == 1 and retry_at > clock.now_ns
+    assert ann.outbox.flush_once() == 0
+    clock.now_ns = retry_at
+    assert ann.outbox.flush_once() == 1
     bob.sync.sync_once([CHAT])
     assert writes == [P.file(CHAT, blob_id), P.file(CHAT, blob_id)]
     assert [m.body for m in bob.messages_for(CHAT)] == ["retry me"]

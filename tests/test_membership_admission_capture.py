@@ -206,7 +206,7 @@ def test_mirror_retry_once_then_final_change_and_clock_boundaries_fallback(admis
         return MirrorPositionValidation("changed") if len(calls) == 1 else original(expected)
 
     monkeypatch.setattr(mesh.tx, "validate_mirror_position", changed_once)
-    retried = read_membership_snapshot(mesh, CHAT, scope, clock_ns=_clock(3, 3, 3))
+    retried = read_membership_snapshot(mesh, CHAT, scope, clock_ns=_clock(3, 3, 3, 3))
     assert retried.source == "admitted_local" and len(calls) == 4
 
     monkeypatch.setattr(mesh.tx, "validate_mirror_position", original)
@@ -393,7 +393,7 @@ def test_real_mirror_mutation_retries_capture(admission_mesh, monkeypatch, chang
         return original_open(path)
 
     monkeypatch.setattr(membership_read, "_open_reader", mutate_before_cut)
-    result = read_membership_snapshot(mesh, CHAT, scope, clock_ns=_clock(6, 6, 6))
+    result = read_membership_snapshot(mesh, CHAT, scope, clock_ns=_clock(6, 6, 6, 6))
     assert opened == 2
     if changes == 1:
         assert result.source == "admitted_local"

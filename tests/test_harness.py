@@ -943,19 +943,23 @@ def test_partial_attachment_upload_remains_owned_and_retries_stable_ids(
     batch = runner._attach(snap.id, [str(first), str(second)])
     runner.mesh.post(snap.id, "two files", attachments=batch.prepared)
     runner.mesh.outbox.base_delay = runner.mesh.outbox.max_delay = 0.001
+    clock = SimpleNamespace(now_ns=time.time_ns())
+    monkeypatch.setattr("agentbridge.store.db.time",
+                        SimpleNamespace(time_ns=lambda: clock.now_ns))
     assert runner.mesh.outbox.flush_once() == 0
     assert len(uploaded) == 1 and tx.get_blob(uploaded[0]) is not None
     assert runner.mesh.store.outbox_counts() == {"pending": 1}
     assert len(list(runner.mesh.attachments.root.iterdir())) == 2
 
     monkeypatch.setattr(tx, "put_blob", original_put)
-    deadline = time.monotonic() + 2.0
-    delivered = 0
-    while not delivered and time.monotonic() < deadline:
-        delivered = runner.mesh.outbox.flush_once()
-        if not delivered:
-            time.sleep(0.002)
-    assert delivered == 1
+    with runner.mesh.store._conn() as conn:
+        attempts, retry_at = conn.execute(
+            "SELECT attempts,next_ns FROM outbox WHERE state='pending'",
+        ).fetchone()
+    assert attempts == 1 and retry_at > clock.now_ns
+    assert runner.mesh.outbox.flush_once() == 0
+    clock.now_ns = retry_at
+    assert runner.mesh.outbox.flush_once() == 1
     assert runner.mesh.store.outbox_counts() == {}
     assert list(runner.mesh.attachments.root.iterdir()) == []
 

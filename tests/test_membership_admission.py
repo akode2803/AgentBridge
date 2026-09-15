@@ -86,6 +86,128 @@ def test_genuine_signed_suffix_is_admitted_and_matches_explicit_canonical_snapsh
     assert json.loads(result.snapshot_json)["name"] == "After"
 
 
+def test_signed_suffix_captures_each_lazy_dependency_once(admitted_mesh, monkeypatch):
+    mesh, mirror, chat_id = admitted_mesh
+    _newer_suffix(mesh, mirror, chat_id)
+    original = mirror.capture_mirror_selection
+    requests = []
+
+    def capture(request):
+        requests.append(request)
+        return original(request)
+
+    monkeypatch.setattr(mirror, "capture_mirror_selection", capture)
+    result = _read(mesh, chat_id)
+    assert result.source == "admitted_local", result.rejection_reason
+    assert json.loads(result.snapshot_json)["name"] == "After"
+    assert sum(request.complete_prefixes == ("lifecycle/",) for request in requests) == 1
+    assert sum(request.exact_paths == (P.user("aryan"),) for request in requests) == 1
+    assert result.admission.consumed_accounts.count("aryan") == 1
+
+
+@pytest.mark.parametrize("phase", ("lifecycle", "account", "final"))
+@pytest.mark.parametrize("persistent", (False, True), ids=("once", "persistent"))
+def test_lazy_selection_mirror_change_retries_whole_read_once(
+        admitted_mesh, monkeypatch, phase, persistent):
+    mesh, mirror, chat_id = admitted_mesh
+    _newer_suffix(mesh, mirror, chat_id)
+    original = mirror.capture_mirror_selection
+    initial_captures = 0
+    lazy_changes = 0
+    canonical_calls = 0
+
+    def mutate():
+        nonlocal lazy_changes
+        lazy_changes += 1
+        mirror.put_doc("fixture/lazy-change.json", {"change": lazy_changes})
+
+    def capture(request):
+        nonlocal initial_captures, lazy_changes
+        if request.expected is None:
+            initial_captures += 1
+        result = original(request)
+        selected_phase = request.complete_prefixes if phase == "lifecycle" else (
+            request.exact_paths == (P.user("aryan"),) if phase == "account" else False
+        )
+        if selected_phase and (persistent or lazy_changes == 0):
+            mutate()
+        return result
+
+    monkeypatch.setattr(mirror, "capture_mirror_selection", capture)
+    if phase == "final":
+        original_final = admission._validate_final
+
+        def validate(*args, **kwargs):
+            if persistent or lazy_changes == 0:
+                mutate()
+            return original_final(*args, **kwargs)
+
+        monkeypatch.setattr(admission, "_validate_final", validate)
+    original_canonical = mesh.messaging.snapshot
+
+    def canonical(chat):
+        nonlocal canonical_calls
+        canonical_calls += 1
+        return original_canonical(chat)
+
+    monkeypatch.setattr(mesh.messaging, "snapshot", canonical)
+    result = _read(mesh, chat_id)
+    assert initial_captures == 2
+    if persistent:
+        assert (result.source, result.rejection_reason) == ("canonical", "mirror_changed")
+        assert canonical_calls == 1
+        assert json.loads(result.snapshot_json)["name"] == "After"
+    else:
+        assert result.source == "admitted_local", result.rejection_reason
+        assert canonical_calls == 0
+        assert json.loads(result.snapshot_json)["name"] == "After"
+
+
+def test_aggregate_selection_pin_and_sqlite_byte_boundary(admitted_mesh, monkeypatch):
+    mesh, mirror, chat_id = admitted_mesh
+    _newer_suffix(mesh, mirror, chat_id)
+    original_selection = mirror.capture_mirror_selection
+    original_cut = admission.membership_read_inputs.capture_cut
+    selections = []
+    cut_bytes = []
+
+    def capture(request):
+        result = original_selection(request)
+        if hasattr(result, "serialized_bytes"):
+            selections.append(result)
+        return result
+
+    def capture_cut(*args, **kwargs):
+        result = original_cut(*args, **kwargs)
+        cut_bytes.append(result.serialized_bytes)
+        return result
+
+    monkeypatch.setattr(mirror, "capture_mirror_selection", capture)
+    monkeypatch.setattr(admission.membership_read_inputs, "capture_cut", capture_cut)
+    baseline = _read(mesh, chat_id)
+    assert baseline.source == "admitted_local", baseline.rejection_reason
+    pin_bytes = len(admission.canonical_json({"pins": mesh.key_pins._pins,
+                                              "alerts": mesh.key_pins._alerts}).encode("utf-8"))
+    exact_limit = sum(item.serialized_bytes for item in selections) + cut_bytes[-1] + pin_bytes
+    exact_records = sum(len(item.exact_records) + sum(
+        len(group.records) for group in item.complete_prefixes
+    ) for item in selections)
+
+    selections.clear()
+    cut_bytes.clear()
+    at_limit = _read(mesh, chat_id, limits=MembershipReadLimits(max_bytes=exact_limit))
+    assert at_limit.source == "admitted_local", at_limit.rejection_reason
+    below = _read(mesh, chat_id, limits=MembershipReadLimits(max_bytes=exact_limit - 1))
+    assert below.source == "canonical" and below.rejection_reason == "mirror_budget_exceeded"
+    at_count = _read(mesh, chat_id, limits=MembershipReadLimits(max_documents=exact_records))
+    assert at_count.source == "admitted_local", at_count.rejection_reason
+    below_count = _read(
+        mesh, chat_id, limits=MembershipReadLimits(max_documents=exact_records - 1),
+    )
+    assert below_count.source == "canonical"
+    assert below_count.rejection_reason == "mirror_budget_exceeded"
+
+
 def test_no_newer_suffix_admits_without_lifecycle_resolution(admitted_mesh, monkeypatch):
     mesh, _mirror, chat_id = admitted_mesh
     import agentbridge.mesh.membership_read as admission
@@ -94,6 +216,28 @@ def test_no_newer_suffix_admits_without_lifecycle_resolution(admitted_mesh, monk
         admission, "_CapturedResolver",
         lambda *_args, **_kwargs: pytest.fail("no newer suffix resolved lifecycle"),
     )
+    result = _read(mesh, chat_id)
+    assert result.source == "admitted_local", result.rejection_reason
+    assert json.loads(result.snapshot_json) == _canonical(mesh, chat_id)
+
+
+def test_no_newer_suffix_never_requests_lifecycle_prefix(admitted_mesh, monkeypatch):
+    mesh, _mirror, chat_id = admitted_mesh
+    original = mesh.tx.capture_mirror_selection
+    requests = []
+
+    def selected(request):
+        requests.append(request)
+        return original(request)
+
+    monkeypatch.setattr(mesh.tx, "capture_mirror_selection", selected)
+    assert _read(mesh, chat_id).source == "admitted_local"
+    assert all(not request.complete_prefixes for request in requests)
+
+
+def test_no_newer_small_chat_ignores_large_unrelated_mirror_payload(admitted_mesh):
+    mesh, mirror, chat_id = admitted_mesh
+    mirror.put_doc("users/unrelated-large.json", {"payload": "x" * (17 * 1024 * 1024)})
     result = _read(mesh, chat_id)
     assert result.source == "admitted_local", result.rejection_reason
     assert json.loads(result.snapshot_json) == _canonical(mesh, chat_id)
@@ -175,10 +319,12 @@ def test_actual_recursive_lifecycle_closure_is_lazy_and_dependency_bounded(admit
     observed, pins_json, _present, cut = admission._capture(
         mesh, chat_id, MembershipReadLimits(), 2**63 - 1,
     )
-    records = {record.path: record.payload_json for record in observed.records}
+    records = dict(observed.exact_records)
     resolver = admission._CapturedResolver(
         records, pins_json, cut.heads, 2**63 - 1, MembershipReadLimits(),
-    )
+        observed.position, observed.serialized_bytes + len(pins_json.encode("utf-8"))
+        + cut.serialized_bytes,
+    ).bind_transport(mesh.tx)
     assert resolver._state("helper")["owner"] == "fable"
     assert {"helper", "fable"} <= resolver.consumed_subjects
 
@@ -188,7 +334,9 @@ def test_actual_recursive_lifecycle_closure_is_lazy_and_dependency_bounded(admit
     bounded = admission._CapturedResolver(
         records, pins_json, cut.heads, 2**63 - 1,
         MembershipReadLimits(max_dependency_steps=resolver.dependency_steps),
-    )
+        observed.position, observed.serialized_bytes + len(pins_json.encode("utf-8"))
+        + cut.serialized_bytes,
+    ).bind_transport(mesh.tx)
     assert bounded._state("helper")["owner"] == "fable"
     used = bounded.dependency_steps
     assert bounded._state("helper")["owner"] == "fable"
@@ -297,3 +445,14 @@ def test_canonical_exception_identity_propagates_after_candidate_disposal(
     with pytest.raises(RuntimeError) as raised:
         _read(mesh, chat_id, limits=MembershipReadLimits())
     assert raised.value is expected
+
+
+def test_scope_mismatch_continues_to_canonical_exactly_once(admitted_mesh, monkeypatch):
+    mesh, _mirror, chat_id = admitted_mesh
+    scope = register_membership_admission_scope(mesh)
+    object.__setattr__(scope, "database_path", "wrong.sqlite")
+    calls = []
+    canonical = mesh.messaging.snapshot
+    monkeypatch.setattr(mesh.messaging, "snapshot", lambda value: calls.append(value) or canonical(value))
+    result = read_membership_snapshot(mesh, chat_id, scope)
+    assert (result.source, result.rejection_reason, calls) == ("canonical", "scope_mismatch", [chat_id])

@@ -23,6 +23,7 @@ _REASONS = {
     "budget_exceeded",
     "revision_exhausted",
     "mutation_interrupted",
+    "changed",
 }
 _POSITION_STATUSES = {"matched", "changed", "unavailable"}
 
@@ -103,6 +104,158 @@ class MirrorPositionValidation:
             raise ValueError("matched or changed validation cannot have a reason")
 
 
+@dataclass(frozen=True)
+class MirrorSelectionRequest:
+    expected: MirrorExpectedPosition | None
+    exact_paths: tuple[str, ...]
+    complete_prefixes: tuple[str, ...]
+    max_records: int
+    max_bytes: int
+    max_examined_paths: int = 100_000
+
+
+@dataclass(frozen=True)
+class MirrorSelectedPrefix:
+    prefix: str
+    records: tuple[MirrorDocumentRecord, ...]
+
+
+@dataclass(frozen=True)
+class MirrorSelection:
+    position: MirrorExpectedPosition
+    provenance: str
+    exact_records: tuple[tuple[str, str | None], ...]
+    complete_prefixes: tuple[MirrorSelectedPrefix, ...]
+    serialized_bytes: int
+
+
+def validated_selection_request(value: MirrorSelectionRequest) -> MirrorSelectionRequest:
+    """Detach and validate a bounded selection request before owner locking."""
+    if type(value) is not MirrorSelectionRequest:
+        raise ValueError("expected MirrorSelectionRequest")
+    expected, paths, prefixes, records, byte_limit, examined = (
+        value.expected, value.exact_paths, value.complete_prefixes,
+        value.max_records, value.max_bytes, value.max_examined_paths,
+    )
+    if expected is not None:
+        expected = MirrorExpectedPosition(*validated_position_fields(expected))
+    if type(paths) is not tuple or type(prefixes) is not tuple:
+        raise ValueError("mirror selectors must be exact tuples")
+    if len(paths) > 128 or len(prefixes) > 8:
+        raise ValueError("too many mirror selectors")
+    records = validate_capture_budget(records, "max_records")
+    byte_limit = validate_capture_budget(byte_limit, "max_bytes")
+    examined = validate_capture_budget(examined, "max_examined_paths")
+    if examined > 100_000:
+        raise ValueError("max_examined_paths exceeds supported limit")
+    copied_paths = tuple(paths)
+    copied_prefixes = tuple(prefixes)
+    if any(not _valid_path(item) for item in copied_paths) \
+            or any(not _valid_prefix(item) for item in copied_prefixes):
+        raise ValueError("invalid mirror selector")
+    if len(set(copied_paths)) != len(copied_paths) \
+            or len(set(copied_prefixes)) != len(copied_prefixes):
+        raise ValueError("duplicate mirror selector")
+    ordered = sorted(copied_prefixes)
+    if any(right.startswith(left) for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("overlapping mirror prefixes")
+    if any(path.startswith(prefix) for path in copied_paths for prefix in copied_prefixes):
+        raise ValueError("exact mirror selector overlaps prefix")
+    selectors = copied_paths + copied_prefixes
+    selector_bytes = sum(len(item.encode("utf-8")) for item in selectors)
+    if selector_bytes > 64 * 1024:
+        raise ValueError("mirror selectors exceed byte limit")
+    return MirrorSelectionRequest(
+        expected, copied_paths, copied_prefixes, records, byte_limit, examined,
+    )
+
+
+def capture_mirror_selection_locked(*, request: MirrorSelectionRequest, warm: bool,
+                                    invalid_reason: str | None, instance_nonce: str,
+                                    revision: int, root_identity: str | None,
+                                    cache_identity: str | None, provenance: str,
+                                    documents: dict[str, Any]):
+    """Capture a validated selective cut while the owner holds its mutex."""
+    if invalid_reason is not None:
+        return MirrorCaptureUnavailable(invalid_reason)
+    if not warm:
+        return MirrorCaptureUnavailable("cold")
+    if root_identity is None or cache_identity is None:
+        return MirrorCaptureUnavailable("invalid_identity")
+    if type(documents) is not dict or type(provenance) is not str \
+            or provenance not in {"bootstrap_unverified", "provider_observed"}:
+        return MirrorCaptureUnavailable("invalid_payload")
+    try:
+        position = MirrorExpectedPosition(
+            root_identity, cache_identity, instance_nonce, revision,
+        )
+    except ValueError:
+        return MirrorCaptureUnavailable("invalid_identity")
+    if request.expected is not None and request.expected != position:
+        return MirrorCaptureUnavailable("changed")
+    if request.complete_prefixes and len(documents) > request.max_examined_paths:
+        return MirrorCaptureUnavailable("budget_exceeded")
+    try:
+        used = 16 + sum(8 + len(item.encode("utf-8")) for item in (
+            root_identity, cache_identity, instance_nonce, provenance,
+        ))
+        used += sum(8 + len(item.encode("utf-8"))
+                    for item in request.exact_paths + request.complete_prefixes)
+    except UnicodeEncodeError:
+        return MirrorCaptureUnavailable("invalid_identity")
+    exact_paths = sorted(request.exact_paths)
+    prefix_paths = {prefix: [] for prefix in sorted(request.complete_prefixes)}
+    try:
+        if len(exact_paths) > request.max_records:
+            return MirrorCaptureUnavailable("budget_exceeded")
+        used += sum(9 + len(path.encode("utf-8")) for path in exact_paths)
+        used += sum(8 + len(prefix.encode("utf-8")) for prefix in prefix_paths)
+        if used > request.max_bytes:
+            return MirrorCaptureUnavailable("budget_exceeded")
+        count = len(exact_paths)
+        if prefix_paths:
+            for path in documents:
+                if type(path) is not str or not _valid_path(path):
+                    return MirrorCaptureUnavailable("invalid_payload")
+                for prefix, matches in prefix_paths.items():
+                    if path.startswith(prefix):
+                        matches.append(path)
+                        count += 1
+                        used += 8 + len(path.encode("utf-8"))
+                        if count > request.max_records or used > request.max_bytes:
+                            return MirrorCaptureUnavailable("budget_exceeded")
+        exact = []
+        for path in exact_paths:
+            payload = _serialized_document(path, documents[path]) if path in documents else None
+            if payload is not None:
+                used += len(payload.encode("utf-8"))
+                if used > request.max_bytes:
+                    return MirrorCaptureUnavailable("budget_exceeded")
+            exact.append((path, payload))
+        prefixes = []
+        for prefix, matches in prefix_paths.items():
+            rows = []
+            for path in sorted(matches):
+                payload = _serialized_document(path, documents[path])
+                used += len(payload.encode("utf-8"))
+                if used > request.max_bytes:
+                    return MirrorCaptureUnavailable("budget_exceeded")
+                rows.append(MirrorDocumentRecord(path, payload))
+            prefixes.append(MirrorSelectedPrefix(prefix, tuple(rows)))
+    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError, MemoryError):
+        return MirrorCaptureUnavailable("invalid_payload")
+    return MirrorSelection(position, provenance, tuple(exact), tuple(prefixes), used)
+
+
+def _serialized_document(path: str, value: Any) -> str:
+    if not _valid_path(path) or not _valid_json(value, set()):
+        raise ValueError("invalid mirrored document")
+    return json.dumps(
+        value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def validate_capture_budget(value: int, label: str) -> int:
     if type(value) is not int or value < 0 or value > MAX_MIRROR_INTEGER:
         raise ValueError(f"{label} must be a nonnegative bounded integer")
@@ -111,6 +264,8 @@ def validate_capture_budget(value: int, label: str) -> int:
 
 def validate_identity(value: Any) -> str | None:
     if type(value) is not str or not value or "\x00" in value:
+        return None
+    if len(value) > MAX_IDENTITY_BYTES:
         return None
     try:
         if len(value.encode("utf-8")) > MAX_IDENTITY_BYTES:
@@ -242,11 +397,24 @@ def capture_mirror_locked(
 def _valid_path(path: Any) -> bool:
     if type(path) is not str or not path or "\x00" in path:
         return False
+    if len(path) > MAX_DOCUMENT_PATH_BYTES:
+        return False
     if path.startswith("/") or "\\" in path or ":" in path:
         return False
     if any(part in {"", ".", ".."} for part in path.split("/")):
         return False
-    return len(path.encode("utf-8")) <= MAX_DOCUMENT_PATH_BYTES
+    try:
+        return len(path.encode("utf-8")) <= MAX_DOCUMENT_PATH_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _valid_prefix(prefix: Any) -> bool:
+    if type(prefix) is not str or not prefix or "\x00" in prefix \
+            or not prefix.endswith("/") or len(prefix) > MAX_DOCUMENT_PATH_BYTES:
+        return False
+    return _valid_path(prefix[:-1]) \
+        and len(prefix.encode("utf-8")) <= MAX_DOCUMENT_PATH_BYTES
 
 
 def _valid_json(value: Any, active: set[int]) -> bool:
@@ -279,8 +447,13 @@ __all__ = [
     "MirrorExpectedPosition",
     "MirrorObservation",
     "MirrorPositionValidation",
+    "MirrorSelectedPrefix",
+    "MirrorSelection",
+    "MirrorSelectionRequest",
     "capture_mirror_locked",
+    "capture_mirror_selection_locked",
     "validate_capture_budget",
     "validate_identity",
     "validated_position_fields",
+    "validated_selection_request",
 ]
