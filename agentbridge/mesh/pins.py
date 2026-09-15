@@ -33,13 +33,24 @@ from __future__ import annotations
 import hashlib
 import copy
 import threading
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .. import crypto
 from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
 from ..core.timekit import utcnow_iso
 
 __all__ = ["KeyPinStore", "rekey_signing_bytes", "key_fingerprint"]
+
+
+@dataclass(frozen=True)
+class PinDecision:
+    """Pure selection result; publication remains owned by ``KeyPinStore``."""
+
+    action: Literal["keep", "first_seen", "rotate", "alert"]
+    sign_pub: str
+    agree_pub: str
 
 
 def rekey_signing_bytes(
@@ -62,6 +73,60 @@ def key_fingerprint(name: str, sign_pub: str, agree_pub: str) -> str:
     digest = hashlib.sha256(f"{name}|{sign_pub}|{agree_pub}".encode()).hexdigest()
     hexs = digest[:32].upper()
     return " ".join(hexs[i:i + 4] for i in range(0, 32, 4))
+
+
+def _history_advances(
+    name: str,
+    pinned_sign: str,
+    sign_pub: str,
+    agree_pub: str,
+    history: list | None,
+) -> bool:
+    """Whether signed history advances ``pinned_sign`` to the published pair."""
+    entries = sorted(
+        (e for e in (history or []) if isinstance(e, dict)),
+        key=lambda e: int(e.get("ns", 0)),
+    )
+    current = pinned_sign
+    for entry in entries:
+        if entry.get("old_sign_pub") != current:
+            continue
+        data = rekey_signing_bytes(
+            name,
+            current,
+            entry.get("sign_pub", ""),
+            entry.get("agree_pub", ""),
+            int(entry.get("ns", 0)),
+        )
+        if not crypto.verify(current, entry.get("sig", ""), data):
+            return False
+        current = entry.get("sign_pub", "")
+        if current == sign_pub and entry.get("agree_pub", "") == agree_pub:
+            return True
+    return False
+
+
+def evaluate_pin(
+    name: str,
+    pin: object,
+    sign_pub: str,
+    agree_pub: str,
+    history: list | None = None,
+) -> PinDecision:
+    """Select trusted keys from caller-provided observations without I/O."""
+    if not isinstance(pin, dict) or not pin.get("sign_pub"):
+        if not sign_pub:
+            return PinDecision("keep", sign_pub, agree_pub)
+        return PinDecision("first_seen", sign_pub, agree_pub)
+    pinned_sign = pin.get("sign_pub", "")
+    pinned_agree = pin.get("agree_pub", "")
+    if pinned_sign == sign_pub and pinned_agree == agree_pub:
+        return PinDecision("keep", sign_pub, agree_pub)
+    if sign_pub and _history_advances(
+        name, pinned_sign, sign_pub, agree_pub, history
+    ):
+        return PinDecision("rotate", sign_pub, agree_pub)
+    return PinDecision("alert", pinned_sign, pinned_agree)
 
 
 class KeyPinStore:
@@ -92,9 +157,8 @@ class KeyPinStore:
         mismatch is recorded."""
         with self._lock:
             pin = self._pins.get(name)
-            if not isinstance(pin, dict) or not pin.get("sign_pub"):
-                if not sign_pub:
-                    return sign_pub, agree_pub
+            decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
+            if decision.action == "first_seen":
                 # first published keys seen by THIS process — the write merges
                 # with the file, where another process may have pinned already
                 self._write_pin(name, sign_pub, agree_pub)
@@ -103,17 +167,11 @@ class KeyPinStore:
                     return sign_pub, agree_pub
                 self._write_alert(name, sign_pub, agree_pub, pin)
                 return pin.get("sign_pub", ""), pin.get("agree_pub", "")
-            pinned_sign = pin.get("sign_pub", "")
-            pinned_agree = pin.get("agree_pub", "")
-            if pinned_sign == sign_pub and pinned_agree == agree_pub:
-                return sign_pub, agree_pub
-            if sign_pub and self._chain_ok(
-                name, pinned_sign, sign_pub, agree_pub, history
-            ):
+            if decision.action == "rotate":
                 self._write_pin(name, sign_pub, agree_pub, replace=True)
-                return sign_pub, agree_pub
-            self._write_alert(name, sign_pub, agree_pub, pin)
-            return pinned_sign, pinned_agree
+            elif decision.action == "alert":
+                self._write_alert(name, sign_pub, agree_pub, pin)
+            return decision.sign_pub, decision.agree_pub
 
     def _chain_ok(
         self, name: str, pinned_sign: str, sign_pub: str, agree_pub: str,
@@ -121,24 +179,7 @@ class KeyPinStore:
     ) -> bool:
         """True when ``history`` carries signed transitions from the pinned
         key to the published pair, each signed by the key it retires."""
-        entries = sorted(
-            (e for e in (history or []) if isinstance(e, dict)),
-            key=lambda e: int(e.get("ns", 0)),
-        )
-        current = pinned_sign
-        for e in entries:
-            if e.get("old_sign_pub") != current:
-                continue
-            data = rekey_signing_bytes(
-                name, current, e.get("sign_pub", ""), e.get("agree_pub", ""),
-                int(e.get("ns", 0)),
-            )
-            if not crypto.verify(current, e.get("sig", ""), data):
-                return False  # a bad link never advances trust
-            current = e.get("sign_pub", "")
-            if current == sign_pub and e.get("agree_pub", "") == agree_pub:
-                return True
-        return False
+        return _history_advances(name, pinned_sign, sign_pub, agree_pub, history)
 
     # ------------------------------------------------------------- mutations
     def pin(self, name: str, sign_pub: str, agree_pub: str) -> None:
