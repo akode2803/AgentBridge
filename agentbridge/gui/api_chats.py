@@ -15,9 +15,9 @@ from pathlib import Path
 
 from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
-from .context import GuiApp
+from .context import GuiApp, SessionReadToken
 from .projection_perf import ProjectionObservation
-from .routing import authed
+from .routing import authed, authed_read
 from .serialize import chat_json, message_json, user_json
 
 __all__ = ["GET", "POST"]
@@ -160,10 +160,25 @@ def state(app: GuiApp, req) -> dict:
     lock = getattr(app, "lock", None)
     if lock is not None and lock.locked:
         return {"error": "App is locked", "locked": True}
+    token = app.capture_session_read()
+    if token is None:
+        return {"error": "Sign in first"}
+    try:
+        result = _state_captured(app, req, token)
+    except Exception:
+        if not app.validate_session_read(token):
+            return {"error": "Sign in first"}
+        raise
+    return result if app.validate_session_read(token) else {"error": "Sign in first"}
+
+
+def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
+    """Build state solely from one captured anonymous or viewer session."""
+    mesh = token.mesh
     out: dict = {
         "available": True,
         "v": 2,
-        "user": app.user,
+        "user": mesh.user if mesh is not None else None,
         "gui_version": app.app_version,
         "instance_id": getattr(app, "instance_id", ""),
         "server_pid": os.getpid(),
@@ -172,7 +187,6 @@ def state(app: GuiApp, req) -> dict:
         "max_upload_bytes": None,
         "connection": _connection(app),
     }
-    mesh = app.mesh
     out["paused"] = False  # compatibility field; mesh-global pause is retired
     if mesh is None:
         # V125: signed-out-with-a-pending-restore is NOT signed-out
@@ -241,7 +255,7 @@ def state(app: GuiApp, req) -> dict:
     return out
 
 
-@authed
+@authed_read
 def chat(app: GuiApp, req, mesh) -> dict:
     """The transcript: messages (choke-point filtered), receipts on my own
     messages, active pins, my starred ids + read cursor."""
