@@ -835,13 +835,23 @@ def test_full_snapshot_tick_reports_foreign_change_to_hint_watchdog(delta_mirror
     assert tx._refresh_tick() is True
 
 
-def test_remote_overwrite_of_recent_local_path_still_wakes(delta_mirror):
+def test_remote_overwrite_of_recent_local_path_still_wakes(
+        delta_mirror, monkeypatch):
     inner, tx = delta_mirror
+    # The write guard intentionally preserves a write that lands during a
+    # delta query (``wrote >= pull_started``).  Windows can give the local
+    # write and the immediately-following pull the same monotonic tick, which
+    # accidentally tests that race rather than a remote overwrite.  Make the
+    # intended order explicit: local write, foreign overwrite, then pull.
+    now = [100.0]
+    import agentbridge.transport.cache as cache_module
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: now[0])
     tx.refresh()
     tx.put_doc("users/a.json", {"v": "local"})
     wakes = []
     tx.subscribe_changes(lambda: wakes.append(True))
     inner.put_doc("users/a.json", {"v": "remote"})
+    now[0] = 101.0
     assert tx._refresh_tick() is True
     assert tx.get_doc("users/a.json")["v"] == "remote"
     assert wakes == [True]

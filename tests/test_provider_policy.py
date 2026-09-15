@@ -104,12 +104,17 @@ def test_signature_verification_rejects_file_swap(tmp_path, monkeypatch):
         policy_module._codex_binary_identity(str(executable))
 
 
-@pytest.mark.parametrize("resources", ["/tmp/escape", "../escape"])
+@pytest.mark.parametrize("resources", ["absolute", "../escape"])
 def test_code_mode_host_metadata_cannot_escape_package(
         tmp_path, resources):
     executable = tmp_path / "pkg" / "bin" / "codex"
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"codex")
+    if resources == "absolute":
+        # Use a native absolute spelling.  A POSIX ``/tmp`` spelling is only
+        # drive-relative on Windows and reaches the separate host-boundary
+        # rejection instead of the metadata validator under test.
+        resources = str(tmp_path.parent / "escape")
     machine = policy_module.platform.machine().lower()
     arch = "aarch64" if machine in {"arm64", "aarch64"} else machine
     (tmp_path / "pkg" / "codex-package.json").write_text(
@@ -290,7 +295,9 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
     assert "model_context_window=123456" in rendered
     assert "personality=\"pragmatic\"" in rendered
     assert 'filesystem={":root" = "deny"' in rendered
-    assert str((tmp_path / "work").resolve()) in rendered
+    assert json.dumps(
+        str((tmp_path / "work").resolve()), ensure_ascii=True,
+    ) in rendered
     assert '":workspace_roots"' not in rendered
     assert 'trust_level = "untrusted"' in rendered
     assert "features.multi_agent=false" in rendered
@@ -305,7 +312,9 @@ def test_compiler_binds_version_filters_overlay_and_renders_exact_tools(
     assert "skills.include_instructions=false" in rendered
     assert "skills.bundled.enabled=false" in rendered
     assert "skills.config=[" in rendered
-    assert all(str((skill / "SKILL.md").resolve()) in rendered
+    assert all(json.dumps(
+        str((skill / "SKILL.md").resolve()), ensure_ascii=True,
+    ) in rendered
                for skill in (user_skill, codex_skill, workspace_skill))
     assert "features.auth_elicitation=false" in rendered
     assert "features.tool_call_mcp_elicitation=false" in rendered
