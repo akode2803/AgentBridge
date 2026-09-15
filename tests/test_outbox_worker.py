@@ -1,6 +1,7 @@
 """OutboxWorker: retry-until-delivered semantics against a flaky transport."""
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,7 +48,10 @@ def test_order_preserved_within_flush(store):
     assert sent == [f"m{i}" for i in range(5)]
 
 
-def test_failed_target_head_cannot_be_overtaken(store):
+def test_failed_target_head_cannot_be_overtaken(store, monkeypatch):
+    clock = SimpleNamespace(now_ns=time.time_ns())
+    monkeypatch.setattr("agentbridge.store.db.time",
+                        SimpleNamespace(time_ns=lambda: clock.now_ns))
     seen = []
     fail = {"once": True}
 
@@ -65,10 +69,14 @@ def test_failed_target_head_cannot_be_overtaken(store):
     assert worker.flush_once() == 1
     assert seen == [("c1", "first"), ("c2", "independent")]
 
-    deadline = time.monotonic() + 2.0
-    while store.outbox_counts() and time.monotonic() < deadline:
-        worker.flush_once()
-        time.sleep(0.002)
+    # Keep the failed head in backoff regardless of filesystem speed, then
+    # advance precisely to its persisted retry boundary.
+    with store._conn() as conn:
+        clock.now_ns = conn.execute(
+            "SELECT next_ns FROM outbox WHERE target=? ORDER BY seq LIMIT 1",
+            ("c1",),
+        ).fetchone()[0]
+    assert worker.flush_once() == 2
     assert seen[-2:] == [("c1", "first"), ("c1", "second")]
     assert store.outbox_counts() == {}
 
