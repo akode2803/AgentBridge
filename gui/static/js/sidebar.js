@@ -4,7 +4,7 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
+import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, sessionMayApply, applyMeshState } from "./state.js";
 import { updateTitleBadge } from "./notify.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
@@ -541,14 +541,16 @@ function openChatRowMenu(chatId, x, y) {
 }
 
 async function runChatAction(act, c) {
+  const sessionTicket = captureSessionEpoch();
   const chatId = c.id;
   const name = chatDisplay(c, Mesh.state.user);
   if (act === "mute") {
     if (meshMuteActive(c)) {
       const r = await api("/api/mesh/mute", { chat_id: chatId, muted: false });
+      if (!sessionMayApply(sessionTicket)) return;
       if (r.error) { toast(r.error, true); return; }
       toast("Notifications back on", { check: true });
-      await refreshList();
+      if (!await refreshList(sessionTicket)) return;
     } else {
       V.muteDialog(chatId);   // 8 hours / 1 week / Always (chat.js)
     }
@@ -559,35 +561,42 @@ async function runChatAction(act, c) {
   if (act === "exit") { V.exitGroup(chatId, name); return; }
   if (act === "archive") {
     const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !c.archived });
+    if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
     toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
-    await refreshList();
+    if (!await refreshList(sessionTicket)) return;
   } else if (act === "unread") {
     const isUnread = (c.unread > 0) || !!c.forced_unread;
     const r = isUnread
       ? await api("/api/mesh/read", { chat_id: chatId })
       : await api("/api/mesh/mark_unread", { chat_id: chatId, unread: true });
+    if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
-    await refreshList();
+    if (!await refreshList(sessionTicket)) return;
   } else if (act === "pin") {
     const willPin = !c.pinned;
     const r = await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: willPin });
+    if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
-    await refreshList();
+    if (!await refreshList(sessionTicket)) return;
     toast(willPin ? "Chat pinned" : "Chat unpinned", {
       check: true, action: "Undo", onAction: async () => {
+        const undoTicket = captureSessionEpoch();
         await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: !willPin });
-        await refreshList();
+        if (!sessionMayApply(undoTicket)) return;
+        await refreshList(undoTicket);
       },
     });
   }
 }
 
-async function refreshList() {
-  Mesh.state = await api("/api/mesh/state");
+async function refreshList(ticket = captureSessionEpoch()) {
+  const fresh = await api("/api/mesh/state");
+  if (!applyMeshState(ticket, fresh)) return false;
   const box = $("#side-chats");
   if (box) box.dataset.key = "";
   renderChatListSidebar();
+  return true;
 }
 
 // ---- in-sidebar new-group builder (retires the old modal) -----------------

@@ -12,7 +12,8 @@
 
 import { $, esc, toast } from "./util.js";
 import { api } from "./api.js";
-import { Mesh } from "./state.js";
+import { Mesh, beginSessionTransition, captureSessionEpoch,
+         sessionMayApply } from "./state.js";
 import { openModal, closeModal } from "./modal.js";
 import { V } from "./views.js";
 
@@ -155,16 +156,37 @@ function renderAuthPage(force = false) {
     const spin = $("#auth-spin");
     if (spin) spin.hidden = false;
     try {
+      const requestTicket = captureSessionEpoch();
       const payload = {
         username: userIn.value.trim(),
         password: passIn.value,
         display: $("#auth-display")?.value?.trim(),
       };
       const r = await api(mode === "signup" ? "/api/mesh/signup" : "/api/mesh/login", payload);
-      if (r.error) { setSubError(r.error); return; }  // V39: in-card, never a hidden toast
+      if (r.error) {
+        if (sessionMayApply(requestTicket)) setSubError(r.error);
+        return;
+      }
+      let acceptedTicket;
+      if (sessionMayApply(requestTicket)) {
+        beginSessionTransition();
+        const bootstrap = await V.bootstrapSession();
+        if (!bootstrap || !sessionMayApply(bootstrap.ticket, bootstrap.state)
+            || !sessionMayApply(bootstrap.ticket, r)) return;
+        acceptedTicket = bootstrap.ticket;
+      } else {
+        // A poll can observe and adopt this exact committed auth transition
+        // before the (slower key setup) POST resolves. Its receipt proves this
+        // is the same transition, so preserve the once-only recovery-code UI
+        // without invalidating the already current browser session again.
+        const currentTicket = captureSessionEpoch();
+        if (!sessionMayApply(currentTicket, r)) return;
+        acceptedTicket = currentTicket;
+      }
       // D5: the recovery code is shown ONCE — at signup, and on the first v2
       // sign-in of a migrated account (identity keys freshly minted)
       if (r.recovery_code) await showRecoveryCode(r.recovery_code);
+      if (!sessionMayApply(acceptedTicket)) return;
       closeAuthPage();
       V.renderChats(true);
     } finally {

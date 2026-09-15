@@ -8,8 +8,10 @@ import { api } from "./api.js";
 import { csel, mountCsels } from "./csel.js";
 import { openModal, closeModal, swapModal, openPhotoViewer, confirmModal } from "./modal.js";
 import { App, Mesh, Settings, RULE_LABELS, beginRestartIntent,
-         clearRestartIntent, meshDn, meshAvatar, meshAvatarInner, chatDisplay,
-         renderChrome } from "./state.js";
+         clearRestartIntent, beginSessionTransition,
+         meshDn, meshAvatar, meshAvatarInner, chatDisplay,
+         renderChrome, captureSessionEpoch, sessionMayApply,
+         applyMeshState } from "./state.js";
 import { notifyPrefs } from "./notify.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
@@ -62,6 +64,11 @@ const audienceOptsFor = (field) =>
 // the pass (the next one catches up), and scroll survives the swap.
 let liveData = null;        // sliced view of what the current render shows
 let settingsPollId = null;
+document.addEventListener("ab:session-reset", () => {
+  liveData = null;
+  if (settingsPollId) clearInterval(settingsPollId);
+  settingsPollId = null;
+});
 
 // what the page can display, sliced for change detection: me + my agents
 // only. presence timestamps are deliberately excluded (heartbeats would
@@ -113,9 +120,10 @@ function startSettingsPoll() {
     // notes) stay untouched. Nothing else on this page is user-sliced.
     if ((Settings.section || "account") === "connection") {
       try {
-        const s2 = await api("/api/state");
+        const bootstrap = await V.bootstrapSession();
+        const s2 = bootstrap?.state;
+        if (!s2 || !sessionMayApply(bootstrap.ticket, s2)) return;
         if (s2.error || App.page !== "settings") return;
-        App.state = s2;
         const kv = $("#conn-kv");
         const fresh = connKvRows(s2);
         if (kv && kv.innerHTML !== fresh) kv.innerHTML = fresh;
@@ -123,13 +131,16 @@ function startSettingsPoll() {
       return;
     }
     try {
+      const sessionTicket = captureSessionEpoch();
       const ms = await api("/api/mesh/state");
-      if (ms.error || App.page !== "settings" || !liveData) return;
+      if (ms.error || App.page !== "settings" || !liveData
+          || !sessionMayApply(sessionTicket, ms)) return;
       const section = Settings.section === "profile" ? "account"
         : (Settings.section || "account");
       let me = null;
       if (section === "account" || section === "agents" || section === "privacy") {
         const r = await api("/api/mesh/me");
+        if (!sessionMayApply(sessionTicket)) return;
         if (!r.error) me = r;
       }
       const fresh = liveSlice(ms, me);
@@ -137,9 +148,10 @@ function startSettingsPoll() {
       // fetch error must not become a 4s re-render loop
       for (const agent of Object.keys(liveData.harness)) {
         const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(agent)}`);
+        if (!sessionMayApply(sessionTicket)) return;
         fresh.harness[agent] = r.error ? liveData.harness[agent] : harnessSlice(r);
       }
-      Mesh.state = ms;                  // keep the cache warm either way
+      if (!applyMeshState(sessionTicket, ms)) return;
       if (JSON.stringify(fresh) === JSON.stringify(liveData)) return;
       const box = $("#content");
       const top = box ? box.scrollTop : 0;
@@ -252,7 +264,7 @@ function wireAppLock() {
   const card = $("#applock-card");
   if (!card) return;
   const refreshCard = async () => {
-    try { App.state = await api("/api/state"); } catch { /* poll heals */ }
+    try { await V.bootstrapSession(); } catch { /* poll heals */ }
     renderSettings();
   };
   const post = async (body) => (await api("/api/applock/set", body)).error || null;
@@ -304,6 +316,7 @@ function connKvRows(s) {
 }
 
 async function renderSettings() {
+  const sessionTicket = captureSessionEpoch();
   const routeSeq = App.routeSeq;
   const s = App.state;   // the About section renders connection/version from it
   // V56: arriving from another page paints the EMPTY settings shell in the
@@ -320,12 +333,15 @@ async function renderSettings() {
   if (!ms) {
     const fresh = await api("/api/mesh/state");
     if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
-    Mesh.state = fresh;
+    if (!applyMeshState(sessionTicket, fresh)) return;
     ms = fresh;
   }
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
+  const backgroundTicket = captureSessionEpoch();
   api("/api/mesh/state").then((fresh) => {
-    if (fresh && !fresh.error && App.page === "settings") Mesh.state = fresh;
+    if (fresh && !fresh.error && App.page === "settings") {
+      applyMeshState(backgroundTicket, fresh);
+    }
   }).catch(() => {});
   renderSidebar();
   $("#details-pane").hidden = true;
@@ -345,7 +361,8 @@ async function renderSettings() {
     // agents section needs the owner-only my_agents view too (raw privacy
     // matrix per agent, R36); privacy needs the matrix + blocked list (R40)
     const r = await api("/api/mesh/me");
-    if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
+    if (App.page !== "settings" || routeSeq !== App.routeSeq
+        || !sessionMayApply(sessionTicket)) return;
     if (!r.error) me = r;
   }
 
@@ -1215,6 +1232,7 @@ async function renderSettings() {
       document.querySelectorAll(".ag-timers").forEach(async (dd) => {
         const agent = dd.dataset.agent;
         const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(agent)}`);
+        if (!sessionMayApply(sessionTicket)) return;
         if (!r.error && liveData) liveData.harness[agent] = harnessSlice(r);
         const h = r.harness || {};
         const chatName = (id) => {
@@ -1417,10 +1435,13 @@ async function renderSettings() {
         body: "It leaves every chat and stops running. Its past messages stay, greyed under its name. This can't be undone from the app.",
         action: "Delete agent",
       }))) return;
+      if (!sessionMayApply(sessionTicket)) return;
       const r = await api("/api/mesh/delete_agent", { agent });
+      if (!sessionMayApply(sessionTicket)) return;
       if (r.error) { toast(r.error, true); return; }
       toast(`@${agent} deleted`, { check: true });
-      Mesh.state = await api("/api/mesh/state");
+      const fresh = await api("/api/mesh/state");
+      if (!applyMeshState(sessionTicket, fresh)) return;
       renderSettings();
     });
   });
@@ -1725,19 +1746,22 @@ function openSignOutModal() {
     const go = box.querySelector("#so-go");
     const spin = box.querySelector("#so-spin");
     go.disabled = true; spin.hidden = false;   // loading while the decision sends
+    const requestTicket = captureSessionEpoch();
     const r = await api("/api/mesh/logout", { password: pw });
+    if (!sessionMayApply(requestTicket)) return;
     if (r.error) {                              // wrong password: stay signed in
       go.disabled = false; spin.hidden = true;
       toast(r.error, true);
       box.querySelector("#so-pw").select();
       return;
     }
-    closeModal();
+    beginSessionTransition();
+    const bootstrap = await V.bootstrapSession();
+    if (!bootstrap || !sessionMayApply(bootstrap.ticket, bootstrap.state)
+        || !sessionMayApply(bootstrap.ticket, r)) return;
     // R56 (V40): drop the signed-in state BEFORE navigating — the chats route
     // used to paint the old session's home from stale Mesh.state then slam the
     // auth page over it once the fetch returned (the jank).
-    Mesh.state = null;
-    Mesh.chatId = null;
     Mesh.listKey = "auth";
     V.renderAuthPage();
     location.hash = "#/chats";

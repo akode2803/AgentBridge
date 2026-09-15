@@ -12,14 +12,17 @@ import { toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn, meshAvatarInner, meshChatAvatarInner } from "./state.js";
+import { Mesh, meshDn, meshAvatarInner, meshChatAvatarInner,
+         captureSessionEpoch, applyMeshState } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
 // ids: source-message ids (already in transcript/chronological order).
 async function openForwardPicker(srcChatId, ids) {
   if (!ids || !ids.length) return;
-  const ms = Mesh.state = await api("/api/mesh/state");
+  const ticket = captureSessionEpoch();
+  const ms = await api("/api/mesh/state");
+  if (!applyMeshState(ticket, ms)) return;
   const me = ms.user;
 
   // recent chats = the chats you can post to, minus the source itself. They

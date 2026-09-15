@@ -5,13 +5,18 @@
 import { $, esc, timeOnly, dayLabel, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { Mesh, meshDn } from "./state.js";
+import { Mesh, meshDn, captureSessionEpoch, sessionMayApply } from "./state.js";
 import { V } from "./views.js";
 
 async function renderChatSearch() {
+  const ticket = captureSessionEpoch();
   const chatId = Mesh.chatId;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}&tail=1000`);
-  if (data.error) { toast(data.error, true); return; }
+  if (data.error) {
+    if (sessionMayApply(ticket)) toast("Couldn't load chat search", true);
+    return;
+  }
+  if (!sessionMayApply(ticket, data)) return;
   $("#details-pane").innerHTML = `
     <div class="pane-head">
       <button class="icon-btn" id="cs-back">${ICONS.back}</button>

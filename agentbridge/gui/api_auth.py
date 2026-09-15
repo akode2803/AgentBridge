@@ -46,7 +46,7 @@ def signup(app: GuiApp, req) -> dict:
     return app.signup(
         (data.get("username") or data.get("name") or "").strip().lower(),
         (data.get("display") or "").strip(),
-        data.get("password") or "",
+        data.get("password") or "", include_binding=True,
     )
 
 
@@ -56,7 +56,7 @@ def login(app: GuiApp, req) -> dict:
     data = req.data
     return app.login(
         (data.get("username") or data.get("name") or "").strip().lower(),
-        data.get("password") or "",
+        data.get("password") or "", include_binding=True,
     )
 
 
@@ -65,7 +65,7 @@ def logout(app: GuiApp, req) -> dict:
     # agents — a passer-by must not be able to swap the session)
     if (err := _locked(app)) is not None:
         return err
-    return app.logout((req.data or {}).get("password") or "")
+    return app.logout((req.data or {}).get("password") or "", include_binding=True)
 
 
 def check_name(app: GuiApp, req) -> dict:

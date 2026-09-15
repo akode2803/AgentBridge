@@ -7,7 +7,7 @@ import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive } from "./state.js";
+import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, sessionMayApply, applyMeshState } from "./state.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -17,6 +17,10 @@ import { V } from "./views.js";
 
 let chatRenderSeq = 0;
 let chatsFetchSeq = 0;
+document.addEventListener("ab:session-reset", () => {
+  chatRenderSeq += 1;
+  chatsFetchSeq += 1;
+});
 const chatOpenObservations = [];
 
 function recordChatOpen(observation) {
@@ -159,6 +163,7 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
+  const sessionTicket = captureSessionEpoch();
   const fetchSeq = ++chatsFetchSeq;
   const routeSeq = App.routeSeq;
   const opening = !!Mesh.chatId && !$("#transcript");
@@ -192,7 +197,7 @@ async function renderChats(force) {
   }
   if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
       || routeSeq !== App.routeSeq) return;
-  Mesh.state = fresh;
+  if (!applyMeshState(sessionTicket, fresh)) return;
   // V111: locked is not signed-out — never cache the refusal as state or
   // paint "Start the mesh" over it (api.js already raised the lock screen)
   if (Mesh.state && Mesh.state.locked) {
@@ -432,6 +437,7 @@ function nextClamp(cur) {
 }
 
 async function renderMeshChat(force, openTrace = null) {
+  const sessionTicket = captureSessionEpoch();
   const renderSeq = ++chatRenderSeq;
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
@@ -443,16 +449,23 @@ async function renderMeshChat(force, openTrace = null) {
   }
   if (renderSeq !== chatRenderSeq) return;
   if (data.error) {
+    if (!sessionMayApply(sessionTicket)) return;
     // a deleted chat vanishing under an open view is expected, not an error —
     // slip back to the list quietly (was a scary "No such chat" toast when a
     // delete raced the ~2.5s poll, 2026-07-11). Other errors still surface.
-    if (data.error !== "No such chat") toast(data.error, true);
+    if (data.error !== "No such chat") {
+      const neutral = data.locked ? "App is locked"
+        : data.error === "Sign in first" ? data.error : "Couldn't load this chat";
+      toast(neutral, true);
+    }
     location.hash = "#/chats"; return;
   }
+  if (!sessionMayApply(sessionTicket, data)) return;
   const [feedData, runtimeData] = await Promise.all([
     api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
     api(`/api/mesh/runtime_tasks?id=${encodeURIComponent(chatId)}`),
   ]);
+  if (!sessionMayApply(sessionTicket)) return;
   if (openTrace) {
     openTrace.aux_fetch_ms = Math.max(
       0, performance.now() - openTrace.started_ms
@@ -1914,6 +1927,7 @@ function jumpToMessage() {
 }
 
 async function renderNewChat() {
+  const sessionTicket = captureSessionEpoch();
   const routeSeq = App.routeSeq;
   // the form lives in the sidebar (renderNewChatSidebar); the main pane keeps
   // the resting state. Paint it (and drop the info pane) SYNCHRONOUSLY, before
@@ -1929,7 +1943,7 @@ async function renderNewChat() {
     </div>`;
   const fresh = await api("/api/mesh/state");
   if (App.page !== "new" || routeSeq !== App.routeSeq) return;
-  Mesh.state = fresh;
+  if (!applyMeshState(sessionTicket, fresh)) return;
   const ms = Mesh.state;
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
   renderSidebar();
@@ -2258,13 +2272,17 @@ function deleteChatDialog(chatId, name) {
   box.querySelector("#delc-cancel").addEventListener("click", closeModal);
   box.querySelector("#delc-go").addEventListener("click", async () => {
     closeModal();
+    const sessionTicket = captureSessionEpoch();
     const r = await api("/api/mesh/hide_chat", { chat_id: chatId });
+    if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
     if (Mesh.chatId === chatId) location.hash = "#/chats";  // leave the open chat
-    else await refreshChatListSidebar();
+    else if (!await refreshChatListSidebar(sessionTicket)) return;
     toast("Chat deleted", { check: true, action: "Undo", onAction: async () => {
+      const undoTicket = captureSessionEpoch();
       await api("/api/mesh/hide_chat", { chat_id: chatId, undo: true });
-      await refreshChatListSidebar();
+      if (!sessionMayApply(undoTicket)) return;
+      await refreshChatListSidebar(undoTicket);
     }});
   });
 }
@@ -2289,28 +2307,32 @@ function muteDialog(chatId, onDone) {
   box.querySelector("#mu-cancel").addEventListener("click", closeModal);
   box.querySelectorAll(".mute-opt").forEach((b) => b.addEventListener("click", async () => {
     closeModal();
+    const sessionTicket = captureSessionEpoch();
     const body = b.dataset.h
       ? { chat_id: chatId, hours: +b.dataset.h }
       : { chat_id: chatId, muted: true };
     const r = await api("/api/mesh/mute", body);
+    if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
     const c = (Mesh.state?.chats || []).find((k) => k.id === chatId);
     if (c) c.mute = r.mute;   // show the slashed bell now, not on the next poll
     toast(b.dataset.h === "8" ? "Muted for 8 hours"
       : b.dataset.h ? "Muted for 1 week" : "Muted until you unmute", { check: true });
     if (onDone) onDone();
-    await refreshChatListSidebar();
+    await refreshChatListSidebar(sessionTicket);
   }));
 }
 V.muteDialog = muteDialog;   // reused by the sidebar row menu
 
 // Re-fetch mesh state and repaint the chat-list sidebar (used after a sidebar
 // mutation that isn't tied to opening a chat — pin, mark-unread, delete-for-me).
-async function refreshChatListSidebar() {
-  Mesh.state = await api("/api/mesh/state");
+async function refreshChatListSidebar(ticket = captureSessionEpoch()) {
+  const fresh = await api("/api/mesh/state");
+  if (!applyMeshState(ticket, fresh)) return false;
   const box = $("#side-chats");
   if (box) box.dataset.key = "";
   renderSidebar();
+  return true;
 }
 
 // Apply a rename WITHOUT a full renderChats (which rebuilt the transcript +
