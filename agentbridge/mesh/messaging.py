@@ -12,7 +12,10 @@ OutboxWorker flushes it with retry-forever semantics (R3).
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass, field
 import time
+from typing import Any
 
 from .. import crypto
 from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
@@ -32,9 +35,30 @@ from .projection import ProjectionObserver, observed, observed_count
 from .readmodel import build_messages, parse_tags, unread_info
 from .sealer import E2EESealer, Sealer
 
-__all__ = ["MessagingService", "OUTBOX_APPEND"]
+__all__ = ["ConversationProjection", "MessagingService", "OUTBOX_APPEND"]
 
 OUTBOX_APPEND = "append_log"  # outbox kind; target = "<chat_id>|<log_name>"
+
+
+@dataclass(frozen=True)
+class ConversationProjection:
+    """One request's public conversation fold, not reusable authority.
+
+    Frozen is only a holder-level constraint. The nested domain objects are not
+    immutable and callers must keep this result request-local.
+    """
+
+    snapshot: ChatSnapshot
+    messages: tuple[Message, ...]
+    viewer_state: dict[str, Any]
+    overview: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _MessageRequestFold:
+    snapshot: ChatSnapshot
+    messages: list[Message]
+    _verified_viewer_state: dict[str, Any] = field(repr=False)
 
 
 class MessagingService:
@@ -439,6 +463,17 @@ class MessagingService:
         ``breadcrumbs=True`` (the harness's trigger scan, V92) keeps the V50
         reaction info-events in the fold; every viewer surface leaves them
         dropped."""
+        return self._message_request_fold(
+            chat_id, breadcrumbs=breadcrumbs, observer=observer).messages
+
+    def _message_request_fold(
+        self,
+        chat_id: str,
+        *,
+        breadcrumbs: bool = False,
+        observer: ProjectionObserver | None = None,
+    ) -> _MessageRequestFold:
+        """Capture the canonical message inputs owned by one read request."""
         snap = observed(observer, "snapshot", lambda: self._require_member(chat_id))
         observed_count(observer, "fold_calls")
         # history-on-join policy: unless the group shares history, a member
@@ -455,9 +490,11 @@ class MessagingService:
             observer, "reactions_load",
             lambda: self._verified_reactions(chat_id, snap, ov),
         )
-        state = observed(
-            observer, "viewer_state_load", lambda: self._state(chat_id).get())
-        return observed(observer, "readmodel_fold", lambda: build_messages(
+        # Detach immediately after the verified read. This one private capture
+        # feeds both the security fold and every same-request derivative.
+        state = deepcopy(observed(
+            observer, "viewer_state_load", lambda: self._state(chat_id).get()))
+        messages = observed(observer, "readmodel_fold", lambda: build_messages(
             chat_id,
             self.user,
             envelopes,
@@ -473,6 +510,54 @@ class MessagingService:
             breadcrumbs=breadcrumbs,
             observer=observer,
         ))
+        return _MessageRequestFold(snap, messages, state)
+
+    @staticmethod
+    def _public_viewer_state(state: dict[str, Any]) -> dict[str, Any]:
+        """Detach the established public my-state schema from private input."""
+        return deepcopy({
+            "starred": list(state.get("starred", [])),
+            "read_ns": int(state.get("read_ns", 0)),
+            "hidden_runtime": list(state.get("hidden_runtime", [])),
+            "archived": bool(state.get("archived")),
+            "pinned": bool(state.get("pinned")),
+            "forced_unread": bool(state.get("forced_unread")),
+            "mute": state.get("mute", False),
+        })
+
+    def _overview_from_fold(self, fold: _MessageRequestFold) -> dict[str, Any]:
+        msgs = fold.messages
+        state = fold._verified_viewer_state
+        # Include info events in the preview (R46), but only ones the client
+        # phrases non-empty for this viewer (V59), or the row can go blank.
+        last = next((m for m in reversed(msgs) if self._previewable(m)), None)
+        last_real = next(
+            (m for m in reversed(msgs) if m.kind is MsgKind.MESSAGE), None)
+        return {
+            "last": last,
+            **unread_info(msgs, self.user, state),
+            "archived": bool(state.get("archived")),
+            "pinned": bool(state.get("pinned")),
+            "mute": deepcopy(state.get("mute", False)),
+            # A post-cut real message resurrects a delete-for-me row; an info
+            # event such as a rename deliberately does not.
+            "deleted": bool(state.get("deleted")) and last_real is None,
+        }
+
+    def conversation_projection(
+        self,
+        chat_id: str,
+        *,
+        observer: ProjectionObserver | None = None,
+    ) -> ConversationProjection:
+        """Transcript and summary derived from one ordinary canonical fold."""
+        fold = self._message_request_fold(chat_id, observer=observer)
+        return ConversationProjection(
+            snapshot=fold.snapshot,
+            messages=tuple(fold.messages),
+            viewer_state=self._public_viewer_state(fold._verified_viewer_state),
+            overview=deepcopy(self._overview_from_fold(fold)),
+        )
 
     def _crypto_boundary(self) -> bool:
         """True when this mesh has a real crypto boundary to enforce overlay
@@ -582,43 +667,14 @@ class MessagingService:
                       observer: ProjectionObserver | None = None) -> dict:
         """One-pass sidebar payload: last visible message + unread info + my
         per-chat flags. Folds the chat once (vs unread()+tail separately)."""
-        msgs = self.messages_for(chat_id, observer=observer)
-        state = self._state(chat_id).get()
-        # the preview includes info events (R46 — a fresh group reads "You
-        # created this chat", WhatsApp-style; the client phrases the event)
-        # but only PHRASEABLE ones (V59): the preview must never go blank
-        # because the newest event phrases "" for this viewer.
-        last = next((m for m in reversed(msgs) if self._previewable(m)), None)
-        last_real = next(
-            (m for m in reversed(msgs) if m.kind is MsgKind.MESSAGE), None
-        )
-        return {
-            "last": last,
-            **unread_info(msgs, self.user, state),
-            "archived": bool(state.get("archived")),
-            "pinned": bool(state.get("pinned")),
-            "mute": state.get("mute", False),
-            # delete-for-me of the WHOLE chat (undoable). The row hides only
-            # while no real MESSAGE survives the cut — a new message brings
-            # the chat back, WhatsApp-style, but an info event (a rename
-            # somewhere) deliberately doesn't resurrect it.
-            "deleted": bool(state.get("deleted")) and last_real is None,
-        }
+        fold = self._message_request_fold(chat_id, observer=observer)
+        return self._overview_from_fold(fold)
 
     def my_state(self, chat_id: str) -> dict:
         """My sanitized per-chat state for the transcript view (starred ids +
         read cursor + flags) — never the raw overlay document."""
         self._require_member(chat_id)
-        state = self._state(chat_id).get()
-        return {
-            "starred": list(state.get("starred", [])),
-            "read_ns": int(state.get("read_ns", 0)),
-            "hidden_runtime": list(state.get("hidden_runtime", [])),
-            "archived": bool(state.get("archived")),
-            "pinned": bool(state.get("pinned")),
-            "forced_unread": bool(state.get("forced_unread")),
-            "mute": state.get("mute", False),
-        }
+        return self._public_viewer_state(self._state(chat_id).get())
 
     def pins(self, chat_id: str) -> dict[str, dict]:
         snap = self._require_member(chat_id)

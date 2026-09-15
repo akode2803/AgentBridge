@@ -282,11 +282,12 @@ def chat(app: GuiApp, req, mesh, token: SessionReadToken) -> dict:
     tail = req.int_param("tail", 200, 1, 1000)
     observation = ProjectionObservation("chat")
     try:
-        snap = observation.measure("membership_gate", lambda: mesh.snapshot(chat_id))
-        msgs = observation.measure(
+        projection = observation.measure(
             "transcript_fold",
-            lambda: mesh.messages_for(chat_id, observer=observation),
+            lambda: mesh.conversation_projection(chat_id, observer=observation),
         )  # raises NotAMember for outsiders
+        snap = projection.snapshot
+        msgs = projection.messages
         me = mesh.user
         receipts = observation.measure(
             "receipts_fold",
@@ -305,7 +306,7 @@ def chat(app: GuiApp, req, mesh, token: SessionReadToken) -> dict:
 
         observation.measure("payload_assembly", assemble_payload)
         observation.count("serialization_count", len(payload))
-        mine = observation.measure("viewer_state", lambda: mesh.my_state(chat_id))
+        mine = projection.viewer_state
         meta = chat_json(snap, full=True)
         meta["created"] = _created_iso(msgs)
         meta["created_by"] = _created_by(msgs)
