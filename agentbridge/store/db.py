@@ -21,17 +21,18 @@ from typing import Any, Iterable
 from . import log_position
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
-from . import document_observation, shadow_chat_inputs, shadow_slot
+from . import document_observation, lifecycle_heads, shadow_chat_inputs, shadow_slot
 from .shadow_chat_inputs import ShadowChatInputs
 from .document_observation import (
     DocumentObservation,
     DocumentObservationConflict,
     DocumentPosition,
 )
+from .lifecycle_heads import LifecycleHeadPosition
 
 __all__ = [
     "Store", "OutboxItem", "LogIngestionConflict", "DocumentObservation",
-    "DocumentObservationConflict", "DocumentPosition",
+    "DocumentObservationConflict", "DocumentPosition", "LifecycleHeadPosition",
 ]
 
 
@@ -150,6 +151,7 @@ class Store:
                     raise sqlite3.OperationalError(
                         f"message schema migration did not create {name}")
         log_position.initialize(self._conn())
+        lifecycle_heads.initialize(self._conn())
         document_observation.initialize(self._conn())
         shadow_slot.initialize(self._conn())
 
@@ -390,6 +392,14 @@ class Store:
 
     def capture_document_position(self, source_id: str) -> DocumentPosition:
         return document_observation.capture_position(self.path, source_id)
+
+    def observe_lifecycle_head(self, subject: str) -> LifecycleHeadPosition:
+        return lifecycle_heads.observe(self.path, subject)
+
+    def publish_lifecycle_head(
+        self, expected: LifecycleHeadPosition, proposed: dict,
+    ) -> bool:
+        return lifecycle_heads.publish(self._conn(), self.path, expected, proposed)
 
     def publish_document_batch(
         self, expected_position: DocumentPosition, documents: dict, *,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 from .. import crypto
@@ -10,13 +11,17 @@ from ..core.jsonkit import canonical_json_bytes
 from ..core.timekit import new_id, next_ns
 
 __all__ = [
-    "LifecycleError", "ensure_bootstrap", "lifecycle_prefix",
+    "LifecycleError", "LifecycleUnavailable", "ensure_bootstrap", "lifecycle_prefix",
     "publish_change", "resolve_lifecycle",
 ]
 
 
 class LifecycleError(ValueError):
     """Lifecycle evidence is malformed, forged, stale, or unauthorized."""
+
+
+class LifecycleUnavailable(LifecycleError):
+    """Lifecycle authority cannot currently be resolved without raw fallback."""
 
 
 FIELDS = {
@@ -35,7 +40,7 @@ def _path(subject: str, record_id: str) -> str:
     return f"{lifecycle_prefix(subject)}/{record_id}.json"
 
 
-def _validate(value: object) -> dict:
+def _validate_structure(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != FIELDS:
         raise LifecycleError("invalid lifecycle fields")
     r = value
@@ -53,8 +58,6 @@ def _validate(value: object) -> dict:
         raise LifecycleError("invalid lifecycle ns")
     if not isinstance(r["active"], bool):
         raise LifecycleError("invalid lifecycle active state")
-    if r["ns"] > time.time_ns() + _FUTURE_SKEW_NS:
-        raise LifecycleError("lifecycle record is too far in the future")
     if r["kind"] == UserKind.HUMAN.value and (r["owner"] or r["machine"]):
         raise LifecycleError("human lifecycle cannot carry agent authority")
     if r["kind"] == UserKind.AGENT.value and (not r["owner"] or not r["machine"]):
@@ -62,6 +65,14 @@ def _validate(value: object) -> dict:
     if r["deactivated"] and r["active"]:
         raise LifecycleError("deactivated lifecycle cannot be active")
     return r
+
+
+def _validate(value: object) -> dict:
+    """Validate a newly observed remote record, including current clock admission."""
+    record = _validate_structure(value)
+    if record["ns"] > time.time_ns() + _FUTURE_SKEW_NS:
+        raise LifecycleError("lifecycle record is too far in the future")
+    return record
 
 
 def _raw(directory, name: str):
@@ -155,16 +166,29 @@ def _authorized(directory, record: dict, subject_sig: str,
         raise LifecycleError("bootstrap cannot extend a lifecycle chain")
 
 
-def _cached(store, subject: str) -> dict | None:
+_CONFLICT = object()
+
+
+def _retained(store, subject: str):
     if store is None:
-        return None
-    value = store.cached_doc(f"lifecycle/head/{subject}", default={})
-    return value if isinstance(value, dict) and value.get("id") else None
+        return None, None
+    try:
+        position = store.observe_lifecycle_head(subject)
+        if position.payload_json is None:
+            return position, None
+        value = json.loads(position.payload_json)
+        record = _validate_structure(value)
+        if record["subject"] != subject:
+            raise LifecycleError("retained lifecycle subject mismatch")
+        return position, record
+    except LifecycleUnavailable:
+        raise
+    except Exception as exc:
+        raise LifecycleUnavailable("retained lifecycle authority is unavailable") from exc
 
 
-def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
-    """Fold valid evidence and retain a newer local head against rollback."""
-    local = _cached(store, subject)
+def _resolve_attempt(directory, subject: str, store):
+    position, local = _retained(store, subject)
     records = []
     try:
         paths = directory.tx.list_docs(lifecycle_prefix(subject))
@@ -180,6 +204,8 @@ def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
             if record["subject"] != subject:
                 raise LifecycleError("lifecycle subject mismatch")
             records.append((record["ns"], record["id"], record, subject_sig))
+        except LifecycleUnavailable:
+            raise
         except OSError:
             if local is not None:
                 return local
@@ -194,13 +220,35 @@ def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
             _authorized(directory, record, subject_sig, current)
             current = record
             accepted.add(record["id"])
+        except LifecycleUnavailable:
+            raise
         except (LifecycleError, TypeError, ValueError):
             continue
     if local is not None and (current is None or local["id"] not in accepted):
         return local
     if current is not None and store is not None:
-        store.cache_doc(f"lifecycle/head/{subject}", current)
+        try:
+            _validate_structure(current)
+            if current["subject"] != subject:
+                raise LifecycleError("lifecycle proposal subject mismatch")
+            if not store.publish_lifecycle_head(position, current):
+                return _CONFLICT
+        except LifecycleUnavailable:
+            raise
+        except Exception as exc:
+            raise LifecycleUnavailable(
+                "retained lifecycle publication is unavailable"
+            ) from exc
     return current
+
+
+def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
+    """Fold evidence and publish with at most one complete conflict retry."""
+    for _attempt in range(2):
+        result = _resolve_attempt(directory, subject, store)
+        if result is not _CONFLICT:
+            return result
+    raise LifecycleUnavailable("retained lifecycle head changed repeatedly")
 
 
 def _write(directory, keystore, record: dict, *, subject_proof: bool) -> dict:
@@ -254,6 +302,8 @@ def publish_change(directory, keystore, subject: str, *, actor: str,
             directory, _path(subject, current["id"]),
             directory.tx.get_doc(_path(subject, current["id"])),
         )
+    except LifecycleUnavailable:
+        raise
     except (LifecycleError, OSError, TypeError, ValueError) as exc:
         raise LifecycleError(
             "cannot mutate lifecycle while its verified head is unavailable"
