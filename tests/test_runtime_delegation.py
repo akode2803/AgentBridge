@@ -739,6 +739,9 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
     outcome = {}
     real_view = source._view
     timeout_called = threading.Event()
+    offer_ready = threading.Event()
+    decision_ready = threading.Event()
+    captured_offer = []
     real_sleep = time.sleep
 
     class ControlledClock:
@@ -757,6 +760,12 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
 
     def delayed_view(*args):
         view = real_view(*args)
+        if not offer_ready.is_set():
+            captured_offer.append(view)
+            offer_ready.set()
+            # Pause after real authority reads have released their locks. The
+            # scenario controls delivery order, not competing polling speed.
+            assert decision_ready.wait(30), "decision publication did not complete"
         if not timeout_called.is_set():
             return type(view)(view.task, (view.events[0],))
         return view
@@ -780,17 +789,18 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
     )))
     thread.start()
     try:
-        offered = _wait_until(
-            lambda: source_handoffs.read(chat_id, "run-late"), timeout=10,
-        )[0]
+        assert offer_ready.wait(30), "offer was not observed"
+        offered = captured_offer[0]
         destination_handoffs.decide(
             chat_id=chat_id, run_id="run-late",
             handoff_id=offered.events[0].meta.call_id or "", accept=accept,
         )
         ControlledClock.now_ns = int(offered.events[0].meta.expires_ns or 0) + 1
+        decision_ready.set()
         thread.join(timeout=10)
     finally:
         stopping.set()
+        decision_ready.set()
         thread.join(timeout=10)
     assert not thread.is_alive()
     assert calls == 1
