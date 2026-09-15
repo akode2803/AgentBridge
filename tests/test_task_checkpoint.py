@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from types import SimpleNamespace
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -11,11 +13,16 @@ from pathlib import Path
 
 import pytest
 
+from devtools import task_checkpoint
+
 from devtools.task_checkpoint import (
     ZERO_DIGEST, CheckpointError, StaleCheckpointError, audit_checkpoint,
     repair_journal, validate_active, validate_payload, write_checkpoint,
 )
 
+
+private_storage = pytest.mark.skipif(
+    os.name != "posix", reason="private checkpoint storage requires POSIX permissions")
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
@@ -105,6 +112,7 @@ def _payload(root: Path, *, expected_digest: str = "", objective: str = "Continu
     }
 
 
+@private_storage
 def test_atomic_write_digest_chain_and_journal_repair(workspace, tmp_path):
     state = tmp_path / "state"
     first = write_checkpoint(
@@ -128,6 +136,7 @@ def test_atomic_write_digest_chain_and_journal_repair(workspace, tmp_path):
         first["integrity"]["checkpoint_digest"]
 
 
+@private_storage
 def test_stale_compare_and_swap_allows_exactly_one_writer(workspace, tmp_path):
     state = tmp_path / "state"
     first = write_checkpoint(
@@ -171,6 +180,7 @@ def test_validation_rejects_unknown_and_secret_material(workspace):
         validate_payload(payload)
 
 
+@private_storage
 def test_corrupt_active_and_symlink_destination_fail_closed(workspace, tmp_path):
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -189,6 +199,7 @@ def test_corrupt_active_and_symlink_destination_fail_closed(workspace, tmp_path)
             _payload(workspace), linked, expect_seq=0, expect_digest=ZERO_DIGEST)
 
 
+@private_storage
 def test_audit_classifies_expected_conflicting_and_unknown_drift(workspace, tmp_path):
     state = tmp_path / "state"
     changed = b"expected\n"
@@ -218,6 +229,7 @@ def test_audit_classifies_expected_conflicting_and_unknown_drift(workspace, tmp_
                for row in conflict["observations"])
 
 
+@private_storage
 def test_checkpoint_files_are_private(workspace, tmp_path):
     state = tmp_path / "state"
     write_checkpoint(
@@ -227,8 +239,7 @@ def test_checkpoint_files_are_private(workspace, tmp_path):
         assert (state / name).stat().st_mode & 0o077 == 0
 
 
-def test_existing_broad_permissions_and_credential_url_are_rejected(
-        workspace, tmp_path):
+def test_credential_url_is_rejected(workspace):
     payload = _payload(workspace)
     payload["process_observations"] = [{
         "role": "gui", "pid": 1, "start_token": "start",
@@ -239,6 +250,10 @@ def test_existing_broad_permissions_and_credential_url_are_rejected(
     with pytest.raises(CheckpointError, match="secret material"):
         validate_payload(payload)
 
+
+
+@private_storage
+def test_existing_broad_permissions_are_rejected(workspace, tmp_path):
     state = tmp_path / "state"
     first = write_checkpoint(
         _payload(workspace), state, expect_seq=0, expect_digest=ZERO_DIGEST)
@@ -247,3 +262,18 @@ def test_existing_broad_permissions_and_credential_url_are_rejected(
         write_checkpoint(
             _payload(workspace), state, expect_seq=1,
             expect_digest=first["integrity"]["checkpoint_digest"])
+
+
+def test_unsupported_private_storage_rejects_before_mutation(tmp_path, monkeypatch):
+    # Keep pathlib on the host platform while emulating an unsupported OS.
+    monkeypatch.setattr(task_checkpoint, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(task_checkpoint, "validate_payload", lambda payload: payload)
+    state = tmp_path / "absent" / "state"
+    with pytest.raises(CheckpointError, match="Windows ACL support"):
+        write_checkpoint({}, state, expect_seq=0, expect_digest=ZERO_DIGEST)
+    with pytest.raises(CheckpointError, match="Windows ACL support"):
+        repair_journal(state)
+    with pytest.raises(CheckpointError, match="Windows ACL support"):
+        with task_checkpoint._exclusive_lock(state / ".lock"):
+            pytest.fail("unsupported lock was acquired")
+    assert not state.parent.exists()

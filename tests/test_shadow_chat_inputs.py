@@ -264,6 +264,7 @@ def test_wrong_shaped_stored_chat_ids_reject_in_legacy_and_paired_capture_after_
         )
     legacy_readers, paired_readers = [], []
     legacy_open, paired_open = shadow_slot._open_reader, shadow_chat_inputs.sqlite3.connect
+    owner_thread = threading.get_ident()
 
     def legacy_reader(*args, **kwargs):
         conn = legacy_open(*args, **kwargs)
@@ -272,7 +273,10 @@ def test_wrong_shaped_stored_chat_ids_reject_in_legacy_and_paired_capture_after_
 
     def paired_reader(*args, **kwargs):
         conn = paired_open(*args, **kwargs)
-        paired_readers.append(conn)
+        # sqlite3 is a shared module object. Do not capture unrelated worker
+        # connections while this test temporarily observes its own reader.
+        if threading.get_ident() == owner_thread:
+            paired_readers.append(conn)
         return conn
 
     monkeypatch.setattr(shadow_slot, "_open_reader", legacy_reader)

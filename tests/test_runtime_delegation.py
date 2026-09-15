@@ -119,7 +119,11 @@ def _wait_until(predicate, timeout=5.0):
 def test_manager_retained_agent_tool_returns_once_without_room_post(
         delegation_meshes):
     _owner, manager, specialist, chat_id = delegation_meshes
-    _runs, source_tasks, source_handoffs, source = _coordinator(manager)
+    _runs, source_tasks, source_handoffs, _source = _coordinator(manager)
+    stopping = threading.Event()
+    source = DelegationCoordinator(
+        manager, source_handoffs, machine="box", stopping=stopping.is_set,
+    )
     source_tasks.start_with_run(
         run_id="run-1", task_id="task-1", chat_id=chat_id,
         trigger_id="message-1", provider="codex", model="gpt-test",
@@ -139,21 +143,28 @@ def test_manager_retained_agent_tool_returns_once_without_room_post(
 
     thread = threading.Thread(target=call_manager)
     thread.start()
-    _wait_until(lambda: source_handoffs.read(chat_id, "run-1"))
+    try:
+        _wait_until(lambda: source_handoffs.read(chat_id, "run-1"), timeout=10)
 
-    # First pass accepts; the manager then authorizes while its provider call
-    # remains blocked. A later pass atomically claims the child.
-    def accepted():
-        destination.claim_ready(exclude=set())
-        views = source_handoffs.read(chat_id, "run-1")
-        return bool(views and views[0].events[-1].state
-                    is HandoffState.ACCEPTED)
+        # First pass accepts; the manager then authorizes while its provider call
+        # remains blocked. A later pass atomically claims the child.
+        def accepted():
+            destination.claim_ready(exclude=set())
+            views = source_handoffs.read(chat_id, "run-1")
+            return bool(views and views[0].events[-1].state
+                        is HandoffState.ACCEPTED)
 
-    _wait_until(accepted)
-    work = _wait_until(lambda: destination.claim_ready(exclude=set()))[0]
-    responder = _ChildResponder()
-    destination.execute(work, responder)
-    thread.join(timeout=5)
+        _wait_until(accepted, timeout=10)
+        work = _wait_until(
+            lambda: destination.claim_ready(exclude=set()), timeout=10,
+        )[0]
+        responder = _ChildResponder()
+        destination.execute(work, responder)
+        thread.join(timeout=10)
+    finally:
+        if thread.is_alive():
+            stopping.set()
+            thread.join(timeout=10)
 
     assert not thread.is_alive()
     assert outcome["value"] == "Specialist evidence"
@@ -523,18 +534,26 @@ def test_shutdown_cancels_an_executing_child(delegation_meshes):
     work = destination.claim_ready(exclude=set())[0]
 
     class BlockingResponder(_ChildResponder):
+        entered = threading.Event()
+
         def respond_child(self, prepared, *, cancelled=None):
+            self.entered.set()
             while not cancelled():
                 time.sleep(0.01)
             raise DelegationError("cancelled")
 
+    responder = BlockingResponder()
     thread = threading.Thread(
-        target=destination.execute, args=(work, BlockingResponder()),
+        target=destination.execute, args=(work, responder),
     )
     thread.start()
-    _wait_until(lambda: specialist.store.cached_doc(path)["state"] == "executing")
-    stopping.set()
-    thread.join(timeout=2)
+    try:
+        assert responder.entered.wait(10), "child provider was never entered"
+        stopping.set()
+        thread.join(timeout=10)
+    finally:
+        stopping.set()
+        thread.join(timeout=10)
 
     assert not thread.is_alive()
     view = destination_handoffs.read(
@@ -564,9 +583,15 @@ def test_source_shutdown_releases_blocking_delegation(delegation_meshes):
         success_criteria=("Return a finding",),
     )))
     thread.start()
-    _wait_until(lambda: source_handoffs.read(chat_id, "run-source-stop"))
-    stopping.set()
-    thread.join(timeout=1)
+    try:
+        _wait_until(
+            lambda: source_handoffs.read(chat_id, "run-source-stop"), timeout=10,
+        )
+        stopping.set()
+        thread.join(timeout=10)
+    finally:
+        stopping.set()
+        thread.join(timeout=10)
 
     assert not thread.is_alive()
     assert "runner is stopping" in outcome["value"]
@@ -698,22 +723,41 @@ def test_offline_activation_waits_for_canonical_record_before_provider(
 def test_late_synced_decision_settles_once_without_timeout_loop(
         delegation_meshes, monkeypatch, accept):
     _owner, manager, specialist, chat_id = delegation_meshes
-    _runs, tasks, source_handoffs, source = _coordinator(manager)
+    _runs, tasks, source_handoffs, _source = _coordinator(manager)
     tasks.start_with_run(
         run_id="run-late", task_id="task-late", chat_id=chat_id,
         trigger_id="message-late", provider="codex", model="gpt-test",
         capability_ceiling=("delegate_agent",),
     )
-    source.ACCEPTANCE_S = 2.0
+    stopping = threading.Event()
+    source = DelegationCoordinator(
+        manager, source_handoffs, machine="box", stopping=stopping.is_set,
+    )
+    source.ACCEPTANCE_S = 10.0
     source.POLL_S = 0.01
     _r, _t, destination_handoffs, _destination = _coordinator(specialist)
     outcome = {}
     real_view = source._view
-    release_at = time.monotonic() + 2.2
+    timeout_called = threading.Event()
+    real_sleep = time.sleep
+
+    class ControlledClock:
+        now_ns = time.time_ns()
+
+        @classmethod
+        def time_ns(cls):
+            return cls.now_ns
+
+        @staticmethod
+        def sleep(seconds):
+            real_sleep(seconds)
+
+    monkeypatch.setattr("agentbridge.harness.runtime.delegation.time", ControlledClock)
+    monkeypatch.setattr("agentbridge.harness.runtime.handoffs.time", ControlledClock)
 
     def delayed_view(*args):
         view = real_view(*args)
-        if time.monotonic() < release_at:
+        if not timeout_called.is_set():
             return type(view)(view.task, (view.events[0],))
         return view
 
@@ -724,6 +768,7 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
     def counted_timeout(**kwargs):
         nonlocal calls
         calls += 1
+        timeout_called.set()
         return real_timeout(**kwargs)
 
     monkeypatch.setattr(source_handoffs, "timeout", counted_timeout)
@@ -734,12 +779,19 @@ def test_late_synced_decision_settles_once_without_timeout_loop(
         success_criteria=("Return a finding",),
     )))
     thread.start()
-    offered = _wait_until(lambda: source_handoffs.read(chat_id, "run-late"))[0]
-    destination_handoffs.decide(
-        chat_id=chat_id, run_id="run-late",
-        handoff_id=offered.events[0].meta.call_id or "", accept=accept,
-    )
-    thread.join(timeout=4)
+    try:
+        offered = _wait_until(
+            lambda: source_handoffs.read(chat_id, "run-late"), timeout=10,
+        )[0]
+        destination_handoffs.decide(
+            chat_id=chat_id, run_id="run-late",
+            handoff_id=offered.events[0].meta.call_id or "", accept=accept,
+        )
+        ControlledClock.now_ns = int(offered.events[0].meta.expires_ns or 0) + 1
+        thread.join(timeout=10)
+    finally:
+        stopping.set()
+        thread.join(timeout=10)
     assert not thread.is_alive()
     assert calls == 1
     assert "deadline" in outcome["value"]

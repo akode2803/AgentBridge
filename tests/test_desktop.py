@@ -4,7 +4,7 @@ from agentbridge.gui import desktop
 
 
 def _chrome_only(path):
-    return str(path).endswith("/Applications/Google Chrome.app")
+    return path.name == "Google Chrome.app" and path.parent.name == "Applications"
 
 
 def test_macos_launch_focuses_existing_app_window(monkeypatch):

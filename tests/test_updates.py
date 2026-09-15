@@ -6,6 +6,7 @@ the suite never fetches the actual repo.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 
@@ -214,7 +215,8 @@ def test_restarter_scope_home_canonicalizes_symlinks(tmp_path):
     actual.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
-    assert _scope_home(["--home", str(alias)]) == str(actual.resolve())
+    assert _scope_home(["--home", str(alias)]) == os.path.normcase(
+        str(actual.resolve()))
     assert _has_scope(
         f"python -m agentbridge.harness --all --home {alias}",
         str(actual),
@@ -481,9 +483,10 @@ def test_restarter_posix_master_termination_uses_owned_process_group(
     monkeypatch.setattr(restarter.sys, "platform", "darwin")
     monkeypatch.setattr(restarter, "pid_alive", lambda _pid: True)
     monkeypatch.setattr(restarter, "_command_for_pid", lambda _pid: command)
-    monkeypatch.setattr(restarter.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(restarter.os, "getpgid", lambda pid: pid, raising=False)
     monkeypatch.setattr(
-        restarter.os, "killpg", lambda pid, sig: seen.append((pid, sig)))
+        restarter.os, "killpg", lambda pid, sig: seen.append((pid, sig)),
+        raising=False)
     assert restarter._terminate_validated(46, command) is True
     assert seen == [(46, restarter.signal.SIGTERM)]
 
