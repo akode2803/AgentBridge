@@ -1,5 +1,8 @@
 """Membership & groups: event fold, multi-admin, owner pull-in, permissions."""
 
+import time
+from types import SimpleNamespace
+
 import pytest
 
 from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationError
@@ -622,16 +625,25 @@ def test_terminal_delete_retries_cleanup_before_materializing_acl(
     monkeypatch.setattr(aryan.tx, "delete_blob", fail_once)
     aryan.outbox.base_delay = 0.001
     aryan.outbox.max_delay = 0.001
+    clock = SimpleNamespace(now_ns=time.time_ns())
+    monkeypatch.setattr(
+        "agentbridge.store.db.time",
+        SimpleNamespace(time_ns=lambda: clock.now_ns),
+    )
     preview = aryan.delete_chat(doomed.id)
     assert preview.deleted and failed
     still_authorized = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
     assert still_authorized.is_member("aryan") and not still_authorized.deleted
     assert aryan.store.outbox_counts().get("pending") == 1
 
-    import time
-    deadline = time.monotonic() + 2
-    while aryan.outbox.flush_once() == 0 and time.monotonic() < deadline:
-        pass
+    with aryan.store._conn() as conn:
+        retry_at = conn.execute(
+            "SELECT next_ns FROM outbox WHERE state='pending' ORDER BY seq LIMIT 1",
+        ).fetchone()[0]
+    assert retry_at > clock.now_ns
+    assert aryan.outbox.flush_once() == 0  # fixed DB clock: no early retry
+    clock.now_ns = retry_at
+    assert aryan.outbox.flush_once() == 1
     assert aryan.store.outbox_counts() == {}
     terminal = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
     assert terminal.deleted and terminal.members == {}
