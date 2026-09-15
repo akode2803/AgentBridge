@@ -5,7 +5,7 @@ import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
-         applyMeshState } from "./state.js";
+         applyMeshState, observeLockState } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
@@ -201,10 +201,12 @@ async function refreshOnce(rerender) {
   // renders over it) — the poll keeps watching /api/state, which answers
   // while locked, so unlocking elsewhere heals this window too
   if (App.state.app_lock?.locked) {
+    observeLockState(true);
     if (restarting) clearRestartIntent();
     V.renderLockPage();
     return;
   }
+  if (!lockPending) observeLockState(false);
   // V127: the heal promised above, made real — a lock page still up while
   // the server says unlocked (another window's unlock, the account password
   // over the API) fades away onto the app rendered below
@@ -470,10 +472,14 @@ window.addEventListener("hashchange", route);
   })();
   // ---- V111 app lock: the client-side triggers ------------------------
   // any endpoint refusing with `locked` raises the screen (api.js event)
-  document.addEventListener("ab:locked", () => V.renderLockPage());
+  document.addEventListener("ab:locked", () => {
+    observeLockState(true);
+    V.renderLockPage();
+  });
   // manual lock — the settings card's "Lock now" button and Ctrl+L
   const lockNow = async () => {
     lockPending = true;                    // V127: shield from the poll heal
+    observeLockState(true);
     V.renderLockPage();                    // cover FIRST, then tell the server
     try { await api("/api/applock/lock", {}); } catch { /* poll heals */ }
     if (App.state?.app_lock) App.state.app_lock.locked = true;

@@ -21,13 +21,14 @@ function rxPairs(reactions) {
 
 // the overlay pill: distinct emojis (capped at 3, WhatsApp) + the total count
 // when more than one reaction landed; hover names the reactors
-export function rxBadge(msg, me) {
+export function rxBadge(msg, me, context = Mesh.state) {
   const entries = Object.entries(msg.reactions || {});
   if (!entries.length) return "";
   const total = entries.reduce((n, [, us]) => n + us.length, 0);
   const mine = entries.some(([, us]) => us.includes(me));
   const faces = entries.slice(0, 3).map(([e]) => esc(e)).join("");
-  const names = entries.flatMap(([, us]) => us).map(meshDn).join(", ");
+  const names = entries.flatMap(([, us]) => us)
+    .map((name) => meshDn(name, context)).join(", ");
   return `<button class="rx-badge${mine ? " has-mine" : ""}" title="${esc(names)}"
     aria-label="Reactions">${faces}${total > 1 ? `<span class="rx-n">${total}</span>` : ""}</button>`;
 }

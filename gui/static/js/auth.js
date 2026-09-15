@@ -13,7 +13,7 @@
 import { $, esc, toast } from "./util.js";
 import { api } from "./api.js";
 import { Mesh, beginSessionTransition, captureSessionEpoch,
-         sessionMayApply } from "./state.js";
+         sessionMayApply, observeLockState } from "./state.js";
 import { openModal, closeModal } from "./modal.js";
 import { V } from "./views.js";
 
@@ -320,6 +320,7 @@ function renderLockPage(force = false) {
         return;
       }
       // unlocked: refresh the app UNDER the cover, THEN fade it away
+      observeLockState(false);
       Mesh.state = null;                       // never trust pre-lock caches
       try { await V.refresh(true); } catch { /* the poll heals */ }
       closeLockPage();

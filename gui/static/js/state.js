@@ -68,6 +68,53 @@ window.Mesh = Mesh;
 
 export const Settings = { section: null };   // explicit #/settings/<section>
 
+let meshStateGeneration = 0;
+let meshStateAcceptedAt = null;
+let lockEpoch = 0;
+let observedLocked = false;
+let warmCountersExhausted = false;
+
+const monotonicNow = () => globalThis.performance?.now?.() ?? Number.NaN;
+
+function advanceWarmCounter(value) {
+  if (value >= Number.MAX_SAFE_INTEGER) {
+    warmCountersExhausted = true;
+    return value;
+  }
+  return value + 1;
+}
+
+export function observeLockState(locked, { force = false } = {}) {
+  const next = !!locked;
+  if (force || next !== observedLocked) {
+    lockEpoch = advanceWarmCounter(lockEpoch);
+    meshStateAcceptedAt = null;  // unlock requires a newly accepted state
+    if (typeof CustomEvent === "function") {
+      globalThis.document?.dispatchEvent?.(new CustomEvent("ab:lock-epoch"));
+    }
+  }
+  observedLocked = next;
+  return lockEpoch;
+}
+
+export function meshStateSnapshot() {
+  const session = BrowserSession.capture();
+  const adopted = BrowserSession.snapshot();
+  return Object.freeze({
+    sessionEpoch: session.epoch,
+    lockEpoch,
+    locked: observedLocked,
+    stateGeneration: meshStateGeneration,
+    acceptedAt: meshStateAcceptedAt,
+    ageMs: meshStateAcceptedAt !== null ? monotonicNow() - meshStateAcceptedAt
+      : Number.POSITIVE_INFINITY,
+    exhausted: warmCountersExhausted,
+    bound: adopted.mode === "bound" && adopted.ready && !!adopted.binding,
+    viewer: adopted.mode === "bound" && adopted.ready
+      ? adopted.binding?.viewer ?? null : null,
+  });
+}
+
 export function clearSessionCaches() {
   // Do not call saveDraft here: its storage key derives from Mesh.state.user,
   // which is exactly the identity being removed. Existing persisted per-user
@@ -105,6 +152,9 @@ export function clearSessionCaches() {
   Mesh.timerDone = {};
   if (Mesh.askPollId) clearInterval(Mesh.askPollId);
   Mesh.askPollId = null;
+  meshStateGeneration = advanceWarmCounter(meshStateGeneration);
+  meshStateAcceptedAt = null;
+  observeLockState(observedLocked, { force: true });
   resetSubviews();
   document.dispatchEvent(new CustomEvent("ab:session-reset"));
 }
@@ -117,6 +167,10 @@ export function beginSessionTransition() {
 
 export function captureSessionEpoch() {
   return BrowserSession.capture();
+}
+
+export function captureWarmStateRequest(ticket = captureSessionEpoch()) {
+  return Object.freeze({ sessionEpoch: ticket?.epoch, lockEpoch });
 }
 
 export function sessionMayApply(ticket, response) {
@@ -133,9 +187,22 @@ export function sessionMayApply(ticket, response) {
   return true;
 }
 
-export function applyMeshState(ticket, response) {
+export function applyMeshState(ticket, response, warmRequest = null) {
   if (!sessionMayApply(ticket, response)) return false;
   Mesh.state = response;
+  meshStateGeneration = advanceWarmCounter(meshStateGeneration);
+  // Ordinary state still applies after a lock race, but only a request begun
+  // in this exact lock epoch may seed a warm presentation context.
+  meshStateAcceptedAt = !warmCountersExhausted
+    && warmRequest?.sessionEpoch === ticket?.epoch
+    && warmRequest?.lockEpoch === lockEpoch
+    ? monotonicNow() : null;
+  if (typeof CustomEvent === "function") {
+    globalThis.document?.dispatchEvent?.(new CustomEvent(
+      "ab:mesh-state-accepted",
+      { detail: { generation: meshStateGeneration, state: response } },
+    ));
+  }
   return true;
 }
 
@@ -146,8 +213,8 @@ export const RULE_LABELS = {
   humans: "Reply only to people",   // rule key stays "humans"; label avoids the word
 };
 
-export function meshDn(username) {
-  const u = Mesh.state?.users?.[username];
+export function meshDn(username, context = Mesh.state) {
+  const u = context?.users?.[username];
   return u?.display || dn(username);
 }
 
@@ -157,11 +224,11 @@ export function meshDn(username) {
 // bodies), so text derives here from msg.event. "" = render nothing for this
 // viewer, never an empty pill: admin changes speak only to the affected
 // member (WhatsApp voice) and key rotations are internal plumbing.
-export function meshInfoText(msg, me) {
+export function meshInfoText(msg, me, context = Mesh.state) {
   const ev = msg.event;
   if (!ev) return msg.body || "";
-  const name = (u) => (u === me ? "You" : meshDn(u));
-  const obj = (u) => (u === me ? "you" : meshDn(u));
+  const name = (u) => (u === me ? "You" : meshDn(u, context));
+  const obj = (u) => (u === me ? "you" : meshDn(u, context));
   const by = ev.by || msg.from;
   switch (ev.type) {
     case "created": return `${name(by)} created this chat`;
@@ -169,16 +236,16 @@ export function meshInfoText(msg, me) {
       // V58: lead with the person and WHY — "You added X (responsible for
       // Y)" read as a confusing accusation
       ? (ev.who === me
-          ? `You were added as a responsible member of ${meshDn(ev.agent)}`
-          : `${meshDn(ev.who)} was added as a responsible member of ${meshDn(ev.agent)}`)
+          ? `You were added as a responsible member of ${meshDn(ev.agent, context)}`
+          : `${meshDn(ev.who, context)} was added as a responsible member of ${meshDn(ev.agent, context)}`)
       : `${name(by)} added ${obj(ev.who)}`;
     case "member_removed": return ev.reason === "with_owner"
-      ? `${meshDn(ev.who)} left with ${obj(ev.owner || by)}`
+      ? `${meshDn(ev.who, context)} left with ${obj(ev.owner || by)}`
       : `${name(by)} removed ${obj(ev.who)}`;
     case "member_left": return ev.reason === "owner_changed"
       // V69: an agent departs rooms its NEW responsible member isn't in —
       // say why, or the roster change reads as a silent kick
-      ? `${meshDn(msg.from)} left — their responsible member changed`
+      ? `${meshDn(msg.from, context)} left — their responsible member changed`
       : `${name(msg.from)} left`;
     case "admin_granted": return ev.who === me ? "You're now an admin" : "";
     case "admin_revoked": return ev.who === me ? "You're no longer an admin" : "";
@@ -237,19 +304,19 @@ export function meshAvatar(username) {
 // inner markup for a USER avatar container (photo when set, else a colored
 // initial). Accounts carry no stored color yet (account creation is deferred),
 // so the tint is derived stably from the username.
-export function meshAvatarInner(username) {
-  const u = Mesh.state?.users?.[username];
+export function meshAvatarInner(username, context = Mesh.state) {
+  const u = context?.users?.[username];
   const a = u?.avatar;
-  return avatarInner(meshDn(username), a ? avatarUrl(username, a) : null,
+  return avatarInner(meshDn(username, context), a ? avatarUrl(username, a) : null,
                      u?.color || fallbackColor(username));
 }
 // inner markup for a CHAT avatar: a DM/self shows the other member's photo; a
 // group shows its own group photo (else the name initial on its stored tint,
 // or a name-derived fallback for pre-color groups). One helper for the sidebar
 // row, the chat header and the chat-info pane.
-export function meshChatAvatarInner(chat) {
+export function meshChatAvatarInner(chat, context = Mesh.state) {
   if (!chat) return "#";
-  if (isDmLike(chat)) return meshAvatarInner(dmOther(chat, Mesh.state?.user));
+  if (isDmLike(chat)) return meshAvatarInner(dmOther(chat, context?.user), context);
   return avatarInner(chat.name, chat.avatar ? avatarUrl(chat.id, chat.avatar, "chat") : null,
                      chat.color || fallbackColor(chat.id));
 }
@@ -264,9 +331,9 @@ export function dmOther(meta, viewer) {
 export function isDmLike(meta) {
   return !!meta && (meta.kind === "dm" || meta.kind === "self");
 }
-export function chatDisplay(meta, viewer) {
-  if (meta.kind === "self") return meshDn(viewer) + " (You)";
-  return meta.kind === "dm" ? meshDn(dmOther(meta, viewer)) : meta.name;
+export function chatDisplay(meta, viewer, context = Mesh.state) {
+  if (meta.kind === "self") return meshDn(viewer, context) + " (You)";
+  return meta.kind === "dm" ? meshDn(dmOther(meta, viewer), context) : meta.name;
 }
 
 // composer drafts persist per DEVICE (localStorage), scoped by user + chat, so

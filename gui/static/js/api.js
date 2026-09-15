@@ -23,7 +23,7 @@ export async function api(path, body, options = {}) {
   }
   // V111: ANY endpoint refusing because the app is locked raises the lock
   // screen — a DOM event, so this leaf module never imports a view
-  if (out && out.locked && out.error) {
+  if (options.sideEffects !== false && out && out.locked && out.error) {
     document.dispatchEvent(new CustomEvent("ab:locked"));
   }
   return out;

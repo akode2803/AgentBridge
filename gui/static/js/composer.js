@@ -53,7 +53,7 @@ export function syncSendState(chatId) {
 // the reply OR edit being composed — a quote bar directly above the composer,
 // WhatsApp-style; X (or Escape in the textarea) cancels. Lives on the
 // per-chat draft, so it survives re-renders and chat switches.
-export function renderReplyArea(chatId) {
+export function renderReplyArea(chatId, context = Mesh.state) {
   const area = $("#reply-area");
   if (!area) return;
   const draft = meshDraft(chatId);
@@ -67,13 +67,13 @@ export function renderReplyArea(chatId) {
         </div>
         <button class="icon-btn" id="reply-cancel" title="Cancel edit">${ICONS.close}</button>
       </div>`;
-    $("#reply-cancel").addEventListener("click", () => cancelEdit(chatId));
+    $("#reply-cancel").addEventListener("click", () => cancelEdit(chatId, context));
     return;
   }
   const r = draft.reply;
   if (!r) { area.innerHTML = ""; return; }
-  const ms = Mesh.state;
-  const name = r.from === ms.user ? "You" : meshDn(r.from);
+  const ms = context;
+  const name = r.from === ms.user ? "You" : meshDn(r.from, context);
   const preview = stripMd(r.body || "").replace(/\s+/g, " ").trim() || "📎 Attachment";
   area.innerHTML = `
     <div class="reply-bar">
@@ -85,7 +85,7 @@ export function renderReplyArea(chatId) {
     </div>`;
   $("#reply-cancel").addEventListener("click", () => {
     draft.reply = null;
-    renderReplyArea(chatId);
+    renderReplyArea(chatId, context);
     $("#mesh-body")?.focus();
   });
 }
@@ -123,7 +123,7 @@ export function startEdit(chatId, msg) {
   syncSendState(chatId);
 }
 
-function cancelEdit(chatId) {
+function cancelEdit(chatId, context = Mesh.state) {
   const draft = meshDraft(chatId);
   const prev = draft.editing ? draft.editing.prev : "";
   draft.editing = null;
@@ -135,12 +135,12 @@ function cancelEdit(chatId) {
     body.dispatchEvent(new Event("input"));
     body.focus();
   }
-  renderReplyArea(chatId);
+  renderReplyArea(chatId, context);
   syncSendState(chatId);
 }
 
-export function initComposer(chatId, members) {
-  const ms = Mesh.state;
+export function initComposer(chatId, members, context = Mesh.state) {
+  const ms = context;
   const draft = meshDraft(chatId);
   const body = $("#mesh-body");
   if (!body) return;   // archived chat / non-member: no composer rendered
@@ -215,7 +215,7 @@ export function initComposer(chatId, members) {
   // @tag autofill: chat members, keyboard + mouse. @all (Everyone) leads the
   // list in a group (2+ others) — it tags every member at once (round 11).
   const others = [...members].filter((u) => u !== ms.user);
-  const taggable = others.map((u) => ({ u, d: meshDn(u) }));
+  const taggable = others.map((u) => ({ u, d: meshDn(u, context) }));
   if (others.length >= 2) taggable.unshift({ u: "all", d: "Everyone" });
   const pop = $("#tag-pop");
   let tagCtx = null;
@@ -264,10 +264,10 @@ export function initComposer(chatId, members) {
   body.addEventListener("keydown", (e) => {
     if (!tagCtx) {
       if (e.key === "Escape" && draft.editing) {   // cancel the edit-in-progress
-        cancelEdit(chatId);
+        cancelEdit(chatId, context);
       } else if (e.key === "Escape" && draft.reply) {   // cancel the reply
         draft.reply = null;
-        renderReplyArea(chatId);
+        renderReplyArea(chatId, context);
       }
       return;
     }
@@ -289,7 +289,7 @@ export function initComposer(chatId, members) {
           { chat_id: chatId, msg_id: editing.id, body: newBody });
         if (r.error) { toast(r.error, true); return; }
       }
-      cancelEdit(chatId);   // restores the interrupted draft + send icon
+      cancelEdit(chatId, context);   // restores the interrupted draft + send icon
       playSendBlip();   // V89: saving an edit is a send — same chirp
       V.renderChats(true);
       return;
@@ -315,7 +315,7 @@ export function initComposer(chatId, members) {
     body.value = "";
     autosize();
     renderMeshPending(chatId);   // also re-syncs the send button
-    renderReplyArea(chatId);
+    renderReplyArea(chatId, context);
     // renderChats (not renderMeshChat): a local post fires no SSE event
     // (only synced-IN records do), so the transcript AND the sidebar row
     // (preview/time/order) must both repaint now — without this the sidebar
@@ -342,7 +342,7 @@ export function initComposer(chatId, members) {
   const stageFiles = async (files) => {
     // pre-check against the connector's cap so a too-big file never uploads;
     // a central acknowledge popup names the limit (round 14)
-    const limit = Mesh.state?.max_upload_bytes;
+    const limit = context?.max_upload_bytes;
     const tooBig = limit ? files.filter((f) => f.size > limit) : [];
     const okFiles = limit ? files.filter((f) => f.size <= limit) : files;
     if (tooBig.length) {
