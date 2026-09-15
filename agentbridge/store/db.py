@@ -21,7 +21,7 @@ from typing import Any, Iterable
 from . import log_position
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
-from . import document_observation
+from . import document_observation, shadow_slot
 from .document_observation import (
     DocumentObservation,
     DocumentObservationConflict,
@@ -150,6 +150,7 @@ class Store:
                         f"message schema migration did not create {name}")
         log_position.initialize(self._conn())
         document_observation.initialize(self._conn())
+        shadow_slot.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -344,6 +345,33 @@ class Store:
         return capture_chat_inputs(
             self.path, chat_id, document_paths=document_paths,
             max_messages=max_messages, max_logs=max_logs, max_bytes=max_bytes)
+
+    def inspect_shadow_position(self) -> shadow_slot.ShadowPosition:
+        return shadow_slot.inspect_position(self.path)
+
+    def acquire_shadow(self, expected: shadow_slot.ShadowPosition,
+                       publisher_nonce: str,
+                       source: shadow_slot.ShadowSource) -> shadow_slot.ShadowPosition:
+        return shadow_slot.acquire(self._conn(), self.path, expected, publisher_nonce, source)
+
+    def publish_shadow(self, expected: shadow_slot.ShadowPosition,
+                       snapshot: shadow_slot.ShadowSnapshot, *,
+                       max_documents: int = shadow_slot.MAX_RECORDS,
+                       max_chat_ids: int = shadow_slot.MAX_RECORDS,
+                       max_bytes: int = shadow_slot.MAX_BYTES) -> shadow_slot.ShadowPosition:
+        return shadow_slot.publish(
+            self._conn(), self.path, expected, snapshot,
+            max_documents=max_documents, max_chat_ids=max_chat_ids, max_bytes=max_bytes)
+
+    def retire_shadow(self, expected: shadow_slot.ShadowPosition) -> shadow_slot.ShadowPosition:
+        return shadow_slot.retire(self._conn(), self.path, expected)
+
+    def capture_shadow(self, expected: shadow_slot.ShadowPosition, *,
+                       max_documents: int = shadow_slot.MAX_RECORDS,
+                       max_chat_ids: int = shadow_slot.MAX_RECORDS,
+                       max_bytes: int = shadow_slot.MAX_BYTES) -> shadow_slot.ShadowObservation:
+        return shadow_slot.capture(self.path, expected, max_documents=max_documents,
+                                   max_chat_ids=max_chat_ids, max_bytes=max_bytes)
 
     def capture_document_position(self, source_id: str) -> DocumentPosition:
         return document_observation.capture_position(self.path, source_id)
