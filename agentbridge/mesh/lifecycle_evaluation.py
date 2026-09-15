@@ -68,6 +68,14 @@ class LifecycleEvaluation:
 class LifecycleInputsIncomplete(LifecycleUnavailable):
     """A fact required by this evaluation was not present in the capture."""
 
+    def __init__(
+        self, message: str, dependency_kind: str | None = None,
+        dependency_name: str | None = None,
+    ) -> None:
+        self.dependency_kind = dependency_kind
+        self.dependency_name = dependency_name
+        super().__init__(message)
+
 
 _MAX_LIMITS = LifecycleLimits()
 
@@ -137,7 +145,8 @@ class _Evaluator:
         evidence = self.subjects.get(subject, _MISSING)
         if evidence is _MISSING:
             raise LifecycleInputsIncomplete(
-                f"lifecycle subject @{subject} is missing from captured inputs"
+                f"lifecycle subject @{subject} is missing from captured inputs",
+                "subject", subject,
             )
         local = self._retained(subject, evidence.retained_json)
         if not evidence.available:
@@ -210,7 +219,8 @@ class _Evaluator:
         fact = self.accounts.get(name, _MISSING)
         if fact is _MISSING:
             raise LifecycleInputsIncomplete(
-                f"account @{name} is missing from captured inputs"
+                f"account @{name} is missing from captured inputs",
+                "account", name,
             )
         return fact
 
