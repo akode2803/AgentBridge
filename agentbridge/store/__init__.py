@@ -2,5 +2,11 @@
 
 from .db import OutboxItem, Store
 from .outbox import OutboxWorker
+from .membership_input_position import (
+    MembershipInputPosition, MembershipInputUnavailable,
+)
 
-__all__ = ["Store", "OutboxItem", "OutboxWorker"]
+__all__ = [
+    "MembershipInputPosition", "MembershipInputUnavailable", "Store",
+    "OutboxItem", "OutboxWorker",
+]
