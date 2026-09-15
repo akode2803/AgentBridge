@@ -21,7 +21,8 @@ from typing import Any, Iterable
 from . import log_position
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
-from . import document_observation, shadow_slot
+from . import document_observation, shadow_chat_inputs, shadow_slot
+from .shadow_chat_inputs import ShadowChatInputs
 from .document_observation import (
     DocumentObservation,
     DocumentObservationConflict,
@@ -372,6 +373,20 @@ class Store:
                        max_bytes: int = shadow_slot.MAX_BYTES) -> shadow_slot.ShadowObservation:
         return shadow_slot.capture(self.path, expected, max_documents=max_documents,
                                    max_chat_ids=max_chat_ids, max_bytes=max_bytes)
+
+    def capture_shadow_chat_inputs(
+        self, expected_shadow: shadow_slot.ShadowPosition, chat_id: str, *,
+        max_documents: int = shadow_slot.MAX_RECORDS,
+        max_chat_ids: int = shadow_slot.MAX_RECORDS,
+        max_messages: int = shadow_chat_inputs.MAX_MESSAGES,
+        max_logs: int = shadow_chat_inputs.MAX_LOGS,
+        max_bytes: int = shadow_slot.MAX_BYTES,
+    ) -> ShadowChatInputs:
+        return shadow_chat_inputs.capture(
+            self.path, expected_shadow, chat_id, max_documents=max_documents,
+            max_chat_ids=max_chat_ids, max_messages=max_messages,
+            max_logs=max_logs, max_bytes=max_bytes,
+        )
 
     def capture_document_position(self, source_id: str) -> DocumentPosition:
         return document_observation.capture_position(self.path, source_id)

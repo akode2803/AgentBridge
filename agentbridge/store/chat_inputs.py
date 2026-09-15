@@ -61,39 +61,67 @@ def capture(path: Path, chat_id: str, *, document_paths: tuple[str, ...] = (),
         ).fetchone()
         if identity is None:
             raise RuntimeError("missing ingestion database identity")
-        # Preflight serialized sizes inside the same snapshot, before payloads
-        # cross into Python. LIMIT bounds row counting even on oversized rooms.
-        for query, limit in (
-            ("SELECT length(CAST(payload AS BLOB)) FROM messages "
-             "WHERE chat_id=? AND ns>0 LIMIT ?", max_messages),
-            ("SELECT length(CAST(log_name AS BLOB)) FROM log_offsets "
-             "WHERE chat_id=? LIMIT ?", max_logs),
-        ):
-            for count, (size,) in enumerate(conn.execute(query, (chat_id, limit + 1)), 1):
-                if count > limit:
-                    raise OverflowError("local chat inputs exceed row budget")
-                used += size
-                if used > max_bytes:
-                    raise OverflowError("local chat inputs exceed byte budget")
-        for name in document_paths:
-            row = conn.execute(
-                "SELECT length(CAST(payload AS BLOB)) FROM docs WHERE path=?", (name,)
-            ).fetchone()
-            used += row[0] if row else 0
-            if used > max_bytes:
-                raise OverflowError("local chat inputs exceed byte budget")
-        messages = tuple(row[0] for row in conn.execute(
-            "SELECT payload FROM messages WHERE chat_id=? AND ns>0 "
-            "ORDER BY ns,sender,id", (chat_id,)
-        ))
-        offsets = tuple(conn.execute(
-            "SELECT log_name,offset FROM log_offsets WHERE chat_id=? ORDER BY log_name",
-            (chat_id,),
-        ))
-        docs = []
-        for name in document_paths:
-            row = conn.execute("SELECT payload FROM docs WHERE path=?", (name,)).fetchone()
-            docs.append((name, row[0] if row else None))
+        used += _capture_preflight(
+            conn, chat_id, document_paths,
+            max_messages=max_messages, max_logs=max_logs,
+            max_bytes=max_bytes - used,
+        )
+        messages, offsets, docs = _capture_rows(conn, chat_id, document_paths)
         return LocalChatInputs(str(path), identity[0], chat_id, messages, offsets, tuple(docs))
     finally:
         conn.close()
+
+
+def _capture_preflight(
+    conn: sqlite3.Connection,
+    chat_id: str,
+    document_paths: tuple[str, ...],
+    *,
+    max_messages: int,
+    max_logs: int,
+    max_bytes: int,
+) -> int:
+    """Return serialized payload bytes without owning or ending ``conn``."""
+    used = 0
+    for query, limit in (
+        ("SELECT length(CAST(payload AS BLOB)) FROM messages "
+         "WHERE chat_id=? AND ns>0 LIMIT ?", max_messages),
+        ("SELECT length(CAST(log_name AS BLOB)) FROM log_offsets "
+         "WHERE chat_id=? LIMIT ?", max_logs),
+    ):
+        for count, (size,) in enumerate(conn.execute(query, (chat_id, limit + 1)), 1):
+            if count > limit:
+                raise OverflowError("local chat inputs exceed row budget")
+            used += size
+            if used > max_bytes:
+                raise OverflowError("local chat inputs exceed byte budget")
+    for name in document_paths:
+        row = conn.execute(
+            "SELECT length(CAST(payload AS BLOB)) FROM docs WHERE path=?", (name,)
+        ).fetchone()
+        used += row[0] if row else 0
+        if used > max_bytes:
+            raise OverflowError("local chat inputs exceed byte budget")
+    return used
+
+
+def _capture_rows(
+    conn: sqlite3.Connection,
+    chat_id: str,
+    document_paths: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[tuple[str, int], ...],
+           tuple[tuple[str, str | None], ...]]:
+    """Materialize serialized rows without owning or ending ``conn``."""
+    messages = tuple(row[0] for row in conn.execute(
+        "SELECT payload FROM messages WHERE chat_id=? AND ns>0 "
+        "ORDER BY ns,sender,id", (chat_id,)
+    ))
+    offsets = tuple(conn.execute(
+        "SELECT log_name,offset FROM log_offsets WHERE chat_id=? ORDER BY log_name",
+        (chat_id,),
+    ))
+    docs = []
+    for name in document_paths:
+        row = conn.execute("SELECT payload FROM docs WHERE path=?", (name,)).fetchone()
+        docs.append((name, row[0] if row else None))
+    return messages, offsets, tuple(docs)

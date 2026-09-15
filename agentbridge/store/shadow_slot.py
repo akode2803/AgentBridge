@@ -193,31 +193,62 @@ def capture(path: Path, expected: ShadowPosition, *,
     try:
         conn.execute("BEGIN")
         current = _match(conn, path, wanted)
-        if not current.initialized:
-            return ShadowObservation(current, None)
-        # Preflight before any stored payload crosses into Python.
-        count, size = conn.execute(
-            "SELECT count(*),coalesce(sum(length(CAST(path AS BLOB))+"
-            "length(CAST(payload AS BLOB))),0) FROM diagnostic_shadow_records"
-        ).fetchone()
-        chat_size = conn.execute(
-            "SELECT length(CAST(chat_ids AS BLOB)) FROM diagnostic_shadow_slot"
-        ).fetchone()[0]
-        if count > max_documents or size + chat_size > max_bytes:
-            raise OverflowError("shadow capture exceeds budget")
-        revision, cursor, provenance, chats = conn.execute(
-            "SELECT revision,provider_cursor,provenance,chat_ids "
-            "FROM diagnostic_shadow_slot"
-        ).fetchone()
-        snapshot = ShadowSnapshot(
-            current.source, revision, cursor, provenance, tuple(json.loads(chats)),
-            tuple(conn.execute("SELECT path,payload FROM diagnostic_shadow_records ORDER BY path")),
-        )
+        _capture_preflight(conn, current, max_documents=max_documents,
+                           max_bytes=max_bytes)
+        raw = _capture_rows(conn, current)
     finally:
         conn.close()
+    if raw is None:
+        return ShadowObservation(current, None)
+    revision, cursor, provenance, chats, records = raw
+    snapshot = ShadowSnapshot(
+        current.source, revision, cursor, provenance, _decode_chat_ids(chats), records,
+    )
     # Revalidate serialized content and all returned byte charges outside SQLite.
     snapshot, _, _ = _prepare(snapshot, max_documents, max_chat_ids, max_bytes)
     return ShadowObservation(current, snapshot)
+
+
+def _capture_preflight(
+    conn: sqlite3.Connection,
+    current: ShadowPosition,
+    *,
+    max_documents: int,
+    max_bytes: int,
+) -> int:
+    """Return stored snapshot bytes without owning or ending ``conn``."""
+    if not current.initialized:
+        return 0
+    count, record_bytes = conn.execute(
+        "SELECT count(*),coalesce(sum(length(CAST(path AS BLOB))+"
+        "length(CAST(payload AS BLOB))),0) FROM diagnostic_shadow_records"
+    ).fetchone()
+    metadata_bytes = conn.execute(
+        "SELECT coalesce(length(CAST(provenance AS BLOB)),0)+"
+        "coalesce(length(CAST(chat_ids AS BLOB)),0) "
+        "FROM diagnostic_shadow_slot WHERE singleton=1"
+    ).fetchone()[0]
+    used = record_bytes + metadata_bytes
+    if count > max_documents or used > max_bytes:
+        raise OverflowError("shadow capture exceeds budget")
+    return used
+
+
+def _capture_rows(
+    conn: sqlite3.Connection,
+    current: ShadowPosition,
+) -> tuple[int, int, str, str, tuple[tuple[str, str], ...]] | None:
+    """Materialize raw serialized snapshot rows without JSON decoding."""
+    if not current.initialized:
+        return None
+    revision, cursor, provenance, chats = conn.execute(
+        "SELECT revision,provider_cursor,provenance,chat_ids "
+        "FROM diagnostic_shadow_slot WHERE singleton=1"
+    ).fetchone()
+    records = tuple(conn.execute(
+        "SELECT path,payload FROM diagnostic_shadow_records ORDER BY path"
+    ))
+    return revision, cursor, provenance, chats, records
 
 
 def _position(conn: sqlite3.Connection, path: Path) -> ShadowPosition:
@@ -360,3 +391,11 @@ def _prepare(value: ShadowSnapshot, documents: int, chats: int, size: int):
 
 def _invalid_constant(value: str):
     raise ValueError("non-finite JSON value")
+
+
+def _decode_chat_ids(serialized: str) -> tuple[str, ...]:
+    """Decode the stored collection without accepting another JSON topology."""
+    decoded = json.loads(serialized, parse_constant=_invalid_constant)
+    if type(decoded) is not list:
+        raise ValueError("stored shadow chat ids must be a JSON list")
+    return tuple(decoded)
