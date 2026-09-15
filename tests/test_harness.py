@@ -479,6 +479,12 @@ def test_room_work_is_claimed_before_later_room_scan_finishes(hrig, monkeypatch)
 
 def test_sync_priority_claims_room_before_full_membership_scan(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
+    # This test owns queue ordering, not encrypted authority latency. Resolve
+    # those inputs before the timed worker so the barrier starts at iter_chats.
+    settings = runner.settings()
+    owner = runner.mesh.directory.owner_of(runner.agent)
+    monkeypatch.setattr(runner, "settings", lambda: settings)
+    monkeypatch.setattr(runner.mesh.directory, "owner_of", lambda _agent: owner)
     priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
     other = SimpleNamespace(id="other")
     full_scan_entered = threading.Event()
@@ -490,7 +496,7 @@ def test_sync_priority_claims_room_before_full_membership_scan(hrig, monkeypatch
 
     def all_rooms():
         full_scan_entered.set()
-        release_full_scan.wait(1.0)
+        assert release_full_scan.wait(10), "full membership scan was not released"
         return [priority, other]
 
     monkeypatch.setattr(runner.mesh.membership, "iter_chats_for", all_rooms)
@@ -516,10 +522,12 @@ def test_sync_priority_claims_room_before_full_membership_scan(hrig, monkeypatch
         target=lambda: runner.scan_all(on_added=claim_priority), daemon=True,
     )
     worker.start()
-    assert full_scan_entered.wait(1.0)
-    assert claimed.wait(0.2)
-    release_full_scan.set()
-    worker.join(1.0)
+    try:
+        assert full_scan_entered.wait(10), "worker did not enter membership scan"
+        assert claimed.wait(10), "priority work was not claimed before full scan"
+    finally:
+        release_full_scan.set()
+        worker.join(10)
     assert not worker.is_alive()
     assert scanned == ["priority", "other"]
     assert runner._take_priority_chats() == []
@@ -541,6 +549,12 @@ def test_sync_priority_drops_room_when_membership_was_revoked(hrig, monkeypatch)
 
 def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
+    # Capture the real encrypted authority values outside the timed section;
+    # this test begins when the lazy room iterator is entered.
+    settings = runner.settings()
+    owner = runner.mesh.directory.owner_of(runner.agent)
+    monkeypatch.setattr(runner, "settings", lambda: settings)
+    monkeypatch.setattr(runner.mesh.directory, "owner_of", lambda _agent: owner)
     first = SimpleNamespace(id="first")
     priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
     last = SimpleNamespace(id="last")
@@ -550,7 +564,7 @@ def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypat
 
     def lazy_rooms():
         iterator_entered.set()
-        release_iterator.wait(1.0)
+        assert release_iterator.wait(10), "lazy room iterator was not released"
         yield first
         yield priority
         yield last
@@ -563,10 +577,12 @@ def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypat
     )
     worker = threading.Thread(target=runner.scan_all, daemon=True)
     worker.start()
-    assert iterator_entered.wait(1.0)
-    runner._prioritize_chat("priority", 1)
-    release_iterator.set()
-    worker.join(1.0)
+    try:
+        assert iterator_entered.wait(10), "worker did not enter lazy room iterator"
+        runner._prioritize_chat("priority", 1)
+    finally:
+        release_iterator.set()
+        worker.join(10)
     assert not worker.is_alive()
     assert scanned == ["priority", "first", "last"]
 
