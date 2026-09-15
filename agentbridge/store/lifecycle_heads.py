@@ -302,7 +302,8 @@ def _verify_schema(conn: sqlite3.Connection) -> None:
 
 
 def _sql(value: str) -> str:
-    return " ".join(str(value).split()).lower()
+    # Preserve literal case: lifecycle paths are case-sensitive SQL values.
+    return " ".join(str(value).split())
 
 
 def _stored_identity(value: object) -> None:

@@ -200,6 +200,27 @@ def test_reopen_seeds_legacy_head_and_rejects_missing_generation(tmp_path):
         Store(path)
 
 
+def test_reopen_rejects_trigger_with_case_changed_path_literal(tmp_path):
+    path = tmp_path / "store.sqlite"
+    initialized = Store(path)
+    initialized.close()
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ("lifecycle_head_docs_insert",),
+        ).fetchone()
+        assert row is not None and PREFIX in row[0]
+        conn.execute("DROP TRIGGER lifecycle_head_docs_insert")
+        conn.execute(row[0].replace(PREFIX, PREFIX.upper()))
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(sqlite3.DatabaseError, match="incompatible lifecycle head triggers"):
+        Store(path)
+
+
 def test_generation_exhaustion_and_oversized_values_roll_back(store):
     expected = store.observe_lifecycle_head("claude")
     assert store.publish_lifecycle_head(expected, _head("before"))

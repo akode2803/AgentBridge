@@ -69,8 +69,12 @@ def _validate_structure(value: object) -> dict:
 
 def _validate(value: object) -> dict:
     """Validate a newly observed remote record, including current clock admission."""
+    return _validate_at(value, time.time_ns())
+
+
+def _validate_at(value: object, now_ns: int) -> dict:
     record = _validate_structure(value)
-    if record["ns"] > time.time_ns() + _FUTURE_SKEW_NS:
+    if record["ns"] > now_ns + _FUTURE_SKEW_NS:
         raise LifecycleError("lifecycle record is too far in the future")
     return record
 
@@ -86,18 +90,23 @@ def _pub(directory, name: str) -> str:
 
 
 def _verify_doc(directory, path: str, value: object) -> tuple[dict, str]:
+    return _verify_with_keys(path, value, lambda name: _pub(directory, name),
+                             time.time_ns())
+
+
+def _verify_with_keys(path: str, value: object, keys_of, now_ns: int) -> tuple[dict, str]:
     if not isinstance(value, dict) or set(value) != {"record", "sig", "subject_sig"}:
         raise LifecycleError("invalid lifecycle envelope")
-    record = _validate(value["record"])
+    record = _validate_at(value["record"], now_ns)
     if path != _path(record["subject"], record["id"]):
         raise LifecycleError("lifecycle path mismatch")
     signed = canonical_json_bytes(record)
-    actor_pub = _pub(directory, record["actor"])
+    actor_pub = keys_of(record["actor"])
     if not actor_pub or not crypto.verify(actor_pub, str(value["sig"]), signed):
         raise LifecycleError("invalid lifecycle actor signature")
     subject_sig = str(value["subject_sig"])
     if subject_sig:
-        subject_pub = _pub(directory, record["subject"])
+        subject_pub = keys_of(record["subject"])
         if not subject_pub or not crypto.verify(subject_pub, subject_sig, signed):
             raise LifecycleError("invalid lifecycle subject signature")
     return record, subject_sig
@@ -113,6 +122,19 @@ def _active_human(directory, name: str) -> bool:
 
 def _authorized(directory, record: dict, subject_sig: str,
                 current: dict | None) -> None:
+    def subject_kind(name: str) -> str | None:
+        raw = _raw(directory, name)
+        return raw.kind.value if raw else None
+
+    _authorize_with_facts(
+        record, subject_sig, current, subject_kind,
+        lambda name: _active_human(directory, name),
+    )
+
+
+def _authorize_with_facts(record: dict, subject_sig: str,
+                          current: dict | None, subject_kind,
+                          active_human) -> None:
     kind = record["kind"]
     action = record["action"]
     actor = record["actor"]
@@ -120,8 +142,7 @@ def _authorized(directory, record: dict, subject_sig: str,
     if current is None:
         if action != "bootstrap" or record["previous_id"]:
             raise LifecycleError("lifecycle chain must begin with bootstrap")
-        raw = _raw(directory, subject)
-        if not raw or raw.kind.value != kind:
+        if subject_kind(subject) != kind:
             raise LifecycleError("lifecycle subject does not exist")
         if kind == UserKind.HUMAN.value:
             if actor != subject:
@@ -130,7 +151,7 @@ def _authorized(directory, record: dict, subject_sig: str,
             if not subject_sig:
                 raise LifecycleError("agent bootstrap requires subject proof")
         elif actor == record["owner"]:
-            if not _active_human(directory, actor) or not subject_sig:
+            if not active_human(actor) or not subject_sig:
                 raise LifecycleError("agent bootstrap requires owner and subject proof")
         else:
             raise LifecycleError("invalid agent bootstrap authority")
@@ -154,7 +175,7 @@ def _authorized(directory, record: dict, subject_sig: str,
             raise LifecycleError("host change requires owner and agent proof")
     elif action == "transfer":
         if (kind != UserKind.AGENT.value or actor != record["owner"]
-                or not _active_human(directory, actor) or not subject_sig):
+                or not active_human(actor) or not subject_sig):
             raise LifecycleError("transfer requires new owner and agent proof")
     elif action == "deactivate":
         expected = subject if kind == UserKind.HUMAN.value else current["owner"]
