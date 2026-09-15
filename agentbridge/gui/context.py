@@ -27,7 +27,7 @@ from ..mesh.service import Mesh
 from ..transport import make_transport
 from .applock import AppLock
 
-__all__ = ["GuiApp", "SessionReadToken"]
+__all__ = ["GuiApp", "SessionReadToken", "session_read_binding"]
 
 _SESSION_FILE = "gui_session.json"
 _MAX_SESSION_GENERATION = 2**63 - 1
@@ -38,6 +38,24 @@ class SessionReadToken:
     app_identity: str
     generation: int
     mesh: Mesh | None
+
+
+def session_read_binding(token: SessionReadToken) -> dict:
+    """Serialize the exact captured R187 viewer token for a browser fence."""
+    if type(token) is not SessionReadToken:
+        raise ValueError("invalid session read token")
+    app_identity, generation, mesh = token.app_identity, token.generation, token.mesh
+    if type(app_identity) is not str or not app_identity \
+            or len(app_identity) > 128 or "\x00" in app_identity \
+            or type(generation) is not int \
+            or not 0 <= generation <= _MAX_SESSION_GENERATION \
+            or (mesh is not None and type(mesh) is not Mesh):
+        raise ValueError("invalid session read token")
+    return {
+        "instance_id": app_identity,
+        "session_generation": str(generation),
+        "viewer": mesh.user if mesh is not None else None,
+    }
 
 
 def _breadcrumb(line: str) -> None:
@@ -287,7 +305,8 @@ class GuiApp:
         threading.Thread(target=run, daemon=True,
                          name="ab-restore-retry").start()
 
-    def signup(self, name: str, display: str, password: str) -> dict:
+    def signup(self, name: str, display: str, password: str,
+               *, include_binding: bool = False) -> dict:
         """V124: refuses while someone is signed in. V68 password-gated
         logout precisely because the next sign-in claims this machine's
         agents — an ungated signup was a credential-free bypass around that
@@ -306,9 +325,15 @@ class GuiApp:
                 mesh.close()  # release the half-built facade
                 raise
             self._adopt(mesh)
-        return {"ok": True, "user": name, "recovery_code": code}
+            out = {"ok": True, "user": name, "recovery_code": code}
+            if include_binding:
+                token = self.capture_session_read()
+                out["session_binding"] = (
+                    session_read_binding(token) if token is not None else None)
+            return out
 
-    def login(self, name: str, password: str) -> dict:
+    def login(self, name: str, password: str,
+              *, include_binding: bool = False) -> dict:
         with self._lock:
             # V130 (V124's twin): login was a session swap needing only the
             # CALLER's credentials — a passer-by with their own account
@@ -317,9 +342,10 @@ class GuiApp:
             # signed in; the legitimate swap is logout (password) → login.
             if self.mesh is not None:
                 raise ValidationError("Already signed in — sign out first")
-            return self._login_locked(name, password)
+            return self._login_locked(name, password, include_binding=include_binding)
 
-    def _login_locked(self, name: str, password: str) -> dict:
+    def _login_locked(self, name: str, password: str,
+                      *, include_binding: bool = False) -> dict:
         """The login body — the caller holds ``self._lock`` (V130 keeps the
         signed-out guard and the adopt in ONE lock span, so no session can
         appear between the check and the swap)."""
@@ -359,9 +385,13 @@ class GuiApp:
         out = {"ok": True, "user": name}
         if code:
             out["recovery_code"] = code
+        if include_binding:
+            token = self.capture_session_read()
+            out["session_binding"] = (
+                session_read_binding(token) if token is not None else None)
         return out
 
-    def logout(self, password: str = "") -> dict:
+    def logout(self, password: str = "", *, include_binding: bool = False) -> dict:
         """V68: signing out requires the member's password. The machine-claim
         on the NEXT sign-in transfers this machine's agents to whoever signs
         in, so a passer-by at an unlocked device must not be able to swap the
@@ -376,7 +406,12 @@ class GuiApp:
                     raise ValidationError("Password is incorrect")
             self._detach()
             self._session_path.unlink(missing_ok=True)
-        return {"ok": True}
+            out = {"ok": True}
+            if include_binding:
+                token = self.capture_session_read()
+                out["session_binding"] = (
+                    session_read_binding(token) if token is not None else None)
+            return out
 
     def close(self) -> None:
         with self._lock:

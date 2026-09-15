@@ -4,7 +4,9 @@
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
-         resetSubviews, renderChrome } from "./state.js";
+         resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
+         applyMeshState } from "./state.js";
+import { BrowserSession } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
@@ -50,6 +52,49 @@ let restartWatchActive = false;
 let refreshPromise = null;
 let refreshDirty = false;
 let refreshNeedsRender = false;
+let bootstrapPromise = null;
+let bootstrapEpoch = null;
+
+export async function bootstrapSession() {
+  const wantedEpoch = BrowserSession.snapshot().epoch;
+  if (bootstrapPromise) {
+    if (bootstrapEpoch === wantedEpoch) return bootstrapPromise;
+    try { await bootstrapPromise; } catch { /* caller below starts the fresh read */ }
+    return bootstrapSession();
+  }
+  bootstrapEpoch = wantedEpoch;
+  bootstrapPromise = (async () => {
+    // A changed process is only adopted after a second response from the exact
+    // candidate instance selected by the session machine.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const ticket = BrowserSession.beginBootstrap();
+      const state = await api("/api/state");
+      const decision = BrowserSession.acceptBootstrap(ticket, state);
+      if (decision.transition) clearSessionCaches();
+      if (decision.retryInstance) continue;
+      if (!decision.accepted) return null;
+      App.state = state;
+      return Object.freeze({ state, ticket: BrowserSession.capture() });
+    }
+    return null;
+  })();
+  try { return await bootstrapPromise; }
+  finally { bootstrapPromise = null; bootstrapEpoch = null; }
+}
+V.bootstrapSession = bootstrapSession;
+
+document.addEventListener("ab:session-reset", () => {
+  // These shell surfaces can contain the former viewer's plaintext. Clearing
+  // them is synchronous; the accepted bootstrap decides which view replaces
+  // them. App-lock/restart covers keep their existing policy and lifecycle.
+  const side = document.getElementById("side-chats");
+  const content = document.getElementById("content");
+  const details = document.getElementById("details-pane");
+  if (side) side.replaceChildren();
+  if (content) content.replaceChildren();
+  if (details) { details.replaceChildren(); details.hidden = true; }
+  syncRealtime();
+});
 
 async function refresh(rerender) {
   refreshDirty = true;
@@ -108,8 +153,11 @@ window.addEventListener("storage", (e) => {
 });
 
 async function refreshOnce(rerender) {
+  let bootstrap;
   try {
-    App.state = await api("/api/state");
+    bootstrap = await bootstrapSession();
+    if (!bootstrap || !BrowserSession.mayApply(bootstrap.ticket, bootstrap.state)
+        || App.state !== bootstrap.state) return;
   } catch {
     // V125: the server staying unreachable is a restart's down window — a
     // frozen page with no signal read as "restart app does not work" (live
@@ -182,6 +230,7 @@ async function refreshOnce(rerender) {
   renderChrome();
   if (rerender) {
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
+    if (!BrowserSession.mayApply(bootstrap.ticket) || !App.state) return;
     if (App.state.user) V.closeConnectingPage();
   }
   else if (App.page === "chats" && Mesh.state?.user) await V.renderChats(false);
@@ -197,9 +246,9 @@ async function refreshOnce(rerender) {
   // from the poll (it would clobber half-typed fields); flip only when a
   // user actually shows up.
   else if (App.page === "chats" && Mesh.state && !Mesh.state.user) {
+    const ticket = captureSessionEpoch();
     const fresh = await api("/api/mesh/state");
-    if (!fresh.error && fresh.user) {
-      Mesh.state = fresh;
+    if (!fresh.error && fresh.user && applyMeshState(ticket, fresh)) {
       V.renderChats(true);
     }
   }
@@ -209,13 +258,13 @@ async function refreshOnce(rerender) {
   // on an actual query in progress, not focus; when a changed list does
   // repaint, the (empty) box gets its focus back.
   else if (App.page === "new" && Mesh.state?.user) {
+    const ticket = captureSessionEpoch();
     const ae = document.activeElement;
     const inSide = ae && $("#side-chats")?.contains(ae);
     if (inSide && ae.tagName === "INPUT" && ae.value) return;
     const hadFocus = inSide && ae.id ? ae.id : null;
     const fresh = await api("/api/mesh/state");
-    if (!fresh.error && App.page === "new") {
-      Mesh.state = fresh;
+    if (!fresh.error && App.page === "new" && applyMeshState(ticket, fresh)) {
       renderSidebar();
       if (hadFocus) document.getElementById(hadFocus)?.focus();
     }
@@ -374,7 +423,7 @@ window.addEventListener("hashchange", route);
   });
   if (restartIntent()) showRestarting();
   try {
-    App.state = await api("/api/state");
+    await bootstrapSession();
   } catch {
     downTicks = 2;
     V.renderConnectingPage(restartIntent() ? "Restarting…" : "Connecting…");

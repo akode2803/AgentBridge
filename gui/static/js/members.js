@@ -5,7 +5,8 @@ import { esc, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn, meshAvatarInner } from "./state.js";
+import { Mesh, meshDn, meshAvatarInner, captureSessionEpoch,
+         sessionMayApply, applyMeshState } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
@@ -34,9 +35,15 @@ function pickerSections(users, me, exclude) {
 }
 
 async function showAddMembers(chatId) {
-  const ms = Mesh.state = await api("/api/mesh/state");
+  const ticket = captureSessionEpoch();
+  const ms = await api("/api/mesh/state");
+  if (!applyMeshState(ticket, ms)) return;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (data.error) { toast(data.error, true); return; }
+  if (data.error) {
+    if (sessionMayApply(ticket)) toast("Couldn't load chat members", true);
+    return;
+  }
+  if (!sessionMayApply(ticket, data)) return;
   const picker = pickerSections(ms.users, ms.user, data.meta.members || []);
   const box = openModal(`
     <div class="pane-head" style="margin:0 0 10px">
@@ -71,9 +78,15 @@ V.showAddMembers = showAddMembers;
 
 // Search members: same surface, view-only
 async function showSearchMembers(chatId) {
-  const ms = Mesh.state = await api("/api/mesh/state");
+  const ticket = captureSessionEpoch();
+  const ms = await api("/api/mesh/state");
+  if (!applyMeshState(ticket, ms)) return;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (data.error) { toast(data.error, true); return; }
+  if (data.error) {
+    if (sessionMayApply(ticket)) toast("Couldn't load chat members", true);
+    return;
+  }
+  if (!sessionMayApply(ticket, data)) return;
   const meta = data.meta;
   const row = (u) => {
     const rec = ms.users[u] || {};

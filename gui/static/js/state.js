@@ -3,6 +3,7 @@
    can move between modules without orphaning state. */
 
 import { $, dn, avatarInner, avatarUrl, fallbackColor } from "./util.js";
+import { BrowserSession } from "./session.js";
 
 export const App = {
   state: null,          // last /api/state payload
@@ -66,6 +67,77 @@ export const Mesh = {
 window.Mesh = Mesh;
 
 export const Settings = { section: null };   // explicit #/settings/<section>
+
+export function clearSessionCaches() {
+  // Do not call saveDraft here: its storage key derives from Mesh.state.user,
+  // which is exactly the identity being removed. Existing persisted per-user
+  // drafts remain untouched and will hydrate after that user returns.
+  App.state = null;
+  App.logKey = "";
+  App.draft = { body: "", type: "chat" };
+  App.pendingAtt = null;
+  Mesh.state = null;
+  Mesh.chatId = null;
+  Mesh.listKey = "";
+  Mesh.chatKey = "";
+  Mesh.structKey = "";
+  Mesh.detailsKey = "";
+  Mesh.detailsView = null;
+  Mesh.renderedChat = null;
+  Mesh.drafts = {};
+  Mesh.readTail = {};
+  Mesh.pendingRead = null;
+  Mesh.select = { on: false, ids: new Set(), mode: "select" };
+  if (Mesh.newGroup?.avatarUrl) {
+    try { URL.revokeObjectURL(Mesh.newGroup.avatarUrl); } catch { /* absent in tests */ }
+  }
+  Mesh.newGroup = { active: false, step: "members", members: new Set(), name: "" };
+  Mesh.newChat = { open: false, name: "" };
+  Mesh.authorityCache = {};
+  Mesh.authorityPoll = {};
+  Mesh.authorityExpand = {};
+  Mesh.feedExpand = {};
+  Mesh.msgExpand = {};
+  Mesh.askCounts = {};
+  Mesh.askDone = {};
+  Mesh.askSeen = {};
+  Mesh.askKey = "";
+  Mesh.timerDone = {};
+  if (Mesh.askPollId) clearInterval(Mesh.askPollId);
+  Mesh.askPollId = null;
+  resetSubviews();
+  document.dispatchEvent(new CustomEvent("ab:session-reset"));
+}
+
+export function beginSessionTransition() {
+  const result = BrowserSession.invalidate();
+  clearSessionCaches();
+  return result;
+}
+
+export function captureSessionEpoch() {
+  return BrowserSession.capture();
+}
+
+export function sessionMayApply(ticket, response) {
+  if (!BrowserSession.mayApply(ticket, response)) return false;
+  const snap = BrowserSession.snapshot();
+  if (snap.mode !== "bound") return true;
+  const binding = snap.binding;
+  if (Object.prototype.hasOwnProperty.call(response || {}, "instance_id")
+      && response.instance_id !== binding.instance_id) return false;
+  if (Object.prototype.hasOwnProperty.call(response || {}, "user")
+      && response.user !== binding.viewer) return false;
+  if (Object.prototype.hasOwnProperty.call(response || {}, "me")
+      && response.me !== binding.viewer) return false;
+  return true;
+}
+
+export function applyMeshState(ticket, response) {
+  if (!sessionMayApply(ticket, response)) return false;
+  Mesh.state = response;
+  return true;
+}
 
 // agent reply-rule vocabulary (details pane + settings share these labels)
 export const RULE_LABELS = {

@@ -4,6 +4,13 @@
 import { esc } from "./util.js";
 import { ICONS } from "./icons.js";
 
+let activePhotoClose = null;
+
+document.addEventListener("ab:session-reset", () => {
+  closeModal();
+  if (activePhotoClose) activePhotoClose(true);
+});
+
 export function openModal(html) {
   closeModal();
   const scrim = document.createElement("div");
@@ -108,15 +115,23 @@ export function openPhotoViewer(url, name, origin) {
   });
 
   let closing = false;
-  const close = () => {
+  const close = (immediate = false) => {
     if (closing) return;
     closing = true;
     document.removeEventListener("keydown", onKey);
+    if (immediate === true) {
+      pv.remove();
+      if (activePhotoClose === close) activePhotoClose = null;
+      return;
+    }
     const back = flyTransform();     // re-measure (window may have moved)
     pv.classList.remove("open");
     pv.classList.add("closing");
     if (back) { img.style.transform = back; img.style.borderRadius = "50%"; }
-    const done = () => pv.remove();
+    const done = () => {
+      pv.remove();
+      if (activePhotoClose === close) activePhotoClose = null;
+    };
     img.addEventListener("transitionend", done, { once: true });
     setTimeout(done, 320);           // fallback if transitionend is missed
   };
@@ -128,6 +143,7 @@ export function openPhotoViewer(url, name, origin) {
   // click but not mousedown) still closes; the `closing` guard dedupes.
   pv.querySelector(".pv-close").addEventListener("click", close);
   const onKey = (e) => { if (e.key === "Escape") close(); };
+  activePhotoClose = close;
   document.addEventListener("keydown", onKey);
 }
 

@@ -28,7 +28,7 @@ def test_restart_intent_is_shared_and_generation_gated():
 
 def test_initial_state_failure_reaches_connecting_cover_and_poll_loop():
     main = (ROOT / "main.js").read_text(encoding="utf-8")
-    boot = main[main.index('App.state = await api("/api/state")') - 80:
+    boot = main[main.index("try {\n    await bootstrapSession();"):
                 main.index("if (!location.hash)")]
-    assert "try {" in boot and "catch {" in boot
+    assert "await bootstrapSession();" in boot and "catch {" in boot
     assert 'V.renderConnectingPage(restartIntent() ? "Restarting…" : "Connecting…")' in boot

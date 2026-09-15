@@ -15,9 +15,9 @@ from pathlib import Path
 
 from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
-from .context import GuiApp, SessionReadToken
+from .context import GuiApp, SessionReadToken, session_read_binding
 from .projection_perf import ProjectionObservation
-from .routing import authed, authed_read
+from .routing import authed, authed_read_token
 from .serialize import chat_json, message_json, user_json
 
 __all__ = ["GET", "POST"]
@@ -73,16 +73,33 @@ def bridge_state(app: GuiApp, req) -> dict:
     no bridge/setup wizard, so it always reports configured; the fields the
     frontend actually reads are configured/v/caps/paused/connection
     (+ version)."""
+    token = app.capture_session_read()
+    if token is None:
+        return {"error": "Session changed"}
+    try:
+        result = _bridge_state_captured(app, token)
+    except Exception:
+        if not app.validate_session_read(token):
+            return {"error": "Session changed"}
+        raise
+    return result if app.validate_session_read(token) else {"error": "Session changed"}
+
+
+def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
+    """Build bootstrap state solely from one exact R187 observation."""
     lock = getattr(app, "lock", None)   # V111: the lock page keys off this
+    binding = session_read_binding(token)
     return {
         "configured": True,
         "v": 2,
         "gui_version": app.app_version,
-        "instance_id": getattr(app, "instance_id", ""),
+        "instance_id": token.app_identity,
         "server_pid": os.getpid(),
-        "caps": {"sse": True, "receipts": "delivered", "admins": True},
+        "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "session_binding_v1": True},
         "paused": False,  # compatibility field; mesh-global pause is retired
-        "user": app.user,
+        "user": binding["viewer"],
+        "session_binding": binding,
         # V125: a blind session restore in flight — the frontend holds the
         # boot surface instead of flashing the sign-in page
         "restoring": bool(getattr(app, "restoring", False)),
@@ -180,12 +197,14 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         "v": 2,
         "user": mesh.user if mesh is not None else None,
         "gui_version": app.app_version,
-        "instance_id": getattr(app, "instance_id", ""),
+        "instance_id": token.app_identity,
         "server_pid": os.getpid(),
         "encrypted": app.encrypt,
-        "caps": {"sse": True, "receipts": "delivered", "admins": True},
+        "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "session_binding_v1": True},
         "max_upload_bytes": None,
         "connection": _connection(app),
+        "session_binding": session_read_binding(token),
     }
     out["paused"] = False  # compatibility field; mesh-global pause is retired
     if mesh is None:
@@ -255,8 +274,8 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
     return out
 
 
-@authed_read
-def chat(app: GuiApp, req, mesh) -> dict:
+@authed_read_token
+def chat(app: GuiApp, req, mesh, token: SessionReadToken) -> dict:
     """The transcript: messages (choke-point filtered), receipts on my own
     messages, active pins, my starred ids + read cursor."""
     chat_id = req.params.get("id", "")
@@ -311,6 +330,7 @@ def chat(app: GuiApp, req, mesh) -> dict:
             "starred": mine["starred"],
             "read_ns": mine["read_ns"],
             "total": len(msgs),
+            "session_binding": session_read_binding(token),
         }
     except Exception:
         observation.log(app.home, "denied_or_error")

@@ -19,7 +19,7 @@ export const EXPECTED = [
   "renderChats", "renderMeshChat", "renderNewChat",
   "renderChatDetails", "renderChatMedia", "renderChatSearch",
   "showAddMembers", "showSearchMembers",
-  "renderSettings", "refresh", "openMsgMenu",
+  "renderSettings", "refresh", "bootstrapSession", "openMsgMenu",
   "exitGroup", "openForwardPicker", "exitSelect", "openKeyVerify",
   "renderAuthPage", "closeAuthPage",
 ];
