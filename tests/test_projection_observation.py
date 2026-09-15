@@ -20,7 +20,15 @@ def test_chat_and_sidebar_observations_are_content_free_and_detect_one_fold(rig)
 
     sidebar = rig.get("/api/mesh/state")
     chat = rig.get("/api/mesh/chat", id=cid)
-    assert set(chat) == {"meta", "messages", "me", "starred", "read_ns", "total"}
+    assert set(chat) == {
+        "meta", "messages", "me", "starred", "read_ns", "total",
+        "session_binding",
+    }
+    assert chat["session_binding"] == {
+        "instance_id": rig.app.instance_id,
+        "session_generation": str(rig.app._session_generation),
+        "viewer": "aryan",
+    }
     assert chat["messages"][-1]["body"] == "projection-private-body"
     assert next(item for item in sidebar["chats"] if item["id"] == cid)["last"]
 
