@@ -20,6 +20,7 @@ class _FairPathGate:
         self.waiters: deque[object] = deque()
         self.held = False
         self.owner_thread: int | None = None
+        self.owner_lease: LocalGateLease | None = None
 
 
 class LocalGateLease:
@@ -33,9 +34,11 @@ class LocalGateLease:
         with gate.condition:
             if self._gate is not gate:
                 return
-            gate.held = False
-            gate.owner_thread = None
-            gate.condition.notify_all()
+            if gate.owner_lease is self:
+                gate.held = False
+                gate.owner_thread = None
+                gate.owner_lease = None
+                gate.condition.notify_all()
             self._gate = None
 
 
@@ -67,8 +70,9 @@ def acquire(path: Path, deadline: float) -> LocalGateLease:
                 if eligible and (not waited or time.monotonic() < deadline):
                     admitting = True
                     gate.waiters.popleft()
-                    gate.held = True
+                    gate.owner_lease = lease
                     gate.owner_thread = owner
+                    gate.held = True
                     return lease
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

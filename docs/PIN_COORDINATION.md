@@ -14,7 +14,9 @@ zero timeout still permits one OS attempt when the local gate was immediately
 free. A waiter whose deadline expires in the queue is removed rather than granted
 on a late wake. The local gate remains held for the full OS-lock context. Queue,
 admission, file-open, OS-lock, and context exit paths use nested cleanup for
-ordinary exceptions and asynchronous interruption.
+ordinary exceptions, including interrupted queue admission. Admission ownership
+is lease-identified, so cleanup from an interrupted claimant cannot release a
+later claimant that completed the local transition.
 
 The registry retains gates weakly and resets in a forked child. FIFO applies only
 to threads in one process. Other processes still coordinate through the unchanged

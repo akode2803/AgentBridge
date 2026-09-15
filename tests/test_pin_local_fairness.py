@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,77 @@ def test_expired_waiter_cannot_acquire_after_late_wake(tmp_path, monkeypatch):
     assert done.wait(1)
     thread.join(1)
     assert outcome == ["expired"]
+
+
+def test_interrupted_admission_cannot_clear_new_owner_or_allow_barge(tmp_path, monkeypatch):
+    path = tmp_path / "pins.json.lock"
+    key = pin_lock_gate._path_key(path)
+    gate = pin_lock_gate._gate_for(key)
+    b_acquired, release_b, c_queued, c_acquired = (threading.Event() for _ in range(4))
+
+    def second():
+        lease = pin_lock_gate.acquire(path, time.monotonic() + 1)
+        b_acquired.set()
+        try:
+            assert release_b.wait(1)
+        finally:
+            lease.release()
+
+    def third():
+        lease = pin_lock_gate.acquire(path, time.monotonic() + 1)
+        c_acquired.set()
+        lease.release()
+
+    b = threading.Thread(target=second)
+    c = threading.Thread(target=third)
+
+    class InterruptAfterPopleft(deque):
+        fired = False
+
+        def popleft(self):
+            token = super().popleft()
+            if not self.fired:
+                self.fired = True
+                # Model interruption after A's token was removed but before A
+                # marks the gate held: B becomes the real owner first.
+                gate.condition.release()
+                try:
+                    b.start()
+                    assert b_acquired.wait(1)
+                finally:
+                    gate.condition.acquire()
+                raise StopHere()
+            return token
+
+    class StopHere(BaseException):
+        pass
+
+    original_hook = pin_lock_gate._queue_arrived
+
+    def queue_third(*args):
+        c_queued.set()
+        original_hook(*args)
+
+    try:
+        gate.waiters = InterruptAfterPopleft()
+        with pytest.raises(StopHere):
+            pin_lock_gate.acquire(path, time.monotonic() + 1)
+        assert gate.held and gate.owner_lease is not None
+
+        # C may queue but cannot pass B while B's real lease remains held.
+        monkeypatch.setattr(pin_lock_gate, "_queue_arrived", queue_third)
+        c.start()
+        assert c_queued.wait(1)
+        assert not c_acquired.wait(0.05)
+        release_b.set()
+        assert c_acquired.wait(1)
+    finally:
+        release_b.set()
+        if b.ident is not None:
+            b.join(1)
+        if c.ident is not None:
+            c.join(1)
+    assert not b.is_alive() and not c.is_alive()
 
 
 def test_hook_interrupt_releases_queued_token_and_real_lock_still_acquires(tmp_path, monkeypatch):
