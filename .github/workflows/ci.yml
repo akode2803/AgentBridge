@@ -23,9 +23,11 @@ jobs:
       - name: Sync (core + dev + mcp + cloud)
         run: uv sync --group dev --extra mcp --extra cloud
       - name: Lint
-        run: uv run ruff check agentbridge tests
+        run: uv run ruff check agentbridge tests devtools/check_frontend.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Frontend module check
+        run: uv run python devtools/check_frontend.py
       - name: Tests
         run: uv run pytest -q
-      - name: Frontend module check
-        run: uv run python check_frontend.py
-        if: matrix.os == 'windows-latest'
