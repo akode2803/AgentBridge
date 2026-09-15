@@ -98,15 +98,25 @@ def test_validation_error_goes_dead(store):
     assert store.outbox_counts() == {"dead": 1}
 
 
-def test_transient_failure_never_dies(store):
+def test_transient_failure_never_dies(store, monkeypatch):
     def always_down(target, payload):
         raise OSError("still down")
 
     w = OutboxWorker(store, {"post": always_down}, base_delay=0.001, max_delay=0.002)
     store.outbox_add("post", "c1", {"id": "m1"})
-    for _ in range(10):
-        w.flush_once()
-        time.sleep(0.005)
+    clock = SimpleNamespace(now_ns=time.time_ns())
+    monkeypatch.setattr("agentbridge.store.db.time",
+                        SimpleNamespace(time_ns=lambda: clock.now_ns))
+    for attempt in range(1, 11):
+        assert w.flush_once() == 0
+        with store._conn() as conn:
+            attempts, retry_at = conn.execute(
+                "SELECT attempts,next_ns FROM outbox WHERE target='c1'",
+            ).fetchone()
+        assert attempts == attempt
+        assert retry_at > clock.now_ns
+        assert w.flush_once() == 0  # no early retry, regardless of filesystem speed
+        clock.now_ns = retry_at
     counts = store.outbox_counts()
     assert counts == {"pending": 1}  # retrying forever, never dead, never lost
 
