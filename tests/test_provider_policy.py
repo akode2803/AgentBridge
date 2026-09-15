@@ -403,6 +403,9 @@ def test_codex_0147_catalog_uses_current_models_and_exact_efforts():
 
 def test_exact_codex_profile_rejects_stale_model_and_effort_before_launch():
     registry = ModelRegistry.load()
+    # This is catalog validation, not a host-installation probe. Seed the
+    # owning availability cache as responder unit tests do.
+    registry._which["codex"] = True
     with pytest.raises(ValidationError, match="does not support configured model"):
         registry.resolve(HarnessSettings(
             adapter="codex", model="gpt-5.1-codex", reasoning="high",

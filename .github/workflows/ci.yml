@@ -17,11 +17,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      # Light sync: core + the mcp extra (pure-python, needed by the cli
-      # tests); the HEAVY extras (memory/retrieval) are validated per-round
-      # on the dev box (spikes) and in the dedicated stress round (R24).
-      - name: Sync (core + dev + mcp)
-        run: uv sync --group dev --extra mcp
+      # Core, MCP, and cloud extras: cloud-backed policy tests remain mocked,
+      # but their optional Supabase dependency must be importable on both CI OSes.
+      # Heavy memory/retrieval extras stay in their dedicated validation rounds.
+      - name: Sync (core + dev + mcp + cloud)
+        run: uv sync --group dev --extra mcp --extra cloud
       - name: Lint
         run: uv run ruff check agentbridge tests
       - name: Tests
