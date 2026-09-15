@@ -16,7 +16,7 @@ from ..core.errors import ValidationError
 from ..core.models import Account, UserKind
 from ..transport.base import Transport
 from .paths import P
-from .pins import KeyPinStore
+from .pins import KeyPinStore, PinStoreUnavailable
 from .lifecycle import LifecycleUnavailable
 
 __all__ = ["Directory"]
@@ -50,7 +50,7 @@ class Directory:
             from .lifecycle import resolve_lifecycle
 
             state = resolve_lifecycle(self, name, store=self.store)
-        except LifecycleUnavailable:
+        except (LifecycleUnavailable, PinStoreUnavailable):
             raise
         except Exception:  # noqa: BLE001 — unreadable evidence retains raw compatibility
             state = None
