@@ -39,3 +39,7 @@ charged. These are serialized-input limits rather than exact CPU or heap bounds.
 This module is an authority-normalization primitive. It does not capture facts,
 prove their freshness or trust origin, create a reusable cache key, enable serving,
 or define trust/session generations.
+
+Equivalent retained record content does not require a proposal merely because
+its stored JSON uses a different key order or whitespace. Genuine proposals
+still carry the original observed serialized bytes for the publication CAS.

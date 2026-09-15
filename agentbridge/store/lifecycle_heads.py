@@ -235,6 +235,69 @@ def _capture_current(
     )
 
 
+def _capture_all(
+    conn: sqlite3.Connection, *, max_heads: int, max_bytes: int,
+) -> tuple[tuple[tuple[str, int, str | None], ...], int]:
+    """Preflight then copy the complete bounded retained-head namespace."""
+    invalid_version = conn.execute(
+        "SELECT 1 FROM lifecycle_head_versions WHERE typeof(path)!='text' "
+        "OR substr(path,1,?)!=? "
+        "OR length(path)<=? LIMIT 1", (len(PREFIX), PREFIX, len(PREFIX)),
+    ).fetchone()
+    if invalid_version is not None:
+        raise sqlite3.DatabaseError("invalid lifecycle head version path")
+    orphan = conn.execute(
+        "SELECT 1 FROM docs d WHERE substr(d.path,1,?)=? "
+        "AND length(d.path)>? AND NOT EXISTS "
+        "(SELECT 1 FROM lifecycle_head_versions v WHERE v.path=d.path) LIMIT 1",
+        (len(PREFIX), PREFIX, len(PREFIX)),
+    ).fetchone()
+    if orphan is not None:
+        raise sqlite3.DatabaseError("lifecycle head is missing its durable generation")
+    metadata = conn.execute(
+        "SELECT length(CAST(v.path AS BLOB)),v.generation,d.path IS NOT NULL,"
+        "length(CAST(d.payload AS BLOB)),typeof(v.path),typeof(d.payload) "
+        "FROM lifecycle_head_versions v "
+        "LEFT JOIN docs d ON d.path=v.path WHERE substr(v.path,1,?)=? "
+        "AND length(v.path)>? ORDER BY v.path LIMIT ?",
+        (len(PREFIX), PREFIX, len(PREFIX), max_heads + 1),
+    ).fetchall()
+    if len(metadata) > max_heads:
+        raise OverflowError("lifecycle head capture exceeds row budget")
+    used = 0
+    for path_bytes, generation, present, payload_bytes, path_type, payload_type in metadata:
+        if path_type != "text" or type(path_bytes) is not int:
+            raise sqlite3.DatabaseError("invalid lifecycle head version path")
+        subject_bytes = path_bytes - len(PREFIX)
+        if not 0 < subject_bytes <= MAX_IDENTITY_BYTES:
+            raise OverflowError("lifecycle head subject exceeds byte budget")
+        if type(generation) is not int or not 1 <= generation <= MAX_SQLITE_INTEGER:
+            raise sqlite3.DatabaseError("invalid lifecycle head generation")
+        if type(present) is not int or present not in (0, 1) \
+                or present == 0 and payload_bytes is not None \
+                or present == 1 and (type(payload_bytes) is not int
+                                    or payload_type != "text"):
+            raise sqlite3.DatabaseError("invalid lifecycle head presence")
+        if payload_bytes is not None and payload_bytes > MAX_BYTES:
+            raise OverflowError("lifecycle head payload exceeds byte budget")
+        used += 17 + subject_bytes + (payload_bytes or 0)
+        if used > max_bytes:
+            raise OverflowError("lifecycle head capture exceeds byte budget")
+    rows = tuple(conn.execute(
+        "SELECT substr(v.path,?),v.generation,d.payload "
+        "FROM lifecycle_head_versions v LEFT JOIN docs d ON d.path=v.path "
+        "WHERE substr(v.path,1,?)=? AND length(v.path)>? ORDER BY v.path",
+        (len(PREFIX) + 1, len(PREFIX), PREFIX, len(PREFIX)),
+    ))
+    if len(rows) != len(metadata):
+        raise sqlite3.DatabaseError("lifecycle head namespace changed within snapshot")
+    for subject, generation, payload in rows:
+        _subject_path(subject)
+        if payload is not None and type(payload) is not str:
+            raise sqlite3.DatabaseError("invalid lifecycle head payload")
+    return rows, used
+
+
 def _copy_expected(
     value: LifecycleHeadPosition, path: Path,
 ) -> LifecycleHeadPosition:

@@ -173,7 +173,7 @@ class _Evaluator:
             return local
         if current is not None:
             proposed = _canonical(current)
-            if proposed != evidence.retained_json:
+            if proposed != _canonical(local):
                 self.proposals[subject] = HeadProposal(
                     subject, evidence.retained_json, proposed,
                 )

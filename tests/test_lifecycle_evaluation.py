@@ -146,6 +146,15 @@ def test_invalid_remote_evidence_skips_but_malformed_retained_is_unavailable(mes
     assert not result.proposals
 
 
+def test_equivalent_noncanonical_retained_head_does_not_propose_rewrite(mesh):
+    current = resolve_lifecycle(mesh.directory, "claude", store=mesh.store)
+    raw = json.dumps(current, ensure_ascii=False, indent=1)
+    captured = _inputs(mesh, retained={"claude": raw})
+    result = evaluate_lifecycle(captured, "claude")
+    assert _effective(result) == current
+    assert all(proposal.subject != "claude" for proposal in result.proposals)
+
+
 def test_bounded_deep_remote_json_skips_but_retained_json_is_unavailable(mesh):
     captured = _inputs(mesh)
     deep = "[" * 2_000 + "]" * 2_000
