@@ -81,6 +81,6 @@ Publication does not capture contemporaneous chat messages. A future combined
 Store reader and a separately designed publisher lifecycle remain necessary before
 collector integration or any cache admission.
 
-R172 was implemented under the user's one-round working-agreement experiment.
-Independent code/contract review is deliberately scheduled for the following
-round; passing implementation tests is not that review.
+The storage boundary has independent code/contract review and transactional
+regression coverage. Publisher lifecycle and serving integration remain separate
+work; storage initialization alone does not activate either.
