@@ -7,6 +7,21 @@ wait is bounded to one second with short backoff; the underlying operating-syste
 file calls do not provide a hard latency guarantee. The lock file remains in place
 after release, while the kernel releases ownership when a process exits.
 
+Threads in one process first enter a FIFO gate keyed by the normalized lock-file
+path. Later local readers cannot repeatedly barge ahead of an already queued
+operation. One deadline covers local queue waiting and operating-system retry; a
+zero timeout still permits one OS attempt when the local gate was immediately
+free. A waiter whose deadline expires in the queue is removed rather than granted
+on a late wake. The local gate remains held for the full OS-lock context. Queue,
+admission, file-open, OS-lock, and context exit paths use nested cleanup for
+ordinary exceptions and asynchronous interruption.
+
+The registry retains gates weakly and resets in a forked child. FIFO applies only
+to threads in one process. Other processes still coordinate through the unchanged
+`flock` or Windows byte lock and have no fairness guarantee. Normalizing absolute,
+real, platform-case paths does not unify hard links or protect a symlink retargeted
+after coordinator construction.
+
 The reader distinguishes a missing file from corrupt, unreadable, duplicate-key,
 non-finite, malformed, deeply nested, invalid UTF-8, or oversized content. Only a
 known missing initial file permits first sight. Once a process has observed any

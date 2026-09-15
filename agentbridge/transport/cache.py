@@ -42,6 +42,7 @@ Everything not overridden delegates to the inner transport.
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
 import uuid
@@ -78,6 +79,9 @@ _MAX_BACKOFF_S = 60.0
 _SUSPECT_S = 600.0
 _INTERACTIVE_LEASE_S = 15.0
 _INTERACTIVE_POLL_S = 3.0
+# Testable local clock seam for the write/refresh race guard. It deliberately
+# remains process-local: timestamps here are only mirror ownership hints.
+_monotonic = time.monotonic
 # read-through miss sentinel: tells "doc absent/unreachable" apart from a
 # stored None (inner.get_doc reports both as its default)
 _MISS = object()
@@ -409,7 +413,7 @@ class CachingTransport(Transport):
             return True
 
     def _refresh_once(self) -> bool:
-        t0 = time.monotonic()
+        t0 = _monotonic()
         # snapshot_docs = full pull + the delta cursor it is current at
         # (base default wraps get_docs with cursor 0 for feed-less drivers)
         with self._lock:
@@ -703,10 +707,21 @@ class CachingTransport(Transport):
 
     def _remember_doc_write(self, path: str, data: Any) -> None:
         owned = copy.deepcopy(data)
+        # The provider has already accepted the write. Mirror storage must
+        # retain an independent, wire-equivalent JSON value when possible, but
+        # diagnostic normalization cannot make that successful write fail.
+        # This remains outside the mirror mutex because arbitrary values can
+        # invoke Python hooks during copy/serialization.
+        try:
+            owned = json.loads(json.dumps(
+                owned, ensure_ascii=False, allow_nan=False,
+            ))
+        except (TypeError, ValueError, OverflowError, RecursionError, MemoryError):
+            pass
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs[path] = owned
-                self._doc_writes[path] = time.monotonic()
+                self._doc_writes[path] = _monotonic()
                 self._neg.discard(path)
                 self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
         self._persist_snapshot()

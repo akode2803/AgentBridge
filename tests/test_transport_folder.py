@@ -7,7 +7,9 @@ import sys
 import pytest
 
 from agentbridge.core.errors import TransportError
+from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.mirror_observation import MirrorObservation
 
 
 @pytest.fixture
@@ -25,6 +27,24 @@ def test_docs_roundtrip_and_listing(tx):
     tx.delete_doc("users/claude.json")
     tx.delete_doc("users/claude.json")  # missing is not an error
     assert tx.list_docs("users") == ["users/aryan.json"]
+
+
+def test_snapshot_docs_feed_cache_capture_with_posix_relative_paths(tx):
+    """Folder paths must remain portable mirror-record paths on Windows too."""
+    tx.put_doc("chats/room/meta.json", {"id": "room"})
+    tx.put_doc("users/aryan.json", {"name": "aryan"})
+    docs, cursor = tx.snapshot_docs()
+    assert cursor == 0
+    assert sorted(docs) == ["chats/room/meta.json", "users/aryan.json"]
+    assert all("\\" not in path for path in docs)
+
+    cache = CachingTransport(tx, auto_refresh=False)
+    cache._mirror_root_identity = str(tx.root)
+    cache._mirror_cache_identity = "folder-path-regression"
+    cache.refresh()
+    observation = cache.capture_mirror()
+    assert type(observation) is MirrorObservation
+    assert [record.path for record in observation.records] == sorted(docs)
 
 
 def test_path_traversal_refused(tx):

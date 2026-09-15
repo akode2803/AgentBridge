@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from ..core.config import atomic_write_json
+from . import pin_lock_gate
 
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_PENDING_BYTES = 16 * 1024 * 1024
@@ -93,7 +94,7 @@ class PinFileCoordinator:
     def locked(self):
         if self.conflicted:
             raise PinStoreUnavailable("pin_conflict")
-        fh = self._acquire()
+        held = self._acquire()
         try:
             doc, present = strict_read_pin_file(self.path)
             if self.seen_present and not present:
@@ -105,7 +106,10 @@ class PinFileCoordinator:
             except (MemoryError, RecursionError) as exc:
                 raise PinStoreUnavailable("invalid_file") from exc
         finally:
-            _unlock(fh)
+            try:
+                _unlock(held.fh)
+            finally:
+                held.local.release()
 
     def write(self, doc: dict) -> None:
         validate_output(doc)
@@ -140,18 +144,29 @@ class PinFileCoordinator:
         return operations
 
     def _acquire(self):
+        deadline = time.monotonic() + self.lock_timeout_s
         try:
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(self.lock_path, "a+b")
+            local = pin_lock_gate.acquire(self.lock_path, deadline)
+        except pin_lock_gate.LocalGateTimeout as exc:
+            raise PinStoreUnavailable("lock_timeout") from exc
         except OSError as exc:
             raise PinStoreUnavailable("lock_open") from exc
         try:
-            deadline = time.monotonic() + self.lock_timeout_s
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self.lock_path, "a+b")
+        except BaseException as exc:
+            try:
+                if isinstance(exc, OSError):
+                    raise PinStoreUnavailable("lock_open") from exc
+                raise
+            finally:
+                local.release()
+        try:
             delay = 0.01
             while True:
                 state = _try_lock(fh)
                 if state is True:
-                    return fh
+                    return _HeldPinLock(fh, local)
                 if state is None:
                     raise PinStoreUnavailable("lock_failed")
                 remaining = deadline - time.monotonic()
@@ -160,8 +175,17 @@ class PinFileCoordinator:
                 time.sleep(min(delay, remaining))
                 delay = min(delay * 2, 0.1)
         except BaseException:
-            fh.close()
+            try:
+                fh.close()
+            finally:
+                local.release()
             raise
+
+
+@dataclass(frozen=True)
+class _HeldPinLock:
+    fh: object
+    local: pin_lock_gate.LocalGateLease
 
 
 def strict_read_pin_file(path: Path) -> tuple[dict, bool]:
