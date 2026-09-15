@@ -10,8 +10,10 @@ from ..core.models import UserKind
 from .lifecycle import (
     LifecycleError,
     LifecycleUnavailable,
+    _FUTURE_SKEW_NS,
     _authorize_with_facts,
     _validate_structure,
+    _validate_envelope_structure,
     _verify_with_keys,
 )
 
@@ -60,6 +62,7 @@ class LifecycleEvaluation:
     consumed_accounts: tuple[str, ...]
     consumed_subjects: tuple[str, ...]
     now_ns: int
+    next_recheck_ns: int | None = None
 
 
 class LifecycleInputsIncomplete(LifecycleUnavailable):
@@ -79,12 +82,14 @@ def evaluate_lifecycle(
     captured, root, bounded = _copy_inputs(inputs, subject, limits)
     evaluator = _Evaluator(captured, bounded)
     effective = evaluator.evaluate(root, depth=0)
+    next_recheck_ns = evaluator.next_recheck_ns()
     return LifecycleEvaluation(
         _canonical(effective),
         tuple(evaluator.proposals[name] for name in sorted(evaluator.proposals)),
         tuple(sorted(evaluator.consumed_accounts)),
         tuple(sorted(evaluator.consumed_subjects)),
         captured.now_ns,
+        next_recheck_ns,
     )
 
 
@@ -99,6 +104,27 @@ class _Evaluator:
         self.proposals: dict[str, HeadProposal] = {}
         self.memo: dict[str, dict | None] = {}
         self.stack: set[str] = set()
+
+    def next_recheck_ns(self) -> int | None:
+        boundary = None
+        for subject in self.consumed_subjects:
+            evidence = self.subjects[subject]
+            if not evidence.available:
+                continue
+            for path, serialized in evidence.envelopes:
+                try:
+                    value = json.loads(serialized)
+                    record = _validate_envelope_structure(path, value)
+                    if record["subject"] != subject:
+                        continue
+                    candidate = record["ns"] - _FUTURE_SKEW_NS
+                    if not self.inputs.now_ns < candidate <= 2**63 - 1:
+                        continue
+                    if boundary is None or candidate < boundary:
+                        boundary = candidate
+                except (LifecycleError, TypeError, ValueError, RecursionError):
+                    continue
+        return boundary
 
     def evaluate(self, subject: str, *, depth: int) -> dict | None:
         self.consumed_subjects.add(subject)

@@ -25,10 +25,23 @@ Recursive active-human authorization uses raw captured `active` only after known
 available evidence successfully evaluates to no lifecycle head.
 
 Results contain canonical serialized effective authority, diagnostic retained-head
-proposals, and sorted names of every account and subject actually consumed. A
+proposals, sorted names of every account and subject actually consumed, and a
+conservative `next_recheck_ns` clock boundary. The boundary is the earliest
+representable time when a structurally valid, correctly routed future envelope
+for an available consumed subject reaches the inclusive future-skew cutoff. Its
+signature or authorization may still fail, so the boundary predicts only when
+the inputs must be evaluated again, not a state change. Unavailable enumeration
+uses retained authority and contributes no envelope deadline; retained authority
+has no clock deadline by itself. A
 proposal carries only the observed retained serialization and proposed canonical
 record. It lacks the Store incarnation and generation required by the R178 CAS,
 so it cannot authorize publication.
+
+An evaluation captured at `captured_now` may be reused by clock only while
+`captured_now <= recheck_now < next_recheck_ns`. A `None` boundary has no upper
+clock cutoff. A clock that moves backward invalidates the result. These are
+diagnostic invalidation facts only: this module does not read a clock, admit a
+cached result for serving, or add lifecycle work to a caller's no-newer fast path.
 
 Limits bound supplied accounts, subjects, envelopes, serialized bytes, and owner
 depth. Byte accounting charges each occurrence of the root subject; account name,
