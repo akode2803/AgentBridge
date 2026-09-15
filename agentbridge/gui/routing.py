@@ -11,7 +11,7 @@ from ..core.errors import AgentBridgeError
 
 log = logging.getLogger("agentbridge.gui")
 
-__all__ = ["Request", "Response", "authed", "dispatch"]
+__all__ = ["Request", "Response", "authed", "authed_read", "dispatch"]
 
 
 @dataclass
@@ -57,6 +57,29 @@ def authed(fn):
         if mesh is None:
             return {"error": "Sign in first"}
         return fn(app, req, mesh, *args)
+
+    return wrapper
+
+
+def authed_read(fn):
+    """Fence an explicitly selected read response against session changes."""
+    @functools.wraps(fn)
+    def wrapper(app, req, *args):
+        lock = getattr(app, "lock", None)
+        if lock is not None and lock.expire_if_idle():
+            return {"error": "App is locked", "locked": True}
+        token = app.capture_session_read()
+        if token is None or token.mesh is None:
+            return {"error": "Sign in first"}
+        try:
+            result = fn(app, req, token.mesh, *args)
+        except Exception:
+            if not app.validate_session_read(token):
+                return {"error": "Sign in first"}
+            raise
+        if not app.validate_session_read(token):
+            return {"error": "Sign in first"}
+        return result
 
     return wrapper
 

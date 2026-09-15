@@ -13,6 +13,7 @@ import platform
 import hashlib
 import secrets
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
@@ -26,9 +27,17 @@ from ..mesh.service import Mesh
 from ..transport import make_transport
 from .applock import AppLock
 
-__all__ = ["GuiApp"]
+__all__ = ["GuiApp", "SessionReadToken"]
 
 _SESSION_FILE = "gui_session.json"
+_MAX_SESSION_GENERATION = 2**63 - 1
+
+
+@dataclass(frozen=True)
+class SessionReadToken:
+    app_identity: str
+    generation: int
+    mesh: Mesh | None
 
 
 def _breadcrumb(line: str) -> None:
@@ -86,6 +95,9 @@ class GuiApp:
             else Path(__file__).resolve().parents[2] / "gui" / "static"
         )
         self.mesh: Mesh | None = None
+        self._session_generation = 0
+        self._session_reads_exhausted = False
+        self._session_read_ready = False
         # pre-auth reads (login screen, name checks) — directory only, no store.
         # make_transport so the login screen works on a cloud root too, not just
         # a folder (the FolderTransport hard-wire here broke supabase:// roots).
@@ -107,6 +119,56 @@ class GuiApp:
     @property
     def user(self) -> str | None:
         return self.mesh.user if self.mesh else None
+
+    def capture_session_read(self) -> SessionReadToken | None:
+        """Capture the current viewer for one explicitly protected read."""
+        with self._lock:
+            if self._session_reads_exhausted \
+                    or type(self._session_generation) is not int \
+                    or not 0 <= self._session_generation <= _MAX_SESSION_GENERATION:
+                self._session_reads_exhausted = True
+                self._session_read_ready = False
+                return None
+            if self.mesh is not None and not self._session_read_ready:
+                return None
+            return SessionReadToken(
+                self.instance_id, self._session_generation, self.mesh,
+            )
+
+    def validate_session_read(self, token: SessionReadToken) -> bool:
+        """Linearize one completed read response against session adoption."""
+        if type(token) is not SessionReadToken:
+            return False
+        try:
+            app_identity, generation, mesh = (
+                token.app_identity, token.generation, token.mesh,
+            )
+        except AttributeError:
+            return False
+        if type(app_identity) is not str or not app_identity \
+                or len(app_identity) > 128 or "\x00" in app_identity \
+                or type(generation) is not int \
+                or not 0 <= generation <= _MAX_SESSION_GENERATION \
+                or (mesh is not None and type(mesh) is not Mesh):
+            return False
+        with self._lock:
+            return bool(
+                not self._session_reads_exhausted
+                and type(self._session_generation) is int
+                and 0 <= self._session_generation <= _MAX_SESSION_GENERATION
+                and app_identity == self.instance_id
+                and generation == self._session_generation
+                and mesh is self.mesh
+                and (mesh is None or self._session_read_ready)
+            )
+
+    def _advance_session_generation(self) -> None:
+        self._session_read_ready = False
+        if type(self._session_generation) is not int \
+                or not 0 <= self._session_generation < _MAX_SESSION_GENERATION:
+            self._session_reads_exhausted = True
+            return
+        self._session_generation += 1
 
     @property
     def transport(self):
@@ -336,6 +398,8 @@ class GuiApp:
         )
 
     def _adopt(self, mesh: Mesh) -> None:
+        """Adopt a Mesh while the caller holds ``self._lock``."""
+        self._advance_session_generation()
         self.mesh = mesh
         mesh.start()
         try:  # R25: populate tenure + re-sign any legacy redactions (idempotent)
@@ -356,11 +420,18 @@ class GuiApp:
         atomic_write_json(
             self._session_path, {"user": mesh.user, "ts": utcnow_iso()}
         )
+        self._session_read_ready = True
 
     def _detach(self) -> None:
-        mesh, self.mesh = self.mesh, None
+        """Detach a present Mesh while the caller holds ``self._lock``.
+
+        A signed-out no-op has no session transition and does not advance.
+        """
+        mesh = self.mesh
         if mesh is None:
             return
+        self._advance_session_generation()
+        self.mesh = None
         for sub in list(self._subs):
             sub.close()
         self._subs.clear()
