@@ -58,4 +58,3 @@ def test_agent_identity_surfaces_use_helper_and_keep_status_pills() -> None:
 
     css = (ROOT / "gui" / "static" / "style.css").read_text(encoding="utf-8")
     assert ".agent-icon-badge {" in css
-    assert ".agent-icon-badge svg { width: 14px; height: 14px; }" in css

@@ -53,6 +53,8 @@ def test_base_chat_is_interactive_and_repaints_do_not_stack_handlers(tmp_path: P
     production = "\n".join([
         _function(api, "bindOpenFile"),
         _function(chat, "reconcileRows"),
+        _function(chat, "syncReceiptTicks"),
+        _function(chat, "receiptTicks"),
         _between(chat, "function bindTranscript(", "function openMsgMenu("),
         _between(chat, "async function renderMeshChat(", "V.renderMeshChat = renderMeshChat;"),
     ])

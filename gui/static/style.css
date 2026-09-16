@@ -1926,10 +1926,10 @@ pre.configdump {
 /* Agent identity uses the shared robot mark; text/status pills keep kind-tag. */
 .agent-icon-badge {
   display: inline-grid; place-items: center;
-  width: 15px; height: 15px; margin-left: 2px;
+  width: 17px; height: 17px; margin-left: 2px;
   color: var(--text-dim); vertical-align: -2.5px;
 }
-.agent-icon-badge svg { width: 14px; height: 14px; }
+.agent-icon-badge svg { width: 16px; height: 16px; }
 
 /* ---------------------------------------------------------------- dark mode */
 
@@ -2867,9 +2867,9 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
 .loading-status {
   position: absolute; top: 12px; right: 12px; z-index: 8;
   display: inline-flex; align-items: center; gap: 7px;
-  padding: 10px 14px; border-radius: var(--radius); pointer-events: none;
-  background: var(--surface); color: var(--text-dim); font-size: 13px;
-  border: 1px solid var(--border); box-shadow: var(--shadow);
+  padding: 0; pointer-events: none;
+  color: var(--text-dim); font-size: 13px;
+  background: none; border: 0; box-shadow: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .loading-status .spin-sm { animation: none; }
@@ -2894,3 +2894,7 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
 .pending-send .bubble { animation:send-appear 120ms ease-out; }
 @keyframes send-appear { from { opacity:.5; transform:translateY(3px); } to { opacity:1; transform:none; } }
 @media (prefers-reduced-motion: reduce) { .pending-send .bubble { animation:none; } }
+
+.loading-status.loading-inline { position:static; margin-top:14px; justify-content:center; }
+.bubble .meta .receipt-slot { display:contents; }
+.bubble .meta .ticks.send-pending svg { width:11px; height:11px; }
