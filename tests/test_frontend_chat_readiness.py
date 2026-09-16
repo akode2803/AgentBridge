@@ -173,6 +173,7 @@ const noop = () => {}; const setTaggable = noop, syncDmHeaderPresence = noop, cl
 const syncPinBanner = noop, captureRxSigs = () => [], animateRxChanges = noop;
 const clampLong = noop, jumpToMessage = noop, initComposer = noop, renderReplyArea = noop;
 const renderMeshPending = noop, startAskPoll = noop, markReadNow = noop, applySelectAfterRender = noop;
+const reconcileSends = noop, pendingSendRows = () => [];
 const clearSelectMode = noop;
 const endLoading = noop;
 const toast = noop, enterSelect = noop, muteDialog = noop, clearChatDialog = noop, deleteChatDialog = noop;
@@ -187,7 +188,8 @@ const {renderMeshChat} = factory({api, document, $, Mesh, App, V, location, ICON
   animateRxChanges, clampLong, jumpToMessage, initComposer, renderReplyArea, renderMeshPending,
   startAskPoll, markReadNow, applySelectAfterRender, toast, enterSelect, muteDialog,
   clearChatDialog, deleteChatDialog, innerWidth, innerHeight, performance, encodeURIComponent,
-  Date, Map, Set, JSON, Object, Math, chatRenderSeq, clearSelectMode, endLoading});
+  Date, Map, Set, JSON, Object, Math, chatRenderSeq, clearSelectMode, endLoading,
+  reconcileSends, pendingSendRows});
 const base = {me: "aryan", meta: {id: "room", kind: "dm", members: ["aryan", "bot"], pins: []},
   messages: [{id: "m1", from: "aryan", mine: true, ts: "2026-09-16T00:00:00Z", body: "file", files: [{id: "blob-1", name: "notes.txt", bytes: 4}]}], starred: []};
 const presentation = {user: "aryan", chats: [{id: "room"}], users: {aryan: {}, bot: {}}};

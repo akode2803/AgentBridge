@@ -41,9 +41,10 @@ const host = node();
 let finish = beginLoading(host);
 assert.equal(host.children.length, 0); assert.equal(host.getAttribute('aria-busy'), null);
 finish(); tick(); assert.equal(host.children.length, 0); // fast result never flashes
-finish = beginLoading(host, {label: 'Loading chat info…'});
+finish = beginLoading(host, {label: 'Loading chat info…', placement: 'center'});
 tick(); assert.equal(host.children.length, 1);
 assert.equal(host.children[0].getAttribute('role'), 'status');
+assert.equal(host.children[0].className, 'loading-status loading-centered');
 assert.equal(host.children[0].children[0].textContent, 'Loading chat info…');
 assert.equal(host.getAttribute('aria-busy'), 'true');
 finish(); finish(); assert.equal(host.children.length, 0);

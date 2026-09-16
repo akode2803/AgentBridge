@@ -3,18 +3,19 @@
 
 import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
          toast, clampLong, paneCoversChat, closeMenus } from "./util.js";
-import { ICONS, BIRD, extIcon } from "./icons.js";
+import { ICONS, BIRD, extIcon, agentIdentityBadge } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
+import { pendingSendRows, reconcileSends, removeSend } from "./pending-send.js";
 import { endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
+import { App, Mesh, meshDraft, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { warmContext, selectedChatContext, presentationFromState, sameWarmOperation } from "./warm-context.js";
 import { createLatestRead } from "./latest-read.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
-import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
-import { openModal, closeModal } from "./modal.js";
+import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit, restoreSendDraft } from "./composer.js";
+import { openModal, closeModal, beginModalRead, captureModalRead, modalReadMayApply } from "./modal.js";
 import { notifyAsk } from "./notify.js";
 import { rxBadge, openReactionsPopup, captureRxSigs, animateRxChanges } from "./reactions.js";
 import { V } from "./views.js";
@@ -828,6 +829,7 @@ function nextClamp(cur) {
 
 async function renderMeshChat(force, openTrace = null, prepared = null) {
   const sessionTicket = captureSessionEpoch();
+  const readStarted = performance.now();
   const renderSeq = ++chatRenderSeq;
   const chatId = Mesh.chatId;
   const data = prepared?.data
@@ -883,6 +885,8 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
   if (App.page !== "chats" || Mesh.chatId !== chatId) return;
+  reconcileSends(chatId, data.messages, prepared ? -1 : readStarted);
+  const pendingRows = pendingSendRows(chatId);
   const meta = data.meta;
   const pinsSig = (meta.pins || []).map((p) => p.id + p.until).join(",");
   // transcript content signature — drives the PARTIAL refresh (transcript only)
@@ -891,7 +895,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // would freeze until the next structural change (R33)
   const receiptSig = data.messages
     .filter((m) => m.mine && m.receipt)
-    .map((m) => m.id + m.receipt.state).join(",");
+    .map((m) => m.id + m.receipt.state + (m.receipt.transport?.state || "")).join(",");
   // in-place mutations (edit / delete-for-everyone / reactions) change no
   // count and no last-id — without this signature they froze until the next
   // structural change (Q24: reactions never surfaced on the partial path)
@@ -906,7 +910,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     .filter((u) => u.departed).map((u) => u.username).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
-    pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig,
+    pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig, pendingRows,
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
       (f.draft || "").length, (f.steps || []).map((s) =>
         `${s.ts || ""}:${s.text || ""}`).join("|")]),
@@ -974,7 +978,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
       const label = msg.mine ? "You deleted this message"
                              : "This message was deleted";
       const tombKindTag = displayKind(msg.from) === "agent"
-        ? ' <span class="kind-tag">agent</span>' : "";
+        ? ` ${agentIdentityBadge()}` : "";
       const tombSender = !isDm && !msg.mine
         ? `<div class="sender">${esc(viewDn(msg.from))}${tombKindTag}</div>` : "";
       parts.push(["m:" + (msg.id || "i" + i), `
@@ -1027,7 +1031,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     const showSender = !isDm && !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
     const kindTag = displayKind(msg.from) === "agent"
-      ? `<span class="kind-tag">agent</span>` : "";
+      ? agentIdentityBadge() : "";
     // M11: a departed (deleted) member's messages grey out — name and
     // words remain, nothing else of them does. Keyed on `departed`
     // (deactivated), not active=false — that alone is also the pause switch.
@@ -1099,7 +1103,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const feedHead = (who) => isDm ? "" :
     `<span class="msg-avatar">${viewAvatar(who)}</span>`;
   const feedSender = (who, isAgent) => isDm ? "" :
-    `<div class="sender">${esc(viewDn(who))}${isAgent ? ' <span class="kind-tag">agent</span>' : ""}</div>`;
+    `<div class="sender">${esc(viewDn(who))}${isAgent ? ` ${agentIdentityBadge()}` : ""}</div>`;
   for (const f of feeds) {
     if (f.human) {
       // a human mid-composition: just the dots, nothing else
@@ -1161,6 +1165,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
 
   // parts is (key, html) pairs since R52 — the key feeds the reconciler,
   // the joined html still feeds the full rebuild path
+  parts.push(...pendingRows);
   const bubbles = parts.length ? parts.map((p) => p[1]).join("")
     : `<div class="empty">No messages yet — say hello.</div>`;
 
@@ -1252,7 +1257,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const dmPeer = meta.kind === "dm"
     ? (meta.members || []).find((u) => u !== ms.user) : null;
   const headAgentTag = dmPeer && displayKind(dmPeer) === "agent"
-    ? ' <span class="kind-tag">agent</span>' : "";
+    ? ` ${agentIdentityBadge()}` : "";
   // DM header online/last-seen sub-line (Q32) — only when the peer shares it,
   // so the name stays vertically centered otherwise (the .has-sub class drives
   // the push-up transition in css)
@@ -1472,6 +1477,15 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   Mesh.renderedChat = chatId;
 }
 V.renderMeshChat = renderMeshChat;
+V.renderPendingSends = (chatId, scroll = false) => {
+  const tr = $("#transcript");
+  if (!tr || Mesh.chatId !== chatId || App.page !== "chats") return;
+  const canonical = [...(tr._rows || new Map())]
+    .filter(([key]) => !key.startsWith("send:")).map(([key, row]) => [key, row.html]);
+  reconcileRows(tr, [...canonical, ...pendingSendRows(chatId)]);
+  if (scroll) tr.scrollTop = tr.scrollHeight;
+};
+
 
 // R18/R19.5: my agents' pending asks + scheduled wake-ups, everywhere on the
 // chats page. A run is BLOCKED on an answer, so this polls on a short leash
@@ -1578,14 +1592,14 @@ function renderAskBar(chatId, asks, timers) {
     const peer = a.kind === "peer";
     const repair = peer && a.repair;         // a mutation on another harness
     const head = q
-      ? `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> asks you:`
+      ? `${esc(meshDn(a.agent))} ${agentIdentityBadge()} asks you:`
       : repair
-      ? `<b>@${esc(a.peer)}</b> wants to <b>${esc(a.tool)}</b> ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
+      ? `<b>@${esc(a.peer)}</b> wants to <b>${esc(a.tool)}</b> ${esc(meshDn(a.agent))} ${agentIdentityBadge()}`
       : peer
-      ? `<b>@${esc(a.peer)}</b> wants a diagnostic session with ${esc(meshDn(a.agent))} <span class="kind-tag">agent</span>`
+      ? `<b>@${esc(a.peer)}</b> wants a diagnostic session with ${esc(meshDn(a.agent))} ${agentIdentityBadge()}`
       // R43: the harness sends a friendly verb phrase ("write a file") —
       // the raw tool id stays reachable as the hover title
-      : `${esc(meshDn(a.agent))} <span class="kind-tag">agent</span> wants to <b title="${esc(a.tool)}">${esc(a.label || "use " + a.tool)}</b>`;
+      : `${esc(meshDn(a.agent))} ${agentIdentityBadge()} wants to <b title="${esc(a.tool)}">${esc(a.label || "use " + a.tool)}</b>`;
     // a repair mutation ALWAYS asks — no "always allow" shortcut for it.
     // V85 honesty: an outside-workspace path NEVER gets a standing grant
     // (V83 — "always allow Read" must not become "read any file"), so
@@ -1738,6 +1752,11 @@ function replyQuote(rt, isDm, ms) {
 function receiptTicks(msg, isDm) {
   if (!msg.mine || msg.deleted || msg.kind === "info") return "";
   const r = msg.receipt;
+  const transport = r?.transport?.state;
+  if (transport === "queued" || transport === "failed") {
+    const label = transport === "failed" ? "Send failed" : "Waiting for transport";
+    return `<span class="ticks${transport === "failed" ? " send-failed" : ""}" title="${label}" aria-label="${label}">${transport === "failed" ? ICONS.info : ICONS.clock}</span>`;
+  }
   const state = (r && r.state) || "sent";
   const read = state === "read";
   const delivered = state === "delivered";
@@ -1838,6 +1857,19 @@ function bindTranscript(tr, chatId, data, ctx) {
   if (tr._delegated) return;
   tr._delegated = true;
   tr.addEventListener("click", (e) => {
+    const recovery = e.target.closest("[data-send-action]");
+    if (recovery) {
+      const ref = recovery.closest("[data-send-ref]")?.dataset.sendRef;
+      if (recovery.dataset.sendAction === "restore"
+          && (meshDraft(chatId).editing || !$("#mesh-body"))) {
+        toast("Finish editing before restoring this draft", true); return;
+      }
+      const send = removeSend(ref, chatId);
+      if (send && recovery.dataset.sendAction === "restore") {
+        restoreSendDraft(chatId, send, tr._ctx.presentation);
+      }
+      V.renderPendingSends(chatId); return;
+    }
     // select mode: a click anywhere on a row toggles its checkbox — nothing
     // else fires (no read-more, reply-jump, file-open or hover menu)
     if (Mesh.select.on) {
@@ -2112,11 +2144,14 @@ function openMsgMenu(rect, msg, chatId, ctx) {
 // lists Read by / Delivered to / Pending. For OTHERS' messages: the sent time,
 // plus (for an agent) the tasks it ran to produce the reply.
 async function messageInfoDialog(chatId, msg, presentation = Mesh.state) {
+  const owner = beginModalRead();
   const fetchInfo = () =>
     api(`/api/mesh/message_info?id=${encodeURIComponent(chatId)}`
         + `&msg=${encodeURIComponent(msg.id || "")}`);
   const r = await fetchInfo();
+  if (!modalReadMayApply(owner)) return;
   if (r.error) { toast(r.error, true); return; }
+  if (!modalReadMayApply(owner, r)) return;
   // the receipts body, built fresh each paint — times are fmtWhen (V116:
   // "10 mins ago" under an hour) so they age while the dialog sits open
   const buildBody = (r) => {
@@ -2167,6 +2202,14 @@ async function messageInfoDialog(chatId, msg, presentation = Mesh.state) {
           : '<div class="mi-empty">No task details recorded for this message.</div>';
       }
     }
+    if (r.mine && r.kind === "message" && r.transport) {
+      const status = r.transport.state;
+      const label = status === "queued" ? "Waiting for transport"
+        : status === "failed" ? "Send failed" : "Accepted by transport";
+      const accepted = r.transport?.accepted_ns;
+      const when = accepted ? fmtWhen(new Date(accepted / 1e6).toISOString()) : "—";
+      body = `<div class="mi-row"><span class="mi-ic">${status === "queued" ? ICONS.clock : status === "failed" ? ICONS.info : ICONS.tick}</span><span class="mi-label">${label}</span><span class="mi-time">${esc(when)}</span></div>` + body;
+    }
     return body;
   };
   const preview = stripMd(r.body || msg.body || "").replace(/\s+/g, " ").trim();
@@ -2183,10 +2226,18 @@ async function messageInfoDialog(chatId, msg, presentation = Mesh.state) {
   // dialog is open — refetch and repaint until the box leaves the DOM
   // (closeModal, scrim click, or another modal replacing this one). The
   // innerHTML compare keeps unchanged ticks from resetting the scroll.
+  const shownOwner = captureModalRead();
+  let refreshing = false;
   const tick = setInterval(async () => {
-    if (!document.body.contains(box)) { clearInterval(tick); return; }
-    const f = await fetchInfo();
-    if (f.error || !document.body.contains(box)) return;
+    if (!document.body.contains(box) || !modalReadMayApply(shownOwner)) {
+      clearInterval(tick); return;
+    }
+    if (refreshing) return;
+    refreshing = true;
+    let f;
+    try { f = await fetchInfo(); } catch { return; }
+    finally { refreshing = false; }
+    if (f.error || !document.body.contains(box) || !modalReadMayApply(shownOwner, f)) return;
     const scroll = box.querySelector(".mi-scroll");
     const fresh = buildBody(f);
     if (scroll && scroll.innerHTML !== fresh) scroll.innerHTML = fresh;

@@ -21,6 +21,7 @@ from agentbridge.harness import (
     AgentRunner, HarnessSettings, MESSAGE_BREAK, Reply, SILENCE, clean_reply,
     split_reply,
 )
+from agentbridge.harness.adapters.codex_compat import BridgeCompatibilityError
 from agentbridge.harness.triggers import Candidate
 from agentbridge.harness.recovery import prepare_outbox
 from agentbridge.harness.runtime.controls import (
@@ -807,6 +808,90 @@ def test_responder_failure_posts_notice_once(hrig):
     assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
         "active", "failed",
     ]
+
+
+def test_compatibility_prepare_failure_is_terminal_visible_and_not_retried(hrig):
+    snap = hrig.owner.create_chat("Unsupported CLI", members=["helper"])
+    trigger = hrig.owner.post(snap.id, "@helper answer this")
+
+    class Incompatible(Scripted):
+        prepare_calls = 0
+
+        def prepare(self, _delivery, _settings):
+            self.prepare_calls += 1
+            raise BridgeCompatibilityError(
+                "codex-cli 0.154.0", ("0.147", "0.153"))
+
+    responder = Incompatible()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    assert responder.prepare_calls == 1
+    assert responder.calls == []
+    assert runner.queue._pending() == {}
+    assert runner.queue._ledger(snap.id)[f"{trigger.id}@0"] \
+        == "error:BridgeCompatibilityError"
+    replies = agent_msgs(hrig.owner, snap.id)
+    assert len(replies) == 1
+    assert "Unsupported Codex CLI: codex-cli 0.154.0" in replies[0].body
+    assert "adapters/presets/codex.json" in replies[0].body
+    assert "BridgeCompatibilityError" not in replies[0].body
+    run = latest_run(runner.mesh.tx)
+    assert run["state"] == "error"
+    assert "Unsupported Codex CLI: codex-cli 0.154.0" in run["note"]
+    assert "adapters/presets/codex.json" in run["note"]
+    assert "BridgeCompatibilityError" not in run["note"]
+    assert [event.state.value for event in runner.task_ledger.read(snap.id)] == [
+        "active", "failed",
+    ]
+
+
+def test_compatibility_prepare_failure_history_survives_disabled_notice(hrig):
+    hrig.owner.accounts.set_agent_harness("helper", {"error_notices": False})
+    snap = hrig.owner.create_chat("Private failure", members=["helper"])
+    hrig.owner.post(snap.id, "@helper answer this")
+
+    class Incompatible(Scripted):
+        def prepare(self, _delivery, _settings):
+            raise BridgeCompatibilityError(
+                "codex-cli 0.154.0 token=TOPSECRET-marker", ("0.153",))
+
+    runner = hrig.make_runner(Incompatible())
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    assert agent_msgs(hrig.owner, snap.id) == []
+    run = latest_run(runner.mesh.tx)
+    assert run["state"] == "error"
+    assert "unrecognized version output" in run["note"]
+    assert "TOPSECRET-marker" not in str(run)
+    rate = runner.queue.store.cached_doc("harness/rate", default={}) or {}
+    assert not rate.get(snap.id)
+
+
+def test_generic_prepare_failure_keeps_bounded_retry_policy(hrig):
+    snap = hrig.owner.create_chat("Transient preparation", members=["helper"])
+    hrig.owner.post(snap.id, "@helper answer this")
+
+    class BrokenPrepare(Scripted):
+        prepare_calls = 0
+
+        def prepare(self, _delivery, _settings):
+            self.prepare_calls += 1
+            raise ValidationError("arbitrary preparation detail")
+
+    responder = BrokenPrepare()
+    runner = hrig.make_runner(responder)
+    ripple(hrig, runner, snap.id)
+    turn(hrig, runner, snap.id)
+
+    assert responder.prepare_calls == 1
+    assert responder.calls == []
+    assert runner.queue._pending()
+    assert latest_run(runner.mesh.tx) is None
+    assert agent_msgs(hrig.owner, snap.id) == []
 
 
 # ------------------------------------------------- files, identity, adoption

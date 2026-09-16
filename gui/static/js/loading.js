@@ -5,7 +5,7 @@ export function endLoading(host) {
   pending.get(host)?.();
 }
 
-export function beginLoading(host, { label = "Loading…", current = () => true } = {}) {
+export function beginLoading(host, { label = "Loading…", current = () => true, placement = "corner" } = {}) {
   if (!host) return () => {};
   endLoading(host);
   let status = null;
@@ -22,7 +22,7 @@ export function beginLoading(host, { label = "Loading…", current = () => true 
   const timer = setTimeout(() => {
     if (!host.isConnected || !current()) { finish(); return; }
     status = document.createElement("span");
-    status.className = "loading-status";
+    status.className = "loading-status" + (placement === "center" ? " loading-centered" : "");
     status.setAttribute("role", "status");
     status.innerHTML = '<span class="spin-sm" aria-hidden="true"></span>';
     const text = document.createElement("span");

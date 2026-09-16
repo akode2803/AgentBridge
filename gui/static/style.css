@@ -1923,6 +1923,14 @@ pre.configdump {
   vertical-align: 1.5px;
 }
 
+/* Agent identity uses the shared robot mark; text/status pills keep kind-tag. */
+.agent-icon-badge {
+  display: inline-grid; place-items: center;
+  width: 15px; height: 15px; margin-left: 2px;
+  color: var(--text-dim); vertical-align: -2.5px;
+}
+.agent-icon-badge svg { width: 14px; height: 14px; }
+
 /* ---------------------------------------------------------------- dark mode */
 
 [data-theme="dark"] {
@@ -2859,11 +2867,30 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
 .loading-status {
   position: absolute; top: 12px; right: 12px; z-index: 8;
   display: inline-flex; align-items: center; gap: 7px;
-  padding: 7px 10px; border-radius: 16px; pointer-events: none;
-  background: var(--bg-alt); color: var(--text-dim); font-size: 12px;
-  box-shadow: 0 1px 5px #0002;
+  padding: 10px 14px; border-radius: var(--radius); pointer-events: none;
+  background: var(--surface); color: var(--text-dim); font-size: 13px;
+  border: 1px solid var(--border); box-shadow: var(--shadow);
 }
 @media (prefers-reduced-motion: reduce) {
   .loading-status .spin-sm { animation: none; }
   #side-chats.slide, #details-pane.slide, .chat-in { animation: none; }
 }
+
+.loading-status .spin-sm { color:var(--accent); flex:none; }
+.loading-status.loading-centered {
+  top:50%;left:50%;right:auto;transform:translate(-50%,-50%);
+  max-width:calc(100% - 32px);justify-content:center;
+}
+
+/* Pending intent shares the canonical bubble geometry. */
+.pending-send-file { display:flex; align-items:center; gap:6px; padding:6px 0; }
+.pending-send-file svg { width:18px; height:18px; flex:none; }
+.send-failed, .send-error { color:var(--danger-fg); }
+.send-error { clear:both; font-size:12px; padding-top:8px; }
+.pending-send .msg-body { user-select:text; }
+
+.send-recovery-actions { display:flex; gap:8px; padding-top:6px; }
+
+.pending-send .bubble { animation:send-appear 120ms ease-out; }
+@keyframes send-appear { from { opacity:.5; transform:translateY(3px); } to { opacity:1; transform:none; } }
+@media (prefers-reduced-motion: reduce) { .pending-send .bubble { animation:none; } }

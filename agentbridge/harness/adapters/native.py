@@ -11,12 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 from types import MappingProxyType
 
 from ...core.errors import ValidationError
 
 __all__ = [
-    "CODEX_PROVIDER_VERSION",
     "NATIVE_CAPABILITIES", "NATIVE_CAPABILITY_SCHEMA",
     "NATIVE_DENY_ARG_TEMPLATES", "NativeCapabilitySpec", "NativeProfile",
     "EffectiveNativePolicy", "codex_native_policy", "native_capability_report",
@@ -24,7 +24,6 @@ __all__ = [
 ]
 
 NATIVE_CAPABILITY_SCHEMA = 2
-CODEX_PROVIDER_VERSION = "codex-cli 0.147.0"
 NATIVE_DENY_ARG_TEMPLATES = MappingProxyType({
     "claude": ("--disallowedTools", "{tool}"),
     "cortex": ("--disallowed-tools", "{tool}"),
@@ -105,7 +104,7 @@ def _native(capability_id: str, provider: str, *tools: str,
 def _codex(capability_id: str, *controls: str, effect: str, label: str,
            risk: str = "high", surface: str = "provider-feature",
            approval: str = "package-compiled-provider-policy",
-           enforcement_locus: str = "codex-0.147-config") \
+           enforcement_locus: str = "codex-reviewed-config") \
         -> NativeCapabilitySpec:
     return NativeCapabilitySpec(
         id=capability_id, provider="codex", tools=(),
@@ -452,13 +451,13 @@ def codex_native_policy(*, bridge_attached: bool) -> EffectiveNativePolicy:
     return EffectiveNativePolicy(
         schema_version=NATIVE_CAPABILITY_SCHEMA, provider="codex",
         inventory_complete=True,
-        enforcement_locus="codex-0.147-config+agentbridge-server-authority",
+        enforcement_locus="codex-reviewed-config+agentbridge-server-authority",
         evidence="https://developers.openai.com/codex/config-reference/",
         enabled=tuple(enabled), approval_gated=approval_gated,
         blocked=tuple(blocked),
         auto_allow_tools=(), blocked_tools=(), permission_callback=False,
         enforcement_contract=(
-            "codex-0.147-exact-version", "ignore-user-config", "ignore-rules",
+            "codex-reviewed-version-series", "ignore-user-config", "ignore-rules",
             "strict-config", "fresh-ephemeral-run", "agentbridge-run-permissions",
             "openai-signed-executable-pair", "sha256-launch-recheck",
             "non-user-config-layer-admission",
@@ -485,10 +484,22 @@ def validate_native_authority_facts(
     if unknown:
         raise ValidationError(f"unknown native capability: {sorted(unknown)}")
     if provider == "codex":
+        from .codex_compat import codex_version_supported, \
+            validate_codex_version_series
+
+        preset_path = Path(__file__).resolve().parent / "presets" / "codex.json"
+        try:
+            raw = json.loads(preset_path.read_text(encoding="utf-8"))
+            series = validate_codex_version_series(
+                raw["bridge_profile"]["supported_versions"])
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) \
+                as exc:
+            raise ValidationError(
+                "Codex compatibility policy is unreadable") from exc
         expected = codex_native_policy(
             bridge_attached="codex.agentbridge_mcp" in approval_gated,
         )
-        if (provider_version != CODEX_PROVIDER_VERSION
+        if (not codex_version_supported(provider_version, series)
                 or enabled != expected.enabled
                 or approval_gated != expected.approval_gated
                 or blocked != expected.blocked

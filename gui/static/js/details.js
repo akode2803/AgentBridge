@@ -2,7 +2,7 @@
    page. Subviews (search / media / agents) render into the same pane. */
 
 import { $, esc, fmtTime, fmtTimeLower, toast, clampLong, paneCoversChat, closeMenus } from "./util.js";
-import { ICONS } from "./icons.js";
+import { ICONS, agentIdentityBadge } from "./icons.js";
 import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
 import { csel, mountCsels } from "./csel.js";
@@ -222,7 +222,7 @@ async function renderChatDetails() {
         <span class="mem-avatar">${meshAvatarInner(u)}</span>
         <span class="mem-main">
           <div class="mem-name"><span class="nm">${esc(meshDn(u))}</span>${
-            rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+            rec.kind === "agent" ? agentIdentityBadge() : ""}</div>
           <div class="mem-sub">@${esc(u)}</div>
         </span>
         ${admins.includes(u) ? '<span class="owner-chip">Admin</span>' : ""}
@@ -842,7 +842,7 @@ function renderMemberInfo(u) {
     <div class="ci-identity">
       <div class="ci-avatar-wrap"><div class="ci-avatar">${meshAvatarInner(u)}</div></div>
       <div class="ci-name-row"><span class="ci-name">${esc(meshDn(u))}${
-        isAgent ? ' <span class="kind-tag">agent</span>' : ""}</span></div>
+        isAgent ? ` ${agentIdentityBadge()}` : ""}</span></div>
       <div class="ci-sub">@${esc(u)}</div>
       ${identityLines(rec)}
       ${ownerRec ? `<div class="ci-gates">Responsible member: ${
