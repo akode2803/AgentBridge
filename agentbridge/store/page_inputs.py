@@ -83,7 +83,7 @@ def initialize(conn):
         raise
 
 
-def _schema(conn):
+def _message_schema(conn):
     columns = {r[1]: (r[2].upper(), r[5]) for r in conn.execute('PRAGMA table_info(messages)')}
     required = {'chat_id': ('TEXT', 1), 'id': ('TEXT', 2), 'ns': ('INTEGER', 0),
                 'sender': ('TEXT', 0), 'kind': ('TEXT', 0), 'payload': ('TEXT', 0)}
@@ -94,6 +94,10 @@ def _schema(conn):
         ('chat_id', 0, 'BINARY', 1), ('id', 0, 'BINARY', 1), (None, 0, 'BINARY', 0),
     ]:
         raise PageInputsChanged('message_primary_key_changed')
+
+
+def _schema(conn):
+    _message_schema(conn)
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (INDEX,)).fetchone()
     if row is None:
         raise PageInputsChanged('message_index_pending')

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status, overlay_index, page_inputs
+from . import log_position, send_status, overlay_index, page_inputs, membership_suffix
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -335,6 +335,12 @@ class Store:
             (chat_id, int(ns)),
         )
         return [json.loads(row[0]) for row in rows]
+
+    def prepare_membership_suffix_index(self):
+        return membership_suffix.initialize(self._conn())
+
+    def capture_membership_suffix(self, chat_id, after_ns, **limits):
+        return membership_suffix.capture(self.path, chat_id, after_ns, **limits)
 
     def capture_membership_input_position(
         self, chat_id: str,
