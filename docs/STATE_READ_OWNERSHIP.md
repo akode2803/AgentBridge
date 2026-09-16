@@ -13,6 +13,13 @@ warm variant adds eligibility to seed the bounded legacy presentation context.
 checks the complete owner before modifying state, generation, or accepted-state
 events. Session-only admission is no longer supported.
 
+Queue admission runs before the transport callback creates its request ticket.
+Its predicate must use ownership captured before enqueueing, never dereference
+the not-yet-created request. Response adoption still checks the actual dispatched
+ticket. The automatic-refresh regression test executes the production renderer
+with the real read coordinator so both dispatch and stale-owner rejection are
+covered together.
+
 Request IDs enforce **latest accepted** ordering. A pending newer request does
 not invalidate a useful older result; otherwise periodic requests could starve
 slow state folds. Once a newer request is accepted, older completions and their

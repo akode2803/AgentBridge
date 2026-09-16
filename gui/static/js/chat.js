@@ -282,7 +282,8 @@ async function renderChats(force) {
       },
       () => fetchSeq === chatsFetchSeq && routeSeq === App.routeSeq
         && App.page === "chats" && sessionMayApply(sessionTicket)
-        && warmStateRequest.lockEpoch === meshStateSnapshot().lockEpoch,
+        // Admission runs before read() creates warmStateRequest.
+        && stateSnapshot.lockEpoch === meshStateSnapshot().lockEpoch,
     );
   } catch { return; }
   if (openTrace) {
