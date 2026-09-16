@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_pending_send_lifecycle(tmp_path):
-    source = (ROOT / 'gui/static/js/pending-send.js').read_text()
+    source = (ROOT / 'gui/static/js/pending-send.js').read_text(encoding='utf-8')
     for name in ('state', 'util', 'icons', 'markdown'):
         source = source.replace(f'./{name}.js', f'./{name}.mjs')
-    (tmp_path / 'pending.mjs').write_text(source)
+    (tmp_path / 'pending.mjs').write_text(source, encoding='utf-8')
     (tmp_path / 'state.mjs').write_text('''
 export const App = {page:'chats'}, Mesh = {chatId:'room'};
 export const owner = {epoch:1, lockEpoch:0, locked:false, viewer:'alice'};
@@ -21,10 +21,10 @@ export const captureSessionEpoch = () => ({epoch:owner.epoch});
 export const sessionMayApply = s => s.epoch === owner.epoch;
 export const meshStateSnapshot = () => ({...owner});
 export const currentDraftViewer = () => owner.viewer;
-''')
-    (tmp_path / 'util.mjs').write_text('export const esc = x => String(x), timeOnly = x => x;')
-    (tmp_path / 'icons.mjs').write_text('export const ICONS = {clock:"clock",info:"info",file:"file"};')
-    (tmp_path / 'markdown.mjs').write_text('export const md = x => x;')
+''', encoding='utf-8')
+    (tmp_path / 'util.mjs').write_text('export const esc = x => String(x), timeOnly = x => x;', encoding='utf-8')
+    (tmp_path / 'icons.mjs').write_text('export const ICONS = {clock:"clock",info:"info",file:"file"};', encoding='utf-8')
+    (tmp_path / 'markdown.mjs').write_text('export const md = x => x;', encoding='utf-8')
     (tmp_path / 'run.mjs').write_text('''
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
@@ -64,7 +64,7 @@ const locked = P.beginSend('room','lock',[],null);
 owner.lockEpoch++; owner.locked=true; listeners.get('ab:lock-epoch')();
 assert.equal(P.sendMayApply(locked),false); assert.equal(P.pendingSendRows('room').length,0);
 assert.equal(P.beginSend('room','blocked',[],null),null);
-''')
+''', encoding='utf-8')
     result = subprocess.run(['node', str(tmp_path/'run.mjs')], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -72,7 +72,7 @@ assert.equal(P.beginSend('room','blocked',[],null),null);
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_restore_preserves_new_draft_and_never_reuses_attempted_uploads(tmp_path):
     import json
-    source = (ROOT / 'gui/static/js/composer.js').read_text()
+    source = (ROOT / 'gui/static/js/composer.js').read_text(encoding='utf-8')
     restore = source[source.index('export function restoreSendDraft'):].replace('export ', '', 1)
     script = '''
 import assert from 'node:assert/strict';
@@ -88,6 +88,6 @@ assert.equal(draft.reply.id,'quote');
 assert.match(notices.join(''),/reattach/i);
 ''' % json.dumps(restore)
     path = tmp_path/'restore.mjs'
-    path.write_text(script)
+    path.write_text(script, encoding='utf-8')
     result = subprocess.run(['node', str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
