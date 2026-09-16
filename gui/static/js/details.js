@@ -7,7 +7,7 @@ import { api, bindOpenFile } from "./api.js";
 import { md } from "./markdown.js";
 import { csel, mountCsels } from "./csel.js";
 import { confirmModal, openPhotoViewer, openModal, closeModal } from "./modal.js";
-import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins } from "./state.js";
+import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins, captureViewRead, viewReadMayApply, currentDraftViewer } from "./state.js";
 import { mediaThumb } from "./files.js";
 import { V } from "./views.js";
 
@@ -159,7 +159,9 @@ function mountAgentSlots(scope, chatId, fams) {
 }
 
 async function renderChatDetails() {
+  const owner = captureViewRead();
   const ms = Mesh.state;
+  if (!ms?.user || !viewReadMayApply(owner)) return;
   const chatId = Mesh.chatId;
   // an open inline edit (name/description) survives polls — it only closes
   // when saved or when the pane goes away. `.ci-saving` is the brief
@@ -169,10 +171,12 @@ async function renderChatDetails() {
   // chat_info is the LIGHT payload (meta + files + links) — the pane used
   // to pull 1000 full messages on every open and poll
   const data = await api(`/api/mesh/chat_info?id=${encodeURIComponent(chatId)}`);
+  if (!viewReadMayApply(owner) || !Mesh.detailsView) return;
   if (data.error) {
     if (data.error !== "No such chat") toast(data.error, true);   // deleted → quiet
     location.hash = "#/chats"; return;
   }
+  if (!viewReadMayApply(owner, data)) return;
   const meta = data.meta;
   // "can I administer this group" — v2 multi-admin, v1 single-owner (adapter)
   const isOwner = meshIsAdmin(meta);
@@ -760,15 +764,18 @@ function afterGroupAvatar(chatId) {
 // Leaving a group = removing yourself. Shared by the chat-info danger row and
 // the header ⋮ menu (chat.js), so both confirm and behave identically. The
 // caller decides WHEN to show it (member, not owner, not a DM).
-export async function exitGroup(chatId, title) {
-  const ms = Mesh.state;
+export async function exitGroup(chatId, title, viewer = currentDraftViewer()) {
+  const owner = captureViewRead();
+  if (!viewer || !viewReadMayApply(owner)) return;
   if (!await confirmModal({
     title: `Exit "${esc(title)}"?`,
     body: "You can be added back by a member.",
     action: "Exit",
   })) return;
+  if (!viewReadMayApply(owner)) return;
   const r = await api("/api/mesh/remove_member",
-    { chat_id: chatId, username: ms.user });
+    { chat_id: chatId, username: viewer });
+  if (!viewReadMayApply(owner)) return;
   if (r.error) { toast(r.error, true); return; }
   location.hash = "#/chats";
 }

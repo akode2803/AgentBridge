@@ -6,8 +6,9 @@ import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
 import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
+import { endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
+import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { warmContext, selectedChatContext, presentationFromState, sameWarmOperation } from "./warm-context.js";
 import { createLatestRead } from "./latest-read.js";
@@ -203,12 +204,24 @@ async function renderChats(force) {
   // while its one broad-state hydration is still in flight. Forced mutation
   // and route renders retain their existing ownership and may supersede it.
   if (!force && isInitialSelectedViewPending()) return;
-  if (force) cancelInitialSelectedView();
+  if (force) { advanceSelectedView(); cancelInitialSelectedView(); }
+  // Opening info for an already visible room does not need another all-room
+  // fold or transcript render. Its endpoint performs a fresh membership read.
+  if (force && Mesh.detailsView && Mesh.renderedChat === Mesh.chatId
+      && $("#transcript") && Mesh.state?.user && !meshStateSnapshot().locked) {
+    const pane = $("#details-pane");
+    const opening = pane.hidden;
+    pane.hidden = false;
+    if (opening) { pane.classList.remove("slide"); void pane.offsetWidth;
+      pane.classList.add("slide"); }
+    await V.renderChatDetails();
+    return;
+  }
   if (warmOperationSeq >= Number.MAX_SAFE_INTEGER) warmOperationsExhausted = true;
   else warmOperationSeq += 1;
   const operationId = warmOperationSeq;
   const sessionTicket = captureSessionEpoch();
-  const warmStateRequest = captureWarmStateRequest(sessionTicket);
+  let warmStateRequest;
   const fetchSeq = ++chatsFetchSeq;
   const routeSeq = App.routeSeq;
   const opening = !!Mesh.chatId && !$("#transcript");
@@ -261,8 +274,11 @@ async function renderChats(force) {
   let fresh;
   try {
     fresh = await sidebarRead.request(
-      () => api("/api/mesh/state", undefined,
-        {sideEffects: false, timeoutMs: SIDEBAR_TIMEOUT_MS}),
+      () => {
+        warmStateRequest = captureWarmStateRequest(sessionTicket);
+        return api("/api/mesh/state", undefined,
+          {sideEffects: false, timeoutMs: SIDEBAR_TIMEOUT_MS});
+      },
       () => fetchSeq === chatsFetchSeq && routeSeq === App.routeSeq
         && App.page === "chats" && sessionMayApply(sessionTicket)
         && warmStateRequest.lockEpoch === meshStateSnapshot().lockEpoch,
@@ -274,7 +290,7 @@ async function renderChats(force) {
   }
   if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
       || routeSeq !== App.routeSeq) return;
-  if (!fresh || warmStateRequest.lockEpoch !== meshStateSnapshot().lockEpoch) return;
+  if (!fresh || !warmStateRequest || warmStateRequest.lockEpoch !== meshStateSnapshot().lockEpoch) return;
   if (fresh.locked && fresh.error) {
     observeLockState(true);
     document.dispatchEvent(new CustomEvent("ab:locked"));
@@ -569,10 +585,13 @@ export async function renderWarmChat(force, openTrace, warm, route) {
     else restartColdAfterStateInvalidation(operation, force);
     return;
   }
-  const warmStateRequest = captureWarmStateRequest(ticket);
+  let warmStateRequest;
   const statePromise = sidebarRead.request(
-    () => api("/api/mesh/state", undefined, { sideEffects: false,
-      timeoutMs: SIDEBAR_TIMEOUT_MS }),
+    () => {
+      warmStateRequest = captureWarmStateRequest(ticket);
+      return api("/api/mesh/state", undefined, { sideEffects: false,
+        timeoutMs: SIDEBAR_TIMEOUT_MS });
+    },
     () => warmOperationCurrent(operation),
   );
   const guardedAux = (path, fallback) => api(path, undefined, {
@@ -810,7 +829,6 @@ function nextClamp(cur) {
 async function renderMeshChat(force, openTrace = null, prepared = null) {
   const sessionTicket = captureSessionEpoch();
   const renderSeq = ++chatRenderSeq;
-  const ms = prepared?.presentation || Mesh.state;
   const chatId = Mesh.chatId;
   const data = prepared?.data
     || await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
@@ -834,6 +852,9 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     location.hash = "#/chats"; return;
   }
   if (!sessionMayApply(sessionTicket, data)) return;
+  const ms = prepared?.presentation || Mesh.state
+    || presentationFromState(data.presentation);
+  if (!ms || ms.user !== data.me) return;
   const [feedData, runtimeData] = prepared?.warmBase ? [{ feeds: [] }, { tasks: [] }]
     : prepared?.aux || await Promise.all([
       api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
@@ -848,6 +869,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         - (openTrace.chat_fetch_ms || 0));
   }
   if (renderSeq !== chatRenderSeq) return;
+  endLoading($("#content"));
   const feeds = feedData.feeds || [];
   const runtimeTasks = runtimeData.tasks || [];
   const interactive = !prepared?.warmBase;
@@ -925,25 +947,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const parts = [];
   const isDm = isDmLike(meta);   // a self-chat renders exactly like a DM
   let prevFrom = null, prevDay = null;
-  // the E2EE notice pill (R32, WhatsApp pattern) — SYNTHETIC, client-rendered
-  // from state (never a log event: it's derived, and every existing chat must
-  // show it without a migration). It's a STATIC notice everywhere EXCEPT a DM
-  // whose peer isn't verified yet: there it becomes a clickable nudge that
-  // opens the verification dialog directly (a group/self-chat/verified DM has
-  // nothing to act on, so the pill stays inert — no pointer, no click).
-  if (ms.encrypted) {
-    const encPeer = meta.kind === "dm"
-      ? (meta.members || []).find((u) => u !== ms.user) : null;
-    const encRec = encPeer ? ms.users?.[encPeer] || {} : {};
-    const notice = "Messages are end-to-end encrypted. No one outside this chat can read them.";
-    if (encPeer && encRec.key_fp && !encRec.key_verified) {
-      parts.push(["enc", `<button class="info-pill enc-pill" data-verify="${esc(encPeer)}"
-        title="Verify @${esc(encPeer)}'s keys">${ICONS.key}<span>${notice}
-        <span class="enc-cta">Tap to verify @${esc(encPeer)}'s keys.</span></span></button>`]);
-    } else {
-      parts.push(["enc", `<div class="info-pill enc-notice">${ICONS.key}<span>${notice}</span></div>`]);
-    }
-  }
+  // Encryption/key verification lives in chat info, not a late transcript row.
   for (let i = 0; i < data.messages.length; i++) {
     const msg = data.messages[i];
     const day = new Date(msg.ts).toDateString();
@@ -1166,7 +1170,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
   const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;
-  const menuCtx = { isDm, selfChat: meta.kind === "self",
+  const menuCtx = { presentation: ms, isDm, selfChat: meta.kind === "self",
                     canReply: isMember && !meta.archived,
                     starred: starredSet, pins };
   if (Mesh.structKey === structKey && $("#transcript")) {
@@ -1272,7 +1276,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
                : `<div class="chat-head-sub">${esc(memberLine)}</div>`}
       </div>
       <span class="spacer"></span>
-      ${interactive ? `<button class="icon-btn" id="chat-more">${ICONS.more}</button>
+      <button class="icon-btn" id="chat-more" aria-label="Chat options">${ICONS.more}</button>
       <div class="menu" id="chat-menu" hidden>
         <button data-act="info">${ICONS.info} ${isDm ? "Chat info" : "Group info"}</button>
         ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
@@ -1286,7 +1290,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         <button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>
         ${isDm ? `<button data-act="delete" class="danger-item">${ICONS.trash} Delete chat</button>`
           : (isMember && (!isOwner || chatAdmins(meta).length > 1) ? `<button data-act="exit" class="danger-item">${ICONS.exit} Exit group</button>` : "")}
-      </div>` : ""}
+      </div>
     </div>
     <div id="transcript" class="${isDm ? "dm" : ""}">${bubbles}</div>
     <div id="pending-area"></div>
@@ -1387,7 +1391,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
       }
       else if (act === "clear") { if (!b.disabled) clearChatDialog(chatId); }
       else if (act === "delete") deleteChatDialog(chatId, title);
-      else if (act === "exit") V.exitGroup(chatId, title);
+      else if (act === "exit") V.exitGroup(chatId, title, data.me);
       else if (act === "close") location.hash = "#/chats";
       else if (act === "archive") {
         const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
@@ -1437,9 +1441,11 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     renderMeshPending(chatId);
     Mesh.askKey = "";        // fresh chat surface: let the next tick repaint
     startAskPoll();
-    bindOpenFile(document, chatId, ".mesh-att");
-    bindTranscript(tr, chatId, data, menuCtx);
   }
+  // Canonical messages and metadata are already fresh; interaction need not
+  // wait for directory/runtime hydration. Endpoints still authorize actions.
+  bindOpenFile(tr, chatId, ".mesh-att");
+  bindTranscript(tr, chatId, data, menuCtx);
   // seed the reconciler: a fresh paint's children correspond 1:1 to the
   // rows, so the NEXT partial pass can already reuse them (R52)
   if (parts.length && tr.children.length === parts.length) {
@@ -1839,13 +1845,6 @@ function bindTranscript(tr, chatId, data, ctx) {
       if (row) toggleSelect(row.dataset.mid, row, chatId);
       return;
     }
-    // the E2EE notice pill's verify nudge opens the verification dialog
-    // straight away (not the info pane, which lands above the fold)
-    const encBtn = e.target.closest(".enc-pill");
-    if (encBtn) {
-      V.openKeyVerify(encBtn.dataset.verify);
-      return;
-    }
     // owner stops an in-flight agent run (R36) — this chat's run only
     const stopBtn = e.target.closest(".feed-stop");
     if (stopBtn) {
@@ -1972,7 +1971,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
   menu.className = "menu msg-menu";
   const isPinned = !!(ctx.pins || []).some((p) => p.id === msg.id);
   const isStarred = !!(ctx.starred && ctx.starred.has(msg.id));
-  const me = Mesh.state?.user;
+  const me = ctx.presentation?.user || Mesh.state?.user;
   const myRx = Object.entries(msg.reactions || {})
     .find(([, users]) => users.includes(me))?.[0] || "";
   // R44: the responsible member acts on their AGENT's messages — edit,
@@ -2044,7 +2043,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       toast("Message restored for everyone", { check: true });
       refreshChat();
     } else if (act === "reply") {
-      startReply(chatId, msg);
+      startReply(chatId, msg, ctx.presentation);
       // replying needs the composer: a pane that COVERS the chat closes
       if (ctx.fromPane && paneCoversChat()) location.hash = `#/chats/${chatId}`;
     } else if (act === "message") {
@@ -2100,10 +2099,10 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       // WhatsApp: the message opens in the composer (edit bar + check button),
       // not a separate window. A covering pane closes first — the edit rides
       // the draft and the chat render picks it up.
-      startEdit(chatId, msg);
+      startEdit(chatId, msg, ctx.presentation);
       if (ctx.fromPane && paneCoversChat()) location.hash = `#/chats/${chatId}`;
     } else if (act === "info") {
-      messageInfoDialog(chatId, msg);
+      messageInfoDialog(chatId, msg, ctx.presentation);
     }
   });
 }
@@ -2112,7 +2111,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
 // with real Delivered/Read TIMINGS (R33) — a DM collapses to two rows, a group
 // lists Read by / Delivered to / Pending. For OTHERS' messages: the sent time,
 // plus (for an agent) the tasks it ran to produce the reply.
-async function messageInfoDialog(chatId, msg) {
+async function messageInfoDialog(chatId, msg, presentation = Mesh.state) {
   const fetchInfo = () =>
     api(`/api/mesh/message_info?id=${encodeURIComponent(chatId)}`
         + `&msg=${encodeURIComponent(msg.id || "")}`);
@@ -2156,7 +2155,8 @@ async function messageInfoDialog(chatId, msg) {
     } else {
       body = `<div class="mi-row"><span class="mi-label">Sent</span>
         <span class="mi-time">${esc(fmtWhen(r.ts))}</span></div>`;
-      const isAgent = Mesh.state?.users?.[r.from]?.kind === "agent";
+      const sender = presentation?.users?.[r.from];
+      const isAgent = (sender?.display_kind || sender?.kind) === "agent";
       if (isAgent) {
         const tasks = r.tasks || [];
         body += `<div class="mi-sec"><span class="mi-sec-ic">${ICONS.bot}</span>Tasks run</div>`;
@@ -2332,9 +2332,12 @@ async function renderNewChat() {
         <p><b>New chat</b> — name it in the sidebar and pick the agents.</p>
       </div>
     </div>`;
+  if (Mesh.state?.available && Mesh.state?.user
+      && viewReadMayApply(captureViewRead(), Mesh.state)) renderSidebar();
+  const request = captureMeshStateRead(sessionTicket);
   const fresh = await api("/api/mesh/state");
   if (App.page !== "new" || routeSeq !== App.routeSeq) return;
-  if (!applyMeshState(sessionTicket, fresh)) return;
+  if (!applyMeshState(sessionTicket, fresh, request)) return;
   const ms = Mesh.state;
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
   renderSidebar();
@@ -2536,9 +2539,9 @@ function bulkDelete(chatId) {
   if (!ids.length) return;
   const tr = $("#transcript");
   const msgs = tr?._msgs;
-  const me = Mesh.state?.user;
+  const me = tr?._ctx?.presentation?.user || Mesh.state?.user;
   const selfChat = !!tr?._ctx?.selfChat;
-  const actsFor = (m) => m.from === me
+  const actsFor = (m) => m.mine || m.from === me
     || (Mesh.state?.users?.[m.from]?.kind === "agent"
         && (Mesh.state.users[m.from].owners || []).includes(me));
   const canEveryone = !selfChat && ids.every((id) => {
@@ -2718,8 +2721,10 @@ V.muteDialog = muteDialog;   // reused by the sidebar row menu
 // Re-fetch mesh state and repaint the chat-list sidebar (used after a sidebar
 // mutation that isn't tied to opening a chat — pin, mark-unread, delete-for-me).
 async function refreshChatListSidebar(ticket = captureSessionEpoch()) {
+  if (!sessionMayApply(ticket)) return false;
+  const request = captureMeshStateRead(ticket);
   const fresh = await api("/api/mesh/state");
-  if (!applyMeshState(ticket, fresh)) return false;
+  if (!applyMeshState(ticket, fresh, request)) return false;
   const box = $("#side-chats");
   if (box) box.dataset.key = "";
   renderSidebar();

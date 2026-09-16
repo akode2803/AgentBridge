@@ -11,7 +11,8 @@ from __future__ import annotations
 import re
 
 from ..core.timekit import utcnow_iso
-from .routing import authed
+from .context import session_read_binding
+from .routing import authed, authed_read_token
 from .serialize import chat_json, message_json
 
 __all__ = ["GET", "POST"]
@@ -224,8 +225,8 @@ def mute(app, req, mesh) -> dict:
 
 
 # ------------------------------------------------------- chat-info + feeds
-@authed
-def chat_info(app, req, mesh) -> dict:
+@authed_read_token
+def chat_info(app, req, mesh, token) -> dict:
     """The info pane: meta + media/links walk in one pass (v1 shape)."""
     from .api_chats import _created_by, _created_iso
 
@@ -242,6 +243,7 @@ def chat_info(app, req, mesh) -> dict:
             links.append({"url": url, "from": m.from_, "ts": m.ts})
     mine = mesh.my_state(chat_id)
     return {
+        "session_binding": session_read_binding(token),
         # the info pane's footer + danger card need what the transcript meta
         # has: the chat's birth (R46 — the footer rendered "created by ,
         # never" without them) and the viewer's archived flag

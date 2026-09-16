@@ -3,9 +3,10 @@
 
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
+import { beginLoading, endLoading } from "./loading.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
-         applyMeshState, observeLockState, isInitialSelectedViewReady,
+         applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState, isInitialSelectedViewReady,
          isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { renderSidebar, clearSidebar, syncSidebarSelection } from "./sidebar.js";
@@ -260,8 +261,9 @@ async function refreshOnce(rerender) {
   // user actually shows up.
   else if (App.page === "chats" && Mesh.state && !Mesh.state.user) {
     const ticket = captureSessionEpoch();
+    const request = captureMeshStateRead(ticket);
     const fresh = await api("/api/mesh/state");
-    if (!fresh.error && fresh.user && applyMeshState(ticket, fresh)) {
+    if (!fresh.error && fresh.user && applyMeshState(ticket, fresh, request)) {
       V.renderChats(true);
     }
   }
@@ -276,8 +278,9 @@ async function refreshOnce(rerender) {
     const inSide = ae && $("#side-chats")?.contains(ae);
     if (inSide && ae.tagName === "INPUT" && ae.value) return;
     const hadFocus = inSide && ae.id ? ae.id : null;
+    const request = captureMeshStateRead(ticket);
     const fresh = await api("/api/mesh/state");
-    if (!fresh.error && App.page === "new" && applyMeshState(ticket, fresh)) {
+    if (!fresh.error && App.page === "new" && applyMeshState(ticket, fresh, request)) {
       renderSidebar();
       if (hadFocus) document.getElementById(hadFocus)?.focus();
     }
@@ -305,6 +308,7 @@ const PAGES = {
 };
 
 function route() {
+  ["#content", "#side-chats", "#details-pane"].forEach((id) => endLoading($(id)));
   sessionRoutePending = false;
   cancelInitialSelectedView();
   App.routeSeq = (App.routeSeq || 0) + 1;
@@ -362,8 +366,19 @@ function route() {
   $("#rail-chats").classList.toggle("active", page === "chats" || page === "new");
   $("#rail-account").classList.toggle("active", page === "settings");
   renderChrome();
+  // Existing accepted display state can repaint the sidebar immediately;
+  // canonical content and mutations still make their own fresh reads.
+  if (Mesh.state?.available && Mesh.state?.user
+      && viewReadMayApply(captureViewRead(), Mesh.state)) renderSidebar();
   syncSidebarSelection();
-  return Promise.resolve(PAGES[App.page]()).catch(() => {});
+  const routeSeq = App.routeSeq;
+  const current = () => routeSeq === App.routeSeq;
+  const host = page === "chats" && Mesh.detailsView ? $("#details-pane")
+    : page === "new" ? $("#side-chats") : $("#content");
+  const finish = beginLoading(host, { current,
+    label: page === "new" ? "Updating contacts…"
+      : Mesh.detailsView ? "Loading chat info…" : "Loading…" });
+  return Promise.resolve(PAGES[App.page]()).catch(() => {}).finally(finish);
 }
 
 window.addEventListener("hashchange", route);

@@ -11,18 +11,17 @@
 import { toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn, meshAvatarInner, meshChatAvatarInner,
-         captureSessionEpoch, applyMeshState } from "./state.js";
+import { openModal, closeModal, bindModalFilter, beginModalRead, captureModalRead, modalReadMayApply } from "./modal.js";
+import { Mesh, meshDn, meshAvatarInner, meshChatAvatarInner } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
 // ids: source-message ids (already in transcript/chronological order).
 async function openForwardPicker(srcChatId, ids) {
   if (!ids || !ids.length) return;
-  const ticket = captureSessionEpoch();
+  const ticket = beginModalRead();
   const ms = await api("/api/mesh/state");
-  if (!applyMeshState(ticket, ms)) return;
+  if (!modalReadMayApply(ticket, ms) || ms.error) return;
   const me = ms.user;
 
   // recent chats = the chats you can post to, minus the source itself. They
@@ -40,17 +39,17 @@ async function openForwardPicker(srcChatId, ids) {
   const chatRow = (c) => {
     const dm = c.kind === "dm";
     const other = dm ? (c.members || []).find((u) => u !== me) : null;
-    const name = dm ? meshDn(other) : (c.name || "Chat");
+    const name = dm ? meshDn(other, ms) : (c.name || "Chat");
     const n = (c.members || []).length;
     const sub = dm ? `@${other}` : `${n} member${n === 1 ? "" : "s"}`;
     return pickerRow({ value: `chat:${c.id}`, initial: name, name, sub,
-      avatar: meshChatAvatarInner(c) });
+      avatar: meshChatAvatarInner(c, ms) });
   };
   const contacts = Object.values(ms.users).filter((u) =>
     u.username !== me && !u.departed && !dmPartners.has(u.username));
   const contactRow = (u) => pickerRow({ value: `user:${u.username}`,
     initial: u.display, name: u.display, sub: `@${u.username}`,
-    tag: u.kind === "agent" ? "agent" : "", avatar: meshAvatarInner(u.username) });
+    tag: u.kind === "agent" ? "agent" : "", avatar: meshAvatarInner(u.username, ms) });
 
   const listHtml = pickerSection("Recent chats", chats.map(chatRow).join(""))
     + pickerSection("Other contacts", contacts.map(contactRow).join(""));
@@ -68,7 +67,9 @@ async function openForwardPicker(srcChatId, ids) {
   box.querySelector("#fw-close").addEventListener("click", closeModal);
   bindModalFilter(box);
 
+  const actionOwner = captureModalRead();
   bindPicker(box, async (values) => {
+    if (!modalReadMayApply(actionOwner) || !box.isConnected) return;
     if (!values.length) return;
     const go = box.querySelector(".pf-go");
     if (go) go.disabled = true;
@@ -77,6 +78,7 @@ async function openForwardPicker(srcChatId, ids) {
     for (const v of values) {
       if (v.startsWith("chat:")) { targets.push(v.slice(5)); continue; }
       const r = await api("/api/mesh/create_dm", { username: v.slice(5) });
+      if (!modalReadMayApply(actionOwner) || !box.isConnected) return;
       if (r.error || !r.chat) { toast(r.error || "Could not open a chat", true);
         if (go) go.disabled = false; return; }
       targets.push(r.chat.id);
@@ -86,6 +88,7 @@ async function openForwardPicker(srcChatId, ids) {
     for (const mid of ids) {
       const r = await api("/api/mesh/forward",
         { chat_id: srcChatId, msg_id: mid, targets: uniq });
+      if (!modalReadMayApply(actionOwner) || !box.isConnected) return;
       if (r.error) { toast(r.error, true); if (go) go.disabled = false; return; }
     }
     closeModal();

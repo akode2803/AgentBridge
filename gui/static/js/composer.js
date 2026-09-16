@@ -92,11 +92,11 @@ export function renderReplyArea(chatId, context = Mesh.state) {
 
 // menu "Reply" lands here: remember what's being replied to, show the bar,
 // put the caret in the box
-export function startReply(chatId, msg) {
+export function startReply(chatId, msg, context = Mesh.state) {
   const draft = meshDraft(chatId);
   draft.editing = null;   // reply replaces an edit-in-progress
   draft.reply = { id: msg.id, from: msg.from, body: msg.body || "" };
-  renderReplyArea(chatId);
+  renderReplyArea(chatId, context);
   syncSendState(chatId);
   $("#mesh-body")?.focus();
 }
@@ -106,7 +106,7 @@ export function startReply(chatId, msg) {
 // interrupted draft text is remembered and restored after save/cancel. The
 // composer may not exist yet (menu opened from a covering pane) — the draft
 // carries everything and the next render picks it up.
-export function startEdit(chatId, msg) {
+export function startEdit(chatId, msg, context = Mesh.state) {
   const draft = meshDraft(chatId);
   draft.reply = null;
   draft.editing = { id: msg.id, body: msg.body || "", prev: draft.body || "" };
@@ -119,7 +119,7 @@ export function startEdit(chatId, msg) {
     body.focus();
     body.setSelectionRange(body.value.length, body.value.length);
   }
-  renderReplyArea(chatId);
+  renderReplyArea(chatId, context);
   syncSendState(chatId);
 }
 

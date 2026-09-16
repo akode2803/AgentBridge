@@ -11,7 +11,7 @@ import { App, Mesh, Settings, RULE_LABELS, beginRestartIntent,
          clearRestartIntent, beginSessionTransition,
          meshDn, meshAvatar, meshAvatarInner, chatDisplay,
          renderChrome, captureSessionEpoch, sessionMayApply,
-         applyMeshState } from "./state.js";
+         applyMeshState, captureMeshStateRead, viewReadMayApply } from "./state.js";
 import { notifyPrefs } from "./notify.js";
 import { renderSidebar } from "./sidebar.js";
 import { V } from "./views.js";
@@ -132,15 +132,17 @@ function startSettingsPoll() {
     }
     try {
       const sessionTicket = captureSessionEpoch();
+      const request = captureMeshStateRead(sessionTicket);
       const ms = await api("/api/mesh/state");
       if (ms.error || App.page !== "settings" || !liveData
           || !sessionMayApply(sessionTicket, ms)) return;
+      if (!applyMeshState(sessionTicket, ms, request)) return;
       const section = Settings.section === "profile" ? "account"
         : (Settings.section || "account");
       let me = null;
       if (section === "account" || section === "agents" || section === "privacy") {
         const r = await api("/api/mesh/me");
-        if (!sessionMayApply(sessionTicket)) return;
+        if (!viewReadMayApply(request)) return;
         if (!r.error) me = r;
       }
       const fresh = liveSlice(ms, me);
@@ -148,14 +150,14 @@ function startSettingsPoll() {
       // fetch error must not become a 4s re-render loop
       for (const agent of Object.keys(liveData.harness)) {
         const r = await api(`/api/mesh/agent_harness?agent=${encodeURIComponent(agent)}`);
-        if (!sessionMayApply(sessionTicket)) return;
+        if (!viewReadMayApply(request)) return;
         fresh.harness[agent] = r.error ? liveData.harness[agent] : harnessSlice(r);
       }
-      if (!applyMeshState(sessionTicket, ms)) return;
       if (JSON.stringify(fresh) === JSON.stringify(liveData)) return;
       const box = $("#content");
       const top = box ? box.scrollTop : 0;
       await renderSettings();           // re-baselines liveData itself
+      if (!viewReadMayApply(request)) return;
       // V60: the agents panels fill in ASYNC after the swap and grow the
       // page above the fold — re-pin the position until they settle (the
       // mid-scroll guard above means no user is scrolling right now)
@@ -332,18 +334,20 @@ async function renderSettings() {
   let ms = Mesh.state;
   const hadState = !!ms;
   if (!ms) {
+    const request = captureMeshStateRead(sessionTicket);
     const fresh = await api("/api/mesh/state");
     if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
-    if (!applyMeshState(sessionTicket, fresh)) return;
+    if (!applyMeshState(sessionTicket, fresh, request)) return;
     ms = fresh;
   }
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
   if (hadState) {
     const backgroundTicket = captureSessionEpoch();
+    const backgroundRequest = captureMeshStateRead(backgroundTicket);
     api("/api/mesh/state").then((fresh) => {
       if (fresh && !fresh.error && App.page === "settings"
           && routeSeq === App.routeSeq
-          && applyMeshState(backgroundTicket, fresh)) renderSidebar();
+          && applyMeshState(backgroundTicket, fresh, backgroundRequest)) renderSidebar();
     }).catch(() => {});
   }
   renderSidebar();
@@ -1443,8 +1447,9 @@ async function renderSettings() {
       if (!sessionMayApply(sessionTicket)) return;
       if (r.error) { toast(r.error, true); return; }
       toast(`@${agent} deleted`, { check: true });
+      const request = captureMeshStateRead(sessionTicket);
       const fresh = await api("/api/mesh/state");
-      if (!applyMeshState(sessionTicket, fresh)) return;
+      if (!applyMeshState(sessionTicket, fresh, request)) return;
       renderSettings();
     });
   });

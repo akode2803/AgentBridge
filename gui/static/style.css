@@ -2853,3 +2853,17 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   padding: 5px 14px; cursor: pointer; margin: -3px -6px -3px 2px;
 }
 #toast .toast-act:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+/* Delayed regional progress never inserts a transcript row or shifts layout. */
+.loading-host { position: relative; }
+.loading-status {
+  position: absolute; top: 12px; right: 12px; z-index: 8;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 10px; border-radius: 16px; pointer-events: none;
+  background: var(--bg-alt); color: var(--text-dim); font-size: 12px;
+  box-shadow: 0 1px 5px #0002;
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading-status .spin-sm { animation: none; }
+  #side-chats.slide, #details-pane.slide, .chat-in { animation: none; }
+}
