@@ -34,6 +34,7 @@ import hashlib
 import copy
 import json
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,10 @@ from .. import crypto
 from ..core.config import DEFAULT_HOME
 from ..core.timekit import utcnow_iso
 from .pin_storage import (
+    MAX_PENDING_BYTES,
+    MAX_PENDING_OPS,
+    _operation_dict,
+    _validate_operation,
     PendingAck,
     PendingAlert,
     PendingForget,
@@ -145,6 +150,23 @@ def evaluate_pin(
     return PinDecision("alert", pinned_sign, pinned_agree)
 
 
+@dataclass(frozen=True)
+class PinResolution:
+    sign_pub: str
+    agree_pub: str
+    changed: bool
+
+
+@dataclass(frozen=True)
+class EffectivePinView:
+    owner: str
+    path: str
+    durable_json: str
+    present: bool
+    effective_json: str
+    pending: tuple
+
+
 class KeyPinStore:
     """One pin file per (machine, mesh root); every identity on the machine
     shares it (the trusted keys are the same truth for all of them). Writes
@@ -154,6 +176,7 @@ class KeyPinStore:
     def __init__(self, home: Path | None, root_key: str) -> None:
         tag = hashlib.sha1(str(root_key).encode()).hexdigest()[:12]
         self.path = (home or DEFAULT_HOME) / "pins" / f"{tag}.json"
+        self._observation_owner = uuid.uuid4().hex
         self._lock = threading.Lock()
         self._storage = PinFileCoordinator(self.path)
         with self._lock, self._view():
@@ -172,50 +195,120 @@ class KeyPinStore:
         pin along a validly signed history; otherwise the pin wins and a
         mismatch is recorded."""
         with self._lock, self._view() as doc:
-            pin = doc["pins"].get(name)
-            history_json = None
-            if pin and sign_pub and (
-                pin.get("sign_pub"), pin.get("agree_pub")
-            ) != (sign_pub, agree_pub):
-                history_json = serialize_history(history)
-                decision = evaluate_pin(
-                    name, pin, sign_pub, agree_pub, json.loads(history_json),
-                )
-            else:
-                decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
-            if decision.action == "first_seen":
-                operation = PendingPin(
-                    "first_seen", name, None, None, sign_pub, agree_pub,
-                    utcnow_iso(), "[]",
-                )
-                candidate = copy.deepcopy(doc)
-                self._apply(operation, candidate)
+            return self._trusted_locked(doc, name, sign_pub, agree_pub, history)
+
+    def resolve_observed(self, name, sign_pub, agree_pub, history=None) -> PinResolution:
+        """Canonical pin resolution plus a restart signal, never an authority lease."""
+        with self._lock:
+            initial_pending = tuple(self._storage.pending)
+            with self._view() as doc:
+                before = canonical_json(doc)
+                pair = self._trusted_locked(doc, name, sign_pub, agree_pub, history)
+                after_doc = dict(doc, pins=self._pins, alerts=self._alerts)
+                after = canonical_json(after_doc)
+                changed = before != after or initial_pending != self._storage.pending
+                return PinResolution(*pair, changed)
+
+    def _trusted_locked(self, doc, name, sign_pub, agree_pub, history):
+        pin = doc["pins"].get(name)
+        history_json = None
+        if pin and sign_pub and (
+            pin.get("sign_pub"), pin.get("agree_pub")
+        ) != (sign_pub, agree_pub):
+            history_json = serialize_history(history)
+            decision = evaluate_pin(
+                name, pin, sign_pub, agree_pub, json.loads(history_json),
+            )
+        else:
+            decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
+        if decision.action == "first_seen":
+            operation = PendingPin(
+                "first_seen", name, None, None, sign_pub, agree_pub,
+                utcnow_iso(), "[]",
+            )
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
+            return sign_pub, agree_pub
+        if decision.action == "rotate":
+            operation = PendingPin(
+                "rotate", name, pin.get("sign_pub", ""),
+                pin.get("agree_pub", ""), sign_pub, agree_pub,
+                utcnow_iso(), history_json or "[]",
+            )
+            candidate = copy.deepcopy(doc)
+            self._apply(operation, candidate)
+            self._commit(candidate, operation)
+        elif decision.action == "alert":
+            if any(
+                alert["name"] == name
+                and alert["seen_sign_pub"] == sign_pub
+                for alert in doc["alerts"]
+            ):
+                return decision.sign_pub, decision.agree_pub
+            operation = PendingAlert(
+                name, pin.get("sign_pub", ""), pin.get("agree_pub", ""),
+                sign_pub, agree_pub, utcnow_iso(),
+            )
+            candidate = copy.deepcopy(doc)
+            if self._apply(operation, candidate):
                 self._commit(candidate, operation)
-                return sign_pub, agree_pub
-            if decision.action == "rotate":
-                operation = PendingPin(
-                    "rotate", name, pin.get("sign_pub", ""),
-                    pin.get("agree_pub", ""), sign_pub, agree_pub,
-                    utcnow_iso(), history_json or "[]",
-                )
-                candidate = copy.deepcopy(doc)
-                self._apply(operation, candidate)
-                self._commit(candidate, operation)
-            elif decision.action == "alert":
-                if any(
-                    alert["name"] == name
-                    and alert["seen_sign_pub"] == sign_pub
-                    for alert in doc["alerts"]
-                ):
-                    return decision.sign_pub, decision.agree_pub
-                operation = PendingAlert(
-                    name, pin.get("sign_pub", ""), pin.get("agree_pub", ""),
-                    sign_pub, agree_pub, utcnow_iso(),
-                )
-                candidate = copy.deepcopy(doc)
-                if self._apply(operation, candidate):
-                    self._commit(candidate, operation)
-            return decision.sign_pub, decision.agree_pub
+        return decision.sign_pub, decision.agree_pub
+
+    def _effective_view_locked(self, durable, present):
+        # Called with the pin thread and file locks held, before any SQLite lock.
+        view = copy.deepcopy(durable)
+        pending = tuple(self._storage.pending)
+        try:
+            for operation in pending:
+                self._apply(operation, view)
+        except Exception as exc:
+            self._storage.conflicted = True
+            raise PinStoreUnavailable("pin_conflict") from exc
+        validate_output(view)
+        return EffectivePinView(
+            self._observation_owner, str(self.path.resolve()), canonical_json(durable),
+            present, canonical_json(view), pending,
+        )
+
+    def capture_effective_view(self) -> EffectivePinView:
+        """Observe durable plus accepted pending state without flushing or writing."""
+        with self._lock, self._storage.locked() as (doc, present):
+            return self._effective_view_locked(doc, present)
+
+    @contextmanager
+    def locked_matching_view(self, expected):
+        """Keep pin locks through a caller's final transaction; never mutate pins.
+
+        Replay/validation finishes before yielding. The caller must acquire its
+        SQLite transaction only inside this context, and discard on false.
+        """
+        if type(expected) is not EffectivePinView:
+            raise TypeError("expected EffectivePinView")
+        owner, path, durable, present, effective, pending = (
+            expected.owner, expected.path, expected.durable_json,
+            expected.present, expected.effective_json, expected.pending,
+        )
+        if (any(type(v) is not str or len(v) > MAX_PENDING_BYTES
+                for v in (owner, path, durable, effective))
+                or type(present) is not bool or type(pending) is not tuple
+                or len(pending) > MAX_PENDING_OPS):
+            raise ValueError("invalid effective pin view")
+        # Copy and bound pending values before holding any lock; comparison
+        # inside the lock must not invoke caller-controlled equality methods.
+        detached = []
+        used = 2
+        for operation in pending:
+            copied_operation = _validate_operation(operation)
+            used += len(canonical_json(_operation_dict(copied_operation)).encode()) + 1
+            if used > MAX_PENDING_BYTES:
+                raise PinStoreUnavailable("pending_exhausted")
+            detached.append(copied_operation)
+        copied_pending = tuple(detached)
+        copied = EffectivePinView(owner, path, durable, present, effective, copied_pending)
+        with self._lock, self._storage.locked() as (doc, present):
+            current = self._effective_view_locked(doc, present)
+            yield current == copied
 
     def _chain_ok(
         self, name: str, pinned_sign: str, sign_pub: str, agree_pub: str,

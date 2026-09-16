@@ -113,3 +113,18 @@ DELETE trigger. Explicit collision guards invalidate the removed row's target.
 Counter validation uses trigger RAISE(ABORT), because an outer OR IGNORE can
 suppress ordinary constraint failures. Tests exercise moved targets, malformed
 and exhausted counters, source changes during background publication and ABA.
+
+## R211: preserve side-effect order when replacing a canonical fold
+
+A sorted proposal list from a completed pure evaluation is insufficient for a
+canonical resolver that publishes recursive dependencies before continuing its
+outer fold. A later missing dependency can prevent the pure result from returning
+after the canonical path already made valid inner progress. A separate work
+entry point now stops at the first postorder proposal; publication requires a
+fresh shared authority fence and always forces recapture. Full diagnostic
+semantics remain separate. Review caught this before serving activation.
+
+When binding pending-operation tokens, copy/validate each original once, then
+budget and compare that detached value. Measuring originals before a second copy
+allows mutation between passes to invalidate the aggregate bound. Charge the
+copied operations incrementally before entering the final lock interval.

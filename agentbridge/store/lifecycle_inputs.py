@@ -257,3 +257,36 @@ def matches_subject(conn, path, expected):
         copied.append(documents.SerializedDocumentRecord(name, payload, deleted))
     wanted = SubjectSelection(position, subject, prefix, tuple(copied), size)
     return capture_subject(conn, path, position, subject) == wanted
+
+
+def publish_head_in_transaction(conn, path, expected, proposed_json, fetched_ns):
+    """CAS one prepared raw proposal without owning transaction completion.
+
+    The mesh owner validates/canonicalizes the proposal before taking locks and
+    holds its pin/mirror/input/clock fence around this write. This primitive does
+    not authorize the proposal. Caller uses BEGIN IMMEDIATE and rolls back any
+    changed final fence; no result derived before a successful write is served.
+    """
+    path = _transaction(conn, path)
+    wanted = heads._copy_expected(expected, path)
+    if type(proposed_json) is not str or len(proposed_json) > heads.MAX_BYTES:
+        raise ValueError('invalid prepared head proposal')
+    if len(proposed_json.encode()) > heads.MAX_BYTES:
+        raise OverflowError('prepared head proposal exceeds byte budget')
+    if type(fetched_ns) is not int or not 0 <= fetched_ns <= heads.MAX_SQLITE_INTEGER:
+        raise ValueError('invalid prepared head timestamp')
+    current = capture_heads(conn, path, (wanted.subject,)).entries[0]
+    if current != wanted:
+        return False
+    if current.payload_json == proposed_json:
+        return True
+    name = heads.PREFIX + wanted.subject
+    if current.payload_json is None:
+        conn.execute('INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)',
+                     (name, proposed_json, fetched_ns))
+    else:
+        changed = conn.execute('UPDATE docs SET payload=?,fetched_ns=? WHERE path=?',
+                               (proposed_json, fetched_ns, name))
+        if changed.rowcount != 1:
+            raise LifecycleInputsUnavailable('selected head disappeared')
+    return True

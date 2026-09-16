@@ -63,6 +63,43 @@ class LifecycleEvaluation:
     consumed_subjects: tuple[str, ...]
     now_ns: int
     next_recheck_ns: int | None = None
+    next_proposal: HeadProposal | None = None
+
+
+@dataclass(frozen=True)
+class LifecycleWork:
+    complete: bool
+    result: LifecycleEvaluation
+
+
+class _ProposalReady(Exception):
+    pass
+
+
+def evaluate_lifecycle_work(inputs, subject, *, limits=LifecycleLimits()):
+    """Stop at the first postorder publication, before evaluating outer work.
+
+    A proposal is raw work requiring the coordinator's full authority fence.
+    Its effective state must never be handed out; publish once, then recapture.
+    Existing full diagnostic evaluation keeps its original complete-fold API.
+    """
+    captured, root, bounded = _copy_inputs(inputs, subject, limits)
+    evaluator = _Evaluator(captured, bounded)
+    evaluator.stop_on_proposal = True
+    complete = True
+    effective = None
+    try:
+        effective = evaluator.evaluate(root, depth=0)
+    except _ProposalReady:
+        complete = False
+    result = LifecycleEvaluation(
+        _canonical(effective),
+        tuple(evaluator.proposals[name] for name in sorted(evaluator.proposals)),
+        tuple(sorted(evaluator.consumed_accounts)),
+        tuple(sorted(evaluator.consumed_subjects)), captured.now_ns,
+        evaluator.next_recheck_ns(), next(iter(evaluator.proposals.values()), None),
+    )
+    return LifecycleWork(complete, result)
 
 
 class LifecycleInputsIncomplete(LifecycleUnavailable):
@@ -98,6 +135,7 @@ def evaluate_lifecycle(
         tuple(sorted(evaluator.consumed_subjects)),
         captured.now_ns,
         next_recheck_ns,
+        next(iter(evaluator.proposals.values()), None),
     )
 
 
@@ -110,6 +148,7 @@ class _Evaluator:
         self.consumed_accounts: set[str] = set()
         self.consumed_subjects: set[str] = set()
         self.proposals: dict[str, HeadProposal] = {}
+        self.stop_on_proposal = False
         self.memo: dict[str, dict | None] = {}
         self.stack: set[str] = set()
 
@@ -212,6 +251,8 @@ class _Evaluator:
                 self.proposals[subject] = HeadProposal(
                     subject, evidence.retained_json, proposed,
                 )
+                if self.stop_on_proposal:
+                    raise _ProposalReady
         return current
 
     def _account(self, name: str) -> AccountAuthorityFact | None:
@@ -409,8 +450,10 @@ __all__ = [
     "CapturedLifecycleInputs",
     "HeadProposal",
     "LifecycleEvaluation",
+    "LifecycleWork",
     "LifecycleInputsIncomplete",
     "LifecycleLimits",
     "SubjectEvidence",
     "evaluate_lifecycle",
+    "evaluate_lifecycle_work",
 ]
