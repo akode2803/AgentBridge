@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+from pathlib import Path
 from dataclasses import dataclass
 
 from ..store import document_observation as documents, lifecycle_inputs
@@ -48,6 +50,10 @@ def _source(chat, mirror):
 
 def _copy_receipt(transport, store, receipt):
     _observe(observation._owner, transport)
+    return _copy_source_receipt(store, receipt)
+
+
+def _copy_source_receipt(store, receipt):
     if type(receipt) is not AuthoritySourceReceipt:
         raise TypeError('expected AuthoritySourceReceipt')
     chat, position, mirror = receipt.chat_id, receipt.position, receipt.mirror
@@ -130,3 +136,57 @@ def capture_authority_subject(transport, store, receipt, subject, **limits):
         raise AuthoritySourceUnavailable('authority_source_changed')
     _match_mirror(transport, receipt)
     return result
+
+
+def matches_inputs_in_transaction(conn, store, expected, *, max_bytes=4 * 1024 * 1024):
+    """Compare bounded raw rows within the caller's final Store transaction.
+
+    Live mirror/policy, pins and membership remain separate owner fences. This
+    helper neither acquires those locks nor parses/authorizes document payloads.
+    """
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('authority matching requires an active transaction')
+    actual = conn.execute('PRAGMA database_list').fetchone()[2]
+    if not actual or Path(actual).resolve() != Path(store.path).resolve():
+        raise ValueError('authority connection belongs to another database')
+    observation._limit(max_bytes, 4 * 1024 * 1024)
+    if type(expected) is not AuthorityInputs:
+        raise TypeError('expected AuthorityInputs')
+    receipt, policy, captured = expected.receipt, expected.policy, expected.documents
+    receipt = _copy_source_receipt(store, receipt)
+    policy = observation._copy_lookup_policy(policy)
+    if policy.chat_id != receipt.chat_id or policy.mirror != receipt.mirror:
+        raise ValueError('authority policy binding mismatch')
+    if type(captured) is not documents.DocumentObservation:
+        raise TypeError('expected DocumentObservation')
+    position, records = captured.position, captured.records
+    position = documents._validate_expected(position, store.path)
+    modes = (policy.meta,) + policy.accounts
+    if position != receipt.position or type(records) is not tuple or len(records) != len(modes):
+        raise ValueError('authority document binding mismatch')
+    copied = []
+    used = 0
+    for record, (path, mode) in zip(records, modes):
+        if type(record) is not documents.SerializedDocumentRecord:
+            raise ValueError('invalid authority record')
+        name, payload, deleted = record.path, record.payload_json, record.deleted
+        if (type(name) is not str or name != path or type(deleted) is not bool
+                or mode == 'online_readthrough_required'
+                or deleted != (mode != 'present')
+                or (deleted and payload is not None)
+                or (not deleted and type(payload) is not str)):
+            raise ValueError('invalid authority record policy')
+        # Cheap character lower bound precedes UTF-8 allocation.
+        if len(name) + (len(payload) if payload is not None else 0) > max_bytes - used:
+            raise OverflowError('authority comparison byte budget')
+        used += len(name.encode()) + (len(payload.encode()) if payload is not None else 0)
+        if used > max_bytes:
+            raise OverflowError('authority comparison byte budget')
+        copied.append(documents.SerializedDocumentRecord(name, payload, deleted))
+    wanted = documents.DocumentObservation(position, tuple(copied))
+    if documents._capture_position(conn, store.path, position.source_id) != position:
+        return False
+    if not position.initialized:
+        return False
+    return documents._capture_selected(conn, store.path, position,
+        tuple(path for path, _mode in modes), max_documents=129, max_bytes=max_bytes) == wanted

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .mirror_observation import MirrorExpectedPosition, _valid_path
@@ -199,25 +200,29 @@ def capture_lookup_policy(transport, chat_id, account_names=(), *, expected=None
         expected = MirrorExpectedPosition(expected.root_identity, expected.cache_identity,
                                           expected.instance_nonce, expected.revision)
     with transport._lock:
-        position = _position_locked(transport)
-        if expected is not None and position != expected:
-            raise AuthorityObservationUnavailable('authority_mirror_changed')
-        statuses = []
-        for path in paths:
-            if path in transport._docs:
-                mode = 'present'
-            elif path in transport._neg:
-                mode = 'known_negative'
-            elif transport._health_state != 'online':
-                mode = 'offline_absent'
-            else:
-                mode = 'online_readthrough_required'
-            statuses.append((path, mode))
-        return LookupPolicy(chat, position, tuple(statuses),
-                            (meta, 'present' if meta in transport._docs else 'mirror_absent'))
+        return _lookup_policy_locked(transport, chat, paths, meta, expected)
 
 
-def matches_lookup_policy(transport, expected):
+def _lookup_policy_locked(transport, chat, paths, meta, expected):
+    position = _position_locked(transport)
+    if expected is not None and position != expected:
+        raise AuthorityObservationUnavailable('authority_mirror_changed')
+    statuses = []
+    for path in paths:
+        if path in transport._docs:
+            mode = 'present'
+        elif path in transport._neg:
+            mode = 'known_negative'
+        elif transport._health_state != 'online':
+            mode = 'offline_absent'
+        else:
+            mode = 'online_readthrough_required'
+        statuses.append((path, mode))
+    return LookupPolicy(chat, position, tuple(statuses),
+                        (meta, 'present' if meta in transport._docs else 'mirror_absent'))
+
+
+def _copy_lookup_policy(expected):
     if type(expected) is not LookupPolicy:
         raise ValueError('invalid lookup policy')
     chat, mirror, accounts, meta = expected.chat_id, expected.mirror, expected.accounts, expected.meta
@@ -227,16 +232,46 @@ def matches_lookup_policy(transport, expected):
         raise ValueError('invalid lookup mirror')
     mirror = MirrorExpectedPosition(mirror.root_identity, mirror.cache_identity,
                                     mirror.instance_nonce, mirror.revision)
-    names = []
+    chat = _part(chat)
+    paths = []
     for item in accounts:
         if (type(item) is not tuple or len(item) != 2 or any(type(v) is not str for v in item)
+                or len(item[0]) > 4107
                 or not item[0].startswith('users/') or not item[0].endswith('.json')):
             raise ValueError('invalid lookup policy account')
-        names.append(item[0][6:-5])
+        name = _part(item[0][6:-5])
+        path = 'users/' + name + '.json'
+        if item[1] not in ('present', 'known_negative', 'offline_absent', 'online_readthrough_required'):
+            raise ValueError('invalid lookup policy mode')
+        paths.append(path)
     if any(type(v) is not str for v in meta):
         raise ValueError('invalid lookup policy metadata')
-    copied = LookupPolicy(chat, mirror, accounts, meta)
-    return capture_lookup_policy(transport, chat, tuple(names), expected=mirror) == copied
+    if (meta[0] != f'chats/{chat}/meta.json' or not _valid_path(meta[0])
+            or meta[1] not in ('present', 'mirror_absent')
+            or len(set(paths)) != len(paths) or sum(len(p.encode()) for p in paths) > 64 * 1024):
+        raise ValueError('invalid lookup policy selection')
+    return LookupPolicy(chat, mirror, accounts, meta)
+
+
+def matches_lookup_policy(transport, expected):
+    with _locked_matching_lookup_policy(transport, expected) as matched:
+        return matched
+
+
+@contextmanager
+def _locked_matching_lookup_policy(transport, expected):
+    """Hold raw policy exclusion through the coordinator's prepared SQL commit.
+
+    Caller order is pin -> SQLite -> mirror. No provider, parsing, crypto,
+    callbacks or SQLite acquisition is permitted inside this private context.
+    This is a current raw-input comparison, never an authority grant.
+    """
+    _owner(transport)
+    copied = _copy_lookup_policy(expected)
+    paths = tuple(path for path, _mode in copied.accounts)
+    with transport._lock:
+        yield _lookup_policy_locked(transport, copied.chat_id, paths,
+                                    copied.meta[0], copied.mirror) == copied
 
 
 def detach_ingress_value(path, value):

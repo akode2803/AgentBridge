@@ -170,7 +170,12 @@ def matches_heads(conn, path, expected):
     if any(e.incarnation != incarnation for e in copied):
         raise ValueError('inconsistent head selection incarnation')
     wanted = HeadSelection(database, incarnation, copied, size)
-    return capture_heads(conn, path, tuple(e.subject for e in copied)) == wanted
+    try:
+        return capture_heads(conn, path, tuple(e.subject for e in copied), max_bytes=size) == wanted
+    except OverflowError:
+        # A now-larger selection cannot match. Preserve the boolean mismatch
+        # contract without loading payload bytes beyond the captured budget.
+        return False
 
 
 def capture_subject(conn, path, expected, subject, *, max_records=MAX_RECORDS, max_bytes=MAX_BYTES):
@@ -256,7 +261,10 @@ def matches_subject(conn, path, expected):
         used = _charge(used + len(name.encode()) + (len(payload.encode()) if payload is not None else 0), MAX_BYTES)
         copied.append(documents.SerializedDocumentRecord(name, payload, deleted))
     wanted = SubjectSelection(position, subject, prefix, tuple(copied), size)
-    return capture_subject(conn, path, position, subject) == wanted
+    try:
+        return capture_subject(conn, path, position, subject, max_bytes=size) == wanted
+    except OverflowError:
+        return False
 
 
 def publish_head_in_transaction(conn, path, expected, proposed_json, fetched_ns):

@@ -51,3 +51,27 @@ failure may leave a pending generation, and old receipts never override live
 mirror/source/policy checks. The coordinator still owns operation-wide budgets,
 current pins, lifecycle effects, membership/terminal checks and the common final
 page/session fence. These inputs are not continuing authority.
+
+## Coordinator comparison seams
+
+`matches_inputs_in_transaction` checks the exact account/meta source and raw
+rows in the caller's active SQLite transaction. `membership_suffix.matches_position`
+checks the message generation and prepared suffix schema without loading payloads.
+Neither comparison grants permission or performs live transport validation.
+
+The private `_locked_matching_lookup_policy` context detaches the token before
+locking and retains mirror/policy exclusion through a prepared retained-head CAS
+and SQLite commit. The only allowed acquisition order is pins, SQLite, mirror.
+Provider calls, callbacks, JSON parsing and crypto stay outside the mirror lock.
+Read-only comparisons use the ordinary short `matches_lookup_policy` owner call.
+
+`evaluate_observed_view` replays pin selection against a bounded detached effective
+view. It returns the trusted pair and whether canonical side effects are already
+represented: keep succeeds, first sight/rotation need resolution and restart, and
+an alert must already exist under the canonical name/seen-signing-key identity.
+Every pair consumed during evaluation must equal this final replay. The final
+owner still holds `locked_matching_view`; the pure result is not a trust lease.
+
+These seams remain inactive prerequisites. The request coordinator must compose
+them with all selected lifecycle heads, current terminal/membership inputs, clocks,
+operation-wide budgets and final page/session checks before any serving activation.
