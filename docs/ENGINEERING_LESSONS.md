@@ -128,3 +128,18 @@ When binding pending-operation tokens, copy/validate each original once, then
 budget and compare that detached value. Measuring originals before a second copy
 allows mutation between passes to invalidate the aggregate bound. Charge the
 copied operations incrementally before entering the final lock interval.
+
+## R212: an output budget and deepcopy do not prove bounded owned inputs
+
+Serializing a mirror document before checking its size permits unbounded work
+under the mirror mutex. Also, a provider-defined deepcopy hook may return an
+aliased exact dictionary. Eligible authority documents now receive a bounded,
+hook-free JSON copy at ingress; values that cannot be detached retain canonical
+behavior but cannot enter the new authority source. Background source capture
+checks exact wire size, structure and ownership before serialization off-lock.
+
+Mirror revision alone does not capture account miss policy: negative-cache and
+health changes can alter canonical lookup behavior without advancing it. Recheck
+the demanded paths' current lookup modes. Online unknown misses require canonical
+read-through outside the attempt, followed by full recapture, never false absence.
+These raw-input checks do not replace current membership or final authority gates.

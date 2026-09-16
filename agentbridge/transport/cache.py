@@ -53,6 +53,7 @@ from typing import Any
 from ..core.config import atomic_write_json, read_json
 from .base import Transport, Watcher
 from .health import retry_delay, transport_error_message, classify_transport_error
+from .authority_observation import detach_ingress_documents, detach_ingress_value
 from .mirror_observation import (
     MAX_MIRROR_INTEGER,
     MirrorCaptureUnavailable,
@@ -126,6 +127,7 @@ class CachingTransport(Transport):
         self._mirror_provenance = "bootstrap_unverified"
         self._mirror_invalid_reason: str | None = None
         self._lock = threading.Lock()
+        self._authority_unsafe: set[str] = set()
         self._docs: dict[str, Any] = {}        # the mirror
         self._chat_ids: list[str] = []
         # R66: confirmed inner misses for read-through paths, so unknown
@@ -198,12 +200,13 @@ class CachingTransport(Transport):
             saved = float(doc.get("saved") or 0)
         except (TypeError, ValueError):
             return
-        detached_docs = copy.deepcopy(docs)
+        detached_docs, authority_unsafe = detach_ingress_documents(copy.deepcopy(docs))
         selection_keys_valid = _selection_keys_valid(detached_docs)
         detached_chat_ids = sorted({str(c) for c in chat_ids if c})
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs = detached_docs
+                self._authority_unsafe = authority_unsafe
                 self._mirror_selection_keys_valid = selection_keys_valid
                 self._chat_ids = detached_chat_ids
                 self._cursor = cursor
@@ -438,7 +441,7 @@ class CachingTransport(Transport):
             # Provider-owned nested values must not retain aliases into the
             # mirror after the pull returns.  Detachment happens outside the
             # mirror mutex because arbitrary provider values may define hooks.
-            docs = copy.deepcopy(dict(docs))
+            docs, authority_unsafe = detach_ingress_documents(copy.deepcopy(dict(docs)))
             selection_keys_valid = _selection_keys_valid(docs)
             ids = set(self.inner.list_chat_ids())
         except Exception as exc:
@@ -455,12 +458,18 @@ class CachingTransport(Transport):
                     if wrote >= t0:
                         if path in self._docs:
                             docs[path] = self._docs[path]
+                            if path in self._authority_unsafe:
+                                authority_unsafe.add(path)
+                            else:
+                                authority_unsafe.discard(path)
                         else:
                             docs.pop(path, None)
+                            authority_unsafe.discard(path)
                 for chat_id, wrote in self._chat_writes.items():
                     if wrote >= t0:
                         ids.add(chat_id)
                 self._docs = docs
+                self._authority_unsafe = authority_unsafe
                 self._mirror_selection_keys_valid = (
                     self._mirror_selection_keys_valid and selection_keys_valid
                 )
@@ -509,7 +518,7 @@ class CachingTransport(Transport):
             self._last_attempt = time.time()
         try:
             changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
-            changed = copy.deepcopy(dict(changed))
+            changed, authority_unsafe = detach_ingress_documents(copy.deepcopy(dict(changed)))
             deleted = set(deleted)
             selection_keys_valid = (
                 _selection_keys_valid(changed)
@@ -546,6 +555,10 @@ class CachingTransport(Transport):
                             and not (silent and path.startswith(silent))):
                         foreign = True
                     self._docs[path] = val
+                    if path in authority_unsafe:
+                        self._authority_unsafe.add(path)
+                    else:
+                        self._authority_unsafe.discard(path)
                 for path in deleted:
                     wrote = self._doc_writes.get(path)
                     if wrote is not None and wrote >= t0:
@@ -554,6 +567,7 @@ class CachingTransport(Transport):
                             and not (silent and path.startswith(silent))):
                         foreign = True
                     self._docs.pop(path, None)
+                    self._authority_unsafe.discard(path)
                     if path.startswith("chats/") and path.endswith("/meta.json"):
                         # a tombstoned meta = the chat is gone; stop listing it
                         cid = path.split("/")[1]
@@ -566,6 +580,7 @@ class CachingTransport(Transport):
                         path: value for path, value in self._docs.items()
                         if not path.startswith(revoked_prefixes)
                     }
+                self._authority_unsafe.intersection_update(self._docs)
                 self._chat_ids = sorted(visible_ids | recent_ids)
                 if changed or deleted:
                     self._neg.clear()      # the world moved: re-answer misses
@@ -688,10 +703,15 @@ class CachingTransport(Transport):
                     and not miss_known):
                 val = self.inner.get_doc(path, _MISS)
                 owned = copy.deepcopy(val) if val is not _MISS else _MISS
+                owned, authority_safe = detach_ingress_value(path, owned) if owned is not _MISS else (owned, True)
                 with self._lock:
                     if owned is not _MISS:
                         with self._captured_mutation_locked():
                             self._docs[path] = owned
+                            if authority_safe:
+                                self._authority_unsafe.discard(path)
+                            else:
+                                self._authority_unsafe.add(path)
                             self._mirror_selection_keys_valid = (
                                 self._mirror_selection_keys_valid
                                 and type(path) is str
@@ -751,9 +771,14 @@ class CachingTransport(Transport):
             ))
         except (TypeError, ValueError, OverflowError, RecursionError, MemoryError):
             pass
+        owned, authority_safe = detach_ingress_value(path, owned)
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs[path] = owned
+                if authority_safe:
+                    self._authority_unsafe.discard(path)
+                else:
+                    self._authority_unsafe.add(path)
                 self._mirror_selection_keys_valid = (
                     self._mirror_selection_keys_valid and selection_key_valid
                 )
@@ -767,6 +792,7 @@ class CachingTransport(Transport):
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs.pop(path, None)
+                self._authority_unsafe.discard(path)
                 self._doc_writes[path] = time.monotonic()
         self._persist_snapshot()
 
@@ -897,6 +923,7 @@ class CachingTransport(Transport):
                 prefix = f"chats/{chat_id}/"
                 for p in [p for p in self._docs if p.startswith(prefix)]:
                     self._docs.pop(p, None)
+                    self._authority_unsafe.discard(p)
                     self._doc_writes[p] = now
                 self._chat_ids = [c for c in self._chat_ids if c != chat_id]
                 self._chat_writes.pop(chat_id, None)
