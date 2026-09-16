@@ -9,7 +9,8 @@ import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
 import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
 import { BrowserSession } from "./session.js";
-import { warmContext, initialChatContext, sameWarmOperation } from "./warm-context.js";
+import { warmContext, selectedChatContext, presentationFromState, sameWarmOperation } from "./warm-context.js";
+import { createLatestRead } from "./latest-read.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -23,13 +24,19 @@ let warmOperationSeq = 0;
 let warmOperationsExhausted = false;
 let activeWarmSurface = null;
 let skipWarmChatId = null;
-const INITIAL_SELECTED_TIMEOUT_MS = 10000;
+const INITIAL_SELECTED_TIMEOUT_MS = 30000;
+// A legitimate large sidebar can take longer than a selected room. Its timeout
+// bounds recovery, not freshness; abandoned responses still fail route guards.
+const SIDEBAR_TIMEOUT_MS = 60000;
+const sidebarRead = createLatestRead();
 document.addEventListener("ab:session-reset", () => {
+  sidebarRead.cancel();
   chatRenderSeq += 1;
   chatsFetchSeq += 1;
   activeWarmSurface = null;
 });
 document.addEventListener("ab:lock-epoch", () => {
+  sidebarRead.cancel();
   activeWarmSurface = null;
   cancelInitialSelectedView();
 });
@@ -195,13 +202,7 @@ async function renderChats(force) {
   // A normal safety poll must not supersede a validated initial transcript
   // while its one broad-state hydration is still in flight. Forced mutation
   // and route renders retain their existing ownership and may supersede it.
-  const activeInitial = activeWarmSurface;
-  const activeSession = meshStateSnapshot();
-  if (!force && isInitialSelectedViewPending() && activeInitial?.initial
-      && activeInitial.operationId === warmOperationSeq
-      && activeInitial.sessionEpoch === activeSession.sessionEpoch
-      && activeInitial.viewer === activeSession.viewer
-      && App.page === "chats" && Mesh.chatId === activeInitial.chatId) return;
+  if (!force && isInitialSelectedViewPending()) return;
   if (force) cancelInitialSelectedView();
   if (warmOperationSeq >= Number.MAX_SAFE_INTEGER) warmOperationsExhausted = true;
   else warmOperationSeq += 1;
@@ -224,7 +225,7 @@ async function renderChats(force) {
     ? warmContext(meshStateSnapshot(), Mesh.state, Mesh.chatId) : null;
   const stateSnapshot = meshStateSnapshot();
   const initialBase = !skipWarm && !warmOperationsExhausted
-    ? initialChatContext(BrowserSession.snapshot(), App.state, {
+    ? selectedChatContext(BrowserSession.snapshot(), App.state, {
       state: Mesh.state, snapshot: stateSnapshot,
       chatId: Mesh.chatId, opening,
       details: Mesh.detailsView, restarting: !!restartIntent(),
@@ -236,7 +237,7 @@ async function renderChats(force) {
     stateGeneration: stateSnapshot.stateGeneration,
     chatId: Mesh.chatId,
   }) : null;
-  const accelerated = warm || initial;
+  const accelerated = initial || warm;
   if (accelerated) {
     await renderWarmChat(force, openTrace, accelerated, {
       fetchSeq, routeSeq, chatId: Mesh.chatId, operationId,
@@ -259,7 +260,13 @@ async function renderChats(force) {
   // let the next poll retry (the boot cover / skeleton stays up)
   let fresh;
   try {
-    fresh = await api("/api/mesh/state");
+    fresh = await sidebarRead.request(
+      () => api("/api/mesh/state", undefined,
+        {sideEffects: false, timeoutMs: SIDEBAR_TIMEOUT_MS}),
+      () => fetchSeq === chatsFetchSeq && routeSeq === App.routeSeq
+        && App.page === "chats" && sessionMayApply(sessionTicket)
+        && warmStateRequest.lockEpoch === meshStateSnapshot().lockEpoch,
+    );
   } catch { return; }
   if (openTrace) {
     openTrace.sidebar_fetch_ms = Math.max(
@@ -267,6 +274,12 @@ async function renderChats(force) {
   }
   if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
       || routeSeq !== App.routeSeq) return;
+  if (!fresh || warmStateRequest.lockEpoch !== meshStateSnapshot().lockEpoch) return;
+  if (fresh.locked && fresh.error) {
+    observeLockState(true);
+    document.dispatchEvent(new CustomEvent("ab:locked"));
+    return;
+  }
   if (!applyMeshState(sessionTicket, fresh, warmStateRequest)) return;
   // V111: locked is not signed-out — never cache the refusal as state or
   // paint "Start the mesh" over it (api.js already raised the lock screen)
@@ -499,8 +512,10 @@ export async function renderWarmChat(force, openTrace, warm, route) {
       viewer: data.me,
       initial: !!operation.initial,
     };
+    const presentation = data.presentation?.user === data.me
+      ? presentationFromState(data.presentation) : null;
     await renderMeshChat(force, openTrace, {
-      data, presentation: warm.presentation, warmBase: true,
+      data, presentation: presentation || warm.presentation, warmBase: true,
       guard: () => warmOperationCurrent(operation),
     });
   } catch (error) {
@@ -555,12 +570,14 @@ export async function renderWarmChat(force, openTrace, warm, route) {
     return;
   }
   const warmStateRequest = captureWarmStateRequest(ticket);
-  const statePromise = api("/api/mesh/state", undefined, { sideEffects: false,
-    timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0 })
-    .catch(() => null);
+  const statePromise = sidebarRead.request(
+    () => api("/api/mesh/state", undefined, { sideEffects: false,
+      timeoutMs: SIDEBAR_TIMEOUT_MS }),
+    () => warmOperationCurrent(operation),
+  );
   const guardedAux = (path, fallback) => api(path, undefined, {
     sideEffects: false,
-    timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0,
+    timeoutMs: operation.initial ? 10000 : 0,
   })
     .then((value) => {
       if (!warmOperationCurrent(operation)) return null;
@@ -837,6 +854,8 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const viewDn = (name) => meshDn(name, ms);
   const viewAvatar = (name) => meshAvatarInner(name, ms);
   const viewInfo = (msg, me) => meshInfoText(msg, me, ms);
+  const displayKind = (name) => ms.users?.[name]?.display_kind
+    || ms.users?.[name]?.kind;
   const authorityRuns = prepared?.warmBase ? [] : currentRunAuthority(chatId, feeds);
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare
@@ -950,7 +969,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     if (msg.deleted) {
       const label = msg.mine ? "You deleted this message"
                              : "This message was deleted";
-      const tombKindTag = ms.users?.[msg.from]?.kind === "agent"
+      const tombKindTag = displayKind(msg.from) === "agent"
         ? ' <span class="kind-tag">agent</span>' : "";
       const tombSender = !isDm && !msg.mine
         ? `<div class="sender">${esc(viewDn(msg.from))}${tombKindTag}</div>` : "";
@@ -1003,7 +1022,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // bubble, Telegram-style
     const showSender = !isDm && !msg.mine && msg.from !== prevFrom;
     prevFrom = msg.from;
-    const kindTag = ms.users?.[msg.from]?.kind === "agent"
+    const kindTag = displayKind(msg.from) === "agent"
       ? `<span class="kind-tag">agent</span>` : "";
     // M11: a departed (deleted) member's messages grey out — name and
     // words remain, nothing else of them does. Keyed on `departed`
@@ -1228,7 +1247,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // bubbles have no sender line, so the header is the only place it can show
   const dmPeer = meta.kind === "dm"
     ? (meta.members || []).find((u) => u !== ms.user) : null;
-  const headAgentTag = dmPeer && ms.users?.[dmPeer]?.kind === "agent"
+  const headAgentTag = dmPeer && displayKind(dmPeer) === "agent"
     ? ' <span class="kind-tag">agent</span>' : "";
   // DM header online/last-seen sub-line (Q32) — only when the peer shares it,
   // so the name stays vertically centered otherwise (the .has-sub class drives

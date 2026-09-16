@@ -22,7 +22,7 @@ def test_chat_and_sidebar_observations_are_content_free_and_detect_one_fold(rig)
     chat = rig.get("/api/mesh/chat", id=cid)
     assert set(chat) == {
         "meta", "messages", "me", "starred", "read_ns", "total",
-        "session_binding",
+        "session_binding", "presentation",
     }
     assert chat["session_binding"] == {
         "instance_id": rig.app.instance_id,
@@ -41,6 +41,7 @@ def test_chat_and_sidebar_observations_are_content_free_and_detect_one_fold(rig)
     assert chat_row["counts"]["raw_messages"] >= chat["total"]
     assert chat_row["stages_s"]["transcript_fold"] >= 0
     assert chat_row["stages_s"]["receipts_fold"] >= 0
+    assert chat_row["stages_s"]["selected_presentation"] >= 0
     encoded = json.dumps(rows)
     for private in ("projection-private-body", cid, "aryan", "Observed"):
         assert private not in encoded
@@ -57,7 +58,9 @@ def test_denied_chat_observation_has_no_room_correlation_or_counts(rig):
         private = outsider.create_chat("Private", []).id
     finally:
         outsider.close()
-    assert "error" in rig.get("/api/mesh/chat", id=private)
+    denied = rig.get("/api/mesh/chat", id=private)
+    assert "error" in denied
+    assert "presentation" not in denied
     row = _records(rig.home)[-1]
     assert row["scope"] == "chat" and row["outcome"] == "denied_or_error"
     assert row["counts"] == {}

@@ -42,6 +42,14 @@ def test_drafts_use_ready_session_viewer_and_never_question_identity(tmp_path: P
 @requires_node
 def test_initial_orchestration_paints_then_hydrates_and_falls_back_once(tmp_path: Path):
     source = (ROOT / "gui/static/js/chat.js").read_text(encoding="utf-8")
+    (tmp_path / "warm-context.mjs").write_text(
+        (ROOT / "gui/static/js/warm-context.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "latest-read.mjs").write_text(
+        (ROOT / "gui/static/js/latest-read.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     start = source.index("export async function renderWarmChat")
     end = source.index("// the structural signature", start)
     _run(tmp_path, "initial-orchestration.mjs", _INITIAL_RUNNER.replace(
@@ -51,7 +59,7 @@ def test_initial_orchestration_paints_then_hydrates_and_falls_back_once(tmp_path
 
 _CONTEXT_RUNNER = r'''
 import assert from "node:assert/strict";
-import {initialChatContext} from "./warm-context.mjs";
+import {initialChatContext, selectedChatContext} from "./warm-context.mjs";
 const binding = {instance_id: "i", viewer: "aryan", session_generation: "7"};
 const session = {mode: "bound", ready: true, exhausted: false, binding};
 const bootstrap = {configured: true, restoring: false, user: "aryan",
@@ -76,6 +84,16 @@ for (const changed of [
   [session, bootstrap, {...args, details: true}],
   [session, bootstrap, {...args, restarting: true}],
 ]) assert.equal(initialChatContext(...changed), null);
+const oldState = {user: "aryan", available: true, chats: [{id: "room"}], users: {},
+  connection: {state: "online"}};
+const oldSnapshot = {...snapshot, bound: true, viewer: "aryan", ageMs: 60000};
+assert.equal(initialChatContext(session, bootstrap, {...args, state: oldState}), null);
+const selected = selectedChatContext(session, bootstrap,
+  {...args, state: oldState, snapshot: oldSnapshot});
+assert.equal(selected.initial, true);
+assert.equal(selected.presentation.user, "aryan");
+assert.equal(selectedChatContext(session, bootstrap,
+  {...args, state: oldState, snapshot: {...oldSnapshot, locked: true}}), null);
 '''
 
 
@@ -112,6 +130,8 @@ Mesh.state.user = "legacy"; assert.equal(api.currentDraftViewer(), "legacy");
 
 _INITIAL_RUNNER = r'''
 import assert from "node:assert/strict";
+import {presentationFromState} from "./warm-context.mjs";
+import {createLatestRead} from "./latest-read.mjs";
 const source = __SOURCE__.replace("export async function renderWarmChat",
   "async function renderWarmChat");
 function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
@@ -131,8 +151,9 @@ function make({throwBase = false} = {}) {
     "restartColdAfterStateInvalidation", "restartColdAfterInitialFailure",
     "beginInitialSelectedView", "endInitialSelectedView", "markInitialSelectedViewReady",
     "startAskPoll", "V", "Mesh", "$", "location", "renderSidebar",
+    "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
-     const INITIAL_SELECTED_TIMEOUT_MS = 10000;
+     const INITIAL_SELECTED_TIMEOUT_MS = 30000, SIDEBAR_TIMEOUT_MS = 60000;
      ${source}; return renderWarmChat;`);
   const fn = factory(api, () => ({epoch: 1}), () => ({}), () => true, () => true,
     () => ({stateGeneration: 2}), async (_force, _trace, options) => {
@@ -144,7 +165,7 @@ function make({throwBase = false} = {}) {
     token => { if (token !== owner) return false; ready = true; return true; },
     () => { asks += 1; }, {closeAuthPage() {}, closeConnectingPage() {}},
     {renderedChat: null, structKey: ""}, () => ({innerHTML: ""}),
-    {hash: "#/chats/room"}, () => {});
+    {hash: "#/chats/room"}, () => {}, presentationFromState, createLatestRead(0));
   return {fn, chat, state, frames, calls, renders,
     values: () => ({pending, ready, asks, fallback})};
 }
@@ -152,15 +173,18 @@ const warm = {initial: true, chatId: "room", presentation: {user: "aryan", users
   sessionEpoch: 1, lockEpoch: 1, stateGeneration: 1, routeSeq: 1,
   operationId: 1, chatRenderSeq: 0};
 const route = {chatId: "room", routeSeq: 1, operationId: 1};
-const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]}, messages: []};
+const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]}, messages: [],
+  presentation: {user: "aryan", users: {aryan: {display: "Aryan", display_kind: "human"}}}};
 {
   const h = make(); const done = h.fn(true, null, warm, route);
   assert.deepEqual(h.calls, ["/api/mesh/chat?id=room"]); h.chat.resolve(selected);
   for (let i = 0; i < 6; i++) await Promise.resolve();
   assert.equal(h.renders.length, 1); assert.equal(h.values().pending, true);
+  assert.equal(h.renders[0].presentation.users.aryan.display, "Aryan");
   while (h.frames.length) h.frames.shift()();
-  for (let i = 0; i < 4; i++) await Promise.resolve();
-  assert.equal(h.values().ready, true); assert.equal(h.calls[1], "/api/mesh/state");
+  for (let i = 0; i < 20 && !h.calls.includes("/api/mesh/state"); i++)
+    await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(h.values().ready, true); assert(h.calls.includes("/api/mesh/state"));
   h.state.resolve({chats: [{id: "room"}]}); await done;
   assert.equal(h.calls.filter(p => p.startsWith("/api/mesh/chat?")).length, 1);
   assert.equal(h.renders.length, 2); assert.equal(h.values().asks, 1);

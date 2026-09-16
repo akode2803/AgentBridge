@@ -1,92 +1,89 @@
-# Fresh conversation first on warm switches
+# Fresh selected conversations and consistent navigation
 
-The browser can show a freshly read conversation before refreshing broad sidebar
-state. Source release and running-app activation are separate claims; current
-release evidence is recorded in the project handoff.
+Every eligible selected-chat navigation starts a new canonical `/api/mesh/chat`
+read before broad sidebar hydration. A pending or completed pre-selection
+transcript is never reused. Matching session bindings alone cannot make a
+transcript fresh after an edit, redaction, clear, or membership change.
 
-A recently accepted room directory can help display a conversation without placing
-its expensive all-room projection ahead of the selected conversation request.
-The browser issues a new `/api/mesh/chat` after selection. That response supplies
-the canonical message bodies, viewer identity and room metadata. It is never
-replaced by a pending or completed pre-selection transcript response.
+## First paint and authority
 
-This restriction is necessary even within one browser session. A request may
-have already folded messages before a clear or redaction, yet remain unresolved
-until after the user selects the room. Matching session bindings, an unresolved
-promise, or a fresh membership check cannot make those older bodies current.
-The R192 barrier probe demonstrates that exact case.
+A ready bound bootstrap supplies the viewer, process/session identity, and
+configured, non-restoring, unlocked state. The current observed lock epoch must
+also be unlocked. The selected response must match that viewer and room and
+contain current membership before the transcript or composer can render. Details,
+restart, unbound/legacy and malformed-bootstrap paths retain state-first behavior.
 
-## Presentation and authority
+The selected response now includes a display-only `presentation` block for the
+viewer, current members, and senders already disclosed by returned messages.
+It contains only display names, privacy-filtered avatar markers, and a separately
+named `display_kind` used for static human/agent badges. It excludes owners,
+account activity/departure, presence, keys, verification, settings, mute and
+permissions. The block is limited to 256 entries and 64 KiB of UTF-8 JSON;
+omitted or malformed decorations use username-only fallbacks. It is not a
+complete directory and does not become `Mesh.state` or authorize any action.
 
-The accepted-state display context copies only usernames, display names, avatar markers
-and colors from one recently accepted state. It carries no owner, agent-kind,
-departure, presence, key-verification, mute or capability decisions. Missing
-profiles use neutral display fallbacks. Fresh selected-chat metadata determines
-membership and the base composer. Broader controls and live/runtime decorations
-wait for current metadata.
+This removes the five-second sidebar-age dependency from selected first paint.
+The former bounded five-second display context remains only as a compatibility
+fallback for the older warm path; it is not an authority lease. Broad controls
+and live/runtime decorations still wait for their guarded hydration. A guarded
+double-animation-frame readiness signal may dismiss the startup cover only after
+the fresh selected view has rendered.
 
-The context is memory-only, eligible for five seconds, and limited to 2,048
-profiles and 512 KiB of retained field bytes. Larger contexts fall back cold. It does not persist message bodies,
-change per-user draft storage, introduce model calls, or fetch complete room
-histories speculatively. It is a presentation optimization, not an authorization
-lease or a remote consistency guarantee.
+Draft persistence follows the ready browser-session viewer, including before the
+first sidebar arrives. Ready legacy mode uses its accepted state viewer. Unready,
+transitioning, exhausted and signed-out sessions perform no persistent draft read
+or write under an anonymous identity.
 
-## Continuation ownership
+## Bounded sidebar work
 
-A selected operation is bound to browser session, observed lock epoch, accepted
-state generation, route, room and render operation. Responses are checked before
-applying success or error effects. The guarded request variant returns errors
-without immediately dispatching the global lock event; only its current owner
-may apply that event. Ordinary API behavior remains the default.
+Chat navigation and regular safety refreshes use one coordinator: one active request and one replaceable
+latest pending desire. A 150 ms quiet interval avoids starting obsolete hydration
+while the user continues switching. A pending request checks the exact operation
+before starting. A response is checked again before applying state or side effects.
+No result is cached or promoted into another selection.
 
-Lock and unlock invalidate the presentation context, including a same-user
-lock/unlock cycle. A directory request begun in the new lock epoch must be accepted afterward.
-An older request completing after unlock cannot qualify the context. A manual lock
-remains observed while its server request is pending. Account/process changes,
-room changes and accepted directory replacements invalidate older work.
+Hydration for a selected view must start after that view's fresh selected response.
+An older in-flight read from this coordinator cannot remove or hydrate a newer
+selected room, even if its response completes later. A qualifying later state that omits
+the room clears the visible transcript; accepted state-generation replacements
+retain the existing invalidation/fallback behavior.
 
-After the selected conversation paints, the browser refreshes broad state and
-auxiliary information. A current room omission clears the conversation. A valid
-refresh enhances the same active operation; it does not start another selected
-chat request merely to hydrate controls. A newer canonical refresh or navigation
-must supersede this operation rather than be overwritten by it.
+Selected reads have a 30-second transport bound, broad sidebar reads 60 seconds,
+and initial auxiliary reads 10 seconds. These are failure-recovery ceilings, not
+freshness claims. Large legitimate sidebar folds can exceed ten seconds. A client
+abort does not guarantee that server work has stopped, so the coordinator bounds
+client concurrency, not global server CPU across timeouts or other clients.
 
-The basic composer receives the explicit presentation context. Existing draft
-storage now derives its viewer from the ready browser session binding. Ready
-legacy mode retains the prior state viewer fallback; unready, transitioning,
-exhausted and signed-out sessions keep drafts in memory without reading or
-writing a persistent `?` identity.
+Ordinary safety polls do not supersede a pending selected-first operation. Forced
+navigation or mutation refreshes retain ownership and replace queued work. Session
+and lock changes cancel pending desires; in-flight results remain fenced until
+they settle. Current selected-read or rendering failures receive one state-first
+fallback; stale route/session/lock continuations cannot retry or change the UI.
+After valid state, structural signatures are invalidated before normal polling
+resumes, allowing full controls to recover even when auxiliary data is delayed.
 
-An explicit selected-chat startup may use the same fresh-chat-first renderer
-before broad state exists. Eligibility comes from the accepted bound bootstrap:
-configured, not restoring, unlocked, and the exact adopted session binding and
-viewer. Its presentation map is empty, so names and avatars use neutral
-fallbacks. The fresh selected response must still prove the viewer, room and
-current membership before the base transcript and composer render. A guarded
-double-frame paint signal may then remove the opaque boot cover; starting the
-request or receiving an invalid response cannot. Broad state and auxiliary
-hydration follow the base paint, and ordinary safety polls do not supersede that
-single in-flight initial hydration. A valid accepted state starts the ask poll;
-room omission still clears the surface.
+Modal and post-mutation state reads outside this coordinator still use their
+existing admission rules. Global ordering of all state readers is separate work;
+a pre-selection modal response can still clear a newly visible selected room
+when that older response omits it. This fails closed but can interrupt navigation.
 
-## Cost and measurement
+## Sidebar and restart consistency
 
-The existing chat endpoint still folds room history even when returning a short
-tail. The broad state endpoint still folds room overviews, including the selected
-room. Avoiding an additional selected-chat request does not mean there is only
-one selected-room fold across the entire refresh.
+The selected row follows the route synchronously, without waiting for a network
+response or rebuilding all rows. A session reset clears both sidebar nodes and
+the cache metadata describing those nodes. Otherwise a byte-identical settings
+sidebar after restart could be mistaken for an already rendered sidebar.
+After a new session epoch is accepted and lock/restart gates pass, recovery
+re-parses the URL so the selected chat and both visible surfaces recover together.
 
-Measure selected-message paint separately from composer readiness and complete
-hydration. The disposable encrypted eight-room, hundred-post baseline measured
-30 switches at a 1.11-second median and 1.98-second 95th percentile to selected
-message paint. These are fixture observations, not a general latency guarantee.
-The candidate measured 162 ms median and 251 ms at the 95th percentile with
-the basic composer present in all 30 switches. These sequential version runs
-retain ordinary frontend polling; they are not randomized trials or a total-CPU
-measurement. Cold switches and complete hydration retain broader costs.
+## Measurement limits
 
-Signed-out/unbound startup, malformed bootstrap, details navigation, restart,
-lock, and unavailable connectivity keep the state-first fallback. Initial
-selected-read failure gets one suppressed cold attempt while the exact route,
-session and lock owner remains current. No new endpoint, cache-validation
-protocol or transcript-prefetch authority is introduced.
+The selected endpoint still folds its room history; a short returned tail is not
+a bound on fold work. Broad state still folds all visible overviews. This change
+reduces obsolete concurrent requests and ordering delays; it does not make those
+folds constant-cost or cache their authority decisions. Agent runtime indicators
+are distinct from static agent badges and remain tied to auxiliary reads.
+
+Current source, browser evidence, platform checks and release/activation status
+are recorded in the project handoff and task directory. Disposable fixture timings
+are observations, not general latency guarantees. No live user restart is implied.
