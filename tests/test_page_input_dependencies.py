@@ -227,9 +227,10 @@ def test_selected_document_size_preflight_is_covering_and_does_not_fetch_payload
             "EXPLAIN QUERY PLAN " + query, (source.source_id, path),
         ).fetchall()
         assert any(
-            "USING COVERING INDEX idx_document_observation_selected_size" in row[3]
+            row[3].startswith("SEARCH document_observation_records ")
+            and "idx_document_observation_selected_size" in row[3]
             for row in plan
-        )
+        ), plan
         roots = dict(conn.execute(
             "SELECT name,rootpage FROM sqlite_master WHERE name IN "
             "('document_observation_records','idx_document_observation_selected_size')"
@@ -239,11 +240,23 @@ def test_selected_document_size_preflight_is_covering_and_does_not_fetch_payload
             row[2] for row in bytecode
             if row[1] == "OpenRead" and row[3] == roots["document_observation_records"]
         }
-        assert not any(
-            row[1] == "Column" and row[2] in table_cursors and row[3] == 2
+        # SQLite versions differ in whether EQP labels an expression index
+        # COVERING. The VM must read its stored size without reading the table.
+        index_cursors = {
+            row[2] for row in bytecode
+            if row[1] == "OpenRead" and row[3] == roots["idx_document_observation_selected_size"]
+        }
+        assert any(
+            row[1] == "Column" and row[2] in index_cursors and row[3] == 2
             for row in bytecode
-        )
-        assert not any(row[1] == "Cast" for row in bytecode)
+        ), bytecode
+        assert not any(
+            row[1] == "Column" and row[2] in table_cursors for row in bytecode
+        ), bytecode
+        assert not any(
+            row[1] in ("Cast", "Function", "Function0", "PureFunc")
+            for row in bytecode
+        ), bytecode
 
         statements = []
         real_connect = document_observation.sqlite3.connect
