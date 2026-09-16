@@ -3,8 +3,26 @@
 
 import { esc } from "./util.js";
 import { ICONS } from "./icons.js";
+import { captureViewRead, viewReadMayApply } from "./state.js";
 
 let activePhotoClose = null;
+let modalOwner = {};
+
+export function captureModalRead() {
+  return Object.freeze({ owner: modalOwner, view: captureViewRead() });
+}
+
+export function beginModalRead() {
+  closeModal();
+  return captureModalRead();
+}
+
+export function modalReadMayApply(ticket, response) {
+  return ticket?.owner === modalOwner && viewReadMayApply(ticket.view, response);
+}
+
+window.addEventListener("hashchange", closeModal);
+document.addEventListener("ab:lock-epoch", closeModal);
 
 document.addEventListener("ab:session-reset", () => {
   closeModal();
@@ -22,6 +40,7 @@ export function openModal(html) {
 }
 
 export function closeModal() {
+  modalOwner = {};
   const m = document.querySelector(".modal-scrim");
   if (m) m.remove();
 }
@@ -33,6 +52,7 @@ export function closeModal() {
 // no modal yet) and reuses on the camera path. Returns the .modal-box either
 // way; the className is reset so the caller re-applies its own step classes.
 export function swapModal(html) {
+  modalOwner = {};
   const box = document.querySelector(".modal-scrim > .modal-box");
   if (!box) return openModal(html);
   box.className = "modal-box";

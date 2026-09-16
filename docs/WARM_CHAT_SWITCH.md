@@ -24,8 +24,9 @@ complete directory and does not become `Mesh.state` or authorize any action.
 
 This removes the five-second sidebar-age dependency from selected first paint.
 The former bounded five-second display context remains only as a compatibility
-fallback for the older warm path; it is not an authority lease. Broad controls
-and live/runtime decorations still wait for their guarded hydration. A guarded
+fallback for the older warm path; it is not an authority lease. Canonical chat controls and file/message interaction are available at first
+paint. Agent-owner controls and live/runtime decorations still wait for their
+guarded hydration. A guarded
 double-animation-frame readiness signal may dismiss the startup cover only after
 the fresh selected view has rendered.
 
@@ -62,10 +63,11 @@ fallback; stale route/session/lock continuations cannot retry or change the UI.
 After valid state, structural signatures are invalidated before normal polling
 resumes, allowing full controls to recover even when auxiliary data is delayed.
 
-Modal and post-mutation state reads outside this coordinator still use their
-existing admission rules. Global ordering of all state readers is separate work;
-a pre-selection modal response can still clear a newly visible selected room
-when that older response omits it. This fails closed but can interrupt navigation.
+Every global state adoption additionally requires an explicit local read owner:
+session, lock, route, selected view, and monotonic accepted request order. Modal
+pickers keep state local and cannot dispatch a global room-removal event. This
+is continuation ownership, not a server snapshot revision. See
+[STATE_READ_OWNERSHIP.md](STATE_READ_OWNERSHIP.md).
 
 ## Sidebar and restart consistency
 
@@ -75,6 +77,19 @@ the cache metadata describing those nodes. Otherwise a byte-identical settings
 sidebar after restart could be mistaken for an already rendered sidebar.
 After a new session epoch is accepted and lock/restart gates pass, recovery
 re-parses the URL so the selected chat and both visible surfaces recover together.
+
+Cached, session-owned sidebar presentation can repaint immediately when moving
+between settings, chats and the new-chat chooser; its fresh background read
+still updates the list. Opening info on an already rendered room with accepted
+state starts a fresh session-fenced `chat_info` read without another all-room
+fold or transcript rebuild. Initial/no-state and ordinary safety-refresh paths
+retain their existing reads.
+
+Regional loading indicators appear after 500 ms and do not occupy a transcript
+row. Route replacement and completed paint remove them. The encryption banner
+was removed from the transcript; key verification remains in chat info. Existing
+short transitions remain unchanged, with reduced-motion overrides for these
+surfaces. This slice does not introduce history pagination.
 
 ## Measurement limits
 

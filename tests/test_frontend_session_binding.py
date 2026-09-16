@@ -385,8 +385,9 @@ def test_delete_agent_captures_before_post_and_checks_late_ui_followup():
     capture = delete_flow.index("sessionTicket")
     post = delete_flow.index('api("/api/mesh/delete_agent"')
     result_guard = delete_flow.index("if (!sessionMayApply(sessionTicket)) return;", post)
-    apply = delete_flow.index("applyMeshState(sessionTicket, fresh)", result_guard)
-    assert capture < post < result_guard < apply
+    request = delete_flow.index("captureMeshStateRead(sessionTicket)", result_guard)
+    apply = delete_flow.index("applyMeshState(sessionTicket, fresh, request)", request)
+    assert capture < post < result_guard < request < apply
 
 
 def test_auth_receipt_is_checked_against_the_confirmed_bootstrap_before_ui():

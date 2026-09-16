@@ -4,7 +4,7 @@
 import { $, esc, fmtTime, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, sessionMayApply, applyMeshState } from "./state.js";
+import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, sessionMayApply, applyMeshState, captureMeshStateRead } from "./state.js";
 import { updateTitleBadge } from "./notify.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
@@ -613,11 +613,13 @@ async function runChatAction(act, c) {
 }
 
 async function refreshList(ticket = captureSessionEpoch()) {
+  if (!sessionMayApply(ticket)) return false;
+  const request = captureMeshStateRead(ticket);
   const fresh = await api("/api/mesh/state");
-  if (!applyMeshState(ticket, fresh)) return false;
+  if (!applyMeshState(ticket, fresh, request)) return false;
   const box = $("#side-chats");
   if (box) box.dataset.key = "";
-  renderChatListSidebar();
+  renderSidebar();
   return true;
 }
 

@@ -75,6 +75,9 @@ let observedLocked = false;
 let warmCountersExhausted = false;
 let initialSelectedViewReady = false;
 let initialSelectedViewOwner = null;
+let selectedViewGeneration = 0;
+let meshReadSequence = 0;
+let appliedMeshReadSequence = 0;
 
 const monotonicNow = () => globalThis.performance?.now?.() ?? Number.NaN;
 
@@ -207,8 +210,39 @@ export function isInitialSelectedViewReady() {
   return initialSelectedViewReady;
 }
 
+// These tickets describe local continuation ownership, never a provider revision.
+export function advanceSelectedView() {
+  selectedViewGeneration = advanceWarmCounter(selectedViewGeneration);
+}
+
+export function captureViewRead(ticket = captureSessionEpoch()) {
+  if (warmCountersExhausted || observedLocked) return null;
+  return Object.freeze({ session: ticket, lockEpoch, selectedViewGeneration,
+    routeSeq: App.routeSeq, page: App.page, chatId: Mesh.chatId,
+    details: !!Mesh.detailsView });
+}
+
+export function viewReadMayApply(owner, response) {
+  return !!owner && !warmCountersExhausted && !observedLocked
+    && owner.lockEpoch === lockEpoch
+    && (owner.readSequence == null || owner.readSequence >= appliedMeshReadSequence)
+    && owner.selectedViewGeneration === selectedViewGeneration
+    && owner.routeSeq === App.routeSeq && owner.page === App.page
+    && owner.chatId === Mesh.chatId && owner.details === !!Mesh.detailsView
+    && sessionMayApply(owner.session, response);
+}
+
+export function captureMeshStateRead(ticket = captureSessionEpoch()) {
+  const owner = captureViewRead(ticket);
+  if (!owner) return null;
+  meshReadSequence = advanceWarmCounter(meshReadSequence);
+  if (warmCountersExhausted) return null;
+  return Object.freeze({ ...owner, readSequence: meshReadSequence });
+}
+
 export function captureWarmStateRequest(ticket = captureSessionEpoch()) {
-  return Object.freeze({ sessionEpoch: ticket?.epoch, lockEpoch });
+  const owner = captureMeshStateRead(ticket);
+  return owner ? Object.freeze({ ...owner, warm: true }) : null;
 }
 
 export function sessionMayApply(ticket, response) {
@@ -225,16 +259,17 @@ export function sessionMayApply(ticket, response) {
   return true;
 }
 
-export function applyMeshState(ticket, response, warmRequest = null) {
-  if (!sessionMayApply(ticket, response)) return false;
+export function applyMeshState(ticket, response, request) {
+  if (!viewReadMayApply(request, response) || response?.error
+      || request.session?.epoch !== ticket?.epoch
+      || !Number.isSafeInteger(request.readSequence)
+      || request.readSequence <= appliedMeshReadSequence) return false;
+  // A newer pending read does not starve a slow accepted read. Once a newer
+  // read applies, an older completion can never replace it.
+  appliedMeshReadSequence = request.readSequence;
   Mesh.state = response;
   meshStateGeneration = advanceWarmCounter(meshStateGeneration);
-  // Ordinary state still applies after a lock race, but only a request begun
-  // in this exact lock epoch may seed a warm presentation context.
-  meshStateAcceptedAt = !warmCountersExhausted
-    && warmRequest?.sessionEpoch === ticket?.epoch
-    && warmRequest?.lockEpoch === lockEpoch
-    ? monotonicNow() : null;
+  meshStateAcceptedAt = request.warm ? monotonicNow() : null;
   if (typeof CustomEvent === "function") {
     globalThis.document?.dispatchEvent?.(new CustomEvent(
       "ab:mesh-state-accepted",

@@ -4,9 +4,8 @@
 import { esc, toast } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
-import { openModal, closeModal, bindModalFilter } from "./modal.js";
-import { Mesh, meshDn, meshAvatarInner, captureSessionEpoch,
-         sessionMayApply, applyMeshState } from "./state.js";
+import { openModal, closeModal, bindModalFilter, beginModalRead, captureModalRead, modalReadMayApply } from "./modal.js";
+import { Mesh, meshDn, meshAvatarInner } from "./state.js";
 import { pickerRow, pickerSection, pickerFooter, bindPicker } from "./picker.js";
 import { V } from "./views.js";
 
@@ -15,36 +14,36 @@ import { V } from "./views.js";
 // every agent is listed for everyone — the mesh pulls an agent's responsible
 // human in automatically, so the owner rides along in the sub-line as a
 // heads-up.
-function userRow(u, me) {
+function userRow(u, me, context) {
   const ownerHint = u.kind === "agent" && !(u.owners || []).includes(me)
     ? ` · joins with @${(u.owners || [])[0] || "?"}` : "";
   return pickerRow({ value: u.username, initial: u.display, name: u.display,
     sub: `@${u.username}${ownerHint}`, tag: u.kind === "agent" ? "agent" : "",
-    avatar: meshAvatarInner(u.username) });
+    avatar: meshAvatarInner(u.username, context) });
 }
 
-function pickerSections(users, me, exclude) {
+function pickerSections(users, me, exclude, context) {
   const listed = Object.values(users)
     .filter((u) => u.username !== me && !u.departed
       && !exclude.includes(u.username));
   const agents = listed.filter((u) => u.kind === "agent");
   const humans = listed.filter((u) => u.kind === "human");
-  return { html: pickerSection("Agents", agents.map((u) => userRow(u, me)).join(""))
-                + pickerSection("Members", humans.map((u) => userRow(u, me)).join("")),
+  return { html: pickerSection("Agents", agents.map((u) => userRow(u, me, context)).join(""))
+                + pickerSection("Members", humans.map((u) => userRow(u, me, context)).join("")),
            any: listed.length > 0 };
 }
 
 async function showAddMembers(chatId) {
-  const ticket = captureSessionEpoch();
+  const ticket = beginModalRead();
   const ms = await api("/api/mesh/state");
-  if (!applyMeshState(ticket, ms)) return;
+  if (!modalReadMayApply(ticket, ms) || ms.error) return;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
   if (data.error) {
-    if (sessionMayApply(ticket)) toast("Couldn't load chat members", true);
+    if (modalReadMayApply(ticket)) toast("Couldn't load chat members", true);
     return;
   }
-  if (!sessionMayApply(ticket, data)) return;
-  const picker = pickerSections(ms.users, ms.user, data.meta.members || []);
+  if (!modalReadMayApply(ticket, data)) return;
+  const picker = pickerSections(ms.users, ms.user, data.meta.members || [], ms);
   const box = openModal(`
     <div class="pane-head" style="margin:0 0 10px">
       <button class="icon-btn" id="am-close">${ICONS.close}</button>
@@ -58,11 +57,14 @@ async function showAddMembers(chatId) {
   box.querySelector("#am-close").addEventListener("click", closeModal);
   bindModalFilter(box);
   if (!picker.any) return;
+  const actionOwner = captureModalRead();
   bindPicker(box, async (picked) => {
+    if (!modalReadMayApply(actionOwner) || !box.isConnected) return;
     const go = box.querySelector(".pf-go");
     if (go) go.disabled = true;
     for (const u of picked) {
       const r = await api("/api/mesh/add_member", { chat_id: chatId, username: u });
+      if (!modalReadMayApply(actionOwner) || !box.isConnected) return;
       if (r.error) { toast(r.error, true); if (go) go.disabled = false; return; }
     }
     closeModal();   // the membership event pill is the feedback
@@ -78,23 +80,23 @@ V.showAddMembers = showAddMembers;
 
 // Search members: same surface, view-only
 async function showSearchMembers(chatId) {
-  const ticket = captureSessionEpoch();
+  const ticket = beginModalRead();
   const ms = await api("/api/mesh/state");
-  if (!applyMeshState(ticket, ms)) return;
+  if (!modalReadMayApply(ticket, ms) || ms.error) return;
   const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
   if (data.error) {
-    if (sessionMayApply(ticket)) toast("Couldn't load chat members", true);
+    if (modalReadMayApply(ticket)) toast("Couldn't load chat members", true);
     return;
   }
-  if (!sessionMayApply(ticket, data)) return;
+  if (!modalReadMayApply(ticket, data)) return;
   const meta = data.meta;
   const row = (u) => {
     const rec = ms.users[u] || {};
     return `
     <div class="mem-row modal-row">
-      <span class="mem-avatar">${esc((meshDn(u)[0] || "?").toUpperCase())}</span>
+      <span class="mem-avatar">${esc((meshDn(u, ms)[0] || "?").toUpperCase())}</span>
       <span style="min-width:0">
-        <div class="mem-name">${esc(meshDn(u))}
+        <div class="mem-name">${esc(meshDn(u, ms))}
           ${rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
         <div class="mem-sub">@${esc(u)}</div>
       </span>
