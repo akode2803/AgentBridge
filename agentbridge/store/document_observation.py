@@ -78,29 +78,103 @@ class DocumentObservation:
         return default
 
 
+_TABLES = {
+    "document_observation_sources": (
+        "CREATE TABLE document_observation_sources("
+        "source_id TEXT PRIMARY KEY,generation INTEGER NOT NULL "
+        "CHECK(typeof(generation)='integer' AND generation>=0),"
+        "cursor INTEGER NOT NULL CHECK(typeof(cursor)='integer' AND cursor>=0),"
+        "initialized INTEGER NOT NULL "
+        "CHECK(typeof(initialized)='integer' AND initialized IN (0,1)))"
+    ),
+    "document_observation_records": (
+        "CREATE TABLE document_observation_records("
+        "source_id TEXT NOT NULL, path TEXT NOT NULL, payload TEXT,"
+        "deleted INTEGER NOT NULL CHECK(typeof(deleted)='integer' AND deleted IN (0,1)),"
+        "PRIMARY KEY(source_id,path),CHECK((deleted=0 AND payload IS NOT NULL) OR "
+        "(deleted=1 AND payload IS NULL)))"
+    ),
+    "document_readiness_version": (
+        "CREATE TABLE document_readiness_version("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+        "version INTEGER NOT NULL CHECK(version=1))"
+    ),
+}
+
+
 def initialize(conn: sqlite3.Connection) -> None:
     """Install the additive observation namespace atomically."""
     conn.execute("BEGIN IMMEDIATE")
     with conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS document_observation_sources("
-            "source_id TEXT PRIMARY KEY,"
-            "generation INTEGER NOT NULL "
-            "CHECK(typeof(generation)='integer' AND generation>=0),"
-            "cursor INTEGER NOT NULL "
-            "CHECK(typeof(cursor)='integer' AND cursor>=0),"
-            "initialized INTEGER NOT NULL "
-            "CHECK(typeof(initialized)='integer' AND initialized IN (0,1)))"
+        # Never recreate a missing table over an already-admitted readiness
+        # namespace: that could reset generations inside the same incarnation.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='document_readiness_version'"
+        ).fetchone():
+            _validate_readiness_schema(conn)
+            return
+        for name in ("document_observation_sources", "document_observation_records"):
+            conn.execute(_TABLES[name].replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
+
+        installed = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='document_readiness_version'"
+        ).fetchone()
+        if installed is None:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'document_source_dirty_%' LIMIT 1"
+            ).fetchone():
+                raise sqlite3.OperationalError("partial document readiness schema")
+            conn.execute(_TABLES["document_readiness_version"])
+            conn.execute("INSERT INTO document_readiness_version VALUES(1,1)")
+            for sql in _readiness_triggers().values():
+                conn.execute(sql)
+        _validate_readiness_schema(conn)
+
+
+def _readiness_triggers() -> dict[str, str]:
+    result = {}
+    for event, references in (
+        ("INSERT", ("NEW",)), ("DELETE", ("OLD",)),
+        ("UPDATE", ("OLD", "NEW")),
+    ):
+        updates = " ".join(
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM document_observation_sources "
+            "WHERE source_id=" + ref + ".source_id AND (typeof(generation)<>'integer' "
+            "OR generation<0 OR generation>=9223372036854775807)) "
+            "THEN RAISE(ABORT,'document generation exhausted') END; "
+            "UPDATE document_observation_sources SET initialized=0,"
+            "generation=generation+1 WHERE source_id=" + ref + ".source_id"
+            + (" AND NEW.source_id<>OLD.source_id" if event == "UPDATE" and ref == "NEW" else "")
+            + ";"
+            for ref in references
         )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS document_observation_records("
-            "source_id TEXT NOT NULL, path TEXT NOT NULL, payload TEXT,"
-            "deleted INTEGER NOT NULL "
-            "CHECK(typeof(deleted)='integer' AND deleted IN (0,1)),"
-            "PRIMARY KEY(source_id,path),"
-            "CHECK((deleted=0 AND payload IS NOT NULL) OR "
-            "(deleted=1 AND payload IS NULL)))"
-        )
+        name = "document_source_dirty_" + event.lower()
+        result[name] = ("CREATE TRIGGER " + name + " AFTER " + event
+                        + " ON document_observation_records BEGIN " + updates + " END")
+    return result
+
+
+def _validate_readiness_schema(conn: sqlite3.Connection) -> None:
+    for name, expected in _TABLES.items():
+        actual = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,),
+        ).fetchone()
+        if actual is None or actual[0] != expected:
+            raise sqlite3.OperationalError("invalid document readiness table: " + name)
+    version = conn.execute("SELECT singleton,version FROM document_readiness_version LIMIT 2").fetchall()
+    if (version != [(1, 1)] or any(type(v) is not int for row in version for v in row)):
+        raise sqlite3.OperationalError("invalid document readiness schema version")
+    actual = dict(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+        "AND (name GLOB 'document_source_dirty_*' OR tbl_name IN "
+        "('document_observation_sources','document_observation_records',"
+        "'document_readiness_version')) LIMIT 4"
+    ).fetchall())
+    if actual != _readiness_triggers():
+        raise sqlite3.OperationalError("invalid document readiness triggers")
 
 
 def capture_position(path: Path, source_id: str) -> DocumentPosition:
@@ -123,6 +197,7 @@ def publish(
     cursor: int,
     deleted_paths: tuple[str, ...] = (),
     full: bool = False,
+    retain_tombstones: bool = True,
     max_documents: int = 100_000,
     max_bytes: int = 64 * 1024 * 1024,
 ) -> DocumentPosition:
@@ -131,8 +206,10 @@ def publish(
     new_cursor = _validate_counter(cursor, "cursor")
     document_budget = _validate_budget(max_documents, "max_documents")
     byte_budget = _validate_budget(max_bytes, "max_bytes")
-    if type(full) is not bool:
-        raise ValueError("full must be a bool")
+    if type(full) is not bool or type(retain_tombstones) is not bool:
+        raise ValueError("full and retain_tombstones must be bools")
+    if not full and not retain_tombstones:
+        raise ValueError("tombstone retirement requires a full source snapshot")
     if type(documents) is not dict:
         raise ValueError("documents must be a dict")
     if type(deleted_paths) is not tuple:
@@ -188,11 +265,12 @@ def publish(
             raise OverflowError("document generation is exhausted")
 
         if full:
-            conn.execute(
+            statement = (
                 "UPDATE document_observation_records SET payload=NULL,deleted=1 "
-                "WHERE source_id=?",
-                (expected.source_id,),
+                "WHERE source_id=?" if retain_tombstones else
+                "DELETE FROM document_observation_records WHERE source_id=?"
             )
+            conn.execute(statement, (expected.source_id,))
         for name, payload in normalized.items():
             conn.execute(
                 "INSERT INTO document_observation_records"
@@ -232,6 +310,104 @@ def publish(
         str(path), current.incarnation, expected.source_id,
         generation, new_cursor, full or current.initialized,
     )
+
+
+def invalidate(
+    conn: sqlite3.Connection,
+    path: Path,
+    expected_position: DocumentPosition,
+) -> DocumentPosition:
+    """Retire a source before rebuilding, retaining old rows for background work.
+
+    Retained rows are historical inputs, not a ready projection. Only a new full
+    publication can initialize this generation. This metadata-only transition
+    never walks the source documents and is fenced against stale publishers.
+    """
+    expected = _validate_expected(expected_position, path)
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "cannot invalidate document observations within a caller transaction"
+        )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _capture_position(conn, path, expected.source_id)
+        if current != expected:
+            raise DocumentObservationConflict("document source changed before invalidation")
+        if current.generation == MAX_SQLITE_INTEGER:
+            raise OverflowError("document generation is exhausted")
+        generation = current.generation + 1
+        conn.execute(
+            "INSERT INTO document_observation_sources"
+            "(source_id,generation,cursor,initialized) VALUES(?,?,?,0) "
+            "ON CONFLICT(source_id) DO UPDATE SET generation=excluded.generation,"
+            "initialized=0",
+            (expected.source_id, generation, current.cursor),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return DocumentPosition(
+        str(path), current.incarnation, expected.source_id,
+        generation, current.cursor, False,
+    )
+
+
+def capture_selected(
+    path: Path, expected_position: DocumentPosition, document_paths: tuple[str, ...],
+    *, max_documents: int = 256, max_bytes: int = 1024 * 1024,
+) -> DocumentObservation:
+    """Exact-ID raw input capture in one read transaction; no prefix/full scan.
+
+    Missing rows and tombstones both produce an explicit tombstone. Callers must
+    enforce their own path allowlist and current authority before using inputs.
+    """
+    expected = _validate_expected(expected_position, path)
+    count_limit = _validate_budget(max_documents, "max_documents")
+    byte_limit = _validate_budget(max_bytes, "max_bytes")
+    if type(document_paths) is not tuple:
+        raise ValueError("document_paths must be a tuple")
+    if len(document_paths) > count_limit:
+        raise OverflowError("document selection exceeds row budget")
+    names = tuple(_validate_document_path(name) for name in document_paths)
+    if len(set(names)) != len(names):
+        raise ValueError("document selection contains duplicate paths")
+    used = sum(len(name.encode("utf-8")) for name in names)
+    if used > byte_limit:
+        raise OverflowError("document selection exceeds byte budget")
+    conn = _open_reader(path)
+    try:
+        conn.execute("BEGIN")
+        current = _capture_position(conn, path, expected.source_id)
+        if current != expected or not current.initialized:
+            raise DocumentObservationConflict("document source is changed or pending")
+        for name in names:
+            size = conn.execute(
+                "SELECT coalesce(length(CAST(payload AS BLOB)),0) "
+                "FROM document_observation_records WHERE source_id=? AND path=?",
+                (expected.source_id, name),
+            ).fetchone()
+            used += size[0] if size is not None else 0
+            if used > byte_limit:
+                raise OverflowError("document selection exceeds byte budget")
+        records = []
+        for name in names:
+            row = conn.execute(
+                "SELECT payload,deleted FROM document_observation_records "
+                "WHERE source_id=? AND path=?", (expected.source_id, name),
+            ).fetchone()
+            if row is not None and (
+                type(row[1]) is not int or row[1] not in (0, 1)
+                or (row[1] == 0 and type(row[0]) is not str)
+                or (row[1] == 1 and row[0] is not None)
+            ):
+                raise sqlite3.OperationalError("malformed observed document row")
+            records.append(SerializedDocumentRecord(
+                name, row[0] if row else None, row[1] == 1 if row else True,
+            ))
+        return DocumentObservation(current, tuple(records))
+    finally:
+        conn.close()
 
 
 def reset(
@@ -330,6 +506,7 @@ def _open_reader(path: Path) -> sqlite3.Connection:
 def _capture_position(
     conn: sqlite3.Connection, path: Path, source_id: str
 ) -> DocumentPosition:
+    _validate_readiness_schema(conn)
     row = conn.execute(
         "SELECT i.incarnation,coalesce(s.generation,0),"
         "coalesce(s.cursor,0),coalesce(s.initialized,0) "
@@ -339,8 +516,12 @@ def _capture_position(
     ).fetchone()
     if row is None:
         raise RuntimeError("missing ingestion database identity")
+    if (type(row[0]) is not str or not row[0]
+            or type(row[1]) is not int or type(row[2]) is not int
+            or type(row[3]) is not int or row[3] not in (0, 1)):
+        raise RuntimeError("malformed document source position")
     return DocumentPosition(
-        str(path), str(row[0]), source_id, int(row[1]), int(row[2]), bool(row[3])
+        str(path), row[0], source_id, row[1], row[2], row[3] == 1
     )
 
 

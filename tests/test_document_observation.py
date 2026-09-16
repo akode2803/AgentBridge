@@ -212,14 +212,18 @@ def test_batch_count_budget_rejects_before_payload_serialization_or_begin(store)
 
 def test_injected_error_and_generation_overflow_roll_back_atomically(store):
     current = _full(store, old=1)
-    with store._conn() as conn:
-        conn.execute(
-            "CREATE TRIGGER reject_observation BEFORE INSERT "
-            "ON document_observation_records WHEN NEW.path='reject' "
-            "BEGIN SELECT RAISE(ABORT, 'observation failed'); END"
-        )
-    with pytest.raises(sqlite3.IntegrityError, match="observation failed"):
-        store.publish_document_batch(current, {"reject": 2}, cursor=2)
+    # Readiness now rejects unexpected triggers before starting a build. Inject
+    # the write failure through SQLite's authorizer without altering the schema.
+    conn = store._conn()
+    conn.set_authorizer(lambda action, table, *_: (
+        sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT
+        and table == "document_observation_records" else sqlite3.SQLITE_OK
+    ))
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            store.publish_document_batch(current, {"reject": 2}, cursor=2)
+    finally:
+        conn.set_authorizer(None)
     assert store.capture_document_position("folder:one") == current
     assert store.capture_document_observation("folder:one").documents() == {"old": 1}
 

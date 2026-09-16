@@ -421,11 +421,27 @@ class Store:
     def publish_document_batch(
         self, expected_position: DocumentPosition, documents: dict, *,
         cursor: int, deleted_paths: tuple[str, ...] = (), full: bool = False,
+        retain_tombstones: bool = True,
         max_documents: int = 100_000, max_bytes: int = 64 * 1024 * 1024,
     ) -> DocumentPosition:
         return document_observation.publish(
             self._conn(), self.path, expected_position, documents,
             cursor=cursor, deleted_paths=deleted_paths, full=full,
+            retain_tombstones=retain_tombstones,
+            max_documents=max_documents, max_bytes=max_bytes,
+        )
+
+    def invalidate_document_observation(
+        self, expected_position: DocumentPosition,
+    ) -> DocumentPosition:
+        return document_observation.invalidate(self._conn(), self.path, expected_position)
+
+    def capture_selected_documents(
+        self, expected_position: DocumentPosition, document_paths: tuple[str, ...],
+        *, max_documents: int = 256, max_bytes: int = 1024 * 1024,
+    ) -> DocumentObservation:
+        return document_observation.capture_selected(
+            self.path, expected_position, document_paths,
             max_documents=max_documents, max_bytes=max_bytes,
         )
 
