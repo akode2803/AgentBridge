@@ -92,3 +92,24 @@ source-shape facts, and compare the verification layer against the existing owne
 with callback-order tests. Copy only the needed actor membership facts before
 callbacks; never retain mutable caller membership containers across resolution.
 No endpoint used the drafts when review found these gaps.
+
+## SQL JSON classification can disagree with canonical Python (R209)
+
+A proposed pending-terminal expression index would have treated duplicate JSON
+keys using SQLite's first-key semantics. Python's established parser uses the
+last key, so a payload could be classified nonterminal while the canonical reader
+saw a leave/delete event. SQLite JSON validity also differs for Python's accepted
+NaN values. Review caught this before the draft was connected to serving.
+
+Safeguard: classify with the canonical Python parser outside foreground reads,
+publish source-bound metadata through target-generation CAS, and invalidate it
+atomically on source writes. Oracle regressions retain duplicate raw/wrapped
+keys, NaN, malformed and unsupported-type cases. SQLite REPLACE additionally
+needs explicit conflicting-target invalidation when DELETE triggers are disabled.
+
+Generation invalidation must cover both INSERT OR REPLACE and UPDATE OR REPLACE:
+with recursive triggers disabled, either can remove a conflicting row without a
+DELETE trigger. Explicit collision guards invalidate the removed row's target.
+Counter validation uses trigger RAISE(ABORT), because an outer OR IGNORE can
+suppress ordinary constraint failures. Tests exercise moved targets, malformed
+and exhausted counters, source changes during background publication and ABA.

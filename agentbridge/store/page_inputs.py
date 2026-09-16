@@ -83,7 +83,7 @@ def initialize(conn):
         raise
 
 
-def _schema(conn):
+def _message_schema(conn):
     columns = {r[1]: (r[2].upper(), r[5]) for r in conn.execute('PRAGMA table_info(messages)')}
     required = {'chat_id': ('TEXT', 1), 'id': ('TEXT', 2), 'ns': ('INTEGER', 0),
                 'sender': ('TEXT', 0), 'kind': ('TEXT', 0), 'payload': ('TEXT', 0)}
@@ -94,6 +94,10 @@ def _schema(conn):
         ('chat_id', 0, 'BINARY', 1), ('id', 0, 'BINARY', 1), (None, 0, 'BINARY', 0),
     ]:
         raise PageInputsChanged('message_primary_key_changed')
+
+
+def _schema(conn):
+    _message_schema(conn)
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (INDEX,)).fetchone()
     if row is None:
         raise PageInputsChanged('message_index_pending')
@@ -271,3 +275,26 @@ def capture(
     for row in {r.key.id: r for r in result.rows + result.exact_rows}.values():
         row.decoded()
     return result
+
+
+def matches_position(conn, path, expected):
+    """Validate the page input cut inside a caller-owned final transaction.
+
+    Pair with membership/terminal checks under the coordinator's pin lock and
+    BEGIN IMMEDIATE after projection. This checks local inputs only; it is not
+    current viewer, key, session or transport authority.
+    """
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('page position check requires an active transaction')
+    if type(expected) is not PageInputPosition:
+        raise ValueError('invalid page position')
+    message_input, overlay_input = expected.messages, expected.overlays
+    wanted_messages = messages._copy_expected(message_input, str(Path(path).resolve()))
+    wanted_overlays = overlays._wanted(overlay_input, path)
+    if wanted_messages.chat_id != wanted_overlays.chat_id:
+        raise ValueError('inconsistent page chat binding')
+    _schema(conn)
+    if messages._capture(conn, path, wanted_messages.chat_id) != wanted_messages:
+        return False
+    overlays._ready(conn, path, wanted_overlays)
+    return True

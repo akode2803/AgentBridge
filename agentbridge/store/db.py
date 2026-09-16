@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status, overlay_index, page_inputs
+from . import log_position, send_status, overlay_index, page_inputs, membership_suffix, terminal_observation
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -336,6 +336,12 @@ class Store:
         )
         return [json.loads(row[0]) for row in rows]
 
+    def prepare_membership_suffix_index(self):
+        return membership_suffix.initialize(self._conn())
+
+    def capture_membership_suffix(self, chat_id, after_ns, **limits):
+        return membership_suffix.capture(self.path, chat_id, after_ns, **limits)
+
     def capture_membership_input_position(
         self, chat_id: str,
     ) -> MembershipInputPosition:
@@ -558,6 +564,15 @@ class Store:
             raise
 
     # ----------------------------------------------------------------- outbox
+    def prepare_terminal_observation(self):
+        return terminal_observation.initialize(self._conn())
+
+    def refresh_terminal_observation(self, target, **limits):
+        return terminal_observation.refresh(self._conn(), self.path, target, **limits)
+
+    def capture_terminal_observation(self, target, **selection):
+        return terminal_observation.capture(self.path, target, **selection)
+
     def outbox_add(self, kind: str, target: str, payload: dict[str, Any]) -> int:
         """Enqueue BEFORE any send attempt — commit here is what makes a send
         crash-safe. Returns the queue sequence number."""
