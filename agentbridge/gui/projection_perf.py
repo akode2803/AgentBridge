@@ -17,7 +17,7 @@ _STAGES = frozenset({
     "overview_folds", "membership_gate", "transcript_fold", "receipts_fold",
     "viewer_state", "pins", "pause_state", "payload_assembly",
     "snapshot", "envelope_load", "edits_load", "redactions_load",
-    "reactions_load", "viewer_state_load", "readmodel_fold",
+    "reactions_load", "viewer_state_load", "readmodel_fold", "selected_presentation",
 })
 _COUNTERS = frozenset({
     "room_count", "fold_calls", "raw_messages", "deduplicated_messages",

@@ -44,9 +44,31 @@ export function syncAskDots(asks) {
   });
 }
 
-// First-boot placeholder: a slim indeterminate bar + shimmer rows while the
-// very first /api/mesh/state is in flight (a cloud root warms its read mirror
-// for ~a second on a cold start). Replaced by the real list on arrival.
+export function clearSidebar() {
+  const box = $("#side-chats");
+  if (!box) return;
+  // The render signatures describe these exact nodes. Retaining a signature
+  // after a session reset made the restored settings sidebar look unchanged.
+  box.replaceChildren();
+  delete box.dataset.key;
+  delete box.dataset.mode;
+  delete box.dataset.struct;
+  box.classList.remove("ng-host", "slide");
+  box.style.padding = "";
+  App._sidePage = null;
+}
+
+export function syncSidebarSelection() {
+  document.querySelectorAll("#side-chats .chat-row").forEach((row) => {
+    const selected = App.page === "chats" && row.dataset.chat === Mesh.chatId;
+    if (row.classList.contains("active") !== selected) {
+      row.classList.toggle("active", selected);
+      delete row.dataset.sig;
+    }
+  });
+}
+
+// First-boot placeholder while the first broad state request is in flight.
 export function renderSideLoading() {
   const box = $("#side-chats");
   if (!box || box.querySelector(".chat-row") || box.querySelector(".side-skel")) return;

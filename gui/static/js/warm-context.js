@@ -27,6 +27,9 @@ export function presentationFromState(state) {
       && value.display.length <= 256
       ? value.display : name;
     const item = { username: name, display };
+    if (["human", "agent"].includes(value.display_kind)) {
+      item.display_kind = value.display_kind;
+    }
     if (plainObject(value.avatar)) {
       const avatar = {};
       if (typeof value.avatar.sha256 === "string"
@@ -100,6 +103,12 @@ export function initialChatContext(session, bootstrap, {
     initial: true,
     presentation: Object.freeze({user: session.binding.viewer, users}),
   });
+}
+
+export function selectedChatContext(session, bootstrap, options = {}) {
+  // A fresh canonical selected read supplies both membership and decorations.
+  // An old sidebar is neither needed for first paint nor promoted as authority.
+  return initialChatContext(session, bootstrap, { ...options, state: null });
 }
 
 export function sameWarmOperation(operation, current) {

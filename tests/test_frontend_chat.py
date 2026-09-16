@@ -11,7 +11,9 @@ STYLE = Path(__file__).resolve().parents[1] / "gui" / "static" / "style.css"
 def test_group_agent_badge_uses_sender_account_kind():
     chat = CHAT_JS.read_text(encoding="utf-8")
 
-    assert 'ms.users?.[msg.from]?.kind === "agent"' in chat
+    assert 'displayKind(msg.from) === "agent"' in chat
+    assert 'ms.users?.[name]?.display_kind' in chat
+    assert '|| ms.users?.[name]?.kind' in chat
     assert 'msg.kind === "agent"' not in chat
 
 

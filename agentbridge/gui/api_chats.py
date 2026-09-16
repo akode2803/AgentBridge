@@ -8,9 +8,11 @@ with the Delivered tier, per-user ``archived``.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
+from itertools import chain
 from pathlib import Path
 
 from ..harness.runtime.controls import read_pause
@@ -332,12 +334,55 @@ def chat(app: GuiApp, req, mesh, token: SessionReadToken) -> dict:
             "read_ns": mine["read_ns"],
             "total": len(msgs),
             "session_binding": session_read_binding(token),
+            "presentation": observation.measure(
+                "selected_presentation",
+                lambda: _chat_presentation(mesh, snap.members, payload),
+            ),
         }
     except Exception:
         observation.log(app.home, "denied_or_error")
         raise
     observation.log(app.home, "ok")
     return result
+
+
+def _chat_presentation(mesh, members, messages) -> dict:
+    """Bounded decorations for the already-authorized selected transcript.
+
+    Profiles retain their ordinary privacy filtering. No owner, key, presence,
+    permission or account-state field can become a client authority input.
+    Missing/oversized decorations simply render as usernames.
+    """
+    users = {}
+    budget = 64 * 1024 - len(json.dumps(
+        {"user": mesh.user, "users": {}}, ensure_ascii=False,
+    ).encode("utf-8"))
+    seen = set()
+    for name in chain((mesh.user,), members, (m["from"] for m in messages)):
+        if name in seen:
+            continue
+        if len(seen) >= 256:
+            break
+        seen.add(name)
+        acc = mesh.directory.get(name)
+        if acc is None:
+            continue
+        profile = mesh.visible_profile(name)
+        item = {"display": str(profile.get("display") or name)[:256]}
+        if profile.get("kind") in {"human", "agent"}:
+            item["display_kind"] = profile["kind"]
+        if profile.get("photo_visible") and isinstance(acc.avatar, dict):
+            avatar = {key: value for key, limit in (("sha256", 128), ("updated", 64))
+                      if isinstance(value := acc.avatar.get(key), str)
+                      and len(value) <= limit}
+            if avatar:
+                item["avatar"] = avatar
+        size = len(json.dumps({name: item}, ensure_ascii=False).encode("utf-8"))
+        if size > budget:
+            break
+        budget -= size
+        users[name] = item
+    return {"user": mesh.user, "users": users}
 
 
 def _pins_list(pins: dict, msgs) -> list[dict]:

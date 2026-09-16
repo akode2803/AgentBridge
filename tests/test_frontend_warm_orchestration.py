@@ -23,6 +23,14 @@ def _warm_source() -> str:
 def test_warm_switch_executes_fresh_fold_and_rejects_stale_continuations(tmp_path: Path):
     """The exact route function runs against deferred API barriers, not a copy."""
     runner = tmp_path / "warm-orchestration.mjs"
+    (tmp_path / "warm-context.mjs").write_text(
+        (ROOT / "gui/static/js/warm-context.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "latest-read.mjs").write_text(
+        (ROOT / "gui/static/js/latest-read.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     runner.write_text(
         _RUNNER % json.dumps(_warm_source()), encoding="utf-8"
     )
@@ -47,6 +55,10 @@ def test_accepted_state_removal_clears_an_active_warm_surface(tmp_path: Path):
     end = source.index("const chatOpenObservations", start)
     handler = source[start:end].replace(
         "let activeWarmSurface = null;", "let activeWarmSurface = seed;"
+    )
+    (tmp_path / "latest-read.mjs").write_text(
+        (ROOT / "gui/static/js/latest-read.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
     )
     runner = tmp_path / "accepted-removal.mjs"
     runner.write_text(_REMOVAL_RUNNER.replace("__SOURCE__", json.dumps(handler)), encoding="utf-8")
@@ -75,6 +87,11 @@ def test_state_removal_between_base_dom_commit_and_renderer_resume_clears_surfac
     listener = chat[listener_start:listener_end].replace(
         "let activeWarmSurface = null;", "activeWarmSurface = null;"
     )
+    for name in ("warm-context", "latest-read"):
+        (tmp_path / f"{name}.mjs").write_text(
+            (ROOT / f"gui/static/js/{name}.js").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
     runner = tmp_path / "base-render-removal.mjs"
     runner.write_text(
         _MID_RENDER_RUNNER.replace("__LISTENER__", json.dumps(listener)).replace(
@@ -90,6 +107,11 @@ def test_state_removal_between_base_dom_commit_and_renderer_resume_clears_surfac
 def test_warm_base_telemetry_records_after_two_frames_and_drops_stale(tmp_path: Path):
     """Run the exact warm function's schedule-only telemetry callbacks."""
     runner = tmp_path / "warm-telemetry.mjs"
+    for name in ("warm-context", "latest-read"):
+        (tmp_path / f"{name}.mjs").write_text(
+            (ROOT / f"gui/static/js/{name}.js").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
     runner.write_text(
         _TELEMETRY_RUNNER.replace("__WARM__", json.dumps(_warm_source())),
         encoding="utf-8",
@@ -100,6 +122,8 @@ def test_warm_base_telemetry_records_after_two_frames_and_drops_stale(tmp_path: 
 
 _RUNNER = r'''
 import assert from "node:assert/strict";
+import {presentationFromState} from "./warm-context.mjs";
+import {createLatestRead} from "./latest-read.mjs";
 const source = %s;
 const body = source.replace("export async function renderWarmChat", "async function renderWarmChat");
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise, resolve}; }
@@ -116,7 +140,9 @@ function make({current = () => true, session = () => true, applyState = () => tr
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
     "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent",
     "applyCurrentWarmError", "restartColdAfterStateInvalidation", "Mesh", "$", "location", "renderSidebar",
+    "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
+     const SIDEBAR_TIMEOUT_MS = 60000;
      const restartColdAfterInitialFailure = () => false;
      const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
        markInitialSelectedViewReady = () => true, startAskPoll = () => {};
@@ -125,13 +151,16 @@ function make({current = () => true, session = () => true, applyState = () => tr
   const fn = factory(api, () => ({epoch: 1}), () => ({sessionEpoch: 1, lockEpoch: 1}), session, applyState, () => ({stateGeneration: 2}),
     async (_force, trace, options) => { renders.push({trace, options}); },
     callback => callback(), current, (_operation, value) => errors.push(value), () => cold.push("fallback"), Mesh,
-    selector => { assert.equal(selector, "#content"); return content; }, {hash: "#/chats/open"}, () => {});
+    selector => { assert.equal(selector, "#content"); return content; }, {hash: "#/chats/open"}, () => {},
+    presentationFromState, createLatestRead(0));
   return {fn, calls, renders, errors, cold, state, chat, aux, content, Mesh};
 }
 const warm = {chatId: "room", presentation: {user: "aryan"}, sessionEpoch: 1, lockEpoch: 1,
   stateGeneration: 1, routeSeq: 1, operationId: 1, chatRenderSeq: 0};
 const route = {chatId: "room", routeSeq: 1, operationId: 1, sessionEpoch: 1, lockEpoch: 1, stateGeneration: 1};
-const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]}, messages: [{text: "fresh"}]};
+const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]},
+  messages: [{text: "fresh"}], presentation: {user: "aryan",
+    users: {aryan: {display: "Aryan", display_kind: "human"}}}};
 
 // One selected chat builds the base; hydration reuses its exact payload.
 {
@@ -139,7 +168,11 @@ const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]}, messages:
   assert.deepEqual(h.calls, ["/api/mesh/chat?id=room"]);
   h.chat.resolve(selected); for (let i = 0; i < 6; i += 1) await Promise.resolve();
   assert.equal(h.renders.length, 1); assert.equal(h.renders[0].options.data, selected);
-  assert.equal(h.renders[0].options.warmBase, true); assert(h.calls.includes("/api/mesh/state"));
+  assert.equal(h.renders[0].options.warmBase, true);
+  for (let i = 0; i < 20 && !h.calls.includes("/api/mesh/state"); i++)
+    await new Promise(resolve => setTimeout(resolve, 0));
+  assert(h.calls.includes("/api/mesh/state"));
+  assert.equal(h.renders[0].options.presentation.users.aryan.display, "Aryan");
   h.state.resolve({chats: [{id: "room"}]}); h.aux.forEach((item, i) => item.resolve(i ? {tasks: []} : {feeds: []}));
   await pending;
   assert.equal(h.calls.filter(path => path.startsWith("/api/mesh/chat?")).length, 1);
@@ -178,6 +211,7 @@ const selected = {me: "aryan", meta: {id: "room", members: ["aryan"]}, messages:
 
 _REMOVAL_RUNNER = r'''
 import assert from "node:assert/strict";
+import {createLatestRead} from "./latest-read.mjs";
 const handlers = new Map();
 const content = {innerHTML: "old plaintext"};
 const App = {page: "chats"};
@@ -189,9 +223,9 @@ const $ = selector => { assert.equal(selector, "#content"); return content; };
 const meshStateSnapshot = () => ({sessionEpoch: 3, viewer: "aryan"});
 const CustomEvent = class { constructor(name, init = {}) { this.type = name; this.detail = init.detail; } };
 const source = __SOURCE__;
-const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$", "location", "seed", "CustomEvent", "handlers",
+const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$", "location", "seed", "CustomEvent", "handlers", "createLatestRead",
   `let chatRenderSeq = 0, chatsFetchSeq = 0, warmOperationSeq = 1, warmOperationsExhausted = false; ${source}; return handlers;`);
-const bound = factory(document, meshStateSnapshot, App, Mesh, $, location, seed, CustomEvent, handlers);
+const bound = factory(document, meshStateSnapshot, App, Mesh, $, location, seed, CustomEvent, handlers, createLatestRead);
 bound.get("ab:mesh-state-accepted")({detail: {state: {user: "aryan", chats: []}}});
 assert.equal(content.innerHTML, '<div class="chat-loading"></div>');
 assert.equal(Mesh.renderedChat, null);
@@ -220,12 +254,14 @@ await Promise.resolve(); assert.deepEqual(renders, [true]);
 
 _MID_RENDER_RUNNER = r'''
 import assert from "node:assert/strict";
+import {presentationFromState} from "./warm-context.mjs";
+import {createLatestRead} from "./latest-read.mjs";
 const handlers = new Map(); const document = {addEventListener: (name, handler) => handlers.set(name, handler)};
 const content = {innerHTML: "old"}; const App = {page: "chats", routeSeq: 1};
 const Mesh = {chatId: "room", renderedChat: "old", structKey: "old"}; const location = {hash: "#/chats/room"};
 const $ = () => content; const listener = __LISTENER__; const warmSource = __WARM__;
 const warmBody = warmSource.replace("export async function renderWarmChat", "async function renderWarmChat");
-const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$", "location", "handlers",
+const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$", "location", "handlers", "createLatestRead", "presentationFromState",
   `let chatRenderSeq = 0, chatsFetchSeq = 0, warmOperationSeq = 1, warmOperationsExhausted = false,
        activeWarmSurface = null; ${listener}
    const api = path => path.startsWith("/api/mesh/chat?")
@@ -245,7 +281,7 @@ const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$"
    const V = {closeAuthPage() {}, closeConnectingPage() {}}; const renderSidebar = () => {};
    ${warmBody}; return renderWarmChat;`);
 const snapshot = () => ({sessionEpoch: 3, viewer: "aryan", stateGeneration: 1});
-const renderWarmChat = factory(document, snapshot, App, Mesh, $, location, handlers);
+const renderWarmChat = factory(document, snapshot, App, Mesh, $, location, handlers, createLatestRead, presentationFromState);
 const warm = {chatId: "room", presentation: {user: "aryan"}, sessionEpoch: 3, lockEpoch: 1,
   stateGeneration: 1, routeSeq: 1, operationId: 1, chatRenderSeq: 0};
 renderWarmChat(false, null, warm, {chatId: "room", routeSeq: 1, operationId: 1});
@@ -257,6 +293,8 @@ assert.equal(Mesh.renderedChat, null); assert.equal(location.hash, "#/chats");
 
 _TELEMETRY_RUNNER = r'''
 import assert from "node:assert/strict";
+import {presentationFromState} from "./warm-context.mjs";
+import {createLatestRead} from "./latest-read.mjs";
 const source = __WARM__.replace("export async function renderWarmChat", "async function renderWarmChat");
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise, resolve}; }
 function make() {
@@ -264,7 +302,9 @@ function make() {
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
     "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent", "applyCurrentWarmError",
     "restartColdAfterStateInvalidation", "recordChatOpen", "performance", "Mesh", "$", "location", "renderSidebar",
+    "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
+     const SIDEBAR_TIMEOUT_MS = 60000;
      const restartColdAfterInitialFailure = () => false;
      const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
        markInitialSelectedViewReady = () => true, startAskPoll = () => {};
@@ -275,7 +315,8 @@ function make() {
     () => ({epoch: 1}), () => ({sessionEpoch: 1, lockEpoch: 1}), () => true, () => true,
     () => ({stateGeneration: 1}), async (_force, _trace, options) => renders.push(options),
     callback => frames.push(callback), () => live, () => {}, () => {}, record => records.push(record),
-    {now: () => 42}, {structKey: ""}, () => ({innerHTML: ""}), {hash: "#/chats/room"}, () => {});
+    {now: () => 42}, {structKey: ""}, () => ({innerHTML: ""}), {hash: "#/chats/room"}, () => {},
+    presentationFromState, createLatestRead(0));
   return {fn, frames, records, renders, state, stale: () => { live = false; }};
 }
 const warm = {chatId: "room", presentation: {user: "aryan"}, sessionEpoch: 1, lockEpoch: 1,

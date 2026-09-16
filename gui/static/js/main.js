@@ -8,7 +8,7 @@ import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          applyMeshState, observeLockState, isInitialSelectedViewReady,
          isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
 import { BrowserSession } from "./session.js";
-import { renderSidebar } from "./sidebar.js";
+import { renderSidebar, clearSidebar, syncSidebarSelection } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
 import "./auth.js";
@@ -55,6 +55,7 @@ let refreshDirty = false;
 let refreshNeedsRender = false;
 let bootstrapPromise = null;
 let bootstrapEpoch = null;
+let sessionRoutePending = false;
 
 export async function bootstrapSession() {
   const wantedEpoch = BrowserSession.snapshot().epoch;
@@ -85,13 +86,13 @@ export async function bootstrapSession() {
 V.bootstrapSession = bootstrapSession;
 
 document.addEventListener("ab:session-reset", () => {
+  sessionRoutePending = true;
   // These shell surfaces can contain the former viewer's plaintext. Clearing
   // them is synchronous; the accepted bootstrap decides which view replaces
   // them. App-lock/restart covers keep their existing policy and lifecycle.
-  const side = document.getElementById("side-chats");
   const content = document.getElementById("content");
   const details = document.getElementById("details-pane");
-  if (side) side.replaceChildren();
+  clearSidebar();
   if (content) content.replaceChildren();
   if (details) { details.replaceChildren(); details.hidden = true; }
   syncRealtime();
@@ -231,7 +232,15 @@ async function refreshOnce(rerender) {
   // open/close the SSE stream to match the current server + auth (inert on v1)
   syncRealtime();
   renderChrome();
-  if (rerender) {
+  if (sessionRoutePending) {
+    // A session transition cleared both surfaces and the old room selection.
+    // Re-read the URL only after the new bootstrap passes lock/restart gates.
+    // Rendering the page directly would otherwise silently lose a deep link.
+    await route();
+    if (!BrowserSession.mayApply(bootstrap.ticket) || !App.state) return;
+    if (App.state.user) V.closeConnectingPage();
+  }
+  else if (rerender) {
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
     if (!BrowserSession.mayApply(bootstrap.ticket) || !App.state) return;
     if (App.state.user) V.closeConnectingPage();
@@ -296,6 +305,7 @@ const PAGES = {
 };
 
 function route() {
+  sessionRoutePending = false;
   cancelInitialSelectedView();
   App.routeSeq = (App.routeSeq || 0) + 1;
   const hash = location.hash.replace("#/", "");
@@ -352,7 +362,8 @@ function route() {
   $("#rail-chats").classList.toggle("active", page === "chats" || page === "new");
   $("#rail-account").classList.toggle("active", page === "settings");
   renderChrome();
-  Promise.resolve(PAGES[App.page]()).catch(() => {});
+  syncSidebarSelection();
+  return Promise.resolve(PAGES[App.page]()).catch(() => {});
 }
 
 window.addEventListener("hashchange", route);

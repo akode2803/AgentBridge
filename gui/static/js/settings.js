@@ -330,6 +330,7 @@ async function renderSettings() {
   // screen (minus its chat-mode class) for a visible ~300ms (stutter). A
   // background refresh keeps a long-lived settings page current.
   let ms = Mesh.state;
+  const hadState = !!ms;
   if (!ms) {
     const fresh = await api("/api/mesh/state");
     if (App.page !== "settings" || routeSeq !== App.routeSeq) return;
@@ -337,12 +338,14 @@ async function renderSettings() {
     ms = fresh;
   }
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
-  const backgroundTicket = captureSessionEpoch();
-  api("/api/mesh/state").then((fresh) => {
-    if (fresh && !fresh.error && App.page === "settings") {
-      applyMeshState(backgroundTicket, fresh);
-    }
-  }).catch(() => {});
+  if (hadState) {
+    const backgroundTicket = captureSessionEpoch();
+    api("/api/mesh/state").then((fresh) => {
+      if (fresh && !fresh.error && App.page === "settings"
+          && routeSeq === App.routeSeq
+          && applyMeshState(backgroundTicket, fresh)) renderSidebar();
+    }).catch(() => {});
+  }
   renderSidebar();
   $("#details-pane").hidden = true;
   // Profile is merged into Account (task 2); the old #/settings/profile route
