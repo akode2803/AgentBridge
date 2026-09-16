@@ -138,6 +138,7 @@ def capture(
     before: MessageKey | None = None, raw_limit: int = 128,
     exact_ids: tuple[str, ...] = (), state_paths: tuple[str, ...] = (),
     proof_keys: tuple[tuple[str, str], ...] = (), max_bytes: int = MAX_BYTES,
+    include_reactions: bool = False,
 ) -> RawPageInputs:
     """One SQLite read snapshot for bounded raw rows and their dependencies.
 
@@ -221,10 +222,11 @@ def capture(
             raise OverflowError('message page exceeds byte budget')
         targets = tuple(sorted(unique))
         indexed = overlays._capture(conn, path, index, targets, state_paths,
-                                    max_bytes=min(overlays.MAX_SELECT_BYTES, max_bytes - used))
+                                    max_bytes=min(overlays.MAX_SELECT_BYTES, max_bytes - used),
+                                    include_reactions=include_reactions)
         # R204 budgets count UTF-8 field content, not Python/JSON framing. Charge
         # returned fields here too so combined capture cannot multiply the cap.
-        used += sum(sum(len(v.encode()) for v in (d.path, d.kind, d.actor, d.shape_error, d.scalars_json))
+        used += sum(5 + sum(len(v.encode()) for v in (d.path, d.kind, d.actor, d.shape_error, d.scalars_json))
                     for d in indexed.documents)
         used += sum(sum(len(v.encode()) for v in (c.path, c.kind, c.target, c.value))
                     for c in indexed.candidates)

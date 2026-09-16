@@ -419,9 +419,9 @@ class Store:
         return overlay_index.publish(self._conn(), self.path, prepared)
 
     def capture_overlay_index(self, expected, targets, state_paths=(), *,
-                              max_rows=2048, max_bytes=overlay_index.MAX_SELECT_BYTES):
+                              max_rows=2048, max_bytes=overlay_index.MAX_SELECT_BYTES, include_reactions=False):
         return overlay_index.capture(self.path, expected, targets, state_paths,
-                                     max_rows=max_rows, max_bytes=max_bytes)
+                                     max_rows=max_rows, max_bytes=max_bytes, include_reactions=include_reactions)
 
     def verify_overlay_signature(self, expected, document_path, public_key, *,
                                  max_bytes=16 * 1024 * 1024):

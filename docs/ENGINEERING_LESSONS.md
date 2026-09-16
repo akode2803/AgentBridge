@@ -78,3 +78,17 @@ absent dependencies, and validate owned byte accounting against recomputed uniqu
 message payload bytes before projection callbacks. Regression tests cover shared
 parents across real Store windows and forged counters with an unseal tripwire.
 No page endpoint was active; independent review found both before release.
+
+## Indexed subsets must preserve verification gates (R207, before activation)
+
+Selecting only reaction documents that mention the current page would omit
+Directory failures from unrelated actors. Collapsing source signature shape into
+one error flag also loses legacy short-circuit behavior: an unsigned document
+resolves its current key and is then ignored, while admitted malformed signing
+inputs fail. Validating a key earlier introduced failures the old reader ignored.
+
+Safeguards: capture a complete bounded metadata manifest, retain independent
+source-shape facts, and compare the verification layer against the existing owner
+with callback-order tests. Copy only the needed actor membership facts before
+callbacks; never retain mutable caller membership containers across resolution.
+No endpoint used the drafts when review found these gaps.

@@ -79,3 +79,9 @@ raw-overlay capture, canonical derivative dependencies (pins, unread, receipts),
 reverse keyset page selection and browser invalidation/scroll/memory behavior are
 still required. Phase2 remote recent-tail ingestion remains separate. No page or
 browser performance claim follows from the indexed lookup microbenchmark.
+
+Schema 2 extends this representation with independent source-shape evidence and
+an optional bounded complete reaction manifest. Exact schema-1 migration retains
+source rows but invalidates readiness until explicit rebuild. See
+[verified page overlays](VERIFIED_PAGE_OVERLAYS.md) for verification gate ordering,
+manifest bounds and the transcript-only result contract.
