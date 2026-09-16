@@ -33,6 +33,7 @@ from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
 from .paths import P
 from .projection import ProjectionObserver, observed, observed_count
 from .readmodel import build_messages, parse_tags, unread_info
+from .redaction_verification import redaction_verifier
 from .sealer import E2EESealer, Sealer
 
 __all__ = ["ConversationProjection", "MessagingService", "OUTBOX_APPEND"]
@@ -610,35 +611,7 @@ class MessagingService:
         if not self._crypto_boundary():
             return None
 
-        def authorized(actor: str, original_from: str) -> bool:
-            return actor == original_from or \
-                self.directory.owner_of(original_from) == actor
-
-        def signed(actor: str, sig: str, payload: bytes) -> bool:
-            pub = self.directory.sign_pub(actor)
-            return bool(pub and sig and crypto.verify(pub, sig, payload))
-
-        def ok(msg_id: str, red: dict, original_from: str) -> bool:
-            void = red.get("void")
-            if isinstance(void, dict):
-                vby = void.get("by") or ""
-                if authorized(vby, original_from) and signed(
-                    vby, void.get("sig") or "",
-                    unredaction_signing_bytes(
-                        chat_id, msg_id, int(red.get("ns", 0)),
-                        vby, int(void.get("ns", 0))),
-                ):
-                    return False  # validly restored — no tombstone
-                # forged/misbound void: fall through, verify the redaction
-            by = red.get("by") or ""
-            if not authorized(by, original_from):
-                return False
-            return signed(
-                by, red.get("sig") or "",
-                redaction_signing_bytes(chat_id, msg_id, by, int(red.get("ns", 0))),
-            )
-
-        return ok
+        return redaction_verifier(chat_id, self.directory)
 
     def unread(self, chat_id: str) -> dict:
         return unread_info(

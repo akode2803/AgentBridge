@@ -81,11 +81,14 @@ class AppLock:
     def expire_if_idle(self) -> bool:
         """Apply the process-wide inactivity deadline; return lock state."""
         with self._mx:
-            if (self.enabled and not self.locked and self.autolock_min > 0
-                    and time.monotonic() - self._last_activity
-                    >= self.autolock_min * 60):
-                self.locked = True
-            return self.locked
+            return self._expire_if_idle_locked()
+
+    def _expire_if_idle_locked(self) -> bool:
+        """Owner-private: caller already holds the nonreentrant screen mutex."""
+        if (self.enabled and not self.locked and self.autolock_min > 0
+                and time.monotonic() - self._last_activity >= self.autolock_min * 60):
+            self.locked = True
+        return self.locked
 
     def note_activity(self) -> bool:
         """Record real client input unless the idle deadline already passed."""
