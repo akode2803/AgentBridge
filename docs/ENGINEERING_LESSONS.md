@@ -185,3 +185,13 @@ lock and requires restart when bytes change. An identical plain fallback after
 protection failure must not cause an infinite restart loop. Both issues were
 caught in review before activation; successful decryption alone was insufficient
 evidence of behavioral parity.
+
+## R216 Windows fixture preconditions
+
+Mocking DPAPI after KeyStore fixture setup does not create a legacy plaintext
+identity on Windows: native save has already encrypted it. Tests for migration
+must explicitly arrange the legacy representation before capture, while keeping
+native save/load coverage elsewhere. Split POSIX FIFO cases from portable byte
+and Unicode checks; do not skip the whole input-boundary test on Windows.
+PR22 CI35152436074 exposed five test failures from these two assumptions; no
+production behavior was changed to satisfy the fixtures.

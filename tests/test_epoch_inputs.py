@@ -21,6 +21,11 @@ from agentbridge.transport.folder import FolderTransport
 CHAT, VIEWER, EPOCH = "r216-room", "aryan", 7
 
 
+def _write_legacy_identity(service, bundle):
+    """Arrange the pre-upgrade format regardless of native DPAPI support."""
+    service.keystore._path(VIEWER).write_text(crypto.b64e(bundle), encoding="utf-8")
+
+
 @pytest.fixture
 def epoch_world(tmp_path):
     root = tmp_path / "provider"
@@ -103,7 +108,7 @@ def test_missing_negative_and_online_unknown_are_distinct(epoch_world):
     assert publish_epoch(service, negative) == "missing"
 
 
-def test_identity_budget_nonregular_and_unicode_are_bounded(epoch_world):
+def test_identity_budget_and_unicode_are_bounded(epoch_world):
     service, _mirror, _provider, _bundle, _key, _path = epoch_world
     identity = service.keystore._path(VIEWER)
     identity.write_bytes(b"x" * 65536)
@@ -115,6 +120,11 @@ def test_identity_budget_nonregular_and_unicode_are_bounded(epoch_world):
     with pytest.raises(UnicodeDecodeError):
         publish_epoch(service, observed)
 
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO files are unavailable")
+def test_nonregular_identity_is_rejected_without_blocking(epoch_world):
+    service, _mirror, _provider, _bundle, _key, _path = epoch_world
+    identity = service.keystore._path(VIEWER)
     identity.unlink()
     os.mkfifo(identity)
     with pytest.raises(EpochInputsUnavailable, match="identity_not_regular"):
@@ -122,7 +132,8 @@ def test_identity_budget_nonregular_and_unicode_are_bounded(epoch_world):
 
 
 def test_capture_never_performs_dpapi_upgrade(epoch_world, monkeypatch):
-    service, _mirror, _provider, _bundle, _key, _path = epoch_world
+    service, _mirror, _provider, bundle, _key, _path = epoch_world
+    _write_legacy_identity(service, bundle)
     monkeypatch.setattr("agentbridge.mesh.epoch_inputs.dpapi.available", lambda: True)
     monkeypatch.setattr(
         "agentbridge.mesh.epoch_inputs.dpapi.protect",
@@ -135,6 +146,7 @@ def test_capture_never_performs_dpapi_upgrade(epoch_world, monkeypatch):
 def test_dpapi_upgrade_returns_progress_without_mirror_lock_then_next_attempt_publishes(
         epoch_world, monkeypatch):
     service, mirror, _provider, bundle, key, _path = epoch_world
+    _write_legacy_identity(service, bundle)
     observed = capture_epoch(service, CHAT, EPOCH)
     calls = []
 
@@ -161,6 +173,7 @@ def test_dpapi_upgrade_returns_progress_without_mirror_lock_then_next_attempt_pu
 
 def test_dpapi_upgrade_progress_precedes_failed_wrap_crypto(epoch_world, monkeypatch):
     service, _mirror, _provider, bundle, _key, _path = epoch_world
+    _write_legacy_identity(service, bundle)
     observed = capture_epoch(service, CHAT, EPOCH)
     monkeypatch.setattr("agentbridge.mesh.epoch_inputs.dpapi.available", lambda: True)
     monkeypatch.setattr(
@@ -177,6 +190,7 @@ def test_dpapi_upgrade_progress_precedes_failed_wrap_crypto(epoch_world, monkeyp
 def test_dpapi_protect_none_plain_fallback_unwraps_without_restart(
         epoch_world, monkeypatch):
     service, _mirror, _provider, bundle, key, _path = epoch_world
+    _write_legacy_identity(service, bundle)
     before = service.keystore._path(VIEWER).read_bytes()
     observed = capture_epoch(service, CHAT, EPOCH)
     monkeypatch.setattr("agentbridge.mesh.epoch_inputs.dpapi.available", lambda: True)
@@ -189,7 +203,8 @@ def test_dpapi_protect_none_plain_fallback_unwraps_without_restart(
 
 
 def test_dpapi_encoded_upgrade_budget_rejects_before_write(epoch_world, monkeypatch):
-    service, mirror, _provider, _bundle, _key, _path = epoch_world
+    service, mirror, _provider, bundle, _key, _path = epoch_world
+    _write_legacy_identity(service, bundle)
     identity = service.keystore._path(VIEWER)
     before = identity.read_bytes()
     observed = capture_epoch(service, CHAT, EPOCH)
