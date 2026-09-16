@@ -1,4 +1,8 @@
-"""Pure crypto primitives (R9, D4/D5) — no transport, no services, no state.
+"""Policy-free crypto primitives (R9, D4/D5).
+
+There is no transport, service, storage-authority, or persistent state here.
+The module retains only a private bounded process-local memo of successful
+Ed25519 verification digests; trust and key selection remain with callers.
 
 Validated end-to-end by spikes/r1/smoke_crypto.py before a line of this
 shipped. Everything here is bytes-in/bytes-out; the mesh layer (keyring,
@@ -20,8 +24,11 @@ Key hierarchy:
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import secrets
+import threading
+from collections import OrderedDict
 
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import serialization
@@ -46,6 +53,33 @@ __all__ = [
 ]
 
 _KEYWRAP_INFO = b"agentbridge.keywrap.v2"
+_VERIFY_CACHE_CAPACITY = 8192
+_VERIFY_CACHE_MAX_PAYLOAD = 1024 * 1024
+_VERIFY_CACHE_DOMAIN = b"AgentBridge.Ed25519.verify.positive.v1\0"
+
+
+def _new_verify_cache_secret() -> bytes | None:
+    try:
+        return secrets.token_bytes(32)
+    except Exception:  # secure randomness unavailable: verification still works
+        return None
+
+
+_verify_cache_lock = threading.Lock()
+_verify_cache: OrderedDict[bytes, None] = OrderedDict()
+_verify_cache_secret = _new_verify_cache_secret()
+
+
+def _reset_verify_cache_after_fork() -> None:
+    """A child must inherit neither a possibly held mutex nor parent digests."""
+    global _verify_cache_lock, _verify_cache, _verify_cache_secret
+    _verify_cache_lock = threading.Lock()
+    _verify_cache = OrderedDict()
+    _verify_cache_secret = _new_verify_cache_secret()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_verify_cache_after_fork)
 
 
 class CryptoFail(Exception):
@@ -188,9 +222,66 @@ def sign(bundle: bytes, data: bytes) -> str:
     return b64e(Ed25519PrivateKey.from_private_bytes(bundle[:32]).sign(data))
 
 
-def verify(sign_pub_b64: str, sig_b64: str, data: bytes) -> bool:
+def _verify_uncached(sign_pub_b64: str, sig_b64: str, data: bytes) -> bool:
     try:
         Ed25519PublicKey.from_public_bytes(b64d(sign_pub_b64)).verify(b64d(sig_b64), data)
         return True
     except (InvalidSignature, ValueError):
         return False
+
+
+def _verify_cache_digest(
+    sign_pub_b64: str, sig_b64: str, data: bytes,
+) -> bytes | None:
+    secret = _verify_cache_secret
+    if secret is None or type(sign_pub_b64) is not str \
+            or type(sig_b64) is not str or type(data) is not bytes:
+        return None
+    if len(sign_pub_b64) != 44 or len(sig_b64) != 88 \
+            or len(data) > _VERIFY_CACHE_MAX_PAYLOAD \
+            or not sign_pub_b64.isascii() or not sig_b64.isascii():
+        return None
+    pub = sign_pub_b64.encode("ascii")
+    sig = sig_b64.encode("ascii")
+    digest = hashlib.blake2b(key=secret, digest_size=32)
+    digest.update(_VERIFY_CACHE_DOMAIN)
+    for value in (pub, sig, data):
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+    return digest.digest()
+
+
+def _verify_cache_hit(digest: bytes) -> bool:
+    with _verify_cache_lock:
+        if digest not in _verify_cache:
+            return False
+        _verify_cache.move_to_end(digest)
+        return True
+
+
+def _remember_positive_verification(digest: bytes) -> None:
+    with _verify_cache_lock:
+        _verify_cache[digest] = None
+        _verify_cache.move_to_end(digest)
+        while len(_verify_cache) > _VERIFY_CACHE_CAPACITY:
+            _verify_cache.popitem(last=False)
+
+
+def verify(sign_pub_b64: str, sig_b64: str, data: bytes) -> bool:
+    """Verify exactly as before, memoizing only bounded positive predicates."""
+    digest = None
+    try:
+        digest = _verify_cache_digest(sign_pub_b64, sig_b64, data)
+        if digest is not None and _verify_cache_hit(digest):
+            return True
+    except Exception:
+        # Cache preparation/lookup is optional. Run the original primitive once.
+        digest = None
+
+    verified = _verify_uncached(sign_pub_b64, sig_b64, data)
+    if verified and digest is not None:
+        try:
+            _remember_positive_verification(digest)
+        except Exception:
+            pass  # the mathematical result is already established
+    return verified
