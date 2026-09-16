@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status
+from . import log_position, send_status, overlay_index, page_inputs
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -160,6 +160,7 @@ class Store:
         membership_input_position.initialize(self._conn())
         lifecycle_heads.initialize(self._conn())
         document_observation.initialize(self._conn())
+        overlay_index.initialize(self._conn())
         shadow_slot.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
@@ -406,6 +407,30 @@ class Store:
             max_chat_ids=max_chat_ids, max_messages=max_messages,
             max_logs=max_logs, max_bytes=max_bytes,
         )
+
+    def prepare_page_input_index(self):
+        """Explicit background preparation; never called by a chat read."""
+        page_inputs.initialize(self._conn())
+
+    def capture_page_inputs(self, index, **selection):
+        return page_inputs.capture(self.path, index, **selection)
+
+    def publish_overlay_index(self, prepared):
+        return overlay_index.publish(self._conn(), self.path, prepared)
+
+    def capture_overlay_index(self, expected, targets, state_paths=(), *,
+                              max_rows=2048, max_bytes=overlay_index.MAX_SELECT_BYTES):
+        return overlay_index.capture(self.path, expected, targets, state_paths,
+                                     max_rows=max_rows, max_bytes=max_bytes)
+
+    def verify_overlay_signature(self, expected, document_path, public_key, *,
+                                 max_bytes=16 * 1024 * 1024):
+        return overlay_index.verify_signature(
+            self._conn(), self.path, expected, document_path, public_key, max_bytes=max_bytes,
+        )
+
+    def capture_overlay_proofs(self, expected, keys):
+        return overlay_index.proofs(self.path, expected, keys)
 
     def capture_document_position(self, source_id: str) -> DocumentPosition:
         return document_observation.capture_position(self.path, source_id)

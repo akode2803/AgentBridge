@@ -42,3 +42,26 @@ Safeguard: preserve
 Any paging or performance change must separate pure verified computation from
 fresh authorization and must account for side effects such as retained-head
 publication. Do not weaken the counterexample to make an optimization pass.
+
+## A SQL size check can read the payload it intends to reject (R205)
+
+During paging validation, `length(CAST(payload AS BLOB))` against a message table
+emitted SQLite `Column` plus `Cast` bytecode, materializing the payload before the
+byte budget was checked. Limiting returned rows or rejecting after this query
+therefore did not bound payload reads.
+
+Safeguard: materialize the byte-size expression in a covering index at background
+preparation/write time. Assert actual VM column sources, not only an index name in
+EXPLAIN QUERY PLAN. Range and exact-ID tests prove budget rejection occurs before
+payload fetch; lookahead reads metadata only. Index construction is explicit
+background work, with migration time/storage and interruption rollback measured
+separately from first-page cost. This was caught before endpoint activation.
+
+## Freeze request values at the owner boundary (R205)
+
+A frozen dataclass prevents ordinary assignment but does not detach a caller's
+retained object. Validating it and later rereading it can cross a concurrent
+mutation. Copy nested position/key fields once into owned validated values, then
+use only those copies. The retained-object mutation regression exercises the
+reader-open barrier rather than relying on FrozenInstanceError alone. Pure input
+positions still do not grant membership or continuing authority.

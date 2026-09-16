@@ -102,6 +102,22 @@ _TABLES = {
 }
 
 
+_SELECTION_INDEX = 'idx_document_observation_selected_size'
+_SELECTION_INDEX_SQL = (
+    f'CREATE INDEX {_SELECTION_INDEX} ON document_observation_records('
+    'source_id,path,coalesce(length(CAST(payload AS BLOB)),0))'
+)
+
+
+def _selection_index(conn, *, install=False):
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (_SELECTION_INDEX,)).fetchone()
+    if row is None and install:
+        conn.execute(_SELECTION_INDEX_SQL)
+        row = (_SELECTION_INDEX_SQL,)
+    if row != (_SELECTION_INDEX_SQL,):
+        raise sqlite3.OperationalError('invalid document selection size index')
+
+
 def initialize(conn: sqlite3.Connection) -> None:
     """Install the additive observation namespace atomically."""
     conn.execute("BEGIN IMMEDIATE")
@@ -113,6 +129,7 @@ def initialize(conn: sqlite3.Connection) -> None:
             "AND name='document_readiness_version'"
         ).fetchone():
             _validate_readiness_schema(conn)
+            _selection_index(conn, install=True)
             return
         for name in ("document_observation_sources", "document_observation_records"):
             conn.execute(_TABLES[name].replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
@@ -132,6 +149,7 @@ def initialize(conn: sqlite3.Connection) -> None:
             for sql in _readiness_triggers().values():
                 conn.execute(sql)
         _validate_readiness_schema(conn)
+        _selection_index(conn, install=True)
 
 
 def _readiness_triggers() -> dict[str, str]:
@@ -357,11 +375,26 @@ def capture_selected(
     path: Path, expected_position: DocumentPosition, document_paths: tuple[str, ...],
     *, max_documents: int = 256, max_bytes: int = 1024 * 1024,
 ) -> DocumentObservation:
+    conn = _open_reader(path)
+    try:
+        conn.execute("BEGIN")
+        return _capture_selected(conn, path, expected_position, document_paths,
+                                 max_documents=max_documents, max_bytes=max_bytes)
+    finally:
+        conn.close()
+
+
+def _capture_selected(
+    conn: sqlite3.Connection, path: Path, expected_position: DocumentPosition, document_paths: tuple[str, ...],
+    *, max_documents: int = 256, max_bytes: int = 1024 * 1024,
+) -> DocumentObservation:
     """Exact-ID raw input capture in one read transaction; no prefix/full scan.
 
     Missing rows and tombstones both produce an explicit tombstone. Callers must
     enforce their own path allowlist and current authority before using inputs.
     """
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('capture requires an active read transaction')
     expected = _validate_expected(expected_position, path)
     count_limit = _validate_budget(max_documents, "max_documents")
     byte_limit = _validate_budget(max_bytes, "max_bytes")
@@ -375,39 +408,36 @@ def capture_selected(
     used = sum(len(name.encode("utf-8")) for name in names)
     if used > byte_limit:
         raise OverflowError("document selection exceeds byte budget")
-    conn = _open_reader(path)
-    try:
-        conn.execute("BEGIN")
-        current = _capture_position(conn, path, expected.source_id)
-        if current != expected or not current.initialized:
-            raise DocumentObservationConflict("document source is changed or pending")
-        for name in names:
-            size = conn.execute(
-                "SELECT coalesce(length(CAST(payload AS BLOB)),0) "
-                "FROM document_observation_records WHERE source_id=? AND path=?",
-                (expected.source_id, name),
-            ).fetchone()
-            used += size[0] if size is not None else 0
-            if used > byte_limit:
-                raise OverflowError("document selection exceeds byte budget")
-        records = []
-        for name in names:
-            row = conn.execute(
-                "SELECT payload,deleted FROM document_observation_records "
-                "WHERE source_id=? AND path=?", (expected.source_id, name),
-            ).fetchone()
-            if row is not None and (
-                type(row[1]) is not int or row[1] not in (0, 1)
-                or (row[1] == 0 and type(row[0]) is not str)
-                or (row[1] == 1 and row[0] is not None)
-            ):
-                raise sqlite3.OperationalError("malformed observed document row")
-            records.append(SerializedDocumentRecord(
-                name, row[0] if row else None, row[1] == 1 if row else True,
-            ))
-        return DocumentObservation(current, tuple(records))
-    finally:
-        conn.close()
+    current = _capture_position(conn, path, expected.source_id)
+    if current != expected or not current.initialized:
+        raise DocumentObservationConflict("document source is changed or pending")
+    _selection_index(conn)
+    for name in names:
+        size = conn.execute(
+            "SELECT coalesce(length(CAST(payload AS BLOB)),0) "
+            f"FROM document_observation_records INDEXED BY {_SELECTION_INDEX} "
+            "WHERE source_id=? AND path=?",
+            (expected.source_id, name),
+        ).fetchone()
+        used += size[0] if size is not None else 0
+        if used > byte_limit:
+            raise OverflowError("document selection exceeds byte budget")
+    records = []
+    for name in names:
+        row = conn.execute(
+            "SELECT payload,deleted FROM document_observation_records "
+            "WHERE source_id=? AND path=?", (expected.source_id, name),
+        ).fetchone()
+        if row is not None and (
+            type(row[1]) is not int or row[1] not in (0, 1)
+            or (row[1] == 0 and type(row[0]) is not str)
+            or (row[1] == 1 and row[0] is not None)
+        ):
+            raise sqlite3.OperationalError("malformed observed document row")
+        records.append(SerializedDocumentRecord(
+            name, row[0] if row else None, row[1] == 1 if row else True,
+        ))
+    return DocumentObservation(current, tuple(records))
 
 
 def reset(
@@ -528,7 +558,9 @@ def _capture_position(
 def _validate_expected(position: DocumentPosition, path: Path) -> DocumentPosition:
     if type(position) is not DocumentPosition:
         raise TypeError("publication requires a captured DocumentPosition")
-    _validate_position(position)
+    position = DocumentPosition(position.database_path, position.incarnation,
+                                position.source_id, position.generation,
+                                position.cursor, position.initialized)
     if position.database_path != str(path):
         raise DocumentObservationConflict("document position belongs to another store")
     return position
