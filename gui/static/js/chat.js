@@ -7,8 +7,9 @@ import { ICONS, BIRD, extIcon } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent } from "./state.js";
-import { warmContext, sameWarmOperation } from "./warm-context.js";
+import { App, Mesh, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
+import { BrowserSession } from "./session.js";
+import { warmContext, initialChatContext, sameWarmOperation } from "./warm-context.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit } from "./composer.js";
 import { openModal, closeModal } from "./modal.js";
@@ -22,12 +23,16 @@ let warmOperationSeq = 0;
 let warmOperationsExhausted = false;
 let activeWarmSurface = null;
 let skipWarmChatId = null;
+const INITIAL_SELECTED_TIMEOUT_MS = 10000;
 document.addEventListener("ab:session-reset", () => {
   chatRenderSeq += 1;
   chatsFetchSeq += 1;
   activeWarmSurface = null;
 });
-document.addEventListener("ab:lock-epoch", () => { activeWarmSurface = null; });
+document.addEventListener("ab:lock-epoch", () => {
+  activeWarmSurface = null;
+  cancelInitialSelectedView();
+});
 document.addEventListener("ab:mesh-state-accepted", (event) => {
   const active = activeWarmSurface;
   const state = event.detail?.state;
@@ -187,6 +192,17 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
+  // A normal safety poll must not supersede a validated initial transcript
+  // while its one broad-state hydration is still in flight. Forced mutation
+  // and route renders retain their existing ownership and may supersede it.
+  const activeInitial = activeWarmSurface;
+  const activeSession = meshStateSnapshot();
+  if (!force && isInitialSelectedViewPending() && activeInitial?.initial
+      && activeInitial.operationId === warmOperationSeq
+      && activeInitial.sessionEpoch === activeSession.sessionEpoch
+      && activeInitial.viewer === activeSession.viewer
+      && App.page === "chats" && Mesh.chatId === activeInitial.chatId) return;
+  if (force) cancelInitialSelectedView();
   if (warmOperationSeq >= Number.MAX_SAFE_INTEGER) warmOperationsExhausted = true;
   else warmOperationSeq += 1;
   const operationId = warmOperationSeq;
@@ -206,8 +222,23 @@ async function renderChats(force) {
   const warm = !skipWarm && !warmOperationsExhausted
     && opening && !Mesh.detailsView && !restartIntent()
     ? warmContext(meshStateSnapshot(), Mesh.state, Mesh.chatId) : null;
-  if (warm) {
-    await renderWarmChat(force, openTrace, warm, {
+  const stateSnapshot = meshStateSnapshot();
+  const initialBase = !skipWarm && !warmOperationsExhausted
+    ? initialChatContext(BrowserSession.snapshot(), App.state, {
+      state: Mesh.state, snapshot: stateSnapshot,
+      chatId: Mesh.chatId, opening,
+      details: Mesh.detailsView, restarting: !!restartIntent(),
+    }) : null;
+  const initial = initialBase ? Object.freeze({
+    ...initialBase,
+    sessionEpoch: stateSnapshot.sessionEpoch,
+    lockEpoch: stateSnapshot.lockEpoch,
+    stateGeneration: stateSnapshot.stateGeneration,
+    chatId: Mesh.chatId,
+  }) : null;
+  const accelerated = warm || initial;
+  if (accelerated) {
+    await renderWarmChat(force, openTrace, accelerated, {
       fetchSeq, routeSeq, chatId: Mesh.chatId, operationId,
     });
     return;
@@ -373,8 +404,24 @@ function restartColdAfterStateInvalidation(operation, force) {
   return true;
 }
 
+function restartColdAfterInitialFailure(operation, force) {
+  if (!operation.initial) return false;
+  endInitialSelectedView(operation.initialViewOwner);
+  if (operation.coldRestarted || !warmIdentityCurrent(operation)
+      || restartIntent()) return false;
+  operation.coldRestarted = true;
+  activeWarmSurface = null;
+  skipWarmChatId = operation.chatId;
+  queueMicrotask(() => {
+    if (warmIdentityCurrent(operation)) renderChats(force);
+    else if (skipWarmChatId === operation.chatId) skipWarmChatId = null;
+  });
+  return true;
+}
+
 function applyCurrentWarmError(operation, data) {
   if (!warmOperationCurrent(operation)) return false;
+  if (operation.initial) endInitialSelectedView(operation.initialViewOwner);
   if (data?.locked) {
     observeLockState(true);
     document.dispatchEvent(new CustomEvent("ab:locked"));
@@ -399,48 +446,85 @@ export async function renderWarmChat(force, openTrace, warm, route) {
     ...route,
     chatRenderSeq,
   };
+  if (operation.initial) {
+    operation.initialViewOwner = beginInitialSelectedView();
+  }
   const ticket = captureSessionEpoch();
   let data;
   try {
     data = await api(`/api/mesh/chat?id=${encodeURIComponent(operation.chatId)}`,
-      undefined, { sideEffects: false });
+      undefined, { sideEffects: false,
+        timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0 });
   } catch {
-    if (warmOperationCurrent(operation)) {
-      // Leave the safe loading surface; the normal poll owns recovery.
-    }
+    restartColdAfterInitialFailure(operation, force);
     return;
   }
   if (!warmOperationCurrent(operation)) {
-    restartColdAfterStateInvalidation(operation, force);
+    if (!restartColdAfterInitialFailure(operation, force)) {
+      restartColdAfterStateInvalidation(operation, force);
+    }
     return;
   }
-  if (data?.error) return applyCurrentWarmError(operation, data);
+  if (data?.error) {
+    if (!operation.initial || data.locked || data.error === "No such chat") {
+      return applyCurrentWarmError(operation, data);
+    }
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
   if (!sessionMayApply(ticket, data)
       || data.me !== warm.presentation.user
       || data.meta?.id !== operation.chatId
       || !Array.isArray(data.meta?.members)
-      || !data.meta.members.includes(data.me)) return;
+      || !Array.isArray(data.messages)
+      || !data.meta.members.includes(data.me)) {
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
 
-  operation.chatRenderSeq = chatRenderSeq + 1;
-  // Own the surface before the async function yields. The prepared renderer
-  // commits synchronously, but its resolved promise still creates a microtask
-  // window in which an accepted room-removal event must be able to clear it.
-  activeWarmSurface = {
-    operationId: operation.operationId,
-    sessionEpoch: operation.sessionEpoch,
-    chatId: operation.chatId,
-    viewer: data.me,
-  };
-  await renderMeshChat(force, openTrace, {
-    data, presentation: warm.presentation, warmBase: true,
-    guard: () => warmOperationCurrent(operation),
-  });
+  try {
+    if (operation.initial) {
+      V.closeAuthPage();
+      V.closeConnectingPage();
+    }
+
+    operation.chatRenderSeq = chatRenderSeq + 1;
+    // Own the surface before the async function yields. The prepared renderer
+    // commits synchronously, but its resolved promise still creates a microtask
+    // window in which an accepted room-removal event must be able to clear it.
+    activeWarmSurface = {
+      operationId: operation.operationId,
+      sessionEpoch: operation.sessionEpoch,
+      chatId: operation.chatId,
+      viewer: data.me,
+      initial: !!operation.initial,
+    };
+    await renderMeshChat(force, openTrace, {
+      data, presentation: warm.presentation, warmBase: true,
+      guard: () => warmOperationCurrent(operation),
+    });
+  } catch (error) {
+    if (operation.initial) {
+      restartColdAfterInitialFailure(operation, force);
+      return;
+    }
+    throw error;
+  }
   if (!warmOperationCurrent(operation)) {
     if (activeWarmSurface?.operationId === operation.operationId) {
       activeWarmSurface = null;
     }
-    restartColdAfterStateInvalidation(operation, force);
+    if (operation.initial) restartColdAfterInitialFailure(operation, force);
+    else restartColdAfterStateInvalidation(operation, force);
     return;
+  }
+
+  if (operation.initial) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (warmOperationCurrent(operation)) {
+        markInitialSelectedViewReady(operation.initialViewOwner);
+      } else restartColdAfterInitialFailure(operation, force);
+    }));
   }
 
   // Observe the fresh base paint, not the later state/profile hydration. Keep
@@ -466,20 +550,25 @@ export async function renderWarmChat(force, openTrace, warm, route) {
   // Let the fresh selected room paint before the expensive all-room fold.
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   if (!warmOperationCurrent(operation)) {
-    restartColdAfterStateInvalidation(operation, force);
+    if (operation.initial) restartColdAfterInitialFailure(operation, force);
+    else restartColdAfterStateInvalidation(operation, force);
     return;
   }
   const warmStateRequest = captureWarmStateRequest(ticket);
-  const statePromise = api("/api/mesh/state", undefined, { sideEffects: false })
+  const statePromise = api("/api/mesh/state", undefined, { sideEffects: false,
+    timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0 })
     .catch(() => null);
-  const guardedAux = (path, fallback) => api(path, undefined, { sideEffects: false })
+  const guardedAux = (path, fallback) => api(path, undefined, {
+    sideEffects: false,
+    timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0,
+  })
     .then((value) => {
       if (!warmOperationCurrent(operation)) return null;
       if (value?.locked) {
         applyCurrentWarmError(operation, value);
         return null;
       }
-      return value?.error ? fallback : value;
+      return !value || value.error ? fallback : value;
     })
     .catch(() => fallback);
   const auxPromise = Promise.all([
@@ -490,27 +579,64 @@ export async function renderWarmChat(force, openTrace, warm, route) {
   ]);
   const fresh = await statePromise;
   if (!warmOperationCurrent(operation)) {
-    restartColdAfterStateInvalidation(operation, force);
+    if (operation.initial) restartColdAfterInitialFailure(operation, force);
+    else restartColdAfterStateInvalidation(operation, force);
     return;
   }
-  if (!fresh) return;
-  if (fresh.error) return applyCurrentWarmError(operation, fresh);
-  if (!sessionMayApply(ticket, fresh)) return;
+  if (!fresh) {
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
+  if (fresh.error) {
+    if (!operation.initial || fresh.locked || fresh.error === "No such chat") {
+      return applyCurrentWarmError(operation, fresh);
+    }
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
+  if (!sessionMayApply(ticket, fresh)) {
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
   if (!Array.isArray(fresh.chats)
       || !fresh.chats.some((chat) => chat?.id === operation.chatId)) {
+    if (operation.initial) endInitialSelectedView(operation.initialViewOwner);
     $("#content").innerHTML = '<div class="chat-loading"></div>';
     Mesh.renderedChat = null;
     location.hash = "#/chats";
     return;
   }
-  if (!applyMeshState(ticket, fresh, warmStateRequest)) return;
+  if (!applyMeshState(ticket, fresh, warmStateRequest)) {
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
   const advanced = meshStateSnapshot();
   operation.stateGeneration = advanced.stateGeneration;
   renderSidebar();
-  if (!warmOperationCurrent(operation)) return;
+  if (!warmOperationCurrent(operation)) {
+    restartColdAfterInitialFailure(operation, force);
+    return;
+  }
+  if (operation.initial) {
+    // The base and fully hydrated surfaces intentionally share one renderer.
+    // Once ordinary polls may supersede this operation, force their first pass
+    // through the full rebuild instead of letting the base signatures short-cut
+    // controls while auxiliary hydration is delayed.
+    Mesh.chatKey = "";
+    Mesh.structKey = "";
+    endInitialSelectedView(operation.initialViewOwner);
+    if (activeWarmSurface?.operationId === operation.operationId) {
+      // Retain the surface owner for synchronous room-removal handling, but
+      // broad state is accepted: ordinary safety polling may now supersede
+      // delayed/failed auxiliary hydration.
+      activeWarmSurface.initial = false;
+    }
+    startAskPoll();
+  }
   const aux = await auxPromise;
   if (!warmOperationCurrent(operation)) {
-    restartColdAfterStateInvalidation(operation, force);
+    if (operation.initial) restartColdAfterInitialFailure(operation, force);
+    else restartColdAfterStateInvalidation(operation, force);
     return;
   }
   if (aux.some((value) => !value)) return;

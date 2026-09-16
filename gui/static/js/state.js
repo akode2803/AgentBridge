@@ -73,6 +73,8 @@ let meshStateAcceptedAt = null;
 let lockEpoch = 0;
 let observedLocked = false;
 let warmCountersExhausted = false;
+let initialSelectedViewReady = false;
+let initialSelectedViewOwner = null;
 
 const monotonicNow = () => globalThis.performance?.now?.() ?? Number.NaN;
 
@@ -89,6 +91,8 @@ export function observeLockState(locked, { force = false } = {}) {
   if (force || next !== observedLocked) {
     lockEpoch = advanceWarmCounter(lockEpoch);
     meshStateAcceptedAt = null;  // unlock requires a newly accepted state
+    initialSelectedViewOwner = null;
+    initialSelectedViewReady = false;
     if (typeof CustomEvent === "function") {
       globalThis.document?.dispatchEvent?.(new CustomEvent("ab:lock-epoch"));
     }
@@ -116,9 +120,9 @@ export function meshStateSnapshot() {
 }
 
 export function clearSessionCaches() {
-  // Do not call saveDraft here: its storage key derives from Mesh.state.user,
-  // which is exactly the identity being removed. Existing persisted per-user
-  // drafts remain untouched and will hydrate after that user returns.
+  // Do not call saveDraft here: the adopted browser-session identity is being
+  // removed. Existing persisted per-user drafts remain untouched and hydrate
+  // after that exact viewer returns.
   App.state = null;
   App.logKey = "";
   App.draft = { body: "", type: "chat" };
@@ -152,6 +156,8 @@ export function clearSessionCaches() {
   Mesh.timerDone = {};
   if (Mesh.askPollId) clearInterval(Mesh.askPollId);
   Mesh.askPollId = null;
+  initialSelectedViewReady = false;
+  initialSelectedViewOwner = null;
   meshStateGeneration = advanceWarmCounter(meshStateGeneration);
   meshStateAcceptedAt = null;
   observeLockState(observedLocked, { force: true });
@@ -167,6 +173,38 @@ export function beginSessionTransition() {
 
 export function captureSessionEpoch() {
   return BrowserSession.capture();
+}
+
+export function beginInitialSelectedView() {
+  const owner = Object.freeze({});
+  initialSelectedViewOwner = owner;
+  initialSelectedViewReady = false;
+  return owner;
+}
+
+export function cancelInitialSelectedView() {
+  initialSelectedViewOwner = null;
+  initialSelectedViewReady = false;
+}
+
+export function endInitialSelectedView(owner) {
+  if (owner !== initialSelectedViewOwner) return false;
+  initialSelectedViewOwner = null;
+  return true;
+}
+
+export function isInitialSelectedViewPending() {
+  return initialSelectedViewOwner !== null;
+}
+
+export function markInitialSelectedViewReady(owner) {
+  if (owner !== initialSelectedViewOwner) return false;
+  initialSelectedViewReady = true;
+  return true;
+}
+
+export function isInitialSelectedViewReady() {
+  return initialSelectedViewReady;
 }
 
 export function captureWarmStateRequest(ticket = captureSessionEpoch()) {
@@ -341,14 +379,30 @@ export function chatDisplay(meta, viewer, context = Mesh.state) {
 // the typed text is stored — staged attachments and the reply ref are transient
 // and stay in-memory. localStorage is inherently per-device (not synced), which
 // is exactly the requested scope.
+export function currentDraftViewer() {
+  const session = BrowserSession.snapshot();
+  if (!session.ready || session.exhausted) return null;
+  if (session.mode === "bound") {
+    const viewer = session.binding?.viewer;
+    return typeof viewer === "string" && viewer ? viewer : null;
+  }
+  if (session.mode === "legacy") {
+    const viewer = Mesh.state?.user;
+    return typeof viewer === "string" && viewer ? viewer : null;
+  }
+  return null;
+}
 function draftKey(chatId) {
-  return `ab:draft:${Mesh.state?.user || "?"}:${chatId}`;
+  const viewer = currentDraftViewer();
+  return viewer ? `ab:draft:${viewer}:${chatId}` : null;
 }
 export function saveDraft(chatId) {
   const body = Mesh.drafts[chatId]?.body || "";
+  const key = draftKey(chatId);
+  if (!key) return;
   try {
-    if (body) localStorage.setItem(draftKey(chatId), body);
-    else localStorage.removeItem(draftKey(chatId));
+    if (body) localStorage.setItem(key, body);
+    else localStorage.removeItem(key);
   } catch { /* storage disabled/full: drafts just won't persist this session */ }
 }
 
@@ -356,7 +410,8 @@ export function meshDraft(chatId) {
   let d = Mesh.drafts[chatId];
   if (!d) {   // first touch this session: hydrate the text from this device
     let saved = "";
-    try { saved = localStorage.getItem(draftKey(chatId)) || ""; } catch { /* ignore */ }
+    const key = draftKey(chatId);
+    try { saved = key ? localStorage.getItem(key) || "" : ""; } catch { /* ignore */ }
     d = Mesh.drafts[chatId] = { body: saved, atts: [] };
   }
   if (!d.atts) d.atts = d.att ? [d.att] : [];   // pre-multifile drafts

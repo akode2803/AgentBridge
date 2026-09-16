@@ -71,6 +71,37 @@ export function warmContext(snapshot, state, chatId, now = Date.now()) {
   });
 }
 
+function sameBinding(left, right) {
+  return plainObject(left) && plainObject(right)
+    && typeof left.instance_id === "string" && left.instance_id
+    && left.instance_id === right.instance_id
+    && typeof left.viewer === "string" && left.viewer
+    && left.viewer === right.viewer
+    && typeof left.session_generation === "string" && left.session_generation
+    && left.session_generation === right.session_generation;
+}
+
+export function initialChatContext(session, bootstrap, {
+  state, snapshot, chatId, opening, details, restarting,
+} = {}) {
+  if (state != null || !opening || !chatId || details || restarting
+      || !session || session.mode !== "bound" || !session.ready
+      || session.exhausted || !plainObject(session.binding)
+      || !snapshot || snapshot.locked || snapshot.exhausted
+      || !Number.isSafeInteger(snapshot.sessionEpoch)
+      || !Number.isSafeInteger(snapshot.lockEpoch)
+      || !Number.isSafeInteger(snapshot.stateGeneration)
+      || !plainObject(bootstrap) || bootstrap.configured !== true
+      || bootstrap.restoring !== false || bootstrap.app_lock?.locked !== false
+      || bootstrap.user !== session.binding.viewer
+      || !sameBinding(session.binding, bootstrap.session_binding)) return null;
+  const users = Object.freeze(Object.create(null));
+  return Object.freeze({
+    initial: true,
+    presentation: Object.freeze({user: session.binding.viewer, users}),
+  });
+}
+
 export function sameWarmOperation(operation, current) {
   return !!operation && !!current
     && operation.sessionEpoch === current.sessionEpoch
