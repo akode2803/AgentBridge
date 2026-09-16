@@ -59,6 +59,32 @@ def build_messages(
     breadcrumbs: bool = False,
     observer: ProjectionObserver | None = None,
 ) -> list[Message]:
+    messages, _honored = _build_messages_with_redactions(
+        chat_id, viewer, envelopes, sealer, edits=edits, redactions=redactions,
+        reactions=reactions, state=state, history_from_ns=history_from_ns,
+        tenure=tenure, verify_redaction=verify_redaction, owner_of=owner_of,
+        breadcrumbs=breadcrumbs, observer=observer,
+    )
+    return messages
+
+
+def _build_messages_with_redactions(
+    chat_id: str,
+    viewer: str,
+    envelopes: list[dict],
+    sealer: Sealer,
+    *,
+    edits: dict[str, dict] | None = None,
+    redactions: dict[str, dict] | None = None,
+    reactions: dict[str, dict[str, list[str]]] | None = None,
+    state: dict[str, Any] | None = None,
+    history_from_ns: int = 0,
+    tenure: dict[str, list[list[int]]] | None = None,
+    verify_redaction: Callable[[str, dict, str], bool] | None = None,
+    owner_of: Callable[[str], str | None] | None = None,
+    breadcrumbs: bool = False,
+    observer: ProjectionObserver | None = None,
+) -> tuple[list[Message], set[str]]:
     edits = edits or {}
     redactions = redactions or {}
     reactions = reactions or {}
@@ -201,6 +227,15 @@ def build_messages(
 
         out.append(msg)
 
+    _blank_reply_quotes(out, honored)
+
+    bump("visible_messages", len(out))
+    for name, value in metrics.items():
+        observed_count(observer, name, value)
+    return out, honored
+
+
+def _blank_reply_quotes(out, honored):
     # blank reply-quotes that point at redacted parents (only HONORED ones —
     # a forged redaction that was ignored must not blank a quote either, R25)
     for msg in out:
@@ -210,10 +245,26 @@ def build_messages(
                 blank["quote"] = False
             msg.reply_to = blank
 
-    bump("visible_messages", len(out))
-    for name, value in metrics.items():
-        observed_count(observer, name, value)
-    return out
+
+
+def transcript_visible(message: Message, viewer: str) -> bool:
+    """Whether the canonical message yields a transcript row (not a day label).
+
+    Mirrors meshInfoText's empty cases without altering full-fold consumers.
+    Event wording and display names remain GUI concerns.
+    """
+    if message.kind is not MsgKind.INFO:
+        return True
+    event = message.event or {}
+    kind = event.get("type")
+    if kind in ("admin_granted", "admin_revoked"):
+        return event.get("who") == viewer
+    if kind in ("key_rotated", "reaction"):
+        return False
+    if kind in ("created", "member_added", "member_removed", "member_left",
+                "renamed", "description", "permissions_changed", "avatar", "chat_deleted"):
+        return True
+    return bool(message.body)
 
 
 def unread_info(msgs: list[Message], viewer: str, state: dict[str, Any]) -> dict[str, Any]:

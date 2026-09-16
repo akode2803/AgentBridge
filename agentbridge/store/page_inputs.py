@@ -65,6 +65,7 @@ class RawPageInputs:
     indexed: overlays.IndexedOverlayInputs
     proofs: tuple[tuple[str, str, bool | None], ...]
     captured_bytes: int
+    raw_window_captured: bool = True
 
 
 def initialize(conn):
@@ -260,7 +261,7 @@ def capture(
         result = RawPageInputs(position, tuple(rows[k.id] for k, _, _ in selected), lookahead,
                              tuple(rows[k.id] for k, _, _ in exact_meta), tuple(absent),
                              documents, indexed,
-                             tuple((name, pub, value) for (name, pub), value in zip(proof_keys, evidence)), used)
+                             tuple((name, pub, value) for (name, pub), value in zip(proof_keys, evidence)), used, raw_limit > 0)
     finally:
         conn.close()
     # Decode/validate bounded payload identities after releasing the snapshot.

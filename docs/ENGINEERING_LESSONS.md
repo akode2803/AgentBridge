@@ -65,3 +65,16 @@ mutation. Copy nested position/key fields once into owned validated values, then
 use only those copies. The retained-object mutation regression exercises the
 reader-open barrier rather than relying on FrozenInstanceError alone. Pure input
 positions still do not grant membership or continuing authority.
+
+## Page budgets must span all captured windows (R206, caught before activation)
+
+A first accumulator carried parent counts but not identities, so two windows
+replying to the same off-page parent could falsely exhaust a one-parent budget.
+It also trusted a captured-byte field even though the input DTO could be mutated;
+a zeroed counter could bypass the aggregate byte limit despite bounded windows.
+
+Safeguards: retain the request-wide normalized parent-ID union, including known
+absent dependencies, and validate owned byte accounting against recomputed unique
+message payload bytes before projection callbacks. Regression tests cover shared
+parents across real Store windows and forged counters with an unseal tripwire.
+No page endpoint was active; independent review found both before release.
