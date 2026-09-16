@@ -167,6 +167,50 @@ class EffectivePinView:
     pending: tuple
 
 
+@dataclass(frozen=True)
+class ObservedPinDecision:
+    action: str
+    sign_pub: str
+    agree_pub: str
+    satisfied: bool
+
+
+def evaluate_observed_view(view, name, sign_pub, agree_pub, history=None):
+    """Pure final replay against an effective view; not current pin authority.
+
+    Call before acquiring SQLite/mirror locks. The coordinator must also hold
+    locked_matching_view across its final transaction and compare the returned
+    pair with every pair consumed during evaluation, preventing pin ABA.
+    """
+    if type(view) is not EffectivePinView:
+        raise TypeError('expected EffectivePinView')
+    raw = view.effective_json
+    if type(raw) is not str or len(raw) > MAX_PENDING_BYTES:
+        raise ValueError('invalid effective pin JSON')
+    if len(raw.encode()) > MAX_PENDING_BYTES:
+        raise ValueError('effective pin JSON exceeds budget')
+    for value in (name, sign_pub, agree_pub):
+        if type(value) is not str or len(value) > MAX_PENDING_BYTES:
+            raise ValueError('invalid observed pin input')
+        if len(value.encode()) > MAX_PENDING_BYTES:
+            raise ValueError('observed pin input exceeds budget')
+    if not name:
+        raise ValueError('invalid observed pin name')
+    doc = json.loads(raw)
+    validate_output(doc)
+    pin = doc.get('pins', {}).get(name)
+    # Match trusted(): irrelevant history is not validated on the keep or
+    # first-sight path. A mismatch uses the owner's bounded history serializer.
+    if pin and sign_pub and (pin.get('sign_pub'), pin.get('agree_pub')) != (sign_pub, agree_pub):
+        history = json.loads(serialize_history(history))
+    decision = evaluate_pin(name, pin, sign_pub, agree_pub, history)
+    satisfied = decision.action == 'keep' or (decision.action == 'alert' and any(
+        alert['name'] == name and alert['seen_sign_pub'] == sign_pub
+        for alert in doc.get('alerts', [])
+    ))
+    return ObservedPinDecision(decision.action, decision.sign_pub, decision.agree_pub, satisfied)
+
+
 class KeyPinStore:
     """One pin file per (machine, mesh root); every identity on the machine
     shares it (the trusted keys are the same truth for all of them). Writes

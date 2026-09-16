@@ -139,3 +139,12 @@ def _capture(conn, path, chat_id, after_ns, *, expected=None, max_events=128, ma
             raise MembershipSuffixUnavailable('malformed_suffix_payload')
         rows.append(SerializedMessage(key, kind, row[0]))
     return MembershipSuffix(position, after_ns, tuple(rows), used)
+
+
+def matches_position(conn, path, expected):
+    """Payload-free final suffix fence inside the caller's active transaction."""
+    copied = membership_input_position._copy_expected(expected, str(Path(path).resolve()))
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('suffix matching requires an active transaction')
+    _schema(conn)
+    return membership_input_position._capture(conn, path, copied.chat_id) == copied

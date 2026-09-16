@@ -143,3 +143,18 @@ health changes can alter canonical lookup behavior without advancing it. Recheck
 the demanded paths' current lookup modes. Online unknown misses require canonical
 read-through outside the attempt, followed by full recapture, never false absence.
 These raw-input checks do not replace current membership or final authority gates.
+
+## R213: validate consumed trust and hold publication exclusion through commit
+
+Initial/final pin-view equality does not bind an intermediate key used during
+computation. A disposable replay showed K0 -> K1 -> K0 with an unchanged
+resolve-observed flag, while the computation consumed K1. Final replay must
+compare every consumed key and verify that first-sight/rotation/alert side effects
+are represented in the effective view, including accepted pending operations.
+
+A separate WAL replay showed a mirror mutation completing after the last short
+mirror check, a reader still observing the old retained head, and a stale proposal
+becoming visible at later SQLite commit. The prepared mutation must retain the
+mirror-policy mutex through commit, inside the existing pin -> SQLite -> mirror
+order. Read-only results need their final common observation point. Both defects
+were found in coordinator designs before serving activation.
