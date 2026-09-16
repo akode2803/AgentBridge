@@ -33,9 +33,11 @@ function node() {
     setAttribute: (k, v) => attrs.set(k, v), removeAttribute: k => attrs.delete(k),
     appendChild(child) {this.children.push(child); child.parent = this;},
     remove() {if (this.parent) this.parent.children = this.parent.children.filter(x => x !== this);},
+    querySelector(selector) {return this.queries?.get(selector) || null;},
   };
 }
-globalThis.document = {createElement: node};
+let cover = null;
+globalThis.document = {createElement: node, querySelector: () => cover};
 function tick() {const calls = [...timers.values()]; timers.clear(); calls.forEach(f => f());}
 const host = node();
 let finish = beginLoading(host);
@@ -50,6 +52,19 @@ assert.equal(host.getAttribute('aria-busy'), 'true');
 finish(); finish(); assert.equal(host.children.length, 0);
 assert.equal(host.getAttribute('aria-busy'), null);
 assert.equal(host.classList.contains('loading-host'), false);
+// A centered welcome keeps progress in normal flow immediately below its box.
+const welcome = node(); host.queries = new Map([[".empty-state .es-box", welcome]]);
+finish = beginLoading(host, {placement: 'center'}); tick();
+assert.equal(host.children.length, 0); assert.equal(welcome.children.length, 1);
+assert.equal(welcome.children[0].className, 'loading-status loading-inline');
+finish(); assert.equal(welcome.children.length, 0);
+host.queries.clear();
+// Global boot/connecting/lock/auth covers exclusively own progress feedback.
+for (const id of ['boot', 'connecting', 'lock', 'auth']) {
+  cover = {id}; beginLoading(host, {placement: 'center'}); tick();
+  assert.equal(host.children.length, 0); assert.equal(host.getAttribute('aria-busy'), null);
+}
+cover = null;
 beginLoading(host, {current: () => false}); tick(); assert.equal(host.children.length, 0);
 host.isConnected = false; beginLoading(host); tick(); assert.equal(host.children.length, 0);
 host.isConnected = true;

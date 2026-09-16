@@ -96,7 +96,7 @@ export function pendingSendRows(chatId) {
         ${s.reply ? `<div class="reply-quote"><div class="rq-body">${esc(s.reply.body || "Reply")}</div></div>` : ""}
         <div class="msg-body">${md(s.body)}</div>
         ${s.attachments.map(a => `<div class="pending-send-file">${ICONS.file} ${esc(a.name)}</div>`).join("")}
-        <span class="meta"><span class="meta-time">${esc(timeOnly(s.ts))}</span><span class="ticks${failed ? " send-failed" : ""}" aria-label="${label}" title="${label}">${failed ? ICONS.info : ICONS.clock}</span></span>
+        <span class="meta"><span class="meta-time">${esc(timeOnly(s.ts))}</span><span class="ticks${failed ? " send-failed" : " send-pending"}" aria-label="${label}" title="${label}">${failed ? ICONS.info : ICONS.clock}</span></span>
         ${failed ? `<div class="send-error" role="status">${esc(label)}${s.error ? ": " + esc(s.error) : ""}<div class="send-recovery-actions"><button class="btn" data-send-action="restore">Restore draft</button><button class="btn" data-send-action="dismiss">Dismiss</button></div></div>` : ""}
       </div></div>`];
     });

@@ -21,8 +21,12 @@ export function beginLoading(host, { label = "Loading…", current = () => true,
   };
   const timer = setTimeout(() => {
     if (!host.isConnected || !current()) { finish(); return; }
+    if (document.querySelector("#boot:not(.done), #connecting, #lock, #auth")) {
+      finish(); return; // A full-page cover already owns progress feedback.
+    }
+    const welcome = placement === "center" ? host.querySelector(".empty-state .es-box") : null;
     status = document.createElement("span");
-    status.className = "loading-status" + (placement === "center" ? " loading-centered" : "");
+    status.className = "loading-status" + (welcome ? " loading-inline" : placement === "center" ? " loading-centered" : "");
     status.setAttribute("role", "status");
     status.innerHTML = '<span class="spin-sm" aria-hidden="true"></span>';
     const text = document.createElement("span");
@@ -30,7 +34,7 @@ export function beginLoading(host, { label = "Loading…", current = () => true,
     status.appendChild(text);
     host.classList.add("loading-host");
     host.setAttribute("aria-busy", "true");
-    host.appendChild(status);
+    (welcome || host).appendChild(status);
   }, 500);
   pending.set(host, finish);
   return finish;

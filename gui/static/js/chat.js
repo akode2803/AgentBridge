@@ -891,12 +891,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const meta = data.meta;
   const pinsSig = (meta.pins || []).map((p) => p.id + p.until).join(",");
   // transcript content signature — drives the PARTIAL refresh (transcript only)
-  // receipt tiers on my own messages advance over time (delivered → read)
-  // without any new message, so fold them into the signature or the ticks
-  // would freeze until the next structural change (R33)
-  const receiptSig = data.messages
-    .filter((m) => m.mine && m.receipt)
-    .map((m) => m.id + m.receipt.state + (m.receipt.transport?.state || "")).join(",");
+  // Receipt-only changes patch their status slot without replacing message DOM.
   // in-place mutations (edit / delete-for-everyone / reactions) change no
   // count and no last-id — without this signature they froze until the next
   // structural change (Q24: reactions never surfaced on the partial path)
@@ -911,7 +906,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     .filter((u) => u.departed).map((u) => u.username).join(",");
   const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
-    pinsSig, (data.starred || []).join(","), receiptSig, mutSig, goneSig, pendingRows,
+    pinsSig, (data.starred || []).join(","), mutSig, goneSig, pendingRows,
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
       (f.draft || "").length, (f.steps || []).map((s) =>
         `${s.ts || ""}:${s.text || ""}`).join("|")]),
@@ -933,6 +928,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (key === Mesh.chatKey && structKey === Mesh.structKey
       && App.page === "chats" && $("#transcript")) {
     if (prepared?.guard && !prepared.guard()) return;
+    syncReceiptTicks($("#transcript"), data.messages, isDmLike(meta));
     if (Mesh.jumpTo) jumpToMessage();
     return;
   }
@@ -1044,7 +1040,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
       msg.edited ? '<span class="meta-edited">edited</span>' : ""
     }${
       starred ? '<span class="star-mini">★</span>' : ""
-    }<span class="meta-time">${esc(timeOnly(msg.ts))}</span>${receiptTicks(msg, isDm)}</span>`;
+    }<span class="meta-time">${esc(timeOnly(msg.ts))}</span><span class="receipt-slot"></span></span>`;
     // reactions (R50, WhatsApp): ONE pill hanging off the bubble's bottom
     // corner — clicking opens the who-reacted popup (writes live in the
     // quick-react bar + the popup). has-rx pads the row so the overlay
@@ -1197,6 +1193,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // only the fresh rows need binding + clamping below
     const freshEls = reconcileRows(tr,
       parts.length ? parts : [["empty", bubbles]]);
+    syncReceiptTicks(tr, data.messages, isDm);
     bindTranscript(tr, chatId, data, menuCtx);
     animateRxChanges(tr, data.messages, oldRx);
     freshEls.forEach((el) => bindOpenFile(el, chatId, ".mesh-att"));
@@ -1457,6 +1454,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (parts.length && tr.children.length === parts.length) {
     tr._rows = new Map(parts.map(([k, h], i) => [k, { html: h, el: tr.children[i] }]));
   }
+  syncReceiptTicks(tr, data.messages, isDm);
   clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
   else if (keep && !keep.nearBottom) tr.scrollTop = keep.top;
@@ -1750,13 +1748,25 @@ function replyQuote(rt, isDm, ms) {
 // group each tier means the LOWEST any other member is at (double-accent only
 // when everyone read); the tooltip carries the running count. Deleted/system
 // messages carry no receipt. State comes from msg.receipt (server).
+function syncReceiptTicks(tr, messages, isDm) {
+  for (const msg of messages) {
+    const row = tr._rows?.get("m:" + msg.id)?.el;
+    const slot = row?.querySelector(".bubble > .meta > .receipt-slot");
+    if (!slot) continue;
+    const html = receiptTicks(msg, isDm);
+    if (slot._receiptHtml === html) continue;
+    slot.innerHTML = html;
+    slot._receiptHtml = html;
+  }
+}
+
 function receiptTicks(msg, isDm) {
   if (!msg.mine || msg.deleted || msg.kind === "info") return "";
   const r = msg.receipt;
   const transport = r?.transport?.state;
   if (transport === "queued" || transport === "failed") {
     const label = transport === "failed" ? "Send failed" : "Waiting for transport";
-    return `<span class="ticks${transport === "failed" ? " send-failed" : ""}" title="${label}" aria-label="${label}">${transport === "failed" ? ICONS.info : ICONS.clock}</span>`;
+    return `<span class="ticks${transport === "failed" ? " send-failed" : " send-pending"}" title="${label}" aria-label="${label}">${transport === "failed" ? ICONS.info : ICONS.clock}</span>`;
   }
   const state = (r && r.state) || "sent";
   const read = state === "read";
