@@ -158,3 +158,14 @@ becoming visible at later SQLite commit. The prepared mutation must retain the
 mirror-policy mutex through commit, inside the existing pin -> SQLite -> mirror
 order. Read-only results need their final common observation point. Both defects
 were found in coordinator designs before serving activation.
+
+## R214: a write transaction does not exclude its own triggers
+
+The first coordinator draft checked dependencies before publishing a retained
+head, then assumed SQLite writer exclusion made post-write checks redundant.
+Independent review identified that the coordinator's own statement can fire
+additional triggers and change its proposal or other consumed inputs. Before
+commit, recheck all Store dependencies, require exactly one generation advance
+with the intended proposal bytes, and roll back any mismatch. Reuse the original
+serialized-size ceilings so a trigger-expanded row is rejected before loading it.
+This was an inactive draft; no page was served using the incomplete fence.
