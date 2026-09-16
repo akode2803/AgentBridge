@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position
+from . import log_position, send_status
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -155,6 +155,7 @@ class Store:
                 if name not in columns:
                     raise sqlite3.OperationalError(
                         f"message schema migration did not create {name}")
+        send_status.initialize(self._conn())
         log_position.initialize(self._conn())
         membership_input_position.initialize(self._conn())
         lifecycle_heads.initialize(self._conn())
@@ -530,7 +531,7 @@ class Store:
         self, chat_id: str, record: dict[str, Any],
         kind: str, target: str, outbox_payload: dict[str, Any],
         *, observed_ns: int | None = None, observed_clock: str = "",
-        observed_mono: int | None = None,
+        observed_mono: int | None = None, client_ref: str = "",
     ) -> int:
         """Atomically publish the optimistic cache row and durable send intent."""
         rid, ns = record.get("id"), record.get("ns")
@@ -556,7 +557,13 @@ class Store:
                 (kind, target, json.dumps(outbox_payload, ensure_ascii=False),
                  time.time_ns()),
             )
-            return int(cur.lastrowid)
+            seq = int(cur.lastrowid)
+            if kind == "append_log" and record.get("kind") == "message":
+                c.execute("INSERT INTO local_send_status "
+                          "(chat_id,message_id,outbox_seq,state,client_ref) "
+                          "VALUES(?,?,?,'queued',?)",
+                          (chat_id, rid, seq, client_ref))
+            return seq
 
     def cache_doc_and_outbox_add(
         self, path: str, data: Any, kind: str, target: str,
@@ -628,6 +635,8 @@ class Store:
 
     def outbox_done(self, seq: int) -> None:
         with self._conn() as c:
+            c.execute("UPDATE local_send_status SET state='sent',accepted_ns=? "
+                      "WHERE outbox_seq=?", (time.time_ns(), seq))
             c.execute("DELETE FROM outbox WHERE seq=?", (seq,))
 
     def outbox_retry(self, seq: int, error: str, delay_s: float) -> None:
@@ -642,10 +651,15 @@ class Store:
         """Only for structurally unprocessable items (unknown kind, malformed
         payload). Transient failures NEVER go dead — they retry forever."""
         with self._conn() as c:
+            c.execute("UPDATE local_send_status SET state='failed' "
+                      "WHERE outbox_seq=?", (seq,))
             c.execute(
                 "UPDATE outbox SET state='dead', lease_ns=0, last_error=? WHERE seq=?",
                 (error[:500], seq),
             )
+
+    def send_statuses(self, chat_id: str, ids: Iterable[str]) -> dict:
+        return send_status.capture(self._conn(), chat_id, ids)
 
     def outbox_counts(self) -> dict[str, int]:
         rows = self._conn().execute(

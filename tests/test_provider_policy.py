@@ -12,7 +12,10 @@ from agentbridge.harness.adapters import ModelRegistry, Preset
 from agentbridge.harness.adapters.policy import (
     BridgeProfile, compile_bridge_policy,
 )
-from agentbridge.harness.adapters.native import NATIVE_CAPABILITIES
+from agentbridge.harness.adapters.codex_compat import BridgeCompatibilityError
+from agentbridge.harness.adapters.native import (
+    NATIVE_CAPABILITIES, codex_native_policy, validate_native_authority_facts,
+)
 from agentbridge.harness.adapters import policy as policy_module
 from agentbridge.harness.adapters.registry import PRESET_DIR
 from agentbridge.harness.capabilities import compile_capability_ceiling
@@ -47,11 +50,13 @@ def test_bridge_profile_schema_is_strict():
         BridgeProfile.from_dict({**raw, "surprise": True})
     with pytest.raises(ValidationError, match="capability"):
         BridgeProfile.from_dict({**raw, "capabilities": ["*"]})
-    with pytest.raises(ValidationError, match="anchored"):
-        BridgeProfile.from_dict({**raw, "version_pattern": "codex"})
-    with pytest.raises(ValidationError, match="reviewed version"):
+    with pytest.raises(ValidationError, match="version series"):
         BridgeProfile.from_dict({
-            **raw, "version_pattern": "^codex-cli 0\\.147\\.1$",
+            **raw, "supported_versions": ["0.153.4"],
+        })
+    with pytest.raises(ValidationError, match="duplicate"):
+        BridgeProfile.from_dict({
+            **raw, "supported_versions": ["0.153", "0.153"],
         })
 
 
@@ -450,7 +455,8 @@ def test_codex_catalog_controls_are_not_misreported_as_callback_tools():
             "features.network_proxy", "mcp_servers.ab"} <= controls
 
 
-def test_compiler_rejects_unverified_version(monkeypatch, tmp_path):
+def test_compiler_rejects_unsupported_version_with_actionable_policy(
+        monkeypatch, tmp_path):
     import agentbridge.harness.adapters.policy as module
     monkeypatch.setattr(module.shutil, "which", lambda _command: "/tmp/codex")
     monkeypatch.setattr(
@@ -460,11 +466,127 @@ def test_compiler_rejects_unverified_version(monkeypatch, tmp_path):
     monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs:
                         SimpleNamespace(returncode=0, stdout="codex-cli 9.9.9\n",
                                         stderr=""))
-    with pytest.raises(ValidationError, match="unverified provider version"):
+    with pytest.raises(BridgeCompatibilityError) as raised:
         compile_bridge_policy(
             codex_profile(), command="codex", workspace=tmp_path,
             timeout_s=30, requested_capabilities={"delegate_agent"},
             source_env={"PATH": "/bin"},
+        )
+    message = str(raised.value)
+    assert "Unsupported Codex CLI: codex-cli 9.9.9" in message
+    assert "codex-cli 0.147.x, codex-cli 0.153.x" in message
+    assert "adapters/presets/codex.json" in message
+
+
+@pytest.mark.parametrize("output", [
+    "codex-cli 0.154.0 token=TOPSECRET-marker",
+    "codex-cli 00.153.4",
+    "Bearer TOPSECRET-marker",
+    "https://member:TOPSECRET-marker@example.invalid/codex",
+    "/Users/private/TOPSECRET-marker/codex",
+    "codex-cli 1234567.1.1",
+])
+def test_unsupported_version_never_exposes_unparsed_probe_output(
+        monkeypatch, tmp_path, output):
+    import agentbridge.harness.adapters.policy as module
+    monkeypatch.setattr(module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        module, "_codex_binary_identity",
+        lambda _path: ("a" * 64, "/tmp/codex-code-mode-host",
+                       "b" * 64, "2DC432GLL2"),
+    )
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda *_args, **_kwargs:
+        SimpleNamespace(returncode=0, stdout=output, stderr=""),
+    )
+    with pytest.raises(BridgeCompatibilityError) as raised:
+        compile_bridge_policy(
+            codex_profile(), command="codex", workspace=tmp_path,
+            timeout_s=30, requested_capabilities=set(),
+            source_env={"PATH": "/bin"},
+        )
+    message = str(raised.value)
+    assert "unrecognized version output" in message
+    assert "TOPSECRET-marker" not in message
+    assert "Bearer" not in message
+    assert "member:" not in message
+    assert "/Users/private" not in message
+
+
+def test_nonzero_probe_with_supported_output_is_generic_and_retryable(
+        monkeypatch, tmp_path):
+    import agentbridge.harness.adapters.policy as module
+    monkeypatch.setattr(module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(
+        module, "_codex_binary_identity",
+        lambda _path: ("a" * 64, "/tmp/codex-code-mode-host",
+                       "b" * 64, "2DC432GLL2"),
+    )
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda *_args, **_kwargs:
+        SimpleNamespace(returncode=2, stdout="codex-cli 0.153.4", stderr=""),
+    )
+    with pytest.raises(ValidationError, match="version probe failed") as raised:
+        compile_bridge_policy(
+            codex_profile(), command="codex", workspace=tmp_path,
+            timeout_s=30, requested_capabilities=set(),
+            source_env={"PATH": "/bin"},
+        )
+    assert not isinstance(raised.value, BridgeCompatibilityError)
+    assert "0.153.4" not in str(raised.value)
+
+
+def test_compiler_accepts_reviewed_patch_release(monkeypatch, tmp_path):
+    import agentbridge.harness.adapters.policy as module
+    monkeypatch.setattr(module.shutil, "which", lambda _command: "/tmp/codex")
+    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs:
+                        SimpleNamespace(returncode=0, stdout="codex-cli 0.153.4\n",
+                                        stderr=""))
+    mock_codex_admission(monkeypatch)
+    policy = compile_bridge_policy(
+        codex_profile(), command="codex", workspace=tmp_path,
+        timeout_s=30, requested_capabilities=set(), source_env={"PATH": "/bin"},
+    )
+    assert policy.executable_version == "codex-cli 0.153.4"
+
+
+def test_native_authority_accepts_reviewed_series_and_rejects_future_minor():
+    policy = codex_native_policy(bridge_attached=True)
+    validate_native_authority_facts(
+        provider="codex", provider_version="codex-cli 0.153.4",
+        authority_digest=policy.authority_digest("codex-cli 0.153.4"),
+        enabled=policy.enabled, approval_gated=policy.approval_gated,
+        blocked=policy.blocked,
+    )
+    with pytest.raises(ValidationError, match="non-canonical"):
+        validate_native_authority_facts(
+            provider="codex", provider_version="codex-cli 0.154.0",
+            authority_digest=policy.authority_digest("codex-cli 0.154.0"),
+            enabled=policy.enabled, approval_gated=policy.approval_gated,
+            blocked=policy.blocked,
+        )
+
+
+def test_version_probe_must_match_package_metadata(monkeypatch, tmp_path):
+    import agentbridge.harness.adapters.policy as module
+    executable = tmp_path / "pkg" / "bin" / "codex"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"codex")
+    (tmp_path / "pkg" / "codex-package.json").write_text(json.dumps({
+        "version": "0.153.3",
+    }), encoding="utf-8")
+    monkeypatch.setattr(module.shutil, "which", lambda _command: str(executable))
+    monkeypatch.setattr(module, "_codex_binary_identity", lambda _path: (
+        "a" * 64, str(executable.with_name("codex-code-mode-host")),
+        "b" * 64, "2DC432GLL2",
+    ))
+    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs:
+                        SimpleNamespace(returncode=0, stdout="codex-cli 0.153.4\n",
+                                        stderr=""))
+    with pytest.raises(ValidationError, match="does not match its package metadata"):
+        compile_bridge_policy(
+            codex_profile(), command="codex", workspace=tmp_path,
+            timeout_s=30, requested_capabilities=set(), source_env={"PATH": "/bin"},
         )
 
 

@@ -2,7 +2,7 @@
    symmetric, humans get added exactly like agents) and view/search members. */
 
 import { esc, toast } from "./util.js";
-import { ICONS } from "./icons.js";
+import { ICONS, agentIdentityBadge } from "./icons.js";
 import { api } from "./api.js";
 import { openModal, closeModal, bindModalFilter, beginModalRead, captureModalRead, modalReadMayApply } from "./modal.js";
 import { Mesh, meshDn, meshAvatarInner } from "./state.js";
@@ -97,7 +97,7 @@ async function showSearchMembers(chatId) {
       <span class="mem-avatar">${esc((meshDn(u, ms)[0] || "?").toUpperCase())}</span>
       <span style="min-width:0">
         <div class="mem-name">${esc(meshDn(u, ms))}
-          ${rec.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+          ${rec.kind === "agent" ? agentIdentityBadge() : ""}</div>
         <div class="mem-sub">@${esc(u)}</div>
       </span>
       ${meta.owner === u ? '<span class="owner-chip">Owner</span>' : ""}

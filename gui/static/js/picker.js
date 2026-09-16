@@ -8,7 +8,7 @@
    and another view can import it without a forbidden view→view dependency. */
 
 import { esc } from "./util.js";
-import { ICONS } from "./icons.js";
+import { ICONS, agentIdentityBadge } from "./icons.js";
 
 // value = the checkbox value the caller reads back; tag = optional badge
 // (e.g. "agent"). `avatar` is optional trusted inner markup (from
@@ -21,7 +21,9 @@ export function pickerRow({ value, initial, name, sub, tag, avatar }) {
     <label class="mem-row modal-row pk-row">
       <span class="mem-avatar">${inner}</span>
       <span class="pk-text">
-        <div class="mem-name">${esc(name)}${tag ? ` <span class="kind-tag">${esc(tag)}</span>` : ""}</div>
+        <div class="mem-name">${esc(name)}${tag === "agent"
+          ? ` ${agentIdentityBadge()}`
+          : tag ? ` <span class="kind-tag">${esc(tag)}</span>` : ""}</div>
         ${sub ? `<div class="mem-sub">${esc(sub)}</div>` : ""}
       </span>
       <input type="checkbox" class="am-check pk-check" value="${esc(value)}">

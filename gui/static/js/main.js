@@ -375,7 +375,7 @@ function route() {
   const current = () => routeSeq === App.routeSeq;
   const host = page === "chats" && Mesh.detailsView ? $("#details-pane")
     : page === "new" ? $("#side-chats") : $("#content");
-  const finish = beginLoading(host, { current,
+  const finish = beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
     label: page === "new" ? "Updating contacts…"
       : Mesh.detailsView ? "Loading chat info…" : "Loading…" });
   return Promise.resolve(PAGES[App.page]()).catch(() => {}).finally(finish);

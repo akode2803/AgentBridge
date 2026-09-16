@@ -16,6 +16,7 @@ import mimetypes
 import re
 import secrets
 import time
+from pathlib import Path
 
 from ..mesh.paths import P
 from . import desktop
@@ -34,6 +35,19 @@ def safe_name(name: str) -> str:
     name = (name or "file").replace("\\", "/").rsplit("/", 1)[-1]
     name = re.sub(r"[^\w.\- ()\[\]]", "_", name).strip() or "file"
     return name[:120]
+
+
+def cache_filename(name: str, blob_id: str) -> str:
+    """Readable prefix, collision-resistant suffix, original OS extension.
+
+    Bound UTF-8 bytes as well as characters for common filesystem limits.
+    Internal blob IDs and pre-existing cache files are unchanged.
+    """
+    readable = Path(safe_name(name))
+    stem = readable.stem.encode("utf-8")[:160].decode("utf-8", errors="ignore")
+    suffix = readable.suffix.encode("utf-8")[:40].decode("utf-8", errors="ignore")
+    identity = hashlib.sha256(blob_id.encode("utf-8")).hexdigest()[:24]
+    return f"{stem}_{identity}{suffix}"
 
 
 def stage_dir(app, user: str = ""):
@@ -317,7 +331,7 @@ def open_file(app, req, mesh) -> dict:
         return {"error": "File not available"}
     cache = app.home / "files_cache" / chat_id
     cache.mkdir(parents=True, exist_ok=True)
-    target = cache / f"{blob_id}_{safe_name(rec.get('name') or 'file')}"
+    target = cache / cache_filename(rec.get("name") or "file", blob_id)
     if not target.is_file() or target.stat().st_size != len(raw):
         target.write_bytes(raw)
     desktop.open_path(target)

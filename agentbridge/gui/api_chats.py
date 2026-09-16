@@ -418,6 +418,10 @@ def _created_by(msgs) -> str:
 @authed
 def post(app: GuiApp, req, mesh) -> dict:
     data = req.data
+    client_ref = data.get("client_ref") or ""
+    if (not isinstance(client_ref, str) or (client_ref and len(client_ref) != 32)
+            or any(c not in "0123456789abcdef" for c in client_ref)):
+        return {"error": "Invalid send reference"}
     chat_id = data.get("chat_id") or ""
     prepared = []
     staged = []
@@ -433,7 +437,7 @@ def post(app: GuiApp, req, mesh) -> dict:
             chat_id,
             data.get("body") or "",
             reply_to=data.get("reply_to"),
-            attachments=prepared,
+            attachments=prepared, client_ref=client_ref,
         )
     except Exception:
         mesh.cancel_attachments(prepared)

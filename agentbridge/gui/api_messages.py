@@ -160,11 +160,12 @@ def forward(app, req, mesh) -> dict:
     return {"ok": True, "forwarded": sent}
 
 
-@authed
-def message_info(app, req, mesh) -> dict:
+@authed_read_token
+def message_info(app, req, mesh, token) -> dict:
     chat_id = req.params.get("id", "")
     msg_id = req.params.get("msg", "")
     out = mesh.message_info(chat_id, msg_id)
+    out["session_binding"] = session_read_binding(token)
     # agent replies carry the task steps their harness recorded (R15) — the
     # membership gate already ran inside message_info
     doc = mesh.tx.get_doc(f"chats/{chat_id}/tasks/{msg_id}.json")

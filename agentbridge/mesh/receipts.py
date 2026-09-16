@@ -107,6 +107,9 @@ class ReceiptsService:
                 "pending": sorted(pending),
                 "total": len(others),
             }
+        statuses = self.messaging.store.send_statuses(chat_id, out)
+        for mid, transport in statuses.items():
+            out[mid]["transport"] = transport
         return out
 
     def message_info(self, chat_id: str, msg_id: str) -> dict:
@@ -144,5 +147,6 @@ class ReceiptsService:
                 "read_ts": cur["read_ts"]
                 if tier is ReceiptState.READ else "",
             })
+        transport = self.messaging.store.send_statuses(chat_id, [msg.id]).get(msg.id)
         return {**base, "state": worst.value, "total": len(others),
-                "members": rows}
+                "members": rows, "transport": transport}

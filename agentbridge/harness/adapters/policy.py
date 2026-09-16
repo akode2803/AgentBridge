@@ -25,14 +25,18 @@ from pathlib import Path
 from ...core.errors import ValidationError
 from ..capabilities import BRIDGE_CAPABILITIES, compile_capability_ceiling
 from .native import (
-    CODEX_PROVIDER_VERSION, EffectiveNativePolicy, codex_native_policy,
+    EffectiveNativePolicy, codex_native_policy,
+)
+from .codex_compat import (
+    BridgeCompatibilityError, codex_version_supported, parse_codex_version,
+    validate_codex_version_series,
 )
 
 __all__ = ["BridgeProfile", "CompiledBridgePolicy", "compile_bridge_policy"]
 
 _PROFILE_FIELDS = {
     "schema", "provider", "renderer", "transport", "version_args",
-    "version_pattern", "enforcement_locus", "config_isolation",
+    "supported_versions", "enforcement_locus", "config_isolation",
     "continuation", "capabilities", "safe_overlay_keys",
     "blocked_env",
 }
@@ -53,7 +57,7 @@ class BridgeProfile:
     renderer: str
     transport: str
     version_args: tuple[str, ...]
-    version_pattern: str
+    supported_versions: tuple[str, ...]
     enforcement_locus: str
     config_isolation: str
     continuation: str
@@ -72,7 +76,7 @@ class BridgeProfile:
             raise ValidationError(f"invalid bridge profile fields: {detail}")
         if raw["schema"] != 1 or raw["provider"] != "codex":
             raise ValidationError("unsupported bridge profile schema/provider")
-        if raw["renderer"] != "codex-0.147":
+        if raw["renderer"] != "codex-reviewed":
             raise ValidationError("unsupported bridge profile renderer")
         if raw["transport"] != "streamable-http-bearer":
             raise ValidationError("unsupported bridge transport")
@@ -101,21 +105,12 @@ class BridgeProfile:
         }
         if not required_blocked.issubset(blocked_env):
             raise ValidationError("bridge profile must block credential endpoints")
-        pattern = raw["version_pattern"]
-        if not isinstance(pattern, str) or not pattern.startswith("^") \
-                or not pattern.endswith("$"):
-            raise ValidationError("bridge version pattern must be anchored")
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ValidationError("invalid bridge version pattern") from exc
-        reviewed_pattern = "^" + CODEX_PROVIDER_VERSION.replace(".", r"\.") + "$"
-        if pattern != reviewed_pattern:
-            raise ValidationError("bridge version pattern is not the reviewed version")
+        supported_versions = validate_codex_version_series(
+            raw["supported_versions"])
         return cls(
-            schema=1, provider="codex", renderer="codex-0.147",
+            schema=1, provider="codex", renderer="codex-reviewed",
             transport="streamable-http-bearer", version_args=version_args,
-            version_pattern=pattern,
+            supported_versions=supported_versions,
             enforcement_locus="provider-filter+server-authority",
             config_isolation="ignore-user-config", continuation="fresh-only",
             capabilities=capabilities, safe_overlay_keys=overlay,
@@ -243,9 +238,14 @@ def compile_bridge_policy(profile: BridgeProfile, *, command: str,
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValidationError("could not verify the bridge provider version") from exc
     version = " ".join((result.stdout or result.stderr).split())
-    if result.returncode or not re.fullmatch(profile.version_pattern, version):
+    if result.returncode:
+        raise ValidationError("Codex CLI version probe failed; check the installation")
+    if not codex_version_supported(version, profile.supported_versions):
+        raise BridgeCompatibilityError(version, profile.supported_versions)
+    package_version = _codex_package_version(Path(executable))
+    if package_version is not None and version != f"codex-cli {package_version}":
         raise ValidationError(
-            f"bridge disabled for unverified provider version {version or 'unknown'!r}")
+            "Codex CLI version output does not match its package metadata")
     _assert_binary_identity(
         executable, executable_sha256, code_mode_host, code_mode_host_sha256)
     config_layers = measured(
@@ -392,13 +392,14 @@ def _resolve_codex_host(executable_path: Path) -> Path:
         arch = "aarch64" if machine in {"arm64", "aarch64"} else machine
         expected = {
             "layoutVersion": 1,
-            "version": CODEX_PROVIDER_VERSION.rsplit(" ", 1)[-1],
             "target": f"{arch}-apple-darwin",
             "variant": "codex",
             "entrypoint": "bin/codex",
         }
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise ValidationError("Codex package metadata does not match this build")
+        if parse_codex_version(f"codex-cli {metadata.get('version')}") is None:
+            raise ValidationError("Codex package metadata version is invalid")
         entrypoint = Path(str(metadata["entrypoint"]))
         if (entrypoint.is_absolute() or ".." in entrypoint.parts
                 or (package_root / entrypoint).resolve() != executable_path):
@@ -426,6 +427,20 @@ def _resolve_codex_host(executable_path: Path) -> Path:
     if host_path is None:
         raise ValidationError("could not resolve the Codex code-mode host")
     return host_path
+
+
+def _codex_package_version(executable_path: Path) -> str | None:
+    metadata_path = executable_path.resolve().parent.parent / "codex-package.json"
+    if not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("Codex package metadata is unreadable") from exc
+    value = metadata.get("version") if isinstance(metadata, dict) else None
+    if parse_codex_version(f"codex-cli {value}") is None:
+        raise ValidationError("Codex package metadata version is invalid")
+    return value
 
 
 def _file_snapshot(path: Path) -> tuple[int, int, int, int, str]:

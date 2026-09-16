@@ -6,9 +6,10 @@ import { $, esc, fmtSize, toast, enterToSend } from "./util.js";
 import { ICONS, extIcon } from "./icons.js";
 import { api } from "./api.js";
 import { stripMd } from "./markdown.js";
-import { Mesh, meshDn, meshDraft, saveDraft } from "./state.js";
+import { App, Mesh, meshDn, meshDraft, saveDraft, sessionMayApply, meshStateSnapshot } from "./state.js";
 import { alertModal } from "./modal.js";
 import { playSendBlip } from "./notify.js";
+import { beginSend, acknowledgeSend, failSend, currentSendChat, sendMayApply } from "./pending-send.js";
 import { V } from "./views.js";
 
 // the connector's upload ceiling, human-readable ("512 MB" / "1 GB")
@@ -295,32 +296,41 @@ export function initComposer(chatId, members, context = Mesh.state) {
       return;
     }
     if (!body.value.trim() && !draft.atts.length) return;
-    $("#mesh-send-btn").disabled = true;
-    const r = await api("/api/mesh/post", {
-      chat_id: chatId, body: body.value.trim(),
-      attachments: draft.atts.map((a) => a.token),
-      reply_to: draft.reply || null,
-    });
-    $("#mesh-send-btn").disabled = false;
-    if (r.error) { toast(r.error, true); return; }
-    playSendBlip();   // V44: the outgoing chirp (pref-gated, default off)
-    // MUTATE the draft — replacing the object orphans this closure's
-    // reference, so later attaches update a ghost while sends keep
-    // posting the already-consumed staged path (the "attach errors
-    // forever after the first file" bug)
-    draft.body = "";
-    saveDraft(chatId);   // sent → drop the saved draft on this device
-    draft.atts.length = 0;
-    draft.reply = null;
-    body.value = "";
-    autosize();
-    renderMeshPending(chatId);   // also re-syncs the send button
-    renderReplyArea(chatId, context);
-    // renderChats (not renderMeshChat): a local post fires no SSE event
-    // (only synced-IN records do), so the transcript AND the sidebar row
-    // (preview/time/order) must both repaint now — without this the sidebar
-    // stayed stale until the next poll or the peer's reply (R31)
-    V.renderChats(true);
+    const send = beginSend(chatId, body.value.trim(), draft.atts, draft.reply || null);
+    if (!send) { toast("Please wait for pending sends to finish", true); return; }
+    // Capture and clear synchronously, so the next keystroke is a new draft.
+    draft.body = ""; draft.atts = []; draft.reply = null;
+    saveDraft(chatId);
+    body.value = ""; autosize();
+    renderMeshPending(chatId); renderReplyArea(chatId, context);
+    V.renderPendingSends?.(chatId, true);
+    try {
+      const r = await api("/api/mesh/post", {
+        chat_id: chatId, body: send.body, client_ref: send.ref,
+        attachments: send.attachments.map(a => a.token), reply_to: send.reply,
+      }, {timeoutMs: 60000});
+      if (!sendMayApply(send)) return; // canonical read may already have settled it
+      if (r.error || !r.id) {
+        failSend(send, r.error || "No message acknowledgement received");
+      } else {
+        acknowledgeSend(send, r.id);
+        playSendBlip();
+      }
+    } catch {
+      // HTTP uncertainty is not proof the durable commit failed. Never auto-retry.
+      failSend(send, "Connection interrupted");
+    }
+    if (currentSendChat(send)) {
+      V.renderPendingSends?.(chatId);
+      V.renderMeshChat(false).then(() => {
+        // Refresh sidebar preview/order through its existing coalesced reader,
+        // only after the selected transcript has settled. Never block first paint.
+        const snapshot = meshStateSnapshot();
+        if (App.page === "chats" && Mesh.chatId === chatId
+            && sessionMayApply(send.session) && snapshot.lockEpoch === send.lockEpoch
+            && !snapshot.locked) V.renderChats(false);
+      }).catch(() => {});
+    }
   };
   $("#mesh-send-btn").addEventListener("click", doSend);
   // Enter-to-send (default on, per device). ON: Enter sends, Shift+Enter is a
@@ -392,4 +402,19 @@ export function initComposer(chatId, members, context = Mesh.state) {
     e.preventDefault();
     stageFiles(files);
   });
+}
+
+// Restoring is explicit: an uncertain HTTP result must never silently resend.
+export function restoreSendDraft(chatId, send, context = Mesh.state) {
+  const draft = meshDraft(chatId);
+  const body = $("#mesh-body");
+  if (!body || Mesh.chatId !== chatId) return;
+  draft.body = [draft.body, send.body].filter(Boolean).join("\n\n");
+  // Attempted uploads may already be consumed; never silently reuse tokens.
+  if (send.attachments.length) toast("Draft restored. Please reattach the files.");
+  if (!draft.reply) draft.reply = send.reply || null;
+  body.value = draft.body;
+  body.dispatchEvent(new Event("input", {bubbles: true}));
+  renderMeshPending(chatId); renderReplyArea(chatId, context);
+  body.focus();
 }

@@ -118,6 +118,10 @@ version, actual argv, working directory, environment, permission/tool hook,
 fallback, stop behavior, and a real smoke result.
 
 R140 re-audits the tagged 0.147.0 schema, feature registry and release surface.
+That line records the historical R140 audit. Current bounded version admission
+is maintained in `docs/CODEX_COMPATIBILITY.md`; it accepts reviewed patch
+releases within explicitly listed minor series and continues to fail closed on
+unreviewed minor or major updates.
 The policy explicitly disables hooks, skills, apps/plugins, browser/computer
 control, image generation, delegation, persistence, automatic approvals,
 elicitation, updates and proxy features. It keeps only provider inference,

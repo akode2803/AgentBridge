@@ -2,7 +2,7 @@
    settings nav, or the new-chat form. Imports no view modules. */
 
 import { $, esc, fmtTime, toast } from "./util.js";
-import { ICONS } from "./icons.js";
+import { ICONS, agentIdentityBadge } from "./icons.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, sessionMayApply, applyMeshState, captureMeshStateRead } from "./state.js";
 import { updateTitleBadge } from "./notify.js";
@@ -176,7 +176,7 @@ function renderNewChatSidebar() {
       <span class="mem-avatar">${meshAvatarInner(u.username)}</span>
       <span style="min-width:0">
         <div class="mem-name">${esc(u.display)}
-          ${u.kind === "agent" ? '<span class="kind-tag">agent</span>' : ""}</div>
+          ${u.kind === "agent" ? agentIdentityBadge() : ""}</div>
         <div class="mem-sub">@${esc(u.username)}${ownerHint}</div>
       </span>
     </button>`;
@@ -294,7 +294,7 @@ function renderChatListSidebar() {
     // a DM with an agent shows the agent tag next to its name, like the header
     const peer = c.kind === "dm" ? (c.members || []).find((u) => u !== ms.user) : null;
     const agentTag = peer && ms.users?.[peer]?.kind === "agent"
-      ? ' <span class="kind-tag">agent</span>' : "";
+      ? ` ${agentIdentityBadge()}` : "";
     return esc(chatDisplay(c, ms.user)) + agentTag;
   };
   // V66: while someone types or an agent works, the row shows THAT instead

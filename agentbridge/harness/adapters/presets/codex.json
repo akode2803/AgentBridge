@@ -10,10 +10,10 @@
   "bridge_profile": {
     "schema": 1,
     "provider": "codex",
-    "renderer": "codex-0.147",
+    "renderer": "codex-reviewed",
     "transport": "streamable-http-bearer",
     "version_args": ["--version"],
-    "version_pattern": "^codex-cli 0\\.147\\.0$",
+    "supported_versions": ["0.147", "0.153"],
     "enforcement_locus": "provider-filter+server-authority",
     "config_isolation": "ignore-user-config",
     "continuation": "fresh-only",

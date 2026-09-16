@@ -66,6 +66,13 @@ export const ICONS = {
   collapse: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>',
 };
 
+// Compact identity marker shared anywhere an agent name appears. Keep the
+// accessible name on the wrapper: the inline SVG is decorative on its own.
+export function agentIdentityBadge() {
+  return `<span class="agent-icon-badge" role="img" aria-label="Agent"
+    title="Agent">${ICONS.bot}</span>`;
+}
+
 // file-type glyphs — modern line icons (was emoji). Keyed by category;
 // extIcon maps a filename's extension to one. Contexts size them in CSS
 // (.att-icon svg / .pending-att svg / .media-tile.file svg).

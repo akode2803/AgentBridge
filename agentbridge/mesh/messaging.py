@@ -134,6 +134,7 @@ class MessagingService:
         files: list[dict] | None = None,
         attachments: list[PreparedAttachment] | None = None,
         fwd: dict | None = None,
+        client_ref: str = "",
     ) -> Envelope:
         self.require_send(chat_id)
         prepared = list(attachments or [])
@@ -160,7 +161,7 @@ class MessagingService:
             kind=MsgKind.MESSAGE, **self.sealer.seal(chat_id, env_id, ns, record),
         )
         self.latency.observe("origin_minted", env.id)
-        self.commit_envelope(chat_id, env, attachments=prepared)
+        self.commit_envelope(chat_id, env, attachments=prepared, client_ref=client_ref)
         return env
 
     def require_send(
@@ -248,6 +249,7 @@ class MessagingService:
     def commit_envelope(
         self, chat_id: str, env: Envelope,
         *, attachments: list[PreparedAttachment] | None = None,
+        client_ref: str = "",
     ) -> None:
         """Optimistic local cache + durable outbox commit (the send guarantee)."""
         payload = env.to_dict()
@@ -264,6 +266,7 @@ class MessagingService:
             self.store.cache_and_outbox_add(
                 chat_id, payload, OUTBOX_APPEND,
                 f"{chat_id}|{P.log_name(self.user, self.machine)}", outbox_payload,
+                client_ref=client_ref,
                 observed_ns=observed, observed_mono=observed_mono,
                 observed_clock=clock_id())
         except Exception:

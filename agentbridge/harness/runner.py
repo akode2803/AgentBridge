@@ -44,6 +44,7 @@ from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
 from .capabilities import validate_model_capability_ceiling
+from .adapters.codex_compat import BridgeCompatibilityError
 from .adapters.native import validate_native_authority_facts
 from .conversation import ConversationManager
 from .feed import (RunFeed, reap_orphan_run, record_tasks,
@@ -83,6 +84,8 @@ def _reaction_only(group) -> bool:
 
 def _failure_reason(err: Exception) -> str:
     """Bounded one-line reason for owner-visible history and notices."""
+    if isinstance(err, BridgeCompatibilityError):
+        return str(err)[:320]  # bounded code-owned public reason
     why = type(err).__name__
     detail = " ".join(str(err).split())
     detail = detail.replace(str(Path.home()), "~")
@@ -592,7 +595,19 @@ class AgentRunner:
             self.mesh.messaging.mark_read(chat_id)  # context read = read
             latency.observe("preparation_started", trace_ref, lane="local")
             timings.start("prepare")
-            invocation = self._prepare_invocation(delivery, settings)
+            try:
+                invocation = self._prepare_invocation(delivery, settings)
+            except BridgeCompatibilityError as exc:
+                # A reviewed compatibility refusal is safe to show and cannot
+                # improve by retrying the same binary three times. No provider
+                # process has started; preserve the existing terminal pipeline.
+                timings.stop()
+                feed = self._new_feed(
+                    group, policy_revision=settings.policy_revision,
+                    transition_id=waiting_token, observe=timings.detail)
+                self._run_failed(group, feed, settings, delivery, exc)
+                self._log_perf(timings, group, "error:compatibility")
+                return
             timings.stop()
             for name, seconds in delivery.preparation_timings.items():
                 timings.detail(name, seconds)
