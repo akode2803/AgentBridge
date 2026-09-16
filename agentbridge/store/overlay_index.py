@@ -154,9 +154,12 @@ def _doc_path(path, chat):
 
 
 def _wanted(position, path):
-    if type(position) is not OverlayIndexPosition or type(position.schema) is not int or position.schema != SCHEMA:
+    if type(position) is not OverlayIndexPosition:
         raise ValueError('invalid overlay index position')
-    source._validate_expected(position.source, path)
+    source_position, chat, build, schema = position.source, position.chat_id, position.build, position.schema
+    position = OverlayIndexPosition(source._validate_expected(source_position, path), chat, build, schema)
+    if type(position.schema) is not int or position.schema != SCHEMA:
+        raise ValueError('invalid overlay index position')
     _chat(position.chat_id)
     if type(position.build) is not str or len(position.build) != 32 or any(c not in '0123456789abcdef' for c in position.build):
         raise ValueError('invalid index build identity')
@@ -289,6 +292,18 @@ def publish(conn, path, prepared):
 
 
 def capture(path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES):
+    conn = source._open_reader(path)
+    try:
+        conn.execute('BEGIN')
+        return _capture(conn, path, expected, targets, state_paths,
+                        max_rows=max_rows, max_bytes=max_bytes)
+    finally:
+        conn.close()
+
+
+def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES):
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('capture requires an active read transaction')
     expected = _wanted(expected, path)
     if type(targets) is not tuple or type(state_paths) is not tuple or len(targets) > MAX_TARGETS or len(state_paths) > MAX_DEPENDENCIES:
         raise ValueError('invalid index selectors')
@@ -307,83 +322,78 @@ def capture(path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes
     if selector_bytes > max_bytes:
         raise OverflowError('overlay selector byte budget exceeded')
     source_id = expected.source.source_id
-    conn = source._open_reader(path)
-    try:
-        conn.execute('BEGIN')
-        _ready(conn, path, expected)
-        selected, paths, used = [], set(state_paths), selector_bytes
-        for target in targets:
-            queries = [('reaction', None)] + [(kind, state) for kind in ('hidden', 'starred') for state in state_paths]
-            for kind, state in queries:
-                sql = 'SELECT kind,target,path,size FROM overlay_index_candidates WHERE source=? AND kind=? AND target=?'
-                params = (source_id, kind, target)
-                if state is not None:
-                    sql += ' AND path=?'
-                    params += (state,)
-                sql += ' ORDER BY path LIMIT ?'
-                rows = conn.execute(sql, (*params, max_rows - len(selected) + 1)).fetchall()
-                for k, t, p, size in rows:
-                    if (type(k) is not str or k != kind or type(t) is not str or t != target
-                            or type(p) is not str):
-                        raise OverlayIndexUnavailable('malformed_candidate')
-                    try:
-                        doc_kind, _ = _doc_path(p, expected.chat_id)
-                    except (TypeError, ValueError) as exc:
-                        raise OverlayIndexUnavailable('malformed_candidate') from exc
-                    if doc_kind != ('reactions' if k == 'reaction' else 'state'):
-                        raise OverlayIndexUnavailable('malformed_candidate')
-                    if type(size) is not int or size < 0:
-                        raise OverlayIndexUnavailable('malformed_candidate')
-                    selected.append((k, t, p))
-                    paths.add(p)
-                    used += size
-                    if len(selected) > max_rows or len(paths) > MAX_DEPENDENCIES or used > max_bytes:
-                        raise OverflowError('overlay selection exceeds budget')
-        present, absent = [], []
-        for name in sorted(paths):
-            size = conn.execute('SELECT size FROM overlay_index_docs WHERE source=? AND path=?', (source_id, name)).fetchone()
-            if size is None:
-                if name not in state_paths:
-                    raise OverlayIndexUnavailable('candidate_document_missing')
-                absent.append(name)
-                continue
-            if type(size[0]) is not int or size[0] < 0:
-                raise OverlayIndexUnavailable('malformed_document_size')
-            used += size[0]
-            if used > max_bytes:
-                raise OverflowError('overlay selection exceeds byte budget')
-            present.append(name)
-        documents = []
-        for name in present:
-            row = conn.execute("SELECT kind,actor,empty,signature<>'',shape_error,scalars FROM overlay_index_docs WHERE source=? AND path=?", (source_id, name)).fetchone()
-            kind, actor = _doc_path(name, expected.chat_id)
-            if (row is None or type(row[0]) is not str or row[0] != kind
-                    or type(row[1]) is not str or row[1] != actor
-                    or type(row[2]) is not int or row[2] not in (0, 1)
-                    or type(row[3]) is not int or row[3] not in (0, 1)
-                    or type(row[4]) is not str or row[4] not in _SHAPE_ERRORS
-                    or type(row[5]) is not str):
-                raise OverlayIndexUnavailable('malformed_document')
-            try:
-                scalar = json.loads(row[5])
-                if type(scalar) is not dict:
-                    raise ValueError('scalars must be object')
-                encoded = json.dumps(scalar, ensure_ascii=False, allow_nan=False,
-                                     sort_keys=True, separators=(',', ':'))
-                if encoded != row[5]:
-                    raise ValueError('noncanonical scalars')
-            except (TypeError, ValueError) as exc:
-                raise OverlayIndexUnavailable('malformed_document_scalars') from exc
-            documents.append(DocumentSummary(name, row[0], row[1], row[2] == 1, row[3] == 1, row[4], row[5]))
-        candidates = []
-        for kind, target, name in selected:
-            row = conn.execute('SELECT value FROM overlay_index_candidates WHERE source=? AND kind=? AND target=? AND path=?', (source_id, kind, target, name)).fetchone()
-            if row is None or type(row[0]) is not str:
-                raise OverlayIndexUnavailable('malformed_candidate')
-            candidates.append(OverlayCandidate(name, kind, target, row[0]))
-        return IndexedOverlayInputs(expected, tuple(documents), tuple(candidates), tuple(absent))
-    finally:
-        conn.close()
+    _ready(conn, path, expected)
+    selected, paths, used = [], set(state_paths), selector_bytes
+    for target in targets:
+        queries = [('reaction', None)] + [(kind, state) for kind in ('hidden', 'starred') for state in state_paths]
+        for kind, state in queries:
+            sql = 'SELECT kind,target,path,size FROM overlay_index_candidates WHERE source=? AND kind=? AND target=?'
+            params = (source_id, kind, target)
+            if state is not None:
+                sql += ' AND path=?'
+                params += (state,)
+            sql += ' ORDER BY path LIMIT ?'
+            rows = conn.execute(sql, (*params, max_rows - len(selected) + 1)).fetchall()
+            for k, t, p, size in rows:
+                if (type(k) is not str or k != kind or type(t) is not str or t != target
+                        or type(p) is not str):
+                    raise OverlayIndexUnavailable('malformed_candidate')
+                try:
+                    doc_kind, _ = _doc_path(p, expected.chat_id)
+                except (TypeError, ValueError) as exc:
+                    raise OverlayIndexUnavailable('malformed_candidate') from exc
+                if doc_kind != ('reactions' if k == 'reaction' else 'state'):
+                    raise OverlayIndexUnavailable('malformed_candidate')
+                if type(size) is not int or size < 0:
+                    raise OverlayIndexUnavailable('malformed_candidate')
+                selected.append((k, t, p))
+                paths.add(p)
+                used += size
+                if len(selected) > max_rows or len(paths) > MAX_DEPENDENCIES or used > max_bytes:
+                    raise OverflowError('overlay selection exceeds budget')
+    present, absent = [], []
+    for name in sorted(paths):
+        size = conn.execute('SELECT size FROM overlay_index_docs WHERE source=? AND path=?', (source_id, name)).fetchone()
+        if size is None:
+            if name not in state_paths:
+                raise OverlayIndexUnavailable('candidate_document_missing')
+            absent.append(name)
+            continue
+        if type(size[0]) is not int or size[0] < 0:
+            raise OverlayIndexUnavailable('malformed_document_size')
+        used += size[0]
+        if used > max_bytes:
+            raise OverflowError('overlay selection exceeds byte budget')
+        present.append(name)
+    documents = []
+    for name in present:
+        row = conn.execute("SELECT kind,actor,empty,signature<>'',shape_error,scalars FROM overlay_index_docs WHERE source=? AND path=?", (source_id, name)).fetchone()
+        kind, actor = _doc_path(name, expected.chat_id)
+        if (row is None or type(row[0]) is not str or row[0] != kind
+                or type(row[1]) is not str or row[1] != actor
+                or type(row[2]) is not int or row[2] not in (0, 1)
+                or type(row[3]) is not int or row[3] not in (0, 1)
+                or type(row[4]) is not str or row[4] not in _SHAPE_ERRORS
+                or type(row[5]) is not str):
+            raise OverlayIndexUnavailable('malformed_document')
+        try:
+            scalar = json.loads(row[5])
+            if type(scalar) is not dict:
+                raise ValueError('scalars must be object')
+            encoded = json.dumps(scalar, ensure_ascii=False, allow_nan=False,
+                                 sort_keys=True, separators=(',', ':'))
+            if encoded != row[5]:
+                raise ValueError('noncanonical scalars')
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise OverlayIndexUnavailable('malformed_document_scalars') from exc
+        documents.append(DocumentSummary(name, row[0], row[1], row[2] == 1, row[3] == 1, row[4], row[5]))
+    candidates = []
+    for kind, target, name in selected:
+        row = conn.execute('SELECT value FROM overlay_index_candidates WHERE source=? AND kind=? AND target=? AND path=?', (source_id, kind, target, name)).fetchone()
+        if row is None or type(row[0]) is not str:
+            raise OverlayIndexUnavailable('malformed_candidate')
+        candidates.append(OverlayCandidate(name, kind, target, row[0]))
+    return IndexedOverlayInputs(expected, tuple(documents), tuple(candidates), tuple(absent))
 
 
 def _key(value):
@@ -441,6 +451,17 @@ def verify_signature(conn, path, expected, document_path, public_key, *, max_byt
 
 
 def proofs(path, expected, keys):
+    conn = source._open_reader(path)
+    try:
+        conn.execute('BEGIN')
+        return _proofs(conn, path, expected, keys)
+    finally:
+        conn.close()
+
+
+def _proofs(conn, path, expected, keys):
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('capture requires an active read transaction')
     expected = _wanted(expected, path)
     if type(keys) is not tuple or len(keys) > MAX_DEPENDENCIES:
         raise ValueError('invalid proof selectors')
@@ -453,16 +474,11 @@ def proofs(path, expected, keys):
         normalized.append((name, _key(key)))
     if len(set(normalized)) != len(normalized):
         raise ValueError('duplicate proof selector')
-    conn = source._open_reader(path)
-    try:
-        conn.execute('BEGIN')
-        _ready(conn, path, expected)
-        out = []
-        for name, key in normalized:
-            row = conn.execute('SELECT valid FROM overlay_index_proofs WHERE source=? AND path=? AND pub=?', (expected.source.source_id, name, key)).fetchone()
-            if row is not None and (type(row[0]) is not int or row[0] not in (0, 1)):
-                raise OverlayIndexUnavailable('malformed_proof')
-            out.append(None if row is None else row[0] == 1)
-        return tuple(out)
-    finally:
-        conn.close()
+    _ready(conn, path, expected)
+    out = []
+    for name, key in normalized:
+        row = conn.execute('SELECT valid FROM overlay_index_proofs WHERE source=? AND path=? AND pub=?', (expected.source.source_id, name, key)).fetchone()
+        if row is not None and (type(row[0]) is not int or row[0] not in (0, 1)):
+            raise OverlayIndexUnavailable('malformed_proof')
+        out.append(None if row is None else row[0] == 1)
+    return tuple(out)

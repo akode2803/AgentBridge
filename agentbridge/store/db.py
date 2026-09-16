@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status, overlay_index
+from . import log_position, send_status, overlay_index, page_inputs
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -407,6 +407,13 @@ class Store:
             max_chat_ids=max_chat_ids, max_messages=max_messages,
             max_logs=max_logs, max_bytes=max_bytes,
         )
+
+    def prepare_page_input_index(self):
+        """Explicit background preparation; never called by a chat read."""
+        page_inputs.initialize(self._conn())
+
+    def capture_page_inputs(self, index, **selection):
+        return page_inputs.capture(self.path, index, **selection)
 
     def publish_overlay_index(self, prepared):
         return overlay_index.publish(self._conn(), self.path, prepared)
