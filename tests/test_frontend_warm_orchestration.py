@@ -35,7 +35,7 @@ def test_warm_switch_executes_fresh_fold_and_rejects_stale_continuations(tmp_pat
 def test_warm_switch_is_registered_as_the_production_route_path():
     source = (ROOT / "gui" / "static" / "js" / "chat.js").read_text(encoding="utf-8")
     assert "export async function renderWarmChat" in source
-    assert "await renderWarmChat(force, openTrace, warm, {" in source
+    assert "await renderWarmChat(force, openTrace, accelerated, {" in source
     assert "fetchSeq, routeSeq, chatId: Mesh.chatId, operationId," in source
 
 
@@ -116,7 +116,12 @@ function make({current = () => true, session = () => true, applyState = () => tr
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
     "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent",
     "applyCurrentWarmError", "restartColdAfterStateInvalidation", "Mesh", "$", "location", "renderSidebar",
-    `let chatRenderSeq = 0, activeWarmSurface = null; ${body}; return renderWarmChat;`);
+    `let chatRenderSeq = 0, activeWarmSurface = null;
+     const restartColdAfterInitialFailure = () => false;
+     const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
+       markInitialSelectedViewReady = () => true, startAskPoll = () => {};
+     const V = {closeAuthPage() {}, closeConnectingPage() {}};
+     ${body}; return renderWarmChat;`);
   const fn = factory(api, () => ({epoch: 1}), () => ({sessionEpoch: 1, lockEpoch: 1}), session, applyState, () => ({stateGeneration: 2}),
     async (_force, trace, options) => { renders.push({trace, options}); },
     callback => callback(), current, (_operation, value) => errors.push(value), () => cold.push("fallback"), Mesh,
@@ -224,7 +229,7 @@ const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$"
   `let chatRenderSeq = 0, chatsFetchSeq = 0, warmOperationSeq = 1, warmOperationsExhausted = false,
        activeWarmSurface = null; ${listener}
    const api = path => path.startsWith("/api/mesh/chat?")
-     ? Promise.resolve({me: "aryan", meta: {id: "room", members: ["aryan"]}})
+     ? Promise.resolve({me: "aryan", meta: {id: "room", members: ["aryan"]}, messages: []})
      : new Promise(() => {});
    const captureSessionEpoch = () => ({epoch: 3}); const captureWarmStateRequest = () => ({sessionEpoch: 3, lockEpoch: 1});
    const sessionMayApply = () => true; const applyMeshState = () => true;
@@ -233,7 +238,11 @@ const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$"
        handlers.get("ab:mesh-state-accepted")({detail: {state: {user: "aryan", chats: []}}})); }
    };
    const requestAnimationFrame = callback => callback(); const warmOperationCurrent = () => true;
-   const applyCurrentWarmError = () => {}; const restartColdAfterStateInvalidation = () => {}; const renderSidebar = () => {};
+   const applyCurrentWarmError = () => {}; const restartColdAfterStateInvalidation = () => {};
+   const restartColdAfterInitialFailure = () => false;
+   const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
+     markInitialSelectedViewReady = () => true, startAskPoll = () => {};
+   const V = {closeAuthPage() {}, closeConnectingPage() {}}; const renderSidebar = () => {};
    ${warmBody}; return renderWarmChat;`);
 const snapshot = () => ({sessionEpoch: 3, viewer: "aryan", stateGeneration: 1});
 const renderWarmChat = factory(document, snapshot, App, Mesh, $, location, handlers);
@@ -255,9 +264,14 @@ function make() {
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
     "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent", "applyCurrentWarmError",
     "restartColdAfterStateInvalidation", "recordChatOpen", "performance", "Mesh", "$", "location", "renderSidebar",
-    `let chatRenderSeq = 0, activeWarmSurface = null; ${source}; return renderWarmChat;`);
+    `let chatRenderSeq = 0, activeWarmSurface = null;
+     const restartColdAfterInitialFailure = () => false;
+     const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
+       markInitialSelectedViewReady = () => true, startAskPoll = () => {};
+     const V = {closeAuthPage() {}, closeConnectingPage() {}};
+     ${source}; return renderWarmChat;`);
   const fn = factory(path => path.startsWith("/api/mesh/chat?")
-      ? Promise.resolve({me: "aryan", meta: {id: "room", members: ["aryan"]}}) : state.promise,
+      ? Promise.resolve({me: "aryan", meta: {id: "room", members: ["aryan"]}, messages: []}) : state.promise,
     () => ({epoch: 1}), () => ({sessionEpoch: 1, lockEpoch: 1}), () => true, () => true,
     () => ({stateGeneration: 1}), async (_force, _trace, options) => renders.push(options),
     callback => frames.push(callback), () => live, () => {}, () => {}, record => records.push(record),

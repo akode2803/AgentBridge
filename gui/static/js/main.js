@@ -5,7 +5,8 @@ import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
-         applyMeshState, observeLockState } from "./state.js";
+         applyMeshState, observeLockState, isInitialSelectedViewReady,
+         isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
@@ -241,6 +242,7 @@ async function refreshOnce(rerender) {
   // window used to sit on the dropped boot cover forever, reading as a
   // sign-out. Kick a full chats render; its own fetch fills Mesh.state.
   else if (!Mesh.state && PAGES[App.page]) {
+    if (isInitialSelectedViewPending()) return;
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
   }
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
@@ -294,6 +296,7 @@ const PAGES = {
 };
 
 function route() {
+  cancelInitialSelectedView();
   App.routeSeq = (App.routeSeq || 0) + 1;
   const hash = location.hash.replace("#/", "");
   const [page0, sub, sub2] = hash.split("/");
@@ -353,6 +356,14 @@ function route() {
 }
 
 window.addEventListener("hashchange", route);
+
+function routeInitialLocation() {
+  // Canonicalize the empty startup URL without queuing a second hashchange.
+  // A direct `location.hash = ...` followed by route() starts two full state
+  // reads: the synchronous route and the later hashchange listener.
+  if (!location.hash) history.replaceState(history.state, "", "#/chats");
+  route();
+}
 
 (async function start() {
   initTheme();
@@ -430,8 +441,7 @@ window.addEventListener("hashchange", route);
     downTicks = 2;
     V.renderConnectingPage(restartIntent() ? "Restarting…" : "Connecting…");
   }
-  if (!location.hash) location.hash = "#/chats";
-  route();
+  routeInitialLocation();
   // V45: the daily auto update check (About page pref, default on). Signed
   // out or offline it fails silently; a hit points at Settings → About.
   if (localStorage.getItem("updAuto") !== "0"
@@ -461,7 +471,8 @@ window.addEventListener("hashchange", route);
       // cover onto a bare shell mid-boot read as "the app signed out".
       // V111: the lock page IS a real first view — fade onto it.
       // V125: so is the connecting page (blind restore in progress).
-      if (!Mesh.state && !document.getElementById("lock")
+      if (!Mesh.state && !isInitialSelectedViewReady()
+          && !document.getElementById("lock")
           && !document.getElementById("connecting")
           && App.page === "chats" && Date.now() - t0 < 45000) {
         setTimeout(tick, 80); return;
