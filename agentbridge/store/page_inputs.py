@@ -275,3 +275,26 @@ def capture(
     for row in {r.key.id: r for r in result.rows + result.exact_rows}.values():
         row.decoded()
     return result
+
+
+def matches_position(conn, path, expected):
+    """Validate the page input cut inside a caller-owned final transaction.
+
+    Pair with membership/terminal checks under the coordinator's pin lock and
+    BEGIN IMMEDIATE after projection. This checks local inputs only; it is not
+    current viewer, key, session or transport authority.
+    """
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('page position check requires an active transaction')
+    if type(expected) is not PageInputPosition:
+        raise ValueError('invalid page position')
+    message_input, overlay_input = expected.messages, expected.overlays
+    wanted_messages = messages._copy_expected(message_input, str(Path(path).resolve()))
+    wanted_overlays = overlays._wanted(overlay_input, path)
+    if wanted_messages.chat_id != wanted_overlays.chat_id:
+        raise ValueError('inconsistent page chat binding')
+    _schema(conn)
+    if messages._capture(conn, path, wanted_messages.chat_id) != wanted_messages:
+        return False
+    overlays._ready(conn, path, wanted_overlays)
+    return True

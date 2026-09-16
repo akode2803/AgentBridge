@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status, overlay_index, page_inputs, membership_suffix
+from . import log_position, send_status, overlay_index, page_inputs, membership_suffix, terminal_observation
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -564,6 +564,15 @@ class Store:
             raise
 
     # ----------------------------------------------------------------- outbox
+    def prepare_terminal_observation(self):
+        return terminal_observation.initialize(self._conn())
+
+    def refresh_terminal_observation(self, target, **limits):
+        return terminal_observation.refresh(self._conn(), self.path, target, **limits)
+
+    def capture_terminal_observation(self, target, **selection):
+        return terminal_observation.capture(self.path, target, **selection)
+
     def outbox_add(self, kind: str, target: str, payload: dict[str, Any]) -> int:
         """Enqueue BEFORE any send attempt — commit here is what makes a send
         crash-safe. Returns the queue sequence number."""
