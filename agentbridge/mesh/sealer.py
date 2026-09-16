@@ -159,6 +159,21 @@ class E2EESealer(Sealer):
         key = self.keys.my_key(chat_id, env.epoch)
         if key is None:
             return None  # neither a resident epoch key nor a recoverable wrap
+        return self.unseal_observed(chat_id, env, sign_pub, key)
+
+    def unseal_observed(self, chat_id: str, env: Envelope, sign_pub: str,
+                        key: bytes | None) -> BodyRecord | None:
+        """Crypto-only core; caller owns bounded inputs and final authority fence.
+
+        Never resolves Directory, transport or key-file inputs. The live wrapper
+        preserves its lookup order, including on successful body-cache hits.
+        """
+        if env.epoch == 0:
+            return None
+        if not all(isinstance(value, str) for value in (env.nonce, env.ct, env.sig)):
+            return None
+        if not sign_pub or key is None:
+            return None
         ckey = (
             "ab-unseal-v2", chat_id, env.id, env.ns, env.from_, env.epoch,
             env.nonce, hashlib.sha256(env.ct.encode()).digest(),

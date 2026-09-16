@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
+import uuid
 from pathlib import Path
 
 from .. import crypto
@@ -29,6 +31,10 @@ from .directory import Directory
 from .paths import P
 
 __all__ = ["KeyStore", "ChatKeyService"]
+
+# All cooperating KeyStore instances participate; external writers are observed
+# by bounded content reads, not excluded by this process-local lock.
+_KEYSTORE_LOCK = threading.RLock()
 
 
 class KeyStore:
@@ -46,37 +52,51 @@ class KeyStore:
     def _path(self, name: str) -> Path:
         return self.dir / f"{name}.key"
 
-    def save(self, name: str, bundle: bytes) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        wrapped = dpapi.protect(bundle) if dpapi.available() else None
-        text = (
-            self._WRAPPED + crypto.b64e(wrapped) if wrapped is not None
-            else crypto.b64e(bundle)  # plain fallback — never lose a key
-        )
-        # atomic replace: load() upgrades legacy files in place, so a
-        # concurrent reader must never see a half-written key file
-        tmp = self._path(name).with_suffix(".key.tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, self._path(name))
+    def save(self, name: str, bundle: bytes, *, max_bytes: int | None = None) -> None:
+        with _KEYSTORE_LOCK:
+            if max_bytes is not None:
+                if type(max_bytes) is not int or max_bytes < 0:
+                    raise ValueError("invalid key file budget")
+                if len(bundle) > max_bytes:
+                    raise OverflowError("key file byte budget")
+            wrapped = dpapi.protect(bundle) if dpapi.available() else None
+            if max_bytes is not None:
+                encoded_size = 4 * ((len(wrapped if wrapped is not None else bundle) + 2) // 3)
+                if wrapped is not None:
+                    encoded_size += len(self._WRAPPED)
+                if encoded_size > max_bytes:
+                    raise OverflowError("key file byte budget")
+            self.dir.mkdir(parents=True, exist_ok=True)
+            text = (
+                self._WRAPPED + crypto.b64e(wrapped) if wrapped is not None
+                else crypto.b64e(bundle)  # plain fallback — never lose a key
+            )
+            # atomic replace: load() upgrades legacy files in place, so a
+            # concurrent reader must never see a half-written key file
+            tmp = self._path(name).with_suffix(".key.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._path(name))
 
     def load(self, name: str, *, upgrade: bool = True) -> bytes | None:
-        try:
-            text = self._path(name).read_text(encoding="utf-8").strip()
-        except (FileNotFoundError, OSError):
-            return None
-        try:
-            if text.startswith(self._WRAPPED):
-                # fail-closed: a wrapped file only opens for this OS user
-                return dpapi.unprotect(crypto.b64d(text[len(self._WRAPPED):]))
-            bundle = crypto.b64d(text)
-        except (ValueError, OSError):
-            return None
-        if upgrade and bundle and dpapi.available():
-            self.save(name, bundle)  # transparent one-time upgrade to wrapped
-        return bundle
+        with _KEYSTORE_LOCK:
+            try:
+                text = self._path(name).read_text(encoding="utf-8").strip()
+            except (FileNotFoundError, OSError):
+                return None
+            try:
+                if text.startswith(self._WRAPPED):
+                    # fail-closed: a wrapped file only opens for this OS user
+                    return dpapi.unprotect(crypto.b64d(text[len(self._WRAPPED):]))
+                bundle = crypto.b64d(text)
+            except (ValueError, OSError):
+                return None
+            if upgrade and bundle and dpapi.available():
+                self.save(name, bundle)  # transparent one-time upgrade to wrapped
+            return bundle
 
     def forget(self, name: str) -> None:
-        self._path(name).unlink(missing_ok=True)
+        with _KEYSTORE_LOCK:
+            self._path(name).unlink(missing_ok=True)
 
 
 class ChatKeyService:
@@ -88,15 +108,18 @@ class ChatKeyService:
         self.keystore = keystore
         self.user = user
         self._cache: dict[tuple[str, int], bytes] = {}  # (chat, epoch) -> key
+        self._cache_lock = threading.RLock()
+        self._epoch_owner = uuid.uuid4().hex
 
     # ------------------------------------------------------------- reading
     def projection_facts(self, chat_id: str, docs: dict) -> dict:
         """Opaque local key facts without read-through or key-cache mutation."""
         bundle = self.keystore.load(self.user, upgrade=False)
-        resident = {
-            epoch: key for (room, epoch), key in tuple(self._cache.items())
-            if room == chat_id
-        }
+        with self._cache_lock:
+            resident = {
+                epoch: key for (room, epoch), key in tuple(self._cache.items())
+                if room == chat_id
+            }
 
         def fingerprint(key: bytes | None) -> str:
             return hashlib.sha256(b"ab-projection-key\0" + key).hexdigest() if key else ""
@@ -138,7 +161,8 @@ class ChatKeyService:
         return eps[-1] if eps else None
 
     def my_key(self, chat_id: str, epoch: int) -> bytes | None:
-        cached = self._cache.get((chat_id, epoch))
+        with self._cache_lock:
+            cached = self._cache.get((chat_id, epoch))
         if cached is not None:
             return cached
         doc = self.tx.get_doc(P.keys(chat_id, epoch))
@@ -155,8 +179,10 @@ class ChatKeyService:
             key = crypto.unwrap_key_with(bundle, wrapped)
         except crypto.CryptoFail:
             return None
-        self._cache[(chat_id, epoch)] = key
-        return key
+        with self._cache_lock:
+            # A concurrent recovery/rotation may have installed a resident key
+            # while this cold read was unwrapping. Resident precedence wins.
+            return self._cache.setdefault((chat_id, epoch), key)
 
     # ------------------------------------------------------------- rotation
     def _wrap_for(self, members: list[str], key: bytes) -> dict:
@@ -179,7 +205,8 @@ class ChatKeyService:
             {"epoch": epoch, "by": self.user, "created": utcnow_iso(),
              "wrapped": self._wrap_for(members, key)},
         )
-        self._cache[(chat_id, epoch)] = key
+        with self._cache_lock:
+            self._cache[(chat_id, epoch)] = key
         return epoch, key
 
     def ensure(self, chat_id: str, snap: ChatSnapshot) -> tuple[int, bytes]:
