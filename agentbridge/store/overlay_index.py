@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .. import crypto
 from . import document_observation as source
 
-SCHEMA = 1
+SCHEMA = 2
 MAX_DOCUMENTS = 20_000
 MAX_CANDIDATES = 500_000
 MAX_BUILD_BYTES = 64 * 1024 * 1024
@@ -30,6 +30,15 @@ class OverlayIndexUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
+class DocumentShape:
+    is_dict: bool
+    signature_truthy: bool
+    signature_string: bool
+    signing_available: bool
+    viewer_ids_compatible: bool
+
+
+@dataclass(frozen=True)
 class IndexedDocument:
     path: str
     kind: str
@@ -41,6 +50,7 @@ class IndexedDocument:
     empty: bool
     shape_error: str
     scalars_json: str
+    shape: DocumentShape | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,7 @@ class DocumentSummary:
     has_signature: bool
     shape_error: str
     scalars_json: str
+    shape: DocumentShape | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ class IndexedOverlayInputs:
     documents: tuple[DocumentSummary, ...]
     candidates: tuple[OverlayCandidate, ...]
     absent_states: tuple[str, ...]
+    reactions_complete: bool = False
 
 
 _TABLES = {
@@ -94,9 +106,14 @@ _TABLES = {
 }
 
 
-def _triggers():
+_V1_TABLES = dict(_TABLES)
+_TABLES['overlay_index_shapes'] = 'CREATE TABLE overlay_index_shapes(source TEXT NOT NULL,path TEXT NOT NULL,is_dict INTEGER NOT NULL,sig_truthy INTEGER NOT NULL,sig_string INTEGER NOT NULL,signing_available INTEGER NOT NULL,ids_compatible INTEGER NOT NULL,PRIMARY KEY(source,path))'
+_MANIFEST_INDEX = 'CREATE INDEX overlay_index_manifest ON overlay_index_docs(source,kind,path,size)'
+
+
+def _triggers(legacy=False):
     result = {}
-    for table in ('docs', 'candidates', 'proofs'):
+    for table in (('docs', 'candidates', 'proofs') if legacy else ('docs', 'candidates', 'proofs', 'shapes')):
         for event, refs in (('INSERT', ('NEW',)), ('DELETE', ('OLD',)), ('UPDATE', ('OLD', 'NEW'))):
             name = f'overlay_index_dirty_{table}_{event.lower()}'
             actions = ' '.join('DELETE FROM overlay_index_ready WHERE source=' + r + '.source;' for r in refs)
@@ -104,29 +121,44 @@ def _triggers():
     return result
 
 
-def _schema(conn):
-    for name, sql in _TABLES.items():
+def _schema(conn, legacy=False):
+    for name, sql in (_V1_TABLES if legacy else _TABLES).items():
         row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
         if row != (sql,):
             raise OverlayIndexUnavailable('index_schema_changed')
     actual = dict(conn.execute(
         "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
         "(name GLOB 'overlay_index_dirty_*' OR tbl_name IN "
-        "('overlay_index_ready','overlay_index_docs','overlay_index_candidates','overlay_index_proofs')) LIMIT 10"
+        "('overlay_index_ready','overlay_index_docs','overlay_index_candidates','overlay_index_proofs','overlay_index_shapes')) LIMIT 13"
     ).fetchall())
-    if actual != _triggers():
+    if actual != _triggers(legacy):
         raise OverlayIndexUnavailable('index_triggers_changed')
+    index = conn.execute("SELECT sql FROM sqlite_master WHERE name='overlay_index_manifest'").fetchone()
+    if index != (None if legacy else (_MANIFEST_INDEX,)):
+        raise OverlayIndexUnavailable('manifest_index_changed')
 
 
 def initialize(conn):
     conn.execute('BEGIN IMMEDIATE')
     with conn:
-        present = conn.execute("SELECT name FROM sqlite_master WHERE name IN (?,?,?,?)", tuple(_TABLES)).fetchall()
+        present = conn.execute("SELECT name FROM sqlite_master WHERE name GLOB 'overlay_index_*' AND type='table'").fetchall()
         if not present:
             for sql in _TABLES.values():
                 conn.execute(sql)
             for sql in _triggers().values():
                 conn.execute(sql)
+            conn.execute(_MANIFEST_INDEX)
+        elif {r[0] for r in present} == set(_V1_TABLES):
+            # Only the exact known v1 layout may migrate. Keep source and derived
+            # rows, but invalidate readiness; a background rebuild supplies facts
+            # that cannot be inferred from v1 normalized signatures.
+            _schema(conn, legacy=True)
+            conn.execute(_TABLES['overlay_index_shapes'])
+            conn.execute(_MANIFEST_INDEX)
+            for name, sql in _triggers().items():
+                if name not in _triggers(legacy=True):
+                    conn.execute(sql)
+            conn.execute('DELETE FROM overlay_index_ready')
         _schema(conn)
 
 
@@ -134,6 +166,16 @@ def _text(value, label, limit=4096, *, empty=False):
     if type(value) is not str or (not value and not empty) or '\x00' in value or len(value.encode('utf-8')) > limit:
         raise ValueError('invalid ' + label)
     return value
+
+
+def _shape(shape):
+    if type(shape) is not DocumentShape:
+        raise ValueError('missing document shape evidence')
+    values = (shape.is_dict, shape.signature_truthy, shape.signature_string,
+              shape.signing_available, shape.viewer_ids_compatible)
+    if any(type(v) is not bool for v in values):
+        raise ValueError('invalid document shape evidence')
+    return DocumentShape(*values)
 
 
 def _chat(value):
@@ -194,7 +236,7 @@ def publish(conn, path, prepared):
         raise ValueError('index batches must be tuples')
     if len(prepared.documents) > MAX_DOCUMENTS or len(prepared.candidates) > MAX_CANDIDATES:
         raise OverflowError('index row budget exceeded')
-    docs, candidates, names, keys, used = [], [], set(), set(), 0
+    docs, candidates, shapes, names, keys, used = [], [], [], set(), set(), 0
     for doc in prepared.documents:
         if type(doc) is not IndexedDocument:
             raise ValueError('invalid indexed document')
@@ -207,6 +249,10 @@ def publish(conn, path, prepared):
                 or type(doc.source_bytes) is not int or not 0 <= doc.source_bytes <= MAX_BUILD_BYTES
                 or (doc.signing_bytes is not None and type(doc.signing_bytes) is not bytes) or type(doc.empty) is not bool):
             raise ValueError('invalid document identity')
+        shape = _shape(doc.shape)
+        if shape.signing_available != (doc.signing_bytes is not None):
+            raise ValueError('inconsistent signing shape evidence')
+        shapes.append((expected.source_id, doc.path, *(int(v) for v in shape.__dict__.values())))
         _text(doc.signature, 'signature', 8192, empty=True)
         _text(doc.shape_error, 'shape error', 64, empty=True)
         if doc.shape_error not in _SHAPE_ERRORS:
@@ -218,7 +264,7 @@ def publish(conn, path, prepared):
         if json.dumps(scalar, ensure_ascii=False, allow_nan=False,
                       sort_keys=True, separators=(',', ':')) != doc.scalars_json:
             raise ValueError('scalars must use canonical JSON')
-        size = sum(len(s.encode()) for s in (doc.path, kind, actor, doc.shape_error, doc.scalars_json))
+        size = 5 + sum(len(s.encode()) for s in (doc.path, kind, actor, doc.shape_error, doc.scalars_json))
         used += size + len(doc.signing_bytes or b'') + len(doc.signature.encode()) + 64
         if used > MAX_BUILD_BYTES:
             raise OverflowError('index byte budget exceeded')
@@ -279,9 +325,10 @@ def publish(conn, path, prepared):
                     or len(row[0].encode()) != doc.source_bytes
                     or hashlib.sha256(row[0].encode()).hexdigest() != doc.source_digest):
                 raise OverlayIndexUnavailable('source_document_changed')
-        for table in ('ready', 'proofs', 'candidates', 'docs'):
+        for table in ('ready', 'proofs', 'candidates', 'shapes', 'docs'):
             conn.execute(f'DELETE FROM overlay_index_{table} WHERE source=?', (expected.source_id,))
         conn.executemany('INSERT INTO overlay_index_docs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', docs)
+        conn.executemany('INSERT INTO overlay_index_shapes VALUES(?,?,?,?,?,?,?)', shapes)
         conn.executemany('INSERT INTO overlay_index_candidates VALUES(?,?,?,?,?,?)', candidates)
         _write_ready(conn, position)
         conn.commit()
@@ -291,20 +338,22 @@ def publish(conn, path, prepared):
     return position
 
 
-def capture(path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES):
+def capture(path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES, include_reactions=False):
     conn = source._open_reader(path)
     try:
         conn.execute('BEGIN')
         return _capture(conn, path, expected, targets, state_paths,
-                        max_rows=max_rows, max_bytes=max_bytes)
+                        max_rows=max_rows, max_bytes=max_bytes, include_reactions=include_reactions)
     finally:
         conn.close()
 
 
-def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES):
+def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES, include_reactions=False):
     if not conn.in_transaction:
         raise sqlite3.OperationalError('capture requires an active read transaction')
     expected = _wanted(expected, path)
+    if type(include_reactions) is not bool:
+        raise ValueError('invalid manifest selector')
     if type(targets) is not tuple or type(state_paths) is not tuple or len(targets) > MAX_TARGETS or len(state_paths) > MAX_DEPENDENCIES:
         raise ValueError('invalid index selectors')
     if type(max_rows) is not int or not 0 <= max_rows <= 4096 or type(max_bytes) is not int or not 0 <= max_bytes <= MAX_SELECT_BYTES:
@@ -324,6 +373,17 @@ def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, ma
     source_id = expected.source.source_id
     _ready(conn, path, expected)
     selected, paths, used = [], set(state_paths), selector_bytes
+    if include_reactions:
+        manifest = conn.execute(
+            'SELECT path,size FROM overlay_index_docs INDEXED BY overlay_index_manifest '
+            "WHERE source=? AND kind='reactions' ORDER BY path LIMIT ?",
+            (source_id, MAX_DEPENDENCIES + 1),
+        ).fetchall()
+        if len(manifest) > MAX_DEPENDENCIES:
+            raise OverflowError('reaction manifest exceeds dependency budget')
+        paths.update(name for name, _ in manifest)
+        if len(paths) > MAX_DEPENDENCIES:
+            raise OverflowError('complete input exceeds dependency budget')
     for target in targets:
         queries = [('reaction', None)] + [(kind, state) for kind in ('hidden', 'starred') for state in state_paths]
         for kind, state in queries:
@@ -386,14 +446,18 @@ def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, ma
                 raise ValueError('noncanonical scalars')
         except (TypeError, ValueError, RecursionError) as exc:
             raise OverlayIndexUnavailable('malformed_document_scalars') from exc
-        documents.append(DocumentSummary(name, row[0], row[1], row[2] == 1, row[3] == 1, row[4], row[5]))
+        flags = conn.execute('SELECT is_dict,sig_truthy,sig_string,signing_available,ids_compatible FROM overlay_index_shapes WHERE source=? AND path=?', (source_id, name)).fetchone()
+        if flags is None or any(type(v) is not int or v not in (0, 1) for v in flags):
+            raise OverlayIndexUnavailable('malformed_document_shape')
+        shape = DocumentShape(*(bool(v) for v in flags))
+        documents.append(DocumentSummary(name, row[0], row[1], row[2] == 1, row[3] == 1, row[4], row[5], shape))
     candidates = []
     for kind, target, name in selected:
         row = conn.execute('SELECT value FROM overlay_index_candidates WHERE source=? AND kind=? AND target=? AND path=?', (source_id, kind, target, name)).fetchone()
         if row is None or type(row[0]) is not str:
             raise OverlayIndexUnavailable('malformed_candidate')
         candidates.append(OverlayCandidate(name, kind, target, row[0]))
-    return IndexedOverlayInputs(expected, tuple(documents), tuple(candidates), tuple(absent))
+    return IndexedOverlayInputs(expected, tuple(documents), tuple(candidates), tuple(absent), include_reactions)
 
 
 def _key(value):

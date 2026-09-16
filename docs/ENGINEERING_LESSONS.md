@@ -65,3 +65,30 @@ mutation. Copy nested position/key fields once into owned validated values, then
 use only those copies. The retained-object mutation regression exercises the
 reader-open barrier rather than relying on FrozenInstanceError alone. Pure input
 positions still do not grant membership or continuing authority.
+
+## Page budgets must span all captured windows (R206, caught before activation)
+
+A first accumulator carried parent counts but not identities, so two windows
+replying to the same off-page parent could falsely exhaust a one-parent budget.
+It also trusted a captured-byte field even though the input DTO could be mutated;
+a zeroed counter could bypass the aggregate byte limit despite bounded windows.
+
+Safeguards: retain the request-wide normalized parent-ID union, including known
+absent dependencies, and validate owned byte accounting against recomputed unique
+message payload bytes before projection callbacks. Regression tests cover shared
+parents across real Store windows and forged counters with an unseal tripwire.
+No page endpoint was active; independent review found both before release.
+
+## Indexed subsets must preserve verification gates (R207, before activation)
+
+Selecting only reaction documents that mention the current page would omit
+Directory failures from unrelated actors. Collapsing source signature shape into
+one error flag also loses legacy short-circuit behavior: an unsigned document
+resolves its current key and is then ignored, while admitted malformed signing
+inputs fail. Validating a key earlier introduced failures the old reader ignored.
+
+Safeguards: capture a complete bounded metadata manifest, retain independent
+source-shape facts, and compare the verification layer against the existing owner
+with callback-order tests. Copy only the needed actor membership facts before
+callbacks; never retain mutable caller membership containers across resolution.
+No endpoint used the drafts when review found these gaps.

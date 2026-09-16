@@ -46,6 +46,8 @@ def _publish_source(store, documents, *, source=SOURCE, expected=None, cursor=1)
 def _indexed_document(path, actor, payload, signing=b"signed-input", bundle=None):
     signature = crypto.sign(bundle, signing) if bundle is not None else ""
     kind = "reactions" if "/reactions/" in path else "state"
+    raw = json.loads(payload)
+    raw_signature = raw.get("sig") if type(raw) is dict else None
     return overlay_index.IndexedDocument(
         path=path,
         kind=kind,
@@ -57,6 +59,10 @@ def _indexed_document(path, actor, payload, signing=b"signed-input", bundle=None
         empty=False,
         shape_error="",
         scalars_json="{}",
+        shape=overlay_index.DocumentShape(
+            type(raw) is dict, bool(raw_signature), type(raw_signature) is str,
+            signing is not None, True,
+        ),
     )
 
 

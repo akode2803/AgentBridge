@@ -96,3 +96,8 @@ undecryptable records, edits, honored off-page parent redactions and viewer cuts
 Current session/member/tenure/key/trust/owner checks, materialization readiness,
 derivative reads and browser range ownership must be integrated and measured
 before enabling lazy history. Phase2 tail ingestion remains separate.
+
+`include_reactions=True` includes the bounded complete reaction metadata manifest
+in the same input cut as messages, selected candidates and proofs. It adds no
+whole-source payload or signing-byte reads. `raw_window_captured` distinguishes a
+raw scan from exact-only validation: the latter cannot prove history exhaustion.

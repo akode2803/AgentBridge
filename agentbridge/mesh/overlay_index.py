@@ -11,7 +11,7 @@ import json
 from ..store.document_observation import DocumentObservation
 from ..store.overlay_index import (
     MAX_BUILD_BYTES, MAX_CANDIDATES, MAX_DOCUMENTS,
-    IndexedDocument, OverlayCandidate, OverlayIndexPosition, OverlayIndexUnavailable, PreparedOverlayIndex,
+    DocumentShape, IndexedDocument, OverlayCandidate, OverlayIndexPosition, OverlayIndexUnavailable, PreparedOverlayIndex,
 )
 from .events import reaction_signing_bytes, state_signing_bytes
 from .overlays import UserState, reaction_map
@@ -57,6 +57,9 @@ def prepare_overlay_index(observation: DocumentObservation, chat_id: str) -> Pre
             raise OverflowError('source byte budget exceeded')
         doc = json.loads(raw)
         # Current reaction_docs skips non-dicts; UserState.get returns {}.
+        is_dict = type(doc) is dict
+        raw_signature = doc.get('sig') if is_dict else None
+        ids_compatible = True
         shape_error = ''
         if type(doc) is not dict:
             shape_error, doc = 'document_shape', {}
@@ -94,6 +97,7 @@ def prepare_overlay_index(observation: DocumentObservation, chat_id: str) -> Pre
                         raise OverflowError('candidate budget exceeded')
                     entries.extend(OverlayCandidate(record.path, name, i, '') for i in sorted(ids))
             except (TypeError, ValueError):
+                ids_compatible = False
                 shape_error = shape_error or 'viewer_ids'
                 entries = []
         scalar_json = json.dumps(scalars, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
@@ -106,6 +110,8 @@ def prepare_overlay_index(observation: DocumentObservation, chat_id: str) -> Pre
         documents.append(IndexedDocument(
             record.path, kind, actor, hashlib.sha256(raw).hexdigest(), len(raw),
             signature, signing, not doc, shape_error, scalar_json,
+            DocumentShape(is_dict, bool(raw_signature), type(raw_signature) is str,
+                          signing is not None, ids_compatible),
         ))
         candidates.extend(entries)
     return PreparedOverlayIndex(observation.position, chat_id, tuple(documents), tuple(candidates))
