@@ -109,10 +109,8 @@ def initialize(store):
             conn.execute(sql)
 
 
-def register_in_transaction(conn, store, value):
-    """Register immutable coverage; caller owns coordinator -> Store ordering."""
-    value = _definition(value)
-    current = owner.capture_in_transaction(conn, store, value.source)
+def _registered_definition(conn, value):
+    """Validate existing raw dependency coverage, without registering it."""
     _schema(conn)
     size = conn.execute('SELECT typeof(definition),length(CAST(definition AS BLOB)) FROM local_source_definitions WHERE source=?', (value.source,)).fetchone()
     if size is not None and (size[0] != 'text' or size[1] > 65536):
@@ -121,12 +119,36 @@ def register_in_transaction(conn, store, value):
     if existing:
         if existing != (value.serialized,):
             raise owner.SourceChanged('definition_changed')
+        count = conn.execute(
+            'SELECT count(*) FROM (SELECT 1 FROM local_source_selectors WHERE source=? LIMIT ?)',
+            (value.source, MAX_SELECTORS + 1),
+        ).fetchone()[0]
+        if count > MAX_SELECTORS:
+            raise owner.SourceChanged('registered_selector_budget')
         bad = conn.execute("SELECT 1 FROM local_source_selectors WHERE source=? AND (typeof(kind)!='text' OR typeof(value)!='text' OR length(CAST(kind AS BLOB))>16 OR length(CAST(value AS BLOB))>4096) LIMIT 1", (value.source,)).fetchone()
         if bad:
             raise owner.SourceChanged('registered_selector_budget')
         registered = tuple(Selector(*row) for row in conn.execute('SELECT kind,value FROM local_source_selectors WHERE source=? ORDER BY kind,value LIMIT ?', (value.source, MAX_SELECTORS + 1)))
         if registered != value.selectors:
             raise owner.SourceChanged('registered_selectors_changed')
+        return True
+    return False
+
+
+def require_registered_in_transaction(conn, store, value):
+    """Foreground check only: missing coverage must be prepared off-path."""
+    value = _definition(value)
+    current = owner.capture_in_transaction(conn, store, value.source)
+    if not _registered_definition(conn, value):
+        raise owner.SourceChanged('source_not_registered')
+    return current
+
+
+def register_in_transaction(conn, store, value):
+    """Register immutable coverage; caller owns coordinator -> Store ordering."""
+    value = _definition(value)
+    current = owner.capture_in_transaction(conn, store, value.source)
+    if _registered_definition(conn, value):
         return current
     count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM local_source_definitions LIMIT ?)', (MAX_SOURCES,)).fetchone()[0]
     if count >= MAX_SOURCES:

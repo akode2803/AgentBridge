@@ -80,6 +80,8 @@ class SourcePublisher:
                 raise ValueError('document outside declared source scope')
         published = self.store.publish_document_batch(
             retired.raw, documents, cursor=retired.raw.cursor, full=True,
-            retain_tombstones=False, max_documents=max_documents, max_bytes=max_bytes)
+            retain_tombstones=False, skip_unchanged=True,
+            max_documents=max_documents, max_bytes=max_bytes)
         with self.coordinator.publication_gate(self.store, self.definition):
-            return owner.admit(self.store, retired, published, observed_ns=observed_ns)
+            return owner.admit(self.store, retired, published, observed_ns=observed_ns,
+                               allow_unchanged=published == retired.raw)
