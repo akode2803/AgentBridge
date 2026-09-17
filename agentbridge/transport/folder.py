@@ -44,6 +44,7 @@ class FolderTransport(Transport):
     def __init__(self, root: Path | str, *, max_upload_mb: int | None = None) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.cache_key = "folder:" + os.path.normcase(_unextend(str(self.root)))
         if max_upload_mb is not None:
             self.max_upload_bytes = max_upload_mb * 1024 * 1024
         # rel -> validated absolute Path. The mapping is DETERMINISTIC for a

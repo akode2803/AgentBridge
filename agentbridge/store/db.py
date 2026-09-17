@@ -421,8 +421,8 @@ class Store:
     def capture_page_inputs(self, index, **selection):
         return page_inputs.capture(self.path, index, **selection)
 
-    def publish_overlay_index(self, prepared):
-        return overlay_index.publish(self._conn(), self.path, prepared)
+    def publish_overlay_index(self, prepared, *, shared_source=False):
+        return overlay_index.publish(self._conn(), self.path, prepared, shared_source=shared_source)
 
     def capture_overlay_index(self, expected, targets, state_paths=(), *,
                               max_rows=2048, max_bytes=overlay_index.MAX_SELECT_BYTES, include_reactions=False):

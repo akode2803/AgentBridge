@@ -66,7 +66,7 @@ from .mirror_observation import (
     capture_mirror_selection_locked,
     _valid_path,
     validate_capture_budget,
-    validate_identity,
+    transport_identities,
     validated_position_fields,
     validated_selection_request,
 )
@@ -116,12 +116,11 @@ class CachingTransport(Transport):
         # Diagnostic identity is pinned before worker activity.  It identifies
         # only this process-local observation domain and grants no authority.
         try:
-            root_identity = getattr(inner, "root", None)
-            cache_identity = getattr(inner, "cache_key", None)
+            root_identity, cache_identity = transport_identities(inner)
         except Exception:  # an optional capture cannot break serving startup
             root_identity = cache_identity = None
-        self._mirror_root_identity = validate_identity(root_identity)
-        self._mirror_cache_identity = validate_identity(cache_identity)
+        self._mirror_root_identity = root_identity
+        self._mirror_cache_identity = cache_identity
         self._mirror_instance_nonce = uuid.uuid4().hex
         self._mirror_revision = 0
         self._mirror_provenance = "bootstrap_unverified"

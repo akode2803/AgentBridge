@@ -224,8 +224,15 @@ def _write_ready(conn, position):
                  (p.source_id, position.chat_id, p.generation, p.cursor, p.incarnation, position.build, SCHEMA))
 
 
-def publish(conn, path, prepared):
-    """Prepare outside SQLite; replace all rows and readiness in one owned CAS."""
+def publish(conn, path, prepared, *, shared_source=False):
+    """Prepare outside SQLite; replace all rows and readiness in one owned CAS.
+
+    A shared source still requires complete coverage of this chat's overlay
+    namespace. Other raw dependencies are excluded by an indexed path range,
+    not by trusting the preparer's selection or by using a different generation.
+    """
+    if type(shared_source) is not bool:
+        raise ValueError('shared_source must be a bool')
     if type(prepared) is not PreparedOverlayIndex:
         raise ValueError('expected prepared overlay index')
     expected = source._validate_expected(prepared.source, path)
@@ -298,10 +305,18 @@ def publish(conn, path, prepared):
         # A partial prepared batch cannot establish absent-state evidence. The
         # background publication checks coverage using metadata only; no such
         # source-wide scan belongs on the foreground capture path.
-        raw_paths = conn.execute(
-            'SELECT path FROM document_observation_records WHERE source_id=? AND deleted=0 LIMIT ?',
-            (expected.source_id, MAX_DOCUMENTS + 1),
-        ).fetchall()
+        if shared_source:
+            prefix = f'chats/{chat}/overlays/'
+            raw_paths = conn.execute(
+                'SELECT path FROM document_observation_records '
+                'WHERE source_id=? AND path>=? AND path<? AND deleted=0 LIMIT ?',
+                (expected.source_id, prefix, prefix[:-1] + '0', MAX_DOCUMENTS + 1),
+            ).fetchall()
+        else:
+            raw_paths = conn.execute(
+                'SELECT path FROM document_observation_records WHERE source_id=? AND deleted=0 LIMIT ?',
+                (expected.source_id, MAX_DOCUMENTS + 1),
+            ).fetchall()
         if len(raw_paths) > MAX_DOCUMENTS:
             raise OverflowError('source document budget exceeded')
         required = set()

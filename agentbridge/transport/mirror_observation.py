@@ -275,6 +275,22 @@ def validate_identity(value: Any) -> str | None:
     return value
 
 
+def transport_identities(transport):
+    """Capture built-in folder Path roots without coercing arbitrary objects.
+
+    Other drivers retain the exact-string identity contract. The same conversion
+    is used at cache construction and when checking its pinned inner owner.
+    """
+    from pathlib import Path
+    from .folder import FolderTransport
+
+    root = getattr(transport, 'root', None)
+    cache = getattr(transport, 'cache_key', None)
+    if type(transport) is FolderTransport and type(root) is type(Path()):
+        root = str(root)
+    return validate_identity(root), validate_identity(cache)
+
+
 def validated_position_fields(
     expected: MirrorExpectedPosition,
 ) -> tuple[str, str, str, int]:
@@ -454,6 +470,7 @@ __all__ = [
     "capture_mirror_selection_locked",
     "validate_capture_budget",
     "validate_identity",
+    "transport_identities",
     "validated_position_fields",
     "validated_selection_request",
 ]
