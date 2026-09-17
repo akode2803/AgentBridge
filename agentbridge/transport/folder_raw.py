@@ -10,8 +10,11 @@ class FolderReadUnavailable(RuntimeError):
 
 
 def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
+    if os.name == 'nt':
+        from .folder_raw_windows import collect as collect_windows
+        return collect_windows(root, exact, prefixes, max_bytes=max_bytes,
+                               max_paths=max_paths, include=include)
     # Never substitute pathname check-then-open on platforms lacking this owner.
-    # A Windows handle-relative backend is required before paging activation there.
     if (os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd
             or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY')):
         raise FolderReadUnavailable('handle_relative_reads_unsupported')

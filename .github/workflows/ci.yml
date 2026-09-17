@@ -29,5 +29,9 @@ jobs:
           node-version: "22"
       - name: Frontend module check
         run: uv run python devtools/check_frontend.py
+      # Fail native ABI/filesystem regressions before the long Windows suite.
+      - name: Windows local-input boundary
+        if: runner.os == 'Windows'
+        run: uv run pytest -q tests/test_folder_raw_windows.py tests/test_raw_documents.py
       - name: Tests
         run: uv run pytest -q

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import os
 
 import pytest
 
@@ -90,7 +91,13 @@ def test_root_bound_exact_prefix_and_legitimate_absence(tmp_path):
         raw_documents.collect_documents(other, definition)
 
 
-@pytest.mark.parametrize("failure", ["malformed", "io"])
+@pytest.mark.parametrize("failure", [
+    "malformed",
+    pytest.param(
+        "io",
+        marks=pytest.mark.skipif(os.name == "nt", reason="POSIX os.open injection"),
+    ),
+])
 def test_malformed_and_io_are_unavailable_not_absence(tmp_path, monkeypatch,
                                                        failure):
     folder = FolderTransport(tmp_path / "provider")
@@ -114,6 +121,7 @@ def test_malformed_and_io_are_unavailable_not_absence(tmp_path, monkeypatch,
         raw_documents.collect_documents(folder, definition)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX os.open injection")
 def test_discovered_prefix_file_deleted_before_read_is_selection_changed(
         tmp_path, monkeypatch):
     folder = _online_folder(tmp_path, {
@@ -316,6 +324,7 @@ def test_folder_and_provider_observed_cache_publish_equivalent_admitted_content(
         cache.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX capability gate")
 def test_handle_relative_capability_absence_fails_closed(tmp_path, monkeypatch):
     folder = _online_folder(tmp_path, {
         "accounts/alice.json": {"name": "Alice"},
@@ -328,6 +337,7 @@ def test_handle_relative_capability_absence_fails_closed(tmp_path, monkeypatch):
         raw_documents.collect_documents(folder, definition)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX os.open injection")
 def test_file_swapped_to_symlink_between_enumeration_and_open_is_rejected(
         tmp_path, monkeypatch):
     folder = _online_folder(tmp_path, {
