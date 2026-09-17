@@ -108,7 +108,9 @@ def test_shipped_presets_load_and_build():
     assert deepseek.context_mode == "inline"
     assert deepseek.context_tail == 8
     assert deepseek.context_recall is False
+    assert deepseek.context_include_self is False
     assert deepseek.strip_ansi is True
+    assert "--nowordwrap" in deepseek.args
     assert "{context}" in deepseek.prompts["task_message"]
 
 
@@ -122,6 +124,9 @@ def test_preset_context_contract_validation():
         Preset.from_dict({"id": "x", "command": "x", "prompts": []})
     with pytest.raises(ValidationError, match="strip_ansi"):
         Preset.from_dict({"id": "x", "command": "x", "strip_ansi": "yes"})
+    with pytest.raises(ValidationError, match="context_include_self"):
+        Preset.from_dict({"id": "x", "command": "x",
+                          "context_include_self": "no"})
 
 
 def test_minimal_argv_keeps_safety_and_blocklist():

@@ -120,7 +120,10 @@ def test_shipped_deepseek_formats_required_model_in_base_argv(tmp_path):
         prompt="Return proof", workdir="/tmp/child", reply_file="",
         model="deepseek-coder:latest",
     )
-    assert argv == ["ollama", "run", "deepseek-coder:latest", "Return proof"]
+    assert argv == [
+        "ollama", "run", "--nowordwrap", "deepseek-coder:latest",
+        "Return proof",
+    ]
 
 
 @pytest.mark.parametrize(

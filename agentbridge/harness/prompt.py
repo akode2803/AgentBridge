@@ -140,7 +140,8 @@ class PromptPack:
     def context_text(self, delivery: Delivery,
                      staged: dict[str, str] | None = None, *,
                      transcript_tail: int = TRANSCRIPT_TAIL,
-                     include_recalled: bool = True) -> str:
+                     include_recalled: bool = True,
+                     include_self: bool = True) -> str:
         members = "; ".join(
             f"@{r['name']}{' (you)' if r.get('you') else ''}"
             f" — {r.get('desc', '')}" for r in delivery.roster)
@@ -263,7 +264,10 @@ class PromptPack:
             for m in delivery.recalled:
                 lines.append(render_message(m, delivery.agent))
             lines.append(self.text("context_recent"))
-        for m in delivery.transcript[-transcript_tail:]:
+        transcript = delivery.transcript
+        if not include_self:
+            transcript = [m for m in transcript if m.from_ != delivery.agent]
+        for m in transcript[-transcript_tail:]:
             lines.append(render_message(m, delivery.agent))
         if staged:
             notes = "\n".join(f"- {name} -> read it at {rel}"

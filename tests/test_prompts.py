@@ -221,6 +221,18 @@ def test_context_text_supports_bounded_tail_without_recall(tmp_path):
     assert "retrieved-old" not in text
 
 
+def test_context_text_can_exclude_agent_previous_replies(tmp_path):
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    d = delivery(transcript=[
+        msg(id="human-1", from_="aryan", body="hello"),
+        msg(id="self-1", from_="helper", body="stale refusal"),
+        msg(id="human-2", from_="aryan", body="try again"),
+    ])
+    text = pack.context_text(d, transcript_tail=8, include_self=False)
+    assert "hello" in text and "try again" in text
+    assert "stale refusal" not in text
+
+
 def test_render_message_variants():
     deleted = msg(deleted=True)
     assert "a message was deleted" in render_message(deleted, "helper")

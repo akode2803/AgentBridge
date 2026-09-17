@@ -624,7 +624,8 @@ class CliResponder:
         context_file = workdir / "context.md"
         context_text = pack.context_text(
             delivery, staged, transcript_tail=inv.preset.context_tail,
-            include_recalled=inv.preset.context_recall)
+            include_recalled=inv.preset.context_recall,
+            include_self=inv.preset.context_include_self)
         context_file.write_text(context_text, encoding="utf-8", newline="\n")
         notes = workdir / "MEMORY.md"        # the workspace note tier (R20)
         if not notes.exists():
