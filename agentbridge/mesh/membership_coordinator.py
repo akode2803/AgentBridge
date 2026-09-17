@@ -314,10 +314,10 @@ class _Round:
                 authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy))
 
     def final(self, snapshot, proposal, *, page=None):
-        if self.source_reader is not None and page is not None:
-            raise _Stop('unavailable', 'local_page_fence_pending')
         prepared_page = None if page is None else page_fence.prepare(
-            self.mesh, page, self.suffix.position, self.receipt.mirror)
+            self.mesh, page, self.suffix.position,
+            self.receipt.mirror if self.source_reader is None else self.receipt,
+            source_reader=self.source_reader, charge_source=self.ledger.charge)
         if prepared_page is not None:
             self.ledger.charge(prepared_page.comparison_bytes * (2 if proposal is not None else 1))
         view = self.mesh.key_pins.capture_effective_view()
@@ -356,7 +356,7 @@ class _Round:
                 self.ledger.charge(len(serialized.encode()))
         elif proposal.subject not in self.heads:
             raise _Stop('unavailable', 'invalid_proposal')
-        local = nullcontext() if prepared_page is None else page_fence.local_scope(self.mesh, prepared_page)
+        local = nullcontext() if prepared_page is None else page_fence.local_scope(self.mesh, prepared_page, source_reader=self.source_reader)
         with local:
             with self.mesh.key_pins.locked_matching_view(view) as pins_match:
                 if not pins_match:
@@ -374,7 +374,7 @@ class _Round:
                             raise _Stop('unavailable', 'lifecycle_inputs_changed')
                     if not terminal_observation.matches(conn, self.mesh.store.path, self.terminal.position):
                         raise _Stop('unavailable', 'terminal_inputs_changed')
-                    if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page):
+                    if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page, source_reader=self.source_reader):
                         raise _Stop('unavailable', 'page_inputs_changed')
                     if (self.mesh.messaging.user, self.mesh.messaging.machine) != (self.viewer, self.machine):
                         raise _Stop('unavailable', 'identity_changed')
@@ -384,7 +384,7 @@ class _Round:
                         with self._policy_scope(policy) as matched:
                             if not matched:
                                 raise _Stop('unavailable', 'lookup_policy_changed')
-                            if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
+                            if self.source_reader is None and prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
                                 raise _Stop('unavailable', 'page_mirror_changed')
                             wanted = self.heads[proposal.subject].entries[0]
                             if wanted.payload_json != proposal.expected_retained_json:
@@ -420,7 +420,7 @@ class _Round:
                                         and current.payload_json == proposal.proposed_json)
                                 if not matched_head:
                                     raise _Stop('unavailable', 'lifecycle_inputs_changed')
-                            if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page):
+                            if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page, source_reader=self.source_reader):
                                 raise _Stop('unavailable', 'page_inputs_changed')
                             self.clock(first)
                             if self.source_reader is None:
@@ -429,7 +429,7 @@ class _Round:
                     with self._policy_scope(policy) as matched:
                         if not matched:
                             raise _Stop('unavailable', 'lookup_policy_changed')
-                        if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
+                        if self.source_reader is None and prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
                             raise _Stop('unavailable', 'page_mirror_changed')
                         last = self.clock(first)
                         if prepared_page is not None:
