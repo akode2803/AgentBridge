@@ -85,6 +85,10 @@ class Preset:
     context_tail: int = 30
     context_recall: bool = True
     context_include_self: bool = True
+    # Some headless providers cannot answer file-access prompts. Keep this a
+    # preset datum: false means the already-authorized transcript stays inline
+    # and attachments/context.md are not materialized for that provider run.
+    context_files: bool = True
     prompts: dict[str, object] = field(default_factory=dict)
     strip_ansi: bool = False
     default_model: str = ""
@@ -155,6 +159,11 @@ class Preset:
             raise ValidationError("preset context_recall must be a boolean")
         if not isinstance(p.context_include_self, bool):
             raise ValidationError("preset context_include_self must be a boolean")
+        if not isinstance(p.context_files, bool):
+            raise ValidationError("preset context_files must be a boolean")
+        if not p.context_files and p.context_mode != "inline":
+            raise ValidationError(
+                "preset context_files may be false only for inline context")
         if not isinstance(p.prompts, dict):
             raise ValidationError("preset prompts must be an object")
         if not isinstance(p.strip_ansi, bool):

@@ -620,13 +620,15 @@ class CliResponder:
         self._run_local.outbox = outbox
 
         self._retrieve(delivery, cutoff_ns)  # long chats stop forgetting (R21)
-        staged = self._stage_inbox(delivery, workdir)
+        staged = (self._stage_inbox(delivery, workdir)
+                  if inv.preset.context_files else {})
         context_file = workdir / "context.md"
         context_text = pack.context_text(
             delivery, staged, transcript_tail=inv.preset.context_tail,
             include_recalled=inv.preset.context_recall,
             include_self=inv.preset.context_include_self)
-        context_file.write_text(context_text, encoding="utf-8", newline="\n")
+        if inv.preset.context_files:
+            context_file.write_text(context_text, encoding="utf-8", newline="\n")
         notes = workdir / "MEMORY.md"        # the workspace note tier (R20)
         if not notes.exists():
             notes.write_text("# Notes for this chat\n\nYours to keep — "

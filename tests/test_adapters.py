@@ -96,7 +96,8 @@ def settings(**harness) -> HarnessSettings:
 
 def test_shipped_presets_load_and_build():
     reg = ModelRegistry.load()
-    for fam in ("claude", "cortex", "codex", "grok", "ollama", "deepseek"):
+    for fam in ("claude", "cortex", "codex", "gemini", "grok", "ollama",
+                "deepseek"):
         assert fam in reg.presets
     argv = reg.presets["claude"].build_argv(
         prompt="hello", workdir="w", reply_file="r",
@@ -109,9 +110,21 @@ def test_shipped_presets_load_and_build():
     assert deepseek.context_tail == 8
     assert deepseek.context_recall is False
     assert deepseek.context_include_self is False
+    assert deepseek.context_files is True
     assert deepseek.strip_ansi is True
     assert "--nowordwrap" in deepseek.args
     assert "{context}" in deepseek.prompts["task_message"]
+    gemini = reg.presets["gemini"]
+    assert gemini.context_mode == "inline"
+    assert gemini.context_files is False
+    assert "{context}" in gemini.prompts["task_message"]
+    argv = gemini.build_argv(
+        prompt="hello", workdir="w", reply_file="r",
+        model="gemini-3.8-flash-medium", minimal=True)
+    assert argv[:3] == ["agy", "--print", "hello"]
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--sandbox" in argv
+    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-medium"
 
 
 def test_preset_context_contract_validation():
@@ -127,6 +140,12 @@ def test_preset_context_contract_validation():
     with pytest.raises(ValidationError, match="context_include_self"):
         Preset.from_dict({"id": "x", "command": "x",
                           "context_include_self": "no"})
+    with pytest.raises(ValidationError, match="context_files"):
+        Preset.from_dict({"id": "x", "command": "x",
+                          "context_files": "no"})
+    with pytest.raises(ValidationError, match="inline context"):
+        Preset.from_dict({"id": "x", "command": "x",
+                          "context_files": False})
 
 
 def test_minimal_argv_keeps_safety_and_blocklist():
@@ -755,6 +774,40 @@ def test_flag_off_does_not_build_unused_minimal_fallback(arig):
         replies = [m for m in arig.owner.messages_for(snap.id)
                    if m.from_ == "helper"]
         assert len(replies) == 1
+    finally:
+        runner.close()
+
+
+def test_context_files_false_keeps_inline_adapter_out_of_workspace(
+        arig, tmp_path):
+    preset = stub_preset(
+        tmp_path, id="inline-stub", context_mode="inline",
+        context_files=False,
+        prompts={
+            "task_message": "Answer from this conversation:\n\n{context}",
+            "capabilities": "Return only the chat message.",
+        },
+    )
+    (arig.home / "adapters").mkdir(parents=True, exist_ok=True)
+    (arig.home / "adapters" / "inline-stub.json").write_text(
+        json.dumps(preset), encoding="utf-8")
+    arig.owner.accounts.set_agent_harness("helper", {"adapter": "inline-stub"})
+    snap = arig.owner.create_chat("Inline", members=["helper"])
+    arig.owner.post(snap.id, "@helper respond without opening a file")
+    arig.owner.outbox.flush_once()
+    runner = AgentRunner(arig.root, "helper", home=arig.home,
+                         machine="devbox", poll_s=0.2)
+    runner.attach_cli_responder()
+    try:
+        runner.mesh.sync.sync_once([snap.id])
+        runner.tick()
+        runner.drain(timeout=60)
+        runner.mesh.outbox.flush_once()
+        arig.owner.sync.sync_once([snap.id])
+        assert any(m.from_ == "helper" for m in arig.owner.messages_for(snap.id))
+        workspace = arig.home / "harness" / "helper" / "workspaces" / snap.id
+        assert not (workspace / "context.md").exists()
+        assert not (workspace / "inbox").exists()
     finally:
         runner.close()
 
