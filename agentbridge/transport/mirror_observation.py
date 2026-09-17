@@ -281,13 +281,19 @@ def transport_identities(transport):
     Other drivers retain the exact-string identity contract. The same conversion
     is used at cache construction and when checking its pinned inner owner.
     """
+    import os
     from pathlib import Path
-    from .folder import FolderTransport
+    from .folder import FolderTransport, _unextend
 
     root = getattr(transport, 'root', None)
     cache = getattr(transport, 'cache_key', None)
     if type(transport) is FolderTransport and type(root) is type(Path()):
         root = str(root)
+        if cache is None:
+            # Diagnostic mirror identity only. Exposing cache_key on the folder
+            # driver would change Mesh's persisted pin/lock namespace, whose
+            # historical identity is the plain root string.
+            cache = 'folder:' + os.path.normcase(_unextend(root))
     return validate_identity(root), validate_identity(cache)
 
 
