@@ -180,6 +180,31 @@ class GuiApp:
                 and (mesh is None or self._session_read_ready)
             )
 
+    def finalize_page_read(self, token: SessionReadToken, prepared):
+        """Inactive page handout seam; retain GUI gates through mesh validation.
+
+        Computation has already finished outside these locks. Order is screen
+        lock -> session -> operation -> epoch/identity -> pins -> SQL -> mirror.
+        No arbitrary caller callback runs inside the final Store transaction.
+        """
+        from ..mesh.page_operation import PageWorkResult, _PreparedPage
+
+        if type(prepared) is not _PreparedPage:
+            raise ValueError("invalid prepared page")
+        with self.lock._mx:
+            if self.lock._expire_if_idle_locked():
+                return PageWorkResult('locked', 'app_locked')
+            with self._lock:
+                if (not self.validate_session_read(token) or token.mesh is None
+                        or token.mesh is not prepared._operation.mesh):
+                    return PageWorkResult('unavailable', 'session_changed')
+                result = prepared.finalize()
+                # A deadline may expire during bounded final verification. Its
+                # postcheck can only withhold a response; it never revives one.
+                if self.lock._expire_if_idle_locked():
+                    return PageWorkResult('locked', 'app_locked')
+                return result
+
     def _advance_session_generation(self) -> None:
         self._session_read_ready = False
         if type(self._session_generation) is not int \

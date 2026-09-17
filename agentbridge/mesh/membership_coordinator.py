@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from ..core.models import Account, ChatSnapshot, UserKind
 from ..store import document_observation, lifecycle_inputs, membership_suffix, terminal_observation
 from ..store.membership_input_position import MembershipInputUnavailable
 from ..transport import authority_observation
-from . import authority_source, events
+from . import authority_source, events, page_fence
 from .lifecycle import LifecycleUnavailable
 from .pin_storage import PinStoreUnavailable
 from .lifecycle_evaluation import (
@@ -56,6 +57,7 @@ class CoordinatorResult:
     candidate: MembershipCandidate | None = None
     work_path: str | None = None
     reason: str | None = None
+    page: page_fence.PageSelection | None = None
 
 
 class _Stop(RuntimeError):
@@ -141,9 +143,9 @@ class _Round:
         return value
 
     def raw(self, name):
-        self.ledger.step()
         if name in self.accounts:
             return self.accounts[name]
+        self.ledger.step()
         if len(self.accounts) >= self.ledger.limits.max_accounts:
             raise _Stop('unavailable', 'account_budget_exhausted')
         value = self.capture((name,)).documents.records[1]
@@ -255,7 +257,11 @@ class _Round:
             raise _Stop('unavailable', 'clock_expired')
         return value
 
-    def final(self, snapshot, proposal):
+    def final(self, snapshot, proposal, *, page=None):
+        prepared_page = None if page is None else page_fence.prepare(
+            self.mesh, page, self.suffix.position, self.receipt.mirror)
+        if prepared_page is not None:
+            self.ledger.charge(prepared_page.comparison_bytes * (2 if proposal is not None else 1))
         view = self.mesh.key_pins.capture_effective_view()
         view_size = len(view.effective_json.encode()) + len(view.durable_json.encode())
         self.ledger.charge(view_size)
@@ -285,87 +291,101 @@ class _Round:
                            for batch in self.batches)
         serialized = None
         if proposal is None:
-            serialized = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
-            self.ledger.charge(len(serialized.encode()))
+            if prepared_page is None:
+                serialized = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
+                self.ledger.charge(len(serialized.encode()))
         elif proposal.subject not in self.heads:
             raise _Stop('unavailable', 'invalid_proposal')
-        with self.mesh.key_pins.locked_matching_view(view) as pins_match:
-            if not pins_match:
-                raise _Stop('unavailable', 'pin_inputs_changed')
-            conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
-            try:
-                conn.execute('BEGIN IMMEDIATE')
-                first = self.clock(self.now)
-                for batch in self.batches:
-                    if not authority_source.matches_inputs_in_transaction(conn, self.mesh.store, batch, max_bytes=_raw_size(batch)):
-                        raise _Stop('unavailable', 'authority_inputs_changed')
-                if not membership_suffix.matches_position(conn, self.mesh.store.path, self.suffix.position):
-                    raise _Stop('unavailable', 'membership_inputs_changed')
-                for name in self.subjects:
-                    if (not lifecycle_inputs.matches_subject(conn, self.mesh.store.path, self.subjects[name])
-                            or not lifecycle_inputs.matches_heads(conn, self.mesh.store.path, self.heads[name])):
-                        raise _Stop('unavailable', 'lifecycle_inputs_changed')
-                if not terminal_observation.matches(conn, self.mesh.store.path, self.terminal.position):
-                    raise _Stop('unavailable', 'terminal_inputs_changed')
-                if (self.mesh.messaging.user, self.mesh.messaging.machine) != (self.viewer, self.machine):
-                    raise _Stop('unavailable', 'identity_changed')
-                if proposal is not None:
-                    # No JSON, crypto, provider or caller callbacks below. All
-                    # mirror writers are excluded until the SQL commit finishes.
+        local = nullcontext() if prepared_page is None else page_fence.local_scope(self.mesh, prepared_page)
+        with local:
+            with self.mesh.key_pins.locked_matching_view(view) as pins_match:
+                if not pins_match:
+                    raise _Stop('unavailable', 'pin_inputs_changed')
+                conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                    first = self.clock(self.now)
+                    for batch in self.batches:
+                        if not authority_source.matches_inputs_in_transaction(conn, self.mesh.store, batch, max_bytes=_raw_size(batch)):
+                            raise _Stop('unavailable', 'authority_inputs_changed')
+                    if not membership_suffix.matches_position(conn, self.mesh.store.path, self.suffix.position):
+                        raise _Stop('unavailable', 'membership_inputs_changed')
+                    for name in self.subjects:
+                        if (not lifecycle_inputs.matches_subject(conn, self.mesh.store.path, self.subjects[name])
+                                or not lifecycle_inputs.matches_heads(conn, self.mesh.store.path, self.heads[name])):
+                            raise _Stop('unavailable', 'lifecycle_inputs_changed')
+                    if not terminal_observation.matches(conn, self.mesh.store.path, self.terminal.position):
+                        raise _Stop('unavailable', 'terminal_inputs_changed')
+                    if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page):
+                        raise _Stop('unavailable', 'page_inputs_changed')
+                    if (self.mesh.messaging.user, self.mesh.messaging.machine) != (self.viewer, self.machine):
+                        raise _Stop('unavailable', 'identity_changed')
+                    if proposal is not None:
+                        # No JSON, crypto, provider or caller callbacks below. All
+                        # mirror writers are excluded until the SQL commit finishes.
+                        with authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy) as matched:
+                            if not matched:
+                                raise _Stop('unavailable', 'lookup_policy_changed')
+                            if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
+                                raise _Stop('unavailable', 'page_mirror_changed')
+                            wanted = self.heads[proposal.subject].entries[0]
+                            if wanted.payload_json != proposal.expected_retained_json:
+                                raise _Stop('unavailable', 'proposal_head_mismatch')
+                            if not lifecycle_inputs.publish_head_in_transaction(conn, self.mesh.store.path,
+                                    wanted, proposal.proposed_json, first):
+                                raise _Stop('unavailable', 'retained_head_changed')
+                            for wanted_rows, paths, size in raw_checks:
+                                current_rows = document_observation._capture_selected(conn,
+                                    self.mesh.store.path, wanted_rows.position, paths,
+                                    max_documents=129, max_bytes=size)
+                                if current_rows != wanted_rows:
+                                    raise _Stop('unavailable', 'authority_inputs_changed')
+                            if not membership_suffix.matches_position(conn, self.mesh.store.path, self.suffix.position):
+                                raise _Stop('unavailable', 'membership_inputs_changed')
+                            if not terminal_observation.matches(conn, self.mesh.store.path, self.terminal.position):
+                                raise _Stop('unavailable', 'terminal_inputs_changed')
+                            for name in self.subjects:
+                                if not lifecycle_inputs.matches_subject(conn, self.mesh.store.path, self.subjects[name]):
+                                    raise _Stop('unavailable', 'lifecycle_inputs_changed')
+                                if name != proposal.subject:
+                                    matched_head = lifecycle_inputs.matches_heads(conn, self.mesh.store.path, self.heads[name])
+                                else:
+                                    head_size = (self.heads[name].serialized_bytes
+                                        - (len(wanted.payload_json.encode()) if wanted.payload_json is not None else 0)
+                                        + len(proposal.proposed_json.encode()))
+                                    current = lifecycle_inputs.capture_heads(conn, self.mesh.store.path, (name,),
+                                        max_bytes=head_size).entries[0]
+                                    matched_head = (current.database_path == wanted.database_path
+                                        and current.incarnation == wanted.incarnation
+                                        and current.subject == wanted.subject
+                                        and current.generation == wanted.generation + 1
+                                        and current.payload_json == proposal.proposed_json)
+                                if not matched_head:
+                                    raise _Stop('unavailable', 'lifecycle_inputs_changed')
+                            if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page):
+                                raise _Stop('unavailable', 'page_inputs_changed')
+                            self.clock(first)
+                            conn.commit()
+                        return CoordinatorResult('restart', reason='retained_head_progress')
                     with authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy) as matched:
                         if not matched:
                             raise _Stop('unavailable', 'lookup_policy_changed')
-                        wanted = self.heads[proposal.subject].entries[0]
-                        if wanted.payload_json != proposal.expected_retained_json:
-                            raise _Stop('unavailable', 'proposal_head_mismatch')
-                        if not lifecycle_inputs.publish_head_in_transaction(conn, self.mesh.store.path,
-                                wanted, proposal.proposed_json, first):
-                            raise _Stop('unavailable', 'retained_head_changed')
-                        for wanted_rows, paths, size in raw_checks:
-                            current_rows = document_observation._capture_selected(conn,
-                                self.mesh.store.path, wanted_rows.position, paths,
-                                max_documents=129, max_bytes=size)
-                            if current_rows != wanted_rows:
-                                raise _Stop('unavailable', 'authority_inputs_changed')
-                        if not membership_suffix.matches_position(conn, self.mesh.store.path, self.suffix.position):
-                            raise _Stop('unavailable', 'membership_inputs_changed')
-                        if not terminal_observation.matches(conn, self.mesh.store.path, self.terminal.position):
-                            raise _Stop('unavailable', 'terminal_inputs_changed')
-                        for name in self.subjects:
-                            if not lifecycle_inputs.matches_subject(conn, self.mesh.store.path, self.subjects[name]):
-                                raise _Stop('unavailable', 'lifecycle_inputs_changed')
-                            if name != proposal.subject:
-                                matched_head = lifecycle_inputs.matches_heads(conn, self.mesh.store.path, self.heads[name])
-                            else:
-                                head_size = (self.heads[name].serialized_bytes
-                                    - (len(wanted.payload_json.encode()) if wanted.payload_json is not None else 0)
-                                    + len(proposal.proposed_json.encode()))
-                                current = lifecycle_inputs.capture_heads(conn, self.mesh.store.path, (name,),
-                                    max_bytes=head_size).entries[0]
-                                matched_head = (current.database_path == wanted.database_path
-                                    and current.incarnation == wanted.incarnation
-                                    and current.subject == wanted.subject
-                                    and current.generation == wanted.generation + 1
-                                    and current.payload_json == proposal.proposed_json)
-                            if not matched_head:
-                                raise _Stop('unavailable', 'lifecycle_inputs_changed')
-                        self.clock(first)
-                        conn.commit()
-                    return CoordinatorResult('restart', reason='retained_head_progress')
-                if not authority_observation.matches_lookup_policy(self.mesh.tx, policy):
-                    raise _Stop('unavailable', 'lookup_policy_changed')
-                last = self.clock(first)
-                candidate = MembershipCandidate(self.chat, self.viewer, self.machine, serialized,
-                    self.receipt, tuple(self.batches), policy, self.suffix, self.terminal,
-                    tuple(self.subjects.values()), tuple(self.heads.values()), view,
-                    self.now, last, self.deadline)
-                return CoordinatorResult('candidate', candidate=candidate)
-            finally:
-                try:
-                    if conn.in_transaction:
-                        conn.rollback()
+                        if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
+                            raise _Stop('unavailable', 'page_mirror_changed')
+                        last = self.clock(first)
+                        if prepared_page is not None:
+                            return CoordinatorResult('page', page=prepared_page.fence.selection)
+                        candidate = MembershipCandidate(self.chat, self.viewer, self.machine, serialized,
+                            self.receipt, tuple(self.batches), policy, self.suffix, self.terminal,
+                            tuple(self.subjects.values()), tuple(self.heads.values()), view,
+                            self.now, last, self.deadline)
+                        return CoordinatorResult('candidate', candidate=candidate)
                 finally:
-                    conn.close()
+                    try:
+                        if conn.in_transaction:
+                            conn.rollback()
+                    finally:
+                        conn.close()
 
 
 def run_membership_round(mesh, receipt, *, limits=CoordinatorLimits()):

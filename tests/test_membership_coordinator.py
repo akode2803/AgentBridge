@@ -333,18 +333,20 @@ def test_final_dependency_races_discard_candidate(world, monkeypatch, seam, reas
 
         monkeypatch.setattr(terminal_observation, "matches", change_terminal)
     elif seam == "policy":
-        original = authority_observation.matches_lookup_policy
+        original = authority_observation._locked_matching_lookup_policy
         calls = 0
 
+        @contextmanager
         def change_at_final(*args, **kwargs):
             nonlocal calls
             calls += 1
             if calls > 1:
                 with mirror._lock:
                     mirror._docs.pop(P.meta(chat), None)
-            return original(*args, **kwargs)
+            with original(*args, **kwargs) as matched:
+                yield matched
 
-        monkeypatch.setattr(authority_observation, "matches_lookup_policy", change_at_final)
+        monkeypatch.setattr(authority_observation, "_locked_matching_lookup_policy", change_at_final)
     else:
         @contextmanager
         def changed(_view):

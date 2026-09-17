@@ -186,6 +186,19 @@ protection failure must not cause an infinite restart loop. Both issues were
 caught in review before activation; successful decryption alone was insufficient
 evidence of behavioral parity.
 
+## R217: compose resource and freshness contracts at the caller
+
+A bounded lower-level selector did not automatically make its draft caller obey
+the requested raw budget: it captured a full window even when only one raw row
+was allowed. Capture now uses the remaining scan allowance; exact parents retain
+an independent cap. Repeated proof/key work remains charged to one operation.
+
+A cursor alone also cannot preserve paging after an older delayed message or edit
+arrives. Continuations now require the original local page position and reject
+changed generations. The final page path returns only its canonical selection,
+not an authority candidate containing the captured account inputs. These draft
+composition gaps were corrected before endpoint activation.
+
 ## R216 Windows fixture preconditions
 
 Mocking DPAPI after KeyStore fixture setup does not create a legacy plaintext
