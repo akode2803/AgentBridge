@@ -52,6 +52,10 @@ def test_directory_records_parse_multiple_unicode_names_and_dot_entries():
     _record("bad/name"),
     _record("a", next_offset=_HEADER.size + 2),
     _record("a", next_offset=72),
+], ids=[
+    "none", "bytearray", "empty", "short", "oversized", "empty-name",
+    "odd-name-size", "invalid-utf16", "unsafe-name", "unaligned-next",
+    "truncated-next",
 ])
 def test_directory_records_reject_malformed_or_unsafe_records(payload):
     with pytest.raises(FolderReadUnavailable):
