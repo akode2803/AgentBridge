@@ -274,6 +274,14 @@ def _locked_matching_lookup_policy(transport, expected):
                                     copied.meta[0], copied.mirror) == copied
 
 
+def _eligible_ingress_path(path):
+    # Keys share raw ownership protection, never the authority-source allowlist.
+    return type(path) is str and (
+        path.startswith(('users/', 'lifecycle/'))
+        or (path.startswith('chats/') and (path.endswith('/meta.json') or '/keys/' in path))
+    )
+
+
 def detach_ingress_value(path, value):
     """Give eligible JSON a private graph; leave legacy unsupported values intact.
 
@@ -281,9 +289,7 @@ def detach_ingress_value(path, value):
     return an aliased *exact* dict; this second, hook-free bounded copy breaks that
     alias. Failure marks only authority eligibility, not canonical write success.
     """
-    eligible = type(path) is str and (path.startswith(('users/', 'lifecycle/'))
-                                     or (path.startswith('chats/') and path.endswith('/meta.json')))
-    if not eligible:
+    if not _eligible_ingress_path(path):
         return value, True
     try:
         return _JSONBudget(MAX_BYTES).copy(value), True
@@ -295,8 +301,7 @@ def detach_ingress_value(path, value):
 def detach_ingress_documents(docs):
     unsafe = set()
     for path, value in docs.items():
-        if type(path) is not str or not (path.startswith(('users/', 'lifecycle/'))
-                                        or (path.startswith('chats/') and path.endswith('/meta.json'))):
+        if not _eligible_ingress_path(path):
             continue
         docs[path], safe = detach_ingress_value(path, value)
         if not safe:
