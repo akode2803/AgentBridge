@@ -6,8 +6,6 @@ and the current raw position. Any interrupted transition remains unavailable.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -48,29 +46,6 @@ class WriteIntent:
     token: str
 
 
-def source_id(root_identity, *, exact_paths=(), prefixes=(), build='phase1-v1'):
-    """Bind immutable source coverage/build to its namespace, not permission.
-
-    All publishers/readers must use this identifier. Expanding a demanded scope
-    creates a different namespace; an earlier ready selection cannot silently
-    stand for the expanded one. Root identity must come from the transport owner.
-    """
-    if (type(root_identity) is not str or not root_identity or len(root_identity) > 4096
-            or type(build) is not str or not build or len(build) > 128):
-        raise ValueError('invalid source definition')
-    selections = []
-    for values in (exact_paths, prefixes):
-        if type(values) is not tuple or len(values) > 256:
-            raise ValueError('invalid source selectors')
-        copied = tuple(docs._validate_document_path(value) for value in values)
-        selections.append(sorted(set(copied)))
-    definition = json.dumps([root_identity, build, *selections],
-                            ensure_ascii=False, separators=(',', ':')).encode()
-    if len(definition) > 64 * 1024:
-        raise ValueError('source definition too large')
-    return 'local-inputs-v1:' + hashlib.sha256(definition).hexdigest()
-
-
 def _expected(store, value):
     if type(value) is not SourcePosition:
         raise ValueError('expected local source position')
@@ -86,6 +61,8 @@ def _expected(store, value):
 
 
 def _schema(conn):
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?,?) LIMIT 1", ('local_source_schema', 'local_sources', 'local_source_writes')).fetchone():
+        raise SourceChanged('unexpected_source_trigger')
     for name, statement in (*_TABLES.items(), ('local_source_writes_source', _INDEX)):
         if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (statement,):
             raise SourceChanged('local_source_schema_changed')
@@ -99,7 +76,7 @@ def _schema(conn):
 def _writer(store):
     # NORMAL is sufficient for ordinary caches, not invalidate-before-external-
     # write ordering. FULL makes the WAL invalidation commit a durability barrier.
-    conn = sqlite3.connect(store.path, timeout=5)
+    conn = sqlite3.connect(f"{store.path.as_uri()}?mode=rw", uri=True, timeout=5)
     try:
         conn.execute('PRAGMA synchronous=FULL')
         conn.execute('BEGIN IMMEDIATE')
@@ -259,13 +236,11 @@ def health(store, source):
         conn.close()
 
 
-def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
-            max_bytes=16 * 1024 * 1024):
-    """Publish a complete admitted selection; interrupted commits stay pending.
+def retire_for_publication(store, expected):
+    """Durably retire this exact scan before raw encoding/publication can fail.
 
-    Collection/readiness evidence is the transport ingestion owner's job. This
-    primitive always replaces the whole declared source, never assumes a delta
-    proves namespace completeness. Source selectors are fixed by that owner.
+    The root-scoped owner must also hold its publication gate when used across
+    registered Stores. No transport reads or payload work belongs in this step.
     """
     expected = _expected(store, expected)
     # Retire the old ready generation durably before any raw publication work.
@@ -276,6 +251,18 @@ def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
             raise SourceChanged('source_changed_before_publication')
         _advance(conn, expected.raw.source_id, current.revision)
         retired = SourcePosition(current.raw, current.epoch, current.revision + 1, False, 0)
+    return retired
+
+
+def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
+            max_bytes=16 * 1024 * 1024):
+    """Publish a complete admitted selection; interrupted commits stay pending.
+
+    Collection/readiness evidence is the transport ingestion owner's job. This
+    primitive always replaces the whole declared source, never assumes a delta
+    proves namespace completeness. Source selectors are fixed by that owner.
+    """
+    retired = retire_for_publication(store, expected)
     published = store.publish_document_batch(retired.raw, documents,
         cursor=retired.raw.cursor, full=True, retain_tombstones=False,
         max_documents=max_documents, max_bytes=max_bytes)

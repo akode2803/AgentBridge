@@ -332,16 +332,9 @@ def test_owner_writes_request_sqlite_full_synchronous(store, monkeypatch):
     assert pragmas == ["PRAGMA synchronous=FULL"]
 
 
-def test_definition_binds_root_coverage_and_build():
-    first = local_source.source_id('folder:one', exact_paths=('users/a.json',),
-                                   prefixes=('chats/a/overlays',))
-    assert first == local_source.source_id('folder:one', exact_paths=('users/a.json', 'users/a.json'),
-                                          prefixes=('chats/a/overlays',))
-    assert first != local_source.source_id('folder:two', exact_paths=('users/a.json',),
-                                          prefixes=('chats/a/overlays',))
-    assert first != local_source.source_id('folder:one', exact_paths=('users/b.json',),
-                                          prefixes=('chats/a/overlays',))
-    assert first != local_source.source_id('folder:one', exact_paths=('users/a.json',),
-                                          prefixes=('chats/a/overlays',), build='phase1-v2')
-    with pytest.raises(ValueError):
-        local_source.source_id('folder:one', exact_paths=('../keys/identity',))
+def test_missing_database_is_not_recreated_by_write_barrier(store):
+    store.close()
+    store.path.unlink()
+    with pytest.raises(sqlite3.OperationalError):
+        local_source.begin_write(store, SOURCE)
+    assert not store.path.exists()

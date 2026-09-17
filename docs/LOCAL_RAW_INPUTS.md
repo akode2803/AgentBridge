@@ -85,3 +85,77 @@ Immutable manifests/coherent source generations remain future architecture for
 multi-mirror replication, atomic multi-document publication, backup/restore and
 stronger snapshot guarantees. They are not a prerequisite for private-folder
 paging under the accepted local snapshot contract.
+
+## Cross-process local coordination (inactive implementation)
+
+GUI and harness Stores are keyed by user and machine, so one writer's Store is
+not the only local reader. `store.mutation_coordinator` registers their exact
+incarnations under a home/root-scoped durable journal. It orders locks as root
+coordinator then Store, retires matching registered sources in every Store, and
+FULL-commits the shared intent before allowing a caller to invoke transport I/O.
+Failure in a later Store prevents that external call; earlier retirements remain
+pending. No compensating transition restores readiness.
+
+`store.source_selectors` binds each source definition to root, build and immutable
+exact-document/prefix/log coverage. Registration and admission use the root gate;
+a source registered during an in-flight overlapping write cannot become ready.
+Retirement uses segment-safe indexed matching and transactional set updates,
+leaving unrelated sources unchanged. Pending mutations, registered Stores and
+source fanout have explicit ceilings. Missing or replaced registered Stores fail
+closed rather than being recreated or silently dropped.
+
+Definite completion re-retires the current registry, then removes only that
+exact intent. It does not enable any old generation. A pending intent missing its
+scope rows is corruption, not absence. Root and Store epochs prevent accidental
+reuse after replacement. None of this grants membership.
+
+There is deliberately no generic ambiguous-write recovery API. A reread while an
+external writer is still executing cannot clear its intent: the write could land
+after the reread. Execution fencing and provider-specific terminal/idempotent
+proof are required; elapsed time, PID death, an available lock, or a later retry
+alone do not establish remote quiescence. Until proven, affected paging stays
+pending and health reporting must explain the unresolved local mutation.
+
+The transport interceptor, source collection/publication owner, reader gates and
+scheduler loop integration are still required before activation. In particular,
+raw serialization/verification runs outside the root publication gate; the final
+bounded admission checks inside it retain the original scan's Store/owner CAS.
+
+### Current implementation boundary
+
+The inactive `transport.local_mutations` wrapper now mediates document, effect,
+log, chat and arbitrary blob writes. Blob APIs can overwrite document/log paths,
+so they cannot bypass retirement merely because ordinary attachments are not
+canonical inputs. Reviewed read, status, wake and optional close behavior is
+preserved explicitly. Tombstone-only provider garbage collection remains a
+logical-absence operation, but erases delta evidence: admission must use a
+complete selection, never infer completeness from a delta cursor alone.
+
+Production composition must use `owned_transport`, which derives the coordinator
+root from the built-in driver before writable references escape. The explicit
+constructor remains a trusted testing seam. Provider identities exclude member
+credentials, normalize origin spelling, and reject credential-bearing/non-origin
+URLs. A folder uses its resolved normalized configured path; callers must use one
+canonical spelling on case-insensitive POSIX volumes until a filesystem-identity
+binding is added. Unknown drivers need an explicit identity contract.
+
+`store.source_publication.SourcePublisher` registers and captures the source
+before collection, retires its exact original revision under the root gate,
+performs raw encoding/publication outside that gate, then admits under a new gate.
+A mutation crossing collection/publication/admission rejects the scan. A failed
+payload or raw commit leaves readiness retired. Declared scope restricts admitted
+document paths; the collector is responsible for completeness, not the DTO.
+
+The inactive `transport.raw_documents` collector distinguishes exact absence from
+malformed/unreadable folder input, bounds traversal and reads before JSON parsing,
+and refuses symlinks in the selected tree rather than claiming a complete scan.
+Its cache path requires provider-observed owned inputs, captures bounded references
+under the mirror lock and copies with byte/structure budgets outside it. This
+captures raw document scope only; ordinary verified log ingestion remains separate.
+It does not establish an atomic multi-file remote cut or continuing authority.
+
+The pure `mesh.source_schedule` policy implements the selected/background cadence,
+coalescing, fairness and idle/failure backoff described above. None of these modules
+is installed in Mesh/SyncEngine or the page route yet. Integration still needs
+reader/session gates, failure health wiring, explicit ambiguous-write recovery,
+complete collection orchestration and the transport-neutral canonical operation.
