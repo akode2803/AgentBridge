@@ -116,6 +116,22 @@ class MutationCoordinator:
         return rows
 
     @staticmethod
+    def _registered_store(root, path):
+        # These unconstrained registry fields must be preflighted before fetching
+        # their values on the bounded foreground path.
+        sizes = root.execute(
+            'SELECT typeof(incarnation),length(CAST(incarnation AS BLOB)),'
+            'typeof(source_epoch),length(CAST(source_epoch AS BLOB)) '
+            'FROM mutation_stores WHERE path=?', (path,),
+        ).fetchone()
+        if sizes is None:
+            raise owner.SourceChanged('store_not_registered')
+        if sizes[0] != 'text' or sizes[1] > 4096 or sizes[2:] != ('text', 32):
+            raise owner.SourceChanged('invalid_store_registration')
+        return root.execute('SELECT incarnation,source_epoch FROM mutation_stores WHERE path=?',
+                            (path,)).fetchone()
+
+    @staticmethod
     def _check_store(conn, store, incarnation, epoch):
         current = owner.capture_in_transaction(conn, store, 'root-registration-check')
         if (current.raw.incarnation, current.epoch) != (incarnation, epoch):
@@ -208,19 +224,49 @@ class MutationCoordinator:
             raise ValueError('definition belongs to another transport root')
         with self._transaction() as root:
             self._schema(root)
-            row = root.execute('SELECT incarnation,source_epoch FROM mutation_stores WHERE path=?', (str(store.path),)).fetchone()
-            if row is None:
-                raise owner.SourceChanged('store_not_registered')
+            row = self._registered_store(root, str(store.path))
             with owner._writer(store) as conn:
                 self._check_store(conn, store, *row)
                 scopes.register_in_transaction(conn, store, value)
-            if root.execute("SELECT 1 FROM mutation_scopes WHERE typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
-                raise owner.SourceChanged('invalid_pending_selector')
-            pending = root.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,)).fetchall()
-            if len(pending) > MAX_PENDING * 8:
-                raise owner.SourceChanged('pending_selector_budget')
-            for raw in pending:
-                change = scopes.selectors((scopes.Selector(*raw),), limit=1)[0]
-                if any(_overlap(change, selected) for selected in value.selectors):
-                    raise owner.SourceChanged('source_mutation_pending')
+            self._require_no_pending(root, value)
             yield
+
+    def _require_no_pending(self, root, value):
+        if root.execute("SELECT 1 FROM mutation_scopes WHERE typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+            raise owner.SourceChanged('invalid_pending_selector')
+        pending = root.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,)).fetchall()
+        if len(pending) > MAX_PENDING * 8:
+            raise owner.SourceChanged('pending_selector_budget')
+        for raw in pending:
+            change = scopes.selectors((scopes.Selector(*raw),), limit=1)[0]
+            if any(_overlap(change, selected) for selected in value.selectors):
+                raise owner.SourceChanged('source_mutation_pending')
+
+    @contextmanager
+    def finalization_cut(self, store, value):
+        """Internal root -> Store cut for bounded canonical final comparisons.
+
+        Requires existing coverage and ready inputs; never registers, repairs or
+        ingests. Enter epoch/identity/pin scopes before this context. No provider,
+        crypto, or application callbacks belong inside it. The caller may persist
+        a verified retained lifecycle head, then must recheck its other captured
+        inputs. We independently recheck source readiness/coverage before commit.
+        Root exclusion lasts through the Store commit, including exception paths.
+        """
+        store = SimpleNamespace(path=Path(store.path).resolve())
+        value = scopes._definition(value)
+        if json.loads(value.serialized)[0] != self.identity:
+            raise ValueError('definition belongs to another transport root')
+        with self._transaction() as root:
+            self._schema(root)
+            row = self._registered_store(root, str(store.path))
+            self._require_no_pending(root, value)
+            with owner._writer(store) as conn:
+                self._check_store(conn, store, *row)
+                position = scopes.require_registered_in_transaction(conn, store, value)
+                if not position.ready or position.writes_pending:
+                    raise owner.SourceChanged('source_not_ready')
+                yield conn, position
+                self._check_store(conn, store, *row)
+                if scopes.require_registered_in_transaction(conn, store, value) != position:
+                    raise owner.SourceChanged('source_changed_during_finalization')

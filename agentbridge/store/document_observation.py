@@ -216,6 +216,7 @@ def publish(
     deleted_paths: tuple[str, ...] = (),
     full: bool = False,
     retain_tombstones: bool = True,
+    skip_unchanged: bool = False,
     max_documents: int = 100_000,
     max_bytes: int = 64 * 1024 * 1024,
 ) -> DocumentPosition:
@@ -226,6 +227,10 @@ def publish(
     byte_budget = _validate_budget(max_bytes, "max_bytes")
     if type(full) is not bool or type(retain_tombstones) is not bool:
         raise ValueError("full and retain_tombstones must be bools")
+    if type(skip_unchanged) is not bool:
+        raise ValueError("skip_unchanged must be a bool")
+    if skip_unchanged and (not full or retain_tombstones or deleted_paths != ()):
+        raise ValueError("unchanged comparison requires complete tombstone-free replacement")
     if not full and not retain_tombstones:
         raise ValueError("tombstone retirement requires a full source snapshot")
     if type(documents) is not dict:
@@ -279,6 +284,11 @@ def publish(
             raise ValueError("document cursor cannot regress without reset")
         if not full and not current.initialized:
             raise ValueError("document deltas require an initialized source")
+        if (skip_unchanged and current.initialized and new_cursor == current.cursor
+                and _same_complete_documents(conn, current.source_id, normalized)):
+            conn.commit()
+            return current
+
         if current.generation == MAX_SQLITE_INTEGER:
             raise OverflowError("document generation is exhausted")
 
@@ -328,6 +338,40 @@ def publish(
         str(path), current.incarnation, expected.source_id,
         generation, new_cursor, full or current.initialized,
     )
+
+
+
+def _same_complete_documents(conn, source, normalized):
+    """Compare exact raw bytes without materializing unbounded old payloads.
+
+    The caller holds the publication write transaction. Incoming serialized
+    values are already budgeted; the covering index proves each old value has
+    exactly that size before its payload is fetched.
+    """
+    _selection_index(conn)
+    count = conn.execute(
+        f"SELECT count(*) FROM (SELECT 1 FROM document_observation_records "
+        f"INDEXED BY {_SELECTION_INDEX} WHERE source_id=? LIMIT ?)",
+        (source, len(normalized) + 1),
+    ).fetchone()[0]
+    if count != len(normalized):
+        return False
+    for name, payload in normalized.items():
+        size = conn.execute(
+            f"SELECT coalesce(length(CAST(payload AS BLOB)),0) "
+            f"FROM document_observation_records INDEXED BY {_SELECTION_INDEX} "
+            "WHERE source_id=? AND path=?", (source, name),
+        ).fetchone()
+        if size != (len(payload.encode("utf-8")),):
+            return False
+    for name, payload in normalized.items():
+        row = conn.execute(
+            "SELECT payload,deleted FROM document_observation_records "
+            "WHERE source_id=? AND path=?", (source, name),
+        ).fetchone()
+        if row != (payload, 0):
+            return False
+    return True
 
 
 def invalidate(

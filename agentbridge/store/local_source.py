@@ -187,21 +187,27 @@ def invalidate(store, source):
         _advance(conn, source, current.revision)
 
 
-def admit(store, expected, published, *, observed_ns):
+def admit(store, expected, published, *, observed_ns, allow_unchanged=False):
     """Admit a complete raw batch, only if no mutation crossed its scan.
 
     `expected` MUST be captured before source collection. `published` is the
     result of a complete raw publication from exactly expected.raw. No provider
-    cursor, timestamp, or ready flag establishes membership.
+    cursor, timestamp, or ready flag establishes membership. The unchanged
+    option is reserved for SourcePublisher after exact complete raw comparison;
+    it does not bypass owner revision or pending-write checks.
     """
+    if type(allow_unchanged) is not bool:
+        raise ValueError('allow_unchanged must be a bool')
     if type(expected) is not SourcePosition or type(published) is not docs.DocumentPosition:
         raise ValueError('invalid source admission')
     expected = _expected(store, expected)
     published = docs._validate_expected(published, store.path)
     if type(observed_ns) is not int or not 0 <= observed_ns <= MAX:
         raise ValueError('invalid observation time')
+    successor = published.generation == expected.raw.generation + 1
+    unchanged = allow_unchanged and published == expected.raw
     if (published.source_id != expected.raw.source_id or published.incarnation != expected.raw.incarnation
-            or published.generation != expected.raw.generation + 1 or not published.initialized):
+            or not (successor or unchanged) or not published.initialized):
         raise SourceChanged('publication_not_successor')
     with _writer(store) as conn:
         current = capture_in_transaction(conn, store, published.source_id)
