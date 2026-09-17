@@ -80,6 +80,7 @@ class PromptPack:
 
     # ------------------------------------------------------------ the prompt
     def prompt(self, delivery: Delivery, acc, *, context_file, outbox,
+               context: str = "",
                bridge: bool = False,
                bridge_capabilities: tuple[str, ...] | list[str] = (),
                workspace_only: bool = False,
@@ -99,16 +100,19 @@ class PromptPack:
         if delivery.kind == "timer":
             parts.append(self.text(
                 "task_timer", note=(delivery.note or "").replace("'", ""),
-                context_file=context_file))
+                context_file=context_file, context=context))
         elif delivery.triggers and all(
                 t.reason == "reaction" for t in delivery.triggers):
             # V92: a pure reaction nudge is an FYI, not a request — a pack
             # without the key degrades to the normal message task
-            parts.append(self.text("task_reaction", context_file=context_file)
+            parts.append(self.text("task_reaction", context_file=context_file,
+                                   context=context)
                          or self.text("task_message",
-                                      context_file=context_file))
+                                      context_file=context_file,
+                                      context=context))
         else:
-            parts.append(self.text("task_message", context_file=context_file))
+            parts.append(self.text("task_message", context_file=context_file,
+                                   context=context))
         parts.append(self.text("capabilities", outbox=outbox,
                                file_limit=file_limit))
         if recovery_notice:
@@ -134,7 +138,9 @@ class PromptPack:
 
     # ----------------------------------------------------------- context.md
     def context_text(self, delivery: Delivery,
-                     staged: dict[str, str] | None = None) -> str:
+                     staged: dict[str, str] | None = None, *,
+                     transcript_tail: int = TRANSCRIPT_TAIL,
+                     include_recalled: bool = True) -> str:
         members = "; ".join(
             f"@{r['name']}{' (you)' if r.get('you') else ''}"
             f" — {r.get('desc', '')}" for r in delivery.roster)
@@ -252,12 +258,12 @@ class PromptPack:
         if delivery.other_timers:
             lines.append(self.text("context_timers_other",
                                    n=delivery.other_timers))
-        if delivery.recalled:          # retrieval hits from beyond the tail
+        if include_recalled and delivery.recalled:
             lines.append(self.text("context_recall"))
             for m in delivery.recalled:
                 lines.append(render_message(m, delivery.agent))
             lines.append(self.text("context_recent"))
-        for m in delivery.transcript[-TRANSCRIPT_TAIL:]:
+        for m in delivery.transcript[-transcript_tail:]:
             lines.append(render_message(m, delivery.agent))
         if staged:
             notes = "\n".join(f"- {name} -> read it at {rel}"
@@ -390,9 +396,10 @@ class PromptManager:
                 continue  # a bad overlay never blocks the shipped wording
         self.base = base
 
-    def for_agent(self, acc) -> PromptPack:
+    def for_agent(self, acc, preset_overrides: dict | None = None) -> PromptPack:
         overrides = {}
         if acc is not None and acc.agent:
             o = (acc.agent.harness or {}).get("prompts")
             overrides = o if isinstance(o, dict) else {}
-        return PromptPack(_overlay(self.base, overrides))
+        return PromptPack(_overlay(_overlay(self.base, preset_overrides or {}),
+                                   overrides))

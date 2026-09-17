@@ -255,10 +255,16 @@ def stream_errors(lines: list[str], fmt: str) -> str:
     return ""
 
 
-def reply_from_output(lines: list[str], fmt: str) -> str:
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def reply_from_output(lines: list[str], fmt: str, *,
+                      strip_ansi: bool = False) -> str:
     """The final reply text out of a finished run's stdout."""
     if fmt == "text":
-        return "\n".join(lines).strip()
+        text = "\n".join(lines).strip()
+        return _ANSI_ESCAPE_RE.sub("", text).strip() if strip_ansi else text
     result = ""
     for line in lines:
         line = line.strip()
@@ -493,7 +499,8 @@ class CliResponder:
                     cancelled=cancelled)
 
         text = _plain_contribution(
-            reply_from_output(lines, preset.format),
+            reply_from_output(lines, preset.format,
+                              strip_ansi=preset.strip_ansi),
             prepared.request.max_output_chars,
         )
         if rc != 0 or not text:
@@ -588,7 +595,7 @@ class CliResponder:
             if (run.provider != inv.preset.id or run.model != model):
                 raise ValidationError(
                     "prepared provider invocation changed after signing")
-        pack = self.prompts.for_agent(acc)
+        pack = self.prompts.for_agent(acc, inv.preset.prompts)
 
         # per-chat context ceiling (Q30): the owner caps how many DAYS of
         # history a run may see — the ceiling applies to the verbatim tail
@@ -615,8 +622,10 @@ class CliResponder:
         self._retrieve(delivery, cutoff_ns)  # long chats stop forgetting (R21)
         staged = self._stage_inbox(delivery, workdir)
         context_file = workdir / "context.md"
-        context_file.write_text(pack.context_text(delivery, staged),
-                                encoding="utf-8", newline="\n")
+        context_text = pack.context_text(
+            delivery, staged, transcript_tail=inv.preset.context_tail,
+            include_recalled=inv.preset.context_recall)
+        context_file.write_text(context_text, encoding="utf-8", newline="\n")
         notes = workdir / "MEMORY.md"        # the workspace note tier (R20)
         if not notes.exists():
             notes.write_text("# Notes for this chat\n\nYours to keep — "
@@ -738,6 +747,9 @@ class CliResponder:
             file_limit = (f"{max(1, cap // (1024 * 1024))} MB per file"
                           if cap else "the configured per-file limit")
             prompt = pack.prompt(delivery, acc, context_file=context_file,
+                                 context=(context_text if
+                                          inv.preset.context_mode == "inline"
+                                          else ""),
                                  outbox=outbox,
                                  workspace_only=bridge_policy is not None,
                                  bridge_capabilities=(
@@ -803,7 +815,8 @@ class CliResponder:
                     env=env, chat_id=delivery.chat_id, run_id=delivery.run_id,
                     launch_policy=bridge_policy)
 
-        text = reply_from_output(lines, inv.preset.format)
+        text = reply_from_output(lines, inv.preset.format,
+                                 strip_ansi=inv.preset.strip_ansi)
         if not text and reply_file.is_file():
             # some CLIs (-o) accumulate ALL assistant text there — fallback
             # only, never the primary (v1: thinking leaked verbatim once)

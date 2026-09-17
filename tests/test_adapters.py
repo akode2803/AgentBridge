@@ -104,6 +104,24 @@ def test_shipped_presets_load_and_build():
     assert argv[0] == "claude" and "hello" in argv
     assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
     assert "--disallowedTools" in argv and "Bash" in argv
+    deepseek = reg.presets["deepseek"]
+    assert deepseek.context_mode == "inline"
+    assert deepseek.context_tail == 8
+    assert deepseek.context_recall is False
+    assert deepseek.strip_ansi is True
+    assert "{context}" in deepseek.prompts["task_message"]
+
+
+def test_preset_context_contract_validation():
+    with pytest.raises(ValidationError, match="context mode"):
+        Preset.from_dict({"id": "x", "command": "x",
+                          "context_mode": "telepathy"})
+    with pytest.raises(ValidationError, match="context_tail"):
+        Preset.from_dict({"id": "x", "command": "x", "context_tail": 31})
+    with pytest.raises(ValidationError, match="prompts"):
+        Preset.from_dict({"id": "x", "command": "x", "prompts": []})
+    with pytest.raises(ValidationError, match="strip_ansi"):
+        Preset.from_dict({"id": "x", "command": "x", "strip_ansi": "yes"})
 
 
 def test_minimal_argv_keeps_safety_and_blocklist():
@@ -285,6 +303,8 @@ def test_reply_from_output_formats():
                          "item": {"type": "agent_message", "text": "done"}})]
     assert reply_from_output(codex, "codex-jsonl") == "done"
     assert reply_from_output(["plain", "text"], "text") == "plain\ntext"
+    noisy = ["\x1b[?25l\x1b[2K\x1b[1G", "pong\x1b[?25h"]
+    assert reply_from_output(noisy, "text", strip_ansi=True) == "pong"
 
 
 def test_stream_errors_surfaces_ccs_reason():
