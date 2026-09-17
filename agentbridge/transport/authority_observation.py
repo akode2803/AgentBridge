@@ -275,11 +275,10 @@ def _locked_matching_lookup_policy(transport, expected):
 
 
 def _eligible_ingress_path(path):
-    # Keys share raw ownership protection, never the authority-source allowlist.
-    return type(path) is str and (
-        path.startswith(('users/', 'lifecycle/'))
-        or (path.startswith('chats/') and (path.endswith('/meta.json') or '/keys/' in path))
-    )
+    # Raw SQLite ingestion may select overlays/receipts as well as authority
+    # classes. Every canonical document path needs hook-free owned JSON before
+    # an off-lock reference capture. This never expands a reader's allowlist.
+    return _valid_path(path)
 
 
 def detach_ingress_value(path, value):
