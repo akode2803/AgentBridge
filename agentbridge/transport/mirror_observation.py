@@ -275,6 +275,28 @@ def validate_identity(value: Any) -> str | None:
     return value
 
 
+def transport_identities(transport):
+    """Capture built-in folder Path roots without coercing arbitrary objects.
+
+    Other drivers retain the exact-string identity contract. The same conversion
+    is used at cache construction and when checking its pinned inner owner.
+    """
+    import os
+    from pathlib import Path
+    from .folder import FolderTransport, _unextend
+
+    root = getattr(transport, 'root', None)
+    cache = getattr(transport, 'cache_key', None)
+    if type(transport) is FolderTransport and type(root) is type(Path()):
+        root = str(root)
+        if cache is None:
+            # Diagnostic mirror identity only. Exposing cache_key on the folder
+            # driver would change Mesh's persisted pin/lock namespace, whose
+            # historical identity is the plain root string.
+            cache = 'folder:' + os.path.normcase(_unextend(root))
+    return validate_identity(root), validate_identity(cache)
+
+
 def validated_position_fields(
     expected: MirrorExpectedPosition,
 ) -> tuple[str, str, str, int]:
@@ -454,6 +476,7 @@ __all__ = [
     "capture_mirror_selection_locked",
     "validate_capture_budget",
     "validate_identity",
+    "transport_identities",
     "validated_position_fields",
     "validated_selection_request",
 ]

@@ -421,8 +421,8 @@ class Store:
     def capture_page_inputs(self, index, **selection):
         return page_inputs.capture(self.path, index, **selection)
 
-    def publish_overlay_index(self, prepared):
-        return overlay_index.publish(self._conn(), self.path, prepared)
+    def publish_overlay_index(self, prepared, *, shared_source=False):
+        return overlay_index.publish(self._conn(), self.path, prepared, shared_source=shared_source)
 
     def capture_overlay_index(self, expected, targets, state_paths=(), *,
                               max_rows=2048, max_bytes=overlay_index.MAX_SELECT_BYTES, include_reactions=False):
@@ -452,13 +452,13 @@ class Store:
     def publish_document_batch(
         self, expected_position: DocumentPosition, documents: dict, *,
         cursor: int, deleted_paths: tuple[str, ...] = (), full: bool = False,
-        retain_tombstones: bool = True,
+        retain_tombstones: bool = True, skip_unchanged: bool = False,
         max_documents: int = 100_000, max_bytes: int = 64 * 1024 * 1024,
     ) -> DocumentPosition:
         return document_observation.publish(
             self._conn(), self.path, expected_position, documents,
             cursor=cursor, deleted_paths=deleted_paths, full=full,
-            retain_tombstones=retain_tombstones,
+            retain_tombstones=retain_tombstones, skip_unchanged=skip_unchanged,
             max_documents=max_documents, max_bytes=max_bytes,
         )
 

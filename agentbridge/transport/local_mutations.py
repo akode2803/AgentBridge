@@ -209,9 +209,8 @@ def root_identity(transport):
     if type(transport) is CachingTransport:
         if type(transport.inner) not in (FolderTransport, SupabaseTransport):
             raise ValueError('unsupported nested transport owner')
-        from .mirror_observation import validate_identity
-        if (transport._mirror_root_identity != validate_identity(transport.inner.root)
-                or transport._mirror_cache_identity != validate_identity(getattr(transport.inner, 'cache_key', None))):
+        from .mirror_observation import transport_identities
+        if (transport._mirror_root_identity, transport._mirror_cache_identity) != transport_identities(transport.inner):
             raise ValueError('cache identity changed')
         return root_identity(transport.inner)
     if type(transport) is FolderTransport:

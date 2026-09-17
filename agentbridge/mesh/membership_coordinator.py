@@ -4,14 +4,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 from ..core.models import Account, ChatSnapshot, UserKind
-from ..store import document_observation, lifecycle_inputs, membership_suffix, terminal_observation
+from ..store import document_observation, lifecycle_inputs, local_source, membership_suffix, terminal_observation
 from ..store.membership_input_position import MembershipInputUnavailable
 from ..transport import authority_observation
-from . import authority_source, events, page_fence
+from . import authority_source, events, local_page_source, page_fence
 from .lifecycle import LifecycleUnavailable
 from .pin_storage import PinStoreUnavailable
 from .lifecycle_evaluation import (
@@ -38,9 +38,9 @@ class MembershipCandidate:
     viewer: str
     machine: str
     snapshot_json: str
-    receipt: authority_source.AuthoritySourceReceipt
-    authority_inputs: tuple[authority_source.AuthorityInputs, ...]
-    policy: authority_observation.LookupPolicy
+    receipt: authority_source.AuthoritySourceReceipt | local_page_source.LocalSourceReceipt
+    authority_inputs: tuple[authority_source.AuthorityInputs | local_page_source.LocalAuthorityInputs, ...]
+    policy: authority_observation.LookupPolicy | None
     suffix: membership_suffix.MembershipSuffix
     terminal: terminal_observation.TerminalObservation
     subjects: tuple[lifecycle_inputs.SubjectSelection, ...]
@@ -102,9 +102,24 @@ def _raw_size(captured):
 
 
 class _Round:
-    def __init__(self, mesh, receipt, ledger):
+    def __init__(self, mesh, receipt, ledger, *, source_reader=None):
         self.mesh, self.ledger = mesh, ledger
-        self.receipt = authority_source._copy_receipt(mesh.tx, mesh.store, receipt)
+        self.source_reader = source_reader
+        self.transport_owner = mesh.tx
+        if source_reader is None:
+            self.receipt = authority_source._copy_receipt(mesh.tx, mesh.store, receipt)
+        else:
+            from ..transport.local_mutations import LocalMutationTransport, root_identity
+            if type(source_reader) is not local_page_source.LocalPageSource or source_reader.store is not mesh.store:
+                raise ValueError('invalid local source owner')
+            transport = mesh.tx
+            if type(transport) is LocalMutationTransport:
+                if transport._coordinator is not source_reader.coordinator:
+                    raise ValueError('local mutation owner mismatch')
+                transport = transport._transport
+            if root_identity(transport) != source_reader.coordinator.identity:
+                raise ValueError('local source transport mismatch')
+            self.receipt = source_reader._receipt(receipt)
         self.chat = self.receipt.chat_id
         self.viewer, self.machine = mesh.messaging.user, mesh.messaging.machine
         authority_observation._part(self.viewer)
@@ -136,8 +151,12 @@ class _Round:
 
     def capture(self, names):
         self.ledger.step()
-        value = authority_source.capture_authority_inputs(self.mesh.tx, self.mesh.store,
-            self.receipt, names, max_bytes=self.ledger.remaining())
+        if self.source_reader is None:
+            value = authority_source.capture_authority_inputs(self.mesh.tx, self.mesh.store,
+                self.receipt, names, max_bytes=self.ledger.remaining())
+        else:
+            value = self.source_reader.capture_authority(self.receipt, names,
+                                                        max_bytes=self.ledger.remaining())
         self.ledger.charge(_raw_size(value))
         self.batches.append(value)
         return value
@@ -174,9 +193,13 @@ class _Round:
         if len(self.subjects) >= self.ledger.limits.max_subjects:
             raise _Stop('unavailable', 'subject_budget_exhausted')
         self.ledger.step()
-        selected = authority_source.capture_authority_subject(self.mesh.tx, self.mesh.store,
-            self.receipt, name, max_records=self.ledger.limits.max_subject_records,
-            max_bytes=self.ledger.remaining())
+        if self.source_reader is None:
+            selected = authority_source.capture_authority_subject(self.mesh.tx, self.mesh.store,
+                self.receipt, name, max_records=self.ledger.limits.max_subject_records,
+                max_bytes=self.ledger.remaining())
+        else:
+            selected = self.source_reader.capture_subject(self.receipt, name,
+                max_records=self.ledger.limits.max_subject_records, max_bytes=self.ledger.remaining())
         self.ledger.charge(selected.serialized_bytes)
         conn = document_observation._open_reader(self.mesh.store.path)
         try:
@@ -257,7 +280,42 @@ class _Round:
             raise _Stop('unavailable', 'clock_expired')
         return value
 
+    @contextmanager
+    def _final_store(self):
+        if self.source_reader is not None:
+            if self.mesh.tx is not self.transport_owner or self.mesh.store is not self.source_reader.store:
+                raise _Stop('unavailable', 'local_source_owner_changed')
+            with self.source_reader.finalization(self.receipt) as conn:
+                yield conn
+            return
+        conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            yield conn
+        finally:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            finally:
+                conn.close()
+
+    def _matches_batch(self, conn, batch):
+        if self.source_reader is None:
+            return authority_source.matches_inputs_in_transaction(
+                conn, self.mesh.store, batch, max_bytes=_raw_size(batch))
+        captured = batch.documents
+        return (self.source_reader.matches_in_transaction(conn, self.receipt)
+                and document_observation._capture_selected(conn, self.mesh.store.path,
+                    self.receipt.source.raw, tuple(r.path for r in captured.records),
+                    max_documents=129, max_bytes=_raw_size(batch)) == captured)
+
+    def _policy_scope(self, policy):
+        return (nullcontext(True) if self.source_reader is not None else
+                authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy))
+
     def final(self, snapshot, proposal, *, page=None):
+        if self.source_reader is not None and page is not None:
+            raise _Stop('unavailable', 'local_page_fence_pending')
         prepared_page = None if page is None else page_fence.prepare(
             self.mesh, page, self.suffix.position, self.receipt.mirror)
         if prepared_page is not None:
@@ -271,10 +329,12 @@ class _Round:
             replay = evaluate_observed_view(view, name, sign, agree, history)
             if not replay.satisfied or (replay.sign_pub, replay.agree_pub) != (used_sign, used_agree):
                 raise _Stop('unavailable', 'pin_inputs_changed')
-        policy = authority_observation.LookupPolicy(self.chat, self.receipt.mirror,
-            tuple(entry for batch in self.batches for entry in batch.policy.accounts),
-            self.meta_input.policy.meta)
-        policy = authority_observation._copy_lookup_policy(policy)
+        policy = None
+        if self.source_reader is None:
+            policy = authority_observation.LookupPolicy(self.chat, self.receipt.mirror,
+                tuple(entry for batch in self.batches for entry in batch.policy.accounts),
+                self.meta_input.policy.meta)
+            policy = authority_observation._copy_lookup_policy(policy)
         # Own SQL writes can fire triggers that mutate other authority inputs.
         # Budget both prewrite and postwrite checks, including the new head bytes.
         comparison_size = (sum(_raw_size(v) for v in self.batches)
@@ -301,12 +361,10 @@ class _Round:
             with self.mesh.key_pins.locked_matching_view(view) as pins_match:
                 if not pins_match:
                     raise _Stop('unavailable', 'pin_inputs_changed')
-                conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
-                try:
-                    conn.execute('BEGIN IMMEDIATE')
+                with self._final_store() as conn:
                     first = self.clock(self.now)
                     for batch in self.batches:
-                        if not authority_source.matches_inputs_in_transaction(conn, self.mesh.store, batch, max_bytes=_raw_size(batch)):
+                        if not self._matches_batch(conn, batch):
                             raise _Stop('unavailable', 'authority_inputs_changed')
                     if not membership_suffix.matches_position(conn, self.mesh.store.path, self.suffix.position):
                         raise _Stop('unavailable', 'membership_inputs_changed')
@@ -323,7 +381,7 @@ class _Round:
                     if proposal is not None:
                         # No JSON, crypto, provider or caller callbacks below. All
                         # mirror writers are excluded until the SQL commit finishes.
-                        with authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy) as matched:
+                        with self._policy_scope(policy) as matched:
                             if not matched:
                                 raise _Stop('unavailable', 'lookup_policy_changed')
                             if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
@@ -365,9 +423,10 @@ class _Round:
                             if prepared_page is not None and not page_fence.matches_store(conn, self.mesh, prepared_page):
                                 raise _Stop('unavailable', 'page_inputs_changed')
                             self.clock(first)
-                            conn.commit()
+                            if self.source_reader is None:
+                                conn.commit()
                         return CoordinatorResult('restart', reason='retained_head_progress')
-                    with authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy) as matched:
+                    with self._policy_scope(policy) as matched:
                         if not matched:
                             raise _Stop('unavailable', 'lookup_policy_changed')
                         if prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
@@ -380,15 +439,9 @@ class _Round:
                             tuple(self.subjects.values()), tuple(self.heads.values()), view,
                             self.now, last, self.deadline)
                         return CoordinatorResult('candidate', candidate=candidate)
-                finally:
-                    try:
-                        if conn.in_transaction:
-                            conn.rollback()
-                    finally:
-                        conn.close()
 
 
-def run_membership_round(mesh, receipt, *, limits=CoordinatorLimits()):
+def run_membership_round(mesh, receipt, *, limits=CoordinatorLimits(), source_reader=None):
     """Perform at most one side effect; caller must recapture after any work.
 
     No retry, source rebuild, provider read-through or canonical full-fold fallback
@@ -398,7 +451,7 @@ def run_membership_round(mesh, receipt, *, limits=CoordinatorLimits()):
     """
     ledger = _Ledger(limits)
     try:
-        attempt = _Round(mesh, receipt, ledger)
+        attempt = _Round(mesh, receipt, ledger, source_reader=source_reader)
         proposal = None
         try:
             snapshot = events.advance(attempt.snapshot,
@@ -413,7 +466,7 @@ def run_membership_round(mesh, receipt, *, limits=CoordinatorLimits()):
         return CoordinatorResult('readthrough', work_path=exc.paths[0], reason='account_readthrough_required')
     except _Stop as exc:
         return CoordinatorResult(exc.status, work_path=exc.path, reason=exc.reason)
-    except (authority_source.AuthoritySourceUnavailable,
+    except (local_source.SourceChanged, authority_source.AuthoritySourceUnavailable,
             authority_observation.AuthorityObservationUnavailable,
             document_observation.DocumentObservationConflict,
             lifecycle_inputs.LifecycleInputsUnavailable,
