@@ -122,6 +122,15 @@ class LocalPageSource:
             return lifecycle_inputs.capture_subject(conn, self.store.path,
                                                      receipt.source.raw, subject, **limits)
 
+    def capture_key_document(self, receipt, epoch, viewer, *, max_bytes=4 * 1024 * 1024):
+        from ..transport.key_observation import selection
+        _limit(max_bytes, 4 * 1024 * 1024)
+        _chat_id, _epoch, _viewer, path = selection(self.chat, epoch, viewer)
+        with self._read(receipt) as (conn, receipt):
+            captured = docs._capture_selected(conn, self.store.path, receipt.source.raw,
+                (path,), max_documents=1, max_bytes=max_bytes)
+        return captured.records[0]
+
     def capture_page(self, receipt, index, **selection):
         receipt = self._receipt(receipt)
         index = overlay_index._wanted(index, self.store.path)
