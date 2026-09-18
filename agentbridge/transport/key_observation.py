@@ -43,42 +43,59 @@ def _budget(max_bytes):
         raise ValueError('invalid key wrap budget')
 
 
+def classify_wrap(document, viewer, *, present, base_bytes, max_bytes):
+    """Pure exact-type shape/field selection for owned, admitted JSON.
+
+    Callers ensure keys are ordinary JSON strings; unrelated dictionary keys are
+    not walked here. Mirror ingress and local JSON decoding own that boundary.
+    """
+    _budget(max_bytes)
+    if type(viewer) is not str or type(present) is not bool or type(base_bytes) is not int or base_bytes < 0:
+        raise ValueError('invalid wrap selection')
+    size = base_bytes
+    if size > max_bytes:
+        raise AuthorityObservationUnavailable('key_wrap_budget')
+    if not present:
+        return 'absent', None, size
+    shape, fields = 'document_not_dict', None
+    if type(document) is dict:
+        wrapped = document.get('wrapped')
+        shape = 'wrapped_not_dict'
+        if type(wrapped) is dict:
+            wrap = wrapped.get(viewer)
+            shape = 'viewer_not_dict'
+            if type(wrap) is dict:
+                values = tuple(wrap.get(k) for k in ('eph', 'nonce', 'ct'))
+                shape = 'invalid_fields'
+                if all(type(v) is str for v in values):
+                    for value in values:
+                        if len(value) > max_bytes - size:
+                            raise AuthorityObservationUnavailable('key_wrap_budget')
+                        size += len(value.encode())
+                        if size > max_bytes:
+                            raise AuthorityObservationUnavailable('key_wrap_budget')
+                    shape, fields = 'valid', values
+    return shape, fields, size
+
+
 def _capture_locked(transport, chat, epoch, viewer, path, max_bytes):
     mirror = _position_locked(transport)
     size = len(path.encode()) + len(viewer.encode())
     if size > max_bytes:
         raise AuthorityObservationUnavailable('key_wrap_budget')
-    shape, fields = 'absent', None
-    if path in transport._docs:
+    present = path in transport._docs
+    if present:
         mode = 'present'
         if path in transport._authority_unsafe:
             raise AuthorityObservationUnavailable('key_wrap_ineligible')
-        doc = transport._docs[path]
-        shape = 'document_not_dict'
-        if type(doc) is dict:
-            wraps = doc.get('wrapped')
-            shape = 'wrapped_not_dict'
-            if type(wraps) is dict:
-                wrap = wraps.get(viewer)
-                shape = 'viewer_not_dict'
-                if type(wrap) is dict:
-                    values = tuple(wrap.get(k) for k in ('eph', 'nonce', 'ct'))
-                    shape = 'invalid_fields'
-                    if all(type(v) is str for v in values):
-                        # Check character count before allocating UTF-8 bytes.
-                        for value in values:
-                            if len(value) > max_bytes - size:
-                                raise AuthorityObservationUnavailable('key_wrap_budget')
-                            size += len(value.encode())
-                            if size > max_bytes:
-                                raise AuthorityObservationUnavailable('key_wrap_budget')
-                        shape, fields = 'valid', values
     elif path in transport._neg:
         mode = 'known_negative'
     elif transport._health_state != 'online':
         mode = 'offline_absent'
     else:
         mode = 'online_readthrough_required'
+    shape, fields, size = classify_wrap(transport._docs[path] if present else None,
+        viewer, present=present, base_bytes=size, max_bytes=max_bytes)
     return KeyWrapObservation(chat, epoch, viewer, mirror, mode, shape, fields, size)
 
 
