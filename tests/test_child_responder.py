@@ -81,7 +81,10 @@ def test_child_preset_declaration_is_explicit_and_fail_closed(tmp_path):
         preset.id for preset in registry.presets.values()
         if preset.is_child_text_only_safe()
     }
-    assert enabled == {"ollama", "deepseek"}
+    assert enabled == {
+        "deepseek", "deepseek-v4.1", "gemma4", "glm-5.3",
+        "glm-5.3-flash", "kimi-k3",
+    }
     assert not registry.presets["codex"].child_text_only
     assert not registry.presets["claude"].child_text_only
 

@@ -96,8 +96,9 @@ def settings(**harness) -> HarnessSettings:
 
 def test_shipped_presets_load_and_build():
     reg = ModelRegistry.load()
-    for fam in ("claude", "cortex", "codex", "gemini", "grok", "ollama",
-                "deepseek"):
+    for fam in ("claude", "cortex", "codex", "gemini", "grok", "deepseek",
+                "deepseek-v4.1", "glm-5.3", "glm-5.3-flash", "kimi-k3",
+                "gemma4"):
         assert fam in reg.presets
     argv = reg.presets["claude"].build_argv(
         prompt="hello", workdir="w", reply_file="r",
@@ -125,6 +126,26 @@ def test_shipped_presets_load_and_build():
     assert argv[argv.index("--mode") + 1] == "plan"
     assert "--sandbox" in argv
     assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-medium"
+
+    ollama_models = {
+        "glm-5.3": "glm-5.3:cloud",
+        "glm-5.3-flash": "glm-5.3-flash:cloud",
+        "kimi-k3": "kimi-k3:cloud",
+        "gemma4": "gemma4:31b:cloud",
+        "deepseek-v4.1": "deepseek-v4.1-flash:cloud",
+    }
+    for preset_id, model in ollama_models.items():
+        preset = reg.presets[preset_id]
+        assert preset.command == "ollama"
+        assert preset.default_model == model
+        assert preset.models == [model]
+        assert preset.context_mode == "inline"
+        assert preset.context_files is False
+        assert preset.strip_ansi is True
+        assert "{context}" in preset.prompts["task_message"]
+        assert preset.build_argv(
+            prompt="hello", workdir="w", reply_file="r", model=model,
+        ) == ["ollama", "run", "--nowordwrap", model, "hello"]
 
 
 def test_preset_context_contract_validation():
