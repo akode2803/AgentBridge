@@ -68,7 +68,7 @@ class LocalPageSource:
         if (type(chat) is not str or chat != self.chat or type(path) is not str
                 or path != str(self.coordinator.path) or type(epoch) is not str
                 or epoch != self.coordinator.epoch
-                or source.raw.source_id != self.definition.source
+                or source.source_id != self.definition.source
                 or not source.ready or source.writes_pending):
             raise owner.SourceChanged('local_receipt_binding_changed')
         return LocalSourceReceipt(chat, path, epoch, source)

@@ -12,7 +12,6 @@ from agentbridge.mesh.sealer import PlainSealer
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source
 from agentbridge.store.db import Store
-from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import (
@@ -247,8 +246,9 @@ def test_stale_failure_cannot_retire_newer_publication(rig):
     runtime.ingest(CHAT)
     reader = runtime.reader(CHAT)
     stale = reader.capture().source
-    publisher = SourcePublisher(runtime.coordinator, mesh.store, reader.definition)
-    winner = publisher.publish(publisher.capture(), _documents(2), observed_ns=2)
+    mesh.tx.put_doc(META, _documents(2)[META])
+    assert runtime.ingest(CHAT)
+    winner = runtime.inputs(CHAT)[1].source
 
     with runtime.coordinator.publication_gate(mesh.store, reader.definition):
         recorded = local_source.record_failure(
@@ -342,14 +342,14 @@ def test_stop_quiesces_manual_ingest_and_permanently_closes_runtime(rig, monkeyp
     entered = threading.Event()
     release = threading.Event()
     stopped = threading.Event()
-    original = local_input_runtime.collect_documents
+    original = local_input_runtime.collect_document_batches
 
     def blocked_collect(*args, **kwargs):
         entered.set()
         assert release.wait(2)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(local_input_runtime, "collect_documents", blocked_collect)
+    monkeypatch.setattr(local_input_runtime, "collect_document_batches", blocked_collect)
     ingest = threading.Thread(target=runtime.ingest, args=(CHAT,))
     ingest.start()
     assert entered.wait(1)

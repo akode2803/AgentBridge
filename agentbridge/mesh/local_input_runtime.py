@@ -9,12 +9,11 @@ from __future__ import annotations
 import threading
 import time
 
-from ..store import local_source, overlay_index, source_selectors
+from ..store import local_source, overlay_index, source_selectors, staged_source, staged_publication, document_observation
 from ..store.source_publication import SourcePublisher
 from ..transport.local_mutations import LocalMutationTransport
-from ..transport.raw_documents import collect_documents
+from ..transport.raw_documents import collect_document_batches, RawCollectionUnavailable
 from .local_page_source import LocalPageSource
-from .overlay_index import prepare_overlay_index
 from .source_schedule import SourceSchedule
 
 
@@ -26,6 +25,7 @@ class LocalInputRuntime:
         self.coordinator = transport._coordinator
         local_source.initialize(store)
         source_selectors.initialize(store)
+        staged_source.initialize(store)
         self.coordinator.register_store(store)
         self.schedule = SourceSchedule()
         self._lock = threading.RLock()
@@ -98,37 +98,71 @@ class LocalInputRuntime:
             reader = self.reader(chat)
             publisher = SourcePublisher(self.coordinator, self.store, reader.definition)
             expected = None
+            stage = None
             try:
                 captured = publisher.capture()
-                expected = captured.source
-                documents = collect_documents(self.transport._transport, reader.definition)
-                published = publisher.publish(captured, documents, observed_ns=time.time_ns())
+                # Retire before the first fallible staging write. A crash or
+                # partial enumeration must not leave the previous ready source.
+                with self.coordinator.publication_gate(self.store, reader.definition):
+                    expected = local_source.retire_for_publication(self.store, captured.source)
+                stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
+                exact = {s.value for s in reader.definition.selectors if s.kind == 'doc_exact'}
+                prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
+
+                def append(batch):
+                    for path in batch:
+                        document_observation._validate_document_path(path)
+                        if len(path.split('/')) > 32:
+                            raise ValueError('source document depth')
+                        if path not in exact and not any(path == p or path.startswith(p + '/') for p in prefixes):
+                            raise ValueError('document outside declared source scope')
+                    staged_source.append(self.store, stage, batch)
+
+                collect_document_batches(self.transport._transport, reader.definition, consume=append)
+                staged_source.finish(self.store, stage)
+                reuse = None
+                comparison = staged_publication.identical(self.store, expected, stage)
+                if comparison:
+                    # Read existing build evidence even though owner readiness
+                    # is deliberately retired during this publication attempt.
+                    conn = document_observation._open_reader(self.store.path)
+                    try:
+                        conn.execute('BEGIN')
+                        row = conn.execute('SELECT build,schema FROM overlay_index_ready WHERE source=?',
+                                           (expected.raw.source_id,)).fetchone()
+                        if row is not None:
+                            reuse = overlay_index.OverlayIndexPosition(expected.raw, reader.chat, *row)
+                            reuse = overlay_index._wanted(reuse, self.store.path)
+                            overlay_index._ready(conn, self.store.path, reuse)
+                    finally:
+                        conn.close()
+                with self.coordinator.publication_gate(self.store, reader.definition):
+                    published, index = staged_publication.admit(self.store, expected, stage,
+                        observed_ns=time.time_ns(), reuse=reuse, comparison=comparison)
                 expected = published
+                if captured.source.raw.source_id != published.raw.source_id:
+                    staged_source.retire_generation(self.store, captured.source.raw.source_id)
                 receipt = reader.capture()
                 if receipt.source != published:
                     raise local_source.SourceChanged('ingestion_superseded')
-                try:
-                    index = self._index(reader, receipt)
-                except overlay_index.OverlayIndexUnavailable:
-                    prefix = f'chats/{reader.chat}/overlays/'
-                    paths = tuple(sorted(p for p in documents if p.startswith(prefix)))
-                    observed = self.store.capture_selected_documents(receipt.source.raw, paths,
-                        max_documents=20_000, max_bytes=16 * 1024 * 1024)
-                    index = self.store.publish_overlay_index(prepare_overlay_index(observed, reader.chat),
-                                                     shared_source=True)
-                # Admission/index preparation racing a local writer cannot be
-                # reported as current successful work after that invalidation.
                 with reader.finalization(receipt) as conn:
                     overlay_index._ready(conn, self.store.path, index)
-                return captured.source.raw != receipt.source.raw
-            except Exception:
-                # Exception text may include paths/provider credentials. Health
-                # deliberately records only a stable content-free outcome.
+                return captured.source.raw != published.raw
+            except Exception as exc:
+                budget = isinstance(exc, OverflowError) or (
+                    isinstance(exc, RawCollectionUnavailable) and exc.args and
+                    exc.args[0] in ('document_budget', 'byte_budget', 'path_budget', 'document_byte_budget'))
                 if expected is not None:
                     with self.coordinator.publication_gate(self.store, reader.definition):
                         local_source.record_failure(self.store, reader.definition.source,
-                            reason='unavailable', expected=expected)
+                            reason='budget' if budget else 'unavailable', expected=expected)
                 raise
+            finally:
+                if stage is not None:
+                    # abort never retires a mapped generation. Partial/unused
+                    # candidates become reclaimable in bounded cleanup steps.
+                    staged_source.abort(self.store, stage)
+                    staged_source.cleanup(self.store, max_rows=128)
 
     def run_due(self):
         job = self.schedule.take_due(now=time.monotonic())
@@ -163,6 +197,17 @@ class LocalInputRuntime:
                 pass  # hints are optional; finite fallback polling remains
             while not self._stop.is_set():
                 if self.run_due():
+                    continue
+                # Reclaim old generations between scheduled scans in bounded
+                # transactions. Selected-room work is reconsidered every chunk.
+                try:
+                    with self._worker_lock:
+                        reclaimed = staged_source.cleanup(self.store, max_rows=128)
+                except Exception:
+                    # Cleanup cannot restore readiness or waive capacity. Keep
+                    # ingestion/health polling alive if reclamation fails.
+                    reclaimed = 0
+                if reclaimed:
                     continue
                 delay = self.schedule.wait_s(now=time.monotonic(), maximum=0.35)
                 if watcher is None:

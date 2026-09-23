@@ -10,6 +10,7 @@ import errno
 import os
 import re
 import struct
+from itertools import chain
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 
@@ -226,11 +227,12 @@ class Reader:
         return b''.join(chunks)
 
 
-def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
+def collect(root, exact, prefixes, *, max_bytes, max_paths, include,
+            max_document_bytes=None, deduplicate=True):
     reader = Reader()
     root_handle = reader.root(root)
     examined, remaining = 0, max_bytes
-    seen = set()
+    seen = set() if deduplicate else None
 
     def charge(parts):
         nonlocal examined
@@ -241,14 +243,18 @@ def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
     def read(handle, parts):
         nonlocal remaining
         logical = '/'.join(parts)
-        if logical in seen:
+        if seen is not None and logical in seen:
             return
-        payload = reader.read(handle, remaining + 1)
+        limit = remaining if max_document_bytes is None else min(remaining, max_document_bytes)
+        payload = reader.read(handle, limit + 1)
+        if max_document_bytes is not None and len(payload) > max_document_bytes:
+            raise FolderReadUnavailable('document_byte_budget')
         remaining -= len(payload)
         if remaining < 0:
             raise FolderReadUnavailable('byte_budget')
         include(logical, payload)
-        seen.add(logical)
+        if seen is not None:
+            seen.add(logical)
 
     def walk(handle, parts):
         for name in reader.entries(handle):
@@ -268,7 +274,8 @@ def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
                 reader.close(child)
 
     try:
-        for logical, prefix in [(p, False) for p in sorted(exact)] + [(p, True) for p in sorted(prefixes)]:
+        for logical, prefix in chain(((p, False) for p in sorted(exact)),
+                                     ((p, True) for p in sorted(prefixes))):
             parts = tuple(logical.split('/'))
             handle, owned = root_handle, False
             try:
