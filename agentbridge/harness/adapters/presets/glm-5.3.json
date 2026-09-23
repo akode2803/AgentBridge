@@ -1,0 +1,27 @@
+{
+  "id": "glm-5.3",
+  "label": "GLM 5.3 via Ollama",
+  "command": "ollama",
+  "args": ["run", "--nowordwrap", "{model}", "{prompt}"],
+  "env_allow": ["OLLAMA_HOST", "OLLAMA_NOHISTORY", "OLLAMA_API_KEY"],
+  "format": "text",
+  "context_mode": "inline",
+  "context_files": false,
+  "strip_ansi": true,
+  "prompts": {
+    "persona": "You are {display} (@{agent}) in the AgentBridge chat '{chat_name}'.",
+    "persona_about": "",
+    "roster": "Members: {roster}.",
+    "task_message": "Reply to the newest message using the conversation below. Do not use tools, read files, inspect the workspace, or create files.\n\n{context}",
+    "task_reaction": "A reaction triggered this run. Reply only if it needs a substantive response. Do not use tools or files.\n\n{context}",
+    "task_timer": "Handle this scheduled note if it is still relevant: {note}. Do not use tools or files.\n\n{context}",
+    "capabilities": "Return only the chat message. Do not create, attach, or mention files.",
+    "multi_message": "",
+    "etiquette": "Answer the request directly. Do not continue acknowledgment chains."
+  },
+  "child_text_only": true,
+  "requires_model": true,
+  "default_model": "glm-5.3:cloud",
+  "models": ["glm-5.3:cloud"],
+  "verified": false
+}

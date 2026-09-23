@@ -63,6 +63,16 @@ def test_agent_overrides_win(tmp_path):
     assert "OPTIONAL" in pack.text("silence", sentinel=SILENCE)
 
 
+def test_preset_prompt_overrides_are_below_agent_overrides(tmp_path):
+    pm = PromptManager(tmp_path / "nohome")
+    pack = pm.for_agent(
+        acc(prompts={"etiquette": "Agent choice."}),
+        {"persona": "Preset persona.", "etiquette": "Preset choice."},
+    )
+    assert pack.text("persona") == "Preset persona."
+    assert pack.text("etiquette") == "Agent choice."
+
+
 def test_broken_template_degrades_to_raw(tmp_path):
     pm = PromptManager(tmp_path / "nohome")
     pack = pm.for_agent(acc(prompts={"persona": "Bad {brace and {display}"}))
@@ -197,6 +207,30 @@ def test_context_text_renders_transcript(tmp_path):
     assert '@helper (you): [replying to @aryan: "hello there"] hi' in text
     assert "(id m1)" in text and "(id m2)" in text   # tool-actable ids (R19)
     assert "- a.csv -> read it at inbox/a.csv" in text
+
+
+def test_context_text_supports_bounded_tail_without_recall(tmp_path):
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    d = delivery(
+        transcript=[msg(id=f"m{i}", body=f"recent-{i}") for i in range(4)],
+        recalled=[msg(id="old", body="retrieved-old")],
+    )
+    text = pack.context_text(d, transcript_tail=2, include_recalled=False)
+    assert "recent-0" not in text and "recent-1" not in text
+    assert "recent-2" in text and "recent-3" in text
+    assert "retrieved-old" not in text
+
+
+def test_context_text_can_exclude_agent_previous_replies(tmp_path):
+    pack = PromptManager(tmp_path / "nohome").for_agent(acc())
+    d = delivery(transcript=[
+        msg(id="human-1", from_="aryan", body="hello"),
+        msg(id="self-1", from_="helper", body="stale refusal"),
+        msg(id="human-2", from_="aryan", body="try again"),
+    ])
+    text = pack.context_text(d, transcript_tail=8, include_self=False)
+    assert "hello" in text and "try again" in text
+    assert "stale refusal" not in text
 
 
 def test_render_message_variants():

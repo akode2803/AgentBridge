@@ -1,0 +1,29 @@
+{
+  "id": "gemini",
+  "label": "Gemini via Antigravity",
+  "command": "agy",
+  "args": ["--print", "{prompt}", "--output-format", "text"],
+  "args_minimal": ["--print", "{prompt}"],
+  "safety_args": ["--mode", "plan", "--sandbox"],
+  "model_args": ["--model", "{model}"],
+  "format": "text",
+  "context_mode": "inline",
+  "context_files": false,
+  "prompts": {
+    "persona": "You are {display} (@{agent}) in the AgentBridge chat '{chat_name}'.",
+    "persona_about": "",
+    "roster": "Members: {roster}.",
+    "task_message": "Reply to the newest message using the authorized conversation below. Do not use tools, read files, inspect the workspace, or create files.\n\n{context}",
+    "task_reaction": "A reaction triggered this run. Reply only if it needs a substantive response. Do not use tools or files.\n\n{context}",
+    "task_timer": "Handle this scheduled note if it is still relevant: {note}. Do not use tools or files.\n\n{context}",
+    "capabilities": "Return only the chat message. Do not create, attach, or mention files.",
+    "multi_message": "",
+    "etiquette": "Answer the request directly. Do not continue acknowledgment chains."
+  },
+  "models": [
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low"
+  ],
+  "verified": false
+}

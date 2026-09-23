@@ -78,6 +78,19 @@ class Preset:
     # and provider endpoints must be named here instead of inheriting the host.
     env_allow: list[str] = field(default_factory=list)
     format: str = "text"              # claude-stream | codex-jsonl | text
+    # Provider-specific prompt delivery remains data. Tool-capable CLIs read
+    # context.md; plain model CLIs can instead receive a bounded transcript
+    # inline without forking the shared harness.
+    context_mode: str = "file"         # file | inline
+    context_tail: int = 30
+    context_recall: bool = True
+    context_include_self: bool = True
+    # Some headless providers cannot answer file-access prompts. Keep this a
+    # preset datum: false means the already-authorized transcript stays inline
+    # and attachments/context.md are not materialized for that provider run.
+    context_files: bool = True
+    prompts: dict[str, object] = field(default_factory=dict)
+    strip_ansi: bool = False
     default_model: str = ""
     models: list[str] = field(default_factory=list)        # picker suggestions
     requires_model: bool = False      # e.g. `ollama run <model>` is mandatory
@@ -135,6 +148,26 @@ class Preset:
             raise ValidationError("a preset needs at least id and command")
         if p.format not in FORMATS:
             raise ValidationError(f"unknown preset format {p.format!r}")
+        if p.context_mode not in ("file", "inline"):
+            raise ValidationError(
+                f"unknown preset context mode {p.context_mode!r}")
+        if (isinstance(p.context_tail, bool)
+                or not isinstance(p.context_tail, int)
+                or not 1 <= p.context_tail <= 30):
+            raise ValidationError("preset context_tail must be from 1 to 30")
+        if not isinstance(p.context_recall, bool):
+            raise ValidationError("preset context_recall must be a boolean")
+        if not isinstance(p.context_include_self, bool):
+            raise ValidationError("preset context_include_self must be a boolean")
+        if not isinstance(p.context_files, bool):
+            raise ValidationError("preset context_files must be a boolean")
+        if not p.context_files and p.context_mode != "inline":
+            raise ValidationError(
+                "preset context_files may be false only for inline context")
+        if not isinstance(p.prompts, dict):
+            raise ValidationError("preset prompts must be an object")
+        if not isinstance(p.strip_ansi, bool):
+            raise ValidationError("preset strip_ansi must be a boolean")
         if p.child_text_only and (raw_bridge is not None
                                   or raw_native is not None
                                   or d.get("permission_args") is not None
