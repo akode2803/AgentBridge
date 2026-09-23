@@ -16,12 +16,37 @@ from . import document_observation as docs
 
 MAX = docs.MAX_SQLITE_INTEGER
 MAX_WRITES = 64
-_TABLES = {
+_V1_TABLES = {
     'local_source_schema': 'CREATE TABLE local_source_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=1),epoch TEXT NOT NULL)',
     'local_sources': 'CREATE TABLE local_sources(source TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(typeof(revision)=\'integer\' AND revision>=1),ready_incarnation TEXT,ready_generation INTEGER,ready_cursor INTEGER,last_success_ns INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT \'\')',
     'local_source_writes': 'CREATE TABLE local_source_writes(token TEXT PRIMARY KEY,source TEXT NOT NULL)',
 }
+_TABLES = dict(_V1_TABLES)
+_TABLES['local_source_schema'] = 'CREATE TABLE local_source_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2),epoch TEXT NOT NULL)'
+_MAPPING = 'CREATE TABLE local_input_generations(source TEXT PRIMARY KEY,physical TEXT NOT NULL UNIQUE)'
 _INDEX = 'CREATE INDEX local_source_writes_source ON local_source_writes(source)'
+
+
+def _mapping_trigger(event, refs):
+    actions = []
+    for ref, condition in refs:
+        actions.append(
+            'SELECT CASE WHEN ' + condition + ' AND EXISTS(SELECT 1 FROM local_sources '
+            'WHERE source=' + ref + '.source AND revision>=9223372036854775807) '
+            "THEN RAISE(ABORT,'local source revision exhausted') END; "
+            'UPDATE local_sources SET revision=revision+1,ready_incarnation=NULL,'
+            'ready_generation=NULL,ready_cursor=NULL WHERE source=' + ref + '.source AND '
+            + condition + ';'
+        )
+    return ('CREATE TRIGGER local_input_generation_dirty_' + event.lower() + ' AFTER '
+            + event + ' ON local_input_generations BEGIN ' + ' '.join(actions) + ' END')
+
+
+_MAPPING_TRIGGERS = {
+    'INSERT': _mapping_trigger('INSERT', (('NEW', '1'),)),
+    'DELETE': _mapping_trigger('DELETE', (('OLD', '1'),)),
+    'UPDATE': _mapping_trigger('UPDATE', (('OLD', '1'), ('NEW', 'NEW.source<>OLD.source'))),
+}
 
 
 class SourceChanged(RuntimeError):
@@ -35,6 +60,11 @@ class SourcePosition:
     revision: int
     ready: bool
     writes_pending: int
+    logical_source: str | None = None
+
+    @property
+    def source_id(self):
+        return self.logical_source or self.raw.source_id
 
 
 @dataclass(frozen=True)
@@ -57,17 +87,30 @@ def _expected(store, value):
             or type(epoch) is not str or len(epoch) != 32
             or any(c not in '0123456789abcdef' for c in epoch)):
         raise ValueError('invalid expected source position')
-    return SourcePosition(raw, epoch, revision, ready, pending)
+    logical = value.logical_source
+    if logical is not None:
+        logical = docs._validate_source_id(logical)
+    return SourcePosition(raw, epoch, revision, ready, pending, logical)
 
 
-def _schema(conn):
+def _schema(conn, *, legacy=False):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?,?) LIMIT 1", ('local_source_schema', 'local_sources', 'local_source_writes')).fetchone():
         raise SourceChanged('unexpected_source_trigger')
-    for name, statement in (*_TABLES.items(), ('local_source_writes_source', _INDEX)):
+    for name, statement in (*(_V1_TABLES if legacy else _TABLES).items(), ('local_source_writes_source', _INDEX)):
         if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (statement,):
             raise SourceChanged('local_source_schema_changed')
+    actual = dict(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
+        "(name GLOB 'local_input_generation_*' OR tbl_name='local_input_generations') LIMIT 4"
+    ).fetchall())
+    if legacy:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='local_input_generations' LIMIT 1").fetchone() or actual:
+            raise SourceChanged('local_generation_schema_changed')
+    else:
+        if conn.execute("SELECT sql FROM sqlite_master WHERE name='local_input_generations'").fetchone() != (_MAPPING,) or actual != {'local_input_generation_dirty_' + event.lower(): sql for event, sql in _MAPPING_TRIGGERS.items()}:
+            raise SourceChanged('local_generation_schema_changed')
     row = conn.execute('SELECT version,epoch FROM local_source_schema WHERE singleton=1').fetchone()
-    if row is None or row[0] != 1 or type(row[1]) is not str or len(row[1]) != 32:
+    if row is None or type(row[0]) is not int or row[0] != (1 if legacy else 2) or type(row[1]) is not str or len(row[1]) != 32 or any(c not in '0123456789abcdef' for c in row[1]):
         raise SourceChanged('local_source_epoch_missing')
     return row[1]
 
@@ -94,12 +137,25 @@ def initialize(store):
     with _writer(store) as conn:
         existing = conn.execute("SELECT name FROM sqlite_master WHERE name GLOB 'local_source*'").fetchall()
         if existing:
+            version = conn.execute('SELECT version FROM local_source_schema WHERE singleton=1').fetchone()
+            if version == (1,):
+                epoch = _schema(conn, legacy=True)
+                conn.execute('DROP TABLE local_source_schema')
+                conn.execute(_TABLES['local_source_schema'])
+                conn.execute('INSERT INTO local_source_schema VALUES(1,2,?)', (epoch,))
+                conn.execute(_MAPPING)
+                conn.execute('INSERT INTO local_input_generations(source,physical) SELECT source,source FROM local_sources')
+                for statement in _MAPPING_TRIGGERS.values():
+                    conn.execute(statement)
             _schema(conn)
             return
         for statement in _TABLES.values():
             conn.execute(statement)
         conn.execute(_INDEX)
-        conn.execute('INSERT INTO local_source_schema VALUES(1,1,?)', (secrets.token_hex(16),))
+        conn.execute(_MAPPING)
+        for statement in _MAPPING_TRIGGERS.values():
+            conn.execute(statement)
+        conn.execute('INSERT INTO local_source_schema VALUES(1,2,?)', (secrets.token_hex(16),))
 
 
 def capture_in_transaction(conn, store, source):
@@ -111,8 +167,15 @@ def capture_in_transaction(conn, store, source):
     if not databases.get('main') or Path(databases['main']).resolve() != store.path.resolve():
         raise ValueError('wrong local source database')
     epoch = _schema(conn)
-    raw = docs._capture_position(conn, store.path, source)
+    size = conn.execute('SELECT typeof(physical),length(CAST(physical AS BLOB)) FROM local_input_generations WHERE source=?', (source,)).fetchone()
+    if size is not None and (size[0] != 'text' or type(size[1]) is not int or not 1 <= size[1] <= docs.MAX_SOURCE_ID_BYTES):
+        raise SourceChanged('invalid_generation_mapping')
+    selected = conn.execute('SELECT physical FROM local_input_generations WHERE source=?', (source,)).fetchone() if size is not None else None
+    physical = docs._validate_source_id(selected[0]) if selected else source
+    raw = docs._capture_position(conn, store.path, physical)
     row = conn.execute('SELECT revision,ready_incarnation,ready_generation,ready_cursor,last_success_ns,failures,error FROM local_sources WHERE source=?', (source,)).fetchone()
+    if bool(row) != bool(selected):
+        raise SourceChanged('missing_generation_mapping')
     pending = conn.execute('SELECT count(*) FROM (SELECT 1 FROM local_source_writes WHERE source=? LIMIT ?)', (source, MAX_WRITES + 1)).fetchone()[0]
     if pending > MAX_WRITES:
         raise SourceChanged('too_many_pending_writes')
@@ -123,7 +186,7 @@ def capture_in_transaction(conn, store, source):
         raise SourceChanged('invalid_source_row')
     revision = row[0] if row else 0
     ready = bool(row and not pending and raw.initialized and (row[1], row[2], row[3]) == (raw.incarnation, raw.generation, raw.cursor))
-    return SourcePosition(raw, epoch, revision, ready, pending)
+    return SourcePosition(raw, epoch, revision, ready, pending, source if physical != source else None)
 
 
 def capture(store, source):
@@ -138,6 +201,10 @@ def capture(store, source):
 def _advance(conn, source, revision):
     if type(revision) is not int or not 0 <= revision < MAX:
         raise OverflowError('local source revision exhausted')
+    # New logical rows always receive an explicit self mapping. Existing rows
+    # must already have one; never silently repair a deleted admission pointer.
+    if revision == 0:
+        conn.execute('INSERT INTO local_input_generations(source,physical) VALUES(?,?)', (source, source))
     conn.execute('INSERT INTO local_sources(source,revision) VALUES(?,?) ON CONFLICT(source) DO UPDATE SET revision=excluded.revision,ready_incarnation=NULL,ready_generation=NULL,ready_cursor=NULL', (source, revision + 1))
 
 
@@ -210,20 +277,20 @@ def admit(store, expected, published, *, observed_ns, allow_unchanged=False):
             or not (successor or unchanged) or not published.initialized):
         raise SourceChanged('publication_not_successor')
     with _writer(store) as conn:
-        current = capture_in_transaction(conn, store, published.source_id)
+        current = capture_in_transaction(conn, store, expected.source_id)
         if (current.epoch != expected.epoch or current.revision != expected.revision
                 or current.writes_pending or expected.writes_pending or current.raw != published):
             raise SourceChanged('source_changed_during_ingestion')
-        _advance(conn, published.source_id, current.revision)
-        conn.execute('UPDATE local_sources SET ready_incarnation=?,ready_generation=?,ready_cursor=?,last_success_ns=?,failures=0,error=\'\' WHERE source=?', (published.incarnation, published.generation, published.cursor, observed_ns, published.source_id))
-    return SourcePosition(published, current.epoch, current.revision + 1, True, 0)
+        _advance(conn, expected.source_id, current.revision)
+        conn.execute('UPDATE local_sources SET ready_incarnation=?,ready_generation=?,ready_cursor=?,last_success_ns=?,failures=0,error=\'\' WHERE source=?', (published.incarnation, published.generation, published.cursor, observed_ns, expected.source_id))
+    return SourcePosition(published, current.epoch, current.revision + 1, True, 0, current.logical_source)
 
 
 def record_failure(store, source, *, reason, expected=None):
     """Bounded diagnostic codes only; retire readiness, preserve last success."""
     if expected is not None:
         expected = _expected(store, expected)
-        if expected.raw.source_id != source:
+        if expected.source_id != source:
             raise ValueError('failure source mismatch')
     if reason not in ('io', 'incomplete', 'budget', 'conflict', 'unavailable'):
         raise ValueError('invalid source health reason')
@@ -259,11 +326,11 @@ def retire_for_publication(store, expected):
     # Retire the old ready generation durably before any raw publication work.
     # CAS losers do not own a publication attempt and cannot retire a winner.
     with _writer(store) as conn:
-        current = capture_in_transaction(conn, store, expected.raw.source_id)
+        current = capture_in_transaction(conn, store, expected.source_id)
         if expected.writes_pending or current != expected:
             raise SourceChanged('source_changed_before_publication')
-        _advance(conn, expected.raw.source_id, current.revision)
-        retired = SourcePosition(current.raw, current.epoch, current.revision + 1, False, 0)
+        _advance(conn, expected.source_id, current.revision)
+        retired = SourcePosition(current.raw, current.epoch, current.revision + 1, False, 0, current.logical_source)
     return retired
 
 
@@ -275,6 +342,9 @@ def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
     primitive always replaces the whole declared source, never assumes a delta
     proves namespace completeness. Source selectors are fixed by that owner.
     """
+    expected = _expected(store, expected)
+    if expected.raw.source_id.startswith('stage:'):
+        raise SourceChanged('staged_source_requires_staged_publication')
     retired = retire_for_publication(store, expected)
     published = store.publish_document_batch(retired.raw, documents,
         cursor=retired.raw.cursor, full=True, retain_tombstones=False,

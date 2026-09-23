@@ -9,11 +9,14 @@ class FolderReadUnavailable(RuntimeError):
     pass
 
 
-def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
+def collect(root, exact, prefixes, *, max_bytes, max_paths, include,
+            max_document_bytes=None, deduplicate=True):
     if os.name == 'nt':
         from .folder_raw_windows import collect as collect_windows
         return collect_windows(root, exact, prefixes, max_bytes=max_bytes,
-                               max_paths=max_paths, include=include)
+                               max_paths=max_paths, include=include,
+                               max_document_bytes=max_document_bytes,
+                               deduplicate=deduplicate)
     # Never substitute pathname check-then-open on platforms lacking this owner.
     if (os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd
             or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY')):
@@ -21,7 +24,7 @@ def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     examined, remaining = 0, max_bytes
-    seen = set()
+    seen = set() if deduplicate else None
 
     def charge(parts):
         nonlocal examined
@@ -66,7 +69,7 @@ def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
         def read(parent, name, parts, *, missing_ok):
             nonlocal remaining
             logical = '/'.join(parts)
-            if logical in seen:
+            if seen is not None and logical in seen:
                 return
             charge(parts)
             try:
@@ -78,13 +81,17 @@ def collect(root, exact, prefixes, *, max_bytes, max_paths, include):
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise FolderReadUnavailable('non_regular_document')
+                limit = remaining if max_document_bytes is None else min(remaining, max_document_bytes)
                 with os.fdopen(fd, 'rb', closefd=False) as stream:
-                    payload = stream.read(remaining + 1)
+                    payload = stream.read(limit + 1)
+                if max_document_bytes is not None and len(payload) > max_document_bytes:
+                    raise FolderReadUnavailable('document_byte_budget')
                 remaining -= len(payload)
                 if remaining < 0:
                     raise FolderReadUnavailable('byte_budget')
                 include(logical, payload)
-                seen.add(logical)
+                if seen is not None:
+                    seen.add(logical)
             finally:
                 os.close(fd)
 

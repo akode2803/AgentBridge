@@ -129,9 +129,14 @@ def _schema(conn, legacy=False):
     actual = dict(conn.execute(
         "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
         "(name GLOB 'overlay_index_dirty_*' OR tbl_name IN "
-        "('overlay_index_ready','overlay_index_docs','overlay_index_candidates','overlay_index_proofs','overlay_index_shapes')) LIMIT 13"
+        "('overlay_index_ready','overlay_index_docs','overlay_index_candidates','overlay_index_proofs','overlay_index_shapes')) LIMIT 23"
     ).fetchall())
-    if actual != _triggers(legacy):
+    expected_triggers = _triggers(legacy)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='staged_sources'").fetchone():
+        from . import staged_source
+        staged_source._schema(conn)
+        expected_triggers = {**expected_triggers, **staged_source._triggers()}
+    if actual != expected_triggers:
         raise OverlayIndexUnavailable('index_triggers_changed')
     index = conn.execute("SELECT sql FROM sqlite_master WHERE name='overlay_index_manifest'").fetchone()
     if index != (None if legacy else (_MANIFEST_INDEX,)):
@@ -224,15 +229,8 @@ def _write_ready(conn, position):
                  (p.source_id, position.chat_id, p.generation, p.cursor, p.incarnation, position.build, SCHEMA))
 
 
-def publish(conn, path, prepared, *, shared_source=False):
-    """Prepare outside SQLite; replace all rows and readiness in one owned CAS.
-
-    A shared source still requires complete coverage of this chat's overlay
-    namespace. Other raw dependencies are excluded by an indexed path range,
-    not by trusting the preparer's selection or by using a different generation.
-    """
-    if type(shared_source) is not bool:
-        raise ValueError('shared_source must be a bool')
+def _validated_rows(prepared, path):
+    """Bound one normalized batch before either replacement or staged insertion."""
     if type(prepared) is not PreparedOverlayIndex:
         raise ValueError('expected prepared overlay index')
     expected = source._validate_expected(prepared.source, path)
@@ -294,6 +292,19 @@ def publish(conn, path, prepared, *, shared_source=False):
         if used > MAX_BUILD_BYTES:
             raise OverflowError('index byte budget exceeded')
         candidates.append((expected.source_id, *key, item.value, size))
+    return expected, chat, docs, candidates, shapes, names, used
+
+
+def publish(conn, path, prepared, *, shared_source=False):
+    """Prepare outside SQLite; replace all rows and readiness in one owned CAS.
+
+    A shared source still requires complete coverage of this chat's overlay
+    namespace. Other raw dependencies are excluded by an indexed path range,
+    not by trusting the preparer's selection or by using a different generation.
+    """
+    if type(shared_source) is not bool:
+        raise ValueError('shared_source must be a bool')
+    expected, chat, docs, candidates, shapes, names, used = _validated_rows(prepared, path)
     if conn.in_transaction:
         raise sqlite3.OperationalError('index publication requires an owned transaction')
     position = OverlayIndexPosition(expected, chat, uuid.uuid4().hex)

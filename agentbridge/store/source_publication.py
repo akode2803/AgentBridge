@@ -46,7 +46,7 @@ class SourcePublisher:
         if (type(path) is not str or type(epoch) is not str
                 or path != str(self.coordinator.path)
                 or epoch != self.coordinator.epoch
-                or definition != self.definition or expected.raw.source_id != definition.source):
+                or definition != self.definition or expected.source_id != definition.source):
             raise ValueError('foreign collection position')
         return expected
 
@@ -61,6 +61,8 @@ class SourcePublisher:
         leave the source unavailable, including invalid/oversize input.
         """
         expected = self._expected(captured)
+        if expected.raw.source_id.startswith('stage:'):
+            raise owner.SourceChanged('staged_source_requires_staged_publication')
         with self.coordinator.publication_gate(self.store, self.definition):
             retired = owner.retire_for_publication(self.store, expected)
         # Do not move this into a root gate: encoding/SQLite raw replacement can
