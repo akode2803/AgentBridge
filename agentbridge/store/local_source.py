@@ -219,14 +219,21 @@ def admit(store, expected, published, *, observed_ns, allow_unchanged=False):
     return SourcePosition(published, current.epoch, current.revision + 1, True, 0)
 
 
-def record_failure(store, source, *, reason):
+def record_failure(store, source, *, reason, expected=None):
     """Bounded diagnostic codes only; retire readiness, preserve last success."""
+    if expected is not None:
+        expected = _expected(store, expected)
+        if expected.raw.source_id != source:
+            raise ValueError('failure source mismatch')
     if reason not in ('io', 'incomplete', 'budget', 'conflict', 'unavailable'):
         raise ValueError('invalid source health reason')
     with _writer(store) as conn:
         current = capture_in_transaction(conn, store, source)
+        if expected is not None and current != expected:
+            return False
         _advance(conn, source, current.revision)
         conn.execute('UPDATE local_sources SET failures=min(failures+1,?),error=? WHERE source=?', (MAX, reason, source))
+        return True
 
 
 def health(store, source):
