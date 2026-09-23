@@ -50,7 +50,10 @@ class Mesh:
         sync_workers: int = 4,
         app_version: str = "",
         release_info=None,
+        local_inputs: bool = False,
     ) -> None:
+        if type(local_inputs) is not bool:
+            raise ValueError('local_inputs must be a bool')
         self.user = user
         self.machine = machine
         self.home = home or DEFAULT_HOME
@@ -69,6 +72,22 @@ class Mesh:
             root_tag = hashlib.sha1(root_key.encode()).hexdigest()[:12]
             store_path = self.home / "cache" / f"{user}@{machine}-{root_tag}.sqlite"
         self.store = Store(store_path)
+
+        # Internal opt-in until bounded API metadata and session handout are
+        # wired. Capture the legacy durable namespace BEFORE adding the owner.
+        from ..transport.local_mutations import LocalMutationTransport, owned_transport
+        self.local_inputs = None
+        if local_inputs or type(self.tx) is LocalMutationTransport:
+            try:
+                if sealer is not None:
+                    raise ValueError('local inputs require a Mesh-owned sealer')
+                if type(self.tx) is not LocalMutationTransport:
+                    self.tx = owned_transport(self.tx, self.home)
+                from .local_input_runtime import LocalInputRuntime
+                self.local_inputs = LocalInputRuntime(self.tx, self.store)
+            except BaseException:
+                self.store.close()
+                raise
 
         # R27: published account keys resolve through the machine-local pin
         # store — a rewritten directory doc can't displace keys already seen.
@@ -142,6 +161,8 @@ class Mesh:
 
     def _mirror_changed(self) -> None:
         """Wake local read-model consumers without exposing changed paths."""
+        if self.local_inputs is not None:
+            self.local_inputs.hint()
         self.bus.publish(Event(eventbus.MIRROR_UPDATE, ns=time.time_ns()))
 
     def _sign_event(self, data: bytes) -> str:
@@ -421,12 +442,16 @@ class Mesh:
         """Start the background outbox flusher, notifier pump (+ the presence
         heartbeat). The sync loop stays the caller's to run — GUI/harness own
         their cadence via ``sync.run``/``sync_once``."""
+        if self.local_inputs is not None:
+            self.local_inputs.start()
         self.outbox.start()
         self.notifier.start()
         if heartbeat:
             self.presence.start()
 
     def close(self) -> None:
+        if self.local_inputs is not None:
+            self.local_inputs.stop()
         if self._mirror_unsubscribe is not None:
             self._mirror_unsubscribe()
             self._mirror_unsubscribe = None
