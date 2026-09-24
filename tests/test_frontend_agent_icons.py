@@ -53,7 +53,7 @@ def test_agent_identity_surfaces_use_helper_and_keep_status_pills() -> None:
     assert "agentIdentityBadge()" in sources["picker.js"]
 
     # These are statuses or user labels, not agent identity tags.
-    assert '<span class="kind-tag">agents paused</span>' in sources["chat.js"]
+    assert '<span class="kind-tag agent-pause-tag">agents paused</span>' in sources["chat.js"]
     assert '<span class="kind-tag">You</span>' in sources["sidebar.js"]
 
     css = (ROOT / "gui" / "static" / "style.css").read_text(encoding="utf-8")

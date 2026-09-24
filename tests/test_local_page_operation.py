@@ -183,7 +183,8 @@ def test_delayed_local_changes_reject_prepared_finalizer(world, race):
         mesh.keys._cache[(chat, epoch)] = b"changed-key"
 
     result = prepared.prepared.finalize()
-    assert result.status == "unavailable", result
+    assert result.status == ("restart" if race == "source" else "unavailable"), result
+    assert result.result is None  # A changed cut never hands out old content.
 
 
 def test_continuation_rejects_delayed_older_message_instead_of_skipping(world):
@@ -284,7 +285,7 @@ def test_pending_local_source_never_reads_provider_or_falls_back(world, monkeypa
         result = PageOperation(mesh, chat, source_reader=reader).prepare(*inputs)
     finally:
         root.complete(intent)
-    assert result.status == "unavailable"
+    assert (result.status, result.reason) == ("restart", "local_inputs_changed")
 
 
 def test_local_page_operation_ledger_remains_bounded(world):

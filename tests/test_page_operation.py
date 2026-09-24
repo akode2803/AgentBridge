@@ -159,7 +159,7 @@ def test_presentation_is_page_local_and_joins_starred_across_raw_windows(world):
     ]
     assert presentation.starred == ("m199", "m399")
     assert json.loads(presentation.viewer_state_json) == {
-        "read_ns": base + 42, "archived": True,
+        "read_ns": base + 42, "archived": True, "mute": False,
     }
     assert json.loads(presentation.snapshot_json)["id"] == chat
     assert result.result.candidate is None

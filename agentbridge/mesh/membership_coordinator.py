@@ -165,13 +165,16 @@ class _Round:
         self.batches.append(value)
         return value
 
+    def _account_record(self, name):
+        return self.capture((name,)).documents.records[1]
+
     def raw(self, name):
         if name in self.accounts:
             return self.accounts[name]
         self.ledger.step()
         if len(self.accounts) >= self.ledger.limits.max_accounts:
             raise _Stop('unavailable', 'account_budget_exhausted')
-        value = self.capture((name,)).documents.records[1]
+        value = self._account_record(name)
         doc = None if value.deleted else json.loads(value.payload_json)
         if type(doc) is not dict:
             self.accounts[name], self.facts[name] = None, None
@@ -370,9 +373,15 @@ class _Round:
             raise _Stop('unavailable', 'invalid_proposal')
         local = nullcontext() if prepared_page is None else page_fence.local_scope(self.mesh, prepared_page, source_reader=self.source_reader)
         companions = ()
-        if prepared_page is not None and prepared_page.fence.presence is not None:
+        if prepared_page is not None and (prepared_page.fence.presence is not None
+                                         or prepared_page.fence.display_presence is not None):
             from .local_presence_source import definition as presence_definition
             companions = (presence_definition(self.source_reader.coordinator.identity),)
+        if prepared_page is not None and prepared_page.fence.auxiliary:
+            from .local_aux_source import definition as aux_definition
+            companions += tuple(aux_definition(self.source_reader.coordinator.identity,
+                                receipt.scope, receipt.chat_id)
+                                for receipt in prepared_page.fence.auxiliary)
         with local:
             with self.mesh.key_pins.locked_matching_view(view) as pins_match:
                 if not pins_match:

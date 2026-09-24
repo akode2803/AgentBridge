@@ -38,11 +38,13 @@ class LocalInputRuntime:
         self._discovery = None
         self._discovery_due = 0.0
         self.presence = None
+        self.auxiliary = None
 
     def bind_page_owner(self, mesh):
         from .page_preparation import PagePreparation
         from .source_discovery import SourceDiscovery
         from .presence_input_runtime import PresenceInputRuntime
+        from .aux_input_runtime import AuxInputRuntime
         if mesh.store is not self.store or mesh.tx is not self.transport:
             raise ValueError('foreign page preparation owner')
         with self._lock:
@@ -51,6 +53,7 @@ class LocalInputRuntime:
             self._page_preparation = PagePreparation(mesh)
             self._discovery = SourceDiscovery(self.store)
             self.presence = PresenceInputRuntime(self.transport, self.store)
+            self.auxiliary = AuxInputRuntime(self.transport, self.store)
 
     def request_page(self, chat, *, index=None, proofs=()):
         with self._lock:
@@ -109,6 +112,9 @@ class LocalInputRuntime:
             selected = self._selected
         if selected is not None:
             self.request(selected, activity=True)
+            if self.auxiliary is not None:
+                self.auxiliary.request('status')
+                self.auxiliary.request('runtime', selected)
 
     def health(self, chat):
         reader = self.reader(chat)
@@ -256,7 +262,8 @@ class LocalInputRuntime:
                 ingested = self.run_due()
                 with self._worker_lock:
                     presence_work = self.presence.run_due() if self.presence is not None and not self._closed else False
-                if ingested or presence_work:
+                    aux_work = self.auxiliary.run_due() if self.auxiliary is not None and not self._closed else False
+                if ingested or presence_work or aux_work:
                     continue
                 # Reclaim old generations between scheduled scans in bounded
                 # transactions. Selected-room work is reconsidered every chunk.
@@ -296,6 +303,8 @@ class LocalInputRuntime:
                 self._page_preparation.close()
             if self.presence is not None:
                 self.presence.stop()
+            if self.auxiliary is not None:
+                self.auxiliary.stop()
             thread = self._thread
         if thread is not None:
             thread.join(timeout=5)

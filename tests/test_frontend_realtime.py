@@ -33,7 +33,7 @@ def test_realtime_refresh_is_coalesced_and_visibility_scoped():
     assert "openTrace.chat_id" not in chat
     assert "openTrace.body" not in chat
     assert "Date.now() - Math.round(Number(frame.server_ns)" not in realtime
-    assert "if (document.hidden || !document.hasFocus()) return;" in chat
+    assert "if (document.hidden || !document.hasFocus() || askPollRequest) return;" in chat
     assert "fetchSeq !== chatsFetchSeq" in chat
     assert "routeSeq !== App.routeSeq" in chat
     assert 'App.page !== "new" || routeSeq !== App.routeSeq' in chat

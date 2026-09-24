@@ -464,6 +464,9 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                             "AND name='presence_index_rows'").fetchone():
                 tables.append(('presence_index_rows', 'source'))
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='presence_display_rows'").fetchone():
+                tables.append(('presence_display_rows', 'source'))
             for table, key in tables:
                 if remaining <= 0:
                     break
@@ -475,6 +478,9 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                 "AND name='presence_index_ready'").fetchone():
                     conn.execute('DELETE FROM presence_index_ready WHERE source=?', (source_id,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='presence_display_ready'").fetchone():
+                    conn.execute('DELETE FROM presence_display_ready WHERE source=?', (source_id,))
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                 "AND name='presence_index_builds'").fetchone():
                     conn.execute('DELETE FROM presence_index_builds WHERE source=?', (source_id,))

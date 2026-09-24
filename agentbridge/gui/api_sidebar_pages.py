@@ -1,4 +1,4 @@
-"""Opt-in bounded sidebar rows from fresh finalized canonical page requests.
+"""Bounded sidebar rows from fresh finalized canonical page requests.
 
 Room IDs are positioning hints only. Every emitted row has an independent
 membership/source/session final cut; unresolved rooms make the inventory
@@ -12,9 +12,10 @@ import sqlite3
 from ..core.models import ChatSnapshot, MsgKind
 from ..mesh.page_operation import PageOperation
 from ..mesh.readmodel import unread_info
-from ..store import local_source, overlay_index
+from ..store import aux_inputs, local_source, overlay_index
 from ..transport.authority_observation import _part
-from .serialize import chat_json, snippet_json, user_json
+from .serialize import chat_json, snippet_json
+from . import sidebar_users
 
 
 MAX_ROOMS = 128
@@ -26,25 +27,25 @@ SCAN_BUDGET = 1000
 
 
 def _users(mesh):
-    """Account identity fallback; profile and presence gates are deferred."""
-    users = {}
-    names = mesh.directory.names()
-    if len(names) > MAX_USERS:
-        raise OverflowError('user_limit')
-    used = 0
-    for name in names:
-        account = mesh.directory.get(name)
-        if account is None:
-            continue
-        entry = user_json(account, {
-            'display': account.display or name, 'kind': account.kind.value,
-            'photo_visible': False,
-        }, me=None)
-        used += len(json.dumps({name: entry}, ensure_ascii=False).encode())
-        if used > MAX_USERS_BYTES:
-            raise OverflowError('user_byte_budget')
-        users[name] = entry
-    return users
+    """Public account-name fallback from complete admitted raw input only."""
+    auxiliary = mesh.local_inputs.auxiliary
+    auxiliary.request('users')
+    try:
+        reader, receipt, inputs = auxiliary.inputs(
+            'users', max_documents=MAX_USERS, max_bytes=MAX_USERS_BYTES)
+        users = sidebar_users.public_users(inputs)
+        with reader.finalization(receipt):
+            pass  # exact source position; no payload parse under root/Store.
+        return users, True, 'ready'
+    except aux_inputs.AuxInputsUnavailable as exc:
+        if exc.args == ('aux_document_budget',):
+            return {}, False, 'user_limit'
+        if exc.args == ('aux_byte_budget',):
+            return {}, False, 'user_byte_budget'
+        return {}, False, 'users_pending'
+    except (sidebar_users.UsersUnavailable, local_source.SourceChanged,
+            OSError, sqlite3.Error, OverflowError, ValueError):
+        return {}, False, 'users_pending'
 
 
 def _summary(snapshot, selection, viewer, state):
@@ -120,14 +121,9 @@ def _room(app, mesh, token, chat):
 
 def capture_sidebar(app, mesh, token):
     """Independent complete/incomplete room inventory with a hard row budget."""
-    try:
-        users = _users(mesh)
-    except OverflowError as exc:
-        return {'users': {}, 'chats': [], 'chats_complete': False,
-                'sidebar_status': str(exc),
-                'metadata_status': {'profiles': 'pending', 'presence': 'pending',
-                                    'live': 'deferred'}}
+    users, users_complete, user_status = _users(mesh)
     out = {'users': users, 'chats': [], 'chats_complete': False,
+           'users_complete': users_complete, 'user_status': user_status,
            'metadata_status': {'profiles': 'pending', 'presence': 'pending',
                                'live': 'deferred'}}
     try:
@@ -153,6 +149,6 @@ def capture_sidebar(app, mesh, token):
     out['chats_complete'] = complete
     out['sidebar_status'] = 'ready' if complete else 'rooms_pending'
     if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
-        out.update(users={}, chats=[], chats_complete=False,
-                   sidebar_status='response_byte_budget')
+        out.update(users={}, chats=[], chats_complete=False, users_complete=False,
+                   user_status='response_byte_budget', sidebar_status='response_byte_budget')
     return out

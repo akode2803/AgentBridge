@@ -1,7 +1,7 @@
 """Request-owned canonical page computation and final local-input validation.
 
-Inactive: GUI/session handout and source scheduling remain separate activation
-gates. There is no network, preparation rebuild, or full-fold fallback.
+GUI/session handout and source scheduling have separate owners. There is no
+network, preparation rebuild, or full-fold fallback inside this operation.
 An operation is never serialized, reused by another request, or treated as a
 membership lease. Every progress step discards its entire computed page.
 """
@@ -12,7 +12,7 @@ import threading
 from dataclasses import dataclass, field
 
 from ..core.models import ChatKind, MsgKind
-from ..store import document_observation, overlay_index, local_source, page_metadata, presence_index, page_inputs as raw_pages
+from ..store import aux_inputs, document_observation, overlay_index, local_source, page_metadata, presence_index, page_inputs as raw_pages
 from ..transport import authority_observation
 from . import authority_source, epoch_inputs, events, membership_coordinator as membership
 from . import page_fence, page_inputs, page_overlays, page_pins, page_receipts
@@ -117,31 +117,38 @@ class _Sealer:
         if not pub:
             return None
         ledger.unseal(env)
-        ledger.epoch(env.epoch)
-        if env.epoch not in self.epochs:
+        key = self.key(chat, env.epoch)
+        return mesh.sealer.unseal_observed(chat, env, pub, key)
+
+    def key(self, chat, epoch):
+        mesh, ledger = self.round.mesh, self.round.ledger
+        if chat != self.round.chat or type(epoch) is not int or epoch < 0:
+            raise ValueError('invalid observed runtime epoch')
+        ledger.epoch(epoch)
+        if epoch not in self.epochs:
             local = self.round.source_reader
             source_args = {} if local is None else dict(source_reader=local,
                 receipt=self.round.receipt, charge_source=ledger.charge, max_source_bytes=ledger.remaining())
-            view = epoch_inputs.capture_epoch(mesh.keys, chat, env.epoch,
+            view = epoch_inputs.capture_epoch(mesh.keys, chat, epoch,
                 max_bytes=min(epoch_inputs.MAX_IDENTITY_BYTES, ledger.remaining()), **source_args)
             ledger.charge(view.captured_bytes)
             if view.wrap is not None and (
                     (view.wrap.mirror != self.round.receipt.mirror) if local is None
                     else (view.wrap.receipt != self.round.receipt)):
                 raise _Work('source_refresh')
-            self.epochs[env.epoch] = view
+            self.epochs[epoch] = view
             if view.resident is None:
                 # Charge decode/unwrap and exact comparison as well as capture.
                 ledger.charge(2 * view.captured_bytes)
                 publish_args = {} if local is None else dict(source_reader=local, charge_source=ledger.charge)
                 status = epoch_inputs.publish_epoch(mesh.keys, view, **publish_args)
                 if status == 'readthrough':
-                    raise _Work('epoch_readthrough', (P.keys(chat, env.epoch),))
+                    raise _Work('epoch_readthrough', (P.keys(chat, epoch),))
                 if status in ('published', 'identity_progress'):
                     raise membership._Stop('restart', status)
                 if status != 'missing':
                     raise membership._Stop('restart', 'epoch_conflict')
-        return mesh.sealer.unseal_observed(chat, env, pub, self.epochs[env.epoch].resident)
+        return self.epochs[epoch].resident
 
 
 def _overlays(inputs):
@@ -170,6 +177,14 @@ def _overlays(inputs):
 
 
 def _failure(exc):
+    # A local write/refresh may retire the captured source between selection
+    # and finalization. Retry this request from a fresh cut; the GUI caps its
+    # attempts and returns pending if the source remains unavailable. Schema,
+    # owner-binding and malformed-source failures remain unavailable.
+    if (type(exc) is local_source.SourceChanged and exc.args in (
+            ('local_inputs_changed',), ('source_not_ready',),
+            ('source_mutation_pending',), ('source_changed_during_finalization',))):
+        return PageWorkResult('restart', 'local_inputs_changed')
     if (isinstance(exc, membership.terminal_observation.TerminalObservationUnavailable)
             and exc.args == ('terminal_classification_pending',)):
         return PageWorkResult('work', 'terminal_classification_pending')
@@ -192,7 +207,7 @@ def _failure(exc):
     return PageWorkResult('unavailable', 'inputs_unavailable')
 
 
-_ERRORS = (local_source.SourceChanged, membership._Stop, _Work, authority_source.AuthorityReadThroughRequired,
+_ERRORS = (aux_inputs.AuxInputsUnavailable, local_source.SourceChanged, membership._Stop, _Work, authority_source.AuthorityReadThroughRequired,
     page_metadata.PageMetadataUnavailable,
     presence_index.PresenceIndexUnavailable,
     authority_source.AuthoritySourceUnavailable, authority_observation.AuthorityObservationUnavailable,
@@ -274,6 +289,9 @@ class PageOperation:
         CanonicalPageAccumulator(self.viewer, mesh.sealer, limit=limit, scan_budget=scan_budget)
         self.limit, self.scan_budget = limit, scan_budget
         self.ledger, self._lock, self._serial = _Ledger(limits), threading.RLock(), 0
+
+    def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
+        return None, (), None
 
     def _bound(self):
         return ((self.mesh.messaging.user, self.mesh.messaging.machine) == (self.viewer, self.machine)
@@ -390,11 +408,18 @@ class PageOperation:
                     receipts_json, presence = ((None, None) if self.summary_only else
                         self._receipt_presentation(round_, snapshot,
                             source_binding, index, expected, selection, proofs))
+                    decoration, auxiliary, display_presence = self._decorate(
+                        round_, snapshot, source_binding, index, expected, sealer)
                     snapshot_json = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
                     viewer_metadata = {
                         'read_ns': int((viewer_state or {}).get('read_ns', 0)),
                         'archived': bool((viewer_state or {}).get('archived')),
                     }
+                    if not self.summary_only:
+                        mute = (viewer_state or {}).get('mute', False)
+                        viewer_metadata['mute'] = mute if (
+                            type(mute) is bool or type(mute) is int and 0 <= mute <= 2**63 - 1
+                        ) else None
                     if self.summary_only:
                         viewer_metadata.update(
                             read_ts=str((viewer_state or {}).get('read_ts', '')),
@@ -415,10 +440,10 @@ class PageOperation:
                     ledger.charge(len(snapshot_json.encode()) + len(viewer_state_json.encode())
                                   + sum(len(ident.encode()) for ident in starred))
                     presentation = page_fence.PagePresentation(snapshot_json, viewer_state_json, starred,
-                                                               pins_json, receipts_json)
+                                                               pins_json, receipts_json, decoration)
                     fence = page_fence.PageFence(expected, source_binding,
                         tuple((p, k, v) for (p, k), v in sorted(proofs.items())), tuple(epochs.values()),
-                        selection, presentation, presence)
+                        selection, presentation, presence, auxiliary, display_presence)
                     return PageWorkResult('prepared', prepared=_PreparedPage(self, self._serial, round_, snapshot, fence))
                 before = accumulator._selection.oldest_examined
                 exact, proof_keys = (), ()

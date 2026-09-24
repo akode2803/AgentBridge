@@ -53,6 +53,9 @@ def test_request_is_bounded_hint_and_raw_floors_are_exact(rig, monkeypatch):
     assert inputs.floors == (('bob', 31), ('alice', 0))
     assert 0 < inputs.observed_ns <= time.time_ns()
     assert reader.capture_members(receipt, ('bob',)).floors == (('bob', 31),)
+    displayed = reader.capture_display_members(receipt, ('bob', 'alice'))
+    assert displayed.subjects == (('bob', 31, '', 31), ('alice', 0, '', 0))
+    assert displayed.observed_ns == inputs.observed_ns
     conn = store._conn()
     conn.execute('BEGIN')
     try:
@@ -68,19 +71,25 @@ def test_exact_floors_and_observation_time_share_one_store_cut(rig):
     runtime.request()
     assert runtime.run_due()
     reader, receipt, first = runtime.inputs(('bob',))
+    first_display = reader.capture_display_members(receipt, ('bob',))
     assert first.observed_ns > 0
+    assert first_display.observed_ns == first.observed_ns
     stale = time.time_ns() - 31 * 1_000_000_000
     with store._conn():
         store._conn().execute('UPDATE local_sources SET last_success_ns=? WHERE source=?',
                               (stale, reader.definition.source))
     second = reader.capture_members(receipt, ('bob',))
+    second_display = reader.capture_display_members(receipt, ('bob',))
     assert second.floors == first.floors
     assert second.observed_ns == stale and second != first
+    assert second_display.subjects == first_display.subjects
+    assert second_display.observed_ns == stale and second_display != first_display
     conn = store._conn()
     conn.execute('BEGIN')
     try:
         assert reader.matches_in_transaction(conn, receipt)
         assert reader.capture_in_transaction(conn, receipt, ('bob',)) == second
+        assert reader.capture_display_in_transaction(conn, receipt, ('bob',)) == second_display
     finally:
         conn.rollback()
     # A ready raw/index generation alone cannot establish fresh observation.

@@ -238,6 +238,7 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         ]
         if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
             out.update(users={}, chats=[], key_alerts=[], chats_complete=False,
+                       users_complete=False, user_status='response_byte_budget',
                        sidebar_status='response_byte_budget')
         return out
     observation = ProjectionObservation("sidebar")

@@ -1,11 +1,13 @@
-# Request-owned canonical page operation (opt-in route)
+# Request-owned canonical page operation
 
 `mesh.page_operation.PageOperation` composes the existing indexed local inputs,
 canonical fold, membership round and bounded epoch owner. `prepare()` computes
 outside GUI locks. Its private one-use finalizer checks all consumed inputs
 again. `GuiApp.finalize_page_read()` supplies the outer session and screen-lock
-gate. An additive opt-in endpoint now invokes it; the existing browser chat route
-does not. See [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
+gate. The local paging endpoint and capability-gated browser route invoke it;
+production `serve()` now requests local inputs, while the library `GuiApp`
+constructor still defaults to legacy behavior. See
+[Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
 
 ## Request and continuation
 
@@ -16,7 +18,9 @@ scan budget. Exact reply-parent reads have their existing independent 64-ID cap.
 Ordering and the continuation use `(ns, sender, id)`; display `ts` is irrelevant.
 A continuation requires both the oldest examined key and its original
 `PageInputPosition`. A message, overlay or source/index generation change returns
-`continuation_changed`; the caller restarts from a fresh recent page. This
+`continuation_changed`; the caller discards retained messages and may use only
+an opaque frozen raw window anchor to recompute that historical window from
+fresh canonical inputs. The strict cursor remains generation-bound. This
 includes a delayed older message and edits between page requests.
 
 The output is the existing `PageSelection`: visible messages, oldest raw row
@@ -84,6 +88,11 @@ owner -> pins -> SQLite write exclusion -> one mirror mutex.
 The final transaction rechecks membership/raw source inputs, terminal position,
 page message/overlay positions and selected proof rows, every demanded lifecycle
 range/head, pin decisions, selected epochs, current lookup policy and expiry.
+Optional raw presence, status and room-runtime companions receive their own
+registered source/position checks in the same root-to-Store final cut; missing
+or over-budget companion metadata is pending rather than an authorization
+shortcut. Chatless peer/timer asks use a separate `AccountRound` over exact
+users+lifecycle and trusted pins, not a fabricated room membership.
 All wrap observations and the authority/overlay cut are checked under the same
 nonreentrant mirror mutex. Lifecycle proposals arising during page actor lookup
 use the existing post-write validation path and restart; own SQL triggers must
@@ -96,10 +105,11 @@ membership authority. The GUI gate rejects a replaced session or different Mesh,
 excludes logout during finalization, and withholds the response if its idle
 screen-lock deadline expires during verification.
 
-## Activation boundaries
+## Release boundaries
 
-The opt-in route supplies local source ownership, background preparation,
-bounded response metadata and opaque continuations. Browser scroll anchoring,
-DOM retention and route switching remain unactivated. Phase 2 remote-tail
-ingestion remains out of scope. The Store position is local consistency evidence,
-not proof that all remote history is ingested.
+The source path includes background preparation, bounded metadata, opaque
+continuations, guarded browser paging, scroll anchoring and retained DOM caps.
+This is not evidence that the user's running app has switched or that the R232
+full-suite/CI and browser release gates passed. Phase 2 remote-tail ingestion
+remains out of scope. The Store position is local consistency evidence, not
+proof that all remote history is ingested.

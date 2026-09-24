@@ -32,7 +32,12 @@ const pageRead = createChatPageRead({fetchPage: ({chatId, cursor, anchor, limit,
 }});
 let pageOwner = null;
 let pageRetryTimer = null;
+function abortPagedAux(owner) {
+  owner?.auxAbort?.abort();
+  if (owner) owner.auxAbort = null;
+}
 function resetPagedView() {
+  abortPagedAux(pageOwner);
   pageOwner = null;
   clearTimeout(pageRetryTimer);
   pageRetryTimer = null;
@@ -40,6 +45,129 @@ function resetPagedView() {
 }
 document.addEventListener("ab:session-reset", resetPagedView);
 document.addEventListener("ab:lock-epoch", resetPagedView);
+
+function samePageBinding(a, b) {
+  return !!a && !!b && a.instance_id === b.instance_id
+    && a.session_generation === b.session_generation && a.viewer === b.viewer;
+}
+
+function openAgentPermissionEntry(chatId) {
+  Mesh.agentsView = true;
+  Mesh.agentsFromComposer = true;
+  location.hash = `#/chats/${chatId}/details`;
+}
+
+function syncPagedAuxControls(pageData, presentation, status, response) {
+  const pause = $("#chat-menu [data-act='pause']");
+  if (pause && status.pause === "ready" && typeof response.agents_paused === "boolean") {
+    pageData.meta.agents_paused = response.agents_paused;
+    pageData.metadata_status.pause = "ready";
+    pause.disabled = false;
+    pause._paused = response.agents_paused;
+    pause.innerHTML = `${ICONS.pause} ${response.agents_paused
+      ? "Resume agents in this chat" : "Stand down agents in this chat"}`;
+    const title = $("#chat-top .chat-head-name");
+    let badge = title?.querySelector(".agent-pause-tag");
+    if (response.agents_paused && !badge && title) {
+      badge = document.createElement("span");
+      badge.className = "kind-tag agent-pause-tag";
+      badge.textContent = "agents paused";
+      title.appendChild(badge);
+    } else if (!response.agents_paused) badge?.remove();
+  } else if (pause) {
+    pause.disabled = true;
+    pause._paused = null;
+    pause.textContent = "Agent pause status loading…";
+    $("#chat-top .chat-head-name .agent-pause-tag")?.remove();
+  }
+  const pill = $("#composer-pill");
+  if (!pill) return;
+  const entry = agentPermissionEntry(pageData.meta, presentation);
+  let button = $("#agents-perm-btn");
+  if (entry === "absent") { button?.remove(); return; }
+  if (!button) {
+    button = document.createElement("button");
+    button.id = "agents-perm-btn";
+    button.innerHTML = ICONS.hand;
+    pill.insertBefore(button, pill.firstElementChild);
+    button.addEventListener("click", () => openAgentPermissionEntry(pageData.meta.id));
+  }
+  button.disabled = entry !== "ready";
+  button.title = entry === "ready" ? "Agent permissions" : "Agent permissions loading";
+}
+
+function pagedAuxDisplay(pageData, response) {
+  const data = {...pageData, meta:{...pageData.meta},
+    metadata_status:{...pageData.metadata_status}, _paged:true};
+  const base = Mesh.state?.user === data.me ? Mesh.state : {user:data.me,users:{}};
+  if (!response) return {data, presentation:base, aux:null};
+  Object.assign(data.metadata_status, response.metadata_status);
+  if (response.metadata_status.pause === "ready"
+      && typeof response.agents_paused === "boolean") {
+    data.meta.agents_paused = response.agents_paused;
+  } else {
+    delete data.meta.agents_paused;
+    data.metadata_status.pause = "pending";
+  }
+  return {data, presentation:{...base,users:{...base.users,...response.users}},
+    aux:{feeds:response.metadata_status.live === "ready" ? response.feeds : [],
+         tasks:response.metadata_status.runtime === "ready" ? response.tasks : [],
+         runs:response.metadata_status.runtime === "ready" ? response.runs : []}};
+}
+
+// One companion read for each successful canonical page pass, including an
+// unchanged history window. It owns no transcript rows or continuing access.
+async function refreshPagedAux(owner, revision, pageVersion, pageData) {
+  const abort = new AbortController();
+  owner.auxAbort = abort;
+  let response;
+  try {
+    response = await api(`/api/mesh/chat_aux?id=${encodeURIComponent(owner.chatId)}`,
+      undefined, {sideEffects:false, timeoutMs:8000, signal:abort.signal});
+  } catch { return; } // Next canonical page poll retries a pending companion.
+  const current = () => !abort.signal.aborted && pageOwner === owner
+    && owner.auxAbort === abort && owner.pageRevision === revision
+    && owner.pageVersion === pageVersion && owner.current();
+  if (current() && response?.status === "forbidden"
+      && samePageBinding(response.session_binding, pageData.session_binding)) {
+    resetPagedView();
+    $("#content").innerHTML = "";
+    location.hash = "#/chats";
+    return;
+  }
+  if (!current() || response?.status !== "ready" || response.chat_id !== owner.chatId
+      || response.page_version !== pageVersion
+      || !samePageBinding(response.session_binding, pageData.session_binding)) return;
+  const status = response.metadata_status;
+  if (!status || typeof status !== "object" || Array.isArray(status)
+      || !Array.isArray(response.feeds) || response.feeds.length > 64
+      || !Array.isArray(response.tasks) || response.tasks.length > 50
+      || !Array.isArray(response.runs) || response.runs.length > 50
+      || !response.users || typeof response.users !== "object"
+      || Array.isArray(response.users) || Object.keys(response.users).length > 64) return;
+  const {data,presentation,aux} = pagedAuxDisplay(pageData, response);
+  const tr = $("#transcript");
+  const anchor = tr ? captureTranscriptAnchor(tr) : null;
+  const painted = await renderMeshChat(false, null, {data, presentation,
+    warmBase:true, paged:true, historyRead:true,
+    aux, guard:current});
+  if (painted && current()) {
+    syncPagedAuxControls(pageData, presentation, status, response);
+    const names = $("#chat-top .chat-head-sub");
+    if (names && data.meta.kind !== "dm") {
+      names.textContent = (data.meta.members || []).filter(name => name !== data.me)
+        .map(name => meshDn(name, presentation)).concat("You").join(", ");
+    }
+    if (data.meta.kind === "dm") {
+      syncDmHeaderPresence(status.presence === "ready" ? presentation
+        : {user:data.me,users:{}}, data.meta);
+    }
+    // UI-only retention for the same canonical page version. Every action
+    // still reauthorizes, and a new version/session clears this decoration.
+    owner.auxSnapshot = {pageVersion, response};
+    if (anchor) restoreTranscriptAnchor($("#transcript"), anchor);
+  }
+}
 
 async function refreshPagedSidebar(owner) {
   const ticket = captureSessionEpoch();
@@ -93,6 +221,8 @@ async function renderPagedChat(force, kind = null) {
     if (pageOwner !== owner || !owner.current()) return;
     if (["busy", "stale"].includes(result.status)) return;
     if (result.status !== "page") {
+      abortPagedAux(owner);
+      owner.auxSnapshot = null;
       owner.recoveryAnchor = anchor;
       if (mode === "older" && ++owner.olderRetries > 5) owner.wantOlder = false;
       owner.ready = false;
@@ -125,21 +255,32 @@ async function renderPagedChat(force, kind = null) {
       return;
     }
     owner.ready = true;
+    abortPagedAux(owner);
+    owner.pageRevision = (owner.pageRevision || 0) + 1;
+    if (owner.pageVersion !== result.pageVersion) owner.auxSnapshot = null;
+    owner.pageVersion = result.pageVersion;
     owner.retries = 0;
     if (mode === "older") { owner.browsing = true; owner.wantOlder = false; }
     if (mode === "first") owner.browsing = false;
     clearTimeout(pageRetryTimer);
     delete $("#content").dataset.pagePending;
-    const data = {...result.pageData, messages:result.messages, _paged:true};
-    const presentation = Mesh.state?.user === data.me ? Mesh.state : {user:data.me, users:{}};
+    const retainedAux = owner.auxSnapshot && owner.auxSnapshot.pageVersion === result.pageVersion
+      ? owner.auxSnapshot.response : null;
+    const {data,presentation,aux} = pagedAuxDisplay(
+      {...result.pageData,messages:result.messages}, retainedAux);
     const pane = $("#details-pane");
     if (!Mesh.detailsView) { pane.hidden = true; pane.innerHTML = ""; }
     const painted = await renderMeshChat(force, null, {data, presentation, warmBase:true, paged:true,
       historyRead: mode === "older" || owner.browsing,
-      guard:() => pageOwner === owner && owner.current()});
+      aux, guard:() => pageOwner === owner && owner.current()});
     if (!painted || pageOwner !== owner || !owner.current()) return;
     const tr = $("#transcript");
     if (!tr) return;
+    syncPagedAuxControls(data, presentation, data.metadata_status,
+      {agents_paused:data.meta.agents_paused});
+    if (!retainedAux && data.meta.kind === "dm") {
+      syncDmHeaderPresence({user:data.me,users:{}}, data.meta);
+    }
     pruneTranscriptResources(tr, result.evictedIds || [],
       {msgExpand:Mesh.msgExpand, selectedIds:Mesh.select?.ids});
     tr._pageHasMore = result.hasMore;
@@ -181,6 +322,9 @@ async function renderPagedChat(force, kind = null) {
       else Mesh.pendingRead = chatId;
     }
     if (Mesh.detailsView) { pane.hidden = false; await V.renderChatDetails(); }
+    if (pageOwner === owner && owner.current()) {
+      void refreshPagedAux(owner, owner.pageRevision, result.pageVersion, data);
+    }
     // This is a bounded canonical sidebar request; it never gates first paint.
     if (mode !== "older") void refreshPagedSidebar(owner);
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1017,6 +1161,20 @@ function nextClamp(cur) {
   return Infinity;                    // 3rd click → the rest
 }
 
+// Only current room members can surface the public responsible-owner entry.
+// This is display evidence from the bounded sidebar; details/actions still
+// obtain current server authorization when opened or submitted.
+function agentPermissionEntry(meta, presentation) {
+  let pending = false;
+  for (const name of meta.members || []) {
+    const account = presentation?.users?.[name];
+    if (account?.kind !== "agent") continue;
+    if (!Array.isArray(account.owners)) { pending = true; continue; }
+    if (account.owners.includes(presentation.user)) return "ready";
+  }
+  return pending ? "pending" : "absent";
+}
+
 async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (!prepared && meshCaps().chat_page_v1) return renderPagedChat(force);
   const sessionTicket = captureSessionEpoch();
@@ -1048,7 +1206,9 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const ms = prepared?.presentation || Mesh.state
     || presentationFromState(data.presentation);
   if (!ms || ms.user !== data.me) return;
-  const [feedData, runtimeData] = prepared?.warmBase ? [{ feeds: [] }, { tasks: [] }]
+  const [feedData, runtimeData] = prepared?.paged
+    ? [{feeds:prepared.aux?.feeds || []}, {tasks:prepared.aux?.tasks || []}]
+    : prepared?.warmBase ? [{ feeds: [] }, { tasks: [] }]
     : prepared?.aux || await Promise.all([
       api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
       api(`/api/mesh/runtime_tasks?id=${encodeURIComponent(chatId)}`),
@@ -1071,7 +1231,8 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   const viewInfo = (msg, me) => meshInfoText(msg, me, ms);
   const displayKind = (name) => ms.users?.[name]?.display_kind
     || ms.users?.[name]?.kind;
-  const authorityRuns = prepared?.warmBase ? [] : currentRunAuthority(chatId, feeds);
+  const authorityRuns = prepared?.paged ? prepared.aux?.runs || []
+    : prepared?.warmBase ? [] : currentRunAuthority(chatId, feeds);
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
@@ -1094,9 +1255,14 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // the flag in so the repaint rides the partial path
   const goneSig = Object.values(ms.users || {})
     .filter((u) => u.departed).map((u) => u.username).join(",");
+  const selectedProfileSig = prepared?.paged && prepared?.aux
+    ? (meta.members || []).map(name => {
+        const user = ms.users?.[name];
+        return [name,user?.display,user?.kind,user?.departed,user?.avatar?.sha256];
+      }) : [];
   const key = JSON.stringify([data.messages.map(m => m.id), data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
-    pinsSig, (data.starred || []).join(","), mutSig, goneSig, pendingRows,
+    pinsSig, (data.starred || []).join(","), mutSig, goneSig, selectedProfileSig, pendingRows,
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
       (f.draft || "").length, (f.steps || []).map((s) =>
         `${s.ts || ""}:${s.text || ""}`).join("|")]),
@@ -1453,9 +1619,12 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     : dmPeer ? presenceLine(ms.users?.[dmPeer]?.presence) : "";
   // DM/self header shows the peer's photo; a group shows the group photo
   const headAva = meshChatAvatarInner(meta, ms);
-  // mute state comes from the overview row (meta is the shared snapshot;
-  // mute is per-user state) — the menu label + icon flip on it (R42)
-  const isMuted = meshMuteActive((ms.chats || []).find((k) => k.id === chatId) || {});
+  // Selected pages carry the verified viewer mute scalar; the legacy path
+  // continues reading its sidebar overview. Missing page state stays neutral.
+  const muteReady = !data._paged || data.metadata_status?.mute === "ready";
+  const isMuted = meshMuteActive(data._paged ? {mute:meta.mute}
+    : (ms.chats || []).find((k) => k.id === chatId) || {});
+  const permissionEntry = agentPermissionEntry(meta, ms);
   if (prepared?.guard && !prepared.guard()) return;
   $("#content").innerHTML = `
     <div class="chat-top" id="chat-top">
@@ -1464,7 +1633,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
       <div class="chat-title-btn${(isDm && dmSub) ? " has-sub" : ""}" style="min-width:0" title="Open chat info">
         <div class="chat-head-name">${esc(title)}${headAgentTag}
           ${meta.archived ? '<span class="kind-tag">archived</span>' : ""}
-          ${meta.agents_paused ? '<span class="kind-tag">agents paused</span>' : ""}</div>
+          ${meta.agents_paused ? '<span class="kind-tag agent-pause-tag">agents paused</span>' : ""}</div>
         ${isDm ? (dmSub ? `<div class="chat-head-sub">${dmSub}</div>` : "")
                : `<div class="chat-head-sub">${esc(memberLine)}</div>`}
       </div>
@@ -1475,9 +1644,13 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
         <button data-act="search">${ICONS.search} Search</button>
         <button data-act="select">${ICONS.select} Select messages</button>
-        ${prepared?.warmBase ? "" : `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`}
+        ${prepared?.warmBase && !data._paged ? "" : muteReady
+          ? `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`
+          : '<button data-act="mute" disabled>Mute status loading…</button>'}
         ${isMember ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive" : "Archive"} ${isDm ? "chat" : "group"}</button>` : ""}
-        ${!data._paged || data.metadata_status?.pause === "ready" ? `<button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>` : ""}
+        ${!data._paged || data.metadata_status?.pause === "ready"
+          ? `<button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>`
+          : '<button data-act="pause" disabled>Agent pause status loading…</button>'}
         <button data-act="close">${ICONS.close} Close chat</button>
         <div class="menu-sep"></div>
         <button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>
@@ -1497,10 +1670,12 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     </div>` : `
     <div id="composer">
       <div id="composer-pill">
-        ${!prepared?.warmBase && Object.values(ms.users).some((u) => u.kind === "agent"
-            && (u.owners || []).includes(ms.user)
-            && members.has(u.username))
-          ? `<button id="agents-perm-btn" title="Agent permissions">${ICONS.hand}</button>` : ""}
+        ${prepared?.warmBase && !data._paged ? ""
+          : permissionEntry === "ready"
+            ? `<button id="agents-perm-btn" title="Agent permissions">${ICONS.hand}</button>`
+            : permissionEntry === "pending"
+              ? `<button id="agents-perm-btn" title="Agent permissions loading" disabled>${ICONS.hand}</button>`
+              : ""}
         <div id="composer-ta-wrap">
           <div id="composer-hl" aria-hidden="true"></div>
           <textarea id="mesh-body" rows="1" placeholder="Type a message…"></textarea>
@@ -1540,13 +1715,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     if (menu.hidden) menu._openAt(); else menu.hidden = true;
   });
   const permBtn = $("#agents-perm-btn");
-  if (permBtn) permBtn.addEventListener("click", () => {
-    Mesh.agentsView = true;
-    // opened from the composer (not via chat info): the page gets a Close
-    // button that dismisses the pane outright, instead of a Back to chat info
-    Mesh.agentsFromComposer = true;
-    location.hash = `#/chats/${chatId}/details`;
-  });
+  if (permBtn) permBtn.addEventListener("click", () => openAgentPermissionEntry(chatId));
   syncPinBanner(chatId, pins);
   document.addEventListener("click", function away(e) {
     if (!menu) { document.removeEventListener("click", away); return; }
@@ -1568,18 +1737,24 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
       }
       else if (act === "select") enterSelect(chatId);
       else if (act === "mute") {
+        if (!muteReady) return;
         // re-check live (the captured isMuted goes stale after a toggle);
         // flip the button in place — the header isn't rebuilt on a poll
         const cNow = (Mesh.state?.chats || []).find((k) => k.id === chatId);
-        if (meshMuteActive(cNow || {})) {
+        if (meshMuteActive(data._paged ? {mute:meta.mute} : cNow || {})) {
           const r = await api("/api/mesh/mute", { chat_id: chatId, muted: false });
           if (r.error) { toast(r.error, true); return; }
+          if (data._paged) meta.mute = false;
           if (cNow) cNow.mute = false;   // show it now, don't wait for the poll
           toast("Notifications back on", { check: true });
           b.innerHTML = `${ICONS.bell} Mute notifications`;
           V.refresh(false);
         } else {
-          muteDialog(chatId, () => { b.innerHTML = `${ICONS.bellOff} Unmute`; });
+          muteDialog(chatId, () => {
+            if (data._paged) meta.mute = true;
+            b.innerHTML = `${ICONS.bellOff} Unmute`;
+            if (data._paged) V.refresh(false);
+          });
         }
       }
       else if (act === "clear") { if (!b.disabled) clearChatDialog(chatId); }
@@ -1593,12 +1768,14 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         location.hash = "#/chats";   // archived chats leave the active list
       } else if (act === "pause") {
         // V62: chat-scoped — the harness holds THIS chat's triggers/timers
-        const down = !meta.agents_paused;
+        if (data._paged && (b.disabled || typeof b._paused !== "boolean")) return;
+        const down = data._paged ? !b._paused : !meta.agents_paused;
         toast(down ? "Standing down agents in this chat…"
                    : "Resuming agents in this chat…", { spinner: true });
         const r = await api("/api/mesh/chat_pause",
                             { chat_id: chatId, paused: down });
         if (r.error) { toast(r.error, { error: true, swap: true }); return; }
+        if (data._paged) b._paused = !!r.paused;
         Mesh.structKey = ""; renderMeshChat(true);
         toast(r.paused ? "Agents standing down in this chat"
                        : "Agents resumed in this chat",
@@ -1683,19 +1860,111 @@ V.renderPendingSends = (chatId, scroll = false) => {
 // cards above the composer (Allow / Always allow here / Deny — or a text
 // answer to an agent's question) plus timer chips; every OTHER chat with a
 // pending ask gets a sidebar dot, so nothing waits invisibly.
+let askPollRequest = null;
+let askPollSnapshot = null;
+function resetAskPollState() {
+  askPollRequest?.abort.abort();
+  askPollRequest = askPollSnapshot = null;
+  Mesh.askSeen = new Set();
+  Mesh.askDone = new Map();
+  Mesh.timerDone = new Map();
+  Mesh.askKey = "";
+  syncAskDots([]);
+  const bar = $("#ask-bar");
+  if (bar) bar.innerHTML = "";
+}
+document.addEventListener("ab:session-reset", resetAskPollState);
+document.addEventListener("ab:lock-epoch", resetAskPollState);
+
+function mergeAskLane(previous, incoming, complete, maxRows) {
+  const valid = incoming.filter(item => item && typeof item.id === "string" && item.id);
+  if (complete) return valid.slice(0, maxRows);
+  const merged = new Map(previous.map(item => [item.id, item]));
+  for (const item of valid) merged.set(item.id, item);
+  return merged.size <= maxRows ? [...merged.values()] : previous;
+}
+
 function startAskPoll() {
   if (Mesh.askPollId) return;                // one global poller
   const tick = async () => {
     if (App.page !== "chats") {
       clearInterval(Mesh.askPollId);         // left the page: stand down
       Mesh.askPollId = null;
-      syncAskDots([]);
+      resetAskPollState();
       return;
     }
-    if (document.hidden || !document.hasFocus()) return;
+    if (document.hidden || !document.hasFocus() || askPollRequest) return;
+    const ticket = captureSessionEpoch();
+    const lockEpoch = meshStateSnapshot().lockEpoch;
+    const bound = meshCaps().chat_page_v1;
+    const binding = BrowserSession.snapshot().binding;
+    const request = {abort:new AbortController()};
+    askPollRequest = request;
     try {
-      const r = await api("/api/mesh/asks");
-      const timers = r.timers || [];
+      const r = await api("/api/mesh/asks", undefined,
+        {sideEffects:false,timeoutMs:15000,signal:request.abort.signal});
+      if (askPollRequest !== request || request.abort.signal.aborted
+          || App.page !== "chats" || meshStateSnapshot().lockEpoch !== lockEpoch
+          || !sessionMayApply(ticket, r)
+          || (bound && !samePageBinding(binding, r?.session_binding))) return;
+      if (r?.locked || r?.forbidden || r?.error === "Session changed") {
+        resetAskPollState(); return;
+      }
+      if (r?.error || !Array.isArray(r?.asks) || !Array.isArray(r?.timers)
+          || r.asks.length > 1024 || r.timers.length > 512) return;
+      const key = bound ? JSON.stringify([binding.instance_id,
+        binding.session_generation,binding.viewer]) : "legacy";
+      const prior = askPollSnapshot?.key === key ? askPollSnapshot
+        : {key,rooms:[],peer:[],timers:[]};
+      const rooms = r.asks.filter(item => item?.kind !== "peer");
+      const peerRows = r.asks.filter(item => item?.kind === "peer");
+      if (bound && (r.ok !== true || typeof r.rooms_complete !== "boolean"
+          || typeof r.peer_complete !== "boolean"
+          || typeof r.timers_complete !== "boolean"
+          || !Array.isArray(r.resolved_room_ids)
+          || r.resolved_room_ids.length > 128
+          || r.resolved_room_ids.some(id => typeof id !== "string" || !id)
+          || new Set(r.resolved_room_ids).size !== r.resolved_room_ids.length)) return;
+      const resolved = new Set(bound ? r.resolved_room_ids : []);
+      let roomRows = bound
+        ? (r.rooms_complete ? [] : prior.rooms.filter(item => !resolved.has(item.chat_id)))
+          .concat(rooms.filter(item => resolved.has(item.chat_id))).slice(-1024)
+        : mergeAskLane(prior.rooms,rooms,true,1024);
+      askPollSnapshot = {
+        key,
+        rooms:roomRows,
+        peer:mergeAskLane(prior.peer,peerRows,bound ? r.peer_complete : true,128),
+        timers:mergeAskLane(prior.timers,r.timers,bound ? r.timers_complete : true,512),
+      };
+      // Global incomplete room scans cannot prove that a previously visible
+      // active room is still available. Probe that *known* selected ID only;
+      // never expose provider-discovered forbidden room identities globally.
+      if (bound && !r.rooms_complete && Mesh.chatId && !resolved.has(Mesh.chatId)
+          && prior.rooms.some(item => item.chat_id === Mesh.chatId)) {
+        const scopedChat = Mesh.chatId;
+        try {
+          const scoped = await api(`/api/mesh/asks?chat=${encodeURIComponent(scopedChat)}`,
+            undefined, {sideEffects:false,timeoutMs:15000,signal:request.abort.signal});
+          if (askPollRequest !== request || request.abort.signal.aborted
+              || App.page !== "chats" || Mesh.chatId !== scopedChat
+              || meshStateSnapshot().lockEpoch !== lockEpoch
+              || !sessionMayApply(ticket, scoped)
+              || !samePageBinding(binding, scoped?.session_binding)) return;
+          if (scoped?.forbidden) {
+            askPollSnapshot.rooms = askPollSnapshot.rooms.filter(
+              item => item.chat_id !== scopedChat);
+            askPollSnapshot.timers = askPollSnapshot.timers.filter(
+              item => item.chat_id !== scopedChat);
+          } else if (scoped?.rooms_complete === true
+              && scoped.resolved_room_ids?.includes(scopedChat)
+              && Array.isArray(scoped.asks)) {
+            askPollSnapshot.rooms = askPollSnapshot.rooms.filter(
+              item => item.chat_id !== scopedChat).concat(scoped.asks.filter(
+                item => item?.chat_id === scopedChat && item?.kind !== "peer")).slice(-1024);
+          }
+        } catch { /* previous verified same-session rows remain visible */ }
+      }
+      const timers = askPollSnapshot.timers;
       // V85: local memory of answered/dismissed asks — the card dies the
       // moment you act and never resurrects while the harness's doc is
       // still converging (the old grey-out un-greyed on the next tick and
@@ -1710,7 +1979,8 @@ function startAskPoll() {
         if (now - ts > 900000) Mesh.askDone.delete(id);
       for (const [id, ts] of Mesh.timerDone)
         if (now - ts > 900000) Mesh.timerDone.delete(id);
-      const asks = (r.asks || []).filter((a) => !Mesh.askDone.has(a.id));
+      const asks = [...askPollSnapshot.rooms,...askPollSnapshot.peer]
+        .filter((a) => !Mesh.askDone.has(a.id));
       // V85: a NEW ask pings once — a run is blocked on the owner, and a
       // prompt behind an unfocused window used to time out unseen
       Mesh.askSeen = Mesh.askSeen || new Set();
@@ -1727,7 +1997,8 @@ function startAskPoll() {
         [...asks.filter((a) => a.chat_id === cid), ...peer],
         timers.filter((t) => t.chat_id === cid
                              && !Mesh.timerDone.has(t.id)));
-    } catch { /* next tick retries */ }
+    } catch { /* next tick retries without clearing same-session partial lanes */ }
+    finally { if (askPollRequest === request) askPollRequest = null; }
   };
   Mesh.askPollId = setInterval(tick, 2000);
   tick();
@@ -1987,11 +2258,10 @@ function presenceLine(presence) {
 // keep the DM header's online/last-seen CURRENT (R36 polish): every state
 // poll patches it in place — the header itself only rebuilds on structural
 // change, so without this the line froze at whatever chat-open saw
-function syncDmHeaderPresence() {
-  const ms = Mesh.state;
+function syncDmHeaderPresence(ms = Mesh.state, presentedMeta = null) {
   const btn = document.querySelector("#chat-top .chat-title-btn");
   if (!btn || !ms?.users || !Mesh.chatId) return;
-  const meta = (ms.chats || []).find((c) => c.id === Mesh.chatId);
+  const meta = presentedMeta || (ms.chats || []).find((c) => c.id === Mesh.chatId);
   if (!meta || meta.kind !== "dm") return;
   const peer = (meta.members || []).find((u) => u !== ms.user);
   const line = peer ? presenceLine(ms.users[peer]?.presence) : "";
