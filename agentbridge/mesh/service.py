@@ -159,6 +159,9 @@ class Mesh:
             on_records=self._pump,
         )
 
+        if self.local_inputs is not None:
+            self.local_inputs.bind_page_owner(self)
+
     def _mirror_changed(self) -> None:
         """Wake local read-model consumers without exposing changed paths."""
         if self.local_inputs is not None:

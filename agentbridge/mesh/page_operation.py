@@ -11,13 +11,13 @@ import json
 import threading
 from dataclasses import dataclass, field
 
-from ..core.models import ChatKind
-from ..store import document_observation, overlay_index, local_source, page_inputs as raw_pages
+from ..core.models import ChatKind, MsgKind
+from ..store import document_observation, overlay_index, local_source, page_metadata, presence_index, page_inputs as raw_pages
 from ..transport import authority_observation
 from . import authority_source, epoch_inputs, events, membership_coordinator as membership
-from . import page_fence, page_inputs, page_overlays
+from . import page_fence, page_inputs, page_overlays, page_pins, page_receipts
 from .overlay_source import OverlaySourceUnavailable
-from .page_selection import CanonicalPageAccumulator, PageDependencyPending
+from .page_selection import CanonicalPageAccumulator, PageDependencyPending, select_exact_messages
 from .paths import P
 from .pin_storage import PinStoreUnavailable
 from .redaction_verification import redaction_verifier
@@ -95,6 +95,12 @@ class _Ledger:
         if len(self.epochs) > self.operation_limits.max_epochs:
             raise membership._Stop('unavailable', 'operation_epoch_budget')
 
+    def signature(self, data):
+        self.crypto += 1
+        if self.crypto > self.operation_limits.max_crypto:
+            raise membership._Stop('unavailable', 'operation_crypto_budget')
+        self.charge(len(data))
+
 
 class _Sealer:
     def __init__(self, round_, epochs):
@@ -164,6 +170,9 @@ def _overlays(inputs):
 
 
 def _failure(exc):
+    if (isinstance(exc, membership.terminal_observation.TerminalObservationUnavailable)
+            and exc.args == ('terminal_classification_pending',)):
+        return PageWorkResult('work', 'terminal_classification_pending')
     if isinstance(exc, _Work):
         return PageWorkResult('work', exc.kind, exc.items)
     if isinstance(exc, authority_source.AuthorityReadThroughRequired):
@@ -184,6 +193,8 @@ def _failure(exc):
 
 
 _ERRORS = (local_source.SourceChanged, membership._Stop, _Work, authority_source.AuthorityReadThroughRequired,
+    page_metadata.PageMetadataUnavailable,
+    presence_index.PresenceIndexUnavailable,
     authority_source.AuthoritySourceUnavailable, authority_observation.AuthorityObservationUnavailable,
     OverlaySourceUnavailable, overlay_index.OverlayIndexUnavailable, raw_pages.PageInputsChanged,
     page_overlays.PageOverlaysUnavailable, page_fence.PageFenceChanged,
@@ -291,6 +302,7 @@ class PageOperation:
                           or mesh.keys.user != self.viewer):
             raise ValueError('inconsistent page key owner')
         epochs, proofs, captured = {}, {}, None
+        viewer_state, page_starred = None, set()
         snapshot = None
         try:
             snapshot = events.advance(round_.snapshot,
@@ -335,6 +347,10 @@ class PageOperation:
                         raise _Work('overlay_proofs', pending.keys) from pending
                     proof_keys = requested
                     continue
+                if viewer_state is None:
+                    viewer_state = overlays.viewer_state
+                elif viewer_state != overlays.viewer_state:
+                    raise page_fence.PageFenceChanged('viewer_state_changed_between_windows')
                 edits, redactions = _overlays(inputs)
                 try:
                     more = accumulator.feed(inputs, edits=edits, redactions=redactions,
@@ -346,10 +362,33 @@ class PageOperation:
                     if len(exact) > raw_pages.MAX_EXACT_IDS:
                         raise membership._Stop('unavailable', 'operation_parent_budget') from parents
                     continue
+                page_starred.update(overlays.state.get('starred', ()))
                 if not more:
                     selection = accumulator.finish()
+                    pins_json = self._pin_presentation(round_, snapshot, source_binding, index,
+                        expected, sealer, history, verifier, proofs) if self.source_reader is not None else None
+                    receipts_json, presence = self._receipt_presentation(round_, snapshot,
+                        source_binding, index, expected, selection, proofs)
+                    snapshot_json = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
+                    viewer_metadata = {
+                        'read_ns': int((viewer_state or {}).get('read_ns', 0)),
+                        'archived': bool((viewer_state or {}).get('archived')),
+                    }
+                    if snapshot.kind is ChatKind.DM:
+                        account = round_.get(self.viewer)
+                        other = next((name for name in snapshot.members if name != self.viewer), None)
+                        viewer_metadata['blocked'] = bool(other and account and other in account.blocked)
+                    viewer_state_json = json.dumps(viewer_metadata, sort_keys=True, separators=(',', ':'))
+                    visible = {message.id for message in selection.messages}
+                    starred = tuple(message.id for message in selection.messages
+                                    if message.id in page_starred and message.id in visible)
+                    ledger.charge(len(snapshot_json.encode()) + len(viewer_state_json.encode())
+                                  + sum(len(ident.encode()) for ident in starred))
+                    presentation = page_fence.PagePresentation(snapshot_json, viewer_state_json, starred,
+                                                               pins_json, receipts_json)
                     fence = page_fence.PageFence(expected, source_binding,
-                        tuple((p, k, v) for (p, k), v in sorted(proofs.items())), tuple(epochs.values()), selection)
+                        tuple((p, k, v) for (p, k), v in sorted(proofs.items())), tuple(epochs.values()),
+                        selection, presentation, presence)
                     return PageWorkResult('prepared', prepared=_PreparedPage(self, self._serial, round_, snapshot, fence))
                 before = accumulator._selection.oldest_examined
                 exact, proof_keys = (), ()
@@ -361,3 +400,115 @@ class PageOperation:
                 tuple(epochs.values()), None)
             result = round_.final(None, ready.value, page=fence)
             return PageWorkResult(result.status, result.reason or '')
+
+    def _pin_presentation(self, round_, snapshot, receipt, index, expected,
+                          sealer, history, verifier, proofs):
+        manifest = self.source_reader.capture_pin_manifest(receipt, index)
+        if manifest.position != expected:
+            raise page_fence.PageFenceChanged('pin_manifest_cut_changed')
+        pins = page_pins.verified_pins(manifest, snapshot, round_,
+                                     encrypted=type(self.mesh.sealer) is E2EESealer)
+        targets, exact, keys = tuple(sorted(pins)), tuple(sorted(pins)), ()
+        if not targets:
+            return '[]'
+        while True:
+            self.ledger.step()
+            inputs = self.source_reader.capture_page(receipt, index, raw_limit=0,
+                expected=expected, exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
+                proof_keys=keys, include_reactions=True, max_bytes=self.ledger.remaining())
+            self.ledger.charge(inputs.captured_bytes)
+            for path, key, valid in inputs.proofs:
+                if proofs.get((path, key), valid) != valid:
+                    raise page_fence.PageFenceChanged('pin_proofs_changed')
+                proofs[(path, key)] = valid
+            if len(proofs) > overlay_index.MAX_DEPENDENCIES:
+                raise membership._Stop('unavailable', 'operation_proof_budget')
+            try:
+                overlays = page_overlays.assemble_page_overlays(inputs, self.viewer, snapshot,
+                    directory=round_, crypto_boundary=type(self.mesh.sealer) is E2EESealer)
+            except page_overlays.PageOverlayProofsPending as pending:
+                wanted = tuple(dict.fromkeys(keys + pending.keys))
+                if wanted == keys:
+                    raise _Work('overlay_proofs', pending.keys) from pending
+                keys = wanted
+                continue
+            edits, redactions = _overlays(inputs)
+            try:
+                messages = select_exact_messages(inputs, targets, self.viewer, sealer,
+                    edits=edits, redactions=redactions, reactions=overlays.reactions,
+                    state=overlays.state, tenure=snapshot.tenure, history_from_ns=history,
+                    owner_of=round_.owner_of, verify_redaction=verifier)
+            except PageDependencyPending as parents:
+                exact = tuple(sorted(set(exact).union(parents.ids)))
+                if len(exact) > raw_pages.MAX_EXACT_IDS:
+                    raise membership._Stop('unavailable', 'pin_parent_budget') from parents
+                continue
+            shown = sorted((m for m in messages if not m.deleted),
+                           key=lambda m: (m.ns, m.from_, m.id), reverse=True)
+            encoded = json.dumps([{'id': m.id, 'until': pins[m.id], 'body': m.body, 'ns': m.ns}
+                                  for m in shown], ensure_ascii=False, allow_nan=False)
+            self.ledger.charge(len(encoded.encode()))
+            if len(encoded.encode()) > page_metadata.MAX_PIN_BYTES:
+                raise OverflowError('pins presentation byte budget')
+            return encoded
+
+    def _receipt_presentation(self, round_, snapshot, receipt, index, expected, selection, proofs):
+        if self.source_reader is None:
+            return None, None
+        own = tuple(m for m in selection.messages if m.from_ == self.viewer
+                    and m.kind is MsgKind.MESSAGE and not m.deleted)
+        if not own:
+            return '{}', None
+        members = tuple(sorted(name for name in snapshot.members if name != self.viewer))
+        if len(set(members).union(round_.accounts, (self.viewer,))) > round_.ledger.limits.max_accounts:
+            return None, None
+        presence = None
+        cursors, visible, floors = {}, {}, {}
+        if members:
+            runtime = getattr(self.mesh, 'local_inputs', None)
+            source = None if runtime is None else runtime.presence
+            if source is None:
+                return None, None
+            source.request()  # Queue only; collection never runs on the request.
+            try:
+                _reader, presence_receipt, observed = source.inputs(members)
+            except (local_source.SourceChanged, presence_index.PresenceIndexUnavailable,
+                    OSError, membership.sqlite3.Error):
+                return None, None  # Unknown delivery floors are not Sent receipts.
+            # Presentation freshness only. A recent ingestion still cannot
+            # prove a hard remote-staleness bound or authorize this viewer.
+            if not 0 <= round_.now - observed.observed_ns < 30 * 1_000_000_000:
+                return None, None
+            freshness_end = observed.observed_ns + 30 * 1_000_000_000
+            round_.deadline = freshness_end if round_.deadline is None else min(round_.deadline, freshness_end)
+            presence = page_fence.PresenceFence(presence_receipt, observed)
+            floors = dict(observed.floors)
+            keys = ()
+            while True:
+                self.ledger.step()
+                inputs = self.source_reader.capture_page(receipt, index, raw_limit=0,
+                    expected=expected, exact_ids=(), state_paths=tuple(P.state(self.chat, m) for m in members),
+                    proof_keys=keys, include_reactions=False, max_bytes=self.ledger.remaining())
+                self.ledger.charge(inputs.captured_bytes)
+                for path, key, valid in inputs.proofs:
+                    if proofs.get((path, key), valid) != valid:
+                        raise page_fence.PageFenceChanged('receipt_proofs_changed')
+                    proofs[(path, key)] = valid
+                if len(proofs) > overlay_index.MAX_DEPENDENCIES:
+                    raise membership._Stop('unavailable', 'operation_proof_budget')
+                try:
+                    cursors = page_receipts.verified_cursors(inputs, members, round_,
+                        crypto_boundary=type(self.mesh.sealer) is E2EESealer)
+                    break
+                except page_overlays.PageOverlayProofsPending as pending:
+                    wanted = tuple(dict.fromkeys(keys + pending.keys))
+                    if wanted == keys:
+                        raise _Work('overlay_proofs', pending.keys) from pending
+                    keys = wanted
+            visible = page_receipts.receipt_visibility(self.viewer, members, round_)
+        values = page_receipts.assemble_receipts(own, self.viewer, members, cursors, visible, floors)
+        encoded = json.dumps(values, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        self.ledger.charge(len(encoded.encode()))
+        if len(encoded.encode()) > 1024 * 1024:
+            raise OverflowError('receipt presentation byte budget')
+        return encoded, presence

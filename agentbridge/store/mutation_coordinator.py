@@ -243,7 +243,7 @@ class MutationCoordinator:
                 raise owner.SourceChanged('source_mutation_pending')
 
     @contextmanager
-    def finalization_cut(self, store, value):
+    def finalization_cut(self, store, value, *, companions=()):
         """Internal root -> Store cut for bounded canonical final comparisons.
 
         Requires existing coverage and ready inputs; never registers, repairs or
@@ -255,18 +255,26 @@ class MutationCoordinator:
         """
         store = SimpleNamespace(path=Path(store.path).resolve())
         value = scopes._definition(value)
-        if json.loads(value.serialized)[0] != self.identity:
+        if type(companions) is not tuple or len(companions) > 4:
+            raise ValueError('invalid companion source selection')
+        definitions = (value,) + tuple(scopes._definition(item) for item in companions)
+        if len({item.source for item in definitions}) != len(definitions):
+            raise ValueError('duplicate companion source')
+        if any(json.loads(item.serialized)[0] != self.identity for item in definitions):
             raise ValueError('definition belongs to another transport root')
         with self._transaction() as root:
             self._schema(root)
             row = self._registered_store(root, str(store.path))
-            self._require_no_pending(root, value)
+            for definition in definitions:
+                self._require_no_pending(root, definition)
             with owner._writer(store) as conn:
                 self._check_store(conn, store, *row)
-                position = scopes.require_registered_in_transaction(conn, store, value)
-                if not position.ready or position.writes_pending:
+                positions = tuple(scopes.require_registered_in_transaction(conn, store, item)
+                                  for item in definitions)
+                if any(not item.ready or item.writes_pending for item in positions):
                     raise owner.SourceChanged('source_not_ready')
-                yield conn, position
+                yield conn, positions[0]
                 self._check_store(conn, store, *row)
-                if scopes.require_registered_in_transaction(conn, store, value) != position:
+                if tuple(scopes.require_registered_in_transaction(conn, store, item)
+                         for item in definitions) != positions:
                     raise owner.SourceChanged('source_changed_during_finalization')

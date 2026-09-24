@@ -88,6 +88,7 @@ class GuiApp:
         encrypt: bool = True,
         static_dir: Path | str | None = None,
         app_version: str = "",
+        local_inputs: bool = False,
         poll_s: float = 4.0,
         sse_ping_s: float = 15.0,
     ) -> None:
@@ -112,6 +113,11 @@ class GuiApp:
             if static_dir
             else Path(__file__).resolve().parents[2] / "gui" / "static"
         )
+        if type(local_inputs) is not bool:
+            raise ValueError('local_inputs must be a bool')
+        self.local_inputs_enabled = local_inputs
+        from .page_cursors import PageCursorRegistry
+        self.page_cursors = PageCursorRegistry()
         self.mesh: Mesh | None = None
         self._session_generation = 0
         self._session_reads_exhausted = False
@@ -206,6 +212,9 @@ class GuiApp:
                 return result
 
     def _advance_session_generation(self) -> None:
+        self.page_cursors.clear()
+        if self.mesh is not None and self.mesh.local_inputs is not None:
+            self.mesh.local_inputs.clear_selection()
         self._session_read_ready = False
         if type(self._session_generation) is not int \
                 or not 0 <= self._session_generation < _MAX_SESSION_GENERATION:
@@ -455,6 +464,7 @@ class GuiApp:
             encrypt=self.encrypt,
             home=self.home,
             app_version=self.app_version,
+            local_inputs=self.local_inputs_enabled,
         )
 
     def _adopt(self, mesh: Mesh) -> None:

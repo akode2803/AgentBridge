@@ -8,9 +8,9 @@ history-on-join, trust, keys, lifecycle, overlays and visibility.
 
 A logical source identifies immutable dependency selectors and local mutation
 intents. Each physical candidate uses a new, never-reused `stage:` source ID.
-Raw and normalized overlay rows share that physical source. Existing keyset and
-exact-selection readers use the physical position captured in the logical source
-receipt; they must still finish against current logical admission and session
+Chat-stage raw and normalized overlay rows share that physical source. Existing
+keyset and exact-selection readers use the physical position captured in the
+logical source receipt; they must still finish against current admission and session
 bindings. Physical positions alone do not authorize a request.
 
 ## Publication and failure
@@ -57,10 +57,18 @@ Capacity failure leaves paging unavailable and is reported through source health
 Cleanup runs between scheduled scans and rechecks foreground-selected work between
 chunks. The runtime does not rebuild or fold complete history on a page request.
 
-## Scope of this checkpoint
+## Current additive integration
 
-This is internal ingestion/admission infrastructure. It does not activate the GUI
-paging endpoint, implement remote-tail ingestion, establish a remote-staleness
-bound, or add coherent multi-document folder manifests. Fair room discovery,
-authenticated selected-chat routing, bounded API metadata, opaque continuations
-and browser scroll/DOM retention remain separate activation work.
+An opt-in GUI endpoint now uses this staged owner with bounded canonical page
+reads. Raw-only `kind='raw'` stages support a separate presence-floor source;
+legacy chat-stage rows migrate to explicit `kind='chat'`. Raw stages share the
+document, byte and cleanup budgets but have no chat identity or overlay-index
+readiness. A complete raw seal, derived presence index and exact logical owner
+CAS precede atomic pointer/readiness admission. Background discovery and page
+preparation use bounded work; the live browser route and DOM paging remain
+unchanged. See [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
+
+This still does not implement remote-tail ingestion, a hard remote-staleness
+bound or coherent multi-document folder manifests. The strict retirement before
+collection can leave even an unchanged selected source pending throughout a
+large scan; altering that crash/failure boundary remains a separate decision.

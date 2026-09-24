@@ -58,6 +58,18 @@ class SourceSchedule:
         False means the bounded background queue is full. Its caller can retain
         one reconcile-needed bit, not accumulate another unbounded queue.
         """
+        return self._request(chat_id, now=now, selected=selected, activity=activity)
+
+    def discover(self, chat_id, *, now):
+        """Admit a background discovery, rotating an idle slot when full.
+
+        A discovery is only a scheduling hint. The caller must separately
+        validate source eligibility before doing any work for this chat.
+        """
+        return self._request(chat_id, now=now, reconcile=True)
+
+    def _request(self, chat_id, *, now, selected=False, activity=False,
+                 reconcile=False):
         chat, now = self._chat(chat_id), self._time(now)
         if type(selected) is not bool or type(activity) is not bool:
             raise ValueError('invalid scheduling flags')
@@ -65,13 +77,14 @@ class SourceSchedule:
             state = self._states.get(chat)
             if state is None:
                 if len(self._states) >= self.capacity:
-                    if not selected:
+                    if not selected and not reconcile:
                         return False
-                    # Selected work may displace the least recently requested
-                    # nonrunning background slot. Ordinary reconciliation finds
-                    # it again; a job already executing is never discarded.
+                    # Selected work or bounded discovery may displace the least
+                    # recently requested nonrunning slot. Discovery also keeps
+                    # the current selected route. An executing job is retained.
                     victims = [(s.order, c) for c, s in self._states.items()
-                               if self._running is None or c != self._running.chat_id]
+                               if (self._running is None or c != self._running.chat_id)
+                               and (not reconcile or c != self._selected)]
                     if not victims:
                         return False
                     del self._states[min(victims)[1]]

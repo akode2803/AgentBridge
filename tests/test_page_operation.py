@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -132,6 +133,38 @@ def test_two_hundred_messages_page_and_keyset_pagination(world):
     )
 
 
+def test_presentation_is_page_local_and_joins_starred_across_raw_windows(world):
+    mesh, mirror, _provider, chat, base = world
+    mesh.store.upsert_messages(chat, [
+        _message(f"m{index:03d}", base + index) for index in range(200, 400)
+    ])
+    # One visible message in the first 200 raw rows forces a second bounded
+    # capture. Stars from both windows must survive; an older star must not
+    # pretend to be part of this page's complete inventory.
+    state = {
+        "hidden": [f"m{index:03d}" for index in range(200, 399)],
+        "starred": ["m399", "m199", "m001"],
+        "read_ns": base + 42,
+        "archived": True,
+    }
+    inputs = _inputs(mesh, mirror, chat, state=state)
+    prepared = PageOperation(mesh, chat, limit=10).prepare(*inputs)
+    assert prepared.status == "prepared", prepared
+    result = prepared.prepared.finalize()
+    assert result.status == "page", result
+    page, presentation = result.result.page, result.result.presentation
+    assert page.raw_examined == 209
+    assert [m.id for m in page.messages] == [
+        *(f"m{index:03d}" for index in range(191, 200)), "m399",
+    ]
+    assert presentation.starred == ("m199", "m399")
+    assert json.loads(presentation.viewer_state_json) == {
+        "read_ns": base + 42, "archived": True,
+    }
+    assert json.loads(presentation.snapshot_json)["id"] == chat
+    assert result.result.candidate is None
+
+
 @pytest.mark.parametrize("mutation", ["delayed_message", "new_edit"])
 def test_continuation_requires_exact_previous_cut(world, mutation):
     mesh, mirror, _provider, chat, base = world
@@ -182,6 +215,24 @@ def test_new_prepare_supersedes_earlier_finalizer(world):
     assert current.prepared.finalize().reason == "operation_superseded"
 
 
+def test_finalizer_rejects_presentation_with_noncanonical_snapshot(world):
+    mesh, mirror, _provider, chat, _base = world
+    prepared = PageOperation(mesh, chat, limit=10).prepare(*_inputs(mesh, mirror, chat))
+    assert prepared.status == "prepared"
+    finalizer = prepared.prepared
+    fence = finalizer._fence
+    altered = json.loads(fence.presentation.snapshot_json)
+    altered["name"] = "forged name"
+    finalizer._fence = replace(fence, presentation=replace(
+        fence.presentation,
+        snapshot_json=json.dumps(altered, sort_keys=True, separators=(",", ":")),
+    ))
+    result = finalizer.finalize()
+    assert (result.status, result.reason, result.result) == (
+        "unavailable", "page_presentation_changed", None,
+    )
+
+
 def test_scan_budget_one_never_captures_more_than_one_payload_row(world, monkeypatch):
     mesh, mirror, _provider, chat, _base = world
     inputs = _inputs(mesh, mirror, chat)
@@ -224,6 +275,7 @@ def test_late_input_mutations_reject_prepared_page(world, mutation):
         mesh.store.upsert_messages(chat, [_message("late-message", time.time_ns())])
     finalized = prepared.prepared.finalize()
     assert finalized.status == "unavailable"
+    assert finalized.result is None  # no page or presentation escapes the failed fence
     assert finalized.reason in {
         "page_mirror_changed", "membership_inputs_changed", "page_inputs_changed",
         "inputs_unavailable",
