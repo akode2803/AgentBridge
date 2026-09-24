@@ -197,7 +197,8 @@ def test_late_presence_heartbeat_rejects_prepared_receipts_without_changing_chat
     # usable; only this prepared companion receipt becomes stale.
     assert local_source.capture(mesh.store, chat_receipt.source.source_id) == chat_receipt.source
     result = prepared.prepared.finalize()
-    assert result.status == 'unavailable' and result.result is None
+    assert (result.status, result.reason) == ('restart', 'local_inputs_changed')
+    assert result.result is None
 
 
 def test_pending_companion_mutation_intent_rejects_final_handoff(world):
@@ -211,7 +212,8 @@ def test_pending_companion_mutation_intent_rejects_final_handoff(world):
         result = prepared.prepared.finalize()
     finally:
         mesh.local_inputs.coordinator.complete(intent)
-    assert result.status == 'unavailable' and result.result is None
+    assert (result.status, result.reason) == ('restart', 'local_inputs_changed')
+    assert result.result is None
 
 
 def test_receipt_page_never_reads_provider_or_fullfold_after_ingestion(world, monkeypatch):

@@ -142,7 +142,8 @@ def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     else:
         mesh.tx.put_doc(f'chats/{chat}/runtime/mutation.json', {'value': 1})
     result = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
-    assert result.status == 'unavailable' and result.result is None
+    assert (result.status, result.reason) == ('restart', 'local_inputs_changed')
+    assert result.result is None
 
 
 def test_cold_aux_sources_explicitly_pending_and_not_false_unpaused(page_app):

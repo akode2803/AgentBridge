@@ -145,7 +145,8 @@ def test_pin_source_change_after_prepare_rejects_finalizer(world):
     publisher.publish(publisher.capture(), raw_documents.collect_documents(provider, reader.definition),
                       observed_ns=time.time_ns())
     finalized = prepared.prepared.finalize()
-    assert finalized.status == 'unavailable' and finalized.result is None
+    assert (finalized.status, finalized.reason) == ('restart', 'local_inputs_changed')
+    assert finalized.result is None
 
 
 def test_pinned_page_prepares_without_provider_or_fullfold(world, monkeypatch):

@@ -133,4 +133,5 @@ def test_late_runtime_source_mutation_cannot_hand_out_prepared_owner_ask(world):
     app.mesh.tx.put_doc(f'chats/{chat}/runtime/owner-control/manager/asks/late.json',
                         {'header': {'id': 'late'}})
     result = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
-    assert result.status == 'unavailable' and result.result is None
+    assert (result.status, result.reason) == ('restart', 'local_inputs_changed')
+    assert result.result is None
