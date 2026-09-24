@@ -139,7 +139,7 @@ def _metadata(row):
 def capture(
     path: Path, index: overlays.OverlayIndexPosition, *,
     expected: PageInputPosition | None = None,
-    before: MessageKey | None = None, raw_limit: int = 128,
+    before: MessageKey | None = None, before_inclusive: bool = False, raw_limit: int = 128,
     exact_ids: tuple[str, ...] = (), state_paths: tuple[str, ...] = (),
     proof_keys: tuple[tuple[str, str], ...] = (), max_bytes: int = MAX_BYTES,
     include_reactions: bool = False,
@@ -164,6 +164,8 @@ def capture(
             raise ValueError('page position belongs to another chat')
     if before is not None:
         before = _key(before)
+    if type(before_inclusive) is not bool or (before_inclusive and (before is None or raw_limit == 0)):
+        raise ValueError('inclusive before requires an ordered first window')
     if type(raw_limit) is not int or not 0 <= raw_limit <= MAX_RAW_ROWS:
         raise ValueError('invalid raw row limit')
     if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_BYTES:
@@ -186,7 +188,7 @@ def capture(
         sql = (f'SELECT ns,sender,id,kind,length(CAST(payload AS BLOB)) FROM messages INDEXED BY {INDEX} '
                'WHERE chat_id=? AND ns>0')
         if before is not None:
-            sql += ' AND (ns,sender,id)<(?,?,?)'
+            sql += ' AND (ns,sender,id)' + ('<=' if before_inclusive else '<') + '(?,?,?)'
             params.extend((before.ns, before.sender, before.id))
         sql += ' ORDER BY ns DESC,sender DESC,id DESC LIMIT ?'
         meta = [_metadata(r) for r in conn.execute(sql, (*params, raw_limit + 1))] if raw_limit else []

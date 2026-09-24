@@ -7,18 +7,191 @@ import { ICONS, BIRD, extIcon, agentIdentityBadge } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
 import { pendingSendRows, reconcileSends, removeSend } from "./pending-send.js";
-import { endLoading } from "./loading.js";
+import { beginLoading, endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshDraft, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
+import { App, Mesh, meshCaps, meshDraft, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { warmContext, selectedChatContext, presentationFromState, sameWarmOperation } from "./warm-context.js";
 import { createLatestRead } from "./latest-read.js";
+import { createChatPageRead } from "./chat-page-read.js";
+import { captureTranscriptAnchor, restoreTranscriptAnchor, pruneTranscriptResources } from "./chat-page-scroll.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit, restoreSendDraft } from "./composer.js";
 import { openModal, closeModal, beginModalRead, captureModalRead, modalReadMayApply } from "./modal.js";
 import { notifyAsk } from "./notify.js";
 import { rxBadge, openReactionsPopup, captureRxSigs, animateRxChanges } from "./reactions.js";
 import { V } from "./views.js";
+
+// One active bounded page window; route/session identities never authorize data.
+const pageRead = createChatPageRead({fetchPage: ({chatId, cursor, anchor, limit, signal}) => {
+  const query = new URLSearchParams({id: chatId, limit: String(limit || 50)});
+  if (cursor) query.set("cursor", cursor);
+  if (anchor) query.set("anchor", anchor);
+  return api(`/api/mesh/chat_page?${query}`, undefined,
+    {sideEffects: false, timeoutMs: 15000, signal});
+}});
+let pageOwner = null;
+let pageRetryTimer = null;
+function resetPagedView() {
+  pageOwner = null;
+  clearTimeout(pageRetryTimer);
+  pageRetryTimer = null;
+  pageRead.invalidate?.("route_changed");
+}
+document.addEventListener("ab:session-reset", resetPagedView);
+document.addEventListener("ab:lock-epoch", resetPagedView);
+
+async function refreshPagedSidebar(owner) {
+  const ticket = captureSessionEpoch();
+  let request;
+  try {
+    const fresh = await sidebarRead.request(() => {
+      request = captureMeshStateRead(ticket);
+      return api("/api/mesh/state", undefined, {sideEffects:false, timeoutMs:15000});
+    }, () => pageOwner === owner && owner.current());
+    if (pageOwner !== owner || !owner.current() || !fresh) return;
+    if (applyMeshState(ticket, fresh, request)) renderSidebar();
+  } catch { /* Selected-room reads remain independent of sidebar readiness. */ }
+}
+
+async function renderPagedChat(force, kind = null) {
+  const binding = BrowserSession.snapshot().binding;
+  if (!binding?.viewer) return;
+  const ticket = captureSessionEpoch();
+  const route = App.routeSeq;
+  const chatId = Mesh.chatId;
+  const lockEpoch = meshStateSnapshot().lockEpoch;
+  const identity = JSON.stringify([binding, route, chatId, lockEpoch]);
+  if (!pageOwner || pageOwner.identity !== identity) {
+    resetPagedView();
+    pageRead.reset(binding, chatId, route);
+    pageOwner = {identity, chatId, browsing: false, ready: false, retries: 0,
+      current: () => App.page === "chats" && App.routeSeq === route
+        && Mesh.chatId === chatId && sessionMayApply(ticket)
+        && meshStateSnapshot().lockEpoch === lockEpoch};
+  }
+  const owner = pageOwner;
+  if (owner.busy) return;
+  owner.busy = true;
+  const mode = kind || (owner.browsing && pageRead.refreshPlan() ? "refresh" : "first");
+  const before = $("#transcript");
+  const preserve = kind !== "first" && (mode === "older" || (owner.browsing && mode === "refresh")
+    || (before && before.scrollHeight - before.scrollTop - before.clientHeight > 120));
+  const anchor = kind === "first" ? null
+    : preserve && before ? captureTranscriptAnchor(before) : owner.recoveryAnchor || null;
+  if (mode === "older") {
+    if (!owner.wantOlder) owner.olderRetries = 0;
+    owner.browsing = true; owner.wantOlder = true;
+  }
+  if (kind === "first") { owner.wantOlder = false; owner.recoveryAnchor = null; }
+  const started = performance.now();
+  const finishLoading = $("#content").dataset.pagePending === owner.identity ? () => {}
+    : beginLoading($("#content"), {label: mode === "older" ? "Loading earlier messages…" : "Loading chat…",
+      placement: mode === "first" ? "center" : "corner", current:owner.current});
+  try {
+    const result = await pageRead.read(mode);
+    if (pageOwner !== owner || !owner.current()) return;
+    if (["busy", "stale"].includes(result.status)) return;
+    if (result.status !== "page") {
+      owner.recoveryAnchor = anchor;
+      if (mode === "older" && ++owner.olderRetries > 5) owner.wantOlder = false;
+      owner.ready = false;
+      Mesh.chatKey = Mesh.structKey = "";
+      Mesh.renderedChat = null;
+      const host = $("#content");
+      if (result.status === "locked") {
+        observeLockState(true); document.dispatchEvent(new CustomEvent("ab:locked")); return;
+      }
+      if (result.status === "forbidden") {
+        host.innerHTML = ""; location.hash = "#/chats"; return;
+      }
+      const pending = ["pending", "reset_required"].includes(result.status);
+      if (host.dataset.pagePending !== owner.identity) {
+        endLoading(host);
+        host.innerHTML = '<div class="chat-loading"></div>';
+        host.dataset.pagePending = owner.identity;
+        beginLoading(host, {label:"Loading chat…", placement:"center", current:owner.current});
+      }
+      if (pending && ++owner.retries <= 5) {
+        clearTimeout(pageRetryTimer);
+        pageRetryTimer = setTimeout(() => {
+          if (pageOwner === owner && owner.current()) renderPagedChat(false);
+        }, Math.min(2000, Math.max(350, result.retry_after_ms || 350)));
+      } else {
+        endLoading(host);
+        host.innerHTML = '<div class="empty"><p>Chat is not ready yet.</p><button id="page-retry">Retry</button></div>';
+        $("#page-retry").onclick = () => { owner.retries = 0; renderPagedChat(true); };
+      }
+      return;
+    }
+    owner.ready = true;
+    owner.retries = 0;
+    if (mode === "older") { owner.browsing = true; owner.wantOlder = false; }
+    if (mode === "first") owner.browsing = false;
+    clearTimeout(pageRetryTimer);
+    delete $("#content").dataset.pagePending;
+    const data = {...result.pageData, messages:result.messages, _paged:true};
+    const presentation = Mesh.state?.user === data.me ? Mesh.state : {user:data.me, users:{}};
+    const pane = $("#details-pane");
+    if (!Mesh.detailsView) { pane.hidden = true; pane.innerHTML = ""; }
+    const painted = await renderMeshChat(force, null, {data, presentation, warmBase:true, paged:true,
+      historyRead: mode === "older" || owner.browsing,
+      guard:() => pageOwner === owner && owner.current()});
+    if (!painted || pageOwner !== owner || !owner.current()) return;
+    const tr = $("#transcript");
+    if (!tr) return;
+    pruneTranscriptResources(tr, result.evictedIds || [],
+      {msgExpand:Mesh.msgExpand, selectedIds:Mesh.select?.ids});
+    tr._pageHasMore = result.hasMore;
+    owner.visibleReadNs = data.read_cutoff_ns || "0";
+    if (!tr._pageScrollBound) {
+      tr._pageScrollBound = true;
+      tr.addEventListener("scroll", () => {
+        if (Mesh.pendingRead === chatId && document.hasFocus()
+            && pageOwner === owner && owner.current()) markReadNow(chatId);
+        if (tr.scrollTop < 80 && tr._pageHasMore && !owner.busy
+            && pageOwner === owner && owner.current()) renderPagedChat(false, "older");
+      }, {passive:true});
+    }
+    let controls = $("#page-history-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.id = "page-history-controls";
+      controls.className = "page-history-controls";
+      tr.before(controls);
+    }
+    controls.innerHTML = `${result.hasMore ? '<button data-page="older">Load earlier messages</button>' : ''}
+      ${owner.browsing ? '<button data-page="latest">Jump to latest</button>' : ''}`;
+    controls.onclick = (event) => {
+      const action = event.target.closest("[data-page]")?.dataset.page;
+      if (action) renderPagedChat(false, action === "older" ? "older" : "first");
+    };
+    if (anchor) restoreTranscriptAnchor(tr, anchor);
+    else if (mode === "first") tr.scrollTop = tr.scrollHeight;
+    owner.recoveryAnchor = null;
+    if (mode === "refresh" && owner.wantOlder && result.hasMore) {
+      pageRetryTimer = setTimeout(() => {
+        if (pageOwner === owner && owner.current()) renderPagedChat(false, "older");
+      }, 350);
+    }
+    const readSignature = JSON.stringify(data.messages.map(m => [m.id, m.edited?.ns || 0]));
+    if (!owner.browsing && (owner.lastReadSignature !== readSignature || Mesh.pendingRead === chatId)) {
+      owner.lastReadSignature = readSignature;
+      if (document.hasFocus()) markReadNow(chatId);
+      else Mesh.pendingRead = chatId;
+    }
+    if (Mesh.detailsView) { pane.hidden = false; await V.renderChatDetails(); }
+    // This is a bounded canonical sidebar request; it never gates first paint.
+    if (mode !== "older") void refreshPagedSidebar(owner);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (pageOwner === owner && owner.current()) recordChatOpen({v:1,mode:"paged",
+        chat_fetch_ms:performance.now() - started, messages:result.messages.length});
+    }));
+  } finally {
+    owner.busy = false;
+    if (pageOwner !== owner || !owner.current()) finishLoading();
+  }
+}
 
 let chatRenderSeq = 0;
 let chatsFetchSeq = 0;
@@ -174,8 +347,22 @@ function runAccessDetails(run, open) {
 // which was exactly the "unread counter while I'm using the chat" report.
 // Mirrors the server: mark_read also clears forced_unread (overlays.py).
 function markReadNow(chatId) {
+  const paged = meshCaps().chat_page_v1;
+  if (paged) {
+    const tr = $("#transcript");
+    if (!pageOwner?.ready || pageOwner.chatId !== chatId || !pageOwner.current()
+        || pageOwner.browsing || !tr
+        || tr.scrollHeight - tr.scrollTop - tr.clientHeight > 120) {
+      Mesh.pendingRead = chatId;
+      return;
+    }
+  }
   Mesh.pendingRead = null;
-  api("/api/mesh/read", { chat_id: chatId });
+  api("/api/mesh/read", { chat_id: chatId,
+    ...(paged ? {up_to_ns:pageOwner.visibleReadNs || "0"} : {}) });
+  // The sidebar timestamp is a JS Number; only the next canonical sidebar
+  // response may settle its badge against an exact decimal page cutoff.
+  if (paged) return;
   const c = Mesh.state?.chats?.find((x) => x.id === chatId);
   // V67: remember the tail we've now read, so a racing state fetch (the
   // fire-and-forget read above may not have persisted yet) can't resurrect
@@ -201,6 +388,8 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
+  if (meshCaps().chat_page_v1 && Mesh.chatId) return renderPagedChat(force);
+  if (pageOwner) resetPagedView();
   // A normal safety poll must not supersede a validated initial transcript
   // while its one broad-state hydration is still in flight. Forced mutation
   // and route renders retain their existing ownership and may supersede it.
@@ -829,6 +1018,7 @@ function nextClamp(cur) {
 }
 
 async function renderMeshChat(force, openTrace = null, prepared = null) {
+  if (!prepared && meshCaps().chat_page_v1) return renderPagedChat(force);
   const sessionTicket = captureSessionEpoch();
   const readStarted = performance.now();
   const renderSeq = ++chatRenderSeq;
@@ -904,7 +1094,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // the flag in so the repaint rides the partial path
   const goneSig = Object.values(ms.users || {})
     .filter((u) => u.departed).map((u) => u.username).join(",");
-  const key = JSON.stringify([data.messages.length, data.messages.at(-1)?.id,
+  const key = JSON.stringify([data.messages.map(m => m.id), data.messages.at(-1)?.id,
     meta.archived, (meta.members || []).length,
     pinsSig, (data.starred || []).join(","), mutSig, goneSig, pendingRows,
     feeds.map((f) => [f.run_id || f.agent, f.turns, f.activity,
@@ -928,11 +1118,11 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (key === Mesh.chatKey && structKey === Mesh.structKey
       && App.page === "chats" && $("#transcript")) {
     if (prepared?.guard && !prepared.guard()) return;
-    syncReceiptTicks($("#transcript"), data.messages, isDmLike(meta));
+    syncReceiptTicks($("#transcript"), data.messages, isDmLike(meta), !data._paged || data.metadata_status?.receipts === "ready");
     if (Mesh.jumpTo) jumpToMessage();
-    return;
+    return true;
   }
-  const hadNew = key !== Mesh.chatKey;
+  const hadNew = !prepared?.historyRead && key !== Mesh.chatKey;
   Mesh.chatKey = key;
 
   // mentions highlight only actual members — membership is symmetric:
@@ -1170,7 +1360,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // transcript so the text box (draft, caret, focus) is never disturbed
   // (structKey computed up top; pins ride the partial path on purpose)
   if (!Mesh.msgCounts) Mesh.msgCounts = {};
-  const grew = data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
+  const grew = !prepared?.historyRead && data.messages.length > (Mesh.msgCounts[chatId] ?? data.messages.length);
   Mesh.msgCounts[chatId] = data.messages.length;
   const menuCtx = { presentation: ms, isDm, selfChat: meta.kind === "self",
                     canReply: isMember && !meta.archived,
@@ -1193,7 +1383,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // only the fresh rows need binding + clamping below
     const freshEls = reconcileRows(tr,
       parts.length ? parts : [["empty", bubbles]]);
-    syncReceiptTicks(tr, data.messages, isDm);
+    syncReceiptTicks(tr, data.messages, isDm, !data._paged || data.metadata_status?.receipts === "ready");
     bindTranscript(tr, chatId, data, menuCtx);
     animateRxChanges(tr, data.messages, oldRx);
     freshEls.forEach((el) => bindOpenFile(el, chatId, ".mesh-att"));
@@ -1214,11 +1404,11 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     if (Mesh.jumpTo) jumpToMessage();
     else if (nearBottom) tr.scrollTop = tr.scrollHeight;
     else tr.scrollTop = prevTop;
-    if (hadNew) {
+    if (hadNew && !prepared?.paged) {
       if (document.hasFocus()) markReadNow(chatId);
       else Mesh.pendingRead = chatId;   // settle on the focus listener
     }
-    return;
+    return true;
   }
   Mesh.structKey = structKey;
   // R52: a structural change on the SAME open chat (rename, membership,
@@ -1287,7 +1477,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         <button data-act="select">${ICONS.select} Select messages</button>
         ${prepared?.warmBase ? "" : `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`}
         ${isMember ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive" : "Archive"} ${isDm ? "chat" : "group"}</button>` : ""}
-        <button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>
+        ${!data._paged || data.metadata_status?.pause === "ready" ? `<button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>` : ""}
         <button data-act="close">${ICONS.close} Close chat</button>
         <div class="menu-sep"></div>
         <button data-act="clear" class="danger-item"${canClear ? "" : " disabled"}>${ICONS.eraser} Clear chat</button>
@@ -1454,7 +1644,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (parts.length && tr.children.length === parts.length) {
     tr._rows = new Map(parts.map(([k, h], i) => [k, { html: h, el: tr.children[i] }]));
   }
-  syncReceiptTicks(tr, data.messages, isDm);
+  syncReceiptTicks(tr, data.messages, isDm, !data._paged || data.metadata_status?.receipts === "ready");
   clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
   else if (keep && !keep.nearBottom) tr.scrollTop = keep.top;
@@ -1474,6 +1664,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     $("#mesh-body")?.focus();   // V43: the composer is live the moment a chat opens
   }
   Mesh.renderedChat = chatId;
+  return true;
 }
 V.renderMeshChat = renderMeshChat;
 V.renderPendingSends = (chatId, scroll = false) => {
@@ -1748,12 +1939,12 @@ function replyQuote(rt, isDm, ms) {
 // group each tier means the LOWEST any other member is at (double-accent only
 // when everyone read); the tooltip carries the running count. Deleted/system
 // messages carry no receipt. State comes from msg.receipt (server).
-function syncReceiptTicks(tr, messages, isDm) {
+function syncReceiptTicks(tr, messages, isDm, ready = true) {
   for (const msg of messages) {
     const row = tr._rows?.get("m:" + msg.id)?.el;
     const slot = row?.querySelector(".bubble > .meta > .receipt-slot");
     if (!slot) continue;
-    const html = receiptTicks(msg, isDm);
+    const html = ready ? receiptTicks(msg, isDm) : "";
     if (slot._receiptHtml === html) continue;
     slot.innerHTML = html;
     slot._receiptHtml = html;
@@ -2373,7 +2564,10 @@ function jumpToMessage() {
   Mesh.jumpTo = null;
   if (!id) return;
   const el = document.querySelector(`#transcript .msg[data-mid="${CSS.escape(id)}"]`);
-  if (!el) return;
+  if (!el) {
+    if (meshCaps().chat_page_v1) toast("That message is outside the loaded history. Load earlier messages to find it.");
+    return;
+  }
   el.scrollIntoView({ block: "center" });
   el.classList.add("flash");
   setTimeout(() => el.classList.remove("flash"), 1700);

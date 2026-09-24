@@ -320,6 +320,19 @@ class Store:
         ).fetchone()
         return int(row[0])
 
+    def latest_message_ns(self, chat_id: str) -> int:
+        """Newest positive message ns via the covering chat/ns index.
+
+        Match messages(chat_id)'s legacy ns>0 filter without decoding any
+        payload; a chat with only legacy zero-ns rows still yields zero.
+        """
+        row = self._conn().execute(
+            "SELECT ns FROM messages INDEXED BY idx_messages_chat_ns "
+            "WHERE chat_id=? AND ns>0 ORDER BY ns DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        return row[0] if row is not None else 0
+
     def state_events_after(self, chat_id: str, ns: int) -> list[dict]:
         """Locally ingested chat-state events newer than a materialized fold.
 

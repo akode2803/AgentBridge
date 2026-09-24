@@ -66,6 +66,7 @@ def chat_page(app, req, mesh, token):
             operation = PageOperation(mesh, chat, source_reader=reader,
                                       before=continuation.before if continuation else None,
                                       window_before=anchor.before if anchor else None,
+                                      window_inclusive=anchor.inclusive if anchor else False,
                                       expected_position=expected, limit=limit)
         work = operation.prepare(receipt, receipt, index)
         if work.status == 'restart':
@@ -104,10 +105,15 @@ def chat_page(app, req, mesh, token):
             'messages': [message_json(message, mesh.user) for message in selected.messages],
             'starred': list(presentation.starred), 'starred_scope': 'page',
             'read_ns': viewer.get('read_ns', 0),
+            # Decimal text preserves nanoseconds beyond JS Number precision.
+            'read_cutoff_ns': str(max((message.ns for message in selected.messages), default=0)),
             'has_more': selected.has_more, 'history_exhausted': selected.history_exhausted,
             'scan_budget_exhausted': selected.scan_budget_exhausted,
             'continuation': app.page_cursors.issue(token, chat, selected),
             'window_anchor': app.page_cursors.issue_anchor(token, chat, selected, before),
+            'frozen_window_anchor': (app.page_cursors.issue_anchor(
+                token, chat, selected, selected.newest_examined, inclusive=True)
+                if selected.newest_examined is not None else None),
             'session_binding': session_read_binding(token),
             'metadata_status': {'receipts': 'deferred', 'pins': 'deferred',
                                 'origin': 'deferred', 'profiles': 'deferred',

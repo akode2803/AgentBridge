@@ -15,6 +15,7 @@ import time
 from itertools import chain
 from pathlib import Path
 
+from ..core.errors import ValidationError
 from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
 from .context import GuiApp, SessionReadToken, session_read_binding
@@ -98,7 +99,8 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "instance_id": token.app_identity,
         "server_pid": os.getpid(),
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
-                 "session_binding_v1": True},
+                 "session_binding_v1": True,
+                 "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
         "paused": False,  # compatibility field; mesh-global pause is retired
         "user": binding["viewer"],
         "session_binding": binding,
@@ -203,7 +205,8 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         "server_pid": os.getpid(),
         "encrypted": app.encrypt,
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
-                 "session_binding_v1": True},
+                 "session_binding_v1": True,
+                 "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
         "max_upload_bytes": None,
         "connection": _connection(app),
         "session_binding": session_read_binding(token),
@@ -219,6 +222,23 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
             for n in app.directory0.names()
             if (acc := app.directory0.get(n)) is not None
         }
+        return out
+    if getattr(app, 'local_inputs_enabled', False) and mesh.local_inputs is not None:
+        from .api_sidebar_pages import MAX_RESPONSE_BYTES, capture_sidebar
+
+        out.update(capture_sidebar(app, mesh, token))
+        out['key_alerts'] = [
+            {'name': a.get('name', ''), 'seen_sign_pub': a.get('seen_sign_pub', ''),
+             'first_seen': a.get('first_seen', ''),
+             'pinned_fp': mesh.key_pins.fingerprint(a.get('name', '')),
+             'seen_fp': key_fingerprint(a.get('name', ''),
+                                         a.get('seen_sign_pub', ''),
+                                         a.get('seen_agree_pub', ''))}
+            for a in mesh.key_alerts()
+        ]
+        if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
+            out.update(users={}, chats=[], key_alerts=[], chats_complete=False,
+                       sidebar_status='response_byte_budget')
         return out
     observation = ProjectionObservation("sidebar")
     users: dict = {}
@@ -460,7 +480,24 @@ def post(app: GuiApp, req, mesh) -> dict:
 
 @authed
 def read(app: GuiApp, req, mesh) -> dict:
-    mesh.mark_read(req.data.get("chat_id") or "")
+    chat_id = req.data.get("chat_id") or ""
+    if "up_to_ns" in req.data:
+        cut = req.data["up_to_ns"]
+        if type(cut) is str:
+            if (not cut or len(cut) > 19 or not cut.isascii() or not cut.isdecimal()
+                    or (len(cut) > 1 and cut[0] == '0')):
+                raise ValidationError("Invalid read cursor")
+            cut = int(cut)
+            valid = cut <= 2**63 - 1
+        else:
+            # JSON numbers above this bound have already lost nanosecond
+            # precision in the browser; use the decimal string form instead.
+            valid = type(cut) is int and 0 <= cut <= 2**53 - 1
+        if not valid:
+            raise ValidationError("Invalid read cursor")
+        mesh.mark_read(chat_id, up_to_ns=cut)
+    else:
+        mesh.mark_read(chat_id)
     return {"ok": True}
 
 

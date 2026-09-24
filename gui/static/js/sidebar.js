@@ -287,6 +287,18 @@ function renderChatListSidebar() {
   const recency = (c) => (c.last && c.last.ns) || 0;
   listed.sort((a, b) => (!!b.pinned - !!a.pinned) || (recency(b) - recency(a)));
   const box = $("#side-chats");
+  let progress = $("#sidebar-page-status");
+  if (!progress) {
+    progress = document.createElement("div");
+    progress.id = "sidebar-page-status";
+    progress.className = "hint";
+    progress.setAttribute("role", "status");
+    box.before(progress);
+  }
+  progress.hidden = ms.chats_complete !== false;
+  progress.textContent = ms.sidebar_status === "room_limit"
+    ? "This chat list exceeds the current loading limit."
+    : "Updating chat list…";
 
   // the mutable pieces of a row, shared by the full build AND the in-place
   // update so both render identically (round 12).
@@ -322,7 +334,7 @@ function renderChatListSidebar() {
     return "";
   };
   const lastHtml = (c) => liveHtml(c)
-    || (!c.last ? "No messages yet"
+    || (!c.last ? (c.preview_pending ? "Loading preview…" : "No messages yet")
     : c.last.deleted ? (c.last.from === ms.user
         ? "You deleted this message" : "This message was deleted")
     : c.last.kind === "info" ? esc(meshInfoText(c.last, ms.user))
@@ -332,7 +344,7 @@ function renderChatListSidebar() {
   const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
-    const dot = !hasCount && c.forced_unread && !c.archived;  // mark-unread: no number
+    const dot = !hasCount && (c.forced_unread || c.unread_complete === false) && !c.archived;  // mark-unread: no number
     // V115: an unread message tagging you (or replying to you) in a GROUP
     // shows @ in place of the count (WhatsApp) — a DM is all personal, so
     // it keeps the number
@@ -346,8 +358,8 @@ function renderChatListSidebar() {
       + (muted ? `<span class="mute-ind" title="Muted">${ICONS.bellOff}</span>` : "")
       + (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
       + (hasCount ? `<span class="unread-badge${muted ? " muted" : ""}${at ? " at" : ""}"${
-          at ? ' title="You were mentioned"' : ""}>${at ? "@" : c.unread}</span>`
-        : dot ? `<span class="unread-badge dot"></span>` : "");
+          at ? ' title="You were mentioned"' : ""}>${at ? "@" : `${c.unread}${c.unread_complete === false ? "+" : ""}`}</span>`
+        : dot ? `<span class="unread-badge dot"${c.unread_complete === false ? ' title="Unread count is still loading"' : ""}></span>` : "");
   };
   // DM/self rows show the other member's photo; group rows show the group
   // photo (else the name initial) — one shared helper.

@@ -99,6 +99,9 @@ assert.equal(rendered.status, 'reset_required');
 assert.deepEqual(rendered.evictedIds, ['m2', 'm6']);
 assert.deepEqual(ids(state.snapshot()), []);
 assert.equal(state.begin('older'), null);
+assert.deepEqual(state.refreshPlan(), {
+  windowAnchor:'anchor-newest-raw', requestedMessages:2,
+});
 
 let ticket = state.begin('first');
 rendered = state.accept(ticket, page(['fresh-generation'], 'v4', 'raw-v4'));
@@ -238,7 +241,9 @@ refreshing = refreshState.begin('refresh');
 rendered = refreshState.accept(refreshing, page([], 'v3', 'empty-2', {scan_budget_exhausted:true}));
 assert.equal(rendered.status, 'unavailable');
 assert.equal(rendered.reason, 'refresh_request_budget');
-assert.equal(refreshState.refreshPlan(), null);
+assert.deepEqual(refreshState.refreshPlan(), {
+  windowAnchor:'anchor-next', requestedMessages:3,
+});
 assert.deepEqual(ids(refreshState.snapshot()), []);
 
 const emptyFirst = createChatPages({maxPages:2, maxMessages:4, maxBytes:1000});
@@ -309,6 +314,119 @@ refreshing = refreshState.begin('refresh');
 refreshState.reset(binding('2'), 'room', 2);
 assert.equal(refreshState.accept(refreshing, page(['late'], 'v7')).status, 'stale');
 assert.equal(refreshState.refreshPlan(), null);
+
+// A normal source-generation change invalidates strict older cursors. Discard
+// all old messages but keep only bounded opaque positioning for a fresh window.
+const recovery = createChatPages({maxPages:2,maxMessages:4,maxBytes:1000});
+recovery.reset(binding(), 'room', 1);
+ticket = recovery.begin('first');
+recovery.accept(ticket, page(['r4','r5'], 'v1', 'before-r4'));
+ticket = recovery.begin('older');
+recovery.accept(ticket, page(['r2','r3'], 'v1', 'before-r2'));
+ticket = recovery.begin('older');
+recovery.accept(ticket, page(['r0','r1'], 'v1', 'before-r0'));
+const positionOnly = recovery.refreshPlan();
+assert.deepEqual(positionOnly, {windowAnchor:'anchor-before-r2',requestedMessages:4});
+ticket = recovery.begin('older');
+rendered = recovery.accept(ticket, {status:'reset_required',reason:'continuation_changed',
+  session_binding:binding()});
+assert.deepEqual(rendered.evictedIds,['r0','r1','r2','r3']);
+assert.deepEqual(ids(recovery.snapshot()),[]);
+assert.deepEqual(recovery.refreshPlan(),positionOnly);
+assert.equal(recovery.begin('older'),null);
+refreshing = recovery.begin('refresh');
+assert.equal(refreshing.windowAnchor,positionOnly.windowAnchor);
+progress = recovery.accept(refreshing, {status:'pending',session_binding:binding()});
+assert.equal(progress.status,'pending');
+assert.deepEqual(recovery.refreshPlan(),positionOnly);
+refreshing = recovery.begin('refresh');
+progress = recovery.accept(refreshing, page(['r2-new','r3-new'],'v2','next'));
+assert.equal(progress.status,'refreshing');
+refreshing = recovery.begin('refresh');
+rendered = recovery.accept(refreshing, page(['r0-new','r1-new'],'v2','oldest'));
+assert.equal(rendered.status,'page');
+assert.deepEqual(ids(rendered),['r0-new','r1-new','r2-new','r3-new']);
+assert.equal(recovery.refreshPlan().windowAnchor,'anchor-next');
+recovery.reset(binding('2'),'room',2);
+assert.equal(recovery.refreshPlan(),null);
+
+// The frozen first-consumed raw key is the refresh boundary, not the request
+// anchor (which would move with a newly arrived tail message).
+const frozen = createChatPages({maxPages:2, maxMessages:4, maxBytes:1000});
+frozen.reset(binding(), 'room', 1);
+ticket = frozen.begin('first');
+frozen.accept(ticket, page(['m4','m5'], 'v1', 'before-4', {
+  window_anchor:'ordinary-tail', frozen_window_anchor:'inclusive-m5',
+}));
+assert.deepEqual(frozen.refreshPlan(), {
+  windowAnchor:'inclusive-m5', requestedMessages:2,
+});
+ticket = frozen.begin('older');
+frozen.accept(ticket, page(['m2','m3'], 'v1', 'before-2', {
+  window_anchor:'ordinary-before-4', frozen_window_anchor:'inclusive-m3',
+}));
+assert.deepEqual(frozen.refreshPlan(), {
+  windowAnchor:'inclusive-m5', requestedMessages:4,
+});
+ticket = frozen.begin('older');
+rendered = frozen.accept(ticket, page(['m0','m1'], 'v1', 'before-0', {
+  window_anchor:'ordinary-before-2', frozen_window_anchor:'inclusive-m1',
+}));
+assert.deepEqual(rendered.evictedIds, ['m4','m5']);
+assert.deepEqual(frozen.refreshPlan(), {
+  windowAnchor:'inclusive-m3', requestedMessages:4,
+});
+refreshing = frozen.begin('refresh');
+assert.equal(refreshing.windowAnchor, 'inclusive-m3');
+progress = frozen.accept(refreshing, page(['m2','m3'], 'v2', 'ref-before-2', {
+  window_anchor:'ordinary-ref-3', frozen_window_anchor:'inclusive-ref-m3',
+}));
+assert.equal(progress.status, 'refreshing');
+refreshing = frozen.begin('refresh');
+assert.equal(refreshing.windowAnchor, null);
+assert.equal(refreshing.continuation, 'ref-before-2');
+rendered = frozen.accept(refreshing, page(['m0','m1'], 'v2', null, {
+  window_anchor:'ordinary-ref-1', frozen_window_anchor:'inclusive-ref-m1',
+}));
+assert.deepEqual(ids(rendered), ['m0','m1','m2','m3']);
+assert.equal(frozen.refreshPlan().windowAnchor, 'inclusive-ref-m3');
+
+// An empty visible first scan retains its own frozen raw upper boundary even
+// when later refresh pages carry visible rows and different anchors.
+ticket = frozen.begin('first');
+frozen.accept(ticket, page(['latest'], 'v3', 'before-latest', {
+  frozen_window_anchor:'inclusive-latest',
+}));
+refreshing = frozen.begin('refresh');
+progress = frozen.accept(refreshing, page([], 'v4', 'empty-first', {
+  scan_budget_exhausted:true, window_anchor:'ordinary-empty',
+  frozen_window_anchor:'inclusive-empty',
+}));
+assert.equal(progress.status, 'refreshing');
+refreshing = frozen.begin('refresh');
+rendered = frozen.accept(refreshing, page(['visible'], 'v4', null, {
+  window_anchor:'ordinary-visible', frozen_window_anchor:'inclusive-visible',
+}));
+assert.equal(rendered.status, 'page');
+assert.equal(frozen.refreshPlan().windowAnchor, 'inclusive-empty');
+
+// Null means no consumed raw key; it may use the ordinary anchor. Malformed
+// provided fields fail closed instead of overriding the positioning token.
+ticket = frozen.begin('first');
+frozen.accept(ticket, page(['null-anchor'], 'v5', null, {
+  window_anchor:'ordinary-null', frozen_window_anchor:null,
+}));
+assert.equal(frozen.refreshPlan().windowAnchor, 'ordinary-null');
+for (const invalidFrozen of [123, {}, [], '', 'x'.repeat(513)]) {
+  ticket = frozen.begin('first');
+  rendered = frozen.accept(ticket, page(['malformed'], 'v5', null, {
+    frozen_window_anchor:invalidFrozen,
+  }));
+  assert.equal(rendered.status, 'invalidated');
+  assert.equal(frozen.refreshPlan(), null);
+  ticket = frozen.begin('first');
+  frozen.accept(ticket, page(['restore'], 'v5', null));
+}
 ''', encoding='utf-8')
     run = subprocess.run(['node', str(script)], capture_output=True, text=True, check=False)
     assert run.returncode == 0, run.stdout + run.stderr

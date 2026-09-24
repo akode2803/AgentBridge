@@ -11,7 +11,11 @@ export async function api(path, body, options = {}) {
   };
   const timeoutMs = Number(options.timeoutMs) || 0;
   const controller = timeoutMs > 0 ? new AbortController() : null;
-  if (controller) opts.signal = controller.signal;
+  const signal = options.signal;
+  const abort = () => controller?.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, {once:true});
+  if (controller || signal) opts.signal = controller?.signal || signal;
   const timer = controller
     ? setTimeout(() => controller.abort(), timeoutMs) : null;
   let out;
@@ -20,6 +24,7 @@ export async function api(path, body, options = {}) {
     out = await r.json();
   } finally {
     if (timer) clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
   // V111: ANY endpoint refusing because the app is locked raises the lock
   // screen — a DOM event, so this leaf module never imports a view

@@ -104,4 +104,11 @@ tr._rows.set("m:m2", {el: {querySelector: () => null}});
 syncReceiptTicks(tr, [{id: "m2", mine: true, kind: "message",
   receipt: {state: "read"}}], true);
 assert.equal(writes, 4);
+// A cold paged receipt companion cannot fabricate Sent from absence.
+syncReceiptTicks(tr, [message(undefined)], true, false);
+assert.equal(slot.html, ""); assert.equal(writes, 5);
+syncReceiptTicks(tr, [message(undefined)], true, false);
+assert.equal(writes, 5);
+syncReceiptTicks(tr, [message({state:"delivered"})], true, true);
+assert.match(slot.html, /Delivered/); assert.equal(writes, 6);
 '''

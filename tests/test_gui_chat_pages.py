@@ -10,6 +10,7 @@ from agentbridge.gui import api_chats, api_pages
 from agentbridge.gui.context import GuiApp
 from agentbridge.gui.routing import Request
 from agentbridge.core.models import BodyRecord, Envelope, MsgKind
+from agentbridge.core.errors import ValidationError
 from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.mesh.local_page_source import LocalPageSource
@@ -330,6 +331,40 @@ def test_same_nanosecond_sender_tie_uses_id_in_seek_boundary(page_app):
     assert [m['id'] for m in second['messages']] == ['tie-b']
     third = _settled_page(app, chat, limit='1', cursor=second['continuation'])
     assert [m['id'] for m in third['messages']] == ['tie-a']
+
+
+def test_exact_decimal_read_cutoff_does_not_mark_close_later_arrival(page_app):
+    app, chat = page_app
+    seed = app.mesh.post(chat, 'seed')
+    _ready(app, chat)
+    def record(ident, ns):
+        return Envelope(id=ident, ns=ns, ts='2026-01-01T00:00:00Z',
+                        from_='viewer', kind=MsgKind.MESSAGE,
+                        **app.mesh.sealer.seal(chat, ident, ns,
+                                               BodyRecord(body=ident))).to_dict()
+    painted_ns = seed.ns + 100
+    app.mesh.store.upsert_messages(chat, [record('painted', painted_ns)])
+    page = _settled_page(app, chat, limit='1')
+    assert page['status'] == 'page' and page['messages'][0]['id'] == 'painted'
+    assert page['read_cutoff_ns'] == str(painted_ns)
+    app.mesh.store.upsert_messages(chat, [record('unseen', painted_ns + 1)])
+    assert api_chats.read(app, Request(data={
+        'chat_id': chat, 'up_to_ns': page['read_cutoff_ns'],
+    })) == {'ok': True}
+    assert app.mesh.tx.get_doc(P.state(chat, 'viewer'))['read_ns'] == painted_ns
+    with pytest.raises(ValidationError, match='Invalid read cursor'):
+        api_chats.read(app, Request(data={'chat_id': chat, 'up_to_ns': painted_ns}))
+    for invalid in (True, None, -1, 1.5, '01', ' 1', '+1', '-1',
+                    str(2**63), '１', ''):
+        with pytest.raises(ValidationError, match='Invalid read cursor'):
+            api_chats.read(app, Request(data={'chat_id': chat, 'up_to_ns': invalid}))
+    assert api_chats.read(app, Request(data={'chat_id': chat, 'up_to_ns': 0})) == {'ok': True}
+    assert api_chats.read(app, Request(data={
+        'chat_id': chat, 'up_to_ns': 2**53 - 1,
+    })) == {'ok': True}  # Legacy safe numeric form remains accepted.
+    assert app.mesh.tx.get_doc(P.state(chat, 'viewer'))['read_ns'] == painted_ns
+    assert api_chats.read(app, Request(data={'chat_id': chat})) == {'ok': True}
+    assert app.mesh.tx.get_doc(P.state(chat, 'viewer'))['read_ns'] == painted_ns + 1
 
 
 def test_multi_member_page_defers_receipts_without_complete_presence(page_app):
