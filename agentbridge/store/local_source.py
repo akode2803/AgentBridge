@@ -334,6 +334,33 @@ def retire_for_publication(store, expected):
     return retired
 
 
+def claim_collection(store, expected):
+    """Fence a new staged attempt without retiring the last admitted snapshot.
+
+    Caller holds the root publication gate. Advancing the owner revision lets
+    a new attempt abandon an interrupted candidate, including one from a prior
+    process, without guessing whether a PID or timeout proves it dead. A live
+    superseded builder also loses its exact revision CAS and cannot publish or
+    retire this claim. Readiness and its original observation time are preserved
+    atomically; no pending write can be cleared or admitted here.
+    """
+    expected = _expected(store, expected)
+    with _writer(store) as conn:
+        current = capture_in_transaction(conn, store, expected.source_id)
+        if current != expected or current.writes_pending:
+            raise SourceChanged('source_changed_before_collection')
+        _advance(conn, expected.source_id, current.revision)
+        if current.ready:
+            conn.execute('UPDATE local_sources SET ready_incarnation=?,ready_generation=?,'
+                         'ready_cursor=? WHERE source=?',
+                         (current.raw.incarnation, current.raw.generation,
+                          current.raw.cursor, expected.source_id))
+        claimed = capture_in_transaction(conn, store, expected.source_id)
+        if claimed.raw != current.raw or claimed.ready != current.ready:
+            raise SourceChanged('collection_claim_changed_inputs')
+    return claimed
+
+
 def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
             max_bytes=16 * 1024 * 1024):
     """Publish a complete admitted selection; interrupted commits stay pending.

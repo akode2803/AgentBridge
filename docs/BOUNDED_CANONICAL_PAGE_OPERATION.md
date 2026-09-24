@@ -1,10 +1,11 @@
-# Request-owned canonical page operation (inactive)
+# Request-owned canonical page operation (opt-in route)
 
 `mesh.page_operation.PageOperation` composes the existing indexed local inputs,
 canonical fold, membership round and bounded epoch owner. `prepare()` computes
 outside GUI locks. Its private one-use finalizer checks all consumed inputs
 again. `GuiApp.finalize_page_read()` supplies the outer session and screen-lock
-gate. No chat endpoint or browser caller is enabled by this module.
+gate. An additive opt-in endpoint now invokes it; the existing browser chat route
+does not. See [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
 
 ## Request and continuation
 
@@ -97,11 +98,8 @@ screen-lock deadline expires during verification.
 
 ## Activation boundaries
 
-Direct folder source ownership, bounded source/index/proof work scheduling,
-opaque authenticated continuation encoding, response serialization, retained
-page/DOM bounds and browser scroll behavior are not activated here. The current
-`/chat` response also contains pins, receipts, chat metadata and other derived
-fields; those need bounded owner reads or explicit deferred placeholders, never
-an accidental legacy full-fold fallback. Phase 2 remote-tail ingestion remains
-out of scope. The Store position is local consistency evidence, not proof that
-all remote history is ingested.
+The opt-in route supplies local source ownership, background preparation,
+bounded response metadata and opaque continuations. Browser scroll anchoring,
+DOM retention and route switching remain unactivated. Phase 2 remote-tail
+ingestion remains out of scope. The Store position is local consistency evidence,
+not proof that all remote history is ingested.

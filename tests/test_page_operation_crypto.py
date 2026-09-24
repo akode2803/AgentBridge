@@ -1,6 +1,7 @@
 """R217 encrypted bounded page-operation integration tests."""
 from __future__ import annotations
 
+import json
 import pytest
 
 from agentbridge.mesh import authority_source
@@ -181,3 +182,31 @@ def test_signed_redaction_clear_keep_starred_and_offpage_parent_are_canonical(
     assert visible[0].body == "second encrypted"
     assert visible[0].reactions == {"✅": ["aryan"]}
     assert visible[0].reply_to == {"id": first.id, "deleted": True}
+    assert final.result.presentation.starred == (second.id,)
+
+
+def test_invalid_viewer_signature_cannot_surface_page_presentation(encrypted_page_world):
+    mesh, mirror, _provider, chat, first, _second = encrypted_page_world
+    mesh.messaging.star(chat, [first.id])
+    mesh.messaging.set_chat_flag(chat, "archived", True)
+    valid = PageOperation(mesh, chat, limit=10)
+    prepared, history = _advance_work(valid, mesh, mirror, chat)
+    assert prepared.status == "prepared", history
+    result = prepared.prepared.finalize()
+    assert result.status == "page", result
+    assert result.result.presentation.starred == (first.id,)
+    assert json.loads(result.result.presentation.viewer_state_json)["archived"] is True
+
+    tampered = mirror.get_doc(P.state(chat, mesh.user))
+    tampered["read_ns"] = 2**60
+    tampered["starred"] = [first.id]
+    mirror.put_doc(P.state(chat, mesh.user), tampered)
+    operation = PageOperation(mesh, chat, limit=10)
+    prepared, history = _advance_work(operation, mesh, mirror, chat)
+    assert prepared.status == "prepared", history
+    result = prepared.prepared.finalize()
+    assert result.status == "page", result
+    assert result.result.presentation.starred == ()
+    assert json.loads(result.result.presentation.viewer_state_json) == {
+        "read_ns": 0, "archived": False,
+    }

@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
-from ..core.models import Account, ChatSnapshot, UserKind
-from ..store import document_observation, lifecycle_inputs, local_source, membership_suffix, terminal_observation
+from ..core.models import Account, ChatSnapshot, UserKind, MsgKind
+from ..store import document_observation, lifecycle_inputs, local_source, membership_suffix, terminal_observation, send_status
 from ..store.membership_input_position import MembershipInputUnavailable
 from ..transport import authority_observation
 from . import authority_source, events, local_page_source, page_fence
@@ -58,6 +59,9 @@ class CoordinatorResult:
     work_path: str | None = None
     reason: str | None = None
     page: page_fence.PageSelection | None = None
+    presentation: page_fence.PagePresentation | None = None
+    local_trust_version: str | None = None
+    send_statuses: dict | None = None
 
 
 class _Stop(RuntimeError):
@@ -281,11 +285,11 @@ class _Round:
         return value
 
     @contextmanager
-    def _final_store(self):
+    def _final_store(self, companions=()):
         if self.source_reader is not None:
             if self.mesh.tx is not self.transport_owner or self.mesh.store is not self.source_reader.store:
                 raise _Stop('unavailable', 'local_source_owner_changed')
-            with self.source_reader.finalization(self.receipt) as conn:
+            with self.source_reader.finalization(self.receipt, companions=companions) as conn:
                 yield conn
             return
         conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
@@ -321,6 +325,9 @@ class _Round:
         if prepared_page is not None:
             self.ledger.charge(prepared_page.comparison_bytes * (2 if proposal is not None else 1))
         view = self.mesh.key_pins.capture_effective_view()
+        # Equality evidence for browser window invalidation, never a reused
+        # authority verdict. The view is still checked under its final gate.
+        trust_version = hashlib.sha256(view.effective_json.encode()).hexdigest()
         view_size = len(view.effective_json.encode()) + len(view.durable_json.encode())
         self.ledger.charge(view_size)
         for name, (sign, agree, history, used_sign, used_agree) in self.published.items():
@@ -354,14 +361,23 @@ class _Round:
             if prepared_page is None:
                 serialized = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
                 self.ledger.charge(len(serialized.encode()))
+            elif prepared_page.fence.presentation is not None:
+                serialized = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
+                self.ledger.charge(len(serialized.encode()))
+                if serialized != prepared_page.fence.presentation.snapshot_json:
+                    raise _Stop('unavailable', 'page_presentation_changed')
         elif proposal.subject not in self.heads:
             raise _Stop('unavailable', 'invalid_proposal')
         local = nullcontext() if prepared_page is None else page_fence.local_scope(self.mesh, prepared_page, source_reader=self.source_reader)
+        companions = ()
+        if prepared_page is not None and prepared_page.fence.presence is not None:
+            from .local_presence_source import definition as presence_definition
+            companions = (presence_definition(self.source_reader.coordinator.identity),)
         with local:
             with self.mesh.key_pins.locked_matching_view(view) as pins_match:
                 if not pins_match:
                     raise _Stop('unavailable', 'pin_inputs_changed')
-                with self._final_store() as conn:
+                with self._final_store(companions) as conn:
                     first = self.clock(self.now)
                     for batch in self.batches:
                         if not self._matches_batch(conn, batch):
@@ -433,7 +449,13 @@ class _Round:
                             raise _Stop('unavailable', 'page_mirror_changed')
                         last = self.clock(first)
                         if prepared_page is not None:
-                            return CoordinatorResult('page', page=prepared_page.fence.selection)
+                            selected = prepared_page.fence.selection
+                            statuses = send_status.capture(conn, self.chat, tuple(
+                                m.id for m in selected.messages if m.from_ == self.viewer
+                                and m.kind is MsgKind.MESSAGE and not m.deleted)) if selected is not None else {}
+                            return CoordinatorResult('page', page=prepared_page.fence.selection,
+                                presentation=prepared_page.fence.presentation,
+                                local_trust_version=trust_version, send_statuses=statuses)
                         candidate = MembershipCandidate(self.chat, self.viewer, self.machine, serialized,
                             self.receipt, tuple(self.batches), policy, self.suffix, self.terminal,
                             tuple(self.subjects.values()), tuple(self.heads.values()), view,

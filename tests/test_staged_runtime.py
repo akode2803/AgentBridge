@@ -83,14 +83,15 @@ def test_more_than_sixteen_megabytes_folder_and_cached_parity(tmp_path):
         direct.close()
 
 
-def test_collector_failure_after_provisional_batch_never_admits_old_ready(tmp_path, monkeypatch):
+def test_collector_failure_keeps_old_readable_until_handled_failure(tmp_path, monkeypatch):
     folder = FolderTransport(tmp_path / 'provider')
     _seed(folder)
     mesh = _mesh(tmp_path, folder, 'failure')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
-        old = runtime.inputs(CHAT)[1].source.raw
+        reader, old_receipt, old_index = runtime.inputs(CHAT)
+        old = old_receipt.source.raw
         original = local_input_runtime.collect_document_batches
         delivered = []
 
@@ -98,6 +99,11 @@ def test_collector_failure_after_provisional_batch_never_admits_old_ready(tmp_pa
             def provisional(batch):
                 consume(batch)
                 delivered.append(len(batch))
+                # A candidate is invisible; old admission survives its build.
+                active_reader, active_receipt, active_index = runtime.inputs(CHAT)
+                assert active_receipt.source.ready and active_receipt.source.raw == old
+                assert active_index == old_index
+                assert active_reader.capture_authority(active_receipt).documents.document(META)['id'] == CHAT
                 raise RawCollectionUnavailable('interrupted_after_batch')
             return original(transport, definition, consume=provisional,
                             batch_documents=1, **limits)
@@ -250,7 +256,7 @@ def test_partial_failed_replacement_cannot_expose_missing_subset(tmp_path, monke
         reopened.close()
 
 
-def test_interrupted_stage_persists_unready_across_reopen(tmp_path, monkeypatch):
+def test_interrupted_stage_preserves_old_admission_across_reopen(tmp_path, monkeypatch):
     folder = FolderTransport(tmp_path / 'provider')
     _seed(folder)
     mesh = _mesh(tmp_path, folder, 'crash')
@@ -258,13 +264,17 @@ def test_interrupted_stage_persists_unready_across_reopen(tmp_path, monkeypatch)
     original_abort, original_cleanup = staged_source.abort, staged_source.cleanup
     try:
         assert mesh.local_inputs.ingest(CHAT)
-        old = mesh.local_inputs.inputs(CHAT)[1].source.raw
+        old_reader, old_receipt, old_index = mesh.local_inputs.inputs(CHAT)
+        old = old_receipt.source.raw
         delivered = []
 
         def interrupt(transport, definition, *, consume, **limits):
             def sink(batch):
                 consume(batch)
                 delivered.append(True)
+                _reader, active_receipt, active_index = mesh.local_inputs.inputs(CHAT)
+                assert active_receipt.source.ready and active_receipt.source.raw == old
+                assert active_index == old_index
                 raise KeyboardInterrupt('simulated process interruption')
             return original_collect(transport, definition, consume=sink,
                                     batch_documents=1, **limits)
@@ -284,10 +294,11 @@ def test_interrupted_stage_persists_unready_across_reopen(tmp_path, monkeypatch)
     monkeypatch.setattr(staged_source, 'cleanup', original_cleanup)
     reopened = _mesh(tmp_path, FolderTransport(folder.root), 'crash')
     try:
-        assert not reopened.local_inputs.health(CHAT)['ready']
+        assert reopened.local_inputs.health(CHAT)['ready']
         assert local_source.capture(reopened.store, reopened.local_inputs.reader(CHAT).definition.source).raw == old
-        with pytest.raises(local_source.SourceChanged):
-            reopened.local_inputs.inputs(CHAT)
+        reader, retained, retained_index = reopened.local_inputs.inputs(CHAT)
+        assert retained.source.raw == old and retained_index.source == old
+        assert reader.capture_authority(retained).documents.document(META)['id'] == CHAT
         assert reopened.local_inputs.ingest(CHAT) is False
         assert reopened.local_inputs.inputs(CHAT)[1].source.ready
     finally:

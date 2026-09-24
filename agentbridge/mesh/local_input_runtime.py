@@ -34,6 +34,54 @@ class LocalInputRuntime:
         self._stop = threading.Event()
         self._thread = None
         self._closed = False
+        self._page_preparation = None
+        self._discovery = None
+        self._discovery_due = 0.0
+        self.presence = None
+
+    def bind_page_owner(self, mesh):
+        from .page_preparation import PagePreparation
+        from .source_discovery import SourceDiscovery
+        from .presence_input_runtime import PresenceInputRuntime
+        if mesh.store is not self.store or mesh.tx is not self.transport:
+            raise ValueError('foreign page preparation owner')
+        with self._lock:
+            if self._closed or self._page_preparation is not None:
+                raise RuntimeError('page preparation already bound or closed')
+            self._page_preparation = PagePreparation(mesh)
+            self._discovery = SourceDiscovery(self.store)
+            self.presence = PresenceInputRuntime(self.transport, self.store)
+
+    def request_page(self, chat, *, index=None, proofs=()):
+        with self._lock:
+            if self._closed or self._page_preparation is None:
+                return False
+            return self._page_preparation.request(chat, index=index, proofs=proofs)
+
+    def prepare_one(self):
+        # Serialized with collection and stop. A stale proof request cannot
+        # change source readiness; the next page request recaptures its inputs.
+        with self._worker_lock:
+            if self._closed or self._page_preparation is None:
+                return False
+            try:
+                return self._page_preparation.run_one()
+            except Exception:
+                return False
+
+    def preparation_health(self, chat):
+        with self._lock:
+            return self._page_preparation.health(chat) if self._page_preparation is not None else None
+
+    def discover(self):
+        if self._discovery is None or self._closed:
+            return
+        now = time.monotonic()
+        if now < self._discovery_due:
+            return
+        self._discovery_due = now + 4.0
+        for chat in self._discovery.next_batch(max_rooms=32):
+            self.schedule.discover(chat, now=now)
 
     def reader(self, chat):
         return LocalPageSource(self.coordinator, self.store, chat)
@@ -101,15 +149,19 @@ class LocalInputRuntime:
             stage = None
             try:
                 captured = publisher.capture()
-                # Retire before the first fallible staging write. A crash or
-                # partial enumeration must not leave the previous ready source.
+                # Build an invisible candidate while the latest admitted raw
+                # snapshot remains readable. The final transaction CAS checks
+                # this exact owner position; local writes still retire it
+                # durably before attempting any external mutation.
                 with self.coordinator.publication_gate(self.store, reader.definition):
-                    expected = local_source.retire_for_publication(self.store, captured.source)
+                    expected = local_source.claim_collection(self.store, captured.source)
                 stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
                 exact = {s.value for s in reader.definition.selectors if s.kind == 'doc_exact'}
                 prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
 
                 def append(batch):
+                    if self._stop.is_set() or self._closed:
+                        raise RuntimeError('local input ingestion stopped')
                     for path in batch:
                         document_observation._validate_document_path(path)
                         if len(path.split('/')) > 32:
@@ -123,8 +175,7 @@ class LocalInputRuntime:
                 reuse = None
                 comparison = staged_publication.identical(self.store, expected, stage)
                 if comparison:
-                    # Read existing build evidence even though owner readiness
-                    # is deliberately retired during this publication attempt.
+                    # Retain unchanged raw/index identity after full comparison.
                     conn = document_observation._open_reader(self.store.path)
                     try:
                         conn.execute('BEGIN')
@@ -139,7 +190,8 @@ class LocalInputRuntime:
                 with self.coordinator.publication_gate(self.store, reader.definition):
                     published, index = staged_publication.admit(self.store, expected, stage,
                         observed_ns=time.time_ns(), reuse=reuse, comparison=comparison)
-                expected = published
+                # Keep failure handling bound to the pre-admission claim.
+                # Post-commit cleanup cannot retire the newly admitted winner.
                 if captured.source.raw.source_id != published.raw.source_id:
                     staged_source.retire_generation(self.store, captured.source.raw.source_id)
                 receipt = reader.capture()
@@ -196,7 +248,15 @@ class LocalInputRuntime:
             except Exception:
                 pass  # hints are optional; finite fallback polling remains
             while not self._stop.is_set():
-                if self.run_due():
+                try:
+                    self.discover()
+                except Exception:
+                    pass  # index preparation may still be pending
+                prepared = self.prepare_one()
+                ingested = self.run_due()
+                with self._worker_lock:
+                    presence_work = self.presence.run_due() if self.presence is not None and not self._closed else False
+                if ingested or presence_work:
                     continue
                 # Reclaim old generations between scheduled scans in bounded
                 # transactions. Selected-room work is reconsidered every chunk.
@@ -207,7 +267,7 @@ class LocalInputRuntime:
                     # Cleanup cannot restore readiness or waive capacity. Keep
                     # ingestion/health polling alive if reclamation fails.
                     reclaimed = 0
-                if reclaimed:
+                if reclaimed or prepared:
                     continue
                 delay = self.schedule.wait_s(now=time.monotonic(), maximum=0.35)
                 if watcher is None:
@@ -232,6 +292,10 @@ class LocalInputRuntime:
         with self._lock:
             self._closed = True
             self._stop.set()
+            if self._page_preparation is not None:
+                self._page_preparation.close()
+            if self.presence is not None:
+                self.presence.stop()
             thread = self._thread
         if thread is not None:
             thread.join(timeout=5)

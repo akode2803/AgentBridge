@@ -35,6 +35,7 @@ class TranscriptOverlays:
     reactions: dict
     state: dict
     key_dependencies: tuple[tuple[str, str | None], ...]
+    viewer_state: dict
 
 
 def _detached(inputs):
@@ -193,6 +194,7 @@ def assemble_page_overlays(inputs: RawPageInputs, viewer: str, snapshot: ChatSna
         verified[actor] = selected
 
     state = {}
+    viewer_state = {}
     if state_path in docs:
         _kind, actor, empty, shape, scalars = docs[state_path]
         allow = shape.is_dict and not empty
@@ -203,6 +205,12 @@ def assemble_page_overlays(inputs: RawPageInputs, viewer: str, snapshot: ChatSna
         if allow:
             if not shape.viewer_ids_compatible:
                 raise PageOverlaysUnavailable('viewer_ids_not_representable')
+            # Presentation scalars share the exact signature gate with the
+            # transcript cuts, but must never become transcript fold inputs.
+            viewer_state = {
+                'read_ns': int(scalars.get('read_ns', 0)),
+                'archived': bool(scalars.get('archived')),
+            }
             # These are transcript fields only, never the public my_state schema.
             state = {key: value for key, value in scalars.items() if key in ('cleared', 'deleted')}
             candidates = maps.get(state_path, {})
@@ -210,4 +218,5 @@ def assemble_page_overlays(inputs: RawPageInputs, viewer: str, snapshot: ChatSna
             state['starred'] = list(candidates.get('starred', {}))
     if pending:
         raise PageOverlayProofsPending(pending)
-    return TranscriptOverlays(position, fold_reactions(verified), state, tuple(dependencies))
+    return TranscriptOverlays(position, fold_reactions(verified), state,
+                              tuple(dependencies), viewer_state)

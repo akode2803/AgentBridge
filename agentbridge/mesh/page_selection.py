@@ -173,6 +173,59 @@ class MorePageInputRequired(RuntimeError):
     """The request has remaining budgets and needs another contiguous window."""
 
 
+def select_exact_messages(inputs: RawPageInputs, target_ids: tuple[str, ...],
+                          viewer: str, sealer, **fold_inputs) -> tuple[Message, ...]:
+    """Canonical exact targets, with no ordered-history continuation claim.
+
+    Used for bounded out-of-window references. Absence and all direct reply
+    dependencies must be explicit at the same input position. Hidden targets
+    never escape as placeholder IDs. The caller owns fresh authority and the
+    final source/session cut, just as for transcript page selection.
+    """
+    inputs = _snapshot(inputs)
+    if (type(target_ids) is not tuple or len(target_ids) > MAX_PARENTS
+            or len(set(target_ids)) != len(target_ids)):
+        raise ValueError('invalid exact target selection')
+    for ident in target_ids:
+        _text(ident, 'target message ID')
+    available = {row.key.id: row for row in inputs.rows + inputs.exact_rows}
+    absent = set(inputs.absent_ids)
+    if absent.intersection(available):
+        raise ValueError('inconsistent exact absence')
+    unknown = set(target_ids).difference(available, absent)
+    if unknown:
+        raise PageDependencyPending(unknown)
+    selected, honored = [], set()
+    for ident in target_ids:
+        if ident not in available:
+            continue
+        projected, redacted = _build_messages_with_redactions(
+            inputs.position.messages.chat_id, viewer, [available[ident].decoded()],
+            sealer, **fold_inputs)
+        honored.update(redacted)
+        if projected and transcript_visible(projected[0], viewer):
+            selected.append(projected[0])
+    parents = set()
+    for msg in selected:
+        if msg.reply_to:
+            ident = msg.reply_to.get('id')
+            if type(ident) not in (str, int) or not str(ident):
+                raise ValueError('invalid direct reply parent ID')
+            parents.add(str(ident))
+    if len(parents.union(target_ids)) > MAX_PARENTS:
+        raise OverflowError('exact target dependency budget exceeded')
+    unknown = parents.difference(available, absent)
+    if unknown:
+        raise PageDependencyPending(unknown)
+    for ident in sorted(parents.difference(target_ids).intersection(available)):
+        _unused, redacted = _build_messages_with_redactions(
+            inputs.position.messages.chat_id, viewer, [available[ident].decoded()],
+            sealer, **fold_inputs)
+        honored.update(redacted)
+    _blank_reply_quotes(selected, honored)
+    return tuple(selected)
+
+
 class CanonicalPageAccumulator:
     """Request-local assembly; never retain across HTTP requests or sessions.
 

@@ -58,7 +58,7 @@ def admit(store, expected, candidate, *, observed_ns, reuse=None, comparison=Non
         raise ValueError('invalid observation time')
     with owner._writer(store) as conn:
         current = owner.capture_in_transaction(conn, store, expected.source_id)
-        if current != expected or current.writes_pending or current.ready:
+        if current != expected or current.writes_pending:
             raise owner.SourceChanged('source_changed_during_ingestion')
         raw, index = staged_source.verify_sealed(conn, store, candidate, expected=expected)
         if candidate.logical_source != expected.source_id or raw.incarnation != current.raw.incarnation:
@@ -73,11 +73,14 @@ def admit(store, expected, candidate, *, observed_ns, reuse=None, comparison=Non
                 raise owner.SourceChanged('foreign_reused_index')
             overlay_index._ready(conn, store.path, reuse)
             raw, index = current.raw, reuse
-        else:
+        # Retirement and pointer/readiness publication share this transaction.
+        # Initial registration needs _advance's self mapping before replacing
+        # it; rollback exposes the original admitted snapshot, never a subset.
+        owner._advance(conn, expected.source_id, current.revision)
+        if reuse is None:
             conn.execute('INSERT INTO local_input_generations(source,physical) VALUES(?,?) '
                          'ON CONFLICT(source) DO UPDATE SET physical=excluded.physical',
                          (expected.source_id, raw.source_id))
-        owner._advance(conn, expected.source_id, current.revision)
         conn.execute("UPDATE local_sources SET ready_incarnation=?,ready_generation=?,"
                      "ready_cursor=?,last_success_ns=?,failures=0,error='' WHERE source=?",
                      (raw.incarnation, raw.generation, raw.cursor, observed_ns, expected.source_id))

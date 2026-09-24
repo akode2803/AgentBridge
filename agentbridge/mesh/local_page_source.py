@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from ..store import document_observation as docs, lifecycle_inputs
+from ..store import document_observation as docs, lifecycle_inputs, page_metadata
 from ..store import local_source as owner, overlay_index, source_selectors as scopes
 from ..store.mutation_coordinator import MutationCoordinator
 from ..transport.authority_observation import _part, _limit
@@ -96,10 +96,10 @@ class LocalPageSource:
             conn.close()
 
     @contextmanager
-    def finalization(self, receipt):
+    def finalization(self, receipt, *, companions=()):
         """Enter only after epoch/identity/pin scopes; see coordinator contract."""
         receipt = self._receipt(receipt)
-        with self.coordinator.finalization_cut(self.store, self.definition) as (conn, source):
+        with self.coordinator.finalization_cut(self.store, self.definition, companions=companions) as (conn, source):
             if source != receipt.source:
                 raise owner.SourceChanged('local_inputs_changed')
             yield conn
@@ -145,3 +145,21 @@ class LocalPageSource:
         with self._read(receipt):
             pass
         return result
+
+    def capture_pin_manifest(self, receipt, index):
+        """Raw capped pin inputs; the canonical caller verifies every pin."""
+        receipt = self._receipt(receipt)
+        index = overlay_index._wanted(index, self.store.path)
+        if index.chat_id != self.chat or index.source != receipt.source.raw:
+            raise ValueError('pin index belongs to another local source')
+        with self._read(receipt) as (conn, _receipt):
+            return page_metadata.capture_pin_manifest(conn, self.store.path, index)
+
+    def capture_message_anchor(self, receipt, index, target_id):
+        """Metadata-only exact-ID seek for a later canonical target projection."""
+        receipt = self._receipt(receipt)
+        index = overlay_index._wanted(index, self.store.path)
+        if index.chat_id != self.chat or index.source != receipt.source.raw:
+            raise ValueError('anchor index belongs to another local source')
+        with self._read(receipt) as (conn, _receipt):
+            return page_metadata.capture_message_anchor(conn, self.store.path, index, target_id)

@@ -23,7 +23,10 @@ MAX_STAGES = 1040
 MAX_ACTIVE_STAGES = 16
 MAX_GLOBAL_BYTES = 4 * 1024 * 1024 * 1024
 
-_SCHEMA = 'CREATE TABLE staged_sources(source TEXT PRIMARY KEY,logical_source TEXT NOT NULL,chat TEXT NOT NULL,epoch TEXT NOT NULL,incarnation TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN (\'building\',\'sealed\',\'abandoned\')),document_count INTEGER NOT NULL,index_count INTEGER NOT NULL,total_bytes INTEGER NOT NULL,max_bytes INTEGER NOT NULL,max_documents INTEGER NOT NULL,generation INTEGER NOT NULL,build TEXT,owner_epoch TEXT,owner_revision INTEGER,index_revision INTEGER NOT NULL DEFAULT 0,committed_index_revision INTEGER NOT NULL DEFAULT 0)'
+_LEGACY_SCHEMA = 'CREATE TABLE staged_sources(source TEXT PRIMARY KEY,logical_source TEXT NOT NULL,chat TEXT NOT NULL,epoch TEXT NOT NULL,incarnation TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN (\'building\',\'sealed\',\'abandoned\')),document_count INTEGER NOT NULL,index_count INTEGER NOT NULL,total_bytes INTEGER NOT NULL,max_bytes INTEGER NOT NULL,max_documents INTEGER NOT NULL,generation INTEGER NOT NULL,build TEXT,owner_epoch TEXT,owner_revision INTEGER,index_revision INTEGER NOT NULL DEFAULT 0,committed_index_revision INTEGER NOT NULL DEFAULT 0)'
+_KIND_COLUMN = "kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','raw'))"
+_SCHEMA = _LEGACY_SCHEMA[:-1] + ',' + _KIND_COLUMN + ')'
+_MIGRATED_SCHEMA = _LEGACY_SCHEMA[:-1] + ', ' + _KIND_COLUMN + ')'
 _ACTIVE = "CREATE UNIQUE INDEX staged_source_active ON staged_sources(logical_source) WHERE phase='building'"
 
 
@@ -53,6 +56,7 @@ class StageHandle:
     logical_source: str
     chat_id: str
     epoch: str
+    kind: str = 'chat'
 
 
 def initialize(store):
@@ -69,6 +73,8 @@ def initialize(store):
             conn.execute(_ACTIVE)
             for statement in _triggers().values():
                 conn.execute(statement)
+        elif existing == (_LEGACY_SCHEMA,):
+            conn.execute('ALTER TABLE staged_sources ADD COLUMN ' + _KIND_COLUMN)
         _schema(conn)
         conn.commit()
     except BaseException:
@@ -77,7 +83,7 @@ def initialize(store):
 
 
 def _schema(conn):
-    if conn.execute("SELECT sql FROM sqlite_master WHERE name='staged_sources'").fetchone() != (_SCHEMA,):
+    if conn.execute("SELECT sql FROM sqlite_master WHERE name='staged_sources'").fetchone() not in ((_SCHEMA,), (_MIGRATED_SCHEMA,)):
         raise StageChanged('staging_schema_changed')
     if conn.execute("SELECT sql FROM sqlite_master WHERE name='staged_source_active'").fetchone() != (_ACTIVE,):
         raise StageChanged('staging_index_changed')
@@ -91,7 +97,10 @@ def _handle(store, stage):
         raise ValueError('foreign stage handle')
     docs._validate_source_id(stage.source_id)
     docs._validate_source_id(stage.logical_source)
-    index._chat(stage.chat_id)
+    if stage.kind == 'chat':
+        index._chat(stage.chat_id)
+    elif stage.kind != 'raw' or stage.chat_id != '':
+        raise ValueError('invalid raw stage kind or chat')
     if (not stage.source_id.startswith('stage:') or len(stage.source_id) != 38
             or any(c not in '0123456789abcdef' for c in stage.source_id[6:])
             or type(stage.epoch) is not str or len(stage.epoch) != 32
@@ -103,13 +112,14 @@ def _handle(store, stage):
 def _row(conn, store, stage, phase=None):
     stage = _handle(store, stage)
     _schema(conn)
-    safe = conn.execute('SELECT typeof(logical_source),length(CAST(logical_source AS BLOB)),typeof(chat),length(CAST(chat AS BLOB)),typeof(epoch),length(CAST(epoch AS BLOB)),typeof(incarnation),length(CAST(incarnation AS BLOB)),typeof(phase),length(CAST(phase AS BLOB)),typeof(document_count),typeof(index_count),typeof(total_bytes),typeof(max_bytes),typeof(max_documents),typeof(generation),typeof(build),length(CAST(build AS BLOB)),typeof(index_revision),typeof(committed_index_revision) FROM staged_sources WHERE source=?', (stage.source_id,)).fetchone()
+    safe = conn.execute('SELECT typeof(logical_source),length(CAST(logical_source AS BLOB)),typeof(chat),length(CAST(chat AS BLOB)),typeof(epoch),length(CAST(epoch AS BLOB)),typeof(incarnation),length(CAST(incarnation AS BLOB)),typeof(phase),length(CAST(phase AS BLOB)),typeof(document_count),typeof(index_count),typeof(total_bytes),typeof(max_bytes),typeof(max_documents),typeof(generation),typeof(build),length(CAST(build AS BLOB)),typeof(index_revision),typeof(committed_index_revision),typeof(kind),length(CAST(kind AS BLOB)) FROM staged_sources WHERE source=?', (stage.source_id,)).fetchone()
     if (safe is None or any(safe[i] != 'text' or safe[i+1] > limit for i, limit in ((0,512),(2,256),(4,32),(6,128),(8,16)))
             or any(safe[i] != 'integer' for i in (10,11,12,13,14,15,18,19))
-            or (safe[16] != 'null' and (safe[16] != 'text' or safe[17] > 32))):
+            or (safe[16] != 'null' and (safe[16] != 'text' or safe[17] > 32))
+            or safe[20:] != ('text', len(stage.kind))):
         raise StageChanged('malformed_stage_metadata')
-    row = conn.execute('SELECT logical_source,chat,epoch,incarnation,phase,document_count,index_count,total_bytes,max_bytes,max_documents,generation,build,index_revision,committed_index_revision FROM staged_sources WHERE source=?', (stage.source_id,)).fetchone()
-    if row is None or row[:4] != (stage.logical_source, stage.chat_id, stage.epoch, stage.incarnation):
+    row = conn.execute('SELECT logical_source,chat,epoch,incarnation,phase,document_count,index_count,total_bytes,max_bytes,max_documents,generation,build,index_revision,committed_index_revision,kind FROM staged_sources WHERE source=?', (stage.source_id,)).fetchone()
+    if row is None or row[:4] != (stage.logical_source, stage.chat_id, stage.epoch, stage.incarnation) or row[14] != stage.kind:
         raise StageChanged('stage_owner_changed')
     if (row[4] not in ('building', 'sealed', 'abandoned')
             or not 0 <= row[5] <= row[9] <= MAX_DOCUMENTS
@@ -117,8 +127,10 @@ def _row(conn, store, stage, phase=None):
             or not 0 <= row[7] <= row[8] <= MAX_TOTAL_BYTES
             or not 0 <= row[10] <= docs.MAX_SQLITE_INTEGER
             or not 0 <= row[13] <= row[12] <= docs.MAX_SQLITE_INTEGER
-            or (row[4] == 'sealed' and (type(row[11]) is not str or len(row[11]) != 32
-                                        or any(c not in '0123456789abcdef' for c in row[11])))):
+            or (stage.kind == 'raw' and (row[1] != '' or row[6] != 0 or row[11] is not None))
+            or (row[4] == 'sealed' and stage.kind == 'chat'
+                and (type(row[11]) is not str or len(row[11]) != 32
+                     or any(c not in '0123456789abcdef' for c in row[11])))):
         raise StageChanged('malformed_stage_metadata')
     if phase is not None and row[4] != phase:
         raise StageChanged('stage_not_' + phase)
@@ -126,8 +138,19 @@ def _row(conn, store, stage, phase=None):
 
 
 def begin(store, logical_source, chat, *, expected=None, max_total_bytes=MAX_TOTAL_BYTES, max_documents=MAX_DOCUMENTS):
+    return _begin(store, logical_source, index._chat(chat), 'chat', expected=expected,
+                  max_total_bytes=max_total_bytes, max_documents=max_documents)
+
+
+def begin_raw(store, logical_source, *, expected=None, max_total_bytes=MAX_TOTAL_BYTES,
+              max_documents=MAX_DOCUMENTS):
+    """Open an invisible document-only stage, with no chat index or ready flag."""
+    return _begin(store, logical_source, '', 'raw', expected=expected,
+                  max_total_bytes=max_total_bytes, max_documents=max_documents)
+
+
+def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes, max_documents):
     logical_source = docs._validate_source_id(logical_source)
-    chat = index._chat(chat)
     if (type(max_total_bytes) is not int or not 0 <= max_total_bytes <= MAX_TOTAL_BYTES
             or type(max_documents) is not int or not 0 <= max_documents <= MAX_DOCUMENTS):
         raise ValueError('invalid stage budgets')
@@ -157,9 +180,13 @@ def begin(store, logical_source, chat, *, expected=None, max_total_bytes=MAX_TOT
             raise OverflowError('global stage capacity exceeded')
         source_id = 'stage:' + uuid.uuid4().hex
         epoch = uuid.uuid4().hex
-        conn.execute('INSERT INTO staged_sources VALUES(?,?,?,?,?,\'building\',0,0,0,?,?,0,NULL,?,?,0,0)',
+        conn.execute('INSERT INTO staged_sources '
+                     '(source,logical_source,chat,epoch,incarnation,phase,document_count,index_count,'
+                     'total_bytes,max_bytes,max_documents,generation,build,owner_epoch,owner_revision,'
+                     'index_revision,committed_index_revision,kind) '
+                     "VALUES(?,?,?,?,?,'building',0,0,0,?,?,0,NULL,?,?,0,0,?)",
                      (source_id, logical_source, chat, epoch, identity, max_total_bytes, max_documents,
-                      owner_epoch, owner_revision))
+                      owner_epoch, owner_revision, kind))
         conn.execute('INSERT INTO document_observation_sources VALUES(?,0,0,0)', (source_id,))
         conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -168,7 +195,7 @@ def begin(store, logical_source, chat, *, expected=None, max_total_bytes=MAX_TOT
     except BaseException:
         conn.rollback()
         raise
-    return StageHandle(str(store.path), identity, source_id, logical_source, chat, epoch)
+    return StageHandle(str(store.path), identity, source_id, logical_source, chat, epoch, kind)
 
 
 def _path(path, chat):
@@ -191,7 +218,9 @@ def append(store, stage, documents):
         raise ValueError('stage append requires 1..128 documents')
     raw, bytes_used, observed = [], 0, []
     for path, value in documents.items():
-        kind = _path(path, stage.chat_id)
+        kind = _path(path, stage.chat_id) if stage.kind == 'chat' else None
+        if stage.kind == 'raw':
+            docs._validate_document_path(path)
         docs._validate_json_keys(value)
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
         size = len(path.encode()) + len(payload.encode())
@@ -201,11 +230,12 @@ def append(store, stage, documents):
         raw.append((stage.source_id, path, payload, 0))
         if kind is not None:
             observed.append(docs.SerializedDocumentRecord(path, payload, False))
-    # The mesh normalizer requires a ready observation, but this temporary position
-    # is only a pure preparation input and never makes the SQLite stage readable.
-    temporary = docs.DocumentPosition(str(store.path), stage.incarnation, stage.source_id, 0, 0, True)
-    prepared = prepare_overlay_index(docs.DocumentObservation(temporary, tuple(observed)), stage.chat_id)
-    _, _, normalized, candidates, shapes, names, index_bytes = index._validated_rows(prepared, store.path)
+    normalized, candidates, shapes, names, index_bytes = [], [], [], (), 0
+    if stage.kind == 'chat':
+        # This position is a pure preparation input, never a readable stage.
+        temporary = docs.DocumentPosition(str(store.path), stage.incarnation, stage.source_id, 0, 0, True)
+        prepared = prepare_overlay_index(docs.DocumentObservation(temporary, tuple(observed)), stage.chat_id)
+        _, _, normalized, candidates, shapes, names, index_bytes = index._validated_rows(prepared, store.path)
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError('stage append needs an owned transaction')
@@ -228,10 +258,11 @@ def append(store, stage, documents):
             if conn.execute('SELECT 1 FROM document_observation_records WHERE source_id=? AND path=?', (source_id, path)).fetchone():
                 raise StageChanged('duplicate_stage_path')
             conn.execute('INSERT INTO document_observation_records VALUES(?,?,?,?)', (source_id, path, payload, deleted))
-        for item in prepared.documents:
-            payload = next(raw_row[2] for raw_row in raw if raw_row[1] == item.path)
-            if len(payload.encode()) != item.source_bytes or hashlib.sha256(payload.encode()).hexdigest() != item.source_digest:
-                raise StageChanged('prepared_raw_mismatch')
+        if stage.kind == 'chat':
+            for item in prepared.documents:
+                payload = next(raw_row[2] for raw_row in raw if raw_row[1] == item.path)
+                if len(payload.encode()) != item.source_bytes or hashlib.sha256(payload.encode()).hexdigest() != item.source_digest:
+                    raise StageChanged('prepared_raw_mismatch')
         conn.executemany('INSERT INTO overlay_index_docs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', normalized)
         conn.executemany('INSERT INTO overlay_index_shapes VALUES(?,?,?,?,?,?,?)', shapes)
         conn.executemany('INSERT INTO overlay_index_candidates VALUES(?,?,?,?,?,?)', candidates)
@@ -246,8 +277,27 @@ def append(store, stage, documents):
     return stage
 
 
+def append_raw(store, stage, documents):
+    if _handle(store, stage).kind != 'raw':
+        raise ValueError('expected raw stage')
+    return append(store, stage, documents)
+
+
 def finish(store, stage):
     stage = _handle(store, stage)
+    if stage.kind != 'chat':
+        raise ValueError('expected chat stage')
+    return _finish(store, stage)
+
+
+def finish_raw(store, stage):
+    stage = _handle(store, stage)
+    if stage.kind != 'raw':
+        raise ValueError('expected raw stage')
+    return _finish(store, stage)
+
+
+def _finish(store, stage):
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError('stage finish needs an owned transaction')
@@ -261,21 +311,36 @@ def finish(store, stage):
         # Raw triggers advance generation; index triggers advance revision.
         if row[12] != row[13]:
             raise StageChanged('stage_index_changed')
-        index._schema(conn)
+        if stage.kind == 'chat':
+            index._schema(conn)
         conn.execute('UPDATE document_observation_sources SET initialized=1 WHERE source_id=?', (stage.source_id,))
         position = docs._capture_position(conn, store.path, stage.source_id)
-        indexed = index.OverlayIndexPosition(position, stage.chat_id, uuid.uuid4().hex)
-        index._write_ready(conn, indexed)
-        conn.execute("UPDATE staged_sources SET phase='sealed',build=? WHERE source=?", (indexed.build, stage.source_id))
+        if stage.kind == 'chat':
+            indexed = index.OverlayIndexPosition(position, stage.chat_id, uuid.uuid4().hex)
+            index._write_ready(conn, indexed)
+            conn.execute("UPDATE staged_sources SET phase='sealed',build=? WHERE source=?", (indexed.build, stage.source_id))
+        else:
+            _no_overlay_rows(conn, stage)
+            conn.execute("UPDATE staged_sources SET phase='sealed' WHERE source=?", (stage.source_id,))
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
-    return position, indexed
+    return (position, indexed) if stage.kind == 'chat' else position
+
+
+def _no_overlay_rows(conn, stage):
+    for table in ('overlay_index_docs', 'overlay_index_candidates', 'overlay_index_shapes',
+                  'overlay_index_proofs', 'overlay_index_ready'):
+        if conn.execute(f'SELECT 1 FROM {table} WHERE source=? LIMIT 1',
+                        (stage.source_id,)).fetchone() is not None:
+            raise StageChanged('raw_stage_overlay_changed')
 
 
 def verify_sealed(conn, store, stage, *, expected=None):
     """Verify exact sealed identities in the caller's admission transaction."""
+    if _handle(store, stage).kind != 'chat':
+        raise ValueError('expected chat stage')
     if not conn.in_transaction:
         raise sqlite3.OperationalError('sealed verification requires a transaction')
     row = _row(conn, store, stage, 'sealed')
@@ -295,6 +360,30 @@ def verify_sealed(conn, store, stage, *, expected=None):
     except index.OverlayIndexUnavailable as exc:
         raise StageChanged('sealed_index_changed') from exc
     return position, indexed
+
+
+def verify_raw_sealed(conn, store, stage, *, expected=None):
+    """Verify an unindexed document stage inside an admission transaction."""
+    if _handle(store, stage).kind != 'raw':
+        raise ValueError('expected raw stage')
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('sealed verification requires a transaction')
+    row = _row(conn, store, stage, 'sealed')
+    if expected is not None:
+        from . import local_source
+        expected = local_source._expected(store, expected)
+        owner_matches = conn.execute(
+            "SELECT 1 FROM staged_sources WHERE source=? AND owner_epoch=? "
+            "AND owner_revision=? AND typeof(owner_revision)='integer' LIMIT 1",
+            (stage.source_id, expected.epoch, expected.revision)).fetchone()
+        if expected.source_id != stage.logical_source or owner_matches is None:
+            raise StageChanged('stage_owner_revision_changed')
+    position = docs._capture_position(conn, store.path, stage.source_id)
+    if (position.incarnation != stage.incarnation or position.generation != row[10]
+            or position.cursor != 0 or not position.initialized or row[12] != row[13]):
+        raise StageChanged('sealed_raw_changed')
+    _no_overlay_rows(conn, stage)
+    return position
 
 
 def abort(store, stage):
@@ -369,9 +458,13 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
             if _admitted(conn, source_id):
                 continue
             remaining = max_rows
-            for table, key in [('document_observation_records', 'source_id'), ('overlay_index_candidates', 'source'),
-                               ('overlay_index_shapes', 'source'), ('overlay_index_docs', 'source'),
-                               ('overlay_index_proofs', 'source')]:
+            tables = [('document_observation_records', 'source_id'),
+                      ('overlay_index_candidates', 'source'), ('overlay_index_shapes', 'source'),
+                      ('overlay_index_docs', 'source'), ('overlay_index_proofs', 'source')]
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='presence_index_rows'").fetchone():
+                tables.append(('presence_index_rows', 'source'))
+            for table, key in tables:
                 if remaining <= 0:
                     break
                 rows = conn.execute(f'SELECT rowid FROM {table} WHERE {key}=? LIMIT ?', (source_id, remaining)).fetchall()
@@ -379,6 +472,12 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
                 remaining -= len(rows)
             if remaining > 0:
                 conn.execute('DELETE FROM overlay_index_ready WHERE source=?', (source_id,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='presence_index_ready'").fetchone():
+                    conn.execute('DELETE FROM presence_index_ready WHERE source=?', (source_id,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='presence_index_builds'").fetchone():
+                    conn.execute('DELETE FROM presence_index_builds WHERE source=?', (source_id,))
                 conn.execute('DELETE FROM document_observation_sources WHERE source_id=?', (source_id,))
                 conn.execute('DELETE FROM staged_sources WHERE source=?', (source_id,))
             conn.commit()

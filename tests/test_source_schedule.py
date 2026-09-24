@@ -100,6 +100,42 @@ def test_capacity_never_evicts_inflight_job():
     assert _take(schedule, 0.121, "selected").chat_id == "selected"
 
 
+def test_discovery_rotates_background_but_keeps_selection_and_running_job():
+    schedule = SourceSchedule(capacity=3)
+    schedule.request("running", now=0)
+    schedule.request("old", now=0.01)
+    schedule.request("selected", now=0.02, selected=True)
+    running = _take(schedule, 0.05, "running")
+    assert schedule.discover("new", now=0.09)
+    assert set(schedule._states) == {"running", "selected", "new"}
+    assert schedule._running is running
+    assert not schedule.request("overflow", now=0.1)
+    schedule.finish(running, now=0.1)
+    assert schedule.discover("another", now=0.11)
+    assert set(schedule._states) == {"selected", "new", "another"}
+
+
+def test_discovery_rejects_when_all_slots_protected():
+    schedule = SourceSchedule(capacity=1)
+    schedule.request("selected", now=0, selected=True)
+    assert not schedule.discover("background", now=0.1)
+    assert _take(schedule, 0.1, "selected")
+    assert not schedule.discover("background", now=0.2)
+
+
+def test_discovery_rotates_beyond_capacity_without_starving_later_rooms():
+    schedule = SourceSchedule(capacity=128)
+    visited = set()
+    for group in range(6):
+        for number in range(group * 32, (group + 1) * 32):
+            assert schedule.discover(f"room-{number:03}", now=group)
+        # Let due jobs execute before the next bounded discovery batch.
+        while job := schedule.take_due(now=group + 0.1):
+            visited.add(job.chat_id)
+            schedule.finish(job, now=group + 0.1)
+    assert len(visited) == 192
+
+
 def test_failures_back_off_and_success_resets_failure_delay():
     schedule = SourceSchedule(background_s=2)
     schedule.request("room", now=0)

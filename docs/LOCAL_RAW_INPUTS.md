@@ -20,17 +20,25 @@ can complete the intent, but cannot itself make the source ready: a new complete
 raw publication and admission are still required. A failed republish or crash
 must not restore the previous ready generation.
 
-The initial `store.local_source` primitive is **inactive**. It installs a separate
-raw admission namespace explicitly, uses FULL-synchronous write transactions,
-and binds readiness to both owner revision/epoch and exact current raw document
+The opt-in `store.local_source` owner installs a separate raw admission namespace,
+uses FULL-synchronous write transactions, and binds readiness to both owner
+revision/epoch and exact current raw document
 position. It does not install transport hooks, supply scope-completeness evidence,
-authorize readers, or recover abandoned intents automatically. No timeout clears
+authorize readers, or recover abandoned intents automatically. Its transport,
+selector and reader integration is described in
+[Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md). No timeout clears
 an intent. Recovery must first establish writer quiescence and reconcile actual
 external state; a still-running writer must never be released by a stale recovery
 process. Integration must cover all affected source domains, not only one chat.
 
-Raw publication and admission use separate SQLite commits. A raw generation that
-was published but not admitted is unavailable. The final read must capture and
+Raw staging and admission use separate SQLite commits. A staged generation that
+was sealed but not admitted is unavailable. The final pointer/readiness swap is
+atomic; the last admitted snapshot stays readable while background collection
+builds its replacement. Local mutation invalidation remains durable and immediate.
+Handled refresh failures attempt to retire the captured owner, but a crash or
+disk failure preventing that failure-record commit can leave the older admitted
+snapshot readable. This is the explicitly accepted availability tradeoff.
+The final read must capture and
 compare both positions alongside local messages, overlays, proofs, pins, epoch
 inputs and the GUI session. Directly reading document_observation rows bypasses
 this owner and is not a paging admission path.
@@ -66,15 +74,14 @@ a hard remote-staleness bound or permission to retain a page indefinitely.
 
 ## Remaining activation work
 
-1. Complete mutation-owner invalidation, complete-scope transport admission and
-   abandoned-write recovery; verify crash/interruption and concurrent publishers.
-2. Dispatch the canonical page operation through this transport-neutral local
-   owner, preserving current pin/key/lifecycle effects and request work budgets.
-3. Bound receipts, pins, presentation and viewer metadata; issue opaque session-
-   scoped continuations. Do not fall back to a foreground complete-history fold.
-4. Activate browser upward paging with stale-response rejection, ID deduplication,
-   scroll anchoring and retained page/DOM bounds. Validate equivalent folder/cloud
-   admitted inputs and measure encrypted endpoint latency and browser paint.
+The opt-in endpoint, bounded pins/receipts, raw presence companion and opaque
+continuations are implemented as an additive path. The live browser route still
+uses its existing transcript renderer. Activation requires upward paging,
+scroll anchoring, bounded DOM/resource retention and route/session behavior,
+followed by deterministic, browser and provider-equivalence validation.
+The background last-admitted availability contract is approved. Ambiguous-write
+recovery remains separate and must not infer
+quiescence from elapsed time. No foreground full-fold fallback is permitted.
 
 ## Explicit future architecture
 
@@ -86,7 +93,7 @@ multi-mirror replication, atomic multi-document publication, backup/restore and
 stronger snapshot guarantees. They are not a prerequisite for private-folder
 paging under the accepted local snapshot contract.
 
-## Cross-process local coordination (inactive implementation)
+## Cross-process local coordination (opt-in implementation)
 
 GUI and harness Stores are keyed by user and machine, so one writer's Store is
 not the only local reader. `store.mutation_coordinator` registers their exact
@@ -116,14 +123,14 @@ proof are required; elapsed time, PID death, an available lock, or a later retry
 alone do not establish remote quiescence. Until proven, affected paging stays
 pending and health reporting must explain the unresolved local mutation.
 
-The transport interceptor, source collection/publication owner, reader gates and
-scheduler loop integration are still required before activation. In particular,
+The opt-in path now composes the transport interceptor, source collection and
+publication owner, reader gates and scheduler loop. In particular,
 raw serialization/verification runs outside the root publication gate; the final
 bounded admission checks inside it retain the original scan's Store/owner CAS.
 
 ### Current implementation boundary
 
-The inactive `transport.local_mutations` wrapper now mediates document, effect,
+The opt-in `transport.local_mutations` wrapper mediates document, effect,
 log, chat and arbitrary blob writes. Blob APIs can overwrite document/log paths,
 so they cannot bypass retirement merely because ordinary attachments are not
 canonical inputs. Reviewed read, status, wake and optional close behavior is
@@ -139,14 +146,16 @@ URLs. A folder uses its resolved normalized configured path; callers must use on
 canonical spelling on case-insensitive POSIX volumes until a filesystem-identity
 binding is added. Unknown drivers need an explicit identity contract.
 
-`store.source_publication.SourcePublisher` registers and captures the source
+The legacy whole-batch `store.source_publication.SourcePublisher` registers and captures the source
 before collection, retires its exact original revision under the root gate,
 performs raw encoding/publication outside that gate, then admits under a new gate.
 A mutation crossing collection/publication/admission rejects the scan. A failed
 payload or raw commit leaves readiness retired. Declared scope restricts admitted
 document paths; the collector is responsible for completeness, not the DTO.
+The staged runtime uses only its capture step, then atomically admits an invisible
+candidate as described in [Local raw-input staging](LOCAL_INPUT_STAGING.md).
 
-The inactive `transport.raw_documents` collector distinguishes exact absence from
+The opt-in `transport.raw_documents` collector distinguishes exact absence from
 malformed/unreadable folder input, bounds traversal and reads before JSON parsing,
 and refuses symlinks in the selected tree rather than claiming a complete scan.
 Its cache path requires provider-observed owned inputs, captures bounded references
@@ -154,8 +163,9 @@ under the mirror lock and copies with byte/structure budgets outside it. This
 captures raw document scope only; ordinary verified log ingestion remains separate.
 It does not establish an atomic multi-file remote cut or continuing authority.
 
-The pure `mesh.source_schedule` policy implements the selected/background cadence,
-coalescing, fairness and idle/failure backoff described above. None of these modules
-is installed in Mesh/SyncEngine or the page route yet. Integration still needs
-reader/session gates, failure health wiring, explicit ambiguous-write recovery,
-complete collection orchestration and the transport-neutral canonical operation.
+The bounded `mesh.source_schedule` policy implements selected/background cadence,
+coalescing, rotating discovery admission and idle/failure backoff. The opt-in Mesh
+worker composes it with local-input collection and bounded proof preparation;
+`GuiApp(local_inputs=True)` exposes the additive page route. The default GUI
+remains unchanged, and scheduling hints do not grant membership. Browser
+activation, ambiguous-write recovery and remote completeness remain separate.

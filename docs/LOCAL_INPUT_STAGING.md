@@ -8,15 +8,20 @@ history-on-join, trust, keys, lifecycle, overlays and visibility.
 
 A logical source identifies immutable dependency selectors and local mutation
 intents. Each physical candidate uses a new, never-reused `stage:` source ID.
-Raw and normalized overlay rows share that physical source. Existing keyset and
-exact-selection readers use the physical position captured in the logical source
-receipt; they must still finish against current logical admission and session
+Chat-stage raw and normalized overlay rows share that physical source. Existing
+keyset and exact-selection readers use the physical position captured in the
+logical source receipt; they must still finish against current admission and session
 bindings. Physical positions alone do not authorize a request.
 
 ## Publication and failure
 
 1. Capture the registered logical source under the root publication gate.
-2. Durably retire its readiness before the first fallible staging write.
+2. Claim a new owner revision with an exact CAS, preserving admitted readiness
+   and its observation time in the same transaction. Bind an invisible candidate
+   to this claim. A new attempt fences any interrupted or concurrent older build
+   without guessing process liveness; only the latest claim can publish or record
+   failure. Pending local writes forbid collection and never regain readiness
+   through a claim.
 3. Enumerate the complete declared scope, delivering bounded document batches.
    Partial enumeration never establishes absence. Cached collection checks its
    initial revision throughout; folder collection retains native handle-relative
@@ -30,11 +35,16 @@ bindings. Physical positions alone do not authorize a request.
    inputs may retain the existing raw/index identities, subject to the final CAS.
 7. Under root-to-Store locking, verify the original logical owner revision, absence
    of pending local writes, exact sealed candidate owner and raw/index positions.
-   Switch the admitted pointer and readiness in one durable SQLite transaction.
+   Retire the old owner revision and switch the admitted pointer and readiness in
+   one durable SQLite transaction. No intermediate pending state is committed.
 
-A crash before admission leaves the logical source unavailable. Reopening never
-admits a candidate merely because it is sealed. A fresh successful ingestion must
-pass a new owner revision. Abandoned candidates and superseded generations are
+A crash before admission leaves the previous admitted snapshot readable unless a
+local mutation invalidated it. Reopening never admits a candidate merely because
+it is sealed. A handled collection failure attempts to retire the exact captured
+owner and record bounded failure information. If disk failure prevents that
+transaction, the old admitted snapshot can remain readable; its last-success time
+does not prove current provider state. An already-pending source remains pending
+on any failure. Abandoned candidates and superseded generations are
 reclaimed in bounded transactions, with the admitted pointer checked in the same
 transaction as deletion. SQLite readers retain their captured snapshots, while
 finalization rejects a superseded logical receipt. Ambiguous external-write
@@ -53,14 +63,23 @@ Staging retains explicit aggregate admission limits: one million raw documents,
 staged-generation records. At most 16 builds may be active; metadata slots are
 bounded separately. These are logical payload/work quotas, not an exact upper
 bound on SQLite file size: indexes, page overhead and WAL use additional space.
-Capacity failure leaves paging unavailable and is reported through source health.
+Capacity failure retires paging and is reported through source health when the
+failure-record transaction can commit.
 Cleanup runs between scheduled scans and rechecks foreground-selected work between
 chunks. The runtime does not rebuild or fold complete history on a page request.
 
-## Scope of this checkpoint
+## Current additive integration
 
-This is internal ingestion/admission infrastructure. It does not activate the GUI
-paging endpoint, implement remote-tail ingestion, establish a remote-staleness
-bound, or add coherent multi-document folder manifests. Fair room discovery,
-authenticated selected-chat routing, bounded API metadata, opaque continuations
-and browser scroll/DOM retention remain separate activation work.
+An opt-in GUI endpoint now uses this staged owner with bounded canonical page
+reads. Raw-only `kind='raw'` stages support a separate presence-floor source;
+legacy chat-stage rows migrate to explicit `kind='chat'`. Raw stages share the
+document, byte and cleanup budgets but have no chat identity or overlay-index
+readiness. A complete raw seal, derived presence index and exact logical owner
+CAS precede atomic pointer/readiness admission. Background discovery and page
+preparation use bounded work; the live browser route and DOM paging remain
+unchanged. See [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
+
+This still does not implement remote-tail ingestion, a hard remote-staleness
+bound or coherent multi-document folder manifests. Keeping the last admitted
+snapshot readable during background collection is the user-approved availability
+contract. It never weakens invalidation before locally initiated external writes.

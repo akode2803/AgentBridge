@@ -342,6 +342,7 @@ def test_stop_quiesces_manual_ingest_and_permanently_closes_runtime(rig, monkeyp
     entered = threading.Event()
     release = threading.Event()
     stopped = threading.Event()
+    failures = []
     original = local_input_runtime.collect_document_batches
 
     def blocked_collect(*args, **kwargs):
@@ -350,7 +351,13 @@ def test_stop_quiesces_manual_ingest_and_permanently_closes_runtime(rig, monkeyp
         return original(*args, **kwargs)
 
     monkeypatch.setattr(local_input_runtime, "collect_document_batches", blocked_collect)
-    ingest = threading.Thread(target=runtime.ingest, args=(CHAT,))
+    def interrupted_ingest():
+        try:
+            runtime.ingest(CHAT)
+        except RuntimeError as exc:
+            failures.append(exc)
+
+    ingest = threading.Thread(target=interrupted_ingest)
     ingest.start()
     assert entered.wait(1)
     shutdown = threading.Thread(target=lambda: (runtime.stop(), stopped.set()))
@@ -360,6 +367,8 @@ def test_stop_quiesces_manual_ingest_and_permanently_closes_runtime(rig, monkeyp
     ingest.join(2)
     shutdown.join(2)
     assert stopped.is_set()
+    assert len(failures) == 1 and str(failures[0]) == 'local input ingestion stopped'
+    assert runtime.health(CHAT)['ready'] is False
     assert runtime.request(CHAT, selected=True, activity=True) is False
     with pytest.raises(RuntimeError, match="closed"):
         runtime.start()
