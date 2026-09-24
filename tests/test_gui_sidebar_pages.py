@@ -12,6 +12,7 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.page_operation import PageOperation
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.mesh.paths import P
+from agentbridge.store import aux_inputs
 
 
 @pytest.fixture(params=[False, True], ids=['plain', 'encrypted'])
@@ -35,6 +36,8 @@ def _ready(app, chat):
             break
     runtime.prepare_one()
     runtime.ingest(chat)
+    runtime.auxiliary.request('users')
+    runtime.auxiliary.ingest('users')
 
 
 def _state(app, *, rounds=12):
@@ -74,6 +77,7 @@ def test_optin_never_calls_fullfold_and_preserves_verified_viewer_flags(world, m
     assert row['archived'] and row['pinned'] and row['mute'] and row['forced_unread']
     assert row['unread_complete'] and row['unread'] == 0
     assert state['metadata_status']['profiles'] == 'pending'
+    assert state['users_complete'] and state['user_status'] == 'ready'
     assert 'presence' not in state['users']['viewer']
 
 
@@ -168,15 +172,21 @@ def test_room_limit_and_cold_room_are_explicitly_incomplete(world, monkeypatch):
 def test_directory_and_serialized_response_budgets_fail_explicitly(world, monkeypatch):
     app, _chat, _encrypted = world
     mesh = app.mesh
-    monkeypatch.setattr(mesh.directory, 'names',
-                        lambda: [f'user-{n}' for n in range(2049)])
+    def no_provider_user_walk():
+        pytest.fail('sidebar requested provider-wide Directory.names')
+
+    monkeypatch.setattr(mesh.directory, 'names', no_provider_user_walk)
+    auxiliary = mesh.local_inputs.auxiliary
+    monkeypatch.setattr(auxiliary, 'inputs',
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            aux_inputs.AuxInputsUnavailable('aux_document_budget')))
     capped = api_chats.state(app, Request())
     assert capped['users'] == {} and capped['chats'] == []
-    assert capped['chats_complete'] is False and capped['sidebar_status'] == 'user_limit'
+    assert capped['users_complete'] is False and capped['user_status'] == 'user_limit'
 
     from agentbridge.gui import api_sidebar_pages
     monkeypatch.setattr(api_sidebar_pages, '_users',
-                        lambda _mesh: {'viewer': {'display': 'x' * (4 * 1024 * 1024)}})
+                        lambda _mesh: ({'viewer': {'display': 'x' * (4 * 1024 * 1024)}}, True, 'ready'))
     oversized = api_chats.state(app, Request())
     assert oversized['users'] == {} and oversized['chats'] == []
     assert oversized['chats_complete'] is False

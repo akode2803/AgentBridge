@@ -21,7 +21,7 @@ from . import (
     api_agents,
     api_auth,
     api_chats,
-    api_pages,
+    api_pages, api_page_aux,
     api_files,
     api_membership,
     api_messages,
@@ -59,7 +59,7 @@ CONTENT_TYPES = {
 GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
 RAW_ROUTES: dict = {}
-for mod in (api_auth, api_chats, api_pages, api_messages, api_membership,
+for mod in (api_auth, api_chats, api_pages, api_page_aux, api_messages, api_membership,
             api_profile, api_agents, api_files, api_runtime, api_updates):
     GET_ROUTES.update(mod.GET)
     POST_ROUTES.update(mod.POST)
@@ -272,6 +272,7 @@ def serve(*, root, home: Path | None, args, lock=None,
         encrypt=not args.no_encrypt,
         static_dir=Path(args.static) if args.static else None,
         app_version=app_version,
+        local_inputs=True,
     )
     app.restore()
     server = make_server(app, args.port, args.host, sock=sock)

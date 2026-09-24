@@ -302,6 +302,54 @@ def asks(app, req, mesh) -> dict:
     runner process is dead contributes NO asks (process truth beats the
     stale doc), and a remote agent's asks drop once past their own
     timeout."""
+    if getattr(app, 'local_inputs_enabled', False) and mesh.local_inputs is not None:
+        from .api_ask_companions import capture_companions
+        from .api_bounded_asks import capture_room_asks
+        from .context import session_read_binding
+
+        token = app.capture_session_read()
+        if token is None or token.mesh is not mesh:
+            return {'error': 'Session changed'}
+        chat_id = (req.params.get('chat') or '').strip()
+        rooms, rooms_complete, forbidden, resolved = capture_room_asks(
+            app, mesh, token, chat_id=chat_id)
+        if forbidden:
+            if not app.validate_session_read(token):
+                return {'error': 'Session changed'}
+            return {'ok': True, 'asks': [], 'timers': [], 'asks_complete': True,
+                    'rooms_complete': True, 'peer_complete': True,
+                    'timers_complete': True, 'forbidden': True,
+                    'resolved_room_ids': [],
+                    'session_binding': session_read_binding(token)}
+        companions = capture_companions(app, mesh, token, chat_id=chat_id)
+        asks = rooms + companions['peer_asks']
+        authorized = set(resolved)
+        timers = []
+        timer_room_pending = False
+        for timer in companions['timers']:
+            room = timer['chat_id']
+            if (room == chat_id if chat_id else room == '' or room in authorized):
+                timers.append(timer)
+            elif not rooms_complete:
+                timer_room_pending = True
+        peer_complete = companions['peer_complete']
+        timers_complete = companions['timers_complete'] and not timer_room_pending
+        complete = rooms_complete and peer_complete and timers_complete
+        if not app.validate_session_read(token):
+            return {'error': 'Session changed'}
+        import json
+
+        if (len(asks) > 1024 or len(timers) > 512
+                or len(json.dumps({'asks': asks, 'timers': timers},
+                                  ensure_ascii=False).encode()) > 2 * 1024 * 1024):
+            asks, timers, complete = [], [], False
+            rooms_complete = peer_complete = timers_complete = False
+            resolved = ()
+        return {'ok': True, 'asks': asks, 'timers': timers,
+                'asks_complete': complete, 'rooms_complete': rooms_complete,
+                'peer_complete': peer_complete, 'timers_complete': timers_complete,
+                'forbidden': False, 'resolved_room_ids': list(resolved),
+                'session_binding': session_read_binding(token)}
     chat = (req.params.get("chat") or "").strip()
     out = []
     timers = []

@@ -208,5 +208,5 @@ def test_invalid_viewer_signature_cannot_surface_page_presentation(encrypted_pag
     assert result.status == "page", result
     assert result.result.presentation.starred == ()
     assert json.loads(result.result.presentation.viewer_state_json) == {
-        "read_ns": 0, "archived": False,
+        "read_ns": 0, "archived": False, "mute": False,
     }

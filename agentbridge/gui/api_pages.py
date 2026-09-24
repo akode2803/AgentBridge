@@ -1,7 +1,7 @@
-"""Opt-in local canonical transcript pages; no full-history fallback.
+"""Default GUI canonical transcript pages from admitted local inputs.
 
-Companion metadata is explicitly deferred until its own bounded, canonical
-selectors are available. This endpoint does not replace the legacy GUI route.
+Companions arrive through a separately finalized bounded request. Neither route
+falls back to the legacy complete-history fold when ingestion is pending.
 """
 from __future__ import annotations
 
@@ -96,6 +96,8 @@ def chat_page(app, req, mesh, token):
         meta = chat_json(ChatSnapshot.from_dict(json.loads(presentation.snapshot_json)), full=True)
         viewer = json.loads(presentation.viewer_state_json)
         meta['archived'] = viewer.get('archived', False)
+        if viewer.get('mute') is not None:
+            meta['mute'] = viewer['mute']
         if meta['kind'] == 'dm':
             meta['blocked'] = viewer['blocked']
         result = {
@@ -117,7 +119,9 @@ def chat_page(app, req, mesh, token):
             'session_binding': session_read_binding(token),
             'metadata_status': {'receipts': 'deferred', 'pins': 'deferred',
                                 'origin': 'deferred', 'profiles': 'deferred',
-                                'pause': 'deferred', 'blocking': 'ready'},
+                                'pause': 'deferred', 'blocking': 'ready',
+                                'mute': 'ready' if viewer.get('mute') is not None else 'pending',
+                                'owner_controls': 'pending'},
         }
         if presentation.pins_json is not None:
             result['meta']['pins'] = json.loads(presentation.pins_json)

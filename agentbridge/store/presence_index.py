@@ -19,10 +19,23 @@ _TABLES = {
     'presence_index_ready': 'CREATE TABLE presence_index_ready(source TEXT PRIMARY KEY,incarnation TEXT NOT NULL,generation INTEGER NOT NULL,cursor INTEGER NOT NULL,build TEXT NOT NULL)',
     'presence_index_builds': 'CREATE TABLE presence_index_builds(source TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(typeof(revision)=\'integer\' AND revision>=0))',
 }
+_DISPLAY_TABLES = {
+    'presence_display_rows': 'CREATE TABLE presence_display_rows(source TEXT NOT NULL,user TEXT NOT NULL,seen_ns NUMERIC NOT NULL CHECK(typeof(seen_ns) IN (\'integer\',\'real\')),last_seen TEXT NOT NULL,online_ns NUMERIC NOT NULL CHECK(typeof(online_ns) IN (\'integer\',\'real\')),PRIMARY KEY(source,user))',
+    'presence_display_ready': 'CREATE TABLE presence_display_ready(source TEXT PRIMARY KEY,incarnation TEXT NOT NULL,generation INTEGER NOT NULL,cursor INTEGER NOT NULL,build TEXT NOT NULL)',
+}
 _TRIGGERS = {
     f'presence_index_dirty_{event.lower()}':
     f'CREATE TRIGGER presence_index_dirty_{event.lower()} AFTER {event} ON presence_index_rows BEGIN '
     + ' '.join(f'DELETE FROM presence_index_ready WHERE source={ref}.source; '
+               f'UPDATE presence_index_builds SET revision=revision+1 WHERE source={ref}.source'
+               + (' AND OLD.source IS NOT NEW.source;' if event == 'UPDATE' and ref == 'OLD' else ';')
+               for ref in refs) + ' END'
+    for event, refs in [('INSERT', ('NEW',)), ('DELETE', ('OLD',)), ('UPDATE', ('OLD', 'NEW'))]
+}
+_DISPLAY_TRIGGERS = {
+    f'presence_display_dirty_{event.lower()}':
+    f'CREATE TRIGGER presence_display_dirty_{event.lower()} AFTER {event} ON presence_display_rows BEGIN '
+    + ' '.join(f'DELETE FROM presence_display_ready WHERE source={ref}.source; '
                f'UPDATE presence_index_builds SET revision=revision+1 WHERE source={ref}.source'
                + (' AND OLD.source IS NOT NEW.source;' if event == 'UPDATE' and ref == 'OLD' else ';')
                for ref in refs) + ' END'
@@ -42,25 +55,34 @@ class PresenceInputs:
     observed_ns: int = 0
 
 
+@dataclass(frozen=True)
+class PresenceDisplayInputs:
+    position: docs.DocumentPosition
+    build: str
+    subjects: tuple[tuple[str, int | float, str, int | float], ...]
+    observed_ns: int = 0
+
+
 def initialize(store):
     with local_source._writer(store) as conn:
-        for name, sql in _TABLES.items():
+        for name, sql in {**_TABLES, **_DISPLAY_TABLES}.items():
             if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None:
                 conn.execute(sql)
-        for name, sql in _TRIGGERS.items():
+        for name, sql in {**_TRIGGERS, **_DISPLAY_TRIGGERS}.items():
             if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None:
                 conn.execute(sql)
         _schema(conn)
 
 
 def _schema(conn):
-    for name, sql in _TABLES.items():
+    for name, sql in {**_TABLES, **_DISPLAY_TABLES}.items():
         if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
             raise PresenceIndexUnavailable('presence_schema_unavailable')
     actual = dict(conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
-                              "(name GLOB 'presence_index_dirty_*' OR tbl_name IN "
-                              "('presence_index_rows','presence_index_ready','presence_index_builds')) LIMIT 4"))
-    if actual != _TRIGGERS:
+                              "(name GLOB 'presence_index_dirty_*' OR name GLOB 'presence_display_dirty_*' "
+                              "OR tbl_name IN ('presence_index_rows','presence_index_ready',"
+                              "'presence_index_builds','presence_display_rows','presence_display_ready')) LIMIT 7"))
+    if actual != {**_TRIGGERS, **_DISPLAY_TRIGGERS}:
         raise PresenceIndexUnavailable('presence_triggers_unavailable')
 
 
@@ -80,6 +102,19 @@ def _floor(value):
     return max(0, int(value) if type(value) is bool else value)
 
 
+def _display_record(doc):
+    online = doc.get('online', False)
+    last_seen = doc.get('last_seen', '')
+    if type(online) is not bool or type(last_seen) is not str:
+        raise PresenceIndexUnavailable('invalid_presence_display')
+    try:
+        if len(last_seen.encode()) > 256:
+            raise PresenceIndexUnavailable('presence_display_byte_budget')
+    except UnicodeError as exc:
+        raise PresenceIndexUnavailable('invalid_presence_display') from exc
+    return last_seen, online
+
+
 def build(store, stage, *, expected, check_open=None):
     """Background-only; bounded raw batches, no provider work or long writer lock."""
     raw = None
@@ -89,11 +124,16 @@ def build(store, stage, *, expected, check_open=None):
         raw = staged_source.verify_raw_sealed(conn, store, stage, expected=expected)
         if (conn.execute('SELECT 1 FROM presence_index_rows WHERE source=? LIMIT 1',
                          (raw.source_id,)).fetchone() or
+                conn.execute('SELECT 1 FROM presence_display_rows WHERE source=? LIMIT 1',
+                             (raw.source_id,)).fetchone() or
                 conn.execute('SELECT 1 FROM presence_index_ready WHERE source=?',
+                             (raw.source_id,)).fetchone() or
+                conn.execute('SELECT 1 FROM presence_display_ready WHERE source=?',
                              (raw.source_id,)).fetchone()):
             raise PresenceIndexUnavailable('presence_build_already_started')
         conn.execute('INSERT INTO presence_index_builds VALUES(?,0)', (raw.source_id,))
     revision = 0
+    display_valid = True
     while True:
         if check_open is not None:
             check_open()
@@ -118,12 +158,27 @@ def build(store, stage, *, expected, check_open=None):
         finally:
             conn.close()
         batch = {}
+        display = {}
         for record in captured.records:
             doc = json.loads(record.payload_json)
             if not isinstance(doc, dict) or type(doc.get('user')) is not str or not doc['user']:
                 continue
             user = _user(doc['user'])
-            batch[user] = max(batch.get(user, 0), _floor(doc.get('last_seen_ns', 0)))
+            ns = _floor(doc.get('last_seen_ns', 0))
+            batch[user] = max(batch.get(user, 0), ns)
+            if display_valid:
+                try:
+                    shown, online = _display_record(doc)
+                except PresenceIndexUnavailable:
+                    # A bad display-only field cannot erase a valid delivery
+                    # floor. This generation simply has no display readiness.
+                    display_valid = False
+                    display.clear()
+                else:
+                    prior_ns, prior_shown, prior_online = display.get(user, (0, '', 0))
+                    display[user] = (ns if ns > prior_ns else prior_ns,
+                                     shown if ns > prior_ns else prior_shown,
+                                     max(prior_online, ns if online else 0))
         with local_source._writer(store) as conn:
             _schema(conn)
             if conn.execute('SELECT revision FROM presence_index_builds WHERE source=?',
@@ -138,6 +193,12 @@ def build(store, stage, *, expected, check_open=None):
                         for user in batch if conn.execute(
                             'SELECT 1 FROM presence_index_rows WHERE source=? AND user=?',
                             (raw.source_id, user)).fetchone() is None)
+            # Reserve the maximum normalized display field size per new user;
+            # repeated devices update the same indexed row within that charge.
+            added += sum(len(raw.source_id.encode()) + len(user.encode()) + 256 + 48
+                         for user in display if conn.execute(
+                             'SELECT 1 FROM presence_display_rows WHERE source=? AND user=?',
+                             (raw.source_id, user)).fetchone() is None)
             stage_row = staged_source._row(conn, store, stage, 'sealed')
             used = conn.execute('SELECT coalesce(sum(total_bytes),0) FROM '
                 '(SELECT total_bytes FROM staged_sources LIMIT ?)',
@@ -150,7 +211,14 @@ def build(store, stage, *, expected, check_open=None):
             conn.executemany('INSERT INTO presence_index_rows(source,user,ns) VALUES(?,?,?) '
                              'ON CONFLICT(source,user) DO UPDATE SET ns=max(ns,excluded.ns)',
                              ((raw.source_id, user, ns) for user, ns in batch.items()))
-            revision += len(batch)
+            conn.executemany('INSERT INTO presence_display_rows(source,user,seen_ns,last_seen,online_ns) '
+                             'VALUES(?,?,?,?,?) ON CONFLICT(source,user) DO UPDATE SET '
+                             'last_seen=CASE WHEN excluded.seen_ns>seen_ns THEN excluded.last_seen '
+                             'ELSE last_seen END, seen_ns=max(seen_ns,excluded.seen_ns), '
+                             'online_ns=max(online_ns,excluded.online_ns)',
+                             ((raw.source_id, user, ns, shown, online_ns)
+                              for user, (ns, shown, online_ns) in display.items()))
+            revision += len(batch) + len(display)
             if conn.execute('SELECT revision FROM presence_index_builds WHERE source=?',
                             (raw.source_id,)).fetchone() != (revision,):
                 raise PresenceIndexUnavailable('presence_build_changed')
@@ -165,6 +233,9 @@ def build(store, stage, *, expected, check_open=None):
             raise PresenceIndexUnavailable('presence_raw_changed')
         conn.execute('INSERT INTO presence_index_ready VALUES(?,?,?,?,?)',
                      (raw.source_id, raw.incarnation, raw.generation, raw.cursor, token))
+        if display_valid:
+            conn.execute('INSERT INTO presence_display_ready VALUES(?,?,?,?,?)',
+                         (raw.source_id, raw.incarnation, raw.generation, raw.cursor, token))
     return token
 
 
@@ -194,3 +265,42 @@ def capture(conn, store, raw, members):
                            (raw.source_id, user)).fetchone()
         values.append((user, 0 if row is None else _floor(row[0])))
     return PresenceInputs(raw, ready[3], tuple(values))
+
+
+def capture_display(conn, store, raw, users):
+    """Exact selected presentation inputs; old floor-only builds stay pending."""
+    floor = capture(conn, store, raw, ())
+    if type(users) is not tuple or len(users) > MAX_MEMBERS or len(set(users)) != len(users):
+        raise ValueError('invalid presence display selection')
+    users = tuple(_user(user) for user in users)
+    ready = conn.execute('SELECT incarnation,generation,cursor,build FROM presence_display_ready '
+                         "WHERE source=? AND typeof(incarnation)='text' AND "
+                         "length(CAST(incarnation AS BLOB))<=128 AND "
+                         "typeof(generation)='integer' AND typeof(cursor)='integer' AND "
+                         "typeof(build)='text' AND length(CAST(build AS BLOB))=32",
+                         (raw.source_id,)).fetchone()
+    if ready != (raw.incarnation, raw.generation, raw.cursor, floor.build):
+        raise PresenceIndexUnavailable('presence_display_pending')
+    subjects = []
+    for user in users:
+        safe = conn.execute('SELECT typeof(seen_ns),typeof(last_seen),'
+                            'length(CAST(last_seen AS BLOB)),typeof(online_ns) '
+                            'FROM presence_display_rows WHERE source=? AND user=?',
+                            (raw.source_id, user)).fetchone()
+        if safe is None:
+            subjects.append((user, 0, '', 0))
+            continue
+        if (safe[0] not in ('integer', 'real') or safe[1] != 'text'
+                or type(safe[2]) is not int or safe[2] > 256
+                or safe[3] not in ('integer', 'real')):
+            raise PresenceIndexUnavailable('invalid_presence_display')
+        seen, shown, online = conn.execute(
+            'SELECT seen_ns,last_seen,online_ns FROM presence_display_rows '
+            'WHERE source=? AND user=?', (raw.source_id, user)).fetchone()
+        try:
+            if len(shown.encode()) > 256:
+                raise PresenceIndexUnavailable('presence_display_byte_budget')
+        except UnicodeError as exc:
+            raise PresenceIndexUnavailable('invalid_presence_display') from exc
+        subjects.append((user, _floor(seen), shown, _floor(online)))
+    return PresenceDisplayInputs(raw, floor.build, tuple(subjects))

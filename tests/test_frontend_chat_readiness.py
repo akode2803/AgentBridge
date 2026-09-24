@@ -55,6 +55,8 @@ def test_base_chat_is_interactive_and_repaints_do_not_stack_handlers(tmp_path: P
         _function(chat, "reconcileRows"),
         _function(chat, "syncReceiptTicks"),
         _function(chat, "receiptTicks"),
+        _function(chat, "agentPermissionEntry"),
+        _function(chat, "openAgentPermissionEntry"),
         _between(chat, "function bindTranscript(", "function openMsgMenu("),
         _between(chat, "async function renderMeshChat(", "V.renderMeshChat = renderMeshChat;"),
     ])

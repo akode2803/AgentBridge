@@ -71,7 +71,9 @@ def test_first_page_and_opaque_continuation_with_deferred_metadata(page_app):
     assert first['metadata_status']['pins'] == 'ready'
     assert first['metadata_status']['receipts'] == 'ready'
     assert first['metadata_status']['blocking'] == 'ready'
-    assert set(first['metadata_status'].values()) == {'ready', 'deferred'}
+    assert first['metadata_status']['mute'] == 'ready'
+    assert first['metadata_status']['owner_controls'] == 'pending'
+    assert set(first['metadata_status'].values()) == {'ready', 'deferred', 'pending'}
     assert first['meta']['pins'] == []
     assert 'blocked' not in first['meta']  # The legacy group shape omits DM blocking.
     assert all(message['receipt']['state'] == 'read'
@@ -380,6 +382,31 @@ def test_multi_member_page_defers_receipts_without_complete_presence(page_app):
     assert page['metadata_status']['receipts'] == 'pending'
     shown = next(item for item in page['messages'] if item['id'] == own.id)
     assert 'receipt' not in shown
+
+
+def test_selected_page_mute_state_is_verified_and_missing_shape_is_pending(page_app):
+    app, chat = page_app
+    app.mesh.post(chat, 'message')
+    app.mesh.set_chat_flag(chat, 'mute', True)
+    _ready(app, chat)
+    muted = _settled_page(app, chat)
+    assert muted['status'] == 'page'
+    assert muted['meta']['mute'] is True
+    assert muted['metadata_status']['mute'] == 'ready'
+    assert muted['metadata_status']['owner_controls'] == 'pending'
+    app.mesh.set_chat_flag(chat, 'mute', False)
+    app.mesh.local_inputs.ingest(chat)
+    unmuted = _settled_page(app, chat)
+    assert unmuted['status'] == 'page'
+    assert unmuted['meta']['mute'] is False
+    assert unmuted['metadata_status']['mute'] == 'ready'
+    # A malformed but signed viewer flag must not be guessed as unmuted.
+    app.mesh.set_chat_flag(chat, 'mute', 'invalid-flag')
+    app.mesh.local_inputs.ingest(chat)
+    unknown = _settled_page(app, chat)
+    assert unknown['status'] == 'page'
+    assert 'mute' not in unknown['meta']
+    assert unknown['metadata_status']['mute'] == 'pending'
 
 
 def test_tail_window_anchor_recomputes_after_arrival_hide_and_clear(page_app, monkeypatch):

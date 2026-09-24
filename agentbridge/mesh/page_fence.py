@@ -10,6 +10,7 @@ from ..transport import key_observation
 from ..transport.authority_observation import _position_locked
 from ..transport.mirror_observation import MirrorExpectedPosition
 from . import epoch_inputs, local_key_inputs
+from .local_aux_source import AuxSourceReceipt, LocalAuxSource
 from .local_page_source import LocalSourceReceipt
 from .local_presence_source import LocalPresenceSource, PresenceSourceReceipt
 from .page_selection import PageSelection
@@ -27,12 +28,19 @@ class PagePresentation:
     starred: tuple[str, ...]
     pins_json: str | None = None
     receipts_json: str | None = None
+    decoration_json: str | None = None
 
 
 @dataclass(frozen=True)
 class PresenceFence:
     receipt: PresenceSourceReceipt
     inputs: presence_index.PresenceInputs
+
+
+@dataclass(frozen=True)
+class PresenceDisplayFence:
+    receipt: PresenceSourceReceipt
+    inputs: presence_index.PresenceDisplayInputs
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,8 @@ class PageFence:
     selection: PageSelection | None = field(repr=False)
     presentation: PagePresentation | None = field(default=None, repr=False)
     presence: PresenceFence | None = field(default=None, repr=False)
+    auxiliary: tuple[AuxSourceReceipt, ...] = field(default=(), repr=False)
+    display_presence: PresenceDisplayFence | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -115,12 +125,18 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
             raise OverflowError('page presentation exceeds budget')
         state = json.loads(presentation.viewer_state_json)
         base = {'read_ns', 'archived'}
+        page = base | {'mute'}
         summary = base | {'read_ts', 'pinned', 'mute', 'forced_unread', 'cleared', 'deleted'}
         if (type(state) is not dict or set(state) not in (base, base | {'blocked'},
+                                                        page, page | {'blocked'},
                                                         summary, summary | {'blocked'})
                 or type(state['read_ns']) is not int
                 or type(state['archived']) is not bool
                 or ('blocked' in state and type(state['blocked']) is not bool)
+                or (set(state) in (page, page | {'blocked'})
+                    and state['mute'] is not None
+                    and not (type(state['mute']) is bool or
+                             type(state['mute']) is int and 0 <= state['mute'] <= 2**63 - 1))
                 or ('read_ts' in state and (
                     type(state['read_ts']) is not str or type(state['pinned']) is not bool
                     or type(state['forced_unread']) is not bool
@@ -135,7 +151,14 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
         size += len(presentation.snapshot_json.encode()) + len(presentation.viewer_state_json.encode())
         presentation = PagePresentation(presentation.snapshot_json,
                                         presentation.viewer_state_json, tuple(presentation.starred),
-                                        presentation.pins_json, presentation.receipts_json)
+                                        presentation.pins_json, presentation.receipts_json,
+                                        presentation.decoration_json)
+        if presentation.decoration_json is not None:
+            if (type(presentation.decoration_json) is not str
+                    or len(presentation.decoration_json.encode()) > 4 * 1024 * 1024
+                    or type(json.loads(presentation.decoration_json)) is not dict):
+                raise ValueError('invalid bounded page decoration')
+            size += len(presentation.decoration_json.encode())
         if presentation.pins_json is not None:
             if type(presentation.pins_json) is not str:
                 raise ValueError('invalid pins presentation')
@@ -183,7 +206,48 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
         size += sum(len(name.encode()) + 16 for name, _ in floors)
         presence = PresenceFence(receipt, presence_index.PresenceInputs(inputs.position, inputs.build, floors,
                                                                        inputs.observed_ns))
-    owned = PageFence(position, source, value.proofs, epochs, selected, presentation, presence)
+    if type(value.auxiliary) is not tuple or len(value.auxiliary) > 2:
+        raise ValueError('invalid auxiliary source fences')
+    auxiliary = []
+    for receipt in value.auxiliary:
+        if source_reader is None or type(receipt) is not AuxSourceReceipt:
+            raise ValueError('invalid auxiliary source receipt')
+        if receipt.scope == 'runtime' and receipt.chat_id != position.messages.chat_id:
+            raise ValueError('auxiliary source belongs to another chat')
+        reader = LocalAuxSource(source_reader.coordinator, mesh.store, receipt.scope, receipt.chat_id)
+        owned_receipt = reader._receipt(receipt)
+        if any(r.source.source_id == owned_receipt.source.source_id for r in auxiliary):
+            raise ValueError('duplicate auxiliary source')
+        auxiliary.append(owned_receipt)
+        size += len(owned_receipt.source.source_id.encode()) + 256
+    display = value.display_presence
+    if display is not None:
+        if source_reader is None or type(display) is not PresenceDisplayFence:
+            raise ValueError('invalid display presence fence')
+        reader = LocalPresenceSource(source_reader.coordinator, mesh.store)
+        receipt = reader._receipt(display.receipt)
+        inputs = display.inputs
+        if (type(inputs) is not presence_index.PresenceDisplayInputs
+                or inputs.position != receipt.source.raw or type(inputs.build) is not str
+                or len(inputs.build) != 32 or type(inputs.subjects) is not tuple
+                or len(inputs.subjects) > 64 or type(inputs.observed_ns) is not int
+                or not 0 <= inputs.observed_ns <= 2**63 - 1):
+            raise ValueError('invalid display presence inputs')
+        names = []
+        for row in inputs.subjects:
+            if type(row) is not tuple or len(row) != 4:
+                raise ValueError('invalid display presence subject')
+            name, seen, shown, online = row
+            presence_index._user(name)
+            presence_index._floor(seen)
+            presence_index._floor(online)
+            if type(shown) is not str or len(shown.encode()) > 256 or name in names:
+                raise ValueError('invalid display presence row')
+            names.append(name)
+        size += sum(len(row[0].encode()) + len(row[2].encode()) + 32 for row in inputs.subjects)
+        display = PresenceDisplayFence(receipt, inputs)
+    owned = PageFence(position, source, value.proofs, epochs, selected, presentation,
+                      presence, tuple(auxiliary), display)
     wraps = tuple(v.wrap for v in epochs if v.wrap is not None)
     if source_reader is None:
         prepared_wraps = key_observation._prepare_key_wraps(wraps)
@@ -225,6 +289,20 @@ def matches_store(conn, mesh, prepared, *, source_reader=None):
             return False
         if reader.capture_in_transaction(conn, evidence.receipt,
                                          tuple(name for name, _ in evidence.inputs.floors)) != evidence.inputs:
+            return False
+    if fence.display_presence is not None:
+        if source_reader is None:
+            return False
+        reader = LocalPresenceSource(source_reader.coordinator, mesh.store)
+        evidence = fence.display_presence
+        if reader.capture_display_in_transaction(conn, evidence.receipt,
+                tuple(row[0] for row in evidence.inputs.subjects)) != evidence.inputs:
+            return False
+    for receipt in fence.auxiliary:
+        if source_reader is None:
+            return False
+        reader = LocalAuxSource(source_reader.coordinator, mesh.store, receipt.scope, receipt.chat_id)
+        if not reader.matches_in_transaction(conn, receipt):
             return False
     selected = tuple((path, key) for path, key, _valid in fence.proofs)
     return overlay_index._proofs(conn, mesh.store.path, fence.position.overlays, selected) == tuple(

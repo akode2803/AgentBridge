@@ -66,8 +66,7 @@ class LocalPresenceSource:
         with self._read(receipt) as (conn, receipt):
             return self.capture_in_transaction(conn, receipt, members)
 
-    def capture_in_transaction(self, conn, receipt, members):
-        """Read exact floors and admitted observation time on one Store cut."""
+    def _observed_in_transaction(self, conn, receipt):
         receipt = self._receipt(receipt)
         if not conn.in_transaction:
             raise ValueError('presence capture requires a transaction')
@@ -81,5 +80,20 @@ class LocalPresenceSource:
         ).fetchone()
         if observed is None:
             raise owner.SourceChanged('presence_observation_unavailable')
+        return receipt, observed[0]
+
+    def capture_in_transaction(self, conn, receipt, members):
+        """Read exact floors and admitted observation time on one Store cut."""
+        receipt, observed_ns = self._observed_in_transaction(conn, receipt)
         indexed = presence_index.capture(conn, self.store, receipt.source.raw, members)
-        return replace(indexed, observed_ns=observed[0])
+        return replace(indexed, observed_ns=observed_ns)
+
+    def capture_display_members(self, receipt, users):
+        with self._read(receipt) as (conn, receipt):
+            return self.capture_display_in_transaction(conn, receipt, users)
+
+    def capture_display_in_transaction(self, conn, receipt, users):
+        """Read bounded raw online/last-seen facts, never a visibility verdict."""
+        receipt, observed_ns = self._observed_in_transaction(conn, receipt)
+        indexed = presence_index.capture_display(conn, self.store, receipt.source.raw, users)
+        return replace(indexed, observed_ns=observed_ns)

@@ -120,7 +120,7 @@ def test_many_devices_in_128_document_batches_have_constant_exact_capture(rig):
     presence_index.build(rig[0], stage, expected=retired)
     after = rig[0]._conn().execute('SELECT total_bytes FROM staged_sources WHERE source=?',
                                    (stage.source_id,)).fetchone()[0]
-    assert after - before == len(raw.source_id.encode()) + len('alice') + 32
+    assert after - before == 2 * (len(raw.source_id.encode()) + len('alice')) + 32 + 256 + 48
     conn = docs._open_reader(rig[0].path)
     queries = []
     try:
@@ -178,7 +178,7 @@ def test_index_row_source_move_invalidates_both_namespaces(rig):
         assert conn.execute('SELECT source FROM presence_index_ready WHERE source IN (?,?)',
                             (raw.source_id, moved_to)).fetchall() == []
         assert conn.execute('SELECT revision FROM presence_index_builds WHERE source=?',
-                            (raw.source_id,)).fetchone() == (2,)
+                            (raw.source_id,)).fetchone() == (3,)
         assert conn.execute('SELECT revision FROM presence_index_builds WHERE source=?',
                             (moved_to,)).fetchone() == (1,)
     with pytest.raises(presence_index.PresenceIndexUnavailable, match='pending'):

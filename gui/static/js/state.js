@@ -267,6 +267,43 @@ export function applyMeshState(ticket, response, request) {
   // A newer pending read does not starve a slow accepted read. Once a newer
   // read applies, an older completion can never replace it.
   appliedMeshReadSequence = request.readSequence;
+  // A source-pending bounded user inventory is incomplete, not evidence that
+  // every contact vanished. Retain only this exact signed-in session's public
+  // display rows; a new binding, sign-out or complete inventory replaces them.
+  const prior = Mesh.state;
+  const sameBinding = prior?.session_binding && response?.session_binding
+    && prior.session_binding.instance_id === response.session_binding.instance_id
+    && prior.session_binding.session_generation === response.session_binding.session_generation
+    && prior.session_binding.viewer === response.session_binding.viewer;
+  if (response.users_complete === false && sameBinding && prior.user === response.user
+      && prior.users && typeof prior.users === "object" && !Array.isArray(prior.users)) {
+    const incoming = response.users && typeof response.users === "object"
+      && !Array.isArray(response.users) ? response.users : {};
+    const users = {...prior.users, ...incoming};
+    const newNames = new Set(Object.keys(incoming));
+    let count = Object.keys(users).length;
+    for (const name of Object.keys(users)) {
+      if (count <= 2048) break;
+      if (!newNames.has(name)) { delete users[name]; count--; }
+    }
+    for (const name of Object.keys(users)) {
+      if (count <= 2048) break;
+      delete users[name]; count--;
+    }
+    response = {...response, users};
+  }
+  if (response.chats_complete === false && sameBinding && prior.user === response.user
+      && Array.isArray(prior.chats) && Array.isArray(response.chats)) {
+    // Incomplete inventory omits unresolved rooms. Keep last displayed rows
+    // for this exact session only; every row action still reauthorizes.
+    const held = new Map(prior.chats.filter(row => row && typeof row.id === "string")
+      .map(row => [row.id,row]));
+    for (const row of response.chats) {
+      if (row && typeof row.id === "string") held.set(row.id,row);
+    }
+    while (held.size > 128) held.delete(held.keys().next().value);
+    response = {...response,chats:[...held.values()]};
+  }
   Mesh.state = response;
   meshStateGeneration = advanceWarmCounter(meshStateGeneration);
   meshStateAcceptedAt = request.warm ? monotonicNow() : null;

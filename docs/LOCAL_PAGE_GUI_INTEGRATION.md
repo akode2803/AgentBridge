@@ -1,11 +1,12 @@
-# Additive local transcript page path
+# Local transcript paging and companions
 
-The repository contains an opt-in `GET /api/mesh/chat_page` route.
-`GuiApp(local_inputs=True)` constructs the mutation-owned local input runtime; the
-default remains `False`. The existing chat route and browser transcript renderer
-have not switched to this endpoint. `gui/static/js/chat-pages.js` is an isolated,
-tested state helper, not wired to `chat.js`, scrolling or DOM eviction. This is
-implementation and focused validation, not activation or release evidence.
+`GET /api/mesh/chat_page` serves request-owned canonical windows from admitted
+local inputs. The production `serve()` path now constructs `GuiApp` with
+`local_inputs=True`; the library constructor still defaults to `False` for
+compatibility. Browser chat rendering is wired to this route when its capability
+is present. This source implementation is not evidence of a released build or
+of the user's currently running app; full-suite/CI and release checks remain
+separate.
 
 ## Request and result
 
@@ -42,17 +43,23 @@ and source position are checked with the page's final Store/root cut. A receipt
 floor is used only when locally observed within 30 seconds at preparation and still
 within that interval at handout. This is a local presentation-age guard, not a
 remote staleness guarantee. Cold, failed, stale or over-budget presence yields
-`metadata_status.receipts='pending'` and no fabricated Sent receipt. Other fields
-such as origin, profiles and pause remain explicitly deferred; the endpoint does not
-silently borrow full-history metadata helpers.
+`metadata_status.receipts='pending'` and no fabricated Sent receipt. The selected
+page also carries bounded mute/owner-control presentation; `chat_aux` separately
+prepares runtime cards, pause, typing and profile/presence decoration so those
+fields do not block first-message paint. Incomplete companion sources report
+pending, never a false idle/offline or permission verdict.
 
-The browser helper fences one in-flight page request against session/chat/route
-changes, rejects changed-version or stalled older continuations, clears retained
-history on pending/forbidden/unavailable/reset responses, deduplicates message IDs
-and caps retained pages, messages and serialized message bytes. Empty visible pages
-can advance the raw seek without accumulating pages. It has no fetch, render,
-scroll-anchor or DOM ownership yet; the live browser still needs bounded
-node/resource retention and tested upward-scroll anchoring before switching routes.
+The browser loads 50 visible messages initially and prepends older windows on
+upward scroll. Its request owner fences in-flight reads by session/chat/route,
+rejects changed-version or stalled older continuations, deduplicates IDs and
+retains at most six pages, 600 messages and 4 MiB of serialized message bodies.
+DOM reconciliation prunes evicted resources and restores a measured visible
+anchor. A recoverable pending/reset response clears all message and authority
+data but may retain only an opaque window-position token plus a bounded desired
+count; fresh canonical responses replace the window atomically. Explicit Jump
+to latest discards that historical position. Session replacement/forbidden
+responses discard it. Auxiliary paint has its own guarded request and final
+source/session cut.
 
 ## Background ownership and failure boundary
 
@@ -62,7 +69,9 @@ chat IDs, and prepares signature/index work on its serialized worker. Discovery 
 not a room registry: empty or not-yet-ingested rooms require explicit selection
 hints. The separate presence job shares the worker owner, uses a four-second success
 cadence with bounded failure backoff, and never traverses presence documents on the
-HTTP request.
+HTTP request. Independent raw auxiliary sources cover status, per-room runtime,
+public users, peer owner-control and exact users+lifecycle identity inputs. Their
+background publication is not a foreground authorization shortcut.
 
 Staging has explicit `chat` and raw-only `kind='raw'` generations. Schema migration
 retains existing chat-stage rows, while raw presence stages have no fake chat ID and
@@ -88,7 +97,32 @@ or authority verdict, reject Store namespace replacement and cannot be used as
 generation-bound `cursor` continuations. Every refresh repeats current canonical
 checks; callers must replace retained visible rows with the refreshed results.
 
-## R230 validation checkpoint
+## R232 auxiliary and prompt boundary
+
+The selected-chat auxiliary operation uses captured status/runtime raw sources,
+current membership/account/lifecycle/key facts and final companion positions.
+It runs existing signed pause and runtime-ledger validators over bounded inputs,
+then emits compact typing, run/task and profile decorations. Profile visibility
+comes from exact captured accounts: current shared-room/owner facts can prove
+MEMBERS/AGENTS access, while an unproved relationship defers that private field.
+Presence display uses a separately ready index of latest last-seen and
+online-device timestamps by payload user, with privacy and local observation-age
+gates at handout. Receipt high-water remains independent. No profile or source
+position is reusable authority.
+
+Room-scoped asks use canonical room membership. Chatless owner peer asks and
+timers use an exact users+lifecycle `AccountRound`, trusted pin view and
+independently admitted status/peer sources; no room membership is invented.
+Signed effective deactivation/transfer and local trust changes require a fresh
+final cut. Benign cold pin/head progress restarts within one bounded ledger;
+incomplete input returns pending. External writes become effective after local
+ingestion, while local matching writes retire sources before external I/O. The
+public sidebar user fallback comes from a bounded admitted users source, not a
+provider directory/profile walk. Room inventory still has a separate
+provider-wide enumeration and 128-room response budget; neither is a
+full-history message fold or a product-wide room-creation cap.
+
+## Historical R230 validation checkpoint
 
 The macOS Python suite passed 2,359 tests with 12 skipped (500.64 seconds).
 The only subsequent test change removed an unused assignment; that affected test
@@ -119,3 +153,14 @@ while all 254 sampled selected-input reads succeeded. Previously those scans lef
 the source pending for 1.3–1.4 seconds. A separate new run saw two isolated
 position-change retries; this is sampled availability evidence, not a zero-gap,
 cross-platform, browser or remote-staleness guarantee.
+
+## R232 local backend cost probe
+
+In a separate disposable, warm PlainSealer folder fixture, three fresh
+selected-page operations at 100,000 messages selected the same latest 50 IDs
+as the legacy projection. Median paging CPU/wall was 20.699/20.738 ms versus
+975.715/979.905 ms for the full fold; paging examined 50 raw rows and captured
+at most 200. Provider document reads and the legacy projection were forbidden
+during the page request. Source/index setup was excluded and other tests ran
+concurrently. This is backend evidence, not encrypted proof, cold ingestion,
+browser paint, cloud or cross-platform latency evidence.

@@ -31,6 +31,8 @@ const Mesh = {chatId:'room',state:{user:'alice',chats:[
 let anchorCaptures=0,anchorRestores=0,prunes=0,paints=0,sidebar=0;
 const calls=[], modes=[];
 let paintAllowed=true;
+let pageVersion='v1';
+const auxDisplayCalls=[];
 let pendingOlder=false, savedPlan=false;
 let timerSeq=0;
 const timers=[];
@@ -67,7 +69,7 @@ const pageRead = {
     if (mode==='refresh') savedPlan=false;
     return {status:'page', pageData:{me:'alice',read_cutoff_ns:cutoff,
       meta:{id:'room'},metadata_status:{}}, messages:[{id:'m',ns:60}],
-      evictedIds:[],hasMore:true};
+      evictedIds:[],hasMore:true,pageVersion};
   },
 };
 const deps={App,Mesh,BrowserSession:{snapshot:()=>({binding})},
@@ -78,6 +80,13 @@ const deps={App,Mesh,BrowserSession:{snapshot:()=>({binding})},
   captureTranscriptAnchor:()=>{anchorCaptures++;return {candidates:[]};},
   restoreTranscriptAnchor:()=>{anchorRestores++;},
   pruneTranscriptResources:()=>{prunes++;},
+  abortPagedAux:()=>{},refreshPagedAux:async()=>{},
+  pagedAuxDisplay:(pageData,response)=>{
+    auxDisplayCalls.push(response);
+    return {data:{...pageData,_paged:true},presentation:Mesh.state,
+      aux:response ? response.aux : null};
+  },
+  syncPagedAuxControls:()=>{},syncDmHeaderPresence:()=>{},
   renderMeshChat:async()=>{paints++;return paintAllowed;},
   api:(path,body)=>{calls.push([path,body]);return Promise.resolve({ok:true});},
   renderSidebar:()=>{sidebar++;},meshCaps:()=>({chat_page_v1:true}),
@@ -155,6 +164,16 @@ assert.deepEqual(modes.slice(-2),['older','first']);
 assert.equal(getOwner().wantOlder,false);
 assert.equal(getOwner().recoveryAnchor,null);
 assert.equal(timers.filter(timer=>!timer.cancelled&&!timer.ran).length,0);
+
+// Same-version canonical polls reuse the last bounded decoration as display
+// only. A new raw/trust version neutralizes it until another aux final cut.
+getOwner().auxSnapshot={pageVersion:'v1',response:{aux:{feeds:[{agent:'bot'}]}}};
+await renderPagedChat(false,'first');
+assert.deepEqual(auxDisplayCalls.at(-1),{aux:{feeds:[{agent:'bot'}]}});
+pageVersion='v2';
+await renderPagedChat(false,'first');
+assert.equal(getOwner().auxSnapshot,null);
+assert.equal(auxDisplayCalls.at(-1),null);
 
 // A superseded same-route paint must not prune, restore or mark anything.
 paintAllowed=false;
