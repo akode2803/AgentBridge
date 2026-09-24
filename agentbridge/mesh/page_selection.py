@@ -40,6 +40,7 @@ class PageSelection:
     scan_budget_exhausted: bool
     needs_more_input: bool
     parent_ids: frozenset[str] = frozenset()
+    newest_examined: MessageKey | None = None
 
 
 def _snapshot(inputs):
@@ -127,7 +128,7 @@ def select_message_page(
     if absent.intersection(available):
         raise ValueError('inconsistent exact absence')
     selected, honored, examined_ids = [], set(), set()
-    consumed, oldest = 0, None
+    consumed, oldest, newest = 0, None, None
     for row in inputs.rows:
         if consumed >= scan_budget or len(selected) >= limit:
             break
@@ -135,6 +136,8 @@ def select_message_page(
             chat, viewer, [row.decoded()], sealer, **fold_inputs,
         )
         consumed += 1
+        if newest is None:
+            newest = row.key
         oldest = row.key
         examined_ids.add(row.key.id)
         honored.update(redacted)
@@ -165,7 +168,7 @@ def select_message_page(
     return PageSelection(
         inputs.position, tuple(reversed(selected)), oldest, consumed,
         len(dependency_ids), len(required), more, not more, budget_exhausted,
-        len(selected) < limit and more and not budget_exhausted, frozenset(required),
+        len(selected) < limit and more and not budget_exhausted, frozenset(required), newest,
     )
 
 
@@ -272,7 +275,8 @@ class CanonicalPageAccumulator:
                               raw_examined=prior_raw + current.raw_examined,
                               parents_examined=previous.parents_examined + current.parents_examined,
                               parents_required=len(prior_parent_ids | current.parent_ids),
-                              parent_ids=prior_parent_ids | current.parent_ids)
+                              parent_ids=prior_parent_ids | current.parent_ids,
+                              newest_examined=previous.newest_examined or current.newest_examined)
         self._selection = current
         self._next_key = inputs.lookahead
         self._bytes += size

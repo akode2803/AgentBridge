@@ -232,7 +232,9 @@ class PageOperation:
     never performed here. Each prepare invalidates any earlier finalizer.
     """
     def __init__(self, mesh, chat_id, *, before=None, expected_position=None, window_before=None,
-                 limit=50, scan_budget=1000, limits=PageOperationLimits(), source_reader=None):
+                 window_inclusive=False,
+                 limit=50, scan_budget=1000, limits=PageOperationLimits(), source_reader=None,
+                 summary_only=False):
         authority_observation._part(chat_id)
         self.mesh, self.chat = mesh, chat_id
         if source_reader is not None:
@@ -241,17 +243,23 @@ class PageOperation:
                     or source_reader.chat != chat_id):
                 raise ValueError('invalid local page owner')
         self.source_reader = source_reader
+        if type(summary_only) is not bool:
+            raise ValueError('invalid page summary mode')
+        self.summary_only = summary_only
         self._transport, self._store = mesh.tx, mesh.store
         self.viewer, self.machine = mesh.messaging.user, mesh.messaging.machine
         self.before = None if before is None else raw_pages._key(before)
         if (before is None) != (expected_position is None):
             raise ValueError('continuation requires its original page position')
+        if type(window_inclusive) is not bool or (window_inclusive and window_before is None):
+            raise ValueError('invalid inclusive window position')
         if window_before is not None:
             if before is not None or expected_position is not None:
                 raise ValueError('window positioning cannot be a continuation')
             # Position only. Every prepare still captures current inputs and
             # recomputes membership, trust, keys and canonical visibility.
             self.before = raw_pages._key(window_before)
+        self.window_inclusive = window_inclusive
         self.expected_position = None
         if expected_position is not None:
             if type(expected_position) is not raw_pages.PageInputPosition:
@@ -324,8 +332,13 @@ class PageOperation:
             while True:
                 ledger.step()
                 consumed = accumulator._selection.raw_examined if accumulator._selection is not None else 0
-                raw_limit = min(raw_pages.MAX_RAW_ROWS, self.scan_budget - consumed)
-                selection_args = dict(before=before, expected=expected, raw_limit=raw_limit,
+                # Reply parents outside the ordered window share the indexed
+                # target budget. Reserve space before the dependency recapture.
+                raw_limit = min(raw_pages.MAX_RAW_ROWS, self.scan_budget - consumed,
+                                overlay_index.MAX_TARGETS - len(exact))
+                selection_args = dict(before=before, before_inclusive=(
+                    self.window_inclusive and accumulator._selection is None),
+                    expected=expected, raw_limit=raw_limit,
                     exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
                     proof_keys=proof_keys, include_reactions=True, max_bytes=ledger.remaining())
                 if self.source_reader is None:
@@ -371,15 +384,26 @@ class PageOperation:
                 page_starred.update(overlays.state.get('starred', ()))
                 if not more:
                     selection = accumulator.finish()
-                    pins_json = self._pin_presentation(round_, snapshot, source_binding, index,
-                        expected, sealer, history, verifier, proofs) if self.source_reader is not None else None
-                    receipts_json, presence = self._receipt_presentation(round_, snapshot,
-                        source_binding, index, expected, selection, proofs)
+                    pins_json = (self._pin_presentation(round_, snapshot, source_binding, index,
+                        expected, sealer, history, verifier, proofs)
+                        if self.source_reader is not None and not self.summary_only else None)
+                    receipts_json, presence = ((None, None) if self.summary_only else
+                        self._receipt_presentation(round_, snapshot,
+                            source_binding, index, expected, selection, proofs))
                     snapshot_json = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
                     viewer_metadata = {
                         'read_ns': int((viewer_state or {}).get('read_ns', 0)),
                         'archived': bool((viewer_state or {}).get('archived')),
                     }
+                    if self.summary_only:
+                        viewer_metadata.update(
+                            read_ts=str((viewer_state or {}).get('read_ts', '')),
+                            pinned=bool((viewer_state or {}).get('pinned')),
+                            mute=(viewer_state or {}).get('mute', False),
+                            forced_unread=bool((viewer_state or {}).get('forced_unread')),
+                            cleared=(viewer_state or {}).get('cleared') or {},
+                            deleted=(viewer_state or {}).get('deleted', False),
+                        )
                     if snapshot.kind is ChatKind.DM:
                         account = round_.get(self.viewer)
                         other = next((name for name in snapshot.members if name != self.viewer), None)

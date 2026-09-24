@@ -422,10 +422,13 @@ class MessagingService:
                 cut, keep_starred=keep_starred, runtime_ids=runtime_ids,
             )
 
-    def mark_read(self, chat_id: str) -> None:
+    def mark_read(self, chat_id: str, up_to_ns: int | None = None) -> None:
         self._require_member(chat_id)
-        msgs = self.store.messages(chat_id)
-        latest = max((m.get("ns", 0) for m in msgs), default=0)
+        latest = self.store.latest_message_ns(chat_id)
+        if up_to_ns is not None:
+            if type(up_to_ns) is not int or not 0 <= up_to_ns <= 2**63 - 1:
+                raise ValidationError("Invalid read cursor")
+            latest = min(latest, up_to_ns)
         if latest:
             self._state(chat_id).mark_read(latest)
 
@@ -440,8 +443,7 @@ class MessagingService:
         except NotAMember:
             return False
         if up_to_ns is None:
-            up_to_ns = max(
-                (m.get("ns", 0) for m in self.store.messages(chat_id)), default=0)
+            up_to_ns = self.store.latest_message_ns(chat_id)
         return bool(up_to_ns) and self._state(chat_id).mark_delivered(up_to_ns)
 
     def set_chat_flag(self, chat_id: str, name: str, value) -> None:

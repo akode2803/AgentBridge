@@ -209,7 +209,13 @@ def assemble_page_overlays(inputs: RawPageInputs, viewer: str, snapshot: ChatSna
             # transcript cuts, but must never become transcript fold inputs.
             viewer_state = {
                 'read_ns': int(scalars.get('read_ns', 0)),
+                'read_ts': str(scalars.get('read_ts', '')),
                 'archived': bool(scalars.get('archived')),
+                'pinned': bool(scalars.get('pinned')),
+                'mute': scalars.get('mute', False),
+                'forced_unread': bool(scalars.get('forced_unread')),
+                'cleared': scalars.get('cleared') or {},
+                'deleted': scalars.get('deleted', False),
             }
             # These are transcript fields only, never the public my_state schema.
             state = {key: value for key, value in scalars.items() if key in ('cleared', 'deleted')}

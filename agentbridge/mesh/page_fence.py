@@ -114,10 +114,18 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
                 or len(presentation.starred) > 200):
             raise OverflowError('page presentation exceeds budget')
         state = json.loads(presentation.viewer_state_json)
-        if (type(state) is not dict or set(state) not in ({'read_ns', 'archived'}, {'read_ns', 'archived', 'blocked'})
+        base = {'read_ns', 'archived'}
+        summary = base | {'read_ts', 'pinned', 'mute', 'forced_unread', 'cleared', 'deleted'}
+        if (type(state) is not dict or set(state) not in (base, base | {'blocked'},
+                                                        summary, summary | {'blocked'})
                 or type(state['read_ns']) is not int
                 or type(state['archived']) is not bool
-                or ('blocked' in state and type(state['blocked']) is not bool)):
+                or ('blocked' in state and type(state['blocked']) is not bool)
+                or ('read_ts' in state and (
+                    type(state['read_ts']) is not str or type(state['pinned']) is not bool
+                    or type(state['forced_unread']) is not bool
+                    or type(state['cleared']) is not dict
+                    or type(state['deleted']) not in (bool, int)))):
             raise ValueError('invalid viewer presentation')
         visible = {msg.id for msg in selected.messages}
         if (any(type(ident) is not str or ident not in visible for ident in presentation.starred)

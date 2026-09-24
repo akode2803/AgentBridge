@@ -2898,3 +2898,9 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
 .loading-status.loading-inline { position:static; margin-top:14px; justify-content:center; }
 .bubble .meta .receipt-slot { display:contents; }
 .bubble .meta .ticks.send-pending svg { width:11px; height:11px; }
+
+/* Bounded history navigation stays outside the keyed message rows. */
+.page-history-controls { display:flex; gap:8px; justify-content:center; flex-wrap:wrap;
+  flex-shrink:0; padding:4px 12px; }
+.page-history-controls:empty { display:none; }
+.page-history-controls button { font:inherit; font-size:12px; }

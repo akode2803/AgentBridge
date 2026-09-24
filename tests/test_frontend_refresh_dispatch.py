@@ -35,6 +35,7 @@ function fixture() {
   const next={available:true,user:'alice',chats:[{id:'room',preview:'new message'}]};
   const pane={hidden:true};
   const env={App,Mesh,window:{},BrowserSession:{snapshot:()=>({})},
+    meshCaps:()=>({chat_page_v1:false}),pageOwner:null,
     sidebarRead:createLatestRead(10), SIDEBAR_TIMEOUT_MS:100,
     isInitialSelectedViewPending:()=>false, captureSessionEpoch:()=>session,
     sessionMayApply:t=>t===session, meshStateSnapshot:()=>({lockEpoch}),

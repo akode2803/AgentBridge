@@ -44,6 +44,7 @@ class PageWindowAnchor:
     database_path: str
     incarnation: str
     namespace_epoch: str
+    inclusive: bool = False
 
     def matches_store(self, position: page_inputs.PageInputPosition) -> bool:
         messages = position.messages
@@ -166,7 +167,7 @@ class PageCursorRegistry:
 
     def issue_anchor(self, session: SessionReadToken, chat: str,
                      page_selection: PageSelection,
-                     before: page_inputs.MessageKey | None) -> str:
+                     before: page_inputs.MessageKey | None, *, inclusive: bool = False) -> str:
         """Bind a successful request's upper boundary, including the tail.
 
         Generation and overlay positions are deliberately not retained. This
@@ -176,12 +177,14 @@ class PageCursorRegistry:
         app, generation, mesh, viewer = _session_parts(session)
         overlay_index._chat(chat)
         self.version(session, chat, page_selection)  # Validate completed Store binding.
+        if type(inclusive) is not bool or (inclusive and before is None):
+            raise ValueError('inclusive anchor needs an examined raw key')
         key = None if before is None else page_inputs._key(before)
         if key is not None and len(key.sender.encode()) + len(key.id.encode()) > MAX_POSITION_BYTES:
             raise ValueError('anchor position exceeds byte budget')
         messages = page_selection.position.messages
         anchor = PageWindowAnchor(key, messages.database_path, messages.incarnation,
-                                  messages.namespace_epoch)
+                                  messages.namespace_epoch, inclusive)
         return self._issue(app, generation, mesh, viewer, chat, anchor)
 
     def _issue(self, app, generation, mesh, viewer, chat, continuation):
