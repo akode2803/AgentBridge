@@ -162,3 +162,76 @@ def test_cursor_rejects_page_from_another_store(tmp_path):
         registry.issue(foreign, 'room', page)
     with pytest.raises(ValueError, match='another database'):
         registry.version(foreign, 'room', page)
+
+
+def test_anchor_remembers_request_boundary_not_response_generation(tmp_path):
+    registry = PageCursorRegistry()
+    session = SessionReadToken('app', 1, ViewerMesh('alice', tmp_path))
+    page = selection(tmp_path, before=MessageKey(7, 'bob', 'b'))
+    upper = MessageKey(12, 'alice', 'upper')
+    token = registry.issue_anchor(session, 'room', page, upper)
+    anchor = registry.resolve_anchor(token, session, 'room')
+    assert len(token) == 64 and anchor.before == upper
+    assert anchor.before != page.oldest_examined
+    assert anchor.matches_store(page.position)
+    newer_messages = replace(page.position.messages, generation=77)
+    newer_overlay = replace(page.position.overlays, build='d' * 32)
+    assert anchor.matches_store(replace(page.position, messages=newer_messages,
+                                       overlays=newer_overlay))
+    assert not anchor.matches_store(replace(page.position, messages=replace(
+        newer_messages, incarnation='e' * 32)))
+    assert not anchor.matches_store(replace(page.position, messages=replace(
+        newer_messages, namespace_epoch='f' * 64)))
+    assert registry.resolve(token, session, 'room') is None  # Type separation.
+    cursor = registry.issue(session, 'room', page)
+    assert registry.resolve_anchor(cursor, session, 'room') is None
+    tail = registry.issue_anchor(session, 'room', page, None)
+    assert registry.resolve_anchor(tail, session, 'room').before is None
+    assert tail != token
+
+
+def test_anchor_tampering_chat_viewer_session_and_clear(tmp_path):
+    registry = PageCursorRegistry()
+    mesh = ViewerMesh('alice', tmp_path)
+    session = SessionReadToken('app', 4, mesh)
+    page = selection(tmp_path)
+    token = registry.issue_anchor(session, 'room', page, None)
+    for bad in (token[:-1], token[:-1] + ('0' if token[-1] != '0' else '1'),
+                token.upper(), token + '0', None):
+        assert registry.resolve_anchor(bad, session, 'room') is None
+    assert registry.resolve_anchor(token, session, 'foreign') is None
+    assert registry.resolve_anchor(token, SessionReadToken('other', 4, mesh), 'room') is None
+    assert registry.resolve_anchor(token, SessionReadToken('app', 5, mesh), 'room') is None
+    assert registry.resolve_anchor(token, SessionReadToken('app', 4,
+        ViewerMesh('alice', tmp_path)), 'room') is None
+    mesh.user = 'other'
+    assert registry.resolve_anchor(token, session, 'room') is None
+    mesh.user = 'alice'
+    assert registry.resolve_anchor(token, session, 'room') is not None
+    registry.clear()
+    assert registry.resolve_anchor(token, session, 'room') is None
+
+
+def test_anchor_rejects_foreign_store_and_incomplete_selection(tmp_path):
+    page = selection(tmp_path)
+    registry = PageCursorRegistry()
+    foreign = SessionReadToken('app', 1, ViewerMesh('alice', tmp_path / 'other'))
+    with pytest.raises(ValueError, match='another database'):
+        registry.issue_anchor(foreign, 'room', page, None)
+    session = SessionReadToken('app', 1, ViewerMesh('alice', tmp_path))
+    with pytest.raises(ValueError, match='invalid page selection'):
+        registry.issue_anchor(session, 'room', replace(page, needs_more_input=True), None)
+
+
+def test_anchor_shares_bounded_ttl_lru_registry(tmp_path):
+    now = [0.0]
+    registry = PageCursorRegistry(clock=lambda: now[0])
+    session = SessionReadToken('app', 1, ViewerMesh('alice', tmp_path))
+    page = selection(tmp_path)
+    first = registry.issue_anchor(session, 'room', page, None)
+    for _ in range(128):
+        registry.issue(session, 'room', page)
+    assert registry.resolve_anchor(first, session, 'room') is None
+    tail = registry.issue_anchor(session, 'room', page, None)
+    now[0] = 900.0
+    assert registry.resolve_anchor(tail, session, 'room') is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 import pytest
 
 from agentbridge.gui import api_chats, api_pages
@@ -13,6 +14,7 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.paths import P
+from agentbridge.store.page_inputs import MessageKey
 
 
 @pytest.fixture
@@ -91,11 +93,16 @@ def test_invalid_cross_chat_and_session_cursors_reset(page_app):
     first = _settled_page(app, chat, limit='1')
     assert first['status'] == 'page', first
     token = first['continuation']
+    anchor = first['window_anchor']
     assert _page(app, chat, cursor=token[:-1])['status'] == 'reset_required'
     assert _page(app, 'another', cursor=token)['status'] == 'reset_required'
+    assert _page(app, chat, anchor=anchor[:-1])['status'] == 'reset_required'
+    assert _page(app, 'another', anchor=anchor)['status'] == 'reset_required'
+    assert _page(app, chat, anchor=token)['status'] == 'reset_required'
     assert app.logout('secret')['ok']
     assert app.login('viewer', 'secret')['ok']
     assert _page(app, chat, cursor=token)['status'] == 'reset_required'
+    assert _page(app, chat, anchor=anchor)['status'] == 'reset_required'
 
 
 def test_foreground_has_no_full_history_or_preparation_writes(page_app, monkeypatch):
@@ -338,3 +345,88 @@ def test_multi_member_page_defers_receipts_without_complete_presence(page_app):
     assert page['metadata_status']['receipts'] == 'pending'
     shown = next(item for item in page['messages'] if item['id'] == own.id)
     assert 'receipt' not in shown
+
+
+def test_tail_window_anchor_recomputes_after_arrival_hide_and_clear(page_app, monkeypatch):
+    app, chat = page_app
+    old = app.mesh.post(chat, 'old')
+    newer = app.mesh.post(chat, 'newer')
+    _ready(app, chat)
+    first = _settled_page(app, chat, limit='1')
+    anchor = first['window_anchor']
+    assert len(anchor) == 64 and first['messages'][0]['id'] == newer.id
+    assert _page(app, chat, cursor=anchor)['status'] == 'reset_required'
+    assert _page(app, chat, cursor=first['continuation'], anchor=anchor)['reason'] == 'ambiguous_page_position'
+    app.mesh.post(chat, 'arrival')
+    app.mesh.outbox.flush_once()
+    app.mesh.local_inputs.ingest(chat)
+    app.mesh.local_inputs.prepare_one()
+    latest = _settled_page(app, chat, limit='1', anchor=anchor)
+    assert latest['status'] == 'page' and latest['messages'][0]['body'] == 'arrival'
+    assert latest['page_version'] != first['page_version']
+    app.mesh.hide(chat, [newer.id])
+    app.mesh.local_inputs.ingest(chat)
+    after_hide = _settled_page(app, chat, limit='5', anchor=anchor)
+    assert after_hide['status'] == 'page'
+    assert newer.id not in {m['id'] for m in after_hide['messages']}
+    app.mesh.clear_chat(chat)
+    app.mesh.local_inputs.ingest(chat)
+    after_clear = _settled_page(app, chat, limit='5', anchor=anchor)
+    assert after_clear['status'] == 'page'
+    assert {old.id, newer.id}.isdisjoint(m['id'] for m in after_clear['messages'])
+    original = app.page_cursors.resolve_anchor
+
+    def wrong_namespace(*args, **kwargs):
+        value = original(*args, **kwargs)
+        return replace(value, namespace_epoch='f' * 64)
+
+    monkeypatch.setattr(app.page_cursors, 'resolve_anchor', wrong_namespace)
+    assert _page(app, chat, anchor=anchor)['status'] == 'reset_required'
+
+
+def test_older_window_anchor_refreshes_position_after_generation_change(page_app, monkeypatch):
+    app, chat = page_app
+    old = app.mesh.post(chat, 'old')
+    middle = app.mesh.post(chat, 'middle')
+    latest = app.mesh.post(chat, 'latest')
+    _ready(app, chat)
+    first = _settled_page(app, chat, limit='1')
+    assert first['messages'][0]['id'] == latest.id
+    older = _settled_page(app, chat, limit='1', cursor=first['continuation'])
+    assert older['messages'][0]['id'] == middle.id
+    anchor = older['window_anchor']
+    app.mesh.post(chat, 'newer-than-original')
+    app.mesh.outbox.flush_once()
+    app.mesh.local_inputs.ingest(chat)
+    app.mesh.local_inputs.prepare_one()
+    with monkeypatch.context() as patch:
+        def forbidden(*_args, **_kwargs):
+            pytest.fail('anchor refresh used provider or full-history projection')
+        provider = app.mesh.tx._transport
+        patch.setattr(provider, 'get_doc', forbidden)
+        patch.setattr(provider, 'list_docs', forbidden)
+        patch.setattr(app.mesh, 'conversation_projection', forbidden)
+        refreshed = _settled_page(app, chat, limit='1', anchor=anchor)
+    assert refreshed['status'] == 'page', refreshed
+    assert [m['id'] for m in refreshed['messages']] == [middle.id]
+    app.mesh.hide(chat, [middle.id])
+    app.mesh.local_inputs.ingest(chat)
+    hidden = _settled_page(app, chat, limit='1', anchor=anchor)
+    assert hidden['status'] == 'page'
+    assert middle.id not in {m['id'] for m in hidden['messages']}
+    assert old.id in {m['id'] for m in hidden['messages']}
+
+
+def test_page_operation_window_before_is_separate_from_strict_continuation(page_app):
+    app, chat = page_app
+    _ready(app, chat)
+    key = MessageKey(10, 'viewer', 'upper')
+    reader = app.mesh.local_inputs.reader(chat)
+    operation = api_pages.PageOperation(app.mesh, chat, source_reader=reader,
+                                        window_before=key)
+    assert operation.before == key and operation.expected_position is None
+    with pytest.raises(ValueError, match='continuation requires'):
+        api_pages.PageOperation(app.mesh, chat, source_reader=reader, before=key)
+    with pytest.raises(ValueError):
+        api_pages.PageOperation(app.mesh, chat, source_reader=reader,
+                                before=key, window_before=key)

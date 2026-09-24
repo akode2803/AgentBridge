@@ -24,24 +24,31 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
   boundedPositive(maxBytes, "byte cap");
   let context = null;
   let active = null;
+  let refresh = null; // candidate window; visible pages change only at completion.
   let pages = []; // oldest first; dropping the newest page preserves the raw older seek.
   let pageVersion = null;
   let continuation = null;
   let hasMore = false;
 
-  function retained() {
-    return pages.flatMap(page => page.rows.map(row => JSON.parse(row.json)));
+  function retained(list = pages) {
+    return list.flatMap(page => page.rows.map(row => JSON.parse(row.json)));
   }
 
-  function heldIds() {
-    return pages.flatMap(page => page.rows.map(row => row.id));
+  function heldIds(list = pages) {
+    return list.flatMap(page => page.rows.map(row => row.id));
   }
 
-  function footprint() {
+  function footprint(list = pages) {
     return {
-      messages: pages.reduce((count, page) => count + page.rows.length, 0),
-      bytes: pages.reduce((bytes, page) => bytes + page.bytes, 0),
+      messages: list.reduce((count, page) => count + page.rows.length, 0),
+      bytes: list.reduce((bytes, page) => bytes + page.bytes, 0),
     };
+  }
+
+  function currentRefreshPlan() {
+    if (!pages.length) return null;
+    return Object.freeze({windowAnchor: pages[pages.length - 1].anchor,
+                          requestedMessages: footprint().messages});
   }
 
   function result(status, evictedIds = [], extra = {}) {
@@ -59,7 +66,7 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
     pages = [];
     pageVersion = continuation = null;
     hasMore = false;
-    active = null;
+    active = refresh = null;
     return result(status, evictedIds, {reason});
   }
 
@@ -96,17 +103,35 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
     invalidate(reason = "unavailable") {
       return clear("invalidated", reason);
     },
+    refreshPlan() {
+      return currentRefreshPlan();
+    },
     begin(kind) {
-      if (kind !== "first" && kind !== "older") throw new RangeError("invalid page kind");
-      if (!context || active || (kind === "older" && (!pageVersion || !hasMore || !continuation))) {
+      if (kind !== "first" && kind !== "older" && kind !== "refresh") {
+        throw new RangeError("invalid page kind");
+      }
+      if (!context || active || (refresh && kind !== "refresh")
+          || (kind === "older" && (!pageVersion || !hasMore || !continuation))
+          || (kind === "refresh" && !refresh && !pages.length)) {
         return null;
       }
+      if (kind === "refresh" && !refresh) {
+        const plan = currentRefreshPlan();
+        refresh = {anchor: plan.windowAnchor, target: plan.requestedMessages,
+                   pages: [], firstAnchor: null, version: null,
+                   count: 0, bytes: 0, requests: 0, continuation: null};
+      }
+      if (kind === "refresh") refresh.requests += 1;
       // Ticket object identity is the in-flight fence; there is no counter to
       // overflow after a long-lived browser session.
       const ticket = Object.freeze({
         kind, key: context.key, chatId: context.chatId,
         routeEpoch: context.routeEpoch, pageVersion,
-        continuation: kind === "older" ? continuation : null,
+        continuation: kind === "older" ? continuation
+          : kind === "refresh" && refresh.requests > 1 ? refresh.continuation : null,
+        windowAnchor: kind === "refresh" && refresh.requests === 1 ? refresh.anchor : null,
+        requestedMessages: kind === "refresh" ? refresh.target : null,
+        limit: kind === "refresh" ? Math.min(200, Math.max(1, refresh.target - refresh.count)) : null,
       });
       active = ticket;
       return ticket;
@@ -127,6 +152,8 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
       if (response.status !== "page" || response.chat_id !== context.chatId
           || typeof response.page_version !== "string" || !response.page_version
           || response.page_version.length > 512
+          || typeof response.window_anchor !== "string" || !response.window_anchor
+          || response.window_anchor.length > 512
           || typeof response.has_more !== "boolean"
           || typeof response.history_exhausted !== "boolean"
           || response.history_exhausted === response.has_more
@@ -146,6 +173,48 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
       if (ticket.kind === "older" && response.continuation === ticket.continuation) {
         return clear("reset_required", "continuation_stalled");
       }
+      if (ticket.kind === "refresh") {
+        if (!refresh || (refresh.version !== null && refresh.version !== version)) {
+          return clear("reset_required", "page_version");
+        }
+        if (ticket.continuation && response.continuation === ticket.continuation) {
+          return clear("reset_required", "continuation_stalled");
+        }
+        const rows = encodeRows(response.messages, heldIds(refresh.pages));
+        if (rows === null) return clear("invalidated", "page_budget");
+        const size = rows.reduce((bytes, row) => bytes + row.bytes, 2);
+        if (refresh.requests === 1) refresh.firstAnchor = response.window_anchor;
+        if (rows.length) refresh.pages.unshift({rows, bytes: size, anchor: response.window_anchor});
+        refresh.version = version;
+        refresh.count += rows.length;
+        refresh.bytes += rows.length ? size : 0;
+        refresh.continuation = response.continuation;
+        if (refresh.pages.length > maxPages || refresh.count > maxMessages
+            || refresh.bytes > maxBytes) return clear("invalidated", "refresh_budget");
+        if (refresh.count >= refresh.target || !response.has_more) {
+          const prior = heldIds();
+          pages = refresh.pages.length ? refresh.pages : [
+            {rows: [], bytes: 2, anchor: refresh.firstAnchor},
+          ];
+          // Empty visible raw windows before the first retained row still
+          // belong to this replacement's upper boundary on the next refresh.
+          pages[pages.length - 1].anchor = refresh.firstAnchor;
+          pageVersion = refresh.version;
+          continuation = response.continuation;
+          hasMore = response.has_more;
+          refresh = null;
+          const kept = new Set(heldIds());
+          return result("page", prior.filter(id => !kept.has(id)), {
+            historyExhausted: response.history_exhausted,
+            scanBudgetExhausted: response.scan_budget_exhausted,
+          });
+        }
+        if (refresh.requests >= Math.min(6, maxPages)) {
+          return clear("unavailable", "refresh_request_budget");
+        }
+        return {status: "refreshing", messages: [], evictedIds: [],
+                requestedMessages: refresh.target, stagedMessages: refresh.count};
+      }
       // A first-page refresh always replaces older windows: identical raw
       // positions do not freeze keys, membership, overlays or presentation.
       const priorIds = heldIds();
@@ -155,7 +224,9 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
       if (size > maxBytes) return clear("invalidated", "page_budget");
       const removed = ticket.kind === "first" ? priorIds.slice() : [];
       if (ticket.kind === "first") pages = [];
-      if (ticket.kind === "first" || rows.length) pages.unshift({rows, bytes: size});
+      if (ticket.kind === "first" || rows.length) {
+        pages.unshift({rows, bytes: size, anchor: response.window_anchor});
+      }
       while (pages.length > maxPages || footprint().messages > maxMessages
              || footprint().bytes > maxBytes) {
         removed.push(...pages.pop().rows.map(row => row.id));

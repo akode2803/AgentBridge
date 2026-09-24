@@ -7,7 +7,7 @@ import pytest
 
 from agentbridge.mesh import presence_input_runtime as module
 from agentbridge.mesh.local_presence_source import LocalPresenceSource
-from agentbridge.store import local_source, source_selectors
+from agentbridge.store import local_source, source_selectors, staged_source
 from agentbridge.store.db import Store
 from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import owned_transport
@@ -113,13 +113,16 @@ def test_failed_partial_scan_remains_unready_and_retries_with_backoff(rig, monke
     runtime, _owned, folder, _store, ticks = rig
     runtime.request()
     assert runtime.run_due()
-    prior = runtime.reader.capture().source.raw
+    prior_receipt = runtime.reader.capture()
+    prior = prior_receipt.source.raw
     folder.put_doc('presence/third.json', {'user': 'alice', 'last_seen_ns': 99})
     original = module.collect_document_batches
 
     def partial(transport, definition, *, consume, **kwargs):
         def sink(batch):
             consume(batch)
+            assert runtime.inputs(('bob',))[1].source.raw == prior
+            assert runtime.inputs(('bob',))[2].floors == (('bob', 31),)
             raise RawCollectionUnavailable('incomplete_scan')
         return original(transport, definition, consume=sink, batch_documents=1, **kwargs)
 
@@ -136,6 +139,42 @@ def test_failed_partial_scan_remains_unready_and_retries_with_backoff(rig, monke
     ticks[0] += 4.0
     assert runtime.run_due()
     assert runtime.inputs(('alice',))[2].floors == (('alice', 99),)
+
+
+def test_crash_during_candidate_keeps_admitted_presence_after_reopen(rig, tmp_path, monkeypatch):
+    runtime, _owned, folder, store, _ticks = rig
+    assert runtime.ingest().ready
+    old = runtime.inputs(('bob',))[1]
+    original_collect = module.collect_document_batches
+    original_abort, original_cleanup = staged_source.abort, staged_source.cleanup
+
+    def interrupt(transport, definition, *, consume, **kwargs):
+        def sink(batch):
+            consume(batch)
+            assert runtime.inputs(('bob',))[1].source.raw == old.source.raw
+            raise KeyboardInterrupt('presence candidate crashed')
+        return original_collect(transport, definition, consume=sink,
+                                batch_documents=1, **kwargs)
+
+    monkeypatch.setattr(module, 'collect_document_batches', interrupt)
+    monkeypatch.setattr(staged_source, 'abort', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(staged_source, 'cleanup', lambda *_args, **_kwargs: None)
+    with pytest.raises(KeyboardInterrupt, match='presence candidate crashed'):
+        runtime.ingest()
+    assert runtime.inputs(('bob',))[1].source.raw == old.source.raw
+    monkeypatch.setattr(module, 'collect_document_batches', original_collect)
+    monkeypatch.setattr(staged_source, 'abort', original_abort)
+    monkeypatch.setattr(staged_source, 'cleanup', original_cleanup)
+    reopened_store = Store(store.path)
+    reopened_owned = owned_transport(FolderTransport(folder.root), tmp_path / 'owner')
+    reopened = module.PresenceInputRuntime(reopened_owned, reopened_store)
+    try:
+        assert reopened.inputs(('bob',))[2].floors == (('bob', 31),)
+        assert reopened.ingest().ready
+    finally:
+        reopened.stop()
+        reopened_store.close()
+        reopened_owned.close()
 
 
 def test_new_local_mutation_cannot_cross_staged_admission(rig, monkeypatch):

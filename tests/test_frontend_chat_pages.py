@@ -28,6 +28,7 @@ const binding = (generation = '1', viewer = 'alice') => ({
 const page = (ids, version = 'v1', continuation = 'raw-older', extra = {}) => ({
   status: 'page', chat_id: 'room', session_binding: binding(), page_version: version,
   messages: ids.map(id => ({id, body: id})), continuation,
+  window_anchor: `anchor-${continuation ?? 'tail'}`,
   has_more: continuation !== null, history_exhausted: continuation === null,
   scan_budget_exhausted: false, ...extra,
 });
@@ -61,12 +62,35 @@ assert.equal(rendered.continuation, 'raw-oldest'); // raw cursor, never visible 
 rendered.messages[0].body = 'tampered';
 assert.equal(state.snapshot().messages[0].body, 'm0');
 
+// The newest retained page was once an older page. Refresh from its original
+// raw request anchor, not the tail, staging every replacement off-DOM.
+assert.deepEqual(state.refreshPlan(), {
+  windowAnchor:'anchor-raw-earlier', requestedMessages:4,
+});
+let refreshing = state.begin('refresh');
+assert.equal(refreshing.windowAnchor, 'anchor-raw-earlier');
+assert.equal(refreshing.requestedMessages, 4);
+assert.equal(refreshing.limit, 4);
+assert.equal(state.begin('first'), null);
+let progress = state.accept(refreshing, page(['m2', 'm3'], 'v1', 'ref-next'));
+assert.equal(progress.status, 'refreshing');
+assert.deepEqual(ids(state.snapshot()), ['m0', 'm1', 'm2', 'm3']);
+refreshing = state.begin('refresh');
+assert.equal(refreshing.windowAnchor, null);
+assert.equal(refreshing.continuation, 'ref-next');
+assert.equal(refreshing.limit, 2);
+rendered = state.accept(refreshing, page(['m0', 'm1-new'], 'v1', 'ref-oldest'));
+assert.equal(rendered.status, 'page');
+assert.deepEqual(ids(rendered), ['m0', 'm1-new', 'm2', 'm3']);
+assert.deepEqual(rendered.evictedIds, ['m1']);
+assert.equal(state.refreshPlan().windowAnchor, 'anchor-ref-next');
+
 // Even the same version cannot authorize keeping old visible windows after a
 // first-page refresh: overlays, keys and membership can change independently.
 const refreshed = state.begin('first');
 rendered = state.accept(refreshed, page(['m2', 'm6'], 'v1', 'newest-raw'));
 assert.deepEqual(ids(rendered), ['m2', 'm6']);
-assert.deepEqual(rendered.evictedIds, ['m0', 'm1', 'm3']); // m2 remains visible
+assert.deepEqual(rendered.evictedIds, ['m0', 'm1-new', 'm3']); // m2 remains visible
 assert.equal(rendered.pageCount, 1);
 
 older = state.begin('older');
@@ -187,6 +211,104 @@ for (let n = 0; n < 100; n++) {
   assert.ok(rendered.pageCount <= 2 && rendered.messageCount <= 3 && rendered.bytes <= 160);
 }
 assert.deepEqual(ids(detached.snapshot()), ['old-99', 'old-98']);
+
+const refreshState = createChatPages({maxPages:2, maxMessages:4, maxBytes:1000});
+refreshState.reset(binding(), 'room', 1);
+ticket = refreshState.begin('first');
+refreshState.accept(ticket, page(['new-1', 'new-2'], 'v1', 'raw-2'));
+ticket = refreshState.begin('older');
+refreshState.accept(ticket, page(['old-1'], 'v1', 'raw-1'));
+refreshing = refreshState.begin('refresh');
+progress = refreshState.accept(refreshing, page(['new-v2'], 'v2', 'next'));
+assert.equal(progress.status, 'refreshing');
+assert.deepEqual(ids(refreshState.snapshot()), ['old-1', 'new-1', 'new-2']);
+refreshing = refreshState.begin('refresh');
+assert.equal(refreshing.pageVersion, 'v1'); // previous display version is not authority
+rendered = refreshState.accept(refreshing, page(['old-v2', 'mid-v2'], 'v2', null));
+assert.equal(rendered.status, 'page');
+assert.deepEqual(ids(rendered), ['old-v2', 'mid-v2', 'new-v2']);
+assert.equal(rendered.pageVersion, 'v2');
+assert.deepEqual(rendered.evictedIds, ['old-1', 'new-1', 'new-2']);
+assert.equal(refreshState.refreshPlan().windowAnchor, 'anchor-next');
+
+refreshing = refreshState.begin('refresh');
+progress = refreshState.accept(refreshing, page([], 'v3', 'empty-1', {scan_budget_exhausted:true}));
+assert.equal(progress.status, 'refreshing');
+refreshing = refreshState.begin('refresh');
+rendered = refreshState.accept(refreshing, page([], 'v3', 'empty-2', {scan_budget_exhausted:true}));
+assert.equal(rendered.status, 'unavailable');
+assert.equal(rendered.reason, 'refresh_request_budget');
+assert.equal(refreshState.refreshPlan(), null);
+assert.deepEqual(ids(refreshState.snapshot()), []);
+
+const emptyFirst = createChatPages({maxPages:2, maxMessages:4, maxBytes:1000});
+emptyFirst.reset(binding(), 'room', 1);
+ticket = emptyFirst.begin('first');
+emptyFirst.accept(ticket, page(['a', 'b'], 'v1', 'older'));
+const {begin: beginDetached} = emptyFirst;
+refreshing = beginDetached('refresh'); // no method receiver required
+progress = emptyFirst.accept(refreshing, page([], 'v2', 'empty-raw',
+  {scan_budget_exhausted:true, window_anchor:'first-boundary'}));
+assert.equal(progress.status, 'refreshing');
+refreshing = emptyFirst.begin('refresh');
+rendered = emptyFirst.accept(refreshing, page(['a2', 'b2'], 'v2', null,
+  {window_anchor:'second-boundary'}));
+assert.equal(rendered.status, 'page');
+assert.deepEqual(ids(rendered), ['a2', 'b2']);
+assert.equal(emptyFirst.refreshPlan().windowAnchor, 'first-boundary');
+
+const emptyRetained = createChatPages({maxPages:2, maxMessages:4, maxBytes:1000});
+emptyRetained.reset(binding(), 'room', 1);
+ticket = emptyRetained.begin('first');
+emptyRetained.accept(ticket, page([], 'v1', 'raw-empty', {scan_budget_exhausted:true}));
+assert.equal(emptyRetained.refreshPlan().requestedMessages, 0);
+refreshing = emptyRetained.begin('refresh');
+assert.equal(refreshing.limit, 1);
+rendered = emptyRetained.accept(refreshing, page([], 'v2', 'raw-next', {scan_budget_exhausted:true}));
+assert.equal(rendered.status, 'page');
+assert.equal(rendered.pageCount, 1);
+assert.equal(emptyRetained.refreshPlan().windowAnchor, 'anchor-raw-next');
+
+const refreshCap = createChatPages({maxPages:2, maxMessages:2, maxBytes:100});
+refreshCap.reset(binding(), 'room', 1);
+ticket = refreshCap.begin('first');
+refreshCap.accept(ticket, page(['small'], 'v1'));
+refreshing = refreshCap.begin('refresh');
+rendered = refreshCap.accept(refreshing, page(['small'], 'v2', 'next', {
+  messages:[{id:'small', body:'x'.repeat(1000)}],
+}));
+assert.equal(rendered.status, 'invalidated');
+assert.deepEqual(rendered.evictedIds, ['small']);
+assert.equal(refreshCap.refreshPlan(), null);
+
+ticket = refreshState.begin('first');
+refreshState.accept(ticket, page(['retained'], 'v3'));
+refreshing = refreshState.begin('refresh');
+progress = refreshState.accept(refreshing, page([], 'v4', 'next', {scan_budget_exhausted:true}));
+assert.equal(progress.status, 'refreshing');
+refreshing = refreshState.begin('refresh');
+rendered = refreshState.accept(refreshing, page(['changed'], 'v5', null));
+assert.equal(rendered.status, 'reset_required');
+assert.deepEqual(rendered.evictedIds, ['retained']);
+
+ticket = refreshState.begin('first');
+refreshState.accept(ticket, page(['before-pending'], 'v6'));
+refreshing = refreshState.begin('refresh');
+progress = refreshState.accept(refreshing, page([], 'v7', 'pending-cursor',
+  {scan_budget_exhausted:true}));
+assert.equal(progress.status, 'refreshing');
+assert.deepEqual(ids(refreshState.snapshot()), ['before-pending']);
+refreshing = refreshState.begin('refresh');
+rendered = refreshState.accept(refreshing, {status:'pending', session_binding:binding()});
+assert.equal(rendered.status, 'pending');
+assert.deepEqual(rendered.evictedIds, ['before-pending']);
+
+ticket = refreshState.begin('first');
+refreshState.accept(ticket, page(['before-route'], 'v6'));
+refreshing = refreshState.begin('refresh');
+refreshState.reset(binding('2'), 'room', 2);
+assert.equal(refreshState.accept(refreshing, page(['late'], 'v7')).status, 'stale');
+assert.equal(refreshState.refreshPlan(), null);
 ''', encoding='utf-8')
     run = subprocess.run(['node', str(script)], capture_output=True, text=True, check=False)
     assert run.returncode == 0, run.stdout + run.stderr

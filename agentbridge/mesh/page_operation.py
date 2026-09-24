@@ -231,7 +231,7 @@ class PageOperation:
     Source/index/proof preparation and read-through are explicit caller work,
     never performed here. Each prepare invalidates any earlier finalizer.
     """
-    def __init__(self, mesh, chat_id, *, before=None, expected_position=None,
+    def __init__(self, mesh, chat_id, *, before=None, expected_position=None, window_before=None,
                  limit=50, scan_budget=1000, limits=PageOperationLimits(), source_reader=None):
         authority_observation._part(chat_id)
         self.mesh, self.chat = mesh, chat_id
@@ -246,6 +246,12 @@ class PageOperation:
         self.before = None if before is None else raw_pages._key(before)
         if (before is None) != (expected_position is None):
             raise ValueError('continuation requires its original page position')
+        if window_before is not None:
+            if before is not None or expected_position is not None:
+                raise ValueError('window positioning cannot be a continuation')
+            # Position only. Every prepare still captures current inputs and
+            # recomputes membership, trust, keys and canonical visibility.
+            self.before = raw_pages._key(window_before)
         self.expected_position = None
         if expected_position is not None:
             if type(expected_position) is not raw_pages.PageInputPosition:

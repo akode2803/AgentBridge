@@ -60,7 +60,7 @@ class PresenceInputRuntime:
         captured = publisher.capture()
         try:
             with self.coordinator.publication_gate(self.store, reader.definition):
-                expected = local_source.retire_for_publication(self.store, captured.source)
+                expected = local_source.claim_collection(self.store, captured.source)
             stage = staged_source.begin_raw(self.store, reader.definition.source, expected=expected)
 
             def append(batch):

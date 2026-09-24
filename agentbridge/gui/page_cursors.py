@@ -37,13 +37,29 @@ class PageContinuation:
 
 
 @dataclass(frozen=True)
+class PageWindowAnchor:
+    """Position only: refresh this window against new canonical raw inputs."""
+
+    before: page_inputs.MessageKey | None
+    database_path: str
+    incarnation: str
+    namespace_epoch: str
+
+    def matches_store(self, position: page_inputs.PageInputPosition) -> bool:
+        messages = position.messages
+        return (messages.database_path == self.database_path
+                and messages.incarnation == self.incarnation
+                and messages.namespace_epoch == self.namespace_epoch)
+
+
+@dataclass(frozen=True)
 class _Entry:
     app_identity: str
     generation: int
     mesh: object
     viewer: str
     chat: str
-    continuation: PageContinuation
+    continuation: PageContinuation | PageWindowAnchor
     expires_at: float
 
 
@@ -146,6 +162,29 @@ class PageCursorRegistry:
         continuation = _continuation(chat, page_selection)
         if continuation.position.messages.database_path != str(mesh.store.path):
             raise ValueError('cursor belongs to another store')
+        return self._issue(app, generation, mesh, viewer, chat, continuation)
+
+    def issue_anchor(self, session: SessionReadToken, chat: str,
+                     page_selection: PageSelection,
+                     before: page_inputs.MessageKey | None) -> str:
+        """Bind a successful request's upper boundary, including the tail.
+
+        Generation and overlay positions are deliberately not retained. This
+        handle cannot bypass fresh membership or canonical selection. A Store
+        replacement/namespace reset does invalidate the positioning reference.
+        """
+        app, generation, mesh, viewer = _session_parts(session)
+        overlay_index._chat(chat)
+        self.version(session, chat, page_selection)  # Validate completed Store binding.
+        key = None if before is None else page_inputs._key(before)
+        if key is not None and len(key.sender.encode()) + len(key.id.encode()) > MAX_POSITION_BYTES:
+            raise ValueError('anchor position exceeds byte budget')
+        messages = page_selection.position.messages
+        anchor = PageWindowAnchor(key, messages.database_path, messages.incarnation,
+                                  messages.namespace_epoch)
+        return self._issue(app, generation, mesh, viewer, chat, anchor)
+
+    def _issue(self, app, generation, mesh, viewer, chat, continuation):
         with self._lock:
             now = self._clock()
             self._expire(now)
@@ -160,6 +199,15 @@ class PageCursorRegistry:
 
     def resolve(self, token: str, session: SessionReadToken,
                 chat: str) -> PageContinuation | None:
+        value = self._resolve(token, session, chat)
+        return value if type(value) is PageContinuation else None
+
+    def resolve_anchor(self, token: str, session: SessionReadToken,
+                       chat: str) -> PageWindowAnchor | None:
+        value = self._resolve(token, session, chat)
+        return value if type(value) is PageWindowAnchor else None
+
+    def _resolve(self, token, session, chat):
         if type(token) is not str or _TOKEN.fullmatch(token) is None:
             return None
         try:

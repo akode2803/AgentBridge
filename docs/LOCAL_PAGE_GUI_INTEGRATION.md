@@ -72,15 +72,21 @@ presence seals and builds its own indexed floor before atomic pointer/readiness
 admission. The original chat staging constraints are described in
 [Local raw-input staging](LOCAL_INPUT_STAGING.md).
 
-The current runtime still **durably retires readiness before collection and the
-first staged write**. Partial collection, failure or crash before admission leaves
-that source pending; local mutations retire matching sources before external writes
-and ambiguous intents remain pending. A last successfully admitted snapshot is the
-accepted product model for external observations, but changing this specific
-scan-time retirement/crash boundary is a separate decision. Large repeated scans can
-therefore make selected-page inputs unavailable during staging even when content is
-unchanged. Neither a source timestamp nor this route proves remote atomic
-completeness.
+The runtime keeps the **last admitted snapshot readable during background
+collection**, then replaces pointer and readiness atomically after an exact owner
+CAS. Local mutations still retire matching sources before external writes, and
+ambiguous intents remain pending. Handled failures attempt a durable retirement
+and health update against the captured owner. A crash or disk failure before that
+failure transaction commits can leave the older admitted snapshot readable, as
+explicitly accepted by the user. Neither a source timestamp nor this route proves
+remote atomic completeness.
+
+Successful page responses also carry a session/chat-bound opaque `window_anchor`.
+Requests may use `anchor` to reposition a fresh canonical read at the original
+upper raw boundary even after message or overlay changes. Anchors retain no body
+or authority verdict, reject Store namespace replacement and cannot be used as
+generation-bound `cursor` continuations. Every refresh repeats current canonical
+checks; callers must replace retained visible rows with the refreshed results.
 
 ## R230 validation checkpoint
 
@@ -100,3 +106,16 @@ full projection were forbidden during page requests. Source/index preparation
 was outside timing, and concurrent tests make wall-time measurements noisy.
 This demonstrates bounded warm backend work for that fixture, not encrypted
 proof-preparation cost, cold ingestion cost, cross-platform latency or browser paint.
+
+The subsequent readiness-preserving refresh, orphan recovery and window-anchor
+integration passed a combined 167-test gate (53.07 seconds), with repository Ruff
+and all 30 frontend modules passing. Independent review found and resolved a
+post-admission cleanup path that could retire the new winner; a regression covers
+it. Fault tests also cover rollback after pointer/readiness replacement, crashes
+across reopen, stale builders and failed local external writes.
+
+With 20,031 overlay documents, four instrumented refreshes took 1.46–1.69 seconds
+while all 254 sampled selected-input reads succeeded. Previously those scans left
+the source pending for 1.3–1.4 seconds. A separate new run saw two isolated
+position-change retries; this is sampled availability evidence, not a zero-gap,
+cross-platform, browser or remote-staleness guarantee.

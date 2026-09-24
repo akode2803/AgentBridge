@@ -32,16 +32,24 @@ def chat_page(app, req, mesh, token):
         return _pending(token, 'local_paging_disabled', status='unavailable')
     limit = req.int_param('limit', 50, 1, 200)
     cursor = req.params.get('cursor')
+    anchor_token = req.params.get('anchor')
+    if cursor is not None and anchor_token is not None:
+        return _pending(token, 'ambiguous_page_position', status='reset_required')
     continuation = None
+    anchor = None
     if cursor is not None:
         continuation = app.page_cursors.resolve(cursor, token, chat)
         if continuation is None:
             return _pending(token, 'continuation_expired', status='reset_required')
+    if anchor_token is not None:
+        anchor = app.page_cursors.resolve_anchor(anchor_token, token, chat)
+        if anchor is None:
+            return _pending(token, 'window_anchor_expired', status='reset_required')
     # Routing hints contain no membership verdict. Selection is still checked
     # through canonical raw inputs and the final session/Store cut below.
     runtime.request(chat, selected=True)
     runtime.request_page(chat)
-    before = continuation.before if continuation else None
+    before = continuation.before if continuation else anchor.before if anchor else None
     expected = continuation.position if continuation else None
     operation = None
     for _ in range(4):
@@ -56,7 +64,9 @@ def chat_page(app, req, mesh, token):
             return result
         if operation is None:
             operation = PageOperation(mesh, chat, source_reader=reader,
-                                      before=before, expected_position=expected, limit=limit)
+                                      before=continuation.before if continuation else None,
+                                      window_before=anchor.before if anchor else None,
+                                      expected_position=expected, limit=limit)
         work = operation.prepare(receipt, receipt, index)
         if work.status == 'restart':
             continue
@@ -80,6 +90,8 @@ def chat_page(app, req, mesh, token):
         selected, presentation = final.result.page, final.result.presentation
         if selected is None or presentation is None:
             return _pending(token, 'presentation_unavailable', status='unavailable')
+        if anchor is not None and not anchor.matches_store(selected.position):
+            return _pending(token, 'window_store_changed', status='reset_required')
         meta = chat_json(ChatSnapshot.from_dict(json.loads(presentation.snapshot_json)), full=True)
         viewer = json.loads(presentation.viewer_state_json)
         meta['archived'] = viewer.get('archived', False)
@@ -95,6 +107,7 @@ def chat_page(app, req, mesh, token):
             'has_more': selected.has_more, 'history_exhausted': selected.history_exhausted,
             'scan_budget_exhausted': selected.scan_budget_exhausted,
             'continuation': app.page_cursors.issue(token, chat, selected),
+            'window_anchor': app.page_cursors.issue_anchor(token, chat, selected, before),
             'session_binding': session_read_binding(token),
             'metadata_status': {'receipts': 'deferred', 'pins': 'deferred',
                                 'origin': 'deferred', 'profiles': 'deferred',

@@ -31,8 +31,14 @@ an intent. Recovery must first establish writer quiescence and reconcile actual
 external state; a still-running writer must never be released by a stale recovery
 process. Integration must cover all affected source domains, not only one chat.
 
-Raw publication and admission use separate SQLite commits. A raw generation that
-was published but not admitted is unavailable. The final read must capture and
+Raw staging and admission use separate SQLite commits. A staged generation that
+was sealed but not admitted is unavailable. The final pointer/readiness swap is
+atomic; the last admitted snapshot stays readable while background collection
+builds its replacement. Local mutation invalidation remains durable and immediate.
+Handled refresh failures attempt to retire the captured owner, but a crash or
+disk failure preventing that failure-record commit can leave the older admitted
+snapshot readable. This is the explicitly accepted availability tradeoff.
+The final read must capture and
 compare both positions alongside local messages, overlays, proofs, pins, epoch
 inputs and the GUI session. Directly reading document_observation rows bypasses
 this owner and is not a paging admission path.
@@ -72,9 +78,9 @@ The opt-in endpoint, bounded pins/receipts, raw presence companion and opaque
 continuations are implemented as an additive path. The live browser route still
 uses its existing transcript renderer. Activation requires upward paging,
 scroll anchoring, bounded DOM/resource retention and route/session behavior,
-followed by deterministic, browser and provider-equivalence validation. It also
-requires an explicit decision about the current retire-before-collection
-availability gap. Ambiguous-write recovery remains separate and must not infer
+followed by deterministic, browser and provider-equivalence validation.
+The background last-admitted availability contract is approved. Ambiguous-write
+recovery remains separate and must not infer
 quiescence from elapsed time. No foreground full-fold fallback is permitted.
 
 ## Explicit future architecture
@@ -140,12 +146,14 @@ URLs. A folder uses its resolved normalized configured path; callers must use on
 canonical spelling on case-insensitive POSIX volumes until a filesystem-identity
 binding is added. Unknown drivers need an explicit identity contract.
 
-`store.source_publication.SourcePublisher` registers and captures the source
+The legacy whole-batch `store.source_publication.SourcePublisher` registers and captures the source
 before collection, retires its exact original revision under the root gate,
 performs raw encoding/publication outside that gate, then admits under a new gate.
 A mutation crossing collection/publication/admission rejects the scan. A failed
 payload or raw commit leaves readiness retired. Declared scope restricts admitted
 document paths; the collector is responsible for completeness, not the DTO.
+The staged runtime uses only its capture step, then atomically admits an invisible
+candidate as described in [Local raw-input staging](LOCAL_INPUT_STAGING.md).
 
 The opt-in `transport.raw_documents` collector distinguishes exact absence from
 malformed/unreadable folder input, bounds traversal and reads before JSON parsing,

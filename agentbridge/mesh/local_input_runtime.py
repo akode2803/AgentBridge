@@ -149,10 +149,12 @@ class LocalInputRuntime:
             stage = None
             try:
                 captured = publisher.capture()
-                # Retire before the first fallible staging write. A crash or
-                # partial enumeration must not leave the previous ready source.
+                # Build an invisible candidate while the latest admitted raw
+                # snapshot remains readable. The final transaction CAS checks
+                # this exact owner position; local writes still retire it
+                # durably before attempting any external mutation.
                 with self.coordinator.publication_gate(self.store, reader.definition):
-                    expected = local_source.retire_for_publication(self.store, captured.source)
+                    expected = local_source.claim_collection(self.store, captured.source)
                 stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
                 exact = {s.value for s in reader.definition.selectors if s.kind == 'doc_exact'}
                 prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
@@ -173,8 +175,7 @@ class LocalInputRuntime:
                 reuse = None
                 comparison = staged_publication.identical(self.store, expected, stage)
                 if comparison:
-                    # Read existing build evidence even though owner readiness
-                    # is deliberately retired during this publication attempt.
+                    # Retain unchanged raw/index identity after full comparison.
                     conn = document_observation._open_reader(self.store.path)
                     try:
                         conn.execute('BEGIN')
@@ -189,7 +190,8 @@ class LocalInputRuntime:
                 with self.coordinator.publication_gate(self.store, reader.definition):
                     published, index = staged_publication.admit(self.store, expected, stage,
                         observed_ns=time.time_ns(), reuse=reuse, comparison=comparison)
-                expected = published
+                # Keep failure handling bound to the pre-admission claim.
+                # Post-commit cleanup cannot retire the newly admitted winner.
                 if captured.source.raw.source_id != published.raw.source_id:
                     staged_source.retire_generation(self.store, captured.source.raw.source_id)
                 receipt = reader.capture()
