@@ -15,6 +15,8 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.paths import P
+from agentbridge.mesh import page_operation
+from agentbridge.store import local_source
 from agentbridge.store.page_inputs import MessageKey
 
 
@@ -313,6 +315,52 @@ def test_late_mark_read_cannot_hand_out_page_from_prior_source_cut(page_app, mon
     app.mesh.local_inputs.ingest(chat)
     app.mesh.local_inputs.prepare_one()  # Changed source terminal cut.
     assert _settled_page(app, chat)['status'] == 'page'
+
+
+@pytest.mark.parametrize('phase', ['prepare', 'final'])
+def test_read_cursor_retirement_retries_from_fresh_page_cut(page_app, monkeypatch, phase):
+    app, chat = page_app
+    app.mesh.post(chat, 'visible before read-marker race')
+    runtime = _ready(app, chat)
+    assert _settled_page(app, chat)['status'] == 'page'
+    changed = [False]
+    if phase == 'prepare':
+        original_inputs = runtime.inputs
+        def changed_after_capture(selected):
+            captured = original_inputs(selected)
+            if not changed[0]:
+                changed[0] = True
+                app.mesh.mark_read(chat)
+            return captured
+        monkeypatch.setattr(runtime, 'inputs', changed_after_capture)
+    else:
+        original_final = app.finalize_page_read
+        def changed_before_final(token, prepared):
+            if not changed[0]:
+                changed[0] = True
+                app.mesh.mark_read(chat)
+            return original_final(token, prepared)
+        monkeypatch.setattr(app, 'finalize_page_read', changed_before_final)
+    result = _page(app, chat)
+    assert changed[0]
+    assert result['status'] == 'pending', result
+    assert result['reason'] in ('local_inputs_pending', 'page_progress')
+    assert 'messages' not in result
+    runtime.ingest(chat)
+    assert runtime.prepare_one()
+    assert _settled_page(app, chat)['status'] == 'page'
+
+
+def test_source_race_mapping_excludes_schema_binding_and_unknown_failures():
+    for reason in ('local_inputs_changed', 'source_not_ready',
+                   'source_mutation_pending', 'source_changed_during_finalization'):
+        result = page_operation._failure(local_source.SourceChanged(reason))
+        assert (result.status, result.reason) == ('restart', 'local_inputs_changed')
+    for reason in ('local_source_schema_changed', 'invalid_generation_mapping',
+                   'local_receipt_binding_changed', 'unexpected'):
+        result = page_operation._failure(local_source.SourceChanged(reason))
+        assert (result.status, result.reason) == ('unavailable', 'inputs_unavailable')
+    assert page_operation._failure(OverflowError('budget')).status == 'unavailable'
 
 
 def test_same_nanosecond_sender_tie_uses_id_in_seek_boundary(page_app):

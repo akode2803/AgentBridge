@@ -177,6 +177,14 @@ def _overlays(inputs):
 
 
 def _failure(exc):
+    # A local write/refresh may retire the captured source between selection
+    # and finalization. Retry this request from a fresh cut; the GUI caps its
+    # attempts and returns pending if the source remains unavailable. Schema,
+    # owner-binding and malformed-source failures remain unavailable.
+    if (type(exc) is local_source.SourceChanged and exc.args in (
+            ('local_inputs_changed',), ('source_not_ready',),
+            ('source_mutation_pending',), ('source_changed_during_finalization',))):
+        return PageWorkResult('restart', 'local_inputs_changed')
     if (isinstance(exc, membership.terminal_observation.TerminalObservationUnavailable)
             and exc.args == ('terminal_classification_pending',)):
         return PageWorkResult('work', 'terminal_classification_pending')
