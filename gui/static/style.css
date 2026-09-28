@@ -890,7 +890,7 @@ select, textarea {
 #transcript .day-sep, #transcript .info-pill { margin: 4px 0; }
 
 .msg { max-width: 74%; }
-.msg.mine { align-self: flex-end; }
+.msg.mine { align-self: flex-end; width: fit-content; min-width: 0; }
 .msg:not(.mine) { padding-left: 38px; position: relative; }
 
 /* sender avatar: only on the first message of a consecutive block */
@@ -1197,6 +1197,8 @@ button.enc-pill { cursor: pointer; font: inherit; font-size: 11.5px; }
   border-left: 3px solid var(--accent);
   border-radius: 6px; padding: 5px 9px 5px 8px; margin: 0 0 7px;
 }
+/* Quotes follow message content width rather than determining intrinsic width. */
+.msg .bubble > .reply-quote { contain: inline-size; min-width: 0; }
 /* own bubbles are accent-tinted — the gray overlay muddies there; a white
    wash matches the look of quotes in received bubbles (user-requested) */
 .msg.mine .reply-quote { background: rgba(255, 255, 255, .55); }
@@ -2741,6 +2743,7 @@ body.side-collapsed #side-resizer { display: none; }
     padding: 0; gap: 0;
     border-right: none; border-top: 1px solid var(--border);
   }
+  body.chat-active #rail { display: none; }
   #rail .spacer { display: none; }
   .rail-btn, .rail-avatar-wrap {
     width: 96px; height: 56px; border-radius: 12px;
@@ -2752,7 +2755,7 @@ body.side-collapsed #side-resizer { display: none; }
   .rail-avatar-wrap.active { background: var(--chat-active); color: var(--chat-active-fg); }
   .rail-avatar-wrap .rail-avatar { width: 26px; height: 26px; font-size: 12px; }
   .rail-avatar-wrap.active .rail-avatar { outline: none; }
-  #navrail { width: 100% !important; flex: 1; border-right: none; }
+  #navrail { width: 100% !important; flex: 1; min-height: 0; border-right: none; }
   #side-resizer { display: none; }
   body.side-collapsed #navrail { display: flex; }
   /* pane-open = an open chat or a chosen settings section takes the screen */

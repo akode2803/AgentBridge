@@ -213,7 +213,12 @@ async function renderPagedChat(force, kind = null) {
   }
   if (kind === "first") { owner.wantOlder = false; owner.recoveryAnchor = null; }
   const started = performance.now();
-  const finishLoading = $("#content").dataset.pagePending === owner.identity ? () => {}
+  // Same-room route changes and safety refreshes keep the visible transcript
+  // while making a fresh canonical read. Pending/reset responses below clear
+  // that surface and install their own cue; explicit history actions keep one.
+  const visibleRefresh = before && Mesh.renderedChat === chatId
+    && mode !== "older" && kind !== "first";
+  const finishLoading = visibleRefresh || $("#content").dataset.pagePending === owner.identity ? () => {}
     : beginLoading($("#content"), {label: mode === "older" ? "Loading earlier messages…" : "Loading chat…",
       placement: mode === "first" ? "center" : "corner", current:owner.current});
   try {
@@ -595,7 +600,7 @@ async function renderChats(force) {
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
   // runs and the sidebar refreshes; the empty surface itself is static.
-  if (!Mesh.chatId && App.page === "chats" && Mesh.listKey !== "empty"
+  if (!Mesh.chatId && App.page === "chats" && !$("#content > .empty-state")
       && Mesh.state?.available && Mesh.state?.user) {
     renderEmptyChat();
   }
@@ -3094,43 +3099,66 @@ function deleteDialog(chatId, ids, canEveryone) {
   box.querySelector("#del-me").addEventListener("click", () => { closeModal(); deleteForMe(chatId, ids); });
 }
 
-// delete-for-everyone: redact, tombstones appear in place. No toast (the
-// dialog was the confirmation; it's irreversible).
-async function deleteForEveryone(chatId, ids) {
-  const r = await api("/api/mesh/delete_messages",
-                      { chat_id: chatId, ids, scope: "everyone" });
-  if (r.error) { toast(r.error, true); return; }
-  exitSelect();
-  refreshChat();
+// All delete variants share delayed progress and failure cleanup. A retired
+// session cannot paint feedback (or expose an Undo action) in its replacement.
+async function requestMessageDeletion(chatId, ids, scope) {
+  const ticket = captureSessionEpoch();
+  let dismissProgress;
+  const spin = setTimeout(() => {
+    if (sessionMayApply(ticket)) dismissProgress = toast("Deleting…", { spinner: true });
+  }, 500);
+  try {
+    const r = await api("/api/mesh/delete_messages", { chat_id: chatId, ids, scope });
+    if (!sessionMayApply(ticket)) return false;
+    if (r.error) { toast(r.error, true); return false; }
+    return ticket;
+  } catch {
+    if (sessionMayApply(ticket)) toast("Could not delete messages. Please try again.", true);
+    return false;
+  } finally {
+    clearTimeout(spin);
+    dismissProgress?.();
+  }
 }
 
-// delete-for-me: hide privately, with a toast + Undo. A spinner rides in the
-// toast only if the call is slow (local is instant; the shared folder lags).
+// Redaction replaces content with canonical tombstones after the write.
+async function deleteForEveryone(chatId, ids) {
+  const ticket = await requestMessageDeletion(chatId, ids, "everyone");
+  if (!ticket || !sessionMayApply(ticket)) return;
+  if (Mesh.chatId === chatId) exitSelect();
+  refreshChat();
+  toast(`${ids.length} message${ids.length === 1 ? "" : "s"} deleted for everyone`, { check: true });
+}
+
+// Private deletion retains the existing Undo action.
 async function deleteForMe(chatId, ids) {
   const n = ids.length;
   exitSelect();
-  const spin = setTimeout(() => toast("Deleting…", { spinner: true }), 300);
-  const r = await api("/api/mesh/delete_messages",
-                      { chat_id: chatId, ids, scope: "me" });
-  clearTimeout(spin);
-  if (r.error) { toast(r.error, true); return; }
+  const ticket = await requestMessageDeletion(chatId, ids, "me");
+  if (!ticket || !sessionMayApply(ticket)) return;
   refreshChat();
   toast(`${n} message${n === 1 ? "" : "s"} deleted for me`, {
     icon: ICONS.trash, action: "Undo",
     onAction: async () => {
-      await api("/api/mesh/undelete_messages", { chat_id: chatId, ids });
-      refreshChat();
+      if (!sessionMayApply(ticket)) return;
+      try {
+        const r = await api("/api/mesh/undelete_messages", { chat_id: chatId, ids });
+        if (!sessionMayApply(ticket)) return;
+        if (r.error) { toast(r.error, true); return; }
+        refreshChat();
+      } catch {
+        if (sessionMayApply(ticket)) toast("Could not undo deletion. Please try again.", true);
+      }
     },
   });
 }
 
-// the tombstone's lone "Delete": a silent for-me removal of the trace — no
-// dialog, no toast, no undo (the message is already gone for everyone).
+// Removing an existing tombstone needs no second dialog or Undo action.
 async function hideSilently(chatId, ids) {
-  const r = await api("/api/mesh/delete_messages",
-                      { chat_id: chatId, ids, scope: "me" });
-  if (r.error) { toast(r.error, true); return; }
+  const ticket = await requestMessageDeletion(chatId, ids, "me");
+  if (!ticket || !sessionMayApply(ticket)) return;
   refreshChat();
+  toast(`${ids.length} message${ids.length === 1 ? "" : "s"} deleted for me`, { check: true });
 }
 
 // ---- clear chat -------------------------------------------------------------
