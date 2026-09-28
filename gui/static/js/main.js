@@ -361,6 +361,7 @@ function route() {
   // the screen; the sidebar is the home surface otherwise
   document.body.classList.toggle("pane-open",
     (page === "chats" && !!Mesh.chatId) || (page === "settings" && !!sub));
+  document.body.classList.toggle("chat-active", page === "chats" && !!Mesh.chatId);
   document.body.classList.toggle("details-open",
     page === "chats" && !!Mesh.detailsView);
   $("#rail-chats").classList.toggle("active", page === "chats" || page === "new");
@@ -375,7 +376,14 @@ function route() {
   const current = () => routeSeq === App.routeSeq;
   const host = page === "chats" && Mesh.detailsView ? $("#details-pane")
     : page === "new" ? $("#side-chats") : $("#content");
-  const finish = beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
+  // A visible transcript or static accepted home already owns this surface.
+  // Closing info and returning from settings still make fresh canonical reads;
+  // they do not need a loading overlay over the usable surface.
+  const visibleChat = page === "chats" && !Mesh.detailsView
+    && Mesh.renderedChat === Mesh.chatId && !!$("#transcript");
+  const staticHome = page === "chats" && !Mesh.chatId
+    && Mesh.state?.available && Mesh.state?.user;
+  const finish = visibleChat || staticHome ? () => {} : beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
     label: page === "new" ? "Updating contacts…"
       : Mesh.detailsView ? "Loading chat info…" : "Loading…" });
   return Promise.resolve(PAGES[App.page]()).catch(() => {}).finally(finish);

@@ -132,6 +132,7 @@ export function fmtSize(bytes) {
 }
 
 let toastTimer = null;
+let toastGeneration = 0;
 // toast(msg, true) = error (legacy form). toast(msg, {check, action,
 // onAction, error, duration, spinner, swap}) = snackbar with an optional ✓
 // and an action pill (e.g. Undo). When the info pane is open, snackbars dock
@@ -142,7 +143,9 @@ export function toast(msg, opts) {
   if (opts === true) opts = { error: true };
   opts = opts || {};
   const t = $("#toast");
+  const generation = ++toastGeneration;
   const doRender = () => {
+    if (generation !== toastGeneration) return;
     // opts.icon is trusted markup (our own ICONS / a glyph span), rendered
     // ahead of the message; opts.check is the plain ✓ success tick.
     const lead = opts.spinner
@@ -187,10 +190,20 @@ export function toast(msg, opts) {
     t.classList.remove("toast-in");
     t.classList.add("toast-out");
     clearTimeout(toastTimer);
-    setTimeout(() => { t.classList.remove("toast-out"); doRender(); }, 170);
+    setTimeout(() => {
+      if (generation !== toastGeneration) return;
+      t.classList.remove("toast-out"); doRender();
+    }, 170);
   } else {
     doRender();
   }
+  // A completed/retired operation may dismiss only the cue it created.
+  return () => {
+    if (generation !== toastGeneration) return;
+    toastGeneration++;
+    clearTimeout(toastTimer);
+    t.hidden = true;
+  };
 }
 
 // the ≤1100px breakpoint puts the details pane on TOP of the chat — pane
