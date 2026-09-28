@@ -2743,7 +2743,10 @@ body.side-collapsed #side-resizer { display: none; }
     padding: 0; gap: 0;
     border-right: none; border-top: 1px solid var(--border);
   }
-  body.chat-active #rail { display: none; }
+  /* Keep an escape route through cold, failed, and pending chat/info reads.
+     Pane headers place their Back/Close button first. */
+  body.chat-active:not(.details-open):has(#chat-back) #rail,
+  body.chat-active.details-open:has(#details-pane:not([hidden]) .pane-head > button.icon-btn:first-child) #rail { display: none; }
   #rail .spacer { display: none; }
   .rail-btn, .rail-avatar-wrap {
     width: 96px; height: 56px; border-radius: 12px;
