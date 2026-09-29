@@ -29,6 +29,25 @@ PNG = bytes.fromhex(
 )
 
 
+def _admitted_file(rig, chat, message_id, blob_id):
+    runtime = rig.app.mesh.local_inputs
+    for _ in range(8):
+        if rig.app.mesh.outbox.flush_once() == 0:
+            break
+    runtime.prepare_one()
+    runtime.ingest(chat)
+    for _ in range(12):
+        ctype, body = rig.get_bytes('/api/mesh/file', chat=chat, id=blob_id,
+                                    message_id=message_id)
+        if 'application/json' not in ctype:
+            return ctype, body
+        state = json.loads(body)
+        if state.get('status') != 'pending':
+            return ctype, body
+        runtime.prepare_one()
+    return ctype, body
+
+
 # -------------------------------------------------------- check_name (R53)
 def test_check_name_preauth_facts(rig):
     # pre-auth: works with NO session at all (the sign-in page's live check)
@@ -69,6 +88,7 @@ def test_check_name_cloud_absence_requires_an_authoritative_mirror(rig, monkeypa
 
 # ------------------------------------------------------------- attachments
 def test_sealed_attachment_roundtrip(rig):
+    rig.app.local_inputs_enabled = True
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="Files",
@@ -93,7 +113,7 @@ def test_sealed_attachment_roundtrip(rig):
     assert at_rest.startswith(b"AB2E")
 
     # the endpoint decrypts + verifies provenance
-    ctype, body = rig.get_bytes("/api/mesh/file", chat=cid, id=rec["id"])
+    ctype, body = _admitted_file(rig, cid, sent['id'], rec['id'])
     assert body == PNG and ctype == "image/png"
 
     # the other member decrypts it through their own keys
@@ -151,6 +171,7 @@ def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
 
 
 def test_forward_reseals_attachments(rig):
+    rig.app.local_inputs_enabled = True
     rig.signup()
     c1 = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]
     c2 = rig.post("/api/mesh/create_chat", name="Dst", members=[])["chat"]["id"]
@@ -167,7 +188,7 @@ def test_forward_reseals_attachments(rig):
     assert dst_msg["fwd"]["from"] == "aryan"
     new_id = dst_msg["files"][0]["id"]
     assert new_id != src_msg["files"][0]["id"]  # re-sealed for the target
-    _, body = rig.get_bytes("/api/mesh/file", chat=c2, id=new_id)
+    _, body = _admitted_file(rig, c2, dst_msg['id'], new_id)
     assert body == PNG
 
 

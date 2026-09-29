@@ -2910,3 +2910,10 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   flex-shrink:0; padding:4px 12px; }
 .page-history-controls:empty { display:none; }
 .page-history-controls button { font:inherit; font-size:12px; }
+
+/* Attachment preview progress/failure stays inside the existing file button. */
+.file-preview-label {
+  display: block; padding: 12px; color: var(--text-dim); font-family: inherit; font-size: 12px; line-height: 1.4;
+  white-space: normal; text-align: center;
+}
+.msg-img img[hidden], .media-cell img[hidden] { display: none; }

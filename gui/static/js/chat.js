@@ -1373,10 +1373,10 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // keeps the file chip. Both open the file on click (.mesh-att). File
     // records are v2 {id, name, bytes} — the blob id rides data-id.
     const files = (msg.files || []).map((f) => isImg(f.name)
-      ? `<button class="msg-img mesh-att" data-id="${esc(f.id)}"
+      ? `<button class="msg-img mesh-att" data-id="${esc(f.id)}" data-message-id="${esc(msg.id)}"
              data-name="${esc(f.name)}" title="${esc(f.name)}">
-           <img src="${fileUrl(chatId, f.id)}" alt="${esc(f.name)}" loading="lazy"></button>`
-      : `<button class="att-btn mesh-att" data-id="${esc(f.id)}" data-name="${esc(f.name)}">
+           <img src="${fileUrl(chatId, f.id, msg.id)}" alt="${esc(f.name)}" loading="lazy"></button>`
+      : `<button class="att-btn mesh-att" data-id="${esc(f.id)}" data-message-id="${esc(msg.id)}" data-name="${esc(f.name)}">
            <span class="att-icon">${extIcon(f.name)}</span>
            <span style="min-width:0">
              <div class="att-name">${esc(f.name)}</div>
@@ -3049,11 +3049,18 @@ async function bulkStar(chatId) {
 async function bulkSave(chatId) {
   const sel = [...Mesh.select.ids];
   const msgs = $("#transcript")?._msgs;
-  const ids = [];   // blob ids — the v2 save endpoint's spelling
-  for (const id of sel) for (const f of (msgs?.get(id)?.files || [])) ids.push(f.id);
-  if (!ids.length) return;
-  const r = await api("/api/mesh/save", { chat_id: chatId, ids });
-  if (r.error) { toast(r.error, true); return; }
+  const files = [];
+  for (const id of sel) for (const f of (msgs?.get(id)?.files || [])) {
+    files.push({ message_id: id, id: f.id });
+  }
+  if (!files.length) return;
+  let r;
+  try { r = await api("/api/mesh/save", { chat_id: chatId, files }); }
+  catch { toast("Save interrupted. Check the destination before retrying.", true); return; }
+  if (r.error) {
+    const partial = r.saved ? `${r.saved} file${r.saved === 1 ? "" : "s"} already saved. ` : "";
+    toast(partial + r.error, true); return;
+  }
   if (r.cancelled) return;   // backed out of the picker — stay in select mode
   exitSelect();
   const where = (r.dest || "").split(/[\\/]/).filter(Boolean).pop() || "the folder";

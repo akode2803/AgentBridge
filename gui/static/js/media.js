@@ -40,11 +40,11 @@ async function renderChatMedia(mode = "refresh") {
   }
   const render = {
     media: (g) => `<div class="media-grid">${g.items.map((f) => `
-      <button class="media-cell cd-file" data-id="${esc(f.id)}" data-name="${esc(f.name)}">
-        <img src="${fileUrl(chatId, f.id)}" alt="${esc(f.name)}" loading="lazy">
+      <button class="media-cell cd-file" data-id="${esc(f.id)}" data-message-id="${esc(f.msg_id)}" data-name="${esc(f.name)}">
+        <img src="${fileUrl(chatId, f.id, f.msg_id)}" alt="${esc(f.name)}" loading="lazy">
       </button>`).join("")}</div>`,
     docs: (g) => g.items.map((f) => `
-      <button class="att-btn cd-file" data-id="${esc(f.id)}" data-name="${esc(f.name)}"
+      <button class="att-btn cd-file" data-id="${esc(f.id)}" data-message-id="${esc(f.msg_id)}" data-name="${esc(f.name)}"
               style="max-width:100%;margin-top:6px">
         <span class="att-icon">${extIcon(f.name)}</span>
         <span style="min-width:0">

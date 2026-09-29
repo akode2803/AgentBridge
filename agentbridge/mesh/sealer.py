@@ -91,6 +91,25 @@ def _blob_aad(chat_id: str, blob_id: str, epoch: int) -> bytes:
     return f"{chat_id}|blob|{blob_id}|{epoch}".encode()
 
 
+def observed_blob_epoch(data: bytes) -> int | None:
+    """Parse sealed blob routing metadata without resolving any keys."""
+    if type(data) is not bytes or len(data) < 12 + 12 + 16 or not data.startswith(_BLOB_MAGIC):
+        return None
+    epoch = int.from_bytes(data[4:12], "big")
+    return epoch if 0 < epoch <= 2**63 - 1 else None
+
+
+def open_blob_observed(chat_id: str, blob_id: str, data: bytes,
+                       epoch: int, key: bytes) -> bytes | None:
+    """Decrypt with the caller's exact observed/fenced key, without my_key I/O."""
+    if (observed_blob_epoch(data) != epoch or type(key) is not bytes):
+        return None
+    try:
+        return crypto.unseal_raw(key, _blob_aad(chat_id, blob_id, epoch), data[12:])
+    except crypto.CryptoFail:
+        return None
+
+
 class E2EESealer(Sealer):
     """The real thing (R9). Seal: ensure a correct epoch (rotating after any
     membership drift — the race heal), encrypt with AAD-bound metadata, sign

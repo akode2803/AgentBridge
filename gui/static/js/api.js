@@ -2,6 +2,7 @@
    JSON handling, and (later) uniform error reporting. */
 
 import { toast } from "./util.js";
+import { bindFilePreview } from "./files.js";
 
 export async function api(path, body, options = {}) {
   const opts = body === undefined ? {} : {
@@ -47,6 +48,7 @@ export function bindOpenFile(scope, chatId, selector) {
     // bind on a surviving chip must not stack a second listener
     if (b._openBound) return;
     b._openBound = true;
+    bindFilePreview(b);
     b.addEventListener("click", async () => {
       // fetch + decrypt + OS handoff all happen server-side, so no byte
       // stream reaches this window to meter — an indeterminate ring on the
@@ -55,8 +57,11 @@ export function bindOpenFile(scope, chatId, selector) {
       if (b.classList.contains("att-loading")) return;
       b.classList.add("att-loading");
       try {
-        const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id });
+        const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id, message_id: b.dataset.messageId });
         if (r.error) toast(r.error, true);
+        else if (!r.ok) toast("File is not ready yet. Please try again.", true);
+      } catch {
+        toast("Couldn’t open the file. Please try again.", true);
       } finally {
         b.classList.remove("att-loading");
       }
