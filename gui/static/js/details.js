@@ -8,7 +8,9 @@ import { md } from "./markdown.js";
 import { csel, mountCsels } from "./csel.js";
 import { confirmModal, openPhotoViewer, openModal, closeModal } from "./modal.js";
 import { App, Mesh, RULE_LABELS, meshDn, dmOther, chatDisplay, isDmLike, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, chatAdmins, captureViewRead, viewReadMayApply, currentDraftViewer } from "./state.js";
-import { mediaThumb } from "./files.js";
+import { beginLoading } from "./loading.js";
+import { beginDetailsRead, detailsReadCurrent, finishDetailsRead } from "./details_read.js";
+import { readCollection, collectionControls, pendingDetails } from "./detail_pages.js";
 import { V } from "./views.js";
 
 // group permissions (D12 multi-admin; WhatsApp "Group permissions" minus the
@@ -159,29 +161,44 @@ function mountAgentSlots(scope, chatId, fams) {
 }
 
 async function renderChatDetails() {
-  const owner = captureViewRead();
   const ms = Mesh.state;
-  if (!ms?.user || !viewReadMayApply(owner)) return;
+  if (!ms?.user || !Mesh.detailsView) return;
   const chatId = Mesh.chatId;
-  // an open inline edit (name/description) survives polls — it only closes
-  // when saved or when the pane goes away. `.ci-saving` is the brief
-  // committing state (spinner in place of the ✓): hold the pane there too so a
-  // poll doesn't flash the pre-write name back in (round 11).
+  if (Mesh.searchView) return V.renderChatSearch();
+  if (Mesh.mediaView) return V.renderChatMedia();
+  if (Mesh.starredPane) return renderChatStarred();
   if (document.querySelector("#ci-name-input, #ci-desc-input, .ci-saving")) return;
-  // chat_info is the LIGHT payload (meta + files + links) — the pane used
-  // to pull 1000 full messages on every open and poll
-  const data = await api(`/api/mesh/chat_info?id=${encodeURIComponent(chatId)}`);
-  if (!viewReadMayApply(owner) || !Mesh.detailsView) return;
-  if (data.error) {
-    if (data.error !== "No such chat") toast(data.error, true);   // deleted → quiet
-    location.hash = "#/chats"; return;
+  const ticket = beginDetailsRead();
+  if (!ticket) return;
+  const pane = $("#details-pane");
+  const wasCollection = !!pane.dataset.collection;
+  if (!pane.querySelector(".pane-head") || wasCollection) {
+    pendingDetails("Chat info", () => { location.hash = `#/chats/${chatId}`; });
+    Mesh.detailsKey = "";
   }
-  if (!viewReadMayApply(owner, data)) return;
+  delete pane.dataset.collection;
+  delete pane.dataset.collectionPaint;
+  const finish = pane.querySelector(".ci-identity") ? () => {} : beginLoading(pane, { label: "Loading chat info…", placement: "center",
+    current: () => detailsReadCurrent(ticket) });
+  let data;
+  try {
+    data = await api(`/api/mesh/chat_summary?id=${encodeURIComponent(chatId)}`, undefined, { timeoutMs: 15000 });
+    if (!detailsReadCurrent(ticket, data)) return;
+  } catch {
+    if (!detailsReadCurrent(ticket)) return;
+    data = { status: "unavailable" };
+  } finally { finish(); finishDetailsRead(ticket); }
+  if (data.status !== "ready") {
+    Mesh.detailsKey = "";
+    pendingDetails("Chat info", () => { location.hash = `#/chats/${chatId}`; });
+    pane.querySelector(".pane-view").innerHTML = collectionControls(data);
+    pane.querySelector("[data-collection]")?.addEventListener("click", renderChatDetails);
+    return;
+  }
   const meta = data.meta;
   // "can I administer this group" — v2 multi-admin, v1 single-owner (adapter)
   const isOwner = meshIsAdmin(meta);
   const admins = chatAdmins(meta);
-  const media = data.files || [];
   const myAgentsHere = Object.values(ms.users).filter((u) =>
     u.kind === "agent" && !u.departed && (u.owners || []).includes(ms.user)
     && (meta.members || []).includes(u.username));
@@ -190,8 +207,7 @@ async function renderChatDetails() {
   // status/presence ride the signature so the identity line stays live (R36).
   const dmPeerRec = isDmLike(meta) && meta.kind !== "self"
     ? ms.users[dmOther(meta, ms.user)] : null;
-  const dKey = JSON.stringify([meta, media.length, (data.links || []).length,
-    (data.starred || []).length, myAgentsHere.map((a) => a.settings),
+  const dKey = JSON.stringify([meta, myAgentsHere.map((a) => a.settings),
     dmPeerRec ? [dmPeerRec.status, dmPeerRec.presence, dmPeerRec.key_verified,
                  dmPeerRec.about, dmPeerRec.messaging, dmPeerRec.add_to_group,
                  dmPeerRec.active] : 0,
@@ -202,10 +218,11 @@ async function renderChatDetails() {
 
   // search / media / starred / agents / permissions / member-info pages
   // slide in over chat info
-  if (Mesh.searchView) return V.renderChatSearch();
-  if (Mesh.mediaView) return V.renderChatMedia(data);
-  if (Mesh.starredPane) return renderChatStarred(data);
-  if (Mesh.agentsView) return renderChatAgents(myAgentsHere, meta);
+  if (Mesh.agentsView) {
+    ticket.busy = true;
+    try { return await renderChatAgents(myAgentsHere, meta, ticket); }
+    finally { finishDetailsRead(ticket); }
+  }
   if (Mesh.permsView) return renderChatPerms(meta);
   if (Mesh.memberInfo) return renderMemberInfo(Mesh.memberInfo);
 
@@ -259,7 +276,7 @@ async function renderChatDetails() {
   const memberCount = `${nMembers} member${nMembers === 1 ? "" : "s"}`;
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <button class="icon-btn" id="cd-close">${ICONS.close}</button>
+      <button class="icon-btn" id="cd-close" aria-label="Close chat info">${ICONS.close}</button>
       <span class="pane-title">${isDm ? "Chat info" : "Group info"}</span>
     </div>
     <div class="ci-identity">
@@ -304,19 +321,11 @@ async function renderChatDetails() {
     <div class="card" style="padding-top:8px;padding-bottom:10px">
       <button class="sec-head" id="media-sec">
         ${ICONS.media}<span class="sec-label">Media and files</span>
-        <span class="sec-count">${media.length}</span>
       </button>
-      ${media.length ? `<div class="media-strip">
-        ${media.slice(-6).reverse().map((f) => `
-          <button class="media-tile-btn cd-file" data-id="${esc(f.id)}"
-                  data-name="${esc(f.name)}">
-            ${mediaThumb(chatId, f)}</button>`).join("")}
-      </div>` : ""}
     </div>
     <div class="card" style="padding-top:8px;padding-bottom:8px">
       <button class="sec-head" id="starred-sec">
         ${ICONS.star}<span class="sec-label">Starred messages</span>
-        <span class="sec-count">${(data.starred || []).length}</span>
       </button>
     </div>
     ${myAgentsHere.length ? `
@@ -378,7 +387,7 @@ async function renderChatDetails() {
       ${isOwner ? `<button class="danger-row" id="dg-delete">
         ${ICONS.trash} Delete ${noun}</button>` : ""}
     </div>
-    ${isDm ? "" : `<div class="ci-footer">Group created by ${
+    ${isDm || !meta.created || !meta.created_by ? "" : `<div class="ci-footer">Group created by ${
       esc(meshDn(meta.created_by))}, ${esc(fmtTime(meta.created))}</div>`}`;
 
   $("#cd-close").addEventListener("click", () => { location.hash = `#/chats/${chatId}`; });
@@ -867,15 +876,31 @@ function renderMemberInfo(u) {
   });
 }
 
-async function renderChatStarred(info) {
+async function renderChatStarred(mode = "refresh") {
   const ms = Mesh.state;
   const chatId = Mesh.chatId;
-  const meta = info.meta || {};
+  const pane = $("#details-pane");
+  const back = () => { Mesh.starredPane = false; Mesh.detailsKey = ""; renderChatDetails(); };
+  const identity = JSON.stringify([chatId, "starred"]);
+  if (pane.dataset.collection !== identity || !pane.querySelector(".pane-head")) {
+    pendingDetails("Starred messages", back);
+    pane.dataset.collection = identity;
+    pane.dataset.collectionPaint = "";
+  }
+  const data = await readCollection("starred", mode);
+  if (!data?.current()) return;
+  const paint = JSON.stringify(data);
+  if (pane.dataset.collectionPaint === paint) return;
+  pane.dataset.collectionPaint = paint;
+  const scroll = pane.scrollTop;
+  const filter = pane.querySelector("#cst-q")?.value || "";
+  const meta = data.meta || {};
   const isDm = isDmLike(meta);
   const canReply = (meta.members || []).includes(ms.user) && !meta.archived;
-  const data = await api(`/api/mesh/starred?id=${encodeURIComponent(chatId)}`);
-  if (data.error) { toast(data.error, true); return; }
-  const items = data.starred || [];
+  const items = data.items || [];
+  const windowStart = items[0]?.item_key || "";
+  const resetScroll = pane.dataset.collectionWindow !== windowStart;
+  pane.dataset.collectionWindow = windowStart;
   const card = (s) => {
     const mine = s.from === ms.user;
     const sender = mine ? "You" : meshDn(s.from);
@@ -898,27 +923,30 @@ async function renderChatStarred(info) {
   };
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <button class="icon-btn" id="cst-back">${ICONS.back}</button>
+      <button class="icon-btn" id="cst-back" aria-label="Back">${ICONS.back}</button>
       <span class="pane-title">Starred messages</span>
     </div>
     <div class="pane-view">
       <div class="search-box" style="margin:0 0 4px">${ICONS.search}
-        <input type="text" id="cst-q" placeholder="Search" autocomplete="off">
+        <input type="text" id="cst-q" placeholder="Filter loaded messages" autocomplete="off">
       </div>
-      <div id="cst-list">${items.map(card).join("") ||
-        `<div class="empty" style="padding:26px 0">Nothing starred in this chat</div>`}</div>
+      <div id="cst-list">${items.map(card).join("")}</div>
+      <div class="page-history-controls">${collectionControls(data)}</div>
     </div>`;
-  $("#cst-back").addEventListener("click", () => {
-    Mesh.starredPane = false;
-    Mesh.detailsKey = "";
-    renderChatDetails();
+  $("#cst-back").addEventListener("click", back);
+  pane.querySelectorAll("[data-collection]").forEach(button => {
+    button.addEventListener("click", () => renderChatStarred(button.dataset.collection));
   });
-  $("#cst-q").addEventListener("input", (e) => {
-    const q = e.target.value.trim().toLowerCase();
+  pane.scrollTop = mode === "latest" || resetScroll ? 0 : scroll;
+  $("#cst-q").value = filter;
+  const applyFilter = () => {
+    const q = $("#cst-q").value.trim().toLowerCase();
     document.querySelectorAll("#cst-list .star-card").forEach((c) => {
       c.hidden = !!q && !c.textContent.toLowerCase().includes(q);
     });
-  });
+  };
+  $("#cst-q").addEventListener("input", applyFilter);
+  applyFilter();
   const list = $("#cst-list");
   // the pane has its OWN expansion state: snapshots always open in the
   // default collapsed view, whatever was expanded in the transcript
@@ -970,7 +998,7 @@ async function renderChatStarred(info) {
 
 // per-chat agent rules + models — its own page off chat info (a full
 // permissions overhaul comes later)
-async function renderChatAgents(agents, meta) {
+async function renderChatAgents(agents, meta, ticket) {
   const chatId = Mesh.chatId;
   const isDm = isDmLike(meta || {});
   // reached from the composer's hand → a Close that dismisses the pane;
@@ -978,7 +1006,10 @@ async function renderChatAgents(agents, meta) {
   const fromComposer = Mesh.agentsFromComposer;
   // model options come from this machine's preset catalog (the same source
   // as Settings → My agents); a family with no model list gets no model row
-  const ho = await api("/api/mesh/harness_options");
+  let ho;
+  try { ho = await api("/api/mesh/harness_options", undefined, { timeoutMs: 15000 }); }
+  catch { ho = {}; }
+  if (!detailsReadCurrent(ticket)) return;
   const FAMS = (ho && ho.families) || [];
   const avail = FAMS.filter((f) => f.available);
   const famFor = (st) => FAMS.find((f) => f.id === (st.adapter || ""))
