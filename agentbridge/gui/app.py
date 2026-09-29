@@ -21,6 +21,7 @@ from . import (
     api_agents,
     api_auth,
     api_chats,
+    api_collections,
     api_pages, api_page_aux,
     api_files,
     api_membership,
@@ -59,7 +60,7 @@ CONTENT_TYPES = {
 GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
 RAW_ROUTES: dict = {}
-for mod in (api_auth, api_chats, api_pages, api_page_aux, api_messages, api_membership,
+for mod in (api_auth, api_chats, api_pages, api_page_aux, api_collections, api_messages, api_membership,
             api_profile, api_agents, api_files, api_runtime, api_updates):
     GET_ROUTES.update(mod.GET)
     POST_ROUTES.update(mod.POST)

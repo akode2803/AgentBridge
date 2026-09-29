@@ -118,6 +118,8 @@ class GuiApp:
         self.local_inputs_enabled = local_inputs
         from .page_cursors import PageCursorRegistry
         self.page_cursors = PageCursorRegistry()
+        from .collection_cursors import CollectionCursorRegistry
+        self.collection_cursors = CollectionCursorRegistry()
         self.mesh: Mesh | None = None
         self._session_generation = 0
         self._session_reads_exhausted = False
@@ -213,6 +215,7 @@ class GuiApp:
 
     def _advance_session_generation(self) -> None:
         self.page_cursors.clear()
+        self.collection_cursors.clear()
         if self.mesh is not None and self.mesh.local_inputs is not None:
             self.mesh.local_inputs.clear_selection()
         self._session_read_ready = False

@@ -5,17 +5,31 @@ import { $, esc, fmtSize, fmtTime } from "./util.js";
 import { ICONS, extIcon } from "./icons.js";
 import { bindOpenFile } from "./api.js";
 import { Mesh, meshDn } from "./state.js";
-import { isImg, fileUrl, monthLabel } from "./files.js";
+import { fileUrl, monthLabel } from "./files.js";
+import { readCollection, collectionControls, pendingDetails } from "./detail_pages.js";
 import { V } from "./views.js";
 
-function renderChatMedia(data) {
+async function renderChatMedia(mode = "refresh") {
   const chatId = Mesh.chatId;
   const tab = Mesh.mediaTab || "media";
-  const media = data.files || [];
-  const links = data.links || [];
-  const items = tab === "media" ? media.filter((f) => isImg(f.name)).slice().reverse()
-    : tab === "docs" ? media.filter((f) => !isImg(f.name)).slice().reverse()
-    : links.slice().reverse();
+  const pane = $("#details-pane");
+  const back = () => { Mesh.mediaView = false; Mesh.detailsKey = ""; V.renderChatDetails(); };
+  const identity = JSON.stringify([chatId, "media", tab]);
+  if (pane.dataset.collection !== identity || !pane.querySelector(".pane-head")) {
+    pendingDetails("Media and files", back);
+    pane.dataset.collection = identity;
+    pane.dataset.collectionPaint = "";
+  }
+  const data = await readCollection(tab, mode);
+  if (!data?.current()) return;
+  const paint = JSON.stringify(data);
+  if (pane.dataset.collectionPaint === paint) return;
+  pane.dataset.collectionPaint = paint;
+  const scroll = pane.scrollTop;
+  const items = data.items || [];
+  const windowStart = items[0]?.item_key || "";
+  const resetScroll = pane.dataset.collectionWindow !== windowStart;
+  pane.dataset.collectionWindow = windowStart;
   const groups = [];
   for (const it of items) {
     const label = monthLabel(it.ts);
@@ -49,7 +63,7 @@ function renderChatMedia(data) {
       </div>`).join(""),
   };
   const body = !items.length
-    ? `<div class="empty" style="padding:30px 0">Nothing here yet</div>`
+    ? ""
     : groups.map((g) => `
         <div class="media-month">${esc(g.label)}</div>${render[tab](g)}`).join("");
   // tab switches animate: the underline glides between tabs and the body
@@ -61,7 +75,7 @@ function renderChatMedia(data) {
   Mesh._mediaPrev = tab;
   $("#details-pane").innerHTML = `
     <div class="pane-head">
-      <button class="icon-btn" id="cm-back">${ICONS.back}</button>
+      <button class="icon-btn" id="cm-back" aria-label="Back">${ICONS.back}</button>
       <span class="pane-title">Media and files</span>
     </div>
     <div class="media-tabs">
@@ -70,7 +84,7 @@ function renderChatMedia(data) {
           ${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
       <span class="tab-ink" id="tab-ink"></span>
     </div>
-    <div class="media-body ${dir ? "slide-" + dir : "pane-view"}">${body}</div>`;
+    <div class="media-body ${dir ? "slide-" + dir : "pane-view"}">${body}<div class="page-history-controls">${collectionControls(data)}</div></div>`;
   const act = document.querySelector(".media-tab.active");
   const ink = $("#tab-ink");
   const place = () => {
@@ -86,13 +100,11 @@ function renderChatMedia(data) {
   }
   Mesh._inkLeft = act.offsetLeft;
   Mesh._inkW = act.offsetWidth;
-  $("#cm-back").addEventListener("click", () => {
-    Mesh.mediaView = false;
-    Mesh._mediaPrev = null;
-    Mesh._inkLeft = null;
-    Mesh.detailsKey = "";
-    V.renderChatDetails();
+  $("#cm-back").addEventListener("click", back);
+  pane.querySelectorAll("[data-collection]").forEach(button => {
+    button.addEventListener("click", () => renderChatMedia(button.dataset.collection));
   });
+  pane.scrollTop = mode === "latest" || resetScroll ? 0 : scroll;
   document.querySelectorAll(".media-tab").forEach((b) => {
     b.addEventListener("click", () => {
       if (b.dataset.tab === Mesh.mediaTab) return;
