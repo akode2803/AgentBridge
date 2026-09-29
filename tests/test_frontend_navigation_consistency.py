@@ -62,12 +62,17 @@ const box = {
 };
 const App = {page: "settings", _sidePage: "settings"};
 const $ = selector => { assert.equal(selector, "#side-chats"); return box; };
-const factory = new Function("$", "App", `${source}; return {clearSidebar, setSide};`);
-const api = factory($, App);
+let progressClears = 0;
+const clearSidebarProgress = () => { progressClears += 1; };
+const factory = new Function("$", "App", "clearSidebarProgress",
+  `${source}; return {clearSidebar, setSide};`);
+const api = factory($, App, clearSidebarProgress);
 api.clearSidebar();
+assert.equal(progressClears, 1, "sidebar reset retires progress owner");
 assert.deepEqual(box.dataset, {}); assert.equal(box.innerHTML, "");
 assert.equal(box.style.padding, ""); assert.equal(App._sidePage, null);
 assert.equal(api.setSide("<nav>About</nav>", "12px"), true);
+assert.equal(progressClears, 2, "non-list replacement retires progress owner");
 assert.equal(box.innerHTML, "<nav>About</nav>");
 assert.equal(box.dataset.key, "<nav>About</nav>");
 '''

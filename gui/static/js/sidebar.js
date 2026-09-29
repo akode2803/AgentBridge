@@ -8,6 +8,7 @@ import { App, Mesh, Settings, meshDn, meshInfoText, chatAdmins, chatDisplay, mes
 import { updateTitleBadge } from "./notify.js";
 import { pickerRow, pickerSection } from "./picker.js";
 import { V } from "./views.js";
+import { clearSidebarProgress, syncSidebarProgress } from "./sidebar_progress.js";
 
 // Profile + Account merged into one "Account" section (task 2, 2026-07-11).
 // Privacy became its own section in R40 (Q23) — it outgrew the Account card.
@@ -45,6 +46,7 @@ export function syncAskDots(asks) {
 }
 
 export function clearSidebar() {
+  clearSidebarProgress();
   const box = $("#side-chats");
   if (!box) return;
   // The render signatures describe these exact nodes. Retaining a signature
@@ -72,9 +74,9 @@ export function syncSidebarSelection() {
 export function renderSideLoading() {
   const box = $("#side-chats");
   if (!box || box.querySelector(".chat-row") || box.querySelector(".side-skel")) return;
-  const row = `<div class="skel-row"><div class="skel-av"></div>
-    <div class="skel-lines"><div class="skel-line"></div><div class="skel-line short"></div></div></div>`;
-  box.innerHTML = `<div class="side-skel"><div class="skel-bar"><i></i></div>${row.repeat(6)}</div>`;
+  const owner = captureSessionEpoch();
+  syncSidebarProgress(box, {pending: !Mesh.chatId,
+    current: () => App.page === "chats" && sessionMayApply(owner)});
 }
 
 // V67: a chat we just marked read must not flicker its badge back when a
@@ -97,6 +99,7 @@ function reconcileReadTail(ms) {
 
 export function renderSidebar() {
   const ms = Mesh.state;
+  if (App.page !== "chats" || !ms?.available || !ms.user) clearSidebarProgress();
   reconcileReadTail(ms);
   $("#rail-avatar").innerHTML =
     ms?.user ? meshAvatarInner(ms.user) : "?";
@@ -111,6 +114,7 @@ export function renderSidebar() {
 // swap the sidebar body only when it actually changed (poll redraws were
 // causing visible jitter); slide it in when the rail selection changed
 function setSide(html, padding) {
+  clearSidebarProgress();
   const box = $("#side-chats");
   box.classList.remove("ng-host");   // only the group builder sets this
   box.dataset.mode = "";   // any non-list variant drops chat-list granular state
@@ -287,18 +291,15 @@ function renderChatListSidebar() {
   const recency = (c) => (c.last && c.last.ns) || 0;
   listed.sort((a, b) => (!!b.pinned - !!a.pinned) || (recency(b) - recency(a)));
   const box = $("#side-chats");
-  let progress = $("#sidebar-page-status");
-  if (!progress) {
-    progress = document.createElement("div");
-    progress.id = "sidebar-page-status";
-    progress.className = "hint";
-    progress.setAttribute("role", "status");
-    box.before(progress);
-  }
-  progress.hidden = ms.chats_complete !== false;
-  progress.textContent = ms.sidebar_status === "room_limit"
-    ? "This chat list exceeds the current loading limit."
-    : "Updating chat list…";
+  // The foreground chat owns its own delayed cue. A usable retained list is
+  // already useful while its next canonical refresh runs in the background.
+  const waiting = ms.chats_complete === false && listed.length === 0;
+  const session = captureSessionEpoch();
+  const progress = () => syncSidebarProgress(box, {
+    pending: waiting && !Mesh.chatId,
+    limited: ms.sidebar_status === "room_limit",
+    current: () => App.page === "chats" && sessionMayApply(session),
+  });
 
   // the mutable pieces of a row, shared by the full build AND the in-place
   // update so both render identically (round 12).
@@ -334,7 +335,7 @@ function renderChatListSidebar() {
     return "";
   };
   const lastHtml = (c) => liveHtml(c)
-    || (!c.last ? (c.preview_pending ? "Loading preview…" : "No messages yet")
+    || (!c.last ? (c.preview_pending ? "" : "No messages yet")
     : c.last.deleted ? (c.last.from === ms.user
         ? "You deleted this message" : "This message was deleted")
     : c.last.kind === "info" ? esc(meshInfoText(c.last, ms.user))
@@ -393,7 +394,7 @@ function renderChatListSidebar() {
   // MOVES the existing row nodes instead of flushing the list
   const structSig = (Mesh.showArchived ? "A" : "N") + "|" + archived.length
     + "|" + alerts.map((a) => a.name + (a.seen_sign_pub || "")).join(";")
-    + "|" + [...listed.map((c) => c.id)].sort().join(",");
+    + "|" + waiting + "|" + [...listed.map((c) => c.id)].sort().join(",");
   if (box.dataset.mode === "list" && box.dataset.struct === structSig) {
     // reorder in place: appendChild MOVES a node, so identity (hover, menus,
     // scroll anchoring) survives; rows land after the alerts/archived header
@@ -419,6 +420,7 @@ function renderChatListSidebar() {
       el.querySelector(".chat-time").textContent = timeText(c);
       el.querySelector(".chat-tags").innerHTML = tagsHtml(c);
     });
+    progress();
     return;
   }
 
@@ -442,17 +444,20 @@ function renderChatListSidebar() {
     html = `<button class="arch-row" id="arch-toggle">${ICONS.back}
         <b>Archived</b><span class="arch-count">back to chats</span></button>` +
       (listed.map(rowHtml).join("") ||
-        `<div class="empty" style="padding:24px 10px">Nothing archived</div>`);
+        (waiting ? "" : `<div class="empty" style="padding:24px 10px">Nothing archived</div>`));
   } else {
     html = alertsHtml +
       (archived.length ? `<button class="arch-row" id="arch-toggle">
         ${ICONS.archive} Archived <span class="arch-count">${archived.length}</span></button>` : "") +
       (listed.map(rowHtml).join("") ||
-        `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`);
+        (waiting ? "" : `<div class="empty" style="padding:24px 10px">No chats yet — start one with ✎</div>`));
   }
   box.classList.remove("ng-host");
   box.style.padding = "";
+  const progressRow = box.querySelector(".sidebar-progress");
   box.innerHTML = html;
+  if (progressRow) box.prepend(progressRow);
+  progress();
   box.dataset.mode = "list";      // granular path owns the list now
   box.dataset.struct = structSig;
   box.dataset.key = "";           // not managed by setSide while in list mode

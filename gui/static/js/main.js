@@ -383,7 +383,10 @@ function route() {
     && Mesh.renderedChat === Mesh.chatId && !!$("#transcript");
   const staticHome = page === "chats" && !Mesh.chatId
     && Mesh.state?.available && Mesh.state?.user;
-  const finish = visibleChat || staticHome ? () => {} : beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
+  // With no selected room, list startup owns feedback; a second centered
+  // "Loading" message on the otherwise empty home adds no information.
+  const sidebarOwnsFeedback = page === "chats" && !Mesh.chatId;
+  const finish = visibleChat || staticHome || sidebarOwnsFeedback ? () => {} : beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
     label: page === "new" ? "Updating contacts…"
       : Mesh.detailsView ? "Loading chat info…" : "Loading…" });
   return Promise.resolve(PAGES[App.page]()).catch(() => {}).finally(finish);

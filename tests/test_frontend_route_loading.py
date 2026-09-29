@@ -54,11 +54,11 @@ assert.equal(home.classes.get('chat-active'),false);
 const close=setup({chatId:'room',rendered:'room',transcript:true,details:true});
 close.go('#/chats/room');assert.equal(close.cues,0);assert.equal(close.reads,1);
 assert.equal(close.content.innerHTML,'transcript');assert.equal(close.classes.get('chat-active'),true);
-// New rooms and unknown startup state retain feedback, and never reuse a transcript.
+// New rooms retain a content cue; empty-list startup gives ownership to sidebar.
 const change=setup({chatId:'old',rendered:'old',transcript:true});change.go('#/chats/new');
 assert.equal(change.cues,1);assert.equal(change.content.innerHTML,'<div class="chat-loading"></div>');
 assert.equal(change.reads,1);
-const cold=setup({state:null});cold.go('#/chats');assert.equal(cold.cues,1);assert.equal(cold.paints,0);
+const cold=setup({state:null});cold.go('#/chats');assert.equal(cold.cues,0);assert.equal(cold.paints,0);
 const info=setup({chatId:'room',rendered:'room',transcript:true});info.go('#/chats/room/details');
 assert.equal(info.cues,1);assert.equal(info.reads,1);
 // Paged feedback distinguishes an unchanged visible read from explicit history work.

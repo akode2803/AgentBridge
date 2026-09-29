@@ -2917,3 +2917,21 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   white-space: normal; text-align: center;
 }
 .msg-img img[hidden], .media-cell img[hidden] { display: none; }
+
+/* Startup feedback occupies one chat slot and yields to real entries. */
+.sidebar-progress { overflow:hidden; max-height:76px; animation:sidebar-progress-in 200ms ease-out; }
+.sidebar-progress-row { display:flex; align-items:center; gap:12px; padding:10px; min-height:64px; }
+.sidebar-progress-avatar { display:grid; place-items:center; width:40px; height:40px; flex:none;
+  border-radius:50%; color:var(--accent); background:var(--bg-alt); }
+.sidebar-progress .chat-name, .sidebar-progress .chat-last { display:block; }
+.sidebar-progress .chat-name { font-size:13px; color:var(--text-dim); }
+.sidebar-progress.is-leaving { animation:sidebar-progress-out 200ms ease-in forwards; }
+.sidebar-results-arrive > .chat-row { animation:sidebar-result-in 200ms ease-out; }
+@keyframes sidebar-progress-in { from { max-height:0; opacity:0; transform:translateY(-6px); } }
+@keyframes sidebar-progress-out { to { max-height:0; opacity:0; transform:translateY(-6px); } }
+@keyframes sidebar-result-in { from { opacity:.35; transform:translateY(6px); } }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-progress, .sidebar-progress.is-leaving, .sidebar-results-arrive > .chat-row { animation:none; }
+  .sidebar-progress.is-leaving { display:none; }
+  .sidebar-progress .spin-sm { animation:none; }
+}
