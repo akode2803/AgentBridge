@@ -33,6 +33,11 @@ const pageRead = createChatPageRead({fetchPage: ({chatId, cursor, anchor, limit,
 }});
 let pageOwner = null;
 let pageRetryTimer = null;
+export function isPagedChatViewReady() {
+  // Presentation readiness only; this never authorizes or supplies a page.
+  return !!pageOwner?.ready && pageOwner.current()
+    && Mesh.renderedChat === pageOwner.chatId && !!$("#transcript");
+}
 function abortPagedAux(owner) {
   owner?.auxAbort?.abort();
   if (owner) owner.auxAbort = null;
@@ -209,6 +214,7 @@ async function renderPagedChat(force, kind = null) {
   }
   const owner = pageOwner;
   if (owner.busy) return;
+  if (!Mesh.state) renderSideLoading();
   owner.busy = true;
   const mode = kind || (owner.browsing && pageRead.refreshPlan() ? "refresh" : "first");
   const before = $("#transcript");

@@ -3,18 +3,18 @@
 
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
-import { configureDiagnostics } from "./diagnostics.js";
+import { configureDiagnostics, diagnostic } from "./diagnostics.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
          applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState, isInitialSelectedViewReady,
          isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
 import { BrowserSession } from "./session.js";
-import { renderSidebar, clearSidebar, syncSidebarSelection } from "./sidebar.js";
+import { renderSidebar, clearSidebar, syncSidebarSelection, renderSideLoading } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
 import "./auth.js";
-import "./chat.js";
+import { isPagedChatViewReady } from "./chat.js";
 import "./details.js";
 import "./media.js";
 import "./search.js";
@@ -518,13 +518,15 @@ function routeInitialLocation() {
       // cover onto a bare shell mid-boot read as "the app signed out".
       // V111: the lock page IS a real first view — fade onto it.
       // V125: so is the connecting page (blind restore in progress).
-      if (!Mesh.state && !signedInHome && !isInitialSelectedViewReady()
+      if (!Mesh.state && !signedInHome && !isInitialSelectedViewReady() && !isPagedChatViewReady()
           && !document.getElementById("lock")
           && !document.getElementById("connecting")
           && App.page === "chats" && Date.now() - t0 < 45000) {
         setTimeout(tick, 80); return;
       }
       b.classList.add("done");
+      if (!Mesh.state && App.page === "chats") renderSideLoading();
+      diagnostic("route", {outcome:"completed"});
       setTimeout(() => b.remove(), 350);
     })();
   })();

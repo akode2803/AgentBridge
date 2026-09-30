@@ -75,7 +75,7 @@ export function renderSideLoading() {
   const box = $("#side-chats");
   if (!box || box.querySelector(".chat-row") || box.querySelector(".side-skel")) return;
   const owner = captureSessionEpoch();
-  syncSidebarProgress(box, {pending: !Mesh.chatId,
+  syncSidebarProgress(box, {pending: true,
     current: () => App.page === "chats" && sessionMayApply(owner)});
 }
 

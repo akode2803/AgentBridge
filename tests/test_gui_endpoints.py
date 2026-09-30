@@ -18,6 +18,7 @@ from agentbridge.gui.api_files import stage_dir
 from agentbridge.core.timekit import utcnow_iso
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
+from agentbridge.mesh.sync import SyncEngine
 
 from conftest import wait_for
 
@@ -87,7 +88,11 @@ def test_check_name_cloud_absence_requires_an_authoritative_mirror(rig, monkeypa
 
 
 # ------------------------------------------------------------- attachments
-def test_sealed_attachment_roundtrip(rig):
+def test_sealed_attachment_roundtrip(rig, monkeypatch):
+    # This endpoint test drives admission explicitly. Background delivery receipts
+    # may otherwise correctly retire its source between admission and capture.
+    monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
+    monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
     rig.app.local_inputs_enabled = True
     rig.signup()
     rig.peer_account("fable")
@@ -107,13 +112,15 @@ def test_sealed_attachment_roundtrip(rig):
     assert rec["name"] == "dot.png" and rec["bytes"] == len(PNG)
     assert rec["sha256"] == hashlib.sha256(PNG).hexdigest()
 
+    # Explicitly publish the queued blob/log before inspecting transport storage.
+    ctype, body = _admitted_file(rig, cid, sent["id"], rec["id"])
+
     # at rest the blob is SEALED — not the plaintext bytes
     at_rest = rig.app.mesh.tx.get_blob(P.file(cid, rec["id"]))
     assert at_rest is not None and at_rest != PNG
     assert at_rest.startswith(b"AB2E")
 
     # the endpoint decrypts + verifies provenance
-    ctype, body = _admitted_file(rig, cid, sent['id'], rec['id'])
     assert body == PNG and ctype == "image/png"
 
     # the other member decrypts it through their own keys
@@ -170,7 +177,11 @@ def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
     assert not staged.exists()
 
 
-def test_forward_reseals_attachments(rig):
+def test_forward_reseals_attachments(rig, monkeypatch):
+    # This endpoint test drives admission explicitly. Background delivery receipts
+    # may otherwise correctly retire its source between admission and capture.
+    monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
+    monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
     rig.app.local_inputs_enabled = True
     rig.signup()
     c1 = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]

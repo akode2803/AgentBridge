@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 from ..core.models import ChatSnapshot, MsgKind
 from ..mesh.page_operation import PageOperation
@@ -149,7 +150,13 @@ def capture_sidebar(app, mesh, token):
         if not app.validate_session_read(token):
             out['sidebar_status'] = 'session_changed'
             return out
+        started = time.perf_counter()
         row, resolved = _room(app, mesh, token, chat)
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/state', chat, 'sidebar',
+                              'ready' if resolved else 'pending',
+                              duration_ms=(time.perf_counter() - started) * 1000,
+                              rows=int(row is not None))
         if row is not None:
             out['chats'].append(row)
         if not resolved:

@@ -92,7 +92,7 @@ const deps={App,Mesh,diagnostic:()=>{},BrowserSession:{snapshot:()=>({binding})}
   syncPagedAuxControls:()=>{},syncDmHeaderPresence:()=>{},
   renderMeshChat:async()=>{paints++;return paintAllowed;},
   api:(path,body)=>{calls.push([path,body]);return Promise.resolve({ok:true});},
-  renderSidebar:()=>{sidebar++;},meshCaps:()=>({chat_page_v1:true}),
+  renderSidebar:()=>{sidebar++;},renderSideLoading:()=>{},meshCaps:()=>({chat_page_v1:true}),
   observeLockState:()=>{},CustomEvent:class{},location:{hash:''},
   V:{renderChatDetails:async()=>{}},
   refreshPagedSidebar:async()=>{},
