@@ -184,7 +184,7 @@ async function refreshOnce(rerender) {
   // V131: the server was updated under this page — reload ONCE to pick up
   // the matching frontend, but never mid-thought: not over an open modal,
   // not over a half-typed message. Until it's safe, keep polling armed.
-  const v = App.state.gui_version || "";
+  const v = App.state.frontend_revision || App.state.gui_version || "";
   if (!bootVersion) bootVersion = v;
   else if (v && v !== bootVersion) reloadArmed = true;
   if (reloadArmed

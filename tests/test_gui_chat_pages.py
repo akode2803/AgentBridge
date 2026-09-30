@@ -583,3 +583,78 @@ def test_presence_publication_race_defers_receipts_without_losing_history(page_a
     assert len(older['messages']) == 2
     assert not {m['id'] for m in first['messages']} & {m['id'] for m in older['messages']}
     assert all('receipt' not in m for m in older['messages'])
+
+
+def test_repeated_read_ack_keeps_admitted_page_available(page_app, monkeypatch):
+    """Reopening/scrolling a read room must not retire its canonical source."""
+    app, chat = page_app
+    app.mesh.post(chat, 'already read')
+    _ready(app, chat)
+    app.mesh.mark_read(chat)
+    runtime = _ready(app, chat)
+    assert _settled_page(app, chat)['status'] == 'page'
+    before = runtime.inputs(chat)[1]
+    raw = app.mesh.tx.get_doc(P.state(chat, app.mesh.user))
+    original = app.mesh.tx.put_doc
+    writes = []
+
+    def observed(path, data, *args, **kwargs):
+        writes.append(path)
+        return original(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(app.mesh.tx, 'put_doc', observed)
+    for _ in range(3):
+        app.mesh.mark_read(chat)
+    assert P.state(chat, app.mesh.user) not in writes
+    assert app.mesh.tx.get_doc(P.state(chat, app.mesh.user)) == raw
+    assert runtime.inputs(chat)[1] == before
+    assert _settled_page(app, chat)['status'] == 'page'
+    # An explicit unread flag must still be cleared even at the same cursor,
+    # and that real state mutation must still retire the previous page source.
+    app.mesh.set_chat_flag(chat, 'forced_unread', True)
+    runtime.ingest(chat)
+    writes.clear()
+    app.mesh.mark_read(chat)
+    assert P.state(chat, app.mesh.user) in writes
+    assert app.mesh.tx.get_doc(P.state(chat, app.mesh.user))['forced_unread'] is False
+    assert _page(app, chat)['status'] != 'page'
+
+
+def test_source_and_index_capture_excludes_background_claim(page_app, monkeypatch):
+    app, chat = page_app
+    app.mesh.post(chat, 'coherent capture')
+    runtime = _ready(app, chat)
+    assert _settled_page(app, chat)['status'] == 'page'
+    from agentbridge.store import overlay_index
+    original = overlay_index._ready
+    started, finished = threading.Event(), threading.Event()
+    failures, workers = [], []
+
+    def publish_claim():
+        started.set()
+        try:
+            reader = runtime.reader(chat)
+            with runtime.coordinator.publication_gate(runtime.store, reader.definition):
+                current = local_source.capture(runtime.store, reader.definition.source)
+                local_source.claim_collection(runtime.store, current)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    def during_index(conn, path, index):
+        worker = threading.Thread(target=publish_claim, daemon=True)
+        workers.append(worker)
+        worker.start()
+        assert started.wait(5)
+        # The publisher cannot change the source while this index is captured.
+        assert not finished.wait(.05)
+        return original(conn, path, index)
+
+    monkeypatch.setattr(overlay_index, '_ready', during_index)
+    _, receipt, index = runtime.inputs(chat)
+    assert receipt.source.raw == index.source
+    assert finished.wait(5)
+    for worker in workers:
+        worker.join(5)
+    assert not failures

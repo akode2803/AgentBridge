@@ -55,6 +55,7 @@ REASONS = frozenset({
     'page_unavailable', 'page_changed', 'receipt_presence_changed',
     'source_changed', 'position_changed', 'budget_exhausted',
     'inputs_unavailable', 'key_unavailable',
+    'local_inputs_changed', 'source_changed_during_finalization', 'index_pending',
 })
 MODES = frozenset({'first', 'older', 'refresh', 'latest', 'none', 'other'})
 OUTCOMES = frozenset({

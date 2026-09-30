@@ -57,7 +57,10 @@ def chat_page(app, req, mesh, token):
         try:
             reader, receipt, index = runtime.inputs(chat)
         except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
-                OSError, sqlite3.Error):
+                OSError, sqlite3.Error) as exc:
+            if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+                diagnostics.stage('/api/mesh/chat_page', chat, 'inputs',
+                                  'pending', str(exc), error_type=type(exc).__name__)
             result = _pending(token, 'local_inputs_pending')
             failure = runtime.preparation_health(chat)
             if failure == 'schema_preparation_failed':

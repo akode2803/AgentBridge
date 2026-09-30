@@ -244,6 +244,12 @@ class UserState:
     def mark_read(self, up_to_ns: int) -> None:
         with self._lock:
             state = self.get()
+            # Reopening an already-read room must not publish a new signed
+            # state document: that write retires the local canonical source
+            # (which also carries hidden/cleared state) until reingestion.
+            # Clearing an explicit unread flag is still a real mutation.
+            if int(state.get("read_ns", 0)) >= up_to_ns and not state.get("forced_unread"):
+                return
             merged: dict[str, Any] = {
                 "read_ns": max(int(state.get("read_ns", 0)), up_to_ns),
                 "read_ts": utcnow_iso(),

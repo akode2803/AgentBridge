@@ -96,6 +96,7 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "configured": True,
         "v": 2,
         "gui_version": app.app_version,
+        "frontend_revision": app.frontend_revision,
         "instance_id": token.app_identity,
         "server_pid": os.getpid(),
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
