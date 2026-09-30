@@ -86,6 +86,10 @@ def _room(app, mesh, token, chat):
                                   summary_only=True)
         for _ in range(4):
             value = operation.prepare(receipt, receipt, index)
+            if value.status not in ('prepared', 'restart'):
+                if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+                    diagnostics.stage('/api/mesh/state', chat, 'sidebar',
+                                      value.status, value.reason or 'none')
             if value.status == 'restart':
                 reader, receipt, index = runtime.inputs(chat)
                 continue
@@ -100,6 +104,10 @@ def _room(app, mesh, token, chat):
             if value.status != 'prepared':
                 return None, False
             final = app.finalize_page_read(token, value.prepared)
+            if final.status not in ('page', 'restart'):
+                if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+                    diagnostics.stage('/api/mesh/state', chat, 'sidebar',
+                                      final.status, final.reason or 'none')
             if final.status == 'restart':
                 reader, receipt, index = runtime.inputs(chat)
                 continue

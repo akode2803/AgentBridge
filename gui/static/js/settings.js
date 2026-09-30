@@ -5,6 +5,7 @@ import { $, esc, toast, fmtTime, setThemePref, themePref, enterToSend,
          setEnterToSend, ACCENTS, accentPref, setAccent } from "./util.js";
 import { ICONS } from "./icons.js";
 import { api } from "./api.js";
+import { configureDiagnostics } from "./diagnostics.js";
 import { csel, mountCsels } from "./csel.js";
 import { openModal, closeModal, swapModal, openPhotoViewer, confirmModal } from "./modal.js";
 import { App, Mesh, Settings, RULE_LABELS, beginRestartIntent,
@@ -127,6 +128,11 @@ function startSettingsPoll() {
         const kv = $("#conn-kv");
         const fresh = connKvRows(s2);
         if (kv && kv.innerHTML !== fresh) kv.innerHTML = fresh;
+        const toggle = $("#diagnostics-enabled");
+        if (toggle && !toggle.disabled) {
+          toggle.checked = s2.diagnostics?.enabled === true;
+          $("#diagnostics-note").textContent = toggle.checked ? "Logging is on." : "Logging is off.";
+        }
       } catch { /* transient — the next tick retries */ }
       return;
     }
@@ -802,7 +808,24 @@ async function renderSettings() {
       </div>
       `;
   } else if (section === "connection") {
+    const diagnostics = await api("/api/diagnostics");
+    if (!sessionMayApply(sessionTicket) || App.page !== "settings" || routeSeq !== App.routeSeq) return;
+    if (!diagnostics.error) s.diagnostics = diagnostics;
     html = `${back}<h1>About</h1>
+      <div class="card">
+        <h2>Diagnostics</h2>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="diagnostics-enabled" aria-label="Detailed diagnostic logging" ${s.diagnostics?.enabled ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span><b>Detailed diagnostic logging</b></span>
+        </div>
+        <p class="hint">Record request timings, paging, refreshes, rendering and failures locally.
+          Message contents, passwords and tokens are excluded. Older logs rotate automatically.</p>
+        <p class="hint" id="diagnostics-note" role="status">${s.diagnostics?.enabled ? "Logging is on." : "Logging is off."}</p>
+        <p class="hint" id="diagnostics-path">${esc(s.diagnostics?.path || "")}</p>
+      </div>
       <div class="card">
         <dl class="kv" id="conn-kv">${connKvRows(s)}</dl>
         <div class="row" style="margin-top:10px">
@@ -853,6 +876,27 @@ async function renderSettings() {
   // below extend the baseline as they land)
   liveData = liveSlice(ms, me);
   startSettingsPoll();
+
+  const diagnosticsToggle = $("#diagnostics-enabled");
+  if (diagnosticsToggle) diagnosticsToggle.addEventListener("change", async () => {
+    const enabled = diagnosticsToggle.checked;
+    const ticket = captureSessionEpoch();
+    diagnosticsToggle.disabled = true;
+    try {
+      const result = await api("/api/diagnostics", {enabled});
+      if (!sessionMayApply(ticket) || !diagnosticsToggle.isConnected) return;
+      if (result.error || typeof result.enabled !== "boolean") throw Error("diagnostics setting failed");
+      App.state.diagnostics = result;
+      configureDiagnostics(result.enabled);
+      diagnosticsToggle.checked = result.enabled;
+      $("#diagnostics-note").textContent = result.enabled ? "Logging is on." : "Logging is off.";
+      $("#diagnostics-path").textContent = result.path || "";
+    } catch {
+      if (!sessionMayApply(ticket) || !diagnosticsToggle.isConnected) return;
+      diagnosticsToggle.checked = !enabled;
+      toast("Could not change diagnostic logging. Please try again.", true);
+    } finally { diagnosticsToggle.disabled = false; }
+  });
 
   // theme tiles: click to pick System / Light / Dark; setThemePref applies it
   // live (data-theme flips → the whole app re-themes) and the accent bubble in

@@ -75,7 +75,7 @@ const pageRead = {
       evictedIds:[],hasMore:true,pageVersion};
   },
 };
-const deps={App,Mesh,BrowserSession:{snapshot:()=>({binding})},
+const deps={App,Mesh,diagnostic:()=>{},BrowserSession:{snapshot:()=>({binding})},
   captureSessionEpoch:()=>({id:'session'}),
   sessionMayApply:()=>true,meshStateSnapshot:()=>({lockEpoch:1}),
   pageRead,$,document,performance:{now:()=>1},

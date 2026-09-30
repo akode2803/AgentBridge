@@ -3,6 +3,7 @@
 
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
+import { configureDiagnostics } from "./diagnostics.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
@@ -77,6 +78,7 @@ export async function bootstrapSession() {
       if (decision.retryInstance) continue;
       if (!decision.accepted) return null;
       App.state = state;
+      configureDiagnostics(state.diagnostics?.enabled === true);
       return Object.freeze({ state, ticket: BrowserSession.capture() });
     }
     return null;

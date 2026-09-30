@@ -104,6 +104,7 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "paused": False,  # compatibility field; mesh-global pause is retired
         "user": binding["viewer"],
         "session_binding": binding,
+        "diagnostics": {"enabled": app.diagnostics.enabled},
         # V125: a blind session restore in flight — the frontend holds the
         # boot surface instead of flashing the sign-in page
         "restoring": bool(getattr(app, "restoring", False)),
@@ -210,6 +211,7 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         "max_upload_bytes": None,
         "connection": _connection(app),
         "session_binding": session_read_binding(token),
+        "diagnostics": {"enabled": app.diagnostics.enabled},
     }
     out["paused"] = False  # compatibility field; mesh-global pause is retired
     if mesh is None:

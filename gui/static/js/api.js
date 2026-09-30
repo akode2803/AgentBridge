@@ -3,8 +3,10 @@
 
 import { toast } from "./util.js";
 import { bindFilePreview } from "./files.js";
+import { diagnostic } from "./diagnostics.js";
 
 export async function api(path, body, options = {}) {
+  const started = performance.now();
   const opts = body === undefined ? {} : {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -23,6 +25,13 @@ export async function api(path, body, options = {}) {
   try {
     const r = await fetch(path, opts);
     out = await r.json();
+    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+      status:out?.error ? "error" : out?.status || "ok", reason:out?.reason,
+      rows:Array.isArray(out?.messages) ? out.messages.length : undefined});
+  } catch (error) {
+    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+      status:"error", error_type:error?.name === "AbortError" ? "AbortError" : "Error"});
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", abort);

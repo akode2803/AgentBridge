@@ -6,6 +6,7 @@ import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
 import { ICONS, BIRD, extIcon, agentIdentityBadge } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
+import { diagnostic } from "./diagnostics.js";
 import { pendingSendRows, reconcileSends, removeSend } from "./pending-send.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
@@ -232,7 +233,10 @@ async function renderPagedChat(force, kind = null) {
     : beginLoading(loadingHost, {label: mode === "older" ? "Loading earlier messages…" : "Loading chat…",
       placement: mode === "first" ? "center" : "corner", current:owner.current});
   try {
+    const readStarted = performance.now();
     const result = await pageRead.read(mode);
+    diagnostic("page_read", {mode, duration_ms:performance.now() - readStarted,
+      status:result.status, reason:result.reason, rows:result.messages?.length || 0});
     if (pageOwner !== owner || !owner.current()) return;
     if (["busy", "stale"].includes(result.status)) return;
     if (result.status !== "page") {
@@ -289,6 +293,8 @@ async function renderPagedChat(force, kind = null) {
     const painted = await renderMeshChat(force, null, {data, presentation, warmBase:true, paged:true,
       historyRead: mode === "older" || owner.browsing,
       aux, guard:() => pageOwner === owner && owner.current()});
+    diagnostic("page_paint", {mode, outcome:painted === false ? "skipped" : "completed",
+      duration_ms:performance.now() - readStarted, rows:result.messages?.length || 0});
     if (!painted || pageOwner !== owner || !owner.current()) return;
     const tr = $("#transcript");
     if (!tr) return;

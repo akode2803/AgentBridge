@@ -234,7 +234,7 @@ def test_real_bootstrap_orchestration_discards_stale_and_clears_on_exhaustion(tm
           caps: {{session_binding_v1: true}},
           session_binding: {{instance_id, session_generation: generation, viewer}}}});
         let replies = [];
-        const context = {{BrowserSession: boundary, App, Mesh, clearSessionCaches,
+        const context = {{configureDiagnostics:()=>{{}}, BrowserSession: boundary, App, Mesh, clearSessionCaches,
           V: {{}}, api: async () => replies.shift(), Promise, console}};
         vm.runInNewContext(body, context, {{filename: 'main.bootstrap.extracted.js'}});
         // First authoritative state establishes the binding and cache.
@@ -279,7 +279,7 @@ def test_real_bootstrap_starts_fresh_request_after_auth_epoch_invalidation(tmp_p
           caps: {{session_binding_v1: true}},
           session_binding: {{instance_id: 'same', session_generation: generation, viewer: 'aryan'}}}});
         const replies = [p('1'), old, p('3')];
-        const context = {{BrowserSession: boundary, App, V: {{}}, clearSessionCaches: () => {{ App.state = null; }},
+        const context = {{configureDiagnostics:()=>{{}}, BrowserSession: boundary, App, V: {{}}, clearSessionCaches: () => {{ App.state = null; }},
           api: async () => {{ calls += 1; return replies.shift(); }}, Promise, console}};
         vm.runInNewContext(body, context, {{filename: 'main.bootstrap.extracted.js'}});
         assert.equal((await context.runBootstrap()).state.session_binding.session_generation, '1');

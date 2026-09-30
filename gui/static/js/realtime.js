@@ -9,6 +9,7 @@ import { Mesh, isV2, meshCaps } from "./state.js";
 import { api } from "./api.js";
 import { handleNotifyFrame } from "./notify.js";
 import { V } from "./views.js";
+import { diagnostic } from "./diagnostics.js";
 
 let source = null;
 let connected = false;
@@ -55,6 +56,7 @@ function onEvent(frame) {
   const ref = String(frame.trace_ref || frame.id || `${frame.type}-${frame.ns || 0}`);
   const received = performance.now();
   eventCount += 1;
+  diagnostic("realtime", {outcome:"received"});
   observe("browser_received", ref, received);
   // desktop ping (R42): the server attached a notify lane when the R10 rules
   // said this deserves one; the module applies this window's prefs + focus
@@ -63,6 +65,7 @@ function onEvent(frame) {
   Promise.resolve(V.refresh(false)).then(() => {
     const refreshed = performance.now();
     lastRefreshMs = Math.max(0, refreshed - received);
+    diagnostic("realtime", {outcome:"completed", duration_ms:lastRefreshMs});
     observe("refetch_completed", ref, refreshed);
     requestAnimationFrame(() => requestAnimationFrame(
       () => observe("render_completed", ref)));
@@ -86,6 +89,7 @@ export function startRealtime() {
     onEvent(frame);
   };
   source.onerror = () => {
+    diagnostic("realtime", {outcome:"disconnected"});
     // the browser auto-reconnects an EventSource; mark down so the poll loop
     // resumes its normal cadence until the stream is back. A hard failure
     // (server gone) triggers a bounded manual retry.

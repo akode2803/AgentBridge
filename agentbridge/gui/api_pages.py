@@ -71,6 +71,9 @@ def chat_page(app, req, mesh, token):
                                       expected_position=expected, limit=limit,
                                       defer_receipts=defer_receipts)
         work = operation.prepare(receipt, receipt, index)
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/chat_page', chat, 'prepare',
+                              work.status, work.reason or 'none')
         if work.status == 'restart':
             continue
         if work.status == 'work':
@@ -86,6 +89,13 @@ def chat_page(app, req, mesh, token):
                 return _pending(token, work.reason, status='reset_required')
             return _pending(token, work.reason or 'page_unavailable', status='unavailable')
         final = app.finalize_page_read(token, work.prepared)
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/chat_page', chat, 'finalize',
+                              final.status, final.reason or 'none',
+                              rows=(len(final.result.page.messages) if final.result is not None
+                                    and final.result.page is not None else 0),
+                              raw_examined=(final.result.page.raw_examined if final.result is not None
+                                            and final.result.page is not None else 0))
         if final.status == 'restart':
             if final.reason == 'receipt_presence_changed':
                 # Receipt decorations must not make canonical history unreadable.
