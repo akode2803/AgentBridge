@@ -540,3 +540,46 @@ def test_page_operation_window_before_is_separate_from_strict_continuation(page_
     with pytest.raises(ValueError):
         api_pages.PageOperation(app.mesh, chat, source_reader=reader,
                                 before=key, window_before=key)
+
+
+@pytest.mark.parametrize("revoke_after_race", [False, True])
+def test_presence_publication_race_defers_receipts_without_losing_history(page_app, monkeypatch, revoke_after_race):
+    app, _self_chat = page_app
+    app.mesh.accounts.create_human('peer', 'peer-pass')
+    chat = api_chats.create_chat(app, Request(data={
+        'name': 'Presence race', 'members': ['peer'],
+    }))['chat']['id']
+    for index in range(4):
+        app.mesh.post(chat, f'row-{index}')
+    _ready(app, chat)
+    app.mesh.local_inputs.presence.ingest()
+    first = _settled_page(app, chat, limit='2')
+    assert first['status'] == 'page', first
+    assert first['metadata_status']['receipts'] == 'ready'
+    original = app.finalize_page_read
+    races = []
+
+    def publish_presence(token, prepared):
+        if prepared._fence.presence is not None:
+            # A real independent source publication after capture, before the
+            # final transaction. No message/key/membership input changes.
+            app.mesh.local_inputs.presence.ingest()
+            races.append(True)
+        result = original(token, prepared)
+        if revoke_after_race and result.reason == 'receipt_presence_changed':
+            app.mesh.membership.leave(chat)
+            _ready(app, chat)
+        return result
+
+    monkeypatch.setattr(app, 'finalize_page_read', publish_presence)
+    older = _settled_page(app, chat, limit='2', cursor=first['continuation'])
+    if revoke_after_race:
+        assert older['status'] in {'forbidden', 'reset_required', 'pending'}, older
+        assert 'messages' not in older
+        return
+    assert older['status'] == 'page', older
+    assert races == [True]
+    assert older['metadata_status']['receipts'] == 'pending'
+    assert len(older['messages']) == 2
+    assert not {m['id'] for m in first['messages']} & {m['id'] for m in older['messages']}
+    assert all('receipt' not in m for m in older['messages'])

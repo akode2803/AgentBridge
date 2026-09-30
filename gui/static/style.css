@@ -2910,6 +2910,8 @@ button:not(:disabled), .chat-row, .tag-opt, .search-hit, .snav, .arch-row,
   flex-shrink:0; padding:4px 12px; }
 .page-history-controls:empty { display:none; }
 .page-history-controls button { font:inherit; font-size:12px; }
+.page-history-controls .loading-status { position:static; transform:none; align-self:center; }
+.unread-incomplete { color:var(--text-dim); font-size:13px; }
 
 /* Attachment preview progress/failure stays inside the existing file button. */
 .file-preview-label {

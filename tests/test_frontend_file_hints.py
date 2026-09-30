@@ -14,14 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
 def test_file_urls_media_items_open_and_bulk_save_use_message_hints(tmp_path):
-    files = (ROOT / "gui/static/js/files.js").read_text()
+    files = (ROOT / "gui/static/js/files.js").read_text(encoding="utf-8")
     files = files[files.index("export const fileUrl"):files.index("export function monthLabel")]
     files = files.replace("export const ", "const ")
-    api = (ROOT / "gui/static/js/api.js").read_text()
+    api = (ROOT / "gui/static/js/api.js").read_text(encoding="utf-8")
     binder = api[api.index("export function bindOpenFile("):].replace("export function ", "function ")
-    media = (ROOT / "gui/static/js/media.js").read_text()
+    media = (ROOT / "gui/static/js/media.js").read_text(encoding="utf-8")
     render = media[media.index("  const render = {"):media.index("  const body =", media.index("  const render = {"))]
-    chat = (ROOT / "gui/static/js/chat.js").read_text()
+    chat = (ROOT / "gui/static/js/chat.js").read_text(encoding="utf-8")
     bulk = chat[chat.index("async function bulkSave("):chat.index("// ---- delete", chat.index("async function bulkSave("))]
     script = r'''
 import assert from 'node:assert/strict';
@@ -88,15 +88,15 @@ assert.equal(exits,0);
                             ("__BINDER__", binder), ("__BULK__", bulk)):
         script = script.replace(marker, json.dumps(snippet))
     path = tmp_path / "file_hints.mjs"
-    path.write_text(script)
+    path.write_text(script, encoding="utf-8")
     run = subprocess.run([shutil.which("node"), str(path)], text=True,
-                         capture_output=True, timeout=15)
+                         capture_output=True, timeout=15, encoding="utf-8")
     assert run.returncode == 0, run.stdout + run.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
 def test_preview_finite_retries_detached_node_and_success_cleanup(tmp_path):
-    source = (ROOT / "gui/static/js/files.js").read_text()
+    source = (ROOT / "gui/static/js/files.js").read_text(encoding="utf-8")
     helper = source[source.index("export function bindFilePreview("):].replace(
         "export function ", "function ")
     script = r'''
@@ -138,7 +138,7 @@ assert.equal(m.img.hidden,false); assert.equal(label.removed,true);
 assert.equal(timers.size,0,'load cancels outstanding retry');
 '''.replace("__HELPER__", json.dumps(helper))
     path = tmp_path / "file_preview.mjs"
-    path.write_text(script)
+    path.write_text(script, encoding="utf-8")
     run = subprocess.run([shutil.which("node"), str(path)], text=True,
-                         capture_output=True, timeout=15)
+                         capture_output=True, timeout=15, encoding="utf-8")
     assert run.returncode == 0, run.stdout + run.stderr

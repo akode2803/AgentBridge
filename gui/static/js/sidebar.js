@@ -345,7 +345,8 @@ function renderChatListSidebar() {
   const timeText = (c) => c.last ? fmtTime(c.last.ts) : "";
   const tagsHtml = (c) => {
     const hasCount = c.unread && !c.archived;
-    const dot = !hasCount && (c.forced_unread || c.unread_complete === false) && !c.archived;  // mark-unread: no number
+    const dot = !hasCount && c.forced_unread && !c.archived;
+    const unknown = !hasCount && !dot && c.unread_complete === false && !c.archived;
     // V115: an unread message tagging you (or replying to you) in a GROUP
     // shows @ in place of the count (WhatsApp) — a DM is all personal, so
     // it keeps the number
@@ -360,7 +361,8 @@ function renderChatListSidebar() {
       + (c.pinned ? `<span class="pin-ind" title="Pinned">${ICONS.pin}</span>` : "")
       + (hasCount ? `<span class="unread-badge${muted ? " muted" : ""}${at ? " at" : ""}"${
           at ? ' title="You were mentioned"' : ""}>${at ? "@" : `${c.unread}${c.unread_complete === false ? "+" : ""}`}</span>`
-        : dot ? `<span class="unread-badge dot"${c.unread_complete === false ? ' title="Unread count is still loading"' : ""}></span>` : "");
+        : dot ? `<span class="unread-badge dot" title="Marked unread"></span>`
+        : unknown ? `<span class="unread-incomplete" title="Unread count unavailable for older history" aria-label="Unread count unavailable for older history">…</span>` : "");
   };
   // DM/self rows show the other member's photo; group rows show the group
   // photo (else the name initial) — one shared helper.
@@ -611,6 +613,9 @@ async function runChatAction(act, c) {
       : await api("/api/mesh/mark_unread", { chat_id: chatId, unread: true });
     if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
+    if (!isUnread && r.ok === true) {
+      document.dispatchEvent(new CustomEvent("ab:manual-mark-unread", {detail:{chatId}}));
+    }
     if (!await refreshList(sessionTicket)) return;
   } else if (act === "pin") {
     const willPin = !c.pinned;

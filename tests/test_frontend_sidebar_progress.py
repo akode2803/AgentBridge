@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
 def test_sidebar_progress_lifetime_policy_and_reversal(tmp_path):
-    helper = (ROOT / "gui/static/js/sidebar_progress.js").read_text()
+    helper = (ROOT / "gui/static/js/sidebar_progress.js").read_text(encoding="utf-8")
     helper = helper.replace("export function ", "function ")
-    sidebar = (ROOT / "gui/static/js/sidebar.js").read_text()
+    sidebar = (ROOT / "gui/static/js/sidebar.js").read_text(encoding="utf-8")
     start = sidebar.index("function renderChatListSidebar()")
     end = sidebar.index("  // the mutable pieces of a row", start)
     policy = sidebar[start:end] + "  return {waiting, progress};\n}\n"
@@ -93,15 +93,15 @@ Mesh.state={...base,chats:[],chats_complete:true}; policy().progress();
 assert.equal(calls.at(-1).pending,false,'complete empty state is not loading');
 '''.replace("__HELPER__", json.dumps(helper)).replace("__POLICY__", json.dumps(policy))
     runner = tmp_path / "sidebar_progress.mjs"
-    runner.write_text(script)
+    runner.write_text(script, encoding="utf-8")
     run = subprocess.run([shutil.which("node"), str(runner)], text=True,
-                         capture_output=True, timeout=15)
+                         capture_output=True, timeout=15, encoding="utf-8")
     assert run.returncode == 0, run.stdout + run.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
 def test_full_sidebar_rebuild_retains_departing_row_for_animation(tmp_path):
-    source = (ROOT / "gui/static/js/sidebar.js").read_text()
+    source = (ROOT / "gui/static/js/sidebar.js").read_text(encoding="utf-8")
     start = source.index('  box.classList.remove("ng-host");', source.index("function renderChatListSidebar()"))
     end = source.index('  box.dataset.mode = "list";', start)
     rebuilt = source[start:end]
@@ -118,12 +118,12 @@ assert.equal(box.children[0],row,'same progress node survives list HTML replacem
 assert.equal(progressCalled,1);
 '''.replace("__REBUILD__", json.dumps(rebuilt))
     runner = tmp_path / "sidebar_rebuild.mjs"
-    runner.write_text(program)
+    runner.write_text(program, encoding="utf-8")
     run = subprocess.run([shutil.which("node"), str(runner)], text=True,
-                         capture_output=True, timeout=15)
+                         capture_output=True, timeout=15, encoding="utf-8")
     assert run.returncode == 0, run.stdout + run.stderr
 
-    css = (ROOT / "gui/static/style.css").read_text()
+    css = (ROOT / "gui/static/style.css").read_text(encoding="utf-8")
     motion = css[css.rindex("@media (prefers-reduced-motion: reduce)"):]
     assert ".sidebar-progress.is-leaving { display:none; }" in motion
     assert (".sidebar-progress, .sidebar-progress.is-leaving, "

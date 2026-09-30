@@ -286,10 +286,10 @@ def matches_store(conn, mesh, prepared, *, source_reader=None):
         reader = LocalPresenceSource(source_reader.coordinator, mesh.store)
         evidence = fence.presence
         if not reader.matches_in_transaction(conn, evidence.receipt):
-            return False
+            raise PageFenceChanged('receipt_presence_changed')
         if reader.capture_in_transaction(conn, evidence.receipt,
                                          tuple(name for name, _ in evidence.inputs.floors)) != evidence.inputs:
-            return False
+            raise PageFenceChanged('receipt_presence_changed')
     if fence.display_presence is not None:
         if source_reader is None:
             return False

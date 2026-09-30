@@ -177,6 +177,8 @@ def _overlays(inputs):
 
 
 def _failure(exc):
+    if type(exc) is page_fence.PageFenceChanged and exc.args == ('receipt_presence_changed',):
+        return PageWorkResult('restart', 'receipt_presence_changed')
     # A local write/refresh may retire the captured source between selection
     # and finalization. Retry this request from a fresh cut; the GUI caps its
     # attempts and returns pending if the source remains unavailable. Schema,
@@ -249,7 +251,7 @@ class PageOperation:
     def __init__(self, mesh, chat_id, *, before=None, expected_position=None, window_before=None,
                  window_inclusive=False,
                  limit=50, scan_budget=1000, limits=PageOperationLimits(), source_reader=None,
-                 summary_only=False):
+                 summary_only=False, defer_receipts=False):
         authority_observation._part(chat_id)
         self.mesh, self.chat = mesh, chat_id
         if source_reader is not None:
@@ -261,6 +263,9 @@ class PageOperation:
         if type(summary_only) is not bool:
             raise ValueError('invalid page summary mode')
         self.summary_only = summary_only
+        if type(defer_receipts) is not bool:
+            raise ValueError('invalid receipt mode')
+        self.defer_receipts = defer_receipts
         self._transport, self._store = mesh.tx, mesh.store
         self.viewer, self.machine = mesh.messaging.user, mesh.messaging.machine
         self.before = None if before is None else raw_pages._key(before)
@@ -405,7 +410,7 @@ class PageOperation:
                     pins_json = (self._pin_presentation(round_, snapshot, source_binding, index,
                         expected, sealer, history, verifier, proofs)
                         if self.source_reader is not None and not self.summary_only else None)
-                    receipts_json, presence = ((None, None) if self.summary_only else
+                    receipts_json, presence = ((None, None) if self.summary_only or self.defer_receipts else
                         self._receipt_presentation(round_, snapshot,
                             source_binding, index, expected, selection, proofs))
                     decoration, auxiliary, display_presence = self._decorate(
