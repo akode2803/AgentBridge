@@ -320,6 +320,109 @@ def test_open_replaces_same_length_stale_cache(page_app, monkeypatch):
     assert opened == [target] and target.read_bytes() == b'good'
 
 
+@pytest.mark.parametrize('cached', (b'good', b'evil'))
+def test_open_locked_cache_hands_off_fresh_private_copy(page_app, monkeypatch, cached):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good', name='report.pdf')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(cached)
+    opened = []
+    replace = api_files.os.replace
+
+    def locked_target(source, dest):
+        if dest == target:
+            raise PermissionError(errno.EACCES, 'file held by Windows handler')
+        return replace(source, dest)
+
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    result = api_files.open_file(app, Request(data={'chat_id': chat, 'id': rec['id'],
+                                                  'message_id': message.id}))
+    assert result == {'ok': True}, result
+    assert len(opened) == 1 and opened[0] != target
+    fresh = opened[0]
+    assert fresh.parent == target.parent and fresh.suffix == '.pdf'
+    assert fresh.read_bytes() == b'good' and target.read_bytes() == cached
+    assert set(target.parent.iterdir()) == {target, fresh}
+    if os.name != 'nt':
+        assert fresh.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('failure', ('lock', 'session', 'handler'))
+def test_open_locked_cache_cleans_unhanded_copy(page_app, monkeypatch, failure):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'evil')
+    opened = []
+
+    def locked_target(_source, dest):
+        assert dest == target
+        if failure == 'lock':
+            app.lock.path.write_text('{}', encoding='utf-8')
+            app.lock.lock()
+        elif failure == 'session':
+            monkeypatch.setattr(app, 'validate_session_read', lambda _token: False)
+        raise PermissionError(errno.EACCES, 'file held by Windows handler')
+
+    def open_path(path):
+        opened.append(path)
+        raise OSError('handler unavailable')
+
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', open_path)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    if failure == 'handler':
+        with pytest.raises(OSError, match='handler unavailable'):
+            api_files.open_file(app, req)
+        assert len(opened) == 1
+    else:
+        assert api_files.open_file(app, req)['error']
+        assert opened == []
+    assert set(target.parent.iterdir()) == {target}
+    assert target.read_bytes() == b'evil'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows denies replacing an open file')
+def test_reopen_attachment_while_windows_reader_holds_cache(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    opened = []
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    assert api_files.open_file(app, req) == {'ok': True}
+    target = opened[0]
+    with target.open('rb') as held:
+        assert api_files.open_file(app, req) == {'ok': True}
+        assert held.read() == b'attachment-data'
+    assert len(opened) == 2 and opened[1] != target
+    assert opened[1].suffix == target.suffix
+    assert opened[1].read_bytes() == b'attachment-data'
+
+
+def test_open_never_removes_a_copy_it_did_not_create(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    occupied = []
+    opened = []
+    write_private = api_files._write_private
+
+    def collision(path, data):
+        path.write_bytes(b'another request owns this file')
+        occupied.append(path)
+        write_private(path, data)
+
+    monkeypatch.setattr(api_files, '_write_private', collision)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    with pytest.raises(FileExistsError):
+        api_files.open_file(app, Request(data={'chat_id': chat, 'id': rec['id'],
+                                              'message_id': message.id}))
+    assert opened == [] and len(occupied) == 1
+    assert occupied[0].read_bytes() == b'another request owns this file'
+
+
 def test_save_dialog_before_authority_and_partial_batch(page_app, monkeypatch, tmp_path):
     app, chat = page_app
     first, rec = _posted(app, chat)

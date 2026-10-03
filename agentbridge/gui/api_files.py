@@ -345,16 +345,25 @@ def open_file(app, req, mesh, token) -> dict:
     cache = app.home / "files_cache" / chat_id
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / cache_filename(rec.get("name") or "file", blob_id)
-    temp = target.with_name(f'.{target.name}.{secrets.token_hex(8)}.tmp')
+    # Keep the extension so this private copy can also be handed to the OS if
+    # a Windows handler still holds target without delete sharing.
+    temp = target.with_name(f'.{target.stem}.{secrets.token_hex(8)}{target.suffix}')
+    created = handed_off = False
     try:
         _write_private(temp, raw)
-        os.replace(temp, target)  # same-sized stale bytes must be replaced too
+        created = True
+        try:
+            os.replace(temp, target)  # same-sized stale bytes must be replaced too
+        except PermissionError:
+            target = temp  # Never hand out unverified bytes from the old cache.
+        if not _current_handoff(app, token):
+            return {"error": "session changed"}
+        desktop.open_path(target)
+        handed_off = target == temp
+        return {"ok": True}
     finally:
-        temp.unlink(missing_ok=True)
-    if not _current_handoff(app, token):
-        return {"error": "session changed"}
-    desktop.open_path(target)
-    return {"ok": True}
+        if created and not handed_off:
+            temp.unlink(missing_ok=True)
 
 
 @authed_read_token
