@@ -530,11 +530,24 @@ function runAccessDetails(run, open) {
 // which was exactly the "unread counter while I'm using the chat" report.
 // Mirrors the server: mark_read also clears forced_unread (overlays.py).
 let legacyReadAck = null;
+function clearLegacyReadRetry(ack = legacyReadAck) {
+  if (!ack) return;
+  clearTimeout(ack.retryTimer);
+  ack.retryTimer = null;
+}
+function resetLegacyReadAck() {
+  clearLegacyReadRetry();
+  legacyReadAck = null;
+}
+document.addEventListener("ab:session-reset", resetLegacyReadAck);
+document.addEventListener("ab:lock-epoch", resetLegacyReadAck);
+window.addEventListener("hashchange", resetLegacyReadAck);
 document.addEventListener("ab:manual-mark-unread", (event) => {
   const chatId = event.detail?.chatId;
   if (!chatId || Mesh.chatId !== chatId) return;
   const invalidate = (ack) => {
     if (!ack) return;
+    clearLegacyReadRetry(ack);
     ack.version = (ack.version || 0) + 1;
     delete ack.lastSuccess;
     ack.failures = 0; ack.nextAt = 0;
@@ -565,6 +578,8 @@ function markReadNow(chatId) {
   if (!current()) return;
   const c = Mesh.state?.chats?.find((x) => x.id === chatId);
   const cutoff = paged ? owner.visibleReadNs || "0" : c?.last?.ns || 0;
+  if (!paged && legacyReadAck && (legacyReadAck.chatId !== chatId
+      || !viewReadMayApply(legacyReadAck.owner))) resetLegacyReadAck();
   const ack = paged ? (owner.readAck ||= {inflight:false, failures:0, nextAt:0})
     : legacyReadAck && legacyReadAck.chatId === chatId
       && viewReadMayApply(legacyReadAck.owner)
@@ -573,9 +588,11 @@ function markReadNow(chatId) {
   if (ack.lastSuccess === cutoff && !ack.manualUnreadArmed) return;
   Mesh.pendingRead = chatId;
   if (ack.inflight || Date.now() < ack.nextAt) return;
+  if (!paged) clearLegacyReadRetry(ack);
   ack.inflight = true;
   const ackVersion = ack.version || 0;
-  const requestCurrent = () => current() && (ack.version || 0) === ackVersion;
+  const requestCurrent = () => current() && (paged || legacyReadAck === ack)
+    && (ack.version || 0) === ackVersion;
   api("/api/mesh/read", { chat_id: chatId,
     ...(paged ? {up_to_ns:cutoff} : {}) }, {timeoutMs:8000})
     .then((response) => {
@@ -602,6 +619,17 @@ function markReadNow(chatId) {
       if (!requestCurrent()) return;
       ack.failures = Math.min(6, ack.failures + 1);
       ack.nextAt = Date.now() + Math.min(60000, 2000 * 2 ** (ack.failures - 1));
+      if (!paged) {
+        // Legacy polls read only when messages change. Retry this view's
+        // pending receipt even when no new message or focus event arrives.
+        clearLegacyReadRetry(ack);
+        ack.retryTimer = setTimeout(() => {
+          ack.retryTimer = null;
+          if (!requestCurrent() || meshCaps().chat_page_v1
+              || Mesh.pendingRead !== chatId || !document.hasFocus()) return;
+          markReadNow(chatId);
+        }, Math.max(0, ack.nextAt - Date.now()));
+      }
     })
     .finally(() => { ack.inflight = false; });
   // The sidebar timestamp is a JS Number; only the next canonical sidebar

@@ -34,6 +34,7 @@ const $ = selector => selector === '#transcript' ? tr : null;
 const api = (path, body) => {requests.push({path, body}); return Promise.resolve({ok:true});};
 const renderSidebar = () => {sidebarPaints += 1;};
 const document={addEventListener(){}};
+const window={addEventListener(){}};
 const App={page:'chats'};
 const captureViewRead=()=>({});
 const viewReadMayApply=()=>true;
