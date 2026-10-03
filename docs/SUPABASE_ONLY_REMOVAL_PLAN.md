@@ -1,10 +1,9 @@
 # Supabase-only and mandatory paging removal plan
 
-The user authorized complete production Folder transport removal and retirement
-of old-backend/full-transcript GUI compatibility on October 3. Finish the current
-diagnostics validation before these production changes. No user folder data,
-Mac files, credentials, or remote resources are part of this deletion. Preserve
-the old implementation in existing Git history, without an archive copy.
+Production Folder transport and old-backend/full-transcript GUI compatibility
+are retired. User folder data, machine files, credentials and remote resources
+are outside this source deletion. Existing Git history preserves the removed
+implementation without an archive copy. The completed design sequence follows.
 
 ## Dependencies and sequence
 
@@ -58,7 +57,7 @@ attachment/CI paths. The attachment ceiling implementation already matched.
 The retired legacy retry was ported to current native paged acknowledgments:
 failures acquire a fresh canonical page before bounded automatic retry, with
 owner, session, lock, focus, history and manual-unread cancellation fences.
-No publication is authorized. The focused attachment/startup/native-ACK gate passed 225 tests with five
+The focused attachment/startup/native-ACK gate passed 225 tests with five
 expected skips. The complete combined suite passed 3071 tests with 15 expected
 skips in 622.65 seconds; Ruff and all 36 frontend module checks pass.
 
@@ -72,4 +71,4 @@ conversion and active documentation are complete. The repaired source
 gate passed 731 tests with four expected skips. Offline integrated implementation
 validation is complete. Live Supabase authorization/Realtime, independently owned
 peers, native Windows/Mac behavior and real-use performance remain acceptance
-gaps; no publication or runtime activation has occurred.
+gaps; source validation does not establish runtime activation.

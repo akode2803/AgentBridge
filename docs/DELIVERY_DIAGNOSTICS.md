@@ -2,7 +2,7 @@
 
 ## Source coverage
 
-Integrated with the existing authenticated, opt-in GUI diagnostics setting. Existing private files remain events.jsonl/events.1.jsonl/events.2.jsonl, each bounded to 4 MiB. This work did not activate the changes in a normal app instance; runtime activation remains parent-owned. No live capture, app restart, security change, credential/member creation or release action was performed in this slice.
+Integrated with the existing authenticated, opt-in GUI diagnostics setting. Existing private files remain events.jsonl/events.1.jsonl/events.2.jsonl, each bounded to 4 MiB. Source validation does not establish runtime activation or live capture.
 
 Correlated local phases cover browser HTTP start/JSON settlement, server dispatch, envelope mint/cache commit, outbox attempt/provider handler return/retry/dead outcome, log transport reads/ingestion, source ingestion request/claim/preparation, canonical page prepare/finalize, observed root/local-source Store acquisition/body/commit/rollback, SSE emission/reception/refresh queue/settlement, exact canonical DOM and covering native acknowledgment. Browser sender durations start at native POST dispatch. Incoming durations start at local SSE message reception. Neither measures an independent peer end-to-end. Optimistic pending rows and animation-frame opportunities are excluded from canonical DOM acceptance. Acknowledgments use exact ns from canonical IDs or safe/string integer representations; JavaScript's rounded large Numbers cannot establish coverage.
 
@@ -57,40 +57,20 @@ Holder evidence is one observed in-process holder at acquisition entry. It does 
 
 Use monotonic_ms only within the same clock_ref; browser tab and server clocks differ. Persisted ts is write time, not a causal timestamp. Nested phases overlap: never sum page/input/DB/transport totals indiscriminately. Provider handler return is not remote-peer delivery. Canonical DOM is not physical display paint.
 
-## Earlier offline verification
+## Offline validation and remaining acceptance
 
-213 affected Python/Node tests passed in 38.12 seconds, including privacy, sampling, rotation, faulty recorder/disk, original exceptions, concurrent SQLite holder/wait, deferred opt-out, browser reset/optimistic exclusion/exact ack, blocked-disk admission, existing outbox/page/read-ack/Realtime/local-input behavior. Guard elapsed 38.65 s; peak owned test process tree 147488768 bytes (140.66 MiB), cap 384 MiB, 90-second deadline; process reaped. Subsequent exact-large-nanosecond browser regressions: 2 passed in 0.35 s. Final independent-review regressions: 15 passed in 2.26 s, including persisted-enable writer startup failure and SSE/DOM/ack before POST-response reconciliation. Reconciliation preserves the first DOM/ack observations and emits separately labeled sender delays rather than duplicate DOM/ack stages.
+The complete integrated suite passed **3071 tests, 15 expected skips and 72
+warnings in 622.65 seconds**. Ruff and all 36 frontend module checks pass.
+Independent review found no material blocker. PR34 attachment fixes are retained
+and its legacy retry invariant is ported to paged native acknowledgments. No new
+update/restart warning UI was added.
 
-At the diagnostics checkpoint, the complete sequential suite passed 3025 tests
-with 16 expected skips in 549.70 seconds. Later Supabase-only and mandatory
-paging changes are a separate validation boundary; their current gates and
-remaining full-suite work are in `CLOUD_MIGRATION_CHECKPOINT.md`. The frontend
-now has 36 modules after retiring warm-context. Scoped Ruff passes. No real-use
-overhead/latency claim is made.
+The projection fixture uses a diagnostics-module-local clock to model sparse
+observations below the 64-row/second admission limit. It retains finalize,
+source-budget, sidebar and privacy assertions and requires zero rate drops.
+Separate tests cover burst limits. This fixture does not establish production
+timing or retention under a burst.
 
-Synthetic disposable logger probe: 5000 hooks each mode, tracemalloc enabled. Disabled mean 0.51 microseconds/hook; unsampled enabled 90.16 microseconds/hook; sampled 100.50 microseconds/hook. Traced peak allocation below 394 KiB, process tree peak 27754496 bytes (26.47 MiB), elapsed 1.12 s, reaped. Sampling at 100% intentionally hit the 64-row rate budget: 4936 omissions were counted and only about 19 KiB persisted. This is logger overhead under allocation tracing, not normal app latency or full tracing completeness.
-
-## Evidence and next step
-
-Artifacts: delivery-final-affected.log, delivery-final-affected-guard.json, delivery-overhead-results.json, delivery-overhead-guard.json. Independent review identified transaction-overflow locking and off/on late-completion defects; both were corrected with regressions. Follow-up review status is recorded separately when received.
-
-PR 34 merged at `e98e9dd9` and its reviewed attachment changes are integrated
-locally, with the legacy retry invariant ported to native paged acknowledgments.
-No new update/restart warning UI was added. The parent owns any requested runtime
-activation and independent receiver coordination. Enable existing opt-in logging
-for an authorized real-use capture; native-platform behavior, deployed Supabase
-authorization/Realtime, independent peers and overhead/latency remain acceptance
-gaps. Offline DOM/retention and session/lock gates are recorded in the current
-checkpoint. These new source changes remain unpublished.
-
-The integrated projection fixture uses a diagnostics-module-local clock to
-model sparse observations below the 64-row/second admission limit. It retains
-finalize, source-budget, sidebar and privacy assertions, and requires zero rate
-drops. Separate burst-limit tests retain their real admission/drop assertions.
-This fixture is not evidence of production timing or retention under a burst.
-
-The final integrated suite after transport/legacy retirement passed **3071 tests,
-15 expected skips and 72 warnings in 622.65 seconds**. Ruff and all 36 frontend
-module checks pass. All 200 non-document manifest entries remained unchanged
-during the run. See `CLOUD_MIGRATION_CHECKPOINT.md` for full evidence and the
-separate live/native/performance acceptance gaps.
+Deployed Supabase authorization/Realtime, independent peers, native platforms,
+rich media and real-use latency/overhead remain acceptance gaps. See
+[CLOUD_MIGRATION_CHECKPOINT.md](CLOUD_MIGRATION_CHECKPOINT.md).
