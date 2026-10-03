@@ -277,24 +277,21 @@ def test_request_run_due_failure_finishes_scheduler_lease(rig, monkeypatch):
     assert state.failures == 1
 
 
-def test_inputs_rechecks_index_inside_finalization(rig, monkeypatch):
+def test_inputs_checks_index_inside_atomic_capture(rig, monkeypatch):
     mesh, _provider = rig
     runtime = mesh.local_inputs
     runtime.ingest(CHAT)
     original = overlay_index._ready
-    calls = 0
 
     def index_rebuilt(conn, database_path, expected):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise overlay_index.OverlayIndexUnavailable("index_changed")
+        assert conn.in_transaction
+        conn.execute('UPDATE overlay_index_ready SET generation=generation+1 WHERE source=?',
+                     (expected.source.source_id,))
         return original(conn, database_path, expected)
 
     monkeypatch.setattr(overlay_index, "_ready", index_rebuilt)
-    with pytest.raises(overlay_index.OverlayIndexUnavailable, match="index_changed"):
+    with pytest.raises(overlay_index.OverlayIndexUnavailable, match="changed"):
         runtime.inputs(CHAT)
-    assert calls == 2
 
 
 def test_mesh_start_stop_and_watcher_fallback_are_bounded(rig, monkeypatch):

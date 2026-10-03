@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -19,11 +20,18 @@ from . import local_source as owner, source_selectors as scopes
 
 MAX_STORES = 64
 MAX_PENDING = 64
+MAX_QUARANTINED = 256
+_NORMAL_TOKEN = re.compile(r'[0-9a-f]{64}\Z')
+_SENTINEL_TOKEN = re.compile(r'q[0-9a-f]{63}\Z')
 _SCHEMA = {
     'mutation_root': 'CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)',
     'mutation_stores': 'CREATE TABLE mutation_stores(path TEXT PRIMARY KEY,incarnation TEXT NOT NULL,source_epoch TEXT NOT NULL)',
     'mutation_intents': 'CREATE TABLE mutation_intents(token TEXT PRIMARY KEY)',
     'mutation_scopes': 'CREATE TABLE mutation_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
+}
+_QUARANTINE_SCHEMA = {
+    'quarantine_intents': 'CREATE TABLE quarantine_intents(token TEXT PRIMARY KEY,sentinel TEXT NOT NULL)',
+    'quarantine_scopes': 'CREATE TABLE quarantine_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
 }
 
 
@@ -60,6 +68,13 @@ class MutationCoordinator:
                 for statement in _SCHEMA.values():
                     conn.execute(statement)
                 conn.execute('INSERT INTO mutation_root VALUES(1,?,?)', (self.identity, secrets.token_hex(16)))
+            quarantine = [conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
+                          for name in _QUARANTINE_SCHEMA]
+            if all(value is None for value in quarantine):
+                for statement in _QUARANTINE_SCHEMA.values():
+                    conn.execute(statement)
+            elif any(value is None for value in quarantine):
+                raise owner.SourceChanged('quarantine_schema_incomplete')
             self.epoch = self._schema(conn)
         self.path.chmod(0o600)
 
@@ -81,9 +96,10 @@ class MutationCoordinator:
             conn.close()
 
     def _schema(self, conn):
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?,?,?) LIMIT 1", tuple(_SCHEMA)).fetchone():
+        tables = tuple(_SCHEMA) + tuple(_QUARANTINE_SCHEMA)
+        if conn.execute(f"SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN ({','.join('?' for _ in tables)}) LIMIT 1", tables).fetchone():
             raise owner.SourceChanged('unexpected_mutation_trigger')
-        for name, sql in _SCHEMA.items():
+        for name, sql in {**_SCHEMA, **_QUARANTINE_SCHEMA}.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
         row = conn.execute('SELECT identity,epoch FROM mutation_root WHERE singleton=1').fetchone()
@@ -92,15 +108,62 @@ class MutationCoordinator:
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
         tokens = conn.execute('SELECT token FROM mutation_intents LIMIT ?', (MAX_PENDING + 1,)).fetchall()
-        if len(tokens) > MAX_PENDING or any(type(t[0]) is not str or len(t[0]) != 64 for t in tokens):
+        if len(tokens) > MAX_PENDING or any(type(t[0]) is not str or
+                not (_NORMAL_TOKEN.fullmatch(t[0]) or _SENTINEL_TOKEN.fullmatch(t[0]))
+                for t in tokens):
             raise owner.SourceChanged('invalid_pending_intents')
+        if conn.execute('SELECT 1 FROM mutation_scopes LIMIT 1 OFFSET ?',
+                        (MAX_PENDING * 8,)).fetchone():
+            raise owner.SourceChanged('pending_selector_budget')
+        if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+            raise owner.SourceChanged('invalid_pending_selector')
+        sentinels = {}
         for (token,) in tokens:
-            count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM mutation_scopes WHERE token=? LIMIT 9)', (token,)).fetchone()[0]
-            if not 1 <= count <= 8:
+            rows = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9',
+                                (token,)).fetchall()
+            if not 1 <= len(rows) <= 8:
                 raise owner.SourceChanged('pending_intent_scope_mismatch')
+            if _SENTINEL_TOKEN.fullmatch(token):
+                sentinels[token] = tuple(rows)
         if conn.execute('SELECT 1 FROM mutation_scopes s LEFT JOIN mutation_intents i ON s.token=i.token WHERE i.token IS NULL LIMIT 1').fetchone():
             raise owner.SourceChanged('orphan_mutation_scope')
+        self._quarantine_audit(conn, sentinels)
         return row[1]
+
+    @staticmethod
+    def _quarantine_audit(conn, sentinels):
+        """Bounded archive audit: an archived token must retain its old fence."""
+        if conn.execute('SELECT 1 FROM quarantine_intents LIMIT 1 OFFSET ?',
+                        (MAX_QUARANTINED,)).fetchone():
+            raise owner.SourceChanged('quarantine_budget')
+        if conn.execute('SELECT 1 FROM quarantine_scopes LIMIT 1 OFFSET ?',
+                        (MAX_QUARANTINED * 8,)).fetchone():
+            raise owner.SourceChanged('quarantine_scope_budget')
+        if conn.execute("SELECT 1 FROM quarantine_intents WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(sentinel)!='text' OR length(CAST(sentinel AS BLOB))>64 LIMIT 1").fetchone():
+            raise owner.SourceChanged('invalid_quarantine_intent')
+        if conn.execute("SELECT 1 FROM quarantine_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+            raise owner.SourceChanged('invalid_quarantine_scope')
+        archived = conn.execute('SELECT token,sentinel FROM quarantine_intents LIMIT ?',
+                                (MAX_QUARANTINED + 1,)).fetchall()
+        if len(archived) > MAX_QUARANTINED:
+            raise owner.SourceChanged('quarantine_budget')
+        grouped = {}
+        for token, kind, value in conn.execute(
+                'SELECT token,kind,value FROM quarantine_scopes ORDER BY token,kind,value LIMIT ?',
+                (MAX_QUARANTINED * 8 + 1,)):
+            grouped.setdefault(token, []).append((kind, value))
+        seen = set()
+        for token, sentinel in archived:
+            if (not _NORMAL_TOKEN.fullmatch(token) or sentinel not in sentinels
+                    or token in seen):
+                raise owner.SourceChanged('quarantine_fence_missing')
+            seen.add(token)
+            if tuple(grouped.get(token, ())) != sentinels[sentinel]:
+                raise owner.SourceChanged('quarantine_scope_mismatch')
+        if set(grouped) != seen:
+            raise owner.SourceChanged('orphan_quarantine_scope')
+        if set(sentinels) != {sentinel for _, sentinel in archived}:
+            raise owner.SourceChanged('orphan_quarantine_fence')
 
     def _stores(self, conn):
         if conn.execute("SELECT 1 FROM mutation_stores WHERE typeof(path)!='text' OR length(CAST(path AS BLOB))>16384 OR typeof(incarnation)!='text' OR length(CAST(incarnation AS BLOB))>4096 OR typeof(source_epoch)!='text' OR length(source_epoch)!=32 LIMIT 1").fetchone():
@@ -179,7 +242,12 @@ class MutationCoordinator:
         changes = scopes.selectors(changes, limit=8)
         with self._transaction() as conn:
             self._schema(conn)
-            count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM mutation_intents LIMIT ?)', (MAX_PENDING,)).fetchone()[0]
+            for kind, value in conn.execute("SELECT s.kind,s.value FROM mutation_scopes s JOIN mutation_intents i ON i.token=s.token WHERE substr(i.token,1,1)='q' LIMIT ?", (MAX_PENDING * 8 + 1,)):
+                blocked = scopes.selectors((scopes.Selector(kind, value),), limit=1)[0]
+                if any(_overlap(blocked, change) for change in changes):
+                    raise owner.SourceChanged('mutation_scope_quarantined')
+            count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM mutation_intents LIMIT ?)',
+                                 (MAX_PENDING,)).fetchone()[0]
             if count >= MAX_PENDING:
                 raise owner.SourceChanged('pending_mutation_budget')
             token = secrets.token_hex(32)
@@ -188,6 +256,55 @@ class MutationCoordinator:
             self._retire(conn, changes)
             result = MutationIntent(str(self.path), self.epoch, token, changes)
         return result
+
+    def quarantine(self, expected_tokens: tuple[str, ...]):
+        """Operator CAS: preserve opaque intents and keep old-process fences.
+
+        This isolates active capacity; it is not proof of a remote outcome and
+        does not make any affected page source ready. Call only after stopping
+        old writers, which cannot reject overlap before creating new intents.
+        """
+        if (type(expected_tokens) is not tuple or not 1 <= len(expected_tokens) <= MAX_PENDING
+                or len(set(expected_tokens)) != len(expected_tokens)
+                or any(type(token) is not str or _NORMAL_TOKEN.fullmatch(token) is None
+                       for token in expected_tokens)):
+            raise ValueError('invalid expected pending tokens')
+        with self._transaction() as conn:
+            self._schema(conn)
+            pending = conn.execute('SELECT token FROM mutation_intents ORDER BY token LIMIT ?',
+                                   (MAX_PENDING + 1,)).fetchall()
+            current = tuple(token for (token,) in pending if _NORMAL_TOKEN.fullmatch(token))
+            if set(current) != set(expected_tokens):
+                raise owner.SourceChanged('quarantine_pending_changed')
+            existing = conn.execute('SELECT count(*) FROM (SELECT 1 FROM quarantine_intents LIMIT ?)',
+                                    (MAX_QUARANTINED + 1,)).fetchone()[0]
+            if existing + len(current) > MAX_QUARANTINED:
+                raise owner.SourceChanged('quarantine_budget')
+            groups = {}
+            for token in current:
+                rows = tuple(conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value',
+                                          (token,)).fetchall())
+                groups.setdefault(rows, []).append(token)
+            sentinel_count = len(pending) - len(current)
+            if not groups or sentinel_count + len(groups) >= MAX_PENDING:
+                raise owner.SourceChanged('quarantine_no_capacity_gain')
+            issued = []
+            for rows, members in groups.items():
+                sentinel = 'q' + secrets.token_hex(32)[:63]
+                while conn.execute('SELECT 1 FROM mutation_intents WHERE token=?', (sentinel,)).fetchone():
+                    sentinel = 'q' + secrets.token_hex(32)[:63]
+                for token in members:
+                    conn.execute('INSERT INTO quarantine_intents VALUES(?,?)', (token, sentinel))
+                    conn.executemany('INSERT INTO quarantine_scopes VALUES(?,?,?)',
+                                     ((token, kind, value) for kind, value in rows))
+                    conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
+                    conn.execute('DELETE FROM mutation_intents WHERE token=?', (token,))
+                conn.execute('INSERT INTO mutation_intents VALUES(?)', (sentinel,))
+                conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)',
+                                 ((sentinel, kind, value) for kind, value in rows))
+                issued.append((sentinel, rows, len(members)))
+            self._schema(conn)  # Validate the replacement fence before commit.
+            return tuple(issued)
 
     def complete(self, value):
         """Only after this exact external call definitively returns success.
@@ -201,6 +318,8 @@ class MutationCoordinator:
         changes = scopes.selectors(value.selectors, limit=8)
         if path != str(self.path) or epoch != self.epoch or type(token) is not str or len(token) != 64:
             raise ValueError('foreign mutation intent')
+        if _SENTINEL_TOKEN.fullmatch(token):
+            raise ValueError('quarantine fence cannot complete')
         with self._transaction() as conn:
             self._schema(conn)
             pending = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9', (token,)).fetchall()

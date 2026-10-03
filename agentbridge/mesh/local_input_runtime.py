@@ -13,7 +13,7 @@ from ..store import local_source, overlay_index, source_selectors, staged_source
 from ..store.source_publication import SourcePublisher
 from ..transport.local_mutations import LocalMutationTransport
 from ..transport.raw_documents import collect_document_batches, RawCollectionUnavailable
-from .local_page_source import LocalPageSource
+from .local_page_source import LocalPageSource, LocalSourceReceipt
 from .source_schedule import SourceSchedule
 
 
@@ -120,27 +120,26 @@ class LocalInputRuntime:
         reader = self.reader(chat)
         return local_source.health(self.store, reader.definition.source)
 
-    @staticmethod
-    def _index(reader, receipt):
-        with reader._read(receipt) as (conn, receipt):
-            overlay_index._schema(conn)
+    def inputs(self, chat):
+        """Capture ready source and index at one bounded coordinator/SQLite cut.
+
+        Separate capture/index/finalization transactions can straddle a harmless
+        background collection claim or publication and report pending although
+        each generation was ready. This is raw input capture, not authority;
+        PageOperation still verifies and finalizes its own canonical result.
+        """
+        reader = self.reader(chat)
+        with self.coordinator.finalization_cut(self.store, reader.definition) as (conn, source):
+            receipt = LocalSourceReceipt(reader.chat, str(self.coordinator.path),
+                                         self.coordinator.epoch, source)
             row = conn.execute('SELECT build,schema FROM overlay_index_ready WHERE source=? '
                                "AND typeof(build)='text' AND length(CAST(build AS BLOB))=32 "
                                "AND typeof(schema)='integer'",
-                               (receipt.source.raw.source_id,)).fetchone()
+                               (source.raw.source_id,)).fetchone()
             if row is None:
                 raise overlay_index.OverlayIndexUnavailable('index_pending')
-            index = overlay_index.OverlayIndexPosition(receipt.source.raw, reader.chat, *row)
+            index = overlay_index.OverlayIndexPosition(source.raw, reader.chat, *row)
             index = overlay_index._wanted(index, reader.store.path)
-            overlay_index._ready(conn, reader.store.path, index)
-            return index
-
-    def inputs(self, chat):
-        """Foreground: no collection, registration, index rebuild or authority."""
-        reader = self.reader(chat)
-        receipt = reader.capture()
-        index = self._index(reader, receipt)
-        with reader.finalization(receipt) as conn:
             overlay_index._ready(conn, self.store.path, index)
         return reader, receipt, index
 

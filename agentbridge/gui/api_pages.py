@@ -52,11 +52,15 @@ def chat_page(app, req, mesh, token):
     before = continuation.before if continuation else anchor.before if anchor else None
     expected = continuation.position if continuation else None
     operation = None
+    defer_receipts = False
     for _ in range(4):
         try:
             reader, receipt, index = runtime.inputs(chat)
         except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
-                OSError, sqlite3.Error):
+                OSError, sqlite3.Error) as exc:
+            if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+                diagnostics.stage('/api/mesh/chat_page', chat, 'inputs',
+                                  'pending', str(exc), error_type=type(exc).__name__)
             result = _pending(token, 'local_inputs_pending')
             failure = runtime.preparation_health(chat)
             if failure == 'schema_preparation_failed':
@@ -67,8 +71,12 @@ def chat_page(app, req, mesh, token):
                                       before=continuation.before if continuation else None,
                                       window_before=anchor.before if anchor else None,
                                       window_inclusive=anchor.inclusive if anchor else False,
-                                      expected_position=expected, limit=limit)
+                                      expected_position=expected, limit=limit,
+                                      defer_receipts=defer_receipts)
         work = operation.prepare(receipt, receipt, index)
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/chat_page', chat, 'prepare',
+                              work.status, work.reason or 'none')
         if work.status == 'restart':
             continue
         if work.status == 'work':
@@ -84,7 +92,20 @@ def chat_page(app, req, mesh, token):
                 return _pending(token, work.reason, status='reset_required')
             return _pending(token, work.reason or 'page_unavailable', status='unavailable')
         final = app.finalize_page_read(token, work.prepared)
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/chat_page', chat, 'finalize',
+                              final.status, final.reason or 'none',
+                              rows=(len(final.result.page.messages) if final.result is not None
+                                    and final.result.page is not None else 0),
+                              raw_examined=(final.result.page.raw_examined if final.result is not None
+                                            and final.result.page is not None else 0))
         if final.status == 'restart':
+            if final.reason == 'receipt_presence_changed':
+                # Receipt decorations must not make canonical history unreadable.
+                # Recompute from fresh raw inputs with all authority checks; the
+                # response explicitly reports unknown receipts for this pass.
+                defer_receipts = True
+                operation = None
             continue
         if final.status != 'page' or final.result is None:
             return _pending(token, final.reason or 'page_changed', status=final.status)

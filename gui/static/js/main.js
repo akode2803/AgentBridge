@@ -3,17 +3,18 @@
 
 import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
+import { configureDiagnostics, diagnostic } from "./diagnostics.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
          applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState, isInitialSelectedViewReady,
          isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
 import { BrowserSession } from "./session.js";
-import { renderSidebar, clearSidebar, syncSidebarSelection } from "./sidebar.js";
+import { renderSidebar, clearSidebar, syncSidebarSelection, renderSideLoading } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
 import "./auth.js";
-import "./chat.js";
+import { isPagedChatViewReady } from "./chat.js";
 import "./details.js";
 import "./media.js";
 import "./search.js";
@@ -77,6 +78,7 @@ export async function bootstrapSession() {
       if (decision.retryInstance) continue;
       if (!decision.accepted) return null;
       App.state = state;
+      configureDiagnostics(state.diagnostics?.enabled === true);
       return Object.freeze({ state, ticket: BrowserSession.capture() });
     }
     return null;
@@ -182,7 +184,7 @@ async function refreshOnce(rerender) {
   // V131: the server was updated under this page — reload ONCE to pick up
   // the matching frontend, but never mid-thought: not over an open modal,
   // not over a half-typed message. Until it's safe, keep polling armed.
-  const v = App.state.gui_version || "";
+  const v = App.state.frontend_revision || App.state.gui_version || "";
   if (!bootVersion) bootVersion = v;
   else if (v && v !== bootVersion) reloadArmed = true;
   if (reloadArmed
@@ -383,7 +385,10 @@ function route() {
     && Mesh.renderedChat === Mesh.chatId && !!$("#transcript");
   const staticHome = page === "chats" && !Mesh.chatId
     && Mesh.state?.available && Mesh.state?.user;
-  const finish = visibleChat || staticHome ? () => {} : beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
+  // With no selected room, list startup owns feedback; a second centered
+  // "Loading" message on the otherwise empty home adds no information.
+  const sidebarOwnsFeedback = page === "chats" && !Mesh.chatId;
+  const finish = visibleChat || staticHome || sidebarOwnsFeedback ? () => {} : beginLoading(host, { current, placement: page === "new" ? "corner" : "center",
     label: page === "new" ? "Updating contacts…"
       : Mesh.detailsView ? "Loading chat info…" : "Loading…" });
   return Promise.resolve(PAGES[App.page]()).catch(() => {}).finally(finish);
@@ -501,17 +506,27 @@ function routeInitialLocation() {
     if (!b) return;
     const t0 = Date.now();
     (function tick() {
+      // A verified signed-in home can show its delayed sidebar cue while
+      // room inventory loads. Waiting for that inventory behind the boot
+      // cover made the cue impossible to see on real startup.
+      const signedInHome = App.page === "chats" && !Mesh.chatId
+        && !!App.state?.user && !App.state.restoring
+        && !App.state.app_lock?.locked && !restartIntent()
+        && BrowserSession.snapshot().binding?.viewer === App.state.user
+        && !!$("#content > .empty-state");
       // V122: 45s cap — a restart's down window runs ~20s, and dropping the
       // cover onto a bare shell mid-boot read as "the app signed out".
       // V111: the lock page IS a real first view — fade onto it.
       // V125: so is the connecting page (blind restore in progress).
-      if (!Mesh.state && !isInitialSelectedViewReady()
+      if (!Mesh.state && !signedInHome && !isInitialSelectedViewReady() && !isPagedChatViewReady()
           && !document.getElementById("lock")
           && !document.getElementById("connecting")
           && App.page === "chats" && Date.now() - t0 < 45000) {
         setTimeout(tick, 80); return;
       }
       b.classList.add("done");
+      if (!Mesh.state && App.page === "chats") renderSideLoading();
+      diagnostic("route", {outcome:"completed"});
       setTimeout(() => b.remove(), 350);
     })();
   })();

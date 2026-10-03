@@ -2,8 +2,11 @@
    JSON handling, and (later) uniform error reporting. */
 
 import { toast } from "./util.js";
+import { bindFilePreview } from "./files.js";
+import { diagnostic } from "./diagnostics.js";
 
 export async function api(path, body, options = {}) {
+  const started = performance.now();
   const opts = body === undefined ? {} : {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -22,6 +25,13 @@ export async function api(path, body, options = {}) {
   try {
     const r = await fetch(path, opts);
     out = await r.json();
+    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+      status:out?.error ? "error" : out?.status || "ok", reason:out?.reason,
+      rows:Array.isArray(out?.messages) ? out.messages.length : undefined});
+  } catch (error) {
+    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+      status:"error", error_type:error?.name === "AbortError" ? "AbortError" : "Error"});
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
@@ -47,6 +57,7 @@ export function bindOpenFile(scope, chatId, selector) {
     // bind on a surviving chip must not stack a second listener
     if (b._openBound) return;
     b._openBound = true;
+    bindFilePreview(b);
     b.addEventListener("click", async () => {
       // fetch + decrypt + OS handoff all happen server-side, so no byte
       // stream reaches this window to meter — an indeterminate ring on the
@@ -55,8 +66,11 @@ export function bindOpenFile(scope, chatId, selector) {
       if (b.classList.contains("att-loading")) return;
       b.classList.add("att-loading");
       try {
-        const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id });
+        const r = await api("/api/mesh/open_file", { chat_id: chatId, id: b.dataset.id, message_id: b.dataset.messageId });
         if (r.error) toast(r.error, true);
+        else if (!r.ok) toast("File is not ready yet. Please try again.", true);
+      } catch {
+        toast("Couldn’t open the file. Please try again.", true);
       } finally {
         b.classList.remove("att-loading");
       }

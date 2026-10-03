@@ -33,5 +33,8 @@ jobs:
       - name: Windows local-input boundary
         if: runner.os == 'Windows'
         run: uv run pytest -q tests/test_folder_raw_windows.py tests/test_raw_documents.py
+      - name: Windows attachment handoff boundary
+        if: runner.os == 'Windows'
+        run: uv run pytest -q tests/test_gui_attachment_cache.py tests/test_gui_attachment_read.py tests/test_gui_cache_filename.py
       - name: Tests
         run: uv run pytest -q

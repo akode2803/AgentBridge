@@ -18,6 +18,7 @@ from agentbridge.gui.api_files import stage_dir
 from agentbridge.core.timekit import utcnow_iso
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
+from agentbridge.mesh.sync import SyncEngine
 
 from conftest import wait_for
 
@@ -27,6 +28,25 @@ PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d494844520000000100000001080600000037"
     "6ef9240000000a49444154789c636000000200015d0a2db40000000049454e44ae426082"
 )
+
+
+def _admitted_file(rig, chat, message_id, blob_id):
+    runtime = rig.app.mesh.local_inputs
+    for _ in range(8):
+        if rig.app.mesh.outbox.flush_once() == 0:
+            break
+    runtime.prepare_one()
+    runtime.ingest(chat)
+    for _ in range(12):
+        ctype, body = rig.get_bytes('/api/mesh/file', chat=chat, id=blob_id,
+                                    message_id=message_id)
+        if 'application/json' not in ctype:
+            return ctype, body
+        state = json.loads(body)
+        if state.get('status') != 'pending':
+            return ctype, body
+        runtime.prepare_one()
+    return ctype, body
 
 
 # -------------------------------------------------------- check_name (R53)
@@ -68,7 +88,12 @@ def test_check_name_cloud_absence_requires_an_authoritative_mirror(rig, monkeypa
 
 
 # ------------------------------------------------------------- attachments
-def test_sealed_attachment_roundtrip(rig):
+def test_sealed_attachment_roundtrip(rig, monkeypatch):
+    # This endpoint test drives admission explicitly. Background delivery receipts
+    # may otherwise correctly retire its source between admission and capture.
+    monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
+    monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
+    rig.app.local_inputs_enabled = True
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="Files",
@@ -87,13 +112,15 @@ def test_sealed_attachment_roundtrip(rig):
     assert rec["name"] == "dot.png" and rec["bytes"] == len(PNG)
     assert rec["sha256"] == hashlib.sha256(PNG).hexdigest()
 
+    # Explicitly publish the queued blob/log before inspecting transport storage.
+    ctype, body = _admitted_file(rig, cid, sent["id"], rec["id"])
+
     # at rest the blob is SEALED — not the plaintext bytes
     at_rest = rig.app.mesh.tx.get_blob(P.file(cid, rec["id"]))
     assert at_rest is not None and at_rest != PNG
     assert at_rest.startswith(b"AB2E")
 
     # the endpoint decrypts + verifies provenance
-    ctype, body = rig.get_bytes("/api/mesh/file", chat=cid, id=rec["id"])
     assert body == PNG and ctype == "image/png"
 
     # the other member decrypts it through their own keys
@@ -150,7 +177,12 @@ def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
     assert not staged.exists()
 
 
-def test_forward_reseals_attachments(rig):
+def test_forward_reseals_attachments(rig, monkeypatch):
+    # This endpoint test drives admission explicitly. Background delivery receipts
+    # may otherwise correctly retire its source between admission and capture.
+    monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
+    monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
+    rig.app.local_inputs_enabled = True
     rig.signup()
     c1 = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]
     c2 = rig.post("/api/mesh/create_chat", name="Dst", members=[])["chat"]["id"]
@@ -167,7 +199,7 @@ def test_forward_reseals_attachments(rig):
     assert dst_msg["fwd"]["from"] == "aryan"
     new_id = dst_msg["files"][0]["id"]
     assert new_id != src_msg["files"][0]["id"]  # re-sealed for the target
-    _, body = rig.get_bytes("/api/mesh/file", chat=c2, id=new_id)
+    _, body = _admitted_file(rig, c2, dst_msg['id'], new_id)
     assert body == PNG
 
 

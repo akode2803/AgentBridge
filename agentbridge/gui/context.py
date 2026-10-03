@@ -113,9 +113,13 @@ class GuiApp:
             if static_dir
             else Path(__file__).resolve().parents[2] / "gui" / "static"
         )
+        from .frontend_revision import frontend_revision
+        self.frontend_revision = frontend_revision(self.static_dir)
         if type(local_inputs) is not bool:
             raise ValueError('local_inputs must be a bool')
         self.local_inputs_enabled = local_inputs
+        from .diagnostics import Diagnostics
+        self.diagnostics = Diagnostics(self.home)
         from .page_cursors import PageCursorRegistry
         self.page_cursors = PageCursorRegistry()
         from .collection_cursors import CollectionCursorRegistry

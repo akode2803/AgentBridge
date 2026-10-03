@@ -19,9 +19,11 @@ def test_explicit_latest_scroll_anchor_and_exact_read_after_paint(tmp_path):
                     source.index('let chatRenderSeq =', source.index('async function renderPagedChat(force, kind = null)'))]
     mark = source[source.index('function markReadNow(chatId)'):
                   source.index('// reading needs eyes:', source.index('function markReadNow(chatId)'))]
+    older = source[source.index('function shouldReadOlderPage('):
+                   source.index('function samePageBinding(')]
     runner = r'''
 import assert from 'node:assert/strict';
-const source = __RENDER__ + '\n' + __MARK__;
+const source = __OLDER__ + '\n' + __RENDER__ + '\n' + __MARK__;
 const binding = {instance_id:'app', session_generation:'1', viewer:'alice'};
 const cutoff = '1790238834318311101';
 const App = {page:'chats',routeSeq:3};
@@ -43,8 +45,9 @@ const flushTimer=async()=>{const item=timers.find(timer=>!timer.cancelled&&!time
   assert.ok(item,'expected a scheduled retry');item.ran=true;item.fn();
   await new Promise(resolve=>setImmediate(resolve));};
 const elements = {};
-const transcript = {scrollHeight:1000,scrollTop:100,clientHeight:200,
+const transcript = {scrollHeight:1000,scrollTop:100,clientHeight:200,isConnected:true,
   addEventListener(type,fn) {this['on'+type]=fn;},
+  removeEventListener(type,fn) {if(this['on'+type]===fn)this['on'+type]=null;},
   before(el) {elements['#'+el.id]=el;},
 };
 const content = {dataset:{},innerHTML:''};
@@ -72,7 +75,7 @@ const pageRead = {
       evictedIds:[],hasMore:true,pageVersion};
   },
 };
-const deps={App,Mesh,BrowserSession:{snapshot:()=>({binding})},
+const deps={App,Mesh,diagnostic:()=>{},BrowserSession:{snapshot:()=>({binding})},
   captureSessionEpoch:()=>({id:'session'}),
   sessionMayApply:()=>true,meshStateSnapshot:()=>({lockEpoch:1}),
   pageRead,$,document,performance:{now:()=>1},
@@ -89,7 +92,7 @@ const deps={App,Mesh,BrowserSession:{snapshot:()=>({binding})},
   syncPagedAuxControls:()=>{},syncDmHeaderPresence:()=>{},
   renderMeshChat:async()=>{paints++;return paintAllowed;},
   api:(path,body)=>{calls.push([path,body]);return Promise.resolve({ok:true});},
-  renderSidebar:()=>{sidebar++;},meshCaps:()=>({chat_page_v1:true}),
+  renderSidebar:()=>{sidebar++;},renderSideLoading:()=>{},meshCaps:()=>({chat_page_v1:true}),
   observeLockState:()=>{},CustomEvent:class{},location:{hash:''},
   V:{renderChatDetails:async()=>{}},
   refreshPagedSidebar:async()=>{},
@@ -183,7 +186,7 @@ assert.equal(paints,prior.paints+1);
 assert.equal(prunes,prior.prunes);
 assert.equal(anchorRestores,prior.anchorRestores);
 assert.equal(calls.length,prior.calls);
-'''.replace('__RENDER__', json.dumps(render)).replace('__MARK__', json.dumps(mark))
+'''.replace('__RENDER__', json.dumps(render)).replace('__MARK__', json.dumps(mark)).replace('__OLDER__', json.dumps(older))
     path = tmp_path / 'paged-render.mjs'
     path.write_text(runner, encoding='utf-8')
     run = subprocess.run([shutil.which('node'), str(path)], cwd=tmp_path,

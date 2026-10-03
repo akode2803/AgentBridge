@@ -1,5 +1,29 @@
 # Engineering failure lessons
 
+## R237: real-instance scrolling and write exhaustion
+
+Fast scrolling in Group With Muskan exposed a receipt-presence publication race:
+the message source, keys and page position still matched, but a presence change
+discarded the whole transcript. The fix retries from a fresh canonical cut with
+receipt decorations explicitly pending. Membership changes still fail closed;
+the race test includes concurrent removal. Decorative freshness must not own the
+transcript lifecycle. Prefetch and retained scroll need actual fast-wheel checks,
+not just a simulated page controller.
+
+Read/unread requests returned HTTP 200 with an error body because 64 ambiguous
+log writes in two old test rooms exhausted global mutation capacity. Never clear
+such intents based on age or process death. The conservative operator repair
+archives their exact scopes and retains permanent blocking fences for the affected
+rooms; old writers must stop first. Acknowledgements settle browser read state
+only on explicit success, with bounded retry pressure. Longer-term prevention
+needs durable write outcomes and isolation of repeatedly failing scopes.
+
+The sidebar's recent-window count was also presented as a blue unread dot even
+when zero was observed and older history was unexamined. An unknown count is
+neither zero nor forced unread, and no completion worker means it must not claim
+to be loading forever. Exact counts require canonical background/index work,
+including edits to messages outside the loaded window.
+
 Record consequential failures with their observed symptom, cause, missing coverage,
 and executable safeguard. A passing narrow suite is evidence for its exercised
 paths, not proof that an entire user workflow works. Keep entries when repaired.

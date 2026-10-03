@@ -22,6 +22,7 @@ from . import (
     api_auth,
     api_chats,
     api_collections,
+    api_diagnostics,
     api_pages, api_page_aux,
     api_files,
     api_membership,
@@ -60,7 +61,8 @@ CONTENT_TYPES = {
 GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
 RAW_ROUTES: dict = {}
-for mod in (api_auth, api_chats, api_pages, api_page_aux, api_collections, api_messages, api_membership,
+for mod in (api_auth, api_chats, api_pages, api_page_aux, api_collections,
+            api_diagnostics, api_messages, api_membership,
             api_profile, api_agents, api_files, api_runtime, api_updates):
     GET_ROUTES.update(mod.GET)
     POST_ROUTES.update(mod.POST)
@@ -107,6 +109,13 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             if length < 0:
                 raise ValueError("negative body length")
+            diagnostic_limit = (64 * 1024 if path == '/api/diagnostics/events'
+                                else 1024 if path == '/api/diagnostics' else None)
+            if diagnostic_limit is not None and length > diagnostic_limit:
+                self.close_connection = True
+                self._json({"error": "diagnostics setting too large"} if path == '/api/diagnostics'
+                           else {"ok": True, "accepted": 0, "dropped": True})
+                return
             if length > MAX_BODY:
                 self.close_connection = True
                 self._json({"error": "request body exceeds the 64 MB limit"},

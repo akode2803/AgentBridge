@@ -6,6 +6,7 @@ import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
 import { ICONS, BIRD, extIcon, agentIdentityBadge } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
+import { diagnostic } from "./diagnostics.js";
 import { pendingSendRows, reconcileSends, removeSend } from "./pending-send.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
@@ -32,6 +33,11 @@ const pageRead = createChatPageRead({fetchPage: ({chatId, cursor, anchor, limit,
 }});
 let pageOwner = null;
 let pageRetryTimer = null;
+export function isPagedChatViewReady() {
+  // Presentation readiness only; this never authorizes or supplies a page.
+  return !!pageOwner?.ready && pageOwner.current()
+    && Mesh.renderedChat === pageOwner.chatId && !!$("#transcript");
+}
 function abortPagedAux(owner) {
   owner?.auxAbort?.abort();
   if (owner) owner.auxAbort = null;
@@ -45,6 +51,14 @@ function resetPagedView() {
 }
 document.addEventListener("ab:session-reset", resetPagedView);
 document.addEventListener("ab:lock-epoch", resetPagedView);
+
+// A single upward gesture can request one older page near the top. Restoring
+// an anchor or jumping to latest is not a user scroll and must not drain pages.
+function shouldReadOlderPage(tr, previousTop, owner) {
+  return !!tr?._pageHasMore && !owner.busy && !owner.suppressOlderScroll
+    && Number.isFinite(previousTop) && previousTop > tr.scrollTop
+    && tr.scrollTop <= Math.max(80, Math.min(tr.clientHeight || 0, 800));
+}
 
 function samePageBinding(a, b) {
   return !!a && !!b && a.instance_id === b.instance_id
@@ -200,6 +214,7 @@ async function renderPagedChat(force, kind = null) {
   }
   const owner = pageOwner;
   if (owner.busy) return;
+  if (!Mesh.state) renderSideLoading();
   owner.busy = true;
   const mode = kind || (owner.browsing && pageRead.refreshPlan() ? "refresh" : "first");
   const before = $("#transcript");
@@ -218,11 +233,16 @@ async function renderPagedChat(force, kind = null) {
   // that surface and install their own cue; explicit history actions keep one.
   const visibleRefresh = before && Mesh.renderedChat === chatId
     && mode !== "older" && kind !== "first";
+  const loadingHost = mode === "older" ? $("#page-history-controls") || $("#content")
+    : $("#content");
   const finishLoading = visibleRefresh || $("#content").dataset.pagePending === owner.identity ? () => {}
-    : beginLoading($("#content"), {label: mode === "older" ? "Loading earlier messages…" : "Loading chat…",
+    : beginLoading(loadingHost, {label: mode === "older" ? "Loading earlier messages…" : "Loading chat…",
       placement: mode === "first" ? "center" : "corner", current:owner.current});
   try {
+    const readStarted = performance.now();
     const result = await pageRead.read(mode);
+    diagnostic("page_read", {mode, duration_ms:performance.now() - readStarted,
+      status:result.status, reason:result.reason, rows:result.messages?.length || 0});
     if (pageOwner !== owner || !owner.current()) return;
     if (["busy", "stale"].includes(result.status)) return;
     if (result.status !== "page") {
@@ -275,9 +295,12 @@ async function renderPagedChat(force, kind = null) {
       {...result.pageData,messages:result.messages}, retainedAux);
     const pane = $("#details-pane");
     if (!Mesh.detailsView) { pane.hidden = true; pane.innerHTML = ""; }
+    owner.suppressOlderScroll = true;
     const painted = await renderMeshChat(force, null, {data, presentation, warmBase:true, paged:true,
       historyRead: mode === "older" || owner.browsing,
       aux, guard:() => pageOwner === owner && owner.current()});
+    diagnostic("page_paint", {mode, outcome:painted === false ? "skipped" : "completed",
+      duration_ms:performance.now() - readStarted, rows:result.messages?.length || 0});
     if (!painted || pageOwner !== owner || !owner.current()) return;
     const tr = $("#transcript");
     if (!tr) return;
@@ -290,14 +313,19 @@ async function renderPagedChat(force, kind = null) {
       {msgExpand:Mesh.msgExpand, selectedIds:Mesh.select?.ids});
     tr._pageHasMore = result.hasMore;
     owner.visibleReadNs = data.read_cutoff_ns || "0";
-    if (!tr._pageScrollBound) {
-      tr._pageScrollBound = true;
-      tr.addEventListener("scroll", () => {
-        if (Mesh.pendingRead === chatId && document.hasFocus()
+    if (tr._pageScrollOwner !== owner) {
+      if (tr._pageScrollHandler) tr.removeEventListener("scroll", tr._pageScrollHandler);
+      tr._pageScrollOwner = owner;
+      tr._pageScrollHandler = () => {
+        if ((Mesh.pendingRead === chatId || owner.readAck?.manualUnreadArmed)
+            && document.hasFocus()
             && pageOwner === owner && owner.current()) markReadNow(chatId);
-        if (tr.scrollTop < 80 && tr._pageHasMore && !owner.busy
-            && pageOwner === owner && owner.current()) renderPagedChat(false, "older");
-      }, {passive:true});
+        const previousTop = owner.lastScrollTop;
+        owner.lastScrollTop = tr.scrollTop;
+        if (pageOwner === owner && owner.current()
+            && shouldReadOlderPage(tr, previousTop, owner)) renderPagedChat(false, "older");
+      };
+      tr.addEventListener("scroll", tr._pageScrollHandler, {passive:true});
     }
     let controls = $("#page-history-controls");
     if (!controls) {
@@ -314,6 +342,12 @@ async function renderPagedChat(force, kind = null) {
     };
     if (anchor) restoreTranscriptAnchor(tr, anchor);
     else if (mode === "first") tr.scrollTop = tr.scrollHeight;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (pageOwner === owner && owner.current() && tr.isConnected) {
+        owner.lastScrollTop = tr.scrollTop;
+        owner.suppressOlderScroll = false;
+      }
+    }));
     owner.recoveryAnchor = null;
     if (mode === "refresh" && owner.wantOlder && result.hasMore) {
       pageRetryTimer = setTimeout(() => {
@@ -338,7 +372,7 @@ async function renderPagedChat(force, kind = null) {
     }));
   } finally {
     owner.busy = false;
-    if (pageOwner !== owner || !owner.current()) finishLoading();
+    finishLoading();
   }
 }
 
@@ -495,34 +529,111 @@ function runAccessDetails(run, open) {
 // recomputes unread on the next state fetch — up to 20s away under SSE —
 // which was exactly the "unread counter while I'm using the chat" report.
 // Mirrors the server: mark_read also clears forced_unread (overlays.py).
+let legacyReadAck = null;
+function clearLegacyReadRetry(ack = legacyReadAck) {
+  if (!ack) return;
+  clearTimeout(ack.retryTimer);
+  ack.retryTimer = null;
+}
+function resetLegacyReadAck() {
+  clearLegacyReadRetry();
+  legacyReadAck = null;
+}
+document.addEventListener("ab:session-reset", resetLegacyReadAck);
+document.addEventListener("ab:lock-epoch", resetLegacyReadAck);
+window.addEventListener("hashchange", resetLegacyReadAck);
+document.addEventListener("ab:manual-mark-unread", (event) => {
+  const chatId = event.detail?.chatId;
+  if (!chatId || Mesh.chatId !== chatId) return;
+  const invalidate = (ack) => {
+    if (!ack) return;
+    clearLegacyReadRetry(ack);
+    ack.version = (ack.version || 0) + 1;
+    delete ack.lastSuccess;
+    ack.failures = 0; ack.nextAt = 0;
+    ack.manualUnreadArmed = true;
+  };
+  if (pageOwner?.chatId === chatId && pageOwner.current()) {
+    invalidate(pageOwner.readAck ||= {inflight:false, failures:0, nextAt:0});
+  }
+  if (legacyReadAck?.chatId === chatId && viewReadMayApply(legacyReadAck.owner)) {
+    invalidate(legacyReadAck);
+  }
+});
 function markReadNow(chatId) {
   const paged = meshCaps().chat_page_v1;
+  const owner = paged ? pageOwner : captureViewRead();
   if (paged) {
     const tr = $("#transcript");
-    if (!pageOwner?.ready || pageOwner.chatId !== chatId || !pageOwner.current()
-        || pageOwner.browsing || !tr
+    if (!owner?.ready || owner.chatId !== chatId || !owner.current()
+        || owner.browsing || !tr
         || tr.scrollHeight - tr.scrollTop - tr.clientHeight > 120) {
       Mesh.pendingRead = chatId;
       return;
     }
   }
-  Mesh.pendingRead = null;
+  if (!owner) return;
+  const current = () => paged ? pageOwner === owner && owner.current()
+    : App.page === "chats" && Mesh.chatId === chatId && viewReadMayApply(owner);
+  if (!current()) return;
+  const c = Mesh.state?.chats?.find((x) => x.id === chatId);
+  const cutoff = paged ? owner.visibleReadNs || "0" : c?.last?.ns || 0;
+  if (!paged && legacyReadAck && (legacyReadAck.chatId !== chatId
+      || !viewReadMayApply(legacyReadAck.owner))) resetLegacyReadAck();
+  const ack = paged ? (owner.readAck ||= {inflight:false, failures:0, nextAt:0})
+    : legacyReadAck && legacyReadAck.chatId === chatId
+      && viewReadMayApply(legacyReadAck.owner)
+      ? legacyReadAck : (legacyReadAck = {owner, chatId, inflight:false,
+                                         failures:0, nextAt:0});
+  if (ack.lastSuccess === cutoff && !ack.manualUnreadArmed) return;
+  Mesh.pendingRead = chatId;
+  if (ack.inflight || Date.now() < ack.nextAt) return;
+  if (!paged) clearLegacyReadRetry(ack);
+  ack.inflight = true;
+  const ackVersion = ack.version || 0;
+  const requestCurrent = () => current() && (paged || legacyReadAck === ack)
+    && (ack.version || 0) === ackVersion;
   api("/api/mesh/read", { chat_id: chatId,
-    ...(paged ? {up_to_ns:pageOwner.visibleReadNs || "0"} : {}) });
+    ...(paged ? {up_to_ns:cutoff} : {}) }, {timeoutMs:8000})
+    .then((response) => {
+      if (!requestCurrent()) return;
+      if (!response?.ok) throw Error("read acknowledgement pending");
+      ack.failures = 0; ack.nextAt = 0; ack.lastSuccess = cutoff;
+      ack.manualUnreadArmed = false;
+      const latest = Mesh.state?.chats?.find((x) => x.id === chatId);
+      const sameCutoff = paged ? owner.visibleReadNs === cutoff
+        : (latest?.last?.ns || 0) === cutoff;
+      if (sameCutoff && Mesh.pendingRead === chatId) Mesh.pendingRead = null;
+      if (paged) { void refreshPagedSidebar(owner); return; }
+      // Legacy sidebar mutation follows acknowledgement; a failed read may
+      // never clear the badge or install an optimistic read-tail clamp.
+      if (!sameCutoff) return;
+      Mesh.readTail[chatId] = Math.max(Mesh.readTail[chatId] || 0, latest?.last?.ns || 0);
+      if (latest && (latest.unread || latest.forced_unread)) {
+        latest.unread = 0;
+        latest.forced_unread = false;
+        renderSidebar();
+      }
+    })
+    .catch(() => {
+      if (!requestCurrent()) return;
+      ack.failures = Math.min(6, ack.failures + 1);
+      ack.nextAt = Date.now() + Math.min(60000, 2000 * 2 ** (ack.failures - 1));
+      if (!paged) {
+        // Legacy polls read only when messages change. Retry this view's
+        // pending receipt even when no new message or focus event arrives.
+        clearLegacyReadRetry(ack);
+        ack.retryTimer = setTimeout(() => {
+          ack.retryTimer = null;
+          if (!requestCurrent() || meshCaps().chat_page_v1
+              || Mesh.pendingRead !== chatId || !document.hasFocus()) return;
+          markReadNow(chatId);
+        }, Math.max(0, ack.nextAt - Date.now()));
+      }
+    })
+    .finally(() => { ack.inflight = false; });
   // The sidebar timestamp is a JS Number; only the next canonical sidebar
   // response may settle its badge against an exact decimal page cutoff.
-  if (paged) return;
-  const c = Mesh.state?.chats?.find((x) => x.id === chatId);
-  // V67: remember the tail we've now read, so a racing state fetch (the
-  // fire-and-forget read above may not have persisted yet) can't resurrect
-  // this badge — reconcileReadTail() clamps it back until a genuinely newer
-  // message arrives (last.ns beyond this mark).
-  Mesh.readTail[chatId] = Math.max(Mesh.readTail[chatId] || 0, c?.last?.ns || 0);
-  if (c && (c.unread || c.forced_unread)) {
-    c.unread = 0;
-    c.forced_unread = false;
-    renderSidebar();
-  }
 }
 
 // reading needs eyes: the transcript keeps painting while the window is
@@ -532,7 +643,8 @@ function markReadNow(chatId) {
 window.addEventListener("focus", () => {
   if (App.page !== "chats" || !Mesh.chatId || !Mesh.state?.user) return;
   const c = Mesh.state.chats?.find((x) => x.id === Mesh.chatId);
-  if (Mesh.pendingRead === Mesh.chatId || (c && (c.unread || c.forced_unread)))
+  if (Mesh.pendingRead === Mesh.chatId || pageOwner?.readAck?.manualUnreadArmed
+      || (c && (c.unread || c.forced_unread)))
     markReadNow(Mesh.chatId);
 });
 
@@ -600,6 +712,13 @@ async function renderChats(force) {
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
   // runs and the sidebar refreshes; the empty surface itself is static.
+  const bootstrap = BrowserSession.snapshot();
+  const bootHome = !Mesh.state && !Mesh.chatId && App.page === "chats"
+    && App.state?.user && bootstrap.mode === "bound" && bootstrap.ready
+    && bootstrap.binding?.viewer === App.state.user
+    && !App.state.restoring && !App.state.app_lock?.locked
+    && !stateSnapshot.locked && !restartIntent();
+  if (bootHome && !$("#content > .empty-state")) renderEmptyChat();
   if (!Mesh.chatId && App.page === "chats" && !$("#content > .empty-state")
       && Mesh.state?.available && Mesh.state?.user) {
     renderEmptyChat();
@@ -1373,10 +1492,10 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // keeps the file chip. Both open the file on click (.mesh-att). File
     // records are v2 {id, name, bytes} — the blob id rides data-id.
     const files = (msg.files || []).map((f) => isImg(f.name)
-      ? `<button class="msg-img mesh-att" data-id="${esc(f.id)}"
+      ? `<button class="msg-img mesh-att" data-id="${esc(f.id)}" data-message-id="${esc(msg.id)}"
              data-name="${esc(f.name)}" title="${esc(f.name)}">
-           <img src="${fileUrl(chatId, f.id)}" alt="${esc(f.name)}" loading="lazy"></button>`
-      : `<button class="att-btn mesh-att" data-id="${esc(f.id)}" data-name="${esc(f.name)}">
+           <img src="${fileUrl(chatId, f.id, msg.id)}" alt="${esc(f.name)}" loading="lazy"></button>`
+      : `<button class="att-btn mesh-att" data-id="${esc(f.id)}" data-message-id="${esc(msg.id)}" data-name="${esc(f.name)}">
            <span class="att-icon">${extIcon(f.name)}</span>
            <span style="min-width:0">
              <div class="att-name">${esc(f.name)}</div>
@@ -3049,11 +3168,18 @@ async function bulkStar(chatId) {
 async function bulkSave(chatId) {
   const sel = [...Mesh.select.ids];
   const msgs = $("#transcript")?._msgs;
-  const ids = [];   // blob ids — the v2 save endpoint's spelling
-  for (const id of sel) for (const f of (msgs?.get(id)?.files || [])) ids.push(f.id);
-  if (!ids.length) return;
-  const r = await api("/api/mesh/save", { chat_id: chatId, ids });
-  if (r.error) { toast(r.error, true); return; }
+  const files = [];
+  for (const id of sel) for (const f of (msgs?.get(id)?.files || [])) {
+    files.push({ message_id: id, id: f.id });
+  }
+  if (!files.length) return;
+  let r;
+  try { r = await api("/api/mesh/save", { chat_id: chatId, files }); }
+  catch { toast("Save interrupted. Check the destination before retrying.", true); return; }
+  if (r.error) {
+    const partial = r.saved ? `${r.saved} file${r.saved === 1 ? "" : "s"} already saved. ` : "";
+    toast(partial + r.error, true); return;
+  }
   if (r.cancelled) return;   // backed out of the picker — stay in select mode
   exitSelect();
   const where = (r.dest || "").split(/[\\/]/).filter(Boolean).pop() || "the folder";

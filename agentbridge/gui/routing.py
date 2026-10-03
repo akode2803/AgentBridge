@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 
 from ..core.errors import AgentBridgeError
@@ -111,12 +112,49 @@ def authed_read_token(fn):
 def dispatch(handler, app, req, *args):
     """Run one endpoint with the v1 error contract: domain errors come back
     as ``{"error": ...}`` JSON (HTTP 200), never as an HTML error page."""
+    started = time.perf_counter()
+    failure = None
     try:
-        return handler(app, req, *args)
+        result = handler(app, req, *args)
     except AgentBridgeError as e:
-        return {"error": str(e)}
+        failure = e
+        result = {"error": str(e)}
     except json.JSONDecodeError:
-        return {"error": "malformed JSON body"}
+        result = {"error": "malformed JSON body"}
     except Exception as e:  # noqa: BLE001 — a bug must never kill the socket
+        failure = e
         log.exception("endpoint %s failed", req.path)
-        return {"error": f"internal error: {e}"}
+        result = {"error": f"internal error: {e}"}
+    if not req.path.startswith('/api/diagnostics'):
+        diagnostics = getattr(app, 'diagnostics', None)
+        if diagnostics is not None and diagnostics.enabled:
+            try:
+                status = ('bytes' if isinstance(result, Response) else
+                          result.get('status', 'error' if result.get('error') else
+                                     'ok' if result.get('ok') else 'ready')
+                          if type(result) is dict else 'other')
+                event = {'event': 'server_request', 'route': req.path,
+                         'duration_ms': (time.perf_counter() - started) * 1000,
+                         'status': status}
+                if type(result) is dict:
+                    event['reason'] = (str(failure) if failure is not None else
+                                       result.get('reason') or result.get('sidebar_status') or 'none')
+                    for key in ('messages', 'items', 'chats'):
+                        if type(result.get(key)) is list:
+                            event[key] = len(result[key])
+                    if type(result.get('chats_complete')) is bool:
+                        event['chats_complete'] = result['chats_complete']
+                if failure is not None:
+                    event['error_type'] = type(failure).__name__
+                elif type(result) is dict and result.get('error'):
+                    event['error_type'] = 'DomainError'
+                data = req.params if req.method == 'GET' else req.data
+                if type(data) is dict:
+                    chat = data.get('chat_id') or data.get('chat') or data.get('id')
+                    ref = diagnostics.chat_ref(chat)
+                    if ref is not None:
+                        event['chat_ref'] = ref
+                diagnostics.record(event)
+            except Exception:  # noqa: BLE001 — telemetry must not affect replies
+                pass
+    return result

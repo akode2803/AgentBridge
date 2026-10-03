@@ -130,8 +130,8 @@ const ids = new Map();
 function register(x) { if (x.id) ids.set(x.id, x); x.children.forEach(register); return x; }
 function rowFrom(html) {
   const row = new El("div", {class: "msg", dataset: {mid: html.match(/data-mid="([^"]*)"/)?.[1] || ""}});
-  for (const hit of html.matchAll(/class="([^"]*mesh-att[^"]*)"[^>]*data-id="([^"]+)"/g))
-    row.appendChild(new El("button", {class: hit[1], dataset: {id: hit[2]}}));
+  for (const hit of html.matchAll(/class="([^"]*mesh-att[^"]*)"[^>]*data-id="([^"]+)"[^>]*data-message-id="([^"]+)"/g))
+    row.appendChild(new El("button", {class: hit[1], dataset: {id: hit[2], messageId: hit[3]}}));
   return row;
 }
 const content = new El("main", {id: "content"});
@@ -178,7 +178,7 @@ const syncPinBanner = noop, captureRxSigs = () => [], animateRxChanges = noop;
 const clampLong = noop, jumpToMessage = noop, initComposer = noop, renderReplyArea = noop;
 const renderMeshPending = noop, startAskPoll = noop, markReadNow = noop, applySelectAfterRender = noop;
 const reconcileSends = noop, pendingSendRows = () => [];
-const clearSelectMode = noop;
+const clearSelectMode = noop, bindFilePreview = noop;
 const endLoading = noop;
 const toast = noop, enterSelect = noop, muteDialog = noop, clearChatDialog = noop, deleteChatDialog = noop;
 const innerWidth = 1200, innerHeight = 800, performance = {now: () => 0};
@@ -193,7 +193,7 @@ const {renderMeshChat} = factory({api, document, $, Mesh, App, V, location, ICON
   startAskPoll, markReadNow, applySelectAfterRender, toast, enterSelect, muteDialog,
   clearChatDialog, deleteChatDialog, innerWidth, innerHeight, performance, encodeURIComponent,
   Date, Map, Set, JSON, Object, Math, chatRenderSeq, clearSelectMode, endLoading,
-  reconcileSends, pendingSendRows});
+  reconcileSends, pendingSendRows, bindFilePreview});
 const base = {me: "aryan", meta: {id: "room", kind: "dm", members: ["aryan", "bot"], pins: []},
   messages: [{id: "m1", from: "aryan", mine: true, ts: "2026-09-16T00:00:00Z", body: "file", files: [{id: "blob-1", name: "notes.txt", bytes: 4}]}], starred: []};
 const presentation = {user: "aryan", chats: [{id: "room"}], users: {aryan: {}, bot: {}}};
@@ -204,7 +204,7 @@ assert(more && menu && file, "base paint must expose options and canonical file 
 await more.click(); assert.equal(menu.hidden, false, "base options must open immediately");
 assert.equal(file.listeners.click.length, 1); assert.equal(tr.listeners.click.length, 1);
 await file.click();
-assert.deepEqual(calls.at(-1), ["/api/mesh/open_file", {chat_id: "room", id: "blob-1"}]);
+assert.deepEqual(calls.at(-1), ["/api/mesh/open_file", {chat_id: "room", id: "blob-1", message_id: "m1"}]);
 assert(!content.html.includes("verification-banner") && !content.html.includes("e2ee-banner"));
 assert.equal(content.children.findIndex(x => x.id === "transcript"), 1, "verification must not insert above transcript");
 

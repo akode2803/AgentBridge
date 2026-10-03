@@ -21,6 +21,10 @@ def _node(tmp_path: Path, program: str, *, api: bool = False) -> None:
         source = API.read_text(encoding="utf-8").replace(
             'import { toast } from "./util.js";', "export const toast = () => {};",
         )
+        (tmp_path / "diagnostics.js").write_text("export const diagnostic = () => {};\n", encoding="utf-8")
+        source = source.replace('from "./files.js"', 'from "./files.mjs"')
+        (tmp_path / "files.mjs").write_text(
+            (ROOT / "gui/static/js/files.js").read_text(encoding="utf-8"), encoding="utf-8")
         (tmp_path / "api.mjs").write_text(source, encoding="utf-8")
     else:
         (tmp_path / "warm-context.mjs").write_text(WARM.read_text(encoding="utf-8"), encoding="utf-8")

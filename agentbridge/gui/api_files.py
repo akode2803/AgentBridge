@@ -11,16 +11,24 @@ verifies provenance before a single byte leaves the endpoint.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import mimetypes
+import os
 import re
 import secrets
+import stat
+import threading
 import time
 from pathlib import Path
 
+from ..core.lock import SingleInstance
 from ..mesh.paths import P
+from ..mesh.attachments import attachment_path
 from . import desktop
-from .routing import Response, authed
+from .attachment_read import read_attachment
+from .routing import Response, authed, authed_read_token
 
 __all__ = ["GET", "POST", "RAW_POST", "safe_name", "stage_dir",
            "prepare_attachments"]
@@ -192,46 +200,71 @@ def prepare_attachments(app, mesh, chat_id: str, tokens: list) -> tuple[list, li
 
 
 # ----------------------------------------------------------------- serving
-def _find_file_record(mesh, chat_id: str, blob_id: str) -> dict | None:
-    """The files[] entry naming this blob, from the READ MODEL — so a
-    deleted message's attachment stops being servable too."""
-    for m in mesh.messages_for(chat_id):
-        if m.deleted:
-            continue
-        for f in m.files or []:
-            if f.get("id") == blob_id:
-                return f
-    return None
+def _file_error(state, *, saved=None):
+    out = {'error': state['reason'].replace('_', ' '), **state}
+    if state.get('status') == 'locked':
+        out['locked'] = True
+    if saved is not None:
+        out['saved'] = saved
+    return out
 
 
-def _open_blob(mesh, chat_id: str, blob_id: str) -> bytes | None:
-    return mesh.open_attachment(chat_id, blob_id)
+def _current_handoff(app, token):
+    return not app.lock.expire_if_idle() and app.validate_session_read(token)
 
 
-@authed
-def file(app, req, mesh):
-    """GET ?chat=&id= — membership-gated decrypt-serve with provenance
-    check against the signed message's sha256."""
+def _write_private(path: Path, data: bytes, *, unlink_on_error=True) -> None:
+    """Create our own 0600 file; shared destinations are scrubbed only by fd.
+
+    An untrusted directory entry cannot be identity-checked and unlinked
+    atomically. Shared save failures may leave an empty reserved filename.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    identity = os.fstat(fd)
+    try:
+        # Unbuffered writes let failure cleanup truncate the held descriptor
+        # without a later buffer flush restoring partial plaintext.
+        with os.fdopen(fd, 'wb', buffering=0) as handle:
+            owned_fd = fd
+            fd = -1  # the context now owns and closes this descriptor
+            try:
+                if handle.write(data) != len(data):
+                    raise OSError('short file write')
+                handle.flush()
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                    raise OSError('file replaced during write')
+            except BaseException:
+                if not unlink_on_error:
+                    with contextlib.suppress(OSError):
+                        os.ftruncate(owned_fd, 0)
+                raise
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        if unlink_on_error:
+            with contextlib.suppress(OSError):
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    path.unlink()
+        raise
+
+
+@authed_read_token
+def file(app, req, mesh, token):
+    """GET ?chat=&id=&message_id= — exact canonical two-pass handout."""
     chat_id = req.params.get("chat", "")
     blob_id = req.params.get("id", "")
-    rec = _find_file_record(mesh, chat_id, blob_id)  # gates membership too
-    if rec is None:
-        return {"error": "file not found"}
-    sha = str(rec.get("sha256") or "")
-    raw = _cache_get(app, sha)               # R76: Storage pays once per sha
-    if raw is None:
-        raw = _open_blob(mesh, chat_id, blob_id)
-        if raw is None:
-            return {"error": "file not available"}
-        if sha and hashlib.sha256(raw).hexdigest() != sha:
-            return {"error": "file failed verification"}
-        _cache_put(app, sha, raw)
+    message_id = req.params.get("message_id", "")
+    state, result = read_attachment(app, mesh, token, chat_id, message_id, blob_id)
+    if state:
+        return _file_error(state)
+    rec, raw = result
     name = safe_name(rec.get("name") or blob_id)
     ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
     return Response(body=raw, ctype=ctype, headers={
         "Content-Disposition": f'inline; filename="{name}"',
-        # a blob id names ONE immutable upload — safe to cache long
-        "Cache-Control": "private, max-age=604800",
+        "Cache-Control": "no-store",
     })
 
 
@@ -318,59 +351,191 @@ def clear_group_avatar(app, req, mesh) -> dict:
 
 
 # --------------------------------------------------------------- OS handoff
-@authed
-def open_file(app, req, mesh) -> dict:
+_HANDOFF_LOCK = threading.Lock()
+
+
+def _cache_identity(info):
+    # CPython 3.12 Windows lstat uses creation time for ctime, while fstat can
+    # report change time. Birth time is comparable across both APIs there.
+    generation = getattr(info, 'st_birthtime_ns', info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, generation)
+
+
+def _verified_cache_identity(path, size, digest):
+    """Verify a private regular cache file without another full-size allocation.
+
+    Windows privacy relies on the existing trusted app-home ACL boundary;
+    st_mode there does not describe ACLs. Reject reparse points on that platform.
+    """
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size != size
+                or getattr(before, 'st_file_attributes', 0)
+                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
+            return None
+        if os.name != 'nt' and (before.st_uid != os.getuid() or before.st_mode & 0o077):
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        flags |= getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as handle:
+            opened = os.fstat(handle.fileno())
+            if _cache_identity(opened) != _cache_identity(before):
+                return None
+            observed = hashlib.sha256()
+            remaining = size
+            while remaining:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    return None
+                observed.update(chunk)
+                remaining -= len(chunk)
+            extra = handle.read(1)
+            after = os.fstat(handle.fileno())
+            if (extra or observed.hexdigest() != digest
+                    or _cache_identity(after) != _cache_identity(before)
+                    # Compare change time within the same descriptor API;
+                    # normalization must not hide mutations during hashing.
+                    or after.st_ctime_ns != opened.st_ctime_ns
+                    or (after.st_mode, after.st_nlink, after.st_uid)
+                    != (opened.st_mode, opened.st_nlink, opened.st_uid)
+                    or _cache_identity(path.lstat()) != _cache_identity(before)):
+                return None
+        return _cache_identity(before)
+    except OSError:
+        return None
+
+
+def _unlink_cache_identity(path, identity):
+    # A handler may still own the file. Cleanup must not break a successful open.
+    try:
+        if identity is not None and _cache_identity(path.lstat()) == identity:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _cache_handoff_target(target, raw, digest):
+    """At most one canonical copy and one fallback per attachment, under lock."""
+    fallback = target.with_name(f'.{target.stem}.handoff{target.suffix}')
+    # Keep a handed-off fallback even after canonical replacement becomes
+    # possible: an asynchronous OS handler may not have opened that path yet.
+    # Reusing one fixed slot bounds retention without guessing reader lifetimes.
+    if _verified_cache_identity(target, len(raw), digest) is not None:
+        return target, None
+    temp = target.with_name(f'.{target.name}.{secrets.token_hex(8)}.tmp')
+    identity = None
+    try:
+        _write_private(temp, raw)
+        identity = _cache_identity(temp.lstat())
+        try:
+            os.replace(temp, target)
+        except PermissionError:
+            if _verified_cache_identity(fallback, len(raw), digest) is not None:
+                return fallback, None
+            # Exclusive creation: unsafe or stale collisions are never replaced.
+            try:
+                fallback.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(errno.EEXIST, 'attachment cache slot is occupied',
+                                      str(fallback)) from None
+            _write_private(fallback, raw)
+            return fallback, _cache_identity(fallback.lstat())
+        return target, None
+    finally:
+        _unlink_cache_identity(temp, identity)
+
+
+@authed_read_token
+def open_file(app, req, mesh, token) -> dict:
     """Decrypt to the local cache and open with the OS default handler."""
     chat_id = req.data.get("chat_id") or ""
     blob_id = str(req.data.get("id") or "")
-    rec = _find_file_record(mesh, chat_id, blob_id)
-    if rec is None:
-        return {"error": "File not found — it may still be syncing"}
-    raw = _open_blob(mesh, chat_id, blob_id)
-    if raw is None:
-        return {"error": "File not available"}
+    state, result = read_attachment(app, mesh, token, chat_id,
+                                    req.data.get('message_id'), blob_id)
+    if state:
+        return _file_error(state)
+    rec, raw = result
+    if not _current_handoff(app, token):
+        return {"error": "session changed"}
     cache = app.home / "files_cache" / chat_id
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / cache_filename(rec.get("name") or "file", blob_id)
-    if not target.is_file() or target.stat().st_size != len(raw):
-        target.write_bytes(raw)
-    desktop.open_path(target)
-    return {"ok": True}
+    # Serialize publication through the OS handoff, including other GUI
+    # processes using this home. Keep the lock file: unlinking it splits locks.
+    with _HANDOFF_LOCK, SingleInstance(app.home / 'files_cache.lock', fail_open=False) as guard:
+        if not guard.acquired:
+            return {"error": "Attachment cache is busy; try again"}
+        if not _current_handoff(app, token):
+            return {"error": "session changed"}
+        selected, created = _cache_handoff_target(target, raw, rec['sha256'])
+        handed_off = False
+        try:
+            if not _current_handoff(app, token):
+                return {"error": "session changed"}
+            desktop.open_path(selected)
+            handed_off = True
+            return {"ok": True}
+        finally:
+            if not handed_off:
+                _unlink_cache_identity(selected, created)
 
 
-@authed
-def save(app, req, mesh) -> dict:
+@authed_read_token
+def save(app, req, mesh, token) -> dict:
     """Save attachments OUT to a user-chosen folder (WhatsApp 'download')."""
     chat_id = req.data.get("chat_id") or ""
-    ids = [str(i) for i in (req.data.get("ids") or [])]
-    if not ids:
+    files = req.data.get('files')
+    if type(files) is not list or not files:
         return {"error": "Nothing to save"}
-    items = []
-    for blob_id in ids:
-        rec = _find_file_record(mesh, chat_id, blob_id)
-        raw = _open_blob(mesh, chat_id, blob_id) if rec else None
-        if rec is None or raw is None:
-            return {"error": "A file was not found — it may still be syncing"}
-        items.append((safe_name(rec.get("name") or blob_id), raw))
+    if len(files) > 100 or any(type(item) is not dict
+                               or type(item.get('message_id')) is not str
+                               or not item['message_id']
+                               or type(item.get('id')) is not str for item in files):
+        return {"error": "invalid file selection"}
+    for item in files:
+        attachment_path(chat_id, item['id'])
     dest = desktop.pick_folder()
     if not dest:
         return {"ok": True, "saved": 0, "cancelled": True}
-    from pathlib import Path
-
     dest_dir = Path(dest)
-    saved = 0
-    for name, raw in items:
-        out = dest_dir / name
-        i = 1
-        while out.exists():  # never clobber: name, name (1), name (2)…
-            stem, dot, suf = name.rpartition(".")
-            out = dest_dir / (f"{stem} ({i}).{suf}" if dot else f"{name} ({i})")
-            i += 1
+    saved = total = 0
+    for item in files:
+        state, result = read_attachment(app, mesh, token, chat_id,
+                                        item['message_id'], item['id'])
+        if state:
+            return _file_error(state, saved=saved)
+        rec, raw = result
+        if len(raw) > 512 * 1024 * 1024 - total:
+            return {"error": "save batch byte budget", "saved": saved}
+        name = safe_name(rec.get('name') or item['id'])
+        if not _current_handoff(app, token):
+            return {"error": "session changed", "saved": saved}
         try:
-            out.write_bytes(raw)
+            for i in range(1000):
+                stem, dot, suf = name.rpartition('.')
+                candidate = (name if i == 0 else
+                             f'{stem} ({i}).{suf}' if dot else f'{name} ({i})')
+                output = dest_dir / candidate
+                if not _current_handoff(app, token):
+                    return {"error": "session changed", "saved": saved}
+                try:
+                    # A shared directory can replace a closed staging pathname.
+                    # Write verified bytes only through our exclusive output
+                    # descriptor, as on filesystems without hardlink support.
+                    _write_private(output, raw, unlink_on_error=False)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                return {"error": "file name collision limit", "saved": saved,
+                        "dest": str(dest_dir)}
             saved += 1
+            total += len(raw)
         except OSError:
-            pass
+            return {"error": "file write failed", "saved": saved, "dest": str(dest_dir)}
     return {"ok": True, "saved": saved, "dest": str(dest_dir)}
 
 
