@@ -213,22 +213,40 @@ def _current_handoff(app, token):
     return not app.lock.expire_if_idle() and app.validate_session_read(token)
 
 
-def _write_private(path: Path, data: bytes) -> None:
-    """Create only our own 0600 file, removing partial bytes on write failure."""
+def _write_private(path: Path, data: bytes, *, unlink_on_error=True) -> None:
+    """Create our own 0600 file; shared destinations are scrubbed only by fd.
+
+    An untrusted directory entry cannot be identity-checked and unlinked
+    atomically. Shared save failures may leave an empty reserved filename.
+    """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     identity = os.fstat(fd)
     try:
-        with os.fdopen(fd, 'wb') as handle:
+        # Unbuffered writes let failure cleanup truncate the held descriptor
+        # without a later buffer flush restoring partial plaintext.
+        with os.fdopen(fd, 'wb', buffering=0) as handle:
+            owned_fd = fd
             fd = -1  # the context now owns and closes this descriptor
-            if handle.write(data) != len(data):
-                raise OSError('short file write')
+            try:
+                if handle.write(data) != len(data):
+                    raise OSError('short file write')
+                handle.flush()
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                    raise OSError('file replaced during write')
+            except BaseException:
+                if not unlink_on_error:
+                    with contextlib.suppress(OSError):
+                        os.ftruncate(owned_fd, 0)
+                raise
     except BaseException:
         if fd >= 0:
             os.close(fd)
-        with contextlib.suppress(OSError):
-            current = path.stat(follow_symlinks=False)
-            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
-                path.unlink()
+        if unlink_on_error:
+            with contextlib.suppress(OSError):
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    path.unlink()
         raise
 
 
@@ -337,7 +355,10 @@ _HANDOFF_LOCK = threading.Lock()
 
 
 def _cache_identity(info):
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # CPython 3.12 Windows lstat uses creation time for ctime, while fstat can
+    # report change time. Birth time is comparable across both APIs there.
+    generation = getattr(info, 'st_birthtime_ns', info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, generation)
 
 
 def _verified_cache_identity(path, size, digest):
@@ -358,7 +379,8 @@ def _verified_cache_identity(path, size, digest):
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
         flags |= getattr(os, 'O_NONBLOCK', 0)
         with os.fdopen(os.open(path, flags), 'rb') as handle:
-            if _cache_identity(os.fstat(handle.fileno())) != _cache_identity(before):
+            opened = os.fstat(handle.fileno())
+            if _cache_identity(opened) != _cache_identity(before):
                 return None
             observed = hashlib.sha256()
             remaining = size
@@ -368,8 +390,15 @@ def _verified_cache_identity(path, size, digest):
                     return None
                 observed.update(chunk)
                 remaining -= len(chunk)
-            if (handle.read(1) or observed.hexdigest() != digest
-                    or _cache_identity(os.fstat(handle.fileno())) != _cache_identity(before)
+            extra = handle.read(1)
+            after = os.fstat(handle.fileno())
+            if (extra or observed.hexdigest() != digest
+                    or _cache_identity(after) != _cache_identity(before)
+                    # Compare change time within the same descriptor API;
+                    # normalization must not hide mutations during hashing.
+                    or after.st_ctime_ns != opened.st_ctime_ns
+                    or (after.st_mode, after.st_nlink, after.st_uid)
+                    != (opened.st_mode, opened.st_nlink, opened.st_uid)
                     or _cache_identity(path.lstat()) != _cache_identity(before)):
                 return None
         return _cache_identity(before)
@@ -405,6 +434,13 @@ def _cache_handoff_target(target, raw, digest):
             if _verified_cache_identity(fallback, len(raw), digest) is not None:
                 return fallback, None
             # Exclusive creation: unsafe or stale collisions are never replaced.
+            try:
+                fallback.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(errno.EEXIST, 'attachment cache slot is occupied',
+                                      str(fallback)) from None
             _write_private(fallback, raw)
             return fallback, _cache_identity(fallback.lstat())
         return target, None
@@ -477,36 +513,22 @@ def save(app, req, mesh, token) -> dict:
         name = safe_name(rec.get('name') or item['id'])
         if not _current_handoff(app, token):
             return {"error": "session changed", "saved": saved}
-        temp = dest_dir / f'.agentbridge-{secrets.token_hex(16)}.tmp'
         try:
-            _write_private(temp, raw)
-            if not _current_handoff(app, token):
-                return {"error": "session changed", "saved": saved}
             for i in range(1000):
                 stem, dot, suf = name.rpartition('.')
                 candidate = (name if i == 0 else
                              f'{stem} ({i}).{suf}' if dot else f'{name} ({i})')
                 output = dest_dir / candidate
+                if not _current_handoff(app, token):
+                    return {"error": "session changed", "saved": saved}
                 try:
-                    # Same-directory hardlink publishes complete bytes without
-                    # overwriting a name that another process just created.
-                    os.link(temp, output)
+                    # A shared directory can replace a closed staging pathname.
+                    # Write verified bytes only through our exclusive output
+                    # descriptor, as on filesystems without hardlink support.
+                    _write_private(output, raw, unlink_on_error=False)
                     break
                 except FileExistsError:
                     continue
-                except OSError as link_error:
-                    if link_error.errno not in (errno.EPERM, errno.EACCES,
-                                                errno.ENOTSUP, errno.EOPNOTSUPP,
-                                                errno.ENOSYS, errno.EXDEV):
-                        raise
-                    # FAT/exFAT and some cloud folders lack hardlinks. Keep
-                    # exclusive naming and remove a partial write only while
-                    # the path still names our own newly created file.
-                    try:
-                        _write_private(output, raw)
-                    except FileExistsError:
-                        continue
-                    break
             else:
                 return {"error": "file name collision limit", "saved": saved,
                         "dest": str(dest_dir)}
@@ -514,9 +536,6 @@ def save(app, req, mesh, token) -> dict:
             total += len(raw)
         except OSError:
             return {"error": "file write failed", "saved": saved, "dest": str(dest_dir)}
-        finally:
-            with contextlib.suppress(OSError):
-                temp.unlink(missing_ok=True)
     return {"ok": True, "saved": saved, "dest": str(dest_dir)}
 
 

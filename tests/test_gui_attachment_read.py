@@ -526,7 +526,85 @@ def test_save_dialog_before_authority_and_partial_batch(page_app, monkeypatch, t
     assert list(dest.iterdir()) == []
 
 
-def test_failed_save_write_leaves_no_partial_visible_file(page_app, monkeypatch, tmp_path):
+def test_save_never_publishes_replaced_staging_path(page_app, monkeypatch, tmp_path):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'shared-destination'
+    dest.mkdir()
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    link = api_files.os.link
+    attacks = []
+
+    def swap_staging_inode(source, output):
+        attacks.append(source)
+        source.unlink()
+        source.write_bytes(b'attacker-controlled replacement')
+        return link(source, output)
+
+    monkeypatch.setattr(api_files.os, 'link', swap_staging_inode)
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['saved'] == 1, result
+    assert (dest / rec['name']).read_bytes() == b'attachment-data'
+    assert attacks == []  # No source pathname remains to swap before publication.
+    assert list(dest.iterdir()) == [dest / rec['name']]
+
+
+@pytest.mark.parametrize('kind', ('file', 'symlink'))
+def test_save_exclusive_names_preserve_existing_and_symlink_destinations(
+        page_app, monkeypatch, tmp_path, kind):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'saved'
+    dest.mkdir()
+    existing = dest / rec['name']
+    outside = tmp_path / 'outside.txt'
+    outside.write_bytes(b'leave alone')
+    if kind == 'symlink':
+        try:
+            existing.symlink_to(outside)
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    else:
+        existing.write_bytes(b'leave alone')
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['saved'] == 1, result
+    assert existing.read_bytes() == outside.read_bytes() == b'leave alone'
+    if kind == 'symlink':
+        assert existing.is_symlink()
+    assert (dest / 'test (1).txt').read_bytes() == b'attachment-data'
+    assert set(dest.iterdir()) == {existing, dest / 'test (1).txt'}
+
+
+def test_save_rechecks_lock_after_a_name_collision(page_app, monkeypatch, tmp_path):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'saved'
+    dest.mkdir()
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    write = api_files._write_private
+
+    def collide_then_lock(path, data, **options):
+        assert path == dest / rec['name']
+        path.write_bytes(b'other writer')
+        app.lock.path.write_text('{}', encoding='utf-8')
+        app.lock.lock()
+        write(path, data, **options)
+
+    monkeypatch.setattr(api_files, '_write_private', collide_then_lock)
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['error'] and result['saved'] == 0
+    assert list(dest.iterdir()) == [dest / rec['name']]
+    assert (dest / rec['name']).read_bytes() == b'other writer'
+
+
+def test_failed_save_write_scrubs_only_its_reserved_file(page_app, monkeypatch, tmp_path):
     app, chat = page_app
     message, rec = _posted(app, chat)
     dest = tmp_path / 'saved'
@@ -552,20 +630,21 @@ def test_failed_save_write_leaves_no_partial_visible_file(page_app, monkeypatch,
             self.handle.write(data[:3])
             raise OSError('disk full')
 
-    def failing_write(path, data):
-        if path.parent == dest and path.name.startswith('.agentbridge-'):
+    def failing_write(path, data, **options):
+        if path.parent == dest and path.name == rec['name']:
             with monkeypatch.context() as context:
                 context.setattr(api_files.os, 'fdopen',
-                                lambda fd, mode: PartialFile(original_fdopen(fd, mode)))
-                return original_write(path, data)
-        return original_write(path, data)
+                                lambda fd, mode, **kw: PartialFile(original_fdopen(fd, mode, **kw)))
+                return original_write(path, data, **options)
+        return original_write(path, data, **options)
 
     monkeypatch.setattr(api_files, '_write_private', failing_write)
     result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
         {'message_id': message.id, 'id': rec['id']},
     ]}))
     assert result['error'] and result['saved'] == 0
-    assert list(dest.iterdir()) == []
+    assert list(dest.iterdir()) == [dest / rec['name']]
+    assert (dest / rec['name']).read_bytes() == b''
     if os.name != 'nt':
         assert observed_modes == [0o600]
 
@@ -599,13 +678,14 @@ def test_save_without_hardlink_support_keeps_exclusive_names_and_cleans_failure(
                 self.handle.write(data[:3])
                 raise OSError('storage failed')
 
-        def partial_write(path, data):
+        def partial_write(path, data, **options):
             if path.parent == dest and path.name == rec['name']:
                 with monkeypatch.context() as context:
                     context.setattr(api_files.os, 'fdopen',
-                                    lambda fd, mode: PartialFile(original_fdopen(fd, mode)))
-                    return original_write(path, data)
-            return original_write(path, data)
+                                    lambda fd, mode, **kw: PartialFile(
+                                        original_fdopen(fd, mode, **kw)))
+                    return original_write(path, data, **options)
+            return original_write(path, data, **options)
 
         monkeypatch.setattr(api_files, '_write_private', partial_write)
     result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
@@ -613,7 +693,8 @@ def test_save_without_hardlink_support_keeps_exclusive_names_and_cleans_failure(
     ]}))
     if fail:
         assert result['error'] and result['saved'] == 0
-        assert list(dest.iterdir()) == []
+        assert list(dest.iterdir()) == [dest / rec['name']]
+        assert (dest / rec['name']).read_bytes() == b''
     else:
         assert result['saved'] == 1, result
         assert (dest / rec['name']).read_bytes() == b'attachment-data'
