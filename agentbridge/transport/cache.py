@@ -907,7 +907,12 @@ class CachingTransport(Transport):
                     # established room, authoritative RLS disappearance is a
                     # revocation and must beat a concurrent local append.
                     self._chat_writes[chat_id] = time.monotonic()
-        self._persist_snapshot()
+        # Logs are never in the bootstrap snapshot. An established-room append
+        # changes no cached fields, so avoid copying/writing the entire mirror.
+        # Failed best-effort cache writes retry on cache-changing operations or
+        # full refresh; append success still depends on the provider above.
+        if is_new:
+            self._persist_snapshot()
 
     def read_log(
         self, chat_id: str, log_name: str, offset: int = 0

@@ -67,7 +67,8 @@ assert.equal(reader.refreshPlan().windowAnchor,'anchor-c2');
 
 let resolveSecond;
 const second = new Promise(resolve => {resolveSecond=resolve;});
-queue.push(page(['m2','m3'],'v2','rc2',['m3']));
+queue.push(page(['m2','m3'],'v2','rc2',['m3'],
+  {read_cutoff_ns:'1790000000000000030',read_ack_token:'a'.repeat(64)}));
 queue.push(second);
 const refresh = reader.read('refresh');
 await new Promise(resolve => setImmediate(resolve));
@@ -77,7 +78,8 @@ assert.equal(calls.at(-2).cursor,null);
 assert.equal(calls.at(-1).anchor,null);
 assert.equal(calls.at(-1).cursor,'rc2');
 resolveSecond(page(['m0','m1-new'],'v2','rc0',['m1-new'],
-  {meta:{id:'room',pins:[{id:'fresh'}]}, read_ns:19}));
+  {meta:{id:'room',pins:[{id:'fresh'}]}, read_ns:19,
+   read_cutoff_ns:'1790000000000000020',read_ack_token:'b'.repeat(64)}));
 result = await refresh;
 assert.deepEqual(ids(result),['m0','m1-new','m2','m3']);
 assert.deepEqual(result.evictedIds,['m1']);
@@ -85,6 +87,8 @@ assert.deepEqual(result.pageData.starred,['m1-new','m3']);
 assert.equal(result.pageData.meta.pins[0].id,'fresh');
 assert.equal(result.pageData.read_ns,19);
 assert.equal(result.pageVersion,'v2');
+assert.equal(result.pageData.read_cutoff_ns,'1790000000000000030');
+assert.equal(result.pageData.read_ack_token,'a'.repeat(64));
 
 queue.push(page([], 'v3', 'empty1', [], {scan_budget_exhausted:true}));
 queue.push(page([], 'v3', 'empty2', [], {scan_budget_exhausted:true}));

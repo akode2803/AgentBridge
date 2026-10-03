@@ -6,6 +6,9 @@ and the current raw position. Any interrupted transition remains unavailable.
 """
 from __future__ import annotations
 
+from ..core.input_phase_timings import span
+from ..core import delivery_trace
+
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -117,19 +120,29 @@ def _schema(conn, *, legacy=False):
 
 @contextmanager
 def _writer(store):
-    # NORMAL is sufficient for ordinary caches, not invalidate-before-external-
-    # write ordering. FULL makes the WAL invalidation commit a durability barrier.
-    conn = sqlite3.connect(f"{store.path.as_uri()}?mode=rw", uri=True, timeout=5)
-    try:
-        conn.execute('PRAGMA synchronous=FULL')
-        conn.execute('BEGIN IMMEDIATE')
-        yield conn
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    with delivery_trace.transaction('store', store.path) as trace:
+        # NORMAL is sufficient for ordinary caches, not invalidate-before-external-
+        # write ordering. FULL makes the WAL invalidation commit a durability barrier.
+        with span('store_open'):
+            conn = sqlite3.connect(f"{store.path.as_uri()}?mode=rw", uri=True, timeout=5)
+        try:
+            with span('store_setup'):
+                conn.execute('PRAGMA synchronous=FULL')
+            with span('store_begin'):
+                with trace.acquiring():
+                    conn.execute('BEGIN IMMEDIATE')
+            yield conn
+            with span('store_commit'):
+                with trace.finishing('db_commit'):
+                    conn.commit()
+        except BaseException:
+            with span('store_rollback'):
+                with trace.finishing('db_rollback'):
+                    conn.rollback()
+            raise
+        finally:
+            with span('store_close'):
+                conn.close()
 
 
 def initialize(store):

@@ -88,6 +88,7 @@ def test_background_schema_terminal_and_exact_signature_generation(tmp_path):
             store.capture_document_observation(source.source_id), 'room',
         ))
         preflight = PagePreparation(_mesh(store))
+        preflight.select('room')
         assert preflight.request('room', index=index, proofs=((path, pub),))
         assert preflight.run_one()  # Schema preparation; no request-side DDL.
         assert preflight.run_one()  # Terminal classification.
@@ -175,6 +176,7 @@ def test_failed_schema_and_terminal_health_clears_after_background_retry(tmp_pat
         monkeypatch.setattr(store, 'prepare_terminal_observation', original_schema)
         assert preflight.run_one()
         assert preflight.health('room') is None
+        store.outbox_add('append', 'room|viewer@laptop', {'kind': 'message'})
         original_terminal = store.refresh_terminal_observation
         monkeypatch.setattr(store, 'refresh_terminal_observation',
                             lambda target: (_ for _ in ()).throw(RuntimeError('terminal unavailable')))
@@ -203,5 +205,246 @@ def test_terminal_failure_health_is_bounded_under_many_rooms(tmp_path, monkeypat
         assert len(preflight._terminal_errors) == 128
         assert preflight.health('room0') is None
         assert preflight.health('room149') == 'terminal_preparation_failed'
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("kind", ["terminal", "proof"])
+def test_repeated_inventory_requests_do_not_starve_queued_preparation(tmp_path, monkeypatch, kind):
+    """A readiness wake may trigger a full inventory before the next quantum."""
+    store, _source, index = _store(tmp_path)
+    try:
+        preflight = PagePreparation(_mesh(store))
+        preflight._schema_ready = True
+        completed = []
+        monkeypatch.setattr(store, "capture_terminal_observation",
+                            lambda _target: SimpleNamespace(position=0))
+        monkeypatch.setattr(store, "refresh_terminal_observation", lambda _target: 0)
+        if kind == "terminal":
+            def capture(target):
+                completed.append(target.split("|", 1)[0])
+                return SimpleNamespace(position=0)
+            monkeypatch.setattr(store, "capture_terminal_observation", capture)
+            expected = {"selected", "ordinary-a", "ordinary-b"}
+            def inventory():
+                for chat in ("selected", "ordinary-a", "ordinary-b"):
+                    preflight.request(chat)
+        else:
+            public = crypto.identity_pubs(crypto.generate_identity())[0]
+            paths = tuple(P.state("room", who) for who in ("selected", "ordinary-a", "ordinary-b"))
+            expected = set(paths)
+            monkeypatch.setattr(store, "capture_overlay_proofs",
+                                lambda _position, keys: tuple((path, pub, True) for path, pub in keys))
+            def verify(_position, path, _public):
+                completed.append(path)
+                return True
+            monkeypatch.setattr(store, "verify_overlay_signature", verify)
+            def inventory():
+                preflight.request("room", index=index, proofs=tuple((path, public) for path in paths))
+        # The caller reissues the same pending work after every background step.
+        # Every original job must still make progress; duplicate wakes aren't
+        # new jobs and must not displace the uncompleted ones.
+        for _ in range(8):
+            inventory()
+            assert preflight.run_one()
+        assert expected <= set(completed)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("payload", [None, {"kind": "message"},
+                                     {"kind": "info", "event": {"type": "member_left"}}])
+def test_ready_terminal_preparation_has_no_reclassification_writes(tmp_path, monkeypatch, payload):
+    store, _source, _index = _store(tmp_path)
+    try:
+        store.prepare_terminal_observation()
+        target = 'room|viewer@laptop'
+        if payload is not None:
+            store.outbox_add('append', target, payload)
+            store.refresh_terminal_observation(target)
+        before = store.capture_terminal_observation(target)
+        preflight = PagePreparation(_mesh(store), on_ready=lambda *_: pytest.fail('unchanged readiness emitted'))
+        preflight._schema_ready = True
+        preflight._terminal_errors['room'] = None
+        calls = []
+        original = store.refresh_terminal_observation
+        def refresh(selected):
+            calls.append(selected)
+            return original(selected)
+        monkeypatch.setattr(store, 'refresh_terminal_observation', refresh)
+        changes = store._conn().total_changes
+        for _ in range(3):
+            assert preflight.request('room')
+            assert preflight.run_one()
+        assert calls == [], 'fresh valid classifications were rebuilt'
+        assert store._conn().total_changes == changes
+        assert store.capture_terminal_observation(target) == before
+        assert preflight.health('room') is None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('mutation', ['insert', 'payload', 'state', 'delete'])
+def test_mutated_terminal_preparation_rebuilds_only_invalid_generation(tmp_path, monkeypatch, mutation):
+    store, _source, _index = _store(tmp_path)
+    try:
+        store.prepare_terminal_observation()
+        target = 'room|viewer@laptop'
+        seq = store.outbox_add('append', target, {'kind': 'message'})
+        old = store.refresh_terminal_observation(target)
+        if mutation == 'insert':
+            store.outbox_add('append', target, {'kind': 'info', 'event': {'type': 'member_left'}})
+        else:
+            with store._conn() as conn:
+                if mutation == 'payload':
+                    conn.execute("UPDATE outbox SET payload=? WHERE seq=?",
+                                 ('{"kind":"info","event":{"type":"member_left"}}', seq))
+                elif mutation == 'state':
+                    conn.execute("UPDATE outbox SET state='dead' WHERE seq=?", (seq,))
+                else:
+                    conn.execute('DELETE FROM outbox WHERE seq=?', (seq,))
+        with pytest.raises(page_preparation.terminal_observation.TerminalObservationUnavailable):
+            store.capture_terminal_observation(target, expected=old)
+        calls = []
+        original = store.refresh_terminal_observation
+        def refresh(selected):
+            calls.append(selected)
+            return original(selected)
+        monkeypatch.setattr(store, 'refresh_terminal_observation', refresh)
+        ready = []
+        preflight = PagePreparation(_mesh(store), on_ready=lambda *args: ready.append(args))
+        preflight._schema_ready = True
+        for _ in range(2):
+            assert preflight.request('room')
+            assert preflight.run_one()
+        assert calls == [target]
+        assert ready == [('chat', 'room')]
+        current = store.capture_terminal_observation(target)
+        assert current.position != old
+        assert current.pending is (mutation in ('insert', 'payload'))
+    finally:
+        store.close()
+
+
+def test_mutation_after_valid_capture_keeps_consumers_pending(tmp_path, monkeypatch):
+    store, _source, _index = _store(tmp_path)
+    try:
+        store.prepare_terminal_observation()
+        target = 'room|viewer@laptop'
+        store.outbox_add('append', target, {'kind': 'message'})
+        old = store.refresh_terminal_observation(target)
+        original = store.capture_terminal_observation
+        def capture_then_mutate(selected):
+            captured = original(selected)
+            store.outbox_add('append', target, {'kind': 'info', 'event': {'type': 'member_left'}})
+            return captured
+        monkeypatch.setattr(store, 'capture_terminal_observation', capture_then_mutate)
+        monkeypatch.setattr(store, 'refresh_terminal_observation',
+                            lambda *_: pytest.fail('valid capture unnecessarily rebuilt'))
+        preflight = PagePreparation(_mesh(store))
+        preflight._schema_ready = True
+        assert preflight.request('room') and preflight.run_one()
+        with pytest.raises(page_preparation.terminal_observation.TerminalObservationUnavailable):
+            original(target)
+        with pytest.raises(page_preparation.terminal_observation.TerminalObservationUnavailable):
+            original(target, expected=old)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('switch_route', [False, True])
+def test_selected_terminal_bypasses_inventory_but_third_turn_serves_background(
+        tmp_path, monkeypatch, switch_route):
+    store, _source, _index = _store(tmp_path)
+    try:
+        prep = PagePreparation(_mesh(store))
+        prep._schema_ready = True
+        work = []
+        def absent(_target):
+            raise page_preparation.terminal_observation.TerminalObservationUnavailable('pending')
+        monkeypatch.setattr(store, 'capture_terminal_observation', absent)
+        monkeypatch.setattr(store, 'refresh_terminal_observation',
+                            lambda target: work.append(target.split('|')[0]))
+        for n in range(70):
+            prep.request(f'background{n}')
+        for n in range(9):
+            selected = f'selected{n}' if switch_route else 'selected'
+            assert prep.select(selected)
+            prep.request(selected)
+            assert prep.run_one()
+        assert work[0] == ('selected0' if switch_route else 'selected')
+        assert work[2] == 'background0'
+        assert work[5] == 'background1'
+        assert work[8] == 'background2'
+        assert len(prep._terminals) <= 128
+    finally:
+        store.close()
+
+
+def test_selected_terminal_priority_keeps_proof_alternation_and_clear_fifo(tmp_path, monkeypatch):
+    store, _source, index = _store(tmp_path)
+    try:
+        prep = PagePreparation(_mesh(store))
+        prep._schema_ready = True
+        work = []
+        def absent(_target):
+            raise page_preparation.terminal_observation.TerminalObservationUnavailable('pending')
+        monkeypatch.setattr(store, 'capture_terminal_observation', absent)
+        monkeypatch.setattr(store, 'refresh_terminal_observation',
+                            lambda target: work.append(target.split('|')[0]))
+        monkeypatch.setattr(store, 'capture_overlay_proofs', lambda *_a: ())
+        monkeypatch.setattr(store, 'verify_overlay_signature', lambda *_a: work.append('proof'))
+        pub = crypto.identity_pubs(crypto.generate_identity())[0]
+        prep.request('oldest')
+        prep.request('room', index=index, proofs=((P.state('room', 'viewer'), pub),))
+        prep.select('room')
+        assert prep.run_one()
+        assert prep.run_one()
+        assert work == ['room', 'proof']
+        prep.request('room')
+        prep.select(None)
+        assert prep.run_one()
+        assert work[-1] == 'oldest'
+        prep.close()
+        assert not prep.select('room')
+        assert not prep.run_one()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('selected', ['', True, 5, 'foreign/room', 'x' * 257])
+def test_selected_preparation_hint_rejects_invalid_room_without_io(tmp_path, selected):
+    store, _source, _index = _store(tmp_path)
+    try:
+        prep = PagePreparation(_mesh(store))
+        with pytest.raises((ValueError, TypeError)):
+            prep.select(selected)
+        assert not prep._terminals and not prep._proofs
+    finally:
+        store.close()
+
+
+
+def test_proof_jobs_do_not_reset_selected_terminal_fairness(tmp_path, monkeypatch):
+    store, _source, index = _store(tmp_path)
+    try:
+        prep = PagePreparation(_mesh(store))
+        prep._schema_ready = True
+        work = []
+        def absent(_target):
+            raise page_preparation.terminal_observation.TerminalObservationUnavailable('pending')
+        monkeypatch.setattr(store, 'capture_terminal_observation', absent)
+        monkeypatch.setattr(store, 'refresh_terminal_observation',
+                            lambda target: work.append(target.split('|')[0]))
+        monkeypatch.setattr(store, 'capture_overlay_proofs', lambda *_a: ())
+        monkeypatch.setattr(store, 'verify_overlay_signature', lambda *_a: work.append('proof'))
+        pub = crypto.identity_pubs(crypto.generate_identity())[0]
+        prep.select('room')
+        prep.request('background')
+        for _ in range(3):
+            prep.request('room', index=index, proofs=((P.state('room', 'viewer'), pub),))
+            assert prep.run_one()
+            assert prep.run_one()
+        assert work == ['room', 'proof', 'room', 'proof', 'background', 'proof']
     finally:
         store.close()

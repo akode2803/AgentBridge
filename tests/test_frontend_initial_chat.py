@@ -146,7 +146,7 @@ function make({throwBase = false} = {}) {
     return Promise.resolve(null); // null aux must hydrate with empty decorations
   };
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest",
-    "sessionMayApply", "applyMeshState", "meshStateSnapshot", "renderMeshChat",
+    "sessionMayApply", "applyMeshState", "meshStateSnapshot", "paintMeshChat",
     "requestAnimationFrame", "warmOperationCurrent", "applyCurrentWarmError",
     "restartColdAfterStateInvalidation", "restartColdAfterInitialFailure",
     "beginInitialSelectedView", "endInitialSelectedView", "markInitialSelectedViewReady",
@@ -154,6 +154,7 @@ function make({throwBase = false} = {}) {
     "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
      const INITIAL_SELECTED_TIMEOUT_MS = 30000, SIDEBAR_TIMEOUT_MS = 60000;
+     const redirectWarmToPaged = () => false;
      ${source}; return renderWarmChat;`);
   const fn = factory(api, () => ({epoch: 1}), () => ({}), () => true, () => true,
     () => ({stateGeneration: 2}), async (_force, _trace, options) => {

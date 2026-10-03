@@ -100,6 +100,8 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "instance_id": token.app_identity,
         "server_pid": os.getpid(),
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "sse_refresh_v1": bool(getattr(app, 'local_inputs_enabled', False)
+                     and token.mesh is not None and token.mesh.tx.scheme == 'supabase'),
                  "session_binding_v1": True,
                  "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
         "paused": False,  # compatibility field; mesh-global pause is retired
@@ -207,6 +209,8 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         "server_pid": os.getpid(),
         "encrypted": app.encrypt,
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "sse_refresh_v1": bool(getattr(app, 'local_inputs_enabled', False)
+                     and mesh is not None and mesh.tx.scheme == 'supabase'),
                  "session_binding_v1": True,
                  "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
         "max_upload_bytes": None,

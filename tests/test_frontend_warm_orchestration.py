@@ -138,12 +138,13 @@ function make({current = () => true, session = () => true, applyState = () => tr
     return aux[auxIndex++].promise;
   };
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
-    "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent",
+    "meshStateSnapshot", "paintMeshChat", "requestAnimationFrame", "warmOperationCurrent",
     "applyCurrentWarmError", "restartColdAfterStateInvalidation", "Mesh", "$", "location", "renderSidebar",
     "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
      const SIDEBAR_TIMEOUT_MS = 60000;
      const restartColdAfterInitialFailure = () => false;
+     const redirectWarmToPaged = () => false;
      const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
        markInitialSelectedViewReady = () => true, startAskPoll = () => {};
      const V = {closeAuthPage() {}, closeConnectingPage() {}};
@@ -269,13 +270,14 @@ const factory = new Function("document", "meshStateSnapshot", "App", "Mesh", "$"
      : new Promise(() => {});
    const captureSessionEpoch = () => ({epoch: 3}); const captureWarmStateRequest = () => ({sessionEpoch: 3, lockEpoch: 1});
    const sessionMayApply = () => true; const applyMeshState = () => true;
-   const renderMeshChat = async (_force, _trace, options) => {
+   const paintMeshChat = async (_force, _trace, options) => {
      if (options.warmBase) { Mesh.renderedChat = "room"; queueMicrotask(() =>
        handlers.get("ab:mesh-state-accepted")({detail: {state: {user: "aryan", chats: []}}})); }
    };
    const requestAnimationFrame = callback => callback(); const warmOperationCurrent = () => true;
    const applyCurrentWarmError = () => {}; const restartColdAfterStateInvalidation = () => {};
    const restartColdAfterInitialFailure = () => false;
+   const redirectWarmToPaged = () => false;
    const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
      markInitialSelectedViewReady = () => true, startAskPoll = () => {};
    const V = {closeAuthPage() {}, closeConnectingPage() {}}; const renderSidebar = () => {};
@@ -300,12 +302,13 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 function make() {
   const frames = [], records = [], renders = [], state = deferred(); let live = true;
   const factory = new Function("api", "captureSessionEpoch", "captureWarmStateRequest", "sessionMayApply", "applyMeshState",
-    "meshStateSnapshot", "renderMeshChat", "requestAnimationFrame", "warmOperationCurrent", "applyCurrentWarmError",
+    "meshStateSnapshot", "paintMeshChat", "requestAnimationFrame", "warmOperationCurrent", "applyCurrentWarmError",
     "restartColdAfterStateInvalidation", "recordChatOpen", "performance", "Mesh", "$", "location", "renderSidebar",
     "presentationFromState", "sidebarRead",
     `let chatRenderSeq = 0, activeWarmSurface = null;
      const SIDEBAR_TIMEOUT_MS = 60000;
      const restartColdAfterInitialFailure = () => false;
+     const redirectWarmToPaged = () => false;
      const beginInitialSelectedView = () => ({}), endInitialSelectedView = () => true,
        markInitialSelectedViewReady = () => true, startAskPoll = () => {};
      const V = {closeAuthPage() {}, closeConnectingPage() {}};

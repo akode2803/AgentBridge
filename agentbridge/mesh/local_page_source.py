@@ -96,10 +96,11 @@ class LocalPageSource:
             conn.close()
 
     @contextmanager
-    def finalization(self, receipt, *, companions=()):
+    def finalization(self, receipt, *, companions=(), mutation=None):
         """Enter only after epoch/identity/pin scopes; see coordinator contract."""
         receipt = self._receipt(receipt)
-        with self.coordinator.finalization_cut(self.store, self.definition, companions=companions) as (conn, source):
+        with self.coordinator.finalization_cut(self.store, self.definition, companions=companions,
+                                                mutation=mutation) as (conn, source):
             if source != receipt.source:
                 raise owner.SourceChanged('local_inputs_changed')
             yield conn
@@ -126,6 +127,16 @@ class LocalPageSource:
         from ..transport.key_observation import selection
         _limit(max_bytes, 4 * 1024 * 1024)
         _chat_id, _epoch, _viewer, path = selection(self.chat, epoch, viewer)
+        with self._read(receipt) as (conn, receipt):
+            captured = docs._capture_selected(conn, self.store.path, receipt.source.raw,
+                (path,), max_documents=1, max_bytes=max_bytes)
+        return captured.records[0]
+
+    def capture_viewer_state(self, receipt, viewer, *, max_bytes=4 * 1024 * 1024):
+        """One bounded raw document for a freshly verified read-MERGE-write."""
+        from .paths import P
+        _limit(max_bytes, 4 * 1024 * 1024)
+        path = P.state(self.chat, _part(viewer))
         with self._read(receipt) as (conn, receipt):
             captured = docs._capture_selected(conn, self.store.path, receipt.source.raw,
                 (path,), max_documents=1, max_bytes=max_bytes)

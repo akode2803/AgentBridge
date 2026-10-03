@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 let paged = true, requests = [], sidebarPaints = 0;
 let tr = {scrollHeight:1000, clientHeight:200, scrollTop:250};
 let pageOwner = {ready:true, chatId:'room', browsing:false, current:()=>true,
-                 visibleReadNs:'100'};
+                 visibleReadNs:'100',visibleReadToken:'a'.repeat(64),visibleReadVersion:'v1'};
 let Mesh = {chatId:'room',pendingRead:null, readTail:{}, state:{chats:[
   {id:'room', last:{ns:150}, unread:5, forced_unread:true},
 ]}};
@@ -48,15 +48,27 @@ assert.equal(Mesh.pendingRead,'room');
 assert.deepEqual(requests,[]); // not at tail, even within first page
 assert.equal(sidebarPaints,0);
 tr.scrollTop=800;
+for (const field of ['visibleReadToken','visibleReadVersion']) {
+  const saved=pageOwner[field];
+  pageOwner[field]=null;
+  markReadNow('room');
+  assert.deepEqual(requests,[],'a cutoff alone cannot authorize a paged read');
+  assert.equal(Mesh.pendingRead,'room');
+  pageOwner[field]=saved;
+}
 markReadNow('room');
 assert.equal(Mesh.pendingRead,'room','receipt remains pending until acknowledgement');
 assert.equal(requests.length,1);
-assert.deepEqual(requests[0].body,{chat_id:'room',up_to_ns:'100'});
+assert.deepEqual(requests[0],{path:'/api/mesh/chat_page_read',body:{
+  chat_id:'room',page_version:'v1',read_ack_token:'a'.repeat(64)}});
+assert.equal(Mesh.state.chats[0].unread,5);
+assert.equal(Mesh.state.chats[0].forced_unread,true);
 await Promise.resolve();await Promise.resolve();
 assert.equal(Mesh.pendingRead,null);
 assert.equal(boundedSidebarReads,1);
 assert.equal(Mesh.readTail.room,undefined);
 assert.equal(Mesh.state.chats[0].unread,5); // a newer sidebar tail was not seen
+assert.equal(Mesh.state.chats[0].forced_unread,true);
 Mesh.state.chats[0].last.ns=90;
 markReadNow('room');
 assert.equal(Mesh.state.chats[0].unread,5); // JS Number cannot prove exact cutoff
@@ -69,6 +81,9 @@ markReadNow('different');
 assert.equal(requests.length,1);
 paged=false;
 markReadNow('room');
+assert.deepEqual(requests[1],{path:'/api/mesh/read',body:{chat_id:'room'}});
+assert.equal(Mesh.state.chats[0].unread,5); // legacy badges also wait for success
+assert.equal(Mesh.readTail.room,undefined);
 await Promise.resolve();await Promise.resolve();
 assert.equal(Mesh.readTail.room,90);
 assert.equal(Mesh.state.chats[0].unread,0);

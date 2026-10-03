@@ -36,45 +36,75 @@ const renderSidebar=()=>sidebar++;
 let legacyOwner={}, routeCurrent=true;
 const captureViewRead=()=>legacyOwner;
 const viewReadMayApply=owner=>routeCurrent && owner===legacyOwner;
+const cutoff='1790238834318311101',nextCutoff='1790238834318311102';
+const latestCutoff='1790238834318311103';
+const makeOwner=(ns,token,version)=>({ready:true,chatId:'room',browsing:false,
+  visibleReadNs:ns,visibleReadToken:token,visibleReadVersion:version,current:()=>true});
 const factory=new Function('Mesh','App','meshCaps','$','api','Date',
-  'captureViewRead','viewReadMayApply','refreshPagedSidebar','renderSidebar','document',
-  `let pageOwner={ready:true,chatId:'room',browsing:false,visibleReadNs:'9',current:()=>true};
+  'captureViewRead','viewReadMayApply','refreshPagedSidebar','renderSidebar','document','owner',
+  `let pageOwner=owner;
    ${__READ__};return {markReadNow,getOwner:()=>pageOwner,setOwner:o=>pageOwner=o};`);
 const h=factory(Mesh,App,meshCaps,$,api,Date,captureViewRead,viewReadMayApply,
-  refreshPagedSidebar,renderSidebar,document);
+  refreshPagedSidebar,renderSidebar,document,makeOwner(cutoff,'a'.repeat(64),'v1'));
 const settle=async()=>{await Promise.resolve();await Promise.resolve();await Promise.resolve()};
+const assertPagedRequest=(index,token,version)=>{
+  assert.equal(calls[index].path,'/api/mesh/chat_page_read');
+  assert.deepEqual(calls[index].body,{
+    chat_id:'room',page_version:version,read_ack_token:token});
+};
 h.markReadNow('room');h.markReadNow('room');
 assert.equal(calls.length,1,'at most one request while held');
-assert.equal(calls[0].body.up_to_ns,'9');
+assertPagedRequest(0,'a'.repeat(64),'v1');
 assert.equal(calls[0].options.timeoutMs,8000);
 assert.equal(Mesh.pendingRead,'room');
+assert.equal(Mesh.state.chats[0].unread,2);
+assert.equal(Mesh.state.chats[0].forced_unread,true);
+assert.equal(Mesh.readTail.room,undefined);
 calls[0].reject(Error('network'));await settle();
 assert.equal(Mesh.pendingRead,'room');
 assert.equal(refreshes,0);
 now=2999;h.markReadNow('room');assert.equal(calls.length,1,'bounded cooldown');
 now=3000;h.markReadNow('room');assert.equal(calls.length,2);
 calls[1].resolve({status:'pending'});await settle();
+assert.equal(Mesh.pendingRead,'room');assert.equal(refreshes,0);
+assert.equal(Mesh.state.chats[0].unread,2);
 now=6999;h.markReadNow('room');assert.equal(calls.length,2,'second backoff doubles');
 now=7000;h.markReadNow('room');assert.equal(calls.length,3);
+assertPagedRequest(1,'a'.repeat(64),'v1');
+assertPagedRequest(2,'a'.repeat(64),'v1');
 calls[2].resolve({ok:true});await settle();
 assert.equal(Mesh.pendingRead,null);assert.equal(refreshes,1);
+assert.equal(h.getOwner().readAck.lastSuccess,cutoff);
+assert.equal(Mesh.state.chats[0].unread,2,'paged badges require canonical sidebar data');
+assert.equal(Mesh.state.chats[0].forced_unread,true);
+assert.equal(Mesh.readTail.room,undefined);assert.equal(sidebar,0);
 h.markReadNow('room');assert.equal(calls.length,3,'same cutoff not resent');
 
-// A new visible cutoff arriving during a held acknowledgement remains pending.
-h.getOwner().visibleReadNs='10'; h.markReadNow('room');
+// Adjacent decimal cuts beyond Number precision must not be conflated. A new
+// painted token/cutoff arriving during a held acknowledgement remains pending.
+Object.assign(h.getOwner(),makeOwner(nextCutoff,'b'.repeat(64),'v2'));
+h.markReadNow('room');
 assert.equal(calls.length,4);
-h.getOwner().visibleReadNs='11';calls[3].resolve({ok:true});await settle();
+assertPagedRequest(3,'b'.repeat(64),'v2');
+Object.assign(h.getOwner(),makeOwner(latestCutoff,'c'.repeat(64),'v3'));
+calls[3].resolve({ok:true});await settle();
+assert.equal(h.getOwner().readAck.lastSuccess,nextCutoff);
 assert.equal(Mesh.pendingRead,'room');
 h.markReadNow('room');assert.equal(calls.length,5);
+assertPagedRequest(4,'c'.repeat(64),'v3');
 const retired=h.getOwner();
-h.setOwner({ready:true,chatId:'room',browsing:false,visibleReadNs:'11',current:()=>true});
+const priorRefreshes=refreshes;
+h.setOwner(makeOwner(latestCutoff,'d'.repeat(64),'v4'));
 calls[4].resolve({ok:true});await settle();
 assert.equal(Mesh.pendingRead,'room','retired response cannot settle new owner');
 assert.equal(retired.readAck.inflight,false);
+assert.equal(refreshes,priorRefreshes,'retired response cannot refresh the new sidebar');
 
 // Legacy badge and optimistic readTail are not updated on failure.
 paged=false; now=10000;
 h.markReadNow('room'); assert.equal(calls.length,6);
+assert.equal(calls[5].path,'/api/mesh/read');
+assert.deepEqual(calls[5].body,{chat_id:'room'});
 calls[5].reject(Error('network'));await settle();
 assert.equal(Mesh.state.chats[0].unread,2);
 assert.equal(Mesh.readTail.room,undefined);
@@ -108,12 +138,15 @@ class CustomEvent {constructor(type,options){this.type=type;this.detail=options.
 const Mesh={chatId:'room',pendingRead:null,state:{user:'me',chats:[
   {id:'room',last:{ns:9},unread:0,forced_unread:false}]}};
 const App={page:'chats'}, tr={scrollHeight:100,scrollTop:0,clientHeight:100};
-const owner={ready:true,chatId:'room',current:()=>true,browsing:false,visibleReadNs:'9'};
+const owner={ready:true,chatId:'room',current:()=>true,browsing:false,visibleReadNs:'9',
+  visibleReadToken:'a'.repeat(64),visibleReadVersion:'v1'};
 const $=()=>tr, meshCaps=()=>({chat_page_v1:true});
-const api=(path,body)=>{if(path==='/api/mesh/read'){
+const api=(path,body)=>{
+  assert.equal(path,'/api/mesh/chat_page_read');
+  assert.deepEqual(body,{chat_id:'room',page_version:'v1',read_ack_token:'a'.repeat(64)});
   let resolve;const promise=new Promise(done=>resolve=done);
   reads.push({resolve,body});return promise;
-}return Promise.resolve({ok:true})};
+};
 const build=new Function('document','Mesh','App','$','meshCaps','api',
   'refreshPagedSidebar','renderSidebar','Date','captureViewRead','viewReadMayApply','owner',
   `let pageOwner=owner;${__READ__};return {markReadNow,getOwner:()=>pageOwner};`);

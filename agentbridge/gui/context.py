@@ -13,7 +13,7 @@ import platform
 import hashlib
 import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
@@ -122,6 +122,8 @@ class GuiApp:
         self.diagnostics = Diagnostics(self.home)
         from .page_cursors import PageCursorRegistry
         self.page_cursors = PageCursorRegistry()
+        from .page_read_tokens import PageReadTokens
+        self.page_read_tokens = PageReadTokens()
         from .collection_cursors import CollectionCursorRegistry
         self.collection_cursors = CollectionCursorRegistry()
         self.mesh: Mesh | None = None
@@ -192,7 +194,8 @@ class GuiApp:
                 and (mesh is None or self._session_read_ready)
             )
 
-    def finalize_page_read(self, token: SessionReadToken, prepared):
+    def finalize_page_read(self, token: SessionReadToken, prepared, *,
+                           mutation=None, expected_trust_version=None):
         """Inactive page handout seam; retain GUI gates through mesh validation.
 
         Computation has already finished outside these locks. Order is screen
@@ -210,18 +213,62 @@ class GuiApp:
                 if (not self.validate_session_read(token) or token.mesh is None
                         or token.mesh is not prepared._operation.mesh):
                     return PageWorkResult('unavailable', 'session_changed')
-                result = prepared.finalize()
+                candidate = prepared._operation.unread_candidate
+                if candidate is not None:
+                    from ..mesh.unread_counts import UnreadSession
+                    if candidate.session != UnreadSession(token.app_identity, token.generation, token.mesh.user):
+                        return PageWorkResult('unavailable', 'unread_session_changed')
+                if mutation is not None:
+                    from ..store.mutation_reservation import FinalizationMutation
+                    from ..store.source_selectors import Selector
+                    from ..mesh.paths import P
+                    op = prepared._operation
+                    if (type(mutation) is not FinalizationMutation or op.source_reader is None
+                            or mutation.coordinator is not op.source_reader.coordinator
+                            or mutation.changes != (Selector('doc_exact', P.state(op.chat, op.viewer)),)):
+                        raise ValueError('invalid read-state reservation')
+                result = (prepared.finalize() if mutation is None and expected_trust_version is None
+                          else prepared.finalize(mutation=mutation,
+                              expected_trust_version=expected_trust_version))
                 # A deadline may expire during bounded final verification. Its
                 # postcheck can only withhold a response; it never revives one.
-                if self.lock._expire_if_idle_locked():
-                    return PageWorkResult('locked', 'app_locked')
-                return result
+                release = False
+                try:
+                    if self.lock._expire_if_idle_locked():
+                        return PageWorkResult('locked', 'app_locked')
+                    if (result.status == 'page' and candidate is not None
+                            and candidate.complete and result.result is not None
+                            and result.result.unread is not None):
+                        runtime = token.mesh.local_inputs
+                        if (runtime is None or runtime.unread is None
+                                or not runtime.unread.accept(candidate,
+                                    result.result.validated_now_ns)):
+                            # The normal canonical summary remains valid; a
+                            # replaced job or concurrent newer handout removes
+                            # only its optional exact-count decoration.
+                            result = replace(result, result=replace(result.result, unread=None))
+                    release = result.status == 'page'
+                    return result
+                finally:
+                    # Only a successful page may expose a reserved ticket. A
+                    # failed postcheck/exception cancels this unattempted write.
+                    if (mutation is not None and mutation._state == 'reserved'
+                            and not release):
+                        mutation.abort_unstarted()
 
     def _advance_session_generation(self) -> None:
         self.page_cursors.clear()
+        self.page_read_tokens.clear()
         self.collection_cursors.clear()
         if self.mesh is not None and self.mesh.local_inputs is not None:
             self.mesh.local_inputs.clear_selection()
+            if self.mesh.local_inputs.unread is not None:
+                from ..mesh.unread_counts import UnreadSession
+                session = (UnreadSession(self.instance_id, self._session_generation + 1,
+                                          self.mesh.user)
+                           if type(self._session_generation) is int
+                           and 0 <= self._session_generation < _MAX_SESSION_GENERATION else None)
+                self.mesh.local_inputs.unread.clear(session=session)
         self._session_read_ready = False
         if type(self._session_generation) is not int \
                 or not 0 <= self._session_generation < _MAX_SESSION_GENERATION:
@@ -455,6 +502,9 @@ class GuiApp:
             return out
 
     def close(self) -> None:
+        from ..core.delivery_trace import emit
+        emit('shutdown', outcome='completed')
+        self.diagnostics.close()
         with self._lock:
             self._detach()
 

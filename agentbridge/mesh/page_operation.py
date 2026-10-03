@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..core.models import ChatKind, MsgKind
+from ..core import delivery_trace
 from ..store import aux_inputs, document_observation, overlay_index, local_source, page_metadata, presence_index, page_inputs as raw_pages
 from ..transport import authority_observation
 from . import authority_source, epoch_inputs, events, membership_coordinator as membership
-from . import page_fence, page_inputs, page_overlays, page_pins, page_receipts
+from . import page_fence, page_overlays, page_pins, page_receipts
+from .local_page_source import LocalPageSource
 from .overlay_source import OverlaySourceUnavailable
 from .page_selection import CanonicalPageAccumulator, PageDependencyPending, select_exact_messages
 from .paths import P
@@ -127,23 +129,19 @@ class _Sealer:
         ledger.epoch(epoch)
         if epoch not in self.epochs:
             local = self.round.source_reader
-            source_args = {} if local is None else dict(source_reader=local,
-                receipt=self.round.receipt, charge_source=ledger.charge, max_source_bytes=ledger.remaining())
             view = epoch_inputs.capture_epoch(mesh.keys, chat, epoch,
-                max_bytes=min(epoch_inputs.MAX_IDENTITY_BYTES, ledger.remaining()), **source_args)
+                max_bytes=min(epoch_inputs.MAX_IDENTITY_BYTES, ledger.remaining()),
+                source_reader=local, receipt=self.round.receipt,
+                charge_source=ledger.charge, max_source_bytes=ledger.remaining())
             ledger.charge(view.captured_bytes)
-            if view.wrap is not None and (
-                    (view.wrap.mirror != self.round.receipt.mirror) if local is None
-                    else (view.wrap.receipt != self.round.receipt)):
+            if view.wrap is not None and view.wrap.receipt != self.round.receipt:
                 raise _Work('source_refresh')
             self.epochs[epoch] = view
             if view.resident is None:
                 # Charge decode/unwrap and exact comparison as well as capture.
                 ledger.charge(2 * view.captured_bytes)
-                publish_args = {} if local is None else dict(source_reader=local, charge_source=ledger.charge)
-                status = epoch_inputs.publish_epoch(mesh.keys, view, **publish_args)
-                if status == 'readthrough':
-                    raise _Work('epoch_readthrough', (P.keys(chat, epoch),))
+                status = epoch_inputs.publish_epoch(mesh.keys, view,
+                    source_reader=local, charge_source=ledger.charge)
                 if status in ('published', 'identity_progress'):
                     raise membership._Stop('restart', status)
                 if status != 'missing':
@@ -229,14 +227,31 @@ class _PreparedPage:
         self._round, self._snapshot, self._fence = round_, snapshot, fence
         self._used = False
 
-    def finalize(self):
+    @delivery_trace.observed('page_finalize')
+    def finalize(self, *, mutation=None, expected_trust_version=None):
         op = self._operation
         with op._lock:
             if self._used or self._serial != op._serial or not op._bound():
                 return PageWorkResult('unavailable', 'operation_superseded')
             self._used = True
             try:
-                result = self._round.final(self._snapshot, None, page=self._fence)
+                candidate = op.unread_candidate
+                if candidate is not None:
+                    if expected_trust_version is not None or mutation is not None:
+                        raise ValueError('unread count cannot reserve a mutation')
+                    expected_trust_version = candidate.evidence.trust_version
+                result = self._round.final(self._snapshot, None, page=self._fence,
+                    mutation=mutation, expected_trust_version=expected_trust_version)
+                if result.status == 'page' and candidate is not None and candidate.complete:
+                    result = replace(result, unread=candidate.summary())
+                if result.status == 'page':
+                    runtime = getattr(op.mesh, 'local_inputs', None)
+                    events_ = None if runtime is None else getattr(runtime, 'read_events', None)
+                    if events_ is not None:
+                        deadline = (self._round.deadline if type(op) is PageOperation
+                                    else getattr(op, 'revalidation_deadline', None))
+                        events_.note_deadline(op.chat, deadline,
+                                              result.validated_now_ns)
                 return PageWorkResult(result.status, result.reason or '', result=result)
             except _ERRORS as exc:
                 return _failure(exc)
@@ -245,24 +260,29 @@ class _PreparedPage:
 class PageOperation:
     """One server-owned request; counters survive every discard/restart.
 
-    Source/index/proof preparation and read-through are explicit caller work,
-    never performed here. Each prepare invalidates any earlier finalizer.
+    An explicit LocalPageSource is required. Admission/index/proof preparation
+    is background caller work, never an implicit live-mirror authority mode.
+    Each prepare invalidates any earlier finalizer.
     """
-    def __init__(self, mesh, chat_id, *, before=None, expected_position=None, window_before=None,
-                 window_inclusive=False,
-                 limit=50, scan_budget=1000, limits=PageOperationLimits(), source_reader=None,
-                 summary_only=False, defer_receipts=False):
+    def __init__(self, mesh, chat_id, *, source_reader, before=None, expected_position=None,
+                 window_before=None, window_inclusive=False,
+                 limit=50, scan_budget=1000, limits=PageOperationLimits(),
+                 summary_only=False, defer_receipts=False, unread_candidate=None):
         authority_observation._part(chat_id)
         self.mesh, self.chat = mesh, chat_id
-        if source_reader is not None:
-            from .local_page_source import LocalPageSource
-            if (type(source_reader) is not LocalPageSource or source_reader.store is not mesh.store
-                    or source_reader.chat != chat_id):
-                raise ValueError('invalid local page owner')
+        if (type(source_reader) is not LocalPageSource or source_reader.store is not mesh.store
+                or source_reader.chat != chat_id):
+            raise ValueError('invalid local page owner: PageOperation requires a LocalPageSource '
+                             'for this chat and Store')
         self.source_reader = source_reader
         if type(summary_only) is not bool:
             raise ValueError('invalid page summary mode')
         self.summary_only = summary_only
+        if unread_candidate is not None:
+            from .unread_counts import UnreadCandidate
+            if type(unread_candidate) is not UnreadCandidate or not summary_only:
+                raise ValueError('unread candidate requires local summary mode')
+        self.unread_candidate = unread_candidate
         if type(defer_receipts) is not bool:
             raise ValueError('invalid receipt mode')
         self.defer_receipts = defer_receipts
@@ -302,6 +322,7 @@ class PageOperation:
         return ((self.mesh.messaging.user, self.mesh.messaging.machine) == (self.viewer, self.machine)
                 and self.mesh.tx is self._transport and self.mesh.store is self._store)
 
+    @delivery_trace.observed('page_prepare')
     def prepare(self, authority_receipt, overlay_receipt, index):
         with self._lock:
             self._serial += 1
@@ -318,16 +339,11 @@ class PageOperation:
         round_ = membership._Round(mesh, authority_receipt, ledger, source_reader=self.source_reader)
         if round_.chat != self.chat or overlay_receipt.chat_id != self.chat:
             raise ValueError('wrong page chat')
-        if self.source_reader is None:
-            source_binding = overlay_receipt.mirror
-            if round_.receipt.mirror != source_binding:
-                raise _Work('source_refresh')
-        else:
-            source_binding = self.source_reader._receipt(overlay_receipt)
-            if round_.receipt != source_binding:
-                raise _Work('source_refresh')
-            if index.source != source_binding.source.raw or index.chat_id != self.chat:
-                raise ValueError('index belongs to another local source')
+        source_binding = self.source_reader._receipt(overlay_receipt)
+        if round_.receipt != source_binding:
+            raise _Work('source_refresh')
+        if index.source != source_binding.source.raw or index.chat_id != self.chat:
+            raise ValueError('index belongs to another local source')
         if self.expected_position is not None and (
                 self.expected_position.messages != round_.suffix.position
                 or self.expected_position.overlays != index):
@@ -349,6 +365,9 @@ class PageOperation:
             history = (snapshot.members[self.viewer].joined_ns
                        if snapshot.kind is ChatKind.GROUP and not snapshot.permissions.send_history else 0)
             sealer = _Sealer(round_, epochs)
+            if self.unread_candidate is not None:
+                from .unread_counts import validate_inputs
+                validate_inputs(round_, index, sealer, self.unread_candidate)
             accumulator = CanonicalPageAccumulator(self.viewer, sealer, limit=self.limit, scan_budget=self.scan_budget)
             before, expected, exact, proof_keys = self.before, self.expected_position, (), ()
             verifier = redaction_verifier(self.chat, round_) if encrypted else None
@@ -364,11 +383,7 @@ class PageOperation:
                     expected=expected, raw_limit=raw_limit,
                     exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
                     proof_keys=proof_keys, include_reactions=True, max_bytes=ledger.remaining())
-                if self.source_reader is None:
-                    inputs = page_inputs.capture_page_inputs(mesh.tx, mesh.store,
-                        overlay_receipt, index, **selection_args)
-                else:
-                    inputs = self.source_reader.capture_page(source_binding, index, **selection_args)
+                inputs = self.source_reader.capture_page(source_binding, index, **selection_args)
                 ledger.charge(inputs.captured_bytes)
                 if inputs.position.messages != round_.suffix.position:
                     raise page_fence.PageFenceChanged('page_membership_cut_changed')
@@ -409,7 +424,7 @@ class PageOperation:
                     selection = accumulator.finish()
                     pins_json = (self._pin_presentation(round_, snapshot, source_binding, index,
                         expected, sealer, history, verifier, proofs)
-                        if self.source_reader is not None and not self.summary_only else None)
+                        if not self.summary_only else None)
                     receipts_json, presence = ((None, None) if self.summary_only or self.defer_receipts else
                         self._receipt_presentation(round_, snapshot,
                             source_binding, index, expected, selection, proofs))
@@ -513,8 +528,6 @@ class PageOperation:
             return encoded
 
     def _receipt_presentation(self, round_, snapshot, receipt, index, expected, selection, proofs):
-        if self.source_reader is None:
-            return None, None
         own = tuple(m for m in selection.messages if m.from_ == self.viewer
                     and m.kind is MsgKind.MESSAGE and not m.deleted)
         if not own:

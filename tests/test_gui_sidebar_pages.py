@@ -230,3 +230,91 @@ def test_default_gui_without_local_inputs_keeps_legacy_state_path(tmp_path, monk
         assert any(c['id'] == chat.id for c in state['chats'])
     finally:
         app.close()
+
+
+def test_sidebar_phase_diagnostics_use_existing_private_schema(world):
+    from agentbridge.gui import api_sidebar_pages
+    app, chat, _encrypted = world
+    app.mesh.post(chat, 'private message must not appear in logs')
+    _ready(app, chat)
+    assert _state(app)['chats_complete']
+    assert app.diagnostics.set_enabled(True)
+    row, complete = api_sidebar_pages._room(app, app.mesh, app.capture_session_read(), chat)
+    assert complete and row is not None
+    raw = app.diagnostics.path.read_text()
+    events = [json.loads(line) for line in raw.splitlines()]
+    phases = {e['phase']: e for e in events}
+    assert set(phases) == {'inputs', 'prepare', 'finalize'}
+    assert [phases[p]['status'] for p in ('inputs', 'prepare', 'finalize')] == [
+        'ready', 'prepared', 'page']
+    for event in events:
+        assert event['event'] == 'page_stage' and event['route'] == '/api/mesh/state'
+        assert event['duration_ms'] >= 0 and len(event['chat_ref']) == 16
+    assert chat not in raw and 'private message' not in raw
+    assert app.diagnostics.set_enabled(False)
+    assert api_sidebar_pages._room(app, app.mesh, app.capture_session_read(), chat)[1]
+    assert app.diagnostics.path.read_text() == raw
+
+
+@pytest.mark.parametrize('case,expected_phases,resolved', [
+    ('inputs_error', ['inputs'], False),
+    ('prepare_error', ['inputs', 'prepare'], False),
+    ('forbidden', ['inputs', 'prepare'], True),
+    ('work', ['inputs', 'prepare'], False),
+    ('prepare_restarts', ['inputs'] + ['prepare', 'inputs'] * 4, False),
+    ('finalize_error', ['inputs', 'prepare', 'finalize'], False),
+    ('finalize_locked', ['inputs', 'prepare', 'finalize'], False),
+    ('finalize_restarts', ['inputs'] + ['prepare', 'finalize', 'inputs'] * 4, False),
+])
+def test_sidebar_phase_diagnostics_include_early_exits(monkeypatch, case, expected_phases, resolved):
+    from types import SimpleNamespace as NS
+    from agentbridge.gui import api_sidebar_pages as module
+    from agentbridge.gui.diagnostics import Diagnostics
+    events = []
+
+    def stage(route, chat, phase, status, reason, **fields):
+        event = Diagnostics._sanitize(dict(event='page_stage', route=route, phase=phase,
+                                          status=status, reason=reason, **fields))
+        if phase != 'sidebar':
+            events.append(event)
+
+    def inputs(_chat):
+        if case == 'inputs_error':
+            raise OSError('PRIVATE exception text')
+        return (None, None, None)
+
+    def prepare(*_args):
+        if case == 'prepare_error':
+            raise ValueError('PRIVATE exception text')
+        status = {'forbidden': 'forbidden', 'work': 'work',
+                  'prepare_restarts': 'restart'}.get(case, 'prepared')
+        return NS(status=status, reason='overlay_proofs' if status == 'work' else 'none',
+                  prepared=None, work=())
+
+    def finalize(*_args):
+        if case == 'finalize_error':
+            raise OSError('PRIVATE exception text')
+        return NS(status='restart' if case == 'finalize_restarts' else 'locked',
+                  reason='app_locked', result=None)
+
+    runtime = NS(request=lambda *a, **k: None, request_page=lambda *a, **k: None,
+                 inputs=inputs, unread=None)
+    mesh = NS(local_inputs=runtime, user='viewer')
+    token = NS(app_identity='diagnostics-test', generation=1)
+    app = NS(diagnostics=NS(stage=stage), finalize_page_read=finalize)
+    monkeypatch.setattr(module, 'PageOperation', lambda *a, **k: NS(prepare=prepare))
+    assert module._room(app, mesh, token, 'room') == (None, resolved)
+    assert [e['phase'] for e in events] == expected_phases
+    assert all(e['duration_ms'] >= 0 for e in events)
+    if case.endswith('_error'):
+        assert events[-1]['status'] == 'error'
+        assert events[-1]['error_type'] in ('OSError', 'ValueError')
+    assert 'PRIVATE' not in json.dumps(events)
+
+    # A broken recorder must leave the exact same canonical control flow/result.
+    def broken(*_args, **_kwargs):
+        raise RuntimeError('diagnostics unavailable')
+    app.diagnostics.stage = broken
+    assert module._room(app, mesh, token, 'room') == (None, resolved)
+    del app.diagnostics
+    assert module._room(app, mesh, token, 'room') == (None, resolved)

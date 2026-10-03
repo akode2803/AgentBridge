@@ -218,6 +218,15 @@ docs are owner-signed and read through verified accessors (see §3 Overlays),
 and the local keystore is DPAPI-wrapped on Windows (above). Remaining accepted
 risks live in docs/THREAT_MODEL.md ("What is NOT protected").
 
+**R124 authenticates mutable account authority** without pretending the whole
+profile is signed. `mesh/lifecycle.py` folds append-only signed bootstrap,
+state, host, transfer and terminal-deactivation records; agent moves require
+the agent key, deterministic ordering resolves races, and the SQLite verified
+head resists transport rollback after observation. `Directory.get()` overlays
+only `active`/`deactivated`/agent owner+machine from that fold while all other
+account fields remain the compatibility projection. `harden_startup()`
+TOFU-migrates only identities whose required private keys are local.
+
 ---
 
 ## 6. Transports & storage
@@ -343,8 +352,8 @@ live only in an adapter preset.
   `--all` supervises every agent hosted on this machine, `--supervise` keeps one
   alive with capped backoff). A `SingleInstance` lock stops a second launcher's
   runner (it stands aside with rc 3). The loop: sync → scan triggers → dispatch
-  → post. Honors the global stand-down (`control.json`) and a persisted local
-  peer-hold. Calls `mesh.harden_startup()` on start.
+  → post. Honors append-only signed global/room pause state and a persisted
+  local peer-hold. Calls `mesh.harden_startup()` on start.
   R136 gives `--all` a strict home-scoped master lock and makes every supervisor
   an owned process-tree boundary: POSIX uses process groups and Windows uses
   tree termination. The detached GUI restart helper revalidates exact commands
@@ -358,6 +367,127 @@ live only in an adapter preset.
   while a model is quiet. The GUI dual-reads the old singleton during rollout.
   Completed outcomes live in the capped `<agent>_runs.json` history, and boot
   reaping records genuinely orphaned entries as interrupted.
+- **`runtime/models.py`** (R120/C1.0) — immutable contracts for
+  versioned run/task/handoff/effect/continuation/control records, their
+  room/actor/lineage/policy/epoch bindings, canonical JSON bytes and a future
+  authenticated ciphertext envelope. Parsers reject unknown fields, versions,
+  kinds and states. The generic models are still not a production authority;
+  C1.1's permission lane uses its own complete vertical records instead of
+  partially adopting a generic `ControlRecord`.
+- **`runtime/{contracts,fakes}.py`** (R138/C2.1) - a separate dormant adapter
+  ABI for reusable agent definitions, resolved invocations, streamed events,
+  interruptions, normalized errors/usage and terminal results. Arbitrary JSON
+  is retained as deeply immutable canonical bytes. Definitions have no place
+  to store identity, grants, credentials or continuation state; invocation
+  authority is only a digest-bound projection of exact signed run/task records
+  and must be revalidated before use. Provider/SDK objects stay adapter-local
+  behind authenticated, full-context, one-use continuation references with
+  authenticated consumed tombstones and an external generation watermark against rollback.
+  Provider errors expose only code-owned text plus an optional evidence digest.
+  The deterministic fake clock, continuation store, provider and strict event
+  sink prove replay denial, contiguous ordering, lock-atomic cancellation/
+  terminal arbitration and one terminal event. R139/C2.2 adds
+  `runtime/cli_compat.py`: a default-off validation/observation wrapper around
+  the sole existing CLI responder. It samples one exact boolean per prepared
+  run, verifies the immutable invocation against signed run/root-task truth,
+  digest-checks every actual normal/minimal launch and retains only a bounded
+  adapter-local trace. It adds no provider launcher, authority, durable event,
+  GUI/API/storage surface or usage estimate. Optional SDK wiring was skipped by
+  product decision in R141; the neutral contracts remain provider-independent.
+- **`runtime/{authority,envelope,permissions,peer_control,controls}.py`**
+  (R121-R123/C1.1-C1.3) — the first
+  production signed runtime-control slice. Permission asks and decisions live
+  under their actual chat, carry real run/call ids and full intent/ask digests,
+  and are encrypted with a fresh key wrapped to exactly the agent and current
+  responsible member. Ed25519 authenticates header, audience wraps, nonce and
+  ciphertext; opening and consumption revalidate key/policy/membership/
+  ownership epochs and absolute `ns` expiry. Owner discovery scans current
+  member chats only. Decisions are unique append-only docs; identical
+  concurrent answers converge, conflicting answers deny, and local SQLite
+  atomically claims each ask once across threads/restarts. The legacy plaintext
+  lane exists only behind a private test-fixture flag. R122 applies a distinct
+  chatless target-agent/current-owner authority to peer harness asks and
+  decisions: exact request/ask digest binding, pairwise encryption, signed
+  routing and audience, policy/ownership/expiry revalidation, server-side GUI
+  reconstruction and durable one-use consumption. It never invents a room;
+  legacy plaintext peer verdicts fail closed, and repair is one-shot with an
+  explicit unknown/no-retry crash outcome. R123 replaces unsigned stop and
+  timer-cancel singletons with expiring, pairwise-encrypted owner commands
+  under `runtime/owner-control/<agent>/commands`; current ownership/policy is
+  revalidated and SQLite claims each command once. Timer commands bind the
+  exact server-observed timer id/chat/time. R139 upgrades new stop commands to
+  bind one exact active canonical run: chat supplies its visible feed run and
+  settings resolves only one unambiguous live run. Legacy/unbound stops are
+  inert, so a late process-exit command cannot poison the next run; version-1
+  timer-cancel envelopes remain readable. Global and room pause are visible
+  append-only signed active-human states under `runtime/member-control`; room
+  actors must remain members, `(ns,id)` converges, and uncertain reads retain
+  the last verified state or fail closed. R124 adds signed account
+  lifecycle evidence and authenticated AppLink below; generic effect receipts
+  and peer metadata confidentiality remain outside this security claim.
+- **`runtime/runs.py`** (R125/C1.5) — the first canonical room-ledger record
+  producer. Every harness run durably enqueues an immutable encrypted/signed
+  start before model execution and one ordered terminal event below
+  `chats/<chat>/runtime/runs/<run>/`; startup resolves locally open runs as
+  interrupted. The start recovery map and outbox intent share one SQLite
+  transaction. Terminal intent lands before signing, retries in the ordinary
+  harness loop, and is removed only by the outbox success hook; a process lock
+  prevents completion and retry from creating competing terminals. The CLI
+  invocation and exact harness-policy revision are frozen before the start
+  record; an external CLI default is explicitly marked unattested rather than
+  misrepresented as an exact effective model. Terminal records retain the
+  start policy, and remote delivery is considered complete only after local
+  terminal cleanup succeeds. Current members can open only records whose agent tenure,
+  room key, signature, strict contract and current owner/policy/membership/
+  ownership evidence all validate. Authority drift invalidates this canonical
+  derived view until historical tenure semantics land. `RunFeed` still writes
+  the bounded `status/` live/history documents as the old-client and rollback
+  projection. Tasks, handoffs, capability ceilings, effects and receipts are
+  not implied by this slice.
+- **`runtime/{eventio,tasks}.py`** (R126/C1.6) — shared immutable runtime-event
+  sealing/opening plus one canonical root task for every real harness run.
+  Run start, task start, both recovery maps and both outbox intents commit in
+  one SQLite transaction before provider execution. The run promises the task
+  id; reads then require that exact run, manager/assigner/assignee/return
+  coherence, current room/owner/policy/epoch authority, no parent/call/grants/
+  dependencies, and a trigger-bound context digest. Task progress is limited
+  to one fixed content-free post-model milestone; terminal text is protocol
+  fixed; backdated events are ignored and competing coherent events fail
+  closed. Per-task outbox ordering, restart interruption
+  and delivery-coupled cleanup preserve recovery without exposing provider
+  detail. `RunFeed` and Message Info remain compatibility surfaces; active
+  child execution, effects, receipts, retention and GUI graph projection remain
+  later slices.
+- **`runtime/effects.py`** (R142/C5.1) — one-use effect claims and honest
+  outcomes for AgentBridge-owned execution. The retained signed pairwise owner
+  ask/decision is the grant; one versioned Supabase transition RPC writes fixed
+  append-only PREPARED/EXECUTING/terminal paths after current signed run/root-
+  task revalidation. `clear_chat` is the first narrow integration. Folder,
+  service-key, missing-schema and provider-native paths fail closed; recovery
+  never replays and turns stale dispatched work into UNKNOWN.
+- **`runtime/handoffs.py`** (R127/C3.1) — canonical same-room delegation
+  authority without execution routing. One source operation persists a local
+  recovery row plus a paired outbox payload before transport, then publishes a
+  source-signed encrypted `OFFERED` child task and matching handoff event under
+  exact run/task/call paths. The shared digest commits the source and
+  destination policy/ownership revisions, room/run/parent/child/call lineage,
+  history policy, destination and requested capability subset. Only the named
+  destination can sign `ACCEPTED`/`DECLINED`; only the source can sign
+  `TIMED_OUT`, and parent termination closes the decision window. Reads require
+  both agents and responsible owners to remain room members, the current room
+  key and authority epochs, one exact child pair, an active-root ancestry and
+  one unambiguous decision. Forged, late, stale, retargeted or competing events
+  fail closed. Remote pair creation is sequential, not a storage transaction:
+  a crash can temporarily expose an orphan ciphertext document, but the pair
+  is invisible until complete and the single durable payload retries both
+  immutable writes idempotently after restart. The runner registers this
+  handler before starting transport. `agent_tool` keeps the source manager and
+  return path; accepted execution-transfer handoffs remain inactive until the
+  routing slice. Destination accept/decline is deliberately a current-window
+  projection: after offer expiry it folds back to offer-only, because a
+  signer-selected `ns` cannot prove remote commit time. Preserving a historical
+  pre-expiry decision requires a later source-signed receipt or authoritative
+  provider sequence. No capabilities or grants transfer in R127.
 - **`perf.py`** (R30) — per-run response-time profile: `pickup` (trigger
   posted → group claimed) / `context` (delivery build) / `model` (the
   responder run) / `post` (seal + commit). One JSONL record per run in
@@ -390,8 +520,58 @@ live only in an adapter preset.
   stay owned by the reply pipeline; the first part carries `reply_to`, files
   ride the last part, and attachment delivery preflights every outbox file
   before uploading. A file whose sealed payload exceeds the transport cap is
-  named in the reply and skipped; unexpected partial upload failures roll back
-  blobs from that attempt and retain the normal failure path.
+  named in the reply and retained; unexpected partial upload or message-enqueue
+  failures roll back blobs from that attempt and retain its local sources.
+- **`recovery.py`** (R117) — each invocation owns
+  `workspaces/<chat>/runs/<run>/outbox`, including a PID marker used to recover
+  an abandoned process without touching another live same-chat invocation.
+  Failed, stopped, silent and over-limit files move to that chat's `recovery/`
+  and are named in the next code-owned prompt; they are never resent
+  automatically. Delivered sources disappear only after enqueue succeeds.
+  Retention is newest-first and bounded to 7 days, 1 GiB/50 files per chat and
+  2 GiB/200 files per agent; symlinks are rejected, and agent-wide pruning
+  reports counts without disclosing another chat's filenames. Multi-hundred-MB
+  and GB outputs use an external transfer rather than arbitrary chunks that
+  amplify shared storage. This is local run-artifact recovery; delivery then
+  transfers ownership to the transactional attachment outbox below.
+- **`mesh/attachments.py`** (R118) — one durable message-attachment contract
+  shared by GUI post/forward, bridge forward and harness replies. Preparation
+  validates the target first, mints a stable blob id/public record, seals once,
+  and atomically writes a mode-600 spool. `MessagingService` commits the
+  optimistic message and manifest-bearing outbox row in one SQLite transaction
+  before the first remote blob write. Per-target FIFO retries upload the same
+  verified bytes/path, append the same envelope id, and unlink the spool only
+  after outbox acknowledgement. Sender-side optimistic reads fall back to the
+  spool. Legacy direct envelope rows and existing record-only callers still
+  work. Pending ordinary messages cannot recreate terminal/missing chats;
+  queued leave/delete events drain in order while the actor is still authorized,
+  then rematerialize terminal `meta.json` inside the outbox dispatch before its
+  local acknowledgement (so member RLS admits the event). A crash retry whose
+  terminal state is already materialized succeeds without another append; a
+  terminal row becomes dead if a janitor physically reclaims the chat. Dead rows retain
+  their retry source for a 30-day/100-row review window; row pruning owns spool
+  deletion, while unowned spools and GUI staging have independent byte/count/
+  age bounds. Folder and Supabase logs remain at-least-once across a crash after
+  append but before local acknowledgement; stable ids make the read projection
+  exactly once. True remote exactly-once append would require a format/schema
+  migration and is not claimed.
+- **Terminal-chat blob reclamation** (R119) — terminal outbox dispatch appends
+  the signed deletion event, proves terminal state by folding authenticated
+  info events, reclaims exact owned attachments while the pre-terminal member
+  ACL still authorizes Storage, and only then materializes empty-members meta.
+  A failed exact delete therefore preserves both authorization and the durable
+  retry row. Ownership comes from decryptable sender-signed envelopes whose
+  timestamps fall inside folded sender tenure; the complete remote scan is
+  merged with already-ingested signed local envelopes to tolerate immediate
+  provider read lag. Stable blob ids pass the shared attachment validator and
+  deduplicate to exact paths. The later janitor repeats the proof before
+  relational retention cleanup. Supabase requires confirmation of each exact
+  full deletion key and never lists/removes a chat Storage prefix; the cache
+  wrapper explicitly delegates exact deletes. Folder record deletion likewise
+  leaves unproven files/avatar artifacts inert, and record-backed discovery
+  does not resurrect such an artifact-only directory as a chat. Supabase's
+  deletion-only existence check propagates provider failures, unlike tolerant
+  read-side size probes, so an outage cannot masquerade as an absent object.
 - **`broker.py`** (R18) — the Codex/Claude-Code-style PermissionBroker. Decision
   order: workspace path → allow; deny-root (harness home, mesh root) → refuse
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →
@@ -400,7 +580,11 @@ live only in an adapter preset.
   Ask docs carry a friendly `label` ("write a file", from tooldocs — raw ids
   never headline a popup) and a question's `options`; a deny's `text` rides
   back to the agent as the reason (the GUI's tell-it-what-to-do-instead note,
-  R43).
+  R43). R121 binds each prompt to the live `RunFeed.run_id` and provider
+  `tool_use_id`; production construction requires a full `Mesh` and never
+  falls back to unsigned answers. The GUI opens the signed ask server-side, so
+  caller-echoed tool/scope/chat metadata cannot retarget an approval or create
+  a broader standing rule.
 - **`docs.py` + `prompts/tooldocs.json`** (R43, Q7/Q11) — per-tool wording in
   one data file: `ask` (popup verb phrase), `short` (catalog one-liner),
   `long` (manual entry), plus conceptual `guides`. Owner-overridable at
@@ -430,7 +614,7 @@ live only in an adapter preset.
 - **`retrieval.py`** (R21) — an incremental per-chat history index (`hist-<chat>`)
   with a planner seam and a score gate; recalled hits are injected before the
   transcript tail.
-- **`peer.py`** (R22/R22.5) — peer harness access: signed request/response docs
+- **`peer.py`** (R22/R22.5/R122) — peer harness access: signed request/response docs
   (Ed25519, `from` bound in the signature, per-requester ns replay floor),
   owner-gated `peer_access` (off/ask) + `peer_auto` for READ diagnostics
   (ping/status/run_feed), and a stricter second gate `peer_repair` for
@@ -526,8 +710,18 @@ as `AB_KIND`/`AB_CHAT`/`AB_CHAT_NAME`/`AB_FROM`/`AB_PREVIEW`/`AB_NS` env vars
 persists a command to auto-run later — running the process IS the registration.
 
 ### `agentbridge/applink/` — control lane
-Presence/version announcements and the global stand-down (`control.json`),
-outside the message log.
+R124 machine-addressed controls outside the message log. `machines.py` writes
+one strict Ed25519-signed announcement per user+logical-machine, validates the
+current active identity/agent host, and aggregates GUI+harness capabilities
+without last-writer loss. `control.py` pairwise-encrypts and signs payloads to
+an exact recipient user+machine, binds replies to request digests, checks
+expiry/current signed registration, and records consumption only after the
+handler and reply succeed. Invalid legacy/tampered/retargeted records are
+inert; cleanup can sweep only the local identity's inbox. `setup_assist.py`
+validates target hosting but declines until its owner permission is itself
+authenticated. Logical machine labels are routing assertions, not hardware
+attestation. Global/room pause remains the separate signed member-control
+protocol.
 
 ---
 
@@ -552,6 +746,14 @@ create-account (it rides the boot identity, and packaging extends it into
 the setup pages — the bridge-era wizard.js was retired in R56), the live
 username check against `/api/mesh/check_name`, submit refusals in-card
 (V39), and the D5 recovery-code modal.
+The app lock is process-wide, not window-local. `main.js` reports only real
+pointer, keyboard, text/paste/IME, wheel and touch input through a
+one-second-throttled localhost endpoint bound to the GUI process's random
+instance id. `gui/applock.py` owns the monotonic inactivity deadline, checks it
+before protected requests and before accepting new activity, and therefore
+cannot be delayed by an idle sibling, background tab timer throttling, polling,
+realtime, rendering or focus. A late event cannot rescue an expired session;
+manual and boot locks use the same API-level gate.
 `reactions.js` (R50) owns the WhatsApp reaction surface: the overlay badge a
 message renders, the who-reacted popup (tabbed per emoji; own row removes)
 and the pop-in delta (new (emoji, user) pairs animate after the transcript

@@ -5,7 +5,7 @@ import threading
 import time
 
 from ..store import document_observation, local_source, presence_index
-from ..store import presence_publication, source_selectors, staged_source
+from ..store import presence_publication, raw_publication, source_selectors, staged_source
 from ..store.source_publication import SourcePublisher
 from ..transport.local_mutations import LocalMutationTransport
 from ..transport.raw_documents import RawCollectionUnavailable, collect_document_batches
@@ -13,12 +13,13 @@ from .local_presence_source import LocalPresenceSource
 
 
 class PresenceInputRuntime:
-    def __init__(self, transport, store, *, clock=time.monotonic):
+    def __init__(self, transport, store, *, clock=time.monotonic, on_change=None):
         if type(transport) is not LocalMutationTransport:
             raise ValueError('presence ingestion requires a mutation-owned transport')
         if not callable(clock):
             raise ValueError('invalid presence clock')
         self.transport, self.store, self.clock = transport, store, clock
+        self.on_change = on_change
         self.coordinator = transport._coordinator
         staged_source.initialize(store)
         source_selectors.initialize(store)
@@ -74,6 +75,7 @@ class PresenceInputRuntime:
             collect_document_batches(self.transport._transport, reader.definition, consume=append)
             self._check_open()
             staged_source.finish_raw(self.store, stage)
+            equality = raw_publication.identical(self.store, expected, stage)
             presence_index.build(self.store, stage, expected=expected, check_open=self._check_open)
             self._check_open()
             with self.coordinator.publication_gate(self.store, reader.definition):
@@ -81,6 +83,8 @@ class PresenceInputRuntime:
                     self.store, expected, stage, observed_ns=time.time_ns())
             if captured.source.raw.source_id != admitted.raw.source_id:
                 staged_source.retire_generation(self.store, captured.source.raw.source_id)
+            if self.on_change is not None and (not equality or not captured.source.ready):
+                self.on_change()
             return admitted
         except Exception as exc:
             budget = isinstance(exc, OverflowError) or (

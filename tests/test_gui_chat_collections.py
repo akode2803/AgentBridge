@@ -69,6 +69,107 @@ def test_summary_stays_ready_when_latest_raw_row_is_hidden(page_app, monkeypatch
     assert examined == [(1, ())]
 
 
+def test_summary_roster_matches_legacy_after_membership_and_role_changes(page_app):
+    app, chat = page_app
+    mesh = app.mesh
+    for name in ('zulu', 'alpha'):
+        mesh.accounts.create_human(name, 'peer-password')
+    # Deliberately different from lexical order: legacy preserves the fold's
+    # insertion order, while finalized summary JSON canonicalizes object keys.
+    mesh.membership.add_members(chat, ['zulu', 'alpha'])
+    mesh.membership.grant_admin(chat, 'zulu')
+
+    def assert_roster(expected_members, expected_admins):
+        _ready(app, chat)
+        legacy = api_chats.chat(app, Request(params={'id': chat}))['meta']
+        result = _call(app, chat)
+        assert result['status'] == 'ready', result
+        meta = result['meta']
+        assert legacy['members'] == expected_members
+        assert meta['members'] == sorted(expected_members)
+        assert set(meta['members']) == set(legacy['members'])
+        assert set(meta['admins']) == set(legacy['admins']) == set(expected_admins)
+        assert meta['roles'] == legacy['roles'] == {
+            name: 'admin' if name in expected_admins else 'member'
+            for name in expected_members
+        }
+        assert meta['permissions'] == legacy['permissions']
+        # The v2 model has multiple admins; neither read invents a sole owner.
+        assert 'owner' not in meta and 'owner' not in legacy
+        assert result['chat_id'] == meta['id'] == chat
+        assert 'messages' not in result
+
+    assert_roster(['viewer', 'zulu', 'alpha'], ['viewer', 'zulu'])
+    mesh.membership.revoke_admin(chat, 'zulu')
+    mesh.membership.grant_admin(chat, 'alpha')
+    assert_roster(['viewer', 'zulu', 'alpha'], ['viewer', 'alpha'])
+    mesh.membership.remove_member(chat, 'zulu')
+    assert_roster(['viewer', 'alpha'], ['viewer', 'alpha'])
+
+
+def test_summary_foreground_uses_no_provider_or_full_history_reads(page_app, monkeypatch):
+    app, chat = page_app
+    mesh = app.mesh
+    for n in range(110):
+        mesh.post(chat, f'private-message-body-{n}')
+    _ready(app, chat)
+    assert _call(app, chat)['status'] == 'ready'
+    examined = []
+    original = app.finalize_page_read
+
+    def observed(token, prepared):
+        final = original(token, prepared)
+        if final.status == 'page':
+            examined.append(final.result.page.raw_examined)
+        return final
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail('summary used provider or full-history read')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(app, 'finalize_page_read', observed)
+        provider = mesh.tx._transport
+        for name in ('get_doc', 'list_docs', 'get_docs', 'snapshot_docs',
+                     'read_log', 'list_logs'):
+            patch.setattr(provider, name, forbidden)
+        for name in ('conversation_projection', 'messages_for', 'chat_overview'):
+            patch.setattr(mesh, name, forbidden)
+            patch.setattr(mesh.messaging, name, forbidden)
+        patch.setattr(mesh.store, 'messages', forbidden)
+        result = api_collections.chat_summary(app, Request(params={'id': chat}))
+
+    assert result['status'] == 'ready', result
+    assert examined == [1]
+    assert result['meta']['members'] == ['viewer']
+    assert result['session_binding']
+    assert 'messages' not in result and 'items' not in result
+    assert 'private-message-body-' not in json.dumps(result)
+
+
+def test_summary_rejects_removed_viewer_without_roster_payload(page_app):
+    app, chat = page_app
+    owner = app.mesh
+    owner.accounts.create_human('peer', 'peer-password')
+    owner.membership.add_members(chat, ['peer'])
+    owner.membership.grant_admin(chat, 'peer')
+    _ready(app, chat)
+    assert _call(app, chat)['status'] == 'ready'
+    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+                store_path=app.home / 'peer-summary.sqlite')
+    try:
+        peer.sync.sync_once([chat])
+        peer.remove_member(chat, 'viewer')
+        peer.outbox.flush_once()
+        owner.sync.sync_once([chat])
+        _ready(app, chat)
+        result = _call(app, chat)
+        assert (result['status'], result['reason']) == ('forbidden', 'viewer_not_member')
+        assert result['session_binding']
+        assert 'meta' not in result and 'messages' not in result
+    finally:
+        peer.close()
+
+
 def test_sparse_tail_raw_seek(page_app):
     app, chat = page_app
     for n in range(135):

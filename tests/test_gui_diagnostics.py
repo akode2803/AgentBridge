@@ -11,6 +11,7 @@ from agentbridge.gui.routing import Request, dispatch
 
 
 def _rows(recorder):
+    recorder.flush()
     paths = [recorder.directory / f'events.{n}.jsonl' for n in (2, 1)] + [recorder.path]
     return [json.loads(line) for path in paths if path.exists()
             for line in path.read_text().splitlines()]
@@ -21,7 +22,7 @@ def test_default_off_persistent_toggle_and_strict_client_schema(tmp_path):
     assert recorder.configuration()['enabled'] is False
     assert not recorder.record({'event': 'client_error'})
     assert not recorder.directory.exists()
-    assert recorder.set_enabled(True)
+    assert recorder.set_enabled(True, sample_rate=1)
     assert Diagnostics(tmp_path).enabled is True
     event = {'event': 'client_request', 'route': '/api/mesh/chat_page?token=secret',
              'status': 'pending', 'reason': 'a chat body password',
@@ -50,7 +51,7 @@ def test_default_off_persistent_toggle_and_strict_client_schema(tmp_path):
 def test_rotation_thread_safety_and_bounded_settings_read(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'MAX_BYTES', 700)
     recorder = Diagnostics(tmp_path)
-    assert recorder.set_enabled(True)
+    assert recorder.set_enabled(True, sample_rate=1)
     threads = [threading.Thread(target=lambda: [recorder.record({
         'event': 'server_request', 'route': '/api/mesh/state',
         'status': 'ready', 'reason': 'none', 'rows': 5}) for _ in range(100)])
@@ -69,7 +70,7 @@ def test_rotation_thread_safety_and_bounded_settings_read(tmp_path, monkeypatch)
 
 def test_missing_fchmod_and_log_failure_never_break_dispatch(tmp_path, monkeypatch):
     recorder = Diagnostics(tmp_path)
-    assert recorder.set_enabled(True)
+    assert recorder.set_enabled(True, sample_rate=1)
     with monkeypatch.context() as patch:
         patch.delattr(module.os, 'fchmod', raising=False)
         assert recorder.record({'event': 'page_stage', 'status': 'prepared',
@@ -96,7 +97,7 @@ def test_failed_setting_persistence_keeps_default_off(tmp_path, monkeypatch):
         raise OSError('disk unavailable')
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'replace', failed_replace)
-        assert recorder.set_enabled(True) is False
+        assert recorder.set_enabled(True, sample_rate=1) is False
     assert recorder.enabled is False
     assert Diagnostics(tmp_path).enabled is False
     assert not list(recorder.directory.glob('.settings-*.tmp'))

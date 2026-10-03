@@ -50,6 +50,14 @@ def _state(reason, status='pending'):
     return {'status': status, 'reason': reason, 'retry_after_ms': 350}
 
 
+def _max_sealed_attachment_bytes(tx):
+    """Bound sealed bytes by both the local ceiling and active transport."""
+    transport_cap = int(getattr(tx, 'max_upload_bytes', 0) or 0)
+    if transport_cap > 0:
+        return min(_MAX_FILE_BYTES, transport_cap)
+    return _MAX_FILE_BYTES
+
+
 def _record(selection, anchor, message_id, blob_id):
     if (anchor.key is None or anchor.position != selection.position
             or selection.newest_examined != anchor.key
@@ -136,7 +144,7 @@ def read_attachment(app, mesh, token, chat_id, message_id, blob_id):
     sealed = mesh.tx.get_blob(path)
     if sealed is None and mesh.attachments is not None:
         sealed = mesh.attachments.local_sealed(blob_id)
-    cap = max(_MAX_FILE_BYTES, int(getattr(mesh.tx, 'max_upload_bytes', 0) or 0)) + 64
+    cap = _max_sealed_attachment_bytes(mesh.tx)
     if type(sealed) is not bytes or not sealed or len(sealed) > cap:
         return _state('file_unavailable', 'unavailable'), None
     error, final = _exact(app, mesh, token, chat, message_id, blob_id, sealed)

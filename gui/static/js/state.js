@@ -259,6 +259,22 @@ export function sessionMayApply(ticket, response) {
   return true;
 }
 
+// A current selected canonical denial retires display state, not authority.
+// Fence already captured sidebar reads so a late positive cannot resurrect it.
+export function retireDeniedMeshChat(chatId) {
+  const session = BrowserSession.snapshot();
+  if (observedLocked || App.page !== "chats" || Mesh.chatId !== chatId
+      || typeof chatId !== "string" || !chatId || session.mode !== "bound"
+      || Mesh.state?.user !== session.binding?.viewer) return false;
+  appliedMeshReadSequence = meshReadSequence;
+  if (Array.isArray(Mesh.state.chats)) {
+    Mesh.state = {...Mesh.state, chats:Mesh.state.chats.filter(row => row?.id !== chatId)};
+  }
+  meshStateGeneration = advanceWarmCounter(meshStateGeneration);
+  meshStateAcceptedAt = null;
+  return true;
+}
+
 export function applyMeshState(ticket, response, request) {
   if (!viewReadMayApply(request, response) || response?.error
       || request.session?.epoch !== ticket?.epoch

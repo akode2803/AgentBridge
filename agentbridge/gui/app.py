@@ -88,7 +88,8 @@ class Handler(BaseHTTPRequestHandler):
         handler = GET_ROUTES.get(path)
         if handler is not None:
             params = {k: v[0] for k, v in parse_qs(parts.query).items()}
-            req = Request(method="GET", path=path, params=params)
+            req = Request(method="GET", path=path, params=params,
+                          diagnostic_ref=self.headers.get("X-AgentBridge-Diagnostic"))
             self._reply(dispatch(handler, self.app, req))
             return
         if path.startswith("/api/"):
@@ -142,7 +143,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._json({"error": "malformed JSON body"}, status=400)
             return
-        req = Request(method="POST", path=path, data=data)
+        req = Request(method="POST", path=path, data=data,
+                      diagnostic_ref=self.headers.get("X-AgentBridge-Diagnostic"))
         self._reply(dispatch(handler, self.app, req))
 
     # ------------------------------------------------------------- replies
@@ -205,7 +207,9 @@ class Handler(BaseHTTPRequestHandler):
         if lock is not None and lock.expire_if_idle():
             self._json({"error": "App is locked", "locked": True}, status=401)
             return
-        sub = app.subscribe()
+        with app._lock:
+            token = app.capture_session_read()
+            sub = app.subscribe() if token is not None and token.mesh is not None else None
         if sub is None:
             self._json({"error": "Sign in first"}, status=401)
             return
@@ -215,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
-            for chunk in stream(app, sub, app.sse_ping_s):
+            for chunk in stream(app, sub, app.sse_ping_s, token=token):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except OSError:

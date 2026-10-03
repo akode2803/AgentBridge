@@ -63,11 +63,13 @@ const document={createElement(tag){return {tag,id:'',disabled:false,
 const api=(_path,_body,options)=>new Promise(resolve=>{
   calls.push({resolve,options});
 });
+const retired=[];
 const deps={Mesh,ICONS,$,document,api,location,
+  retireDeniedMeshChat:chat=>retired.push(chat),renderSidebar:()=>{},
   resetPagedView:()=>{resets++;forceReset();},
   captureTranscriptAnchor:()=>({candidates:[{id:'m',offset:1}]}),
   restoreTranscriptAnchor:()=>restores.push('restored'),
-  renderMeshChat:async(_force,_trace,prepared)=>{
+  paintMeshChat:async(_force,_trace,prepared)=>{
     paints.push(prepared);return true;},
 };
 const build=new Function(...Object.keys(deps),
@@ -95,6 +97,7 @@ for(const altered of [
   response({page_version:'v2'}),
   response({session_binding:{...binding,viewer:'other'}}),
   response({chat_id:'elsewhere'}),
+  response({status:'forbidden',session_binding:{...binding,viewer:'other'}}),
   {status:'pending'},
 ]) {
   pending=refreshPagedAux(owner,2,'v1',pageData);
@@ -105,6 +108,7 @@ for(const altered of [
 pending=refreshPagedAux(owner,2,'v1',pageData);
 calls.shift().resolve(response({status:'forbidden'}));await pending;
 assert.equal(resets,1);
+assert.deepEqual(retired,['room']);
 assert.equal(location.hash,'#/chats');
 assert.equal(content.innerHTML,'');
 assert.equal(paints.length,0);

@@ -1,21 +1,25 @@
 """Lifecycle progress discovered only while assembling a bounded page."""
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import pytest
 
 from agentbridge import crypto
-from agentbridge.mesh import authority_source
 from agentbridge.mesh.events import reaction_signing_bytes
+from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.overlay_index import prepare_overlay_index
-from agentbridge.mesh.overlay_source import publish_overlay_source
 from agentbridge.mesh.page_operation import PageOperation, PageOperationLimits
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.store import lifecycle_heads, lifecycle_inputs
+from agentbridge.store import lifecycle_heads, lifecycle_inputs, local_source, source_selectors
+from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.store.source_publication import SourcePublisher
+from agentbridge.transport import raw_documents
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.local_mutations import root_identity
 
 
 OWNER = "aryan"
@@ -27,14 +31,14 @@ def page_lifecycle_world(tmp_path):
     provider = FolderTransport(tmp_path / "provider")
     provider.cache_key = "r217-page-lifecycle-cache"
     mirror = CachingTransport(provider, auto_refresh=False)
-    mirror._mirror_root_identity = "r217-page-lifecycle-root"
-    mirror._mirror_cache_identity = "r217-page-lifecycle-cache"
     mesh = Mesh(mirror, OWNER, "r217-page-box", encrypt=True, home=tmp_path / "home")
     try:
         mesh.store.prepare_terminal_observation()
         mesh.store.prepare_membership_suffix_index()
         mesh.store.prepare_page_input_index()
         lifecycle_inputs.prepare(mesh.store._conn())
+        local_source.initialize(mesh.store)
+        source_selectors.initialize(mesh.store)
         mesh.accounts.create_human(OWNER, "password")
         mesh.accounts.create_agent(AGENT)
         chat = mesh.create_chat("Page lifecycle", members=[AGENT])
@@ -67,26 +71,39 @@ def page_lifecycle_world(tmp_path):
                 "DELETE FROM docs WHERE path IN (?,?)",
                 (lifecycle_heads.PREFIX + OWNER, lifecycle_heads.PREFIX + AGENT),
             )
-        yield mesh, mirror, chat.id
+        root = MutationCoordinator(tmp_path / "owner", root_identity(mirror))
+        root.register_store(mesh.store)
+        reader = LocalPageSource(root, mesh.store, chat.id)
+        publisher = SourcePublisher(root, mesh.store, reader.definition)
+        yield mesh, mirror, chat.id, reader, publisher
     finally:
         mesh.close()
 
 
-def _inputs(mesh, mirror, chat):
+def _inputs(mesh, mirror, reader, publisher, chat):
     target = f"{chat}|{P.log_name(mesh.messaging.user, mesh.messaging.machine)}"
     mesh.store.refresh_terminal_observation(target)
-    authority = authority_source.publish_authority_source(mirror, mesh.store, chat)
-    overlay = publish_overlay_source(mirror, mesh.store, chat)
-    assert authority.mirror == overlay.mirror
-    observed = mesh.store.capture_document_observation(overlay.position.source_id)
-    index = mesh.store.publish_overlay_index(prepare_overlay_index(observed, chat))
-    return authority, overlay, index
+    # Collection and admission are fixture ingestion work, outside PageOperation.
+    captured = publisher.capture()
+    documents = raw_documents.collect_documents(mirror, reader.definition)
+    publisher.publish(captured, documents, observed_ns=time.time_ns())
+    receipt = reader.capture()
+    paths = tuple(path for path in documents if path.startswith(f"chats/{chat}/overlays/"))
+    observed = mesh.store.capture_selected_documents(
+        receipt.source.raw, paths, max_documents=max(1, len(paths)),
+        max_bytes=4 * 1024 * 1024,
+    )
+    index = mesh.store.publish_overlay_index(
+        prepare_overlay_index(observed, chat), shared_source=True,
+    )
+    return receipt, receipt, index
 
 
 def test_page_actor_lifecycle_progress_restarts_without_returning_page(
         page_lifecycle_world):
-    mesh, mirror, chat = page_lifecycle_world
-    result = PageOperation(mesh, chat, limit=10).prepare(*_inputs(mesh, mirror, chat))
+    mesh, mirror, chat, reader, publisher = page_lifecycle_world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    result = PageOperation(mesh, chat, source_reader=reader, limit=10).prepare(*inputs)
 
     assert (result.status, result.reason) == ("restart", "retained_head_progress")
     assert result.prepared is None and result.result is None
@@ -96,8 +113,8 @@ def test_page_actor_lifecycle_progress_restarts_without_returning_page(
 
 def test_page_input_mutation_after_lifecycle_cas_rolls_back(
         page_lifecycle_world, monkeypatch):
-    mesh, mirror, chat = page_lifecycle_world
-    inputs = _inputs(mesh, mirror, chat)
+    mesh, mirror, chat, reader, publisher = page_lifecycle_world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
     source = inputs[2].source.source_id
     owner_head = lifecycle_heads.PREFIX + OWNER
     before = mesh.store.observe_lifecycle_head(OWNER)
@@ -121,7 +138,7 @@ def test_page_input_mutation_after_lifecycle_cas_rolls_back(
             f"('{source}','triggered/path','triggered-key',1); END"
         )
 
-    result = PageOperation(mesh, chat, limit=10).prepare(*inputs)
+    result = PageOperation(mesh, chat, source_reader=reader, limit=10).prepare(*inputs)
 
     assert result.status == "unavailable", result
     assert published
@@ -135,10 +152,10 @@ def test_page_input_mutation_after_lifecycle_cas_rolls_back(
 
 
 def test_operation_round_budget_survives_lifecycle_progress(page_lifecycle_world):
-    mesh, mirror, chat = page_lifecycle_world
-    inputs = _inputs(mesh, mirror, chat)
+    mesh, mirror, chat, reader, publisher = page_lifecycle_world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
     operation = PageOperation(
-        mesh, chat, limit=10,
+        mesh, chat, source_reader=reader, limit=10,
         limits=replace(PageOperationLimits(), max_rounds=1),
     )
 

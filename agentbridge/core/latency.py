@@ -55,6 +55,11 @@ class LatencySink:
                 at_ns: int | None = None, mono_ns: int | None = None,
                 observed_clock: str | None = None) -> None:
         """Record one whitelisted metadata-only boundary, best effort."""
+        try:
+            from .delivery_trace import emit
+            emit(stage, message=trace_ref, outcome='received')
+        except Exception:
+            pass
         if stage not in STAGES or lane not in LANES:
             return
         refs = (str(trace_ref or "")[:160], str(run_ref or "")[:160],

@@ -81,6 +81,15 @@ class LocalMutationTransport(Transport):
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.put_doc(path, data))
 
+    def put_reserved_doc(self, path, data, reservation):
+        """Finish an exact document write reserved in a canonical local cut."""
+        from ..store.mutation_reservation import FinalizationMutation
+        if (type(reservation) is not FinalizationMutation
+                or reservation.coordinator is not self._coordinator
+                or reservation.changes != (Selector('doc_exact', path),)):
+            raise ValueError('foreign document reservation')
+        return reservation.execute(lambda: self._transport.put_doc(path, data))
+
     def create_doc(self, path, data):
         # Delegate directly; base create_doc may call its own put_doc, but it
         # must not create a second outer intent.

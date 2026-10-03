@@ -15,17 +15,22 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_explicit_latest_scroll_anchor_and_exact_read_after_paint(tmp_path):
     source = (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8')
-    render = source[source.index('async function renderPagedChat(force, kind = null)'):
-                    source.index('let chatRenderSeq =', source.index('async function renderPagedChat(force, kind = null)'))]
+    policy_source = (ROOT / 'gui/static/js/chat-page-read.js').read_text(encoding='utf-8')
+    policy = policy_source[policy_source.index('function retryAfter('):
+                          policy_source.index('function noData(')]
+    policy = policy.replace('export function pageRetryDelay', 'function pageRetryDelay')
+    render = source[source.index('async function renderPagedChat('):
+                    source.index('let chatRenderSeq =', source.index('async function renderPagedChat('))]
     mark = source[source.index('function markReadNow(chatId)'):
                   source.index('// reading needs eyes:', source.index('function markReadNow(chatId)'))]
     older = source[source.index('function shouldReadOlderPage('):
                    source.index('function samePageBinding(')]
     runner = r'''
 import assert from 'node:assert/strict';
-const source = __OLDER__ + '\n' + __RENDER__ + '\n' + __MARK__;
+const source = __POLICY__ + '\n' + __OLDER__ + '\n' + __RENDER__ + '\n' + __MARK__;
 const binding = {instance_id:'app', session_generation:'1', viewer:'alice'};
 const cutoff = '1790238834318311101';
+let readToken = 'a'.repeat(64);
 const App = {page:'chats',routeSeq:3};
 const Mesh = {chatId:'room',state:{user:'alice',chats:[
   {id:'room',last:{ns:60},unread:2,forced_unread:true},
@@ -70,12 +75,12 @@ const pageRead = {
       return {status:'pending',reason:'local_inputs_pending',retry_after_ms:350};
     }
     if (mode==='refresh') savedPlan=false;
-    return {status:'page', pageData:{me:'alice',read_cutoff_ns:cutoff,
+    return {status:'page', pageData:{me:'alice',read_cutoff_ns:cutoff,read_ack_token:readToken,
       meta:{id:'room'},metadata_status:{}}, messages:[{id:'m',ns:60}],
       evictedIds:[],hasMore:true,pageVersion};
   },
 };
-const deps={App,Mesh,diagnostic:()=>{},BrowserSession:{snapshot:()=>({binding})},
+const deps={App,Mesh,diagnostic:()=>{},canonicalDeliveryDom:()=>{},BrowserSession:{snapshot:()=>({binding})},
   captureSessionEpoch:()=>({id:'session'}),
   sessionMayApply:()=>true,meshStateSnapshot:()=>({lockEpoch:1}),
   pageRead,$,document,performance:{now:()=>1},
@@ -90,7 +95,7 @@ const deps={App,Mesh,diagnostic:()=>{},BrowserSession:{snapshot:()=>({binding})}
       aux:response ? response.aux : null};
   },
   syncPagedAuxControls:()=>{},syncDmHeaderPresence:()=>{},
-  renderMeshChat:async()=>{paints++;return paintAllowed;},
+  paintMeshChat:async()=>{paints++;return paintAllowed;},
   api:(path,body)=>{calls.push([path,body]);return Promise.resolve({ok:true});},
   renderSidebar:()=>{sidebar++;},renderSideLoading:()=>{},meshCaps:()=>({chat_page_v1:true}),
   observeLockState:()=>{},CustomEvent:class{},location:{hash:''},
@@ -115,18 +120,26 @@ assert.equal(anchorRestores,1);
 assert.equal(Mesh.pendingRead,'room');
 assert.deepEqual(calls,[]);
 assert.equal(prunes,1);
+assert.equal(getOwner().visibleReadNs,cutoff); // retain exact decimal, never a Number
+assert.equal(getOwner().visibleReadToken,readToken);
+assert.equal(getOwner().visibleReadVersion,'v1');
 
 // Explicit Jump to latest ignores the old scroll anchor, moves to bottom,
-// and drains pendingRead with the exact decimal cutoff after a paint.
+// and acknowledges the painted page's token/version, never a caller cutoff.
 transcript.scrollTop=100;
 await renderPagedChat(false,'first');
 assert.deepEqual(modes,['first','first']);
 assert.equal(anchorCaptures,1);
 assert.equal(anchorRestores,1);
 assert.equal(transcript.scrollTop,transcript.scrollHeight);
-assert.deepEqual(calls,[['/api/mesh/read',{chat_id:'room',up_to_ns:cutoff}]]);
+assert.deepEqual(calls,[['/api/mesh/chat_page_read',{
+  chat_id:'room',page_version:'v1',read_ack_token:readToken}]]);
 assert.equal(Mesh.pendingRead,null);
+assert.equal(getOwner().readAck.lastSuccess,cutoff);
 assert.equal(sidebar,0); // Decimal cutoff never does optimistic Number math.
+assert.equal(Mesh.state.chats[0].unread,2);
+assert.equal(Mesh.state.chats[0].forced_unread,true);
+assert.equal(Mesh.readTail.room,undefined);
 
 // A historical page preserves its position, does not advance the read cursor,
 // and its scroll listener fetches older only at the top while idle.
@@ -180,13 +193,38 @@ assert.equal(auxDisplayCalls.at(-1),null);
 
 // A superseded same-route paint must not prune, restore or mark anything.
 paintAllowed=false;
-const prior={paints,prunes,anchorRestores,calls:calls.length};
+const prior={paints,prunes,anchorRestores,calls:calls.length,
+  token:getOwner().visibleReadToken,version:getOwner().visibleReadVersion};
+readToken='b'.repeat(64);pageVersion='v3';
 await renderPagedChat(false,'first');
 assert.equal(paints,prior.paints+1);
 assert.equal(prunes,prior.prunes);
 assert.equal(anchorRestores,prior.anchorRestores);
 assert.equal(calls.length,prior.calls);
-'''.replace('__RENDER__', json.dumps(render)).replace('__MARK__', json.dumps(mark)).replace('__OLDER__', json.dumps(older))
+
+
+assert.equal(getOwner().visibleReadToken,prior.token,'unpainted token cannot become visible');
+assert.equal(getOwner().visibleReadVersion,prior.version);
+
+// A last realtime wake arriving during an ordinary read must carry its
+// recovery obligation into the trailing read, even after the five UI retries.
+paintAllowed=true;
+const originalRead=pageRead.read.bind(pageRead);
+let releaseRead;
+pageRead.read=()=>new Promise(resolve=>{releaseRead=resolve});
+const inFlight=renderPagedChat(false);
+await Promise.resolve();
+await renderPagedChat(false,null,{sidebar:false,realtime:true});
+assert.equal(getOwner().refreshOptions.realtime,true);
+const good=await originalRead('first');
+releaseRead(good);await inFlight;
+pageRead.read=async()=>({status:'pending',reason:'local_inputs_pending'});
+getOwner().retries=8;
+elements['#page-retry']={};
+await flushTimer();
+assert.ok(timers.some(timer=>!timer.cancelled&&!timer.ran&&timer.delay===2000),
+ 'pending page progress keeps its bounded two-second recovery cadence after UI retries');
+'''.replace('__POLICY__', json.dumps(policy)).replace('__RENDER__', json.dumps(render)).replace('__MARK__', json.dumps(mark)).replace('__OLDER__', json.dumps(older))
     path = tmp_path / 'paged-render.mjs'
     path.write_text(runner, encoding='utf-8')
     run = subprocess.run([shutil.which('node'), str(path)], cwd=tmp_path,

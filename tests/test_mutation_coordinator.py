@@ -276,3 +276,89 @@ def test_definition_cannot_cross_transport_root(tmp_path):
                 pytest.fail('foreign definition admitted')
     finally:
         store.close()
+
+
+
+def _seed_pending(root, count, scopes_per_intent=1):
+    with root._transaction() as conn:
+        for n in range(count):
+            token = f'{n + 1:064x}'
+            conn.execute('INSERT INTO mutation_intents VALUES(?)', (token,))
+            conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)',
+                             ((token, 'doc_exact', f'chats/room{n}/doc{i}.json')
+                              for i in range(scopes_per_intent)))
+
+
+def test_full_pending_budget_audit_uses_constant_bounded_query_work(tmp_path):
+    root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
+    _seed_pending(root, 64, 8)
+    queries = []
+    with root._transaction() as conn:
+        conn.set_trace_callback(lambda statement: queries.append(statement)
+                                if statement.lstrip().upper().startswith('SELECT') else None)
+        assert root._schema(conn) == root.epoch
+    # Full schema/type/cardinality/orphan/quarantine audit remains mandatory.
+    # The fixed budget forbids a per-intent SQL query under the root cut.
+    assert len(queries) <= 30
+
+
+@pytest.mark.parametrize('mutation,reason', [
+    ('missing', 'pending_intent_scope_mismatch'),
+    ('nine', 'pending_intent_scope_mismatch'),
+    ('orphan', 'orphan_mutation_scope'),
+    ('scope_budget', 'pending_selector_budget'),
+    ('oversized', 'invalid_pending_selector'),
+    ('wrong_type', 'invalid_pending_selector'),
+])
+def test_bounded_pending_scope_batch_keeps_corruption_denials(tmp_path, mutation, reason):
+    root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
+    _seed_pending(root, 2)
+    token = f'{1:064x}'
+    with root._transaction() as conn:
+        if mutation == 'missing':
+            conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
+        elif mutation == 'nine':
+            conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)',
+                             ((token, 'doc_exact', f'extra{i}') for i in range(8)))
+        elif mutation == 'orphan':
+            conn.execute('INSERT INTO mutation_scopes VALUES(?,?,?)',
+                         ('f' * 64, 'doc_exact', 'orphan'))
+        elif mutation == 'scope_budget':
+            conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)',
+                             ((token, 'doc_exact', f'extra{i}') for i in range(511)))
+        elif mutation == 'oversized':
+            conn.execute('UPDATE mutation_scopes SET value=? WHERE token=?', ('x' * 4097, token))
+        else:
+            conn.execute('UPDATE mutation_scopes SET value=? WHERE token=?', (b'bytes', token))
+    with root._transaction() as conn:
+        with pytest.raises(local_source.SourceChanged, match=reason):
+            root._schema(conn)
+
+
+def test_batched_pending_audit_recaptures_changed_rows_in_same_transaction(tmp_path):
+    root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
+    _seed_pending(root, 2)
+    with root._transaction() as conn:
+        assert root._schema(conn) == root.epoch
+        conn.execute('DELETE FROM mutation_scopes WHERE token=?', (f'{1:064x}',))
+        with pytest.raises(local_source.SourceChanged, match='pending_intent_scope_mismatch'):
+            root._schema(conn)
+
+
+def test_pending_log_fences_selected_room_not_unrelated_room(tmp_path):
+    root = MutationCoordinator(tmp_path / "home", "mesh-root")
+    store = _store(tmp_path / "store.sqlite")
+    root.register_store(store)
+    selected = _definition(root, "selected", S("log_chat", "selected"))
+    unrelated = _definition(root, "unrelated", S("log_chat", "unrelated"))
+    try:
+        _publish(root, store, selected)
+        _publish(root, store, unrelated)
+        intent = root.begin((S("log_chat", "selected"),))
+        with pytest.raises(local_source.SourceChanged, match="source_mutation_pending"):
+            _publish(root, store, selected, 2)
+        assert _publish(root, store, unrelated, 2).ready
+        root.complete(intent)
+        assert _publish(root, store, selected, 3).ready
+    finally:
+        store.close()

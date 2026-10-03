@@ -77,6 +77,10 @@ class AuxiliaryPageOperation(PageOperation):
             data['runs'] = authority_rows(adapter, self.chat)
             status['runtime'] = 'ready'
         display = self._profiles(round_, snapshot, receipt, data)
+        # Preserve real lifecycle/presence rechecks separately from the short
+        # computation-freshness budget below. Only successful finalization may
+        # register this deadline as a content-free future invalidation.
+        self.revalidation_deadline = round_.deadline
         # Live controls use wall-clock expiration. They are presentation only;
         # time never establishes membership, and long computation must retry.
         deadline = round_.now + 1_000_000_000

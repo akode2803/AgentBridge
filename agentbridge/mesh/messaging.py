@@ -458,8 +458,7 @@ class MessagingService:
         (``set_chat_flag('deleted', False)``) restores everything — the cut
         never touches shared state."""
         self._require_member(chat_id)
-        msgs = self.store.messages(chat_id)
-        cut = max((m.get("ns", 0) for m in msgs), default=0) or next_ns()
+        cut = self.store.latest_message_ns(chat_id) or next_ns()
         self._state(chat_id).set_flag("deleted", int(cut))
 
     # ------------------------------------------------------------------- read

@@ -1,0 +1,53 @@
+{
+  "excluded_project_items": [
+    {
+      "path": ".codex/config.toml",
+      "reason": "machine configuration or unrelated user output; not project source"
+    },
+    {
+      "path": "output/pdf/[unrelated personal output omitted]",
+      "reason": "machine configuration or unrelated user output; not project source"
+    },
+    {
+      "path": ".codex/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": ".git/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": ".pytest_cache/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": ".ruff_cache/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": ".venv/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": "__pycache__/",
+      "reason": "directory excluded wholesale; no contents copied"
+    },
+    {
+      "path": "output/",
+      "reason": "directory excluded wholesale; no contents copied"
+    }
+  ],
+  "outside_checkout_excluded": [
+    "user AgentBridge home including sessions, keys, chat stores and diagnostics",
+    "Codex auth/personal runtime home",
+    "all previous raw capture/profiler logs and private browser data",
+    "separate task-3 PR34 checkout and its Windows/race work"
+  ],
+  "dependencies_requiring_setup": [
+    "Python >=3.11; lockfile produced/tested with Python3.12.13",
+    "uv and project dependency group dev; cloud extra required only for authorized Supabase runtime",
+    "Node.js for frontend regression/check tools (local Node26.7.0)",
+    "Cloud network/proxy/CA setup and explicitly configured runtime credentials through human secure entry",
+    "Independent peer persistent member join remains action-time approval blocked"
+  ]
+}

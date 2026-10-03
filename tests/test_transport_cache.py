@@ -331,6 +331,52 @@ def test_own_chat_visible_after_first_append(mirror):
     assert tx.list_chat_ids() == ["c1", "c2"]   # meta-doc-derived ids count
 
 
+def test_append_persists_only_new_chat_and_delegates_every_message(tmp_path, monkeypatch):
+    inner = BulkTransport()
+    path = tmp_path / "cloud.json"
+    tx = CachingTransport(inner, auto_refresh=False, snapshot_path=path)
+    writes = []
+    original = cache_module.atomic_write_json
+
+    def persist(destination, payload):
+        writes.append(list(payload["chat_ids"]))
+        original(destination, payload)
+
+    monkeypatch.setattr(cache_module, "atomic_write_json", persist)
+    tx.append_log("c1", "a@m.jsonl", {"id": "m1"})
+    saved = path.read_bytes()
+    tx.append_log("c1", "a@m.jsonl", {"id": "m2"})
+    assert writes == [["c1"]]
+    assert path.read_bytes() == saved
+    assert [row["id"] for row in inner.logs[("c1", "a@m.jsonl")]] == ["m1", "m2"]
+    tx.append_log("c2", "a@m.jsonl", {"id": "m3"})
+    assert writes == [["c1"], ["c1", "c2"]]
+    assert json.loads(path.read_text())["chat_ids"] == ["c1", "c2"]
+
+
+def test_failed_bootstrap_write_retries_on_cache_change_not_log_append(tmp_path, monkeypatch):
+    inner = BulkTransport()
+    path = tmp_path / "cloud.json"
+    tx = CachingTransport(inner, auto_refresh=False, snapshot_path=path)
+    original = cache_module.atomic_write_json
+    attempts = []
+
+    def persist(destination, payload):
+        attempts.append(list(payload["chat_ids"]))
+        if len(attempts) == 1:
+            raise OSError("disposable cache failure")
+        original(destination, payload)
+
+    monkeypatch.setattr(cache_module, "atomic_write_json", persist)
+    tx.append_log("c1", "a@m.jsonl", {"id": "m1"})
+    tx.append_log("c1", "a@m.jsonl", {"id": "m2"})
+    assert len(attempts) == 1 and not path.exists()
+    assert len(inner.logs[("c1", "a@m.jsonl")]) == 2
+    tx.put_doc("users/a.json", {"v": 1})
+    assert len(attempts) == 2
+    assert json.loads(path.read_text())["docs"]["users/a.json"] == {"v": 1}
+
+
 def test_delete_chat_drops_subtree_and_id(mirror):
     inner, tx = mirror
     tx.put_doc("chats/c1/meta.json", {"id": "c1"})

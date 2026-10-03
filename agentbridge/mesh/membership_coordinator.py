@@ -62,6 +62,8 @@ class CoordinatorResult:
     presentation: page_fence.PagePresentation | None = None
     local_trust_version: str | None = None
     send_statuses: dict | None = None
+    unread: dict | None = None
+    validated_now_ns: int | None = None
 
 
 class _Stop(RuntimeError):
@@ -288,13 +290,15 @@ class _Round:
         return value
 
     @contextmanager
-    def _final_store(self, companions=()):
+    def _final_store(self, companions=(), mutation=None):
         if self.source_reader is not None:
             if self.mesh.tx is not self.transport_owner or self.mesh.store is not self.source_reader.store:
                 raise _Stop('unavailable', 'local_source_owner_changed')
-            with self.source_reader.finalization(self.receipt, companions=companions) as conn:
+            with self.source_reader.finalization(self.receipt, companions=companions, mutation=mutation) as conn:
                 yield conn
             return
+        if mutation is not None:
+            raise ValueError('mutation requires local source finalization')
         conn = sqlite3.connect(self.mesh.store.path, timeout=1.0)
         try:
             conn.execute('BEGIN IMMEDIATE')
@@ -320,7 +324,7 @@ class _Round:
         return (nullcontext(True) if self.source_reader is not None else
                 authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy))
 
-    def final(self, snapshot, proposal, *, page=None):
+    def final(self, snapshot, proposal, *, page=None, mutation=None, expected_trust_version=None):
         prepared_page = None if page is None else page_fence.prepare(
             self.mesh, page, self.suffix.position,
             self.receipt.mirror if self.source_reader is None else self.receipt,
@@ -331,6 +335,8 @@ class _Round:
         # Equality evidence for browser window invalidation, never a reused
         # authority verdict. The view is still checked under its final gate.
         trust_version = hashlib.sha256(view.effective_json.encode()).hexdigest()
+        if expected_trust_version is not None and trust_version != expected_trust_version:
+            raise _Stop('reset_required', 'read_ack_trust_changed')
         view_size = len(view.effective_json.encode()) + len(view.durable_json.encode())
         self.ledger.charge(view_size)
         for name, (sign, agree, history, used_sign, used_agree) in self.published.items():
@@ -386,7 +392,7 @@ class _Round:
             with self.mesh.key_pins.locked_matching_view(view) as pins_match:
                 if not pins_match:
                     raise _Stop('unavailable', 'pin_inputs_changed')
-                with self._final_store(companions) as conn:
+                with self._final_store(companions, mutation) as conn:
                     first = self.clock(self.now)
                     for batch in self.batches:
                         if not self._matches_batch(conn, batch):
@@ -462,9 +468,12 @@ class _Round:
                             statuses = send_status.capture(conn, self.chat, tuple(
                                 m.id for m in selected.messages if m.from_ == self.viewer
                                 and m.kind is MsgKind.MESSAGE and not m.deleted)) if selected is not None else {}
+                            if mutation is not None:
+                                mutation.accepted = True
                             return CoordinatorResult('page', page=prepared_page.fence.selection,
                                 presentation=prepared_page.fence.presentation,
-                                local_trust_version=trust_version, send_statuses=statuses)
+                                local_trust_version=trust_version, send_statuses=statuses,
+                                validated_now_ns=last)
                         candidate = MembershipCandidate(self.chat, self.viewer, self.machine, serialized,
                             self.receipt, tuple(self.batches), policy, self.suffix, self.terminal,
                             tuple(self.subjects.values()), tuple(self.heads.values()), view,

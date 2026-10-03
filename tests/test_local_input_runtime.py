@@ -391,3 +391,152 @@ def test_mesh_close_timeout_leaves_store_open(rig):
         mesh.close()
     assert mesh.store._conn().execute("SELECT 1").fetchone() == (1,)
     runtime._worker_lock = real_lock
+
+
+@pytest.mark.parametrize('outcomes, expected_calls, expected_result', [
+    ([True] * 10, 4, True), ([False], 1, False), ([True, False], 2, True),
+])
+def test_preparation_burst_caps_work_and_keeps_partial_progress(
+        rig, monkeypatch, outcomes, expected_calls, expected_result):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    calls = []
+    values = iter(outcomes)
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: 10.0)
+    def prepare():
+        calls.append(True)
+        return next(values)
+    monkeypatch.setattr(runtime, 'prepare_one', prepare)
+    assert runtime._prepare_burst() is expected_result
+    assert len(calls) == expected_calls
+
+
+@pytest.mark.parametrize('elapsed', [0.020, 0.100])
+def test_preparation_burst_yields_after_time_budget_even_with_more_jobs(rig, monkeypatch, elapsed):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    now, calls = [10.0], []
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: now[0])
+    def slow_quantum():
+        calls.append(True)
+        now[0] += elapsed
+        return True
+    monkeypatch.setattr(runtime, 'prepare_one', slow_quantum)
+    assert runtime._prepare_burst() is True
+    assert calls == [True]  # One quantum may exceed the cooperative budget.
+
+
+def test_preparation_burst_stops_between_quanta(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    calls = []
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: 10.0)
+    def stop_after_one():
+        calls.append(True)
+        runtime._stop.set()
+        return True
+    monkeypatch.setattr(runtime, 'prepare_one', stop_after_one)
+    assert runtime._prepare_burst() is True
+    assert calls == [True]
+    assert runtime._prepare_burst() is False
+    assert calls == [True]
+
+
+def test_worker_preparation_backlog_progress_keeps_every_collection_turn(rig, monkeypatch):
+    from types import SimpleNamespace
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    queue = iter(range(12))
+    events, rounds = [], []
+    monkeypatch.setattr(runtime.transport, 'watch', lambda: None)
+    monkeypatch.setattr(runtime, 'discover', lambda: None)
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: 10.0)
+    def prepare():
+        events.append(('prepare', next(queue)))
+        return True
+    def collect():
+        events.append(('ingest', len(rounds)))
+        rounds.append(True)
+        if len(rounds) == 2:
+            runtime._stop.set()
+        return True
+    monkeypatch.setattr(runtime, 'prepare_one', prepare)
+    monkeypatch.setattr(runtime, 'run_due', collect)
+    monkeypatch.setattr(runtime, 'presence', SimpleNamespace(run_due=lambda: events.append(('presence',)) or False))
+    monkeypatch.setattr(runtime, 'auxiliary', SimpleNamespace(run_due=lambda: events.append(('aux',)) or False))
+    runtime._run()
+    assert events == ([('prepare', i) for i in range(4)] + [('ingest', 0), ('presence',), ('aux',)]
+                      + [('prepare', i) for i in range(4, 8)] + [('ingest', 1), ('presence',), ('aux',)])
+    # Restore real owners before fixture shutdown.
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize('error,blocked', [
+    (local_source.SourceChanged('source_mutation_pending'), True),
+    (local_source.SourceChanged('source_mutation_pending', 'extra'), False),
+    (local_source.SourceChanged('source_changed'), False),
+    (local_source.SourceChanged('source_mutation_pending_extra'), False),
+    (RuntimeError('source_mutation_pending'), False),
+    (OSError('provider unavailable'), False),
+    (RawCollectionUnavailable('mirror_pending'), False),
+])
+def test_run_due_only_exact_pending_intent_uses_short_retry(rig, monkeypatch, error, blocked):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    now = [10.0]
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: now[0])
+    runtime.request(CHAT, selected=True, activity=True)
+    now[0] = 11.0
+    def fail(_chat):
+        raise error
+    monkeypatch.setattr(runtime, 'ingest', fail)
+    assert runtime.run_due() is True
+    state = runtime.schedule._states[CHAT]
+    assert state.failures == (0 if blocked else 1)
+    assert state.due - now[0] == pytest.approx(0.35 if blocked else 4.0)
+
+
+def test_persistent_mutation_pending_never_collects_or_publishes(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    runtime.ingest(CHAT)
+    def fail_write(*_args):
+        raise OSError('ambiguous write')
+    monkeypatch.setattr(provider, 'put_doc', fail_write)
+    with pytest.raises(OSError):
+        mesh.tx.put_doc(META, _documents(2)[META])
+    monkeypatch.setattr(local_input_runtime, 'collect_document_batches',
+                        lambda *_a, **_kw: pytest.fail('pending intent read provider'))
+    now = [10.0]
+    monkeypatch.setattr(local_input_runtime.time, 'monotonic', lambda: now[0])
+    runtime.request(CHAT, selected=True, activity=True)
+    attempts = 0
+    for tick in range(1, 201):
+        now[0] = 10.0 + tick / 100
+        runtime.request(CHAT, selected=True, activity=True)
+        attempts += runtime.run_due()
+        assert not runtime.health(CHAT)['ready']
+    assert 5 <= attempts <= 6
+    assert runtime.schedule._states[CHAT].failures == 0
+    with runtime.coordinator._transaction() as conn:
+        assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (1,)
+
+
+
+def test_route_selection_controls_preparation_priority_without_queuing_or_io(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    prep = runtime._page_preparation
+    assert runtime.request('room', selected=True)
+    assert prep._selected == 'room'
+    assert not prep._terminals and not prep._proofs
+    assert runtime.request('background')
+    assert prep._selected == 'room'
+    assert runtime.request('next-room', selected=True)
+    assert prep._selected == 'next-room'
+    monkeypatch.setattr(runtime.schedule, 'request', lambda *_a, **_kw: False)
+    assert not runtime.request('denied', selected=True)
+    assert prep._selected == 'next-room'
+    runtime.clear_selection()
+    assert prep._selected is None
+    assert not prep._terminals and not prep._proofs

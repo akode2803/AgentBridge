@@ -83,8 +83,15 @@ def test_modal_consumers_keep_state_local_and_capture_post_open_action_owner():
         start = source.index(f"async function {entry}")
         body = source[start:]
         begin = body.index("const ticket = beginModalRead()")
-        state = body.index('await api("/api/mesh/state")', begin)
-        validate = body.index("modalReadMayApply(ticket, ms)", state)
+        if filename == "members.js":
+            state = body.index("await readMemberMetadata(chatId, ticket, null, requireSummary)", begin)
+            validate = body.index("modalReadMayApply(ticket)", state)
+            helper = _function_source(source, "async function readMemberMetadata")
+            assert helper.index('await api("/api/mesh/state"') < helper.index("modalReadMayApply(ticket, ms)")
+            assert "applyMeshState(" not in helper
+        else:
+            state = body.index('await api("/api/mesh/state")', begin)
+            validate = body.index("modalReadMayApply(ticket, ms)", state)
         opened = body.index("const box = openModal", validate)
         action = body.index("const actionOwner = captureModalRead()", opened)
         callback_guard = body.index("modalReadMayApply(actionOwner)", action)
@@ -101,6 +108,11 @@ def test_old_member_search_and_forward_state_cannot_continue_after_navigation(tm
         [
             _function_source(members, "function userRow"),
             _function_source(members, "function pickerSections"),
+            _function_source(members, "function memberSummarySupported"),
+            _function_source(members, "function memberResponseCurrent"),
+            _function_source(members, "function memberReadStatus"),
+            _function_source(members, "async function readMemberMetadata"),
+            _function_source(members, "function showMemberReadProblem"),
             _function_source(members, "async function showAddMembers"),
             _function_source(members, "async function showSearchMembers"),
             _function_source(forward, "async function openForwardPicker"),
@@ -228,15 +240,16 @@ const V = {renderChats() {}, exitSelect() {}};
 let calls = [], responses = [];
 const api = path => { calls.push(path); const next = responses.shift(); return next?.promise || Promise.resolve(next); };
 const functions = __FUNCTIONS__;
-const factory = new Function("api", "beginModalRead", "captureModalRead", "modalReadMayApply", "openModal",
+const meshCaps = () => ({});
+const factory = new Function("meshCaps", "api", "beginModalRead", "captureModalRead", "modalReadMayApply", "openModal",
   "closeModal", "bindModalFilter", "bindPicker", "pickerRow", "pickerSection", "pickerFooter", "esc", "toast",
   "ICONS", "Mesh", "meshDn", "meshAvatarInner", "meshChatAvatarInner", "V",
   `${functions}; return {showAddMembers, showSearchMembers, openForwardPicker};`);
-const funcs = factory(api, beginModalRead, captureModalRead, modalReadMayApply, openModal,
+const funcs = factory(meshCaps, api, beginModalRead, captureModalRead, modalReadMayApply, openModal,
   closeModal, bindModalFilter, bindPicker, pickerRow, pickerSection, pickerFooter, esc, toast,
   ICONS, Mesh, meshDn, meshAvatarInner, meshChatAvatarInner, V);
 const state = {user: "aryan", users: {aryan: {username: "aryan", display: "Aryan", kind: "human"}}, chats: []};
-const chat = {meta: {members: []}};
+const chat = {meta: {id: "A", members: []}};
 
 for (const [name, invoke] of [
   ["add", () => funcs.showAddMembers("A")],
@@ -261,3 +274,36 @@ for (const [name, invoke, expected, queued] of [
   assert.deepEqual(calls, expected, name); assert.equal(opened, 1, name);
 }
 '''
+
+
+@requires_node
+def test_selected_canonical_denial_retires_only_known_row_and_old_reads(tmp_path):
+    setup = _STATE_RUNNER[:_STATE_RUNNER.index('const ticket = BrowserSession.capture();')]
+    setup = setup.replace('applyMeshState, advanceSelectedView, observeLockState',
+                          'applyMeshState, retireDeniedMeshChat, advanceSelectedView, observeLockState')
+    program = setup + r'''
+const ticket=BrowserSession.capture();
+const binding={viewer:'aryan',instance_id:'i',session_generation:'1'};
+const response=(chats,complete=false)=>({user:'aryan',session_binding:binding,
+  chats,chats_complete:complete});
+const denied={id:'a',last:{body:'private preview'}}, other={id:'b'};
+const initial=api.captureMeshStateRead(ticket);
+assert.equal(api.applyMeshState(ticket,response([denied,other]),initial),true);
+const late=api.captureMeshStateRead(ticket);
+assert.equal(api.retireDeniedMeshChat('elsewhere'),false);
+assert.equal(api.retireDeniedMeshChat('a'),true);
+assert.deepEqual(Mesh.state.chats,[other]);
+assert.equal(api.applyMeshState(ticket,response([denied,other]),late),false);
+assert.deepEqual(Mesh.state.chats,[other]);
+const incomplete=api.captureMeshStateRead(ticket);
+assert.equal(api.applyMeshState(ticket,response([]),incomplete),true);
+assert.deepEqual(Mesh.state.chats,[other]);
+// A newly captured canonical positive restores legitimate membership.
+const restored=api.captureMeshStateRead(ticket);
+assert.equal(api.applyMeshState(ticket,response([denied]),restored),true);
+assert.deepEqual(Mesh.state.chats,[other,denied]);
+App.page='settings';assert.equal(api.retireDeniedMeshChat('a'),false);
+App.page='chats';Mesh.state.user='other';
+assert.equal(api.retireDeniedMeshChat('a'),false);
+'''
+    _run(tmp_path, program.replace('__SOURCE__', json.dumps(_ownership_source())))

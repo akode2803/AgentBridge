@@ -27,6 +27,7 @@ from typing import Callable, Iterable
 
 from ..store.db import Store
 from ..core.latency import clock_id, sink_for_store
+from ..core import delivery_trace
 from ..transport.base import Transport
 
 __all__ = ["SyncEngine"]
@@ -63,11 +64,22 @@ class SyncEngine:
         self._known: set[str] = set()
 
     # -------------------------------------------------------------- one log
+    @delivery_trace.observed('ingestion', chat_arg=1)
     def _sync_log(self, chat_id: str, log_name: str, *, lane: str) -> int:
         """Read one log from its stored offset. Returns how many were new."""
         position = self.store.capture_log_position(chat_id, log_name)
         offset = position.offset
-        records, new_offset = self.tx.read_log(chat_id, log_name, offset)
+        started = delivery_trace.queue_clock()
+        read_failed = False
+        try:
+            records, new_offset = self.tx.read_log(chat_id, log_name, offset)
+        except BaseException:
+            read_failed = True
+            raise
+        finally:
+            if started is not None:
+                delivery_trace.emit('transport_read', chat=chat_id, status='error' if read_failed else 'ok',
+                                    duration_ms=delivery_trace.elapsed_ms(started))
         if records:
             # R13.5 ingestion sanity: a per-device log is single-writer, so
             # every record's `from` must be that log's owner. Drop any that

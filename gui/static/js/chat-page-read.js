@@ -8,6 +8,17 @@ function retryAfter(response) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 30000 ? value : null;
 }
 
+// Pending local work is progress, not a failed network request. Keep a short
+// recovery burst, then a bounded cadence so persistent fences cannot hot-loop.
+export function pageRetryDelay(response, attempts = 1, realtime = false) {
+  const n = Number.isSafeInteger(attempts) && attempts > 0 ? Math.min(30, attempts) : 1;
+  const requested = Math.min(2000, Math.max(350, retryAfter(response) ?? 350));
+  if (["pending", "reset_required"].includes(response?.status)) {
+    return n <= 5 ? requested : 2000;
+  }
+  return realtime ? Math.min(8000, 500 * 2 ** Math.min(4, n - 1)) : requested;
+}
+
 function noData(status, reason = null, evictedIds = [], retry = null) {
   return {status, reason, pageData: null, messages: [], evictedIds,
           hasMore: false, continuation: null, pageVersion: null,
@@ -31,6 +42,8 @@ function metadata(response, owner, maxMessages) {
       || response.read_ns < 0
       || (response.read_cutoff_ns !== undefined && (typeof response.read_cutoff_ns !== "string"
           || !/^(0|[1-9][0-9]{0,18})$/.test(response.read_cutoff_ns)))
+      || (response.read_ack_token != null && (typeof response.read_ack_token !== "string"
+          || !/^[0-9a-f]{64}$/.test(response.read_ack_token)))
       || !Array.isArray(response.starred)
       || response.starred.length > 200 || !Array.isArray(response.messages)
       || response.messages.length > maxMessages) return null;
@@ -47,7 +60,7 @@ function metadata(response, owner, maxMessages) {
       || typeof response.metadata_status !== "object"
       || Array.isArray(response.metadata_status)) return null;
   return {metaJson, statusJson, binding: {...response.session_binding},
-          me: response.me, read_ns: response.read_ns, read_cutoff_ns: response.read_cutoff_ns, starred};
+          me: response.me, read_ns: response.read_ns, read_cutoff_ns: response.read_cutoff_ns, read_ack_token: response.read_ack_token, starred};
 }
 
 export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
@@ -68,7 +81,8 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
     return {status: "page", pageData: {
       meta: JSON.parse(pageMeta.metaJson), me: pageMeta.me,
       session_binding: {...pageMeta.binding},
-      read_ns: pageMeta.read_ns, read_cutoff_ns:pageMeta.read_cutoff_ns, metadata_status: JSON.parse(pageMeta.statusJson), starred,
+      read_ns: pageMeta.read_ns, read_cutoff_ns:pageMeta.read_cutoff_ns,
+      read_ack_token:pageMeta.read_ack_token, metadata_status: JSON.parse(pageMeta.statusJson), starred,
     }, messages, evictedIds: accepted.evictedIds, hasMore: accepted.hasMore,
       continuation: accepted.continuation, pageVersion: accepted.pageVersion,
       historyExhausted: accepted.historyExhausted,
@@ -114,6 +128,7 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
       const operation = {owner, abort: new AbortController()};
       active = operation;
       let draftStars = new Map();
+      let draftRead = null;
       try {
         for (let attempt = 0; attempt < 6; attempt++) {
           const current = attempt === 0 ? ticket : pages.begin("refresh");
@@ -136,6 +151,8 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
           if (response?.status === "page" && !data) {
             return clear("unavailable", "page_metadata_invalid");
           }
+          if (data && (!draftRead || BigInt(data.read_cutoff_ns || "0")
+              > BigInt(draftRead.read_cutoff_ns || "0"))) draftRead = data;
           const accepted = pages.accept(current, response);
           if (accepted.status === "refreshing") {
             if (kind !== "refresh") return clear("unavailable", "unexpected_refresh");
@@ -165,7 +182,8 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
               }
             }
           }
-          pageMeta = data;
+          pageMeta = {...data, read_cutoff_ns:draftRead?.read_cutoff_ns,
+                      read_ack_token:draftRead?.read_ack_token};
           return pageResult(accepted);
         }
         return clear("unavailable", "refresh_request_budget");
