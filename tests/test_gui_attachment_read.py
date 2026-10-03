@@ -6,6 +6,7 @@ import os
 import pytest
 
 from agentbridge.gui import api_files
+from agentbridge.gui import attachment_read
 from agentbridge.gui.routing import Request, Response
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
@@ -42,6 +43,55 @@ def test_exact_file_roundtrip_and_no_store(page_app):
     assert isinstance(response, Response), response
     assert response.body == b'attachment-data'
     assert response.headers['Cache-Control'] == 'no-store'
+
+
+@pytest.mark.parametrize('transport_cap,expected', [
+    (0, 512 * 1024 * 1024),
+    (32, 32),
+    (512 * 1024 * 1024 + 1, 512 * 1024 * 1024),
+])
+def test_sealed_attachment_limit_uses_smallest_nonzero_cap(
+        transport_cap, expected):
+    class Tx:
+        max_upload_bytes = transport_cap
+
+    assert attachment_read._max_sealed_attachment_bytes(Tx()) == expected
+
+
+def test_sealed_attachment_limit_defaults_when_transport_has_no_cap():
+    class Tx:
+        pass
+
+    assert attachment_read._max_sealed_attachment_bytes(Tx()) == 512 * 1024 * 1024
+
+
+def test_transport_attachment_limit_accepts_exact_boundary_and_rejects_next_byte(
+        page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    path = P.file(chat, rec['id'])
+    sealed = app.mesh.tx.get_blob(path)
+    assert sealed
+    opened = []
+    open_blob = attachment_read.open_blob_observed
+
+    def observed_open(*args):
+        opened.append(True)
+        return open_blob(*args)
+
+    monkeypatch.setattr(attachment_read, 'open_blob_observed', observed_open)
+    limits = [len(sealed)]
+    monkeypatch.setattr(type(app.mesh.tx), 'max_upload_bytes',
+                        property(lambda _tx: limits[0]))
+    accepted = _request(app, chat, message.id, rec['id'])
+    assert isinstance(accepted, Response) and accepted.body == b'attachment-data'
+    assert opened
+
+    opened.clear()
+    limits[0] = len(sealed) - 1
+    rejected = _request(app, chat, message.id, rec['id'])
+    assert isinstance(rejected, dict) and rejected['status'] == 'unavailable'
+    assert opened == []
 
 
 def test_missing_wrong_hidden_and_mismatched_hints_never_fetch(page_app, monkeypatch):
