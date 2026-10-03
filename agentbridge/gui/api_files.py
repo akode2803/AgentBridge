@@ -18,9 +18,12 @@ import mimetypes
 import os
 import re
 import secrets
+import stat
+import threading
 import time
 from pathlib import Path
 
+from ..core.lock import SingleInstance
 from ..mesh.paths import P
 from ..mesh.attachments import attachment_path
 from . import desktop
@@ -330,6 +333,85 @@ def clear_group_avatar(app, req, mesh) -> dict:
 
 
 # --------------------------------------------------------------- OS handoff
+_HANDOFF_LOCK = threading.Lock()
+
+
+def _cache_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _verified_cache_identity(path, size, digest):
+    """Verify a private regular cache file without another full-size allocation.
+
+    Windows privacy relies on the existing trusted app-home ACL boundary;
+    st_mode there does not describe ACLs. Reject reparse points on that platform.
+    """
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size != size
+                or getattr(before, 'st_file_attributes', 0)
+                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
+            return None
+        if os.name != 'nt' and (before.st_uid != os.getuid() or before.st_mode & 0o077):
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        flags |= getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as handle:
+            if _cache_identity(os.fstat(handle.fileno())) != _cache_identity(before):
+                return None
+            observed = hashlib.sha256()
+            remaining = size
+            while remaining:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    return None
+                observed.update(chunk)
+                remaining -= len(chunk)
+            if (handle.read(1) or observed.hexdigest() != digest
+                    or _cache_identity(os.fstat(handle.fileno())) != _cache_identity(before)
+                    or _cache_identity(path.lstat()) != _cache_identity(before)):
+                return None
+        return _cache_identity(before)
+    except OSError:
+        return None
+
+
+def _unlink_cache_identity(path, identity):
+    # A handler may still own the file. Cleanup must not break a successful open.
+    try:
+        if identity is not None and _cache_identity(path.lstat()) == identity:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _cache_handoff_target(target, raw, digest):
+    """At most one canonical copy and one fallback per attachment, under lock."""
+    fallback = target.with_name(f'.{target.stem}.handoff{target.suffix}')
+    # Keep a handed-off fallback even after canonical replacement becomes
+    # possible: an asynchronous OS handler may not have opened that path yet.
+    # Reusing one fixed slot bounds retention without guessing reader lifetimes.
+    if _verified_cache_identity(target, len(raw), digest) is not None:
+        return target, None
+    temp = target.with_name(f'.{target.name}.{secrets.token_hex(8)}.tmp')
+    identity = None
+    try:
+        _write_private(temp, raw)
+        identity = _cache_identity(temp.lstat())
+        try:
+            os.replace(temp, target)
+        except PermissionError:
+            if _verified_cache_identity(fallback, len(raw), digest) is not None:
+                return fallback, None
+            # Exclusive creation: unsafe or stale collisions are never replaced.
+            _write_private(fallback, raw)
+            return fallback, _cache_identity(fallback.lstat())
+        return target, None
+    finally:
+        _unlink_cache_identity(temp, identity)
+
+
 @authed_read_token
 def open_file(app, req, mesh, token) -> dict:
     """Decrypt to the local cache and open with the OS default handler."""
@@ -345,25 +427,24 @@ def open_file(app, req, mesh, token) -> dict:
     cache = app.home / "files_cache" / chat_id
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / cache_filename(rec.get("name") or "file", blob_id)
-    # Keep the extension so this private copy can also be handed to the OS if
-    # a Windows handler still holds target without delete sharing.
-    temp = target.with_name(f'.{target.stem}.{secrets.token_hex(8)}{target.suffix}')
-    created = handed_off = False
-    try:
-        _write_private(temp, raw)
-        created = True
-        try:
-            os.replace(temp, target)  # same-sized stale bytes must be replaced too
-        except PermissionError:
-            target = temp  # Never hand out unverified bytes from the old cache.
+    # Serialize publication through the OS handoff, including other GUI
+    # processes using this home. Keep the lock file: unlinking it splits locks.
+    with _HANDOFF_LOCK, SingleInstance(app.home / 'files_cache.lock', fail_open=False) as guard:
+        if not guard.acquired:
+            return {"error": "Attachment cache is busy; try again"}
         if not _current_handoff(app, token):
             return {"error": "session changed"}
-        desktop.open_path(target)
-        handed_off = target == temp
-        return {"ok": True}
-    finally:
-        if created and not handed_off:
-            temp.unlink(missing_ok=True)
+        selected, created = _cache_handoff_target(target, raw, rec['sha256'])
+        handed_off = False
+        try:
+            if not _current_handoff(app, token):
+                return {"error": "session changed"}
+            desktop.open_path(selected)
+            handed_off = True
+            return {"ok": True}
+        finally:
+            if not handed_off:
+                _unlink_cache_identity(selected, created)
 
 
 @authed_read_token

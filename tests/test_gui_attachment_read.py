@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from agentbridge.gui import api_files
@@ -321,12 +325,13 @@ def test_open_replaces_same_length_stale_cache(page_app, monkeypatch):
 
 
 @pytest.mark.parametrize('cached', (b'good', b'evil'))
-def test_open_locked_cache_hands_off_fresh_private_copy(page_app, monkeypatch, cached):
+def test_open_locked_cache_reuses_only_verified_private_bytes(page_app, monkeypatch, cached):
     app, chat = page_app
     message, rec = _posted(app, chat, b'good', name='report.pdf')
     target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
     target.parent.mkdir(parents=True)
     target.write_bytes(cached)
+    target.chmod(0o600)
     opened = []
     replace = api_files.os.replace
 
@@ -340,13 +345,20 @@ def test_open_locked_cache_hands_off_fresh_private_copy(page_app, monkeypatch, c
     result = api_files.open_file(app, Request(data={'chat_id': chat, 'id': rec['id'],
                                                   'message_id': message.id}))
     assert result == {'ok': True}, result
-    assert len(opened) == 1 and opened[0] != target
+    assert len(opened) == 1
+    assert (opened[0] == target) == (cached == b'good')
     fresh = opened[0]
     assert fresh.parent == target.parent and fresh.suffix == '.pdf'
     assert fresh.read_bytes() == b'good' and target.read_bytes() == cached
     assert set(target.parent.iterdir()) == {target, fresh}
     if os.name != 'nt':
         assert fresh.stat().st_mode & 0o777 == 0o600
+    for _ in range(4):
+        assert api_files.open_file(app, Request(data={
+            'chat_id': chat, 'id': rec['id'], 'message_id': message.id,
+        })) == {'ok': True}
+    assert opened == [fresh] * 5
+    assert set(target.parent.iterdir()) == {target, fresh}
 
 
 @pytest.mark.parametrize('failure', ('lock', 'session', 'handler'))
@@ -357,9 +369,11 @@ def test_open_locked_cache_cleans_unhanded_copy(page_app, monkeypatch, failure):
     target.parent.mkdir(parents=True)
     target.write_bytes(b'evil')
     opened = []
+    replace = api_files.os.replace
 
-    def locked_target(_source, dest):
-        assert dest == target
+    def locked_target(source, dest):
+        if dest != target:
+            return replace(source, dest)
         if failure == 'lock':
             app.lock.path.write_text('{}', encoding='utf-8')
             app.lock.lock()
@@ -395,11 +409,11 @@ def test_reopen_attachment_while_windows_reader_holds_cache(page_app, monkeypatc
     assert api_files.open_file(app, req) == {'ok': True}
     target = opened[0]
     with target.open('rb') as held:
-        assert api_files.open_file(app, req) == {'ok': True}
+        for _ in range(5):
+            assert api_files.open_file(app, req) == {'ok': True}
         assert held.read() == b'attachment-data'
-    assert len(opened) == 2 and opened[1] != target
-    assert opened[1].suffix == target.suffix
-    assert opened[1].read_bytes() == b'attachment-data'
+    assert opened == [target] * 6
+    assert list(target.parent.iterdir()) == [target]
 
 
 def test_open_never_removes_a_copy_it_did_not_create(page_app, monkeypatch):
@@ -421,6 +435,68 @@ def test_open_never_removes_a_copy_it_did_not_create(page_app, monkeypatch):
                                               'message_id': message.id}))
     assert opened == [] and len(occupied) == 1
     assert occupied[0].read_bytes() == b'another request owns this file'
+
+
+def test_concurrent_open_requests_share_one_fallback(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'evil')
+    ready = threading.Barrier(4)
+    opened = []
+    replace = api_files.os.replace
+
+    def read_attachment(*_args):
+        # Isolate the post-verification disk handoff from unrelated page workers.
+        ready.wait(timeout=5)
+        return None, (rec, b'good')
+
+    def locked_target(source, dest):
+        if dest == target:
+            raise PermissionError(errno.EACCES, 'file held by handler')
+        return replace(source, dest)
+
+    monkeypatch.setattr(api_files, 'read_attachment', read_attachment)
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: api_files.open_file(app, req), range(4)))
+    assert results == [{'ok': True}] * 4
+    assert len(opened) == 4 and len(set(opened)) == 1
+    assert opened[0] != target and opened[0].read_bytes() == b'good'
+    assert set(target.parent.iterdir()) == {target, opened[0]}
+
+
+@pytest.mark.timeout(20)
+def test_another_process_cache_handoff_is_busy_until_released(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    code = (
+        'import sys; from agentbridge.core.lock import SingleInstance; '
+        'guard = SingleInstance(sys.argv[1], fail_open=False); '
+        'print(guard.acquire(), flush=True); sys.stdin.read(1); guard.release()'
+    )
+    opened = []
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    child = subprocess.Popen([sys.executable, '-c', code, str(app.home / 'files_cache.lock')],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'True'
+        assert api_files.open_file(app, req) == {'error': 'Attachment cache is busy; try again'}
+        assert opened == []
+        assert list((app.home / 'files_cache' / chat).iterdir()) == []
+    finally:
+        try:
+            child.communicate('x', timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+    assert child.returncode == 0
+    assert api_files.open_file(app, req) == {'ok': True}
+    assert len(opened) == 1 and opened[0].read_bytes() == b'attachment-data'
 
 
 def test_save_dialog_before_authority_and_partial_batch(page_app, monkeypatch, tmp_path):
