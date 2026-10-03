@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from agentbridge.gui import api_files
@@ -15,8 +19,8 @@ from test_gui_chat_pages import _ready, page_app as _shared_page_app
 
 
 @pytest.fixture(name='page_app')
-def _page_fixture(tmp_path, monkeypatch):
-    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch)
+def _page_fixture(tmp_path, monkeypatch, clouds):
+    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch, clouds)
 
 
 def _posted(app, chat, raw=b'attachment-data', name='test.txt'):
@@ -199,14 +203,14 @@ def test_unrelated_arrival_during_fetch_uses_fresh_final_authority(page_app, mon
     assert fired and isinstance(result, Response), result
 
 
-def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypatch):
+def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypatch, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
     owner.membership.add_members(chat, ['peer'])
     owner.membership.grant_admin(chat, 'peer')
     message, rec = _posted(app, chat)
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-file.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -231,14 +235,14 @@ def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypa
         peer.close()
 
 
-def test_member_removed_while_transport_fetch_waits(page_app, monkeypatch):
+def test_member_removed_while_transport_fetch_waits(page_app, monkeypatch, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
     owner.membership.add_members(chat, ['peer'])
     owner.membership.grant_admin(chat, 'peer')
     message, rec = _posted(app, chat)
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-file.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -320,6 +324,181 @@ def test_open_replaces_same_length_stale_cache(page_app, monkeypatch):
     assert opened == [target] and target.read_bytes() == b'good'
 
 
+@pytest.mark.parametrize('cached', (b'good', b'evil'))
+def test_open_locked_cache_reuses_only_verified_private_bytes(page_app, monkeypatch, cached):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good', name='report.pdf')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(cached)
+    target.chmod(0o600)
+    opened = []
+    replace = api_files.os.replace
+
+    def locked_target(source, dest):
+        if dest == target:
+            raise PermissionError(errno.EACCES, 'file held by Windows handler')
+        return replace(source, dest)
+
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    result = api_files.open_file(app, Request(data={'chat_id': chat, 'id': rec['id'],
+                                                  'message_id': message.id}))
+    assert result == {'ok': True}, result
+    assert len(opened) == 1
+    assert (opened[0] == target) == (cached == b'good')
+    fresh = opened[0]
+    assert fresh.parent == target.parent and fresh.suffix == '.pdf'
+    assert fresh.read_bytes() == b'good' and target.read_bytes() == cached
+    assert set(target.parent.iterdir()) == {target, fresh}
+    if os.name != 'nt':
+        assert fresh.stat().st_mode & 0o777 == 0o600
+    for _ in range(4):
+        assert api_files.open_file(app, Request(data={
+            'chat_id': chat, 'id': rec['id'], 'message_id': message.id,
+        })) == {'ok': True}
+    assert opened == [fresh] * 5
+    assert set(target.parent.iterdir()) == {target, fresh}
+
+
+@pytest.mark.parametrize('failure', ('lock', 'session', 'handler'))
+def test_open_locked_cache_cleans_unhanded_copy(page_app, monkeypatch, failure):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'evil')
+    opened = []
+    replace = api_files.os.replace
+
+    def locked_target(source, dest):
+        if dest != target:
+            return replace(source, dest)
+        if failure == 'lock':
+            app.lock.path.write_text('{}', encoding='utf-8')
+            app.lock.lock()
+        elif failure == 'session':
+            monkeypatch.setattr(app, 'validate_session_read', lambda _token: False)
+        raise PermissionError(errno.EACCES, 'file held by Windows handler')
+
+    def open_path(path):
+        opened.append(path)
+        raise OSError('handler unavailable')
+
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', open_path)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    if failure == 'handler':
+        with pytest.raises(OSError, match='handler unavailable'):
+            api_files.open_file(app, req)
+        assert len(opened) == 1
+    else:
+        assert api_files.open_file(app, req)['error']
+        assert opened == []
+    assert set(target.parent.iterdir()) == {target}
+    assert target.read_bytes() == b'evil'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows denies replacing an open file')
+def test_reopen_attachment_while_windows_reader_holds_cache(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    opened = []
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    assert api_files.open_file(app, req) == {'ok': True}
+    target = opened[0]
+    with target.open('rb') as held:
+        for _ in range(5):
+            assert api_files.open_file(app, req) == {'ok': True}
+        assert held.read() == b'attachment-data'
+    assert opened == [target] * 6
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_open_never_removes_a_copy_it_did_not_create(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    occupied = []
+    opened = []
+    write_private = api_files._write_private
+
+    def collision(path, data):
+        path.write_bytes(b'another request owns this file')
+        occupied.append(path)
+        write_private(path, data)
+
+    monkeypatch.setattr(api_files, '_write_private', collision)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    with pytest.raises(FileExistsError):
+        api_files.open_file(app, Request(data={'chat_id': chat, 'id': rec['id'],
+                                              'message_id': message.id}))
+    assert opened == [] and len(occupied) == 1
+    assert occupied[0].read_bytes() == b'another request owns this file'
+
+
+def test_concurrent_open_requests_share_one_fallback(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat, b'good')
+    target = app.home / 'files_cache' / chat / api_files.cache_filename(rec['name'], rec['id'])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'evil')
+    ready = threading.Barrier(4)
+    opened = []
+    replace = api_files.os.replace
+
+    def read_attachment(*_args):
+        # Isolate the post-verification disk handoff from unrelated page workers.
+        ready.wait(timeout=5)
+        return None, (rec, b'good')
+
+    def locked_target(source, dest):
+        if dest == target:
+            raise PermissionError(errno.EACCES, 'file held by handler')
+        return replace(source, dest)
+
+    monkeypatch.setattr(api_files, 'read_attachment', read_attachment)
+    monkeypatch.setattr(api_files.os, 'replace', locked_target)
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: api_files.open_file(app, req), range(4)))
+    assert results == [{'ok': True}] * 4
+    assert len(opened) == 4 and len(set(opened)) == 1
+    assert opened[0] != target and opened[0].read_bytes() == b'good'
+    assert set(target.parent.iterdir()) == {target, opened[0]}
+
+
+@pytest.mark.timeout(20)
+def test_another_process_cache_handoff_is_busy_until_released(page_app, monkeypatch):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    code = (
+        'import sys; from agentbridge.core.lock import SingleInstance; '
+        'guard = SingleInstance(sys.argv[1], fail_open=False); '
+        'print(guard.acquire(), flush=True); sys.stdin.read(1); guard.release()'
+    )
+    opened = []
+    monkeypatch.setattr(api_files.desktop, 'open_path', opened.append)
+    req = Request(data={'chat_id': chat, 'id': rec['id'], 'message_id': message.id})
+    child = subprocess.Popen([sys.executable, '-c', code, str(app.home / 'files_cache.lock')],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'True'
+        assert api_files.open_file(app, req) == {'error': 'Attachment cache is busy; try again'}
+        assert opened == []
+        assert list((app.home / 'files_cache' / chat).iterdir()) == []
+    finally:
+        try:
+            child.communicate('x', timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+    assert child.returncode == 0
+    assert api_files.open_file(app, req) == {'ok': True}
+    assert len(opened) == 1 and opened[0].read_bytes() == b'attachment-data'
+
+
 def test_save_dialog_before_authority_and_partial_batch(page_app, monkeypatch, tmp_path):
     app, chat = page_app
     first, rec = _posted(app, chat)
@@ -347,7 +526,85 @@ def test_save_dialog_before_authority_and_partial_batch(page_app, monkeypatch, t
     assert list(dest.iterdir()) == []
 
 
-def test_failed_save_write_leaves_no_partial_visible_file(page_app, monkeypatch, tmp_path):
+def test_save_never_publishes_replaced_staging_path(page_app, monkeypatch, tmp_path):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'shared-destination'
+    dest.mkdir()
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    link = api_files.os.link
+    attacks = []
+
+    def swap_staging_inode(source, output):
+        attacks.append(source)
+        source.unlink()
+        source.write_bytes(b'attacker-controlled replacement')
+        return link(source, output)
+
+    monkeypatch.setattr(api_files.os, 'link', swap_staging_inode)
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['saved'] == 1, result
+    assert (dest / rec['name']).read_bytes() == b'attachment-data'
+    assert attacks == []  # No source pathname remains to swap before publication.
+    assert list(dest.iterdir()) == [dest / rec['name']]
+
+
+@pytest.mark.parametrize('kind', ('file', 'symlink'))
+def test_save_exclusive_names_preserve_existing_and_symlink_destinations(
+        page_app, monkeypatch, tmp_path, kind):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'saved'
+    dest.mkdir()
+    existing = dest / rec['name']
+    outside = tmp_path / 'outside.txt'
+    outside.write_bytes(b'leave alone')
+    if kind == 'symlink':
+        try:
+            existing.symlink_to(outside)
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    else:
+        existing.write_bytes(b'leave alone')
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['saved'] == 1, result
+    assert existing.read_bytes() == outside.read_bytes() == b'leave alone'
+    if kind == 'symlink':
+        assert existing.is_symlink()
+    assert (dest / 'test (1).txt').read_bytes() == b'attachment-data'
+    assert set(dest.iterdir()) == {existing, dest / 'test (1).txt'}
+
+
+def test_save_rechecks_lock_after_a_name_collision(page_app, monkeypatch, tmp_path):
+    app, chat = page_app
+    message, rec = _posted(app, chat)
+    dest = tmp_path / 'saved'
+    dest.mkdir()
+    monkeypatch.setattr(api_files.desktop, 'pick_folder', lambda: str(dest))
+    write = api_files._write_private
+
+    def collide_then_lock(path, data, **options):
+        assert path == dest / rec['name']
+        path.write_bytes(b'other writer')
+        app.lock.path.write_text('{}', encoding='utf-8')
+        app.lock.lock()
+        write(path, data, **options)
+
+    monkeypatch.setattr(api_files, '_write_private', collide_then_lock)
+    result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
+        {'message_id': message.id, 'id': rec['id']},
+    ]}))
+    assert result['error'] and result['saved'] == 0
+    assert list(dest.iterdir()) == [dest / rec['name']]
+    assert (dest / rec['name']).read_bytes() == b'other writer'
+
+
+def test_failed_save_write_scrubs_only_its_reserved_file(page_app, monkeypatch, tmp_path):
     app, chat = page_app
     message, rec = _posted(app, chat)
     dest = tmp_path / 'saved'
@@ -373,20 +630,21 @@ def test_failed_save_write_leaves_no_partial_visible_file(page_app, monkeypatch,
             self.handle.write(data[:3])
             raise OSError('disk full')
 
-    def failing_write(path, data):
-        if path.parent == dest and path.name.startswith('.agentbridge-'):
+    def failing_write(path, data, **options):
+        if path.parent == dest and path.name == rec['name']:
             with monkeypatch.context() as context:
                 context.setattr(api_files.os, 'fdopen',
-                                lambda fd, mode: PartialFile(original_fdopen(fd, mode)))
-                return original_write(path, data)
-        return original_write(path, data)
+                                lambda fd, mode, **kw: PartialFile(original_fdopen(fd, mode, **kw)))
+                return original_write(path, data, **options)
+        return original_write(path, data, **options)
 
     monkeypatch.setattr(api_files, '_write_private', failing_write)
     result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
         {'message_id': message.id, 'id': rec['id']},
     ]}))
     assert result['error'] and result['saved'] == 0
-    assert list(dest.iterdir()) == []
+    assert list(dest.iterdir()) == [dest / rec['name']]
+    assert (dest / rec['name']).read_bytes() == b''
     if os.name != 'nt':
         assert observed_modes == [0o600]
 
@@ -420,13 +678,14 @@ def test_save_without_hardlink_support_keeps_exclusive_names_and_cleans_failure(
                 self.handle.write(data[:3])
                 raise OSError('storage failed')
 
-        def partial_write(path, data):
+        def partial_write(path, data, **options):
             if path.parent == dest and path.name == rec['name']:
                 with monkeypatch.context() as context:
                     context.setattr(api_files.os, 'fdopen',
-                                    lambda fd, mode: PartialFile(original_fdopen(fd, mode)))
-                    return original_write(path, data)
-            return original_write(path, data)
+                                    lambda fd, mode, **kw: PartialFile(
+                                        original_fdopen(fd, mode, **kw)))
+                    return original_write(path, data, **options)
+            return original_write(path, data, **options)
 
         monkeypatch.setattr(api_files, '_write_private', partial_write)
     result = api_files.save(app, Request(data={'chat_id': chat, 'files': [
@@ -434,7 +693,8 @@ def test_save_without_hardlink_support_keeps_exclusive_names_and_cleans_failure(
     ]}))
     if fail:
         assert result['error'] and result['saved'] == 0
-        assert list(dest.iterdir()) == []
+        assert list(dest.iterdir()) == [dest / rec['name']]
+        assert (dest / rec['name']).read_bytes() == b''
     else:
         assert result['saved'] == 1, result
         assert (dest / rec['name']).read_bytes() == b'attachment-data'

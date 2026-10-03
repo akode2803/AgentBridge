@@ -55,10 +55,17 @@ def deliver_immutable(tx, path: str, doc: dict) -> None:
         # Avoid a redundant cloud read before every globally unique event.
         try:
             tx.create_doc(path, doc)
-        except Exception:
+        except Exception as create_error:
             # A response may be lost after the create committed. Accept only
-            # exact bytes; conflicting or unavailable readback stays failed.
-            if tx.get_doc(path, default=None) != doc:
+            # exact bytes. Proven conflicts are permanent; absent or unavailable
+            # readback preserves the original transport failure for retry.
+            try:
+                current = tx.get_doc(path, default=None)
+            except Exception:
+                raise create_error from None
+            if current is not None and current != doc:
+                raise ValidationError("immutable runtime path already differs") from create_error
+            if current != doc:
                 raise
         return
     current = tx.get_doc(path, default=None)

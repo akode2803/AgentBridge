@@ -95,16 +95,21 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
 
 def test_accepts_actual_recorder_schema_without_starting_app(tmp_path):
     recorder = Diagnostics(tmp_path)
-    assert recorder.set_enabled(True)
-    assert recorder.record({"event": "client_request", "route": "/api/mesh/state",
-                            "duration_ms": 10, "status": "ready"}, client=True)
-    recorder.stage("/api/mesh/state", "private-chat", "prepare", "prepared",
-                   duration_ms=3)
-    result = summary.summarize([recorder.path])
+    try:
+        assert recorder.set_enabled(True, sample_rate=1)
+        assert recorder.record({"event": "client_request", "route": "/api/mesh/state",
+                                "duration_ms": 10, "status": "ready"}, client=True)
+        recorder.stage("/api/mesh/state", "private-chat", "prepare", "prepared",
+                       duration_ms=3)
+        assert recorder.flush()
+        raw = recorder.path.read_text()
+        result = summary.summarize([recorder.path])
+    finally:
+        recorder.close()
     assert result["input"]["accepted_records"] == 2
     assert _one(result, "page_stage")["phase"] == "prepare"
     assert _one(result, "browser")["route"] == "/api/mesh/state"
-    assert "private-chat" not in json.dumps(result)
+    assert "private-chat" not in raw and "private-chat" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("duration", [

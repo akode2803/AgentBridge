@@ -9,43 +9,42 @@ from agentbridge.mesh import presence_input_runtime as module
 from agentbridge.mesh.local_presence_source import LocalPresenceSource
 from agentbridge.store import local_source, source_selectors, staged_source
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import owned_transport
 from agentbridge.transport.raw_documents import RawCollectionUnavailable
 
 
 @pytest.fixture
-def rig(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    folder.put_doc('presence/alice-device.json',
+def rig(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    provider.put_doc('presence/alice-device.json',
                    {'user': 'bob', 'last_seen_ns': 17, 'online': False})
-    folder.put_doc('presence/bob-device.json',
+    provider.put_doc('presence/bob-device.json',
                    {'user': 'bob', 'last_seen_ns': 31, 'online': True})
-    owned = owned_transport(folder, tmp_path / 'owner')
+    owned = owned_transport(provider, tmp_path / 'owner')
     store = Store(tmp_path / 'cache.sqlite')
     ticks = [10.0]
     runtime = module.PresenceInputRuntime(owned, store, clock=lambda: ticks[0])
-    yield runtime, owned, folder, store, ticks
+    yield runtime, owned, provider, store, ticks
     runtime.stop()
     store.close()
     owned.close()
 
 
 def test_request_is_bounded_hint_and_raw_floors_are_exact(rig, monkeypatch):
-    runtime, _owned, folder, store, _ticks = rig
+    runtime, _owned, provider, store, _ticks = rig
     assert runtime.reader.definition.selectors == (
         source_selectors.Selector('doc_prefix', 'presence'),)
-    original_list = folder.list_docs
+    original_list = provider.list_docs
 
     def no_foreground_walk(*_args, **_kwargs):
         raise AssertionError('request attempted provider traversal')
 
-    monkeypatch.setattr(folder, 'list_docs', no_foreground_walk)
+    monkeypatch.setattr(provider, 'list_docs', no_foreground_walk)
     assert runtime.request()
     assert runtime.request()
     with pytest.raises(local_source.SourceChanged):
         runtime.inputs(('bob',))
-    monkeypatch.setattr(folder, 'list_docs', original_list)
+    monkeypatch.setattr(provider, 'list_docs', original_list)
     assert runtime.run_due()
     reader, receipt, inputs = runtime.inputs(('bob', 'alice'))
     assert isinstance(reader, LocalPresenceSource)
@@ -67,7 +66,7 @@ def test_request_is_bounded_hint_and_raw_floors_are_exact(rig, monkeypatch):
 
 
 def test_exact_floors_and_observation_time_share_one_store_cut(rig):
-    runtime, _owned, _folder, store, _ticks = rig
+    runtime, _owned, _provider, store, _ticks = rig
     runtime.request()
     assert runtime.run_due()
     reader, receipt, first = runtime.inputs(('bob',))
@@ -96,17 +95,17 @@ def test_exact_floors_and_observation_time_share_one_store_cut(rig):
 
 
 def test_local_heartbeat_retires_only_presence_before_external_write(rig, monkeypatch):
-    runtime, owned, folder, _store, ticks = rig
+    runtime, owned, provider, _store, ticks = rig
     runtime.request()
     assert runtime.run_due()
-    original = folder.put_doc
+    original = provider.put_doc
 
     def check_retired(path, payload):
         assert path == 'presence/new.json'
         assert not runtime.health()['ready']
         return original(path, payload)
 
-    monkeypatch.setattr(folder, 'put_doc', check_retired)
+    monkeypatch.setattr(provider, 'put_doc', check_retired)
     owned.put_doc('presence/new.json', {'user': 'alice', 'last_seen_ns': 55})
     assert not runtime.health()['ready']
     with pytest.raises(local_source.SourceChanged):
@@ -119,12 +118,12 @@ def test_local_heartbeat_retires_only_presence_before_external_write(rig, monkey
 
 
 def test_failed_partial_scan_remains_unready_and_retries_with_backoff(rig, monkeypatch):
-    runtime, _owned, folder, _store, ticks = rig
+    runtime, _owned, provider, _store, ticks = rig
     runtime.request()
     assert runtime.run_due()
     prior_receipt = runtime.reader.capture()
     prior = prior_receipt.source.raw
-    folder.put_doc('presence/third.json', {'user': 'alice', 'last_seen_ns': 99})
+    provider.put_doc('presence/third.json', {'user': 'alice', 'last_seen_ns': 99})
     original = module.collect_document_batches
 
     def partial(transport, definition, *, consume, **kwargs):
@@ -150,8 +149,8 @@ def test_failed_partial_scan_remains_unready_and_retries_with_backoff(rig, monke
     assert runtime.inputs(('alice',))[2].floors == (('alice', 99),)
 
 
-def test_crash_during_candidate_keeps_admitted_presence_after_reopen(rig, tmp_path, monkeypatch):
-    runtime, _owned, folder, store, _ticks = rig
+def test_crash_during_candidate_keeps_admitted_presence_after_reopen(clouds, rig, tmp_path, monkeypatch):
+    runtime, _owned, provider, store, _ticks = rig
     assert runtime.ingest().ready
     old = runtime.inputs(('bob',))[1]
     original_collect = module.collect_document_batches
@@ -175,7 +174,7 @@ def test_crash_during_candidate_keeps_admitted_presence_after_reopen(rig, tmp_pa
     monkeypatch.setattr(staged_source, 'abort', original_abort)
     monkeypatch.setattr(staged_source, 'cleanup', original_cleanup)
     reopened_store = Store(store.path)
-    reopened_owned = owned_transport(FolderTransport(folder.root), tmp_path / 'owner')
+    reopened_owned = owned_transport(clouds.cached(provider.root), tmp_path / 'owner')
     reopened = module.PresenceInputRuntime(reopened_owned, reopened_store)
     try:
         assert reopened.inputs(('bob',))[2].floors == (('bob', 31),)
@@ -187,7 +186,7 @@ def test_crash_during_candidate_keeps_admitted_presence_after_reopen(rig, tmp_pa
 
 
 def test_new_local_mutation_cannot_cross_staged_admission(rig, monkeypatch):
-    runtime, owned, _folder, _store, _ticks = rig
+    runtime, owned, _provider, _store, _ticks = rig
     original = module.presence_index.build
 
     def mutate_before_admit(*args, **kwargs):
@@ -204,7 +203,7 @@ def test_new_local_mutation_cannot_cross_staged_admission(rig, monkeypatch):
 
 
 def test_stop_is_a_flag_and_foreground_never_restarts_owner(rig):
-    runtime, _owned, _folder, _store, _ticks = rig
+    runtime, _owned, _provider, _store, _ticks = rig
     runtime.stop()
     assert not runtime.request()
     assert not runtime.run_due()

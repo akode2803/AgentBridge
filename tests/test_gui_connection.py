@@ -2,32 +2,28 @@
 
 from types import SimpleNamespace
 
-from agentbridge.gui import api_chats, desktop
+from agentbridge.gui import api_chats
 from agentbridge.gui.routing import Request
-from agentbridge.transport import FolderTransport
 
 
-def test_local_folder_is_authoritative_without_a_sync_client(tmp_path):
-    root = tmp_path / "mesh"
-    tx = FolderTransport(root)
+def test_cloud_connection_reports_actual_registered_root_and_mirror_health(tmp_path, clouds):
+    root = clouds.root(tmp_path / "cloud-mesh")
+    tx = clouds.cached(root)
     app = SimpleNamespace(root=root, transport=tx)
     conn = api_chats._connection(app)
-    assert conn["scheme"] == "folder"
-    assert conn["mode"] == "local"
-    assert conn["state"] == "online"
-    assert conn["writable"] is True
-    assert conn["sync_client"] is None
+    assert conn["scheme"] == "supabase" and conn["root"] == root
+    assert conn["host"] == "offline.invalid"
+    assert conn["state"] == "online" and conn["mirror"]["warm"] is True
+    assert not {"mode", "provider", "shared_ok", "writable", "sync_client"} & conn.keys()
 
 
-def test_synced_folder_stays_usable_when_client_is_paused(tmp_path, monkeypatch):
-    root = tmp_path / "OneDrive - Team" / "AgentBridge"
-    tx = FolderTransport(root)
-    monkeypatch.setattr(desktop, "sync_client_running", lambda: False)
-    app = SimpleNamespace(root=root, transport=tx)
+def test_cloud_missing_mirror_state_stays_loading():
+    tx = SimpleNamespace(scheme="supabase", host="offline.invalid",
+                         mirror_status=lambda: {"warm": False, "cached": True})
+    app = SimpleNamespace(root="supabase://mesh", transport=tx)
     conn = api_chats._connection(app)
-    assert conn["mode"] == "synced" and conn["provider"] == "OneDrive"
-    assert conn["state"] == "sync_paused"
-    assert conn["shared_ok"] is True and conn["writable"] is True
+    assert conn["state"] == "loading"
+    assert conn["mirror"] == {"warm": False, "cached": True}
 
 
 def test_cloud_state_promotes_normalized_mirror_failure():

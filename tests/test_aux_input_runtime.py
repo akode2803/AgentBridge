@@ -11,7 +11,6 @@ from agentbridge.store import (aux_inputs, document_observation as docs,
                                local_source, raw_publication, staged_source)
 from agentbridge.store.db import Store
 from agentbridge.store.source_publication import SourcePublisher
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import owned_transport
 from agentbridge.transport.raw_documents import RawCollectionUnavailable
 
@@ -22,16 +21,16 @@ PAUSE = f'chats/{CHAT}/runtime/member-control/pause/one.json'
 
 
 @pytest.fixture
-def rig(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    folder.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': '2026-01-01T00:00:00Z'})
-    folder.put_doc(PAUSE, {'record': {'paused': True}, 'sig': 'candidate-only'})
-    owned = owned_transport(folder, tmp_path / 'owner')
+def rig(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    provider.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': '2026-01-01T00:00:00Z'})
+    provider.put_doc(PAUSE, {'record': {'paused': True}, 'sig': 'candidate-only'})
+    owned = owned_transport(provider, tmp_path / 'owner')
     store = Store(tmp_path / 'store.sqlite')
     clock = [10.0]
     runtime = module.AuxInputRuntime(owned, store, clock=lambda: clock[0])
     try:
-        yield runtime, owned, folder, store, clock
+        yield runtime, owned, provider, store, clock
     finally:
         runtime.stop()
         store.close()
@@ -39,7 +38,7 @@ def rig(tmp_path):
 
 
 def test_raw_sources_are_independent_and_do_not_claim_authority(rig):
-    runtime, owned, _folder, _store, _clock = rig
+    runtime, owned, _provider, _store, _clock = rig
     assert runtime.ingest('status').ready
     assert runtime.ingest('runtime', CHAT).ready
     status_reader, status_receipt, status = runtime.inputs('status')
@@ -60,7 +59,7 @@ def test_raw_sources_are_independent_and_do_not_claim_authority(rig):
 
 
 def test_identical_repoll_keeps_physical_generation_but_binds_fresh_receipt(rig):
-    runtime, _owned, _folder, _store, _clock = rig
+    runtime, _owned, _provider, _store, _clock = rig
     first = runtime.ingest('status')
     assert first.ready
     second = runtime.ingest('status')
@@ -69,15 +68,15 @@ def test_identical_repoll_keeps_physical_generation_but_binds_fresh_receipt(rig)
 
 
 def test_coalesced_requested_work_is_not_a_foreground_provider_scan(rig, monkeypatch):
-    runtime, _owned, folder, _store, clock = rig
-    original = folder.list_docs
-    monkeypatch.setattr(folder, 'list_docs',
+    runtime, _owned, provider, _store, clock = rig
+    original = provider.list_docs
+    monkeypatch.setattr(provider, 'list_docs',
                         lambda *_args, **_kwargs: pytest.fail('request walked provider'))
     assert runtime.request('status') and runtime.request('status')
     assert runtime.request('runtime', CHAT)
     with pytest.raises(local_source.SourceChanged):
         runtime.inputs('status')
-    monkeypatch.setattr(folder, 'list_docs', original)
+    monkeypatch.setattr(provider, 'list_docs', original)
     assert not runtime.run_due()
     clock[0] += 0.1
     assert runtime.run_due()
@@ -88,7 +87,7 @@ def test_coalesced_requested_work_is_not_a_foreground_provider_scan(rig, monkeyp
 
 
 def test_request_arriving_during_ingestion_schedules_one_bounded_rerun(rig, monkeypatch):
-    runtime, _owned, _folder, _store, clock = rig
+    runtime, _owned, _provider, _store, clock = rig
     original = runtime._ingest
     calls = []
 
@@ -109,9 +108,9 @@ def test_request_arriving_during_ingestion_schedules_one_bounded_rerun(rig, monk
 
 
 def test_three_docs_over_request_limit_fail_before_payload_copy(rig, monkeypatch):
-    runtime, _owned, folder, _store, _clock = rig
-    folder.put_doc('status/typing_bob.json', {'user': 'bob'})
-    folder.put_doc('status/typing_carl.json', {'user': 'carl'})
+    runtime, _owned, provider, _store, _clock = rig
+    provider.put_doc('status/typing_bob.json', {'user': 'bob'})
+    provider.put_doc('status/typing_carl.json', {'user': 'carl'})
     runtime.ingest('status')
     original = aux_inputs.docs._capture_selected
     monkeypatch.setattr(aux_inputs.docs, '_capture_selected',
@@ -122,7 +121,7 @@ def test_three_docs_over_request_limit_fail_before_payload_copy(rig, monkeypatch
 
 
 def test_default_ten_thousand_document_ceiling_rejects_10001st_without_copy(rig, monkeypatch):
-    runtime, _owned, _folder, store, _clock = rig
+    runtime, _owned, _provider, store, _clock = rig
     reader = runtime.reader('status')
     captured = SourcePublisher(runtime.coordinator, store, reader.definition).capture()
     with runtime.coordinator.publication_gate(store, reader.definition):
@@ -143,7 +142,7 @@ def test_default_ten_thousand_document_ceiling_rejects_10001st_without_copy(rig,
 
 
 def test_prefix_capture_is_generic_over_an_admitted_chat_source(rig):
-    runtime, _owned, _folder, store, _clock = rig
+    runtime, _owned, _provider, store, _clock = rig
     from agentbridge.mesh.local_page_source import LocalPageSource
     from agentbridge.store import staged_publication
 
@@ -171,9 +170,9 @@ def test_prefix_capture_is_generic_over_an_admitted_chat_source(rig):
 
 
 def test_oversize_raw_prefix_fails_before_payload_copy(rig, monkeypatch):
-    runtime, _owned, folder, _store, _clock = rig
+    runtime, _owned, provider, _store, _clock = rig
     for i in range(3):
-        folder.put_doc(f'status/large-{i}.json', {'payload': 'x' * (3 * 1024 * 1024)})
+        provider.put_doc(f'status/large-{i}.json', {'payload': 'x' * (3 * 1024 * 1024)})
     runtime.ingest('status')
     monkeypatch.setattr(aux_inputs.docs, '_capture_selected',
                         lambda *_args, **_kwargs: pytest.fail('copied over-budget payload'))
@@ -182,7 +181,7 @@ def test_oversize_raw_prefix_fails_before_payload_copy(rig, monkeypatch):
 
 
 def test_provisional_collection_keeps_old_ready_but_handled_failure_retires(rig, monkeypatch):
-    runtime, _owned, _folder, _store, _clock = rig
+    runtime, _owned, _provider, _store, _clock = rig
     runtime.ingest('status')
     old = runtime.inputs('status')[1].source.raw
     original = module.collect_document_batches
@@ -202,7 +201,7 @@ def test_provisional_collection_keeps_old_ready_but_handled_failure_retires(rig,
 
 
 def test_local_mutation_during_build_rejects_old_candidate(rig, monkeypatch):
-    runtime, owned, _folder, _store, _clock = rig
+    runtime, owned, _provider, _store, _clock = rig
     runtime.ingest('runtime', CHAT)
     original = module.collect_document_batches
 
@@ -213,16 +212,16 @@ def test_local_mutation_during_build_rejects_old_candidate(rig, monkeypatch):
         return original(transport, definition, consume=sink, batch_documents=1, **kwargs)
 
     monkeypatch.setattr(module, 'collect_document_batches', mutate_after_batch)
-    with pytest.raises(local_source.SourceChanged):
+    with pytest.raises(RawCollectionUnavailable, match="mirror_changed"):
         runtime.ingest('runtime', CHAT)
     with pytest.raises(local_source.SourceChanged):
         runtime.inputs('runtime', CHAT)
 
 
 def test_post_admit_cleanup_fault_cannot_retire_new_winner(rig, monkeypatch):
-    runtime, _owned, folder, _store, _clock = rig
+    runtime, _owned, provider, _store, _clock = rig
     first = runtime.ingest('status')
-    folder.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'new'})
+    provider.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'new'})
     monkeypatch.setattr(staged_source, 'retire_generation',
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('cleanup failed')))
     with pytest.raises(OSError, match='cleanup failed'):
@@ -233,9 +232,9 @@ def test_post_admit_cleanup_fault_cannot_retire_new_winner(rig, monkeypatch):
 
 
 def test_atomic_pointer_rollback_retains_old_ready_if_failure_record_cannot_commit(rig, monkeypatch):
-    runtime, _owned, folder, _store, _clock = rig
+    runtime, _owned, provider, _store, _clock = rig
     first = runtime.ingest('status')
-    folder.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'new'})
+    provider.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'new'})
     capture = raw_publication.owner.capture_in_transaction
     witnessed = []
 
@@ -256,7 +255,7 @@ def test_atomic_pointer_rollback_retains_old_ready_if_failure_record_cannot_comm
 
 
 def test_stale_candidate_or_failure_cannot_retire_newer_winner(rig):
-    runtime, _owned, folder, store, _clock = rig
+    runtime, _owned, provider, store, _clock = rig
     first = runtime.ingest('status')
     reader = runtime.reader('status')
     publisher = SourcePublisher(runtime.coordinator, store, reader.definition)
@@ -265,7 +264,7 @@ def test_stale_candidate_or_failure_cannot_retire_newer_winner(rig):
         stale = local_source.claim_collection(store, captured.source)
     stage = staged_source.begin_raw(store, reader.definition.source, expected=stale)
     staged_source.finish_raw(store, stage)
-    folder.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'later'})
+    provider.put_doc(STATUS, {'user': 'alice', 'chat_id': CHAT, 'updated': 'later'})
     winner = runtime.ingest('status')
     assert winner.raw != first.raw
     with runtime.coordinator.publication_gate(store, reader.definition):
@@ -277,7 +276,7 @@ def test_stale_candidate_or_failure_cannot_retire_newer_winner(rig):
 
 
 def test_queue_covers_room_inventory_and_rotates_old_room_hints(rig):
-    runtime, _owned, _folder, _store, _clock = rig
+    runtime, _owned, _provider, _store, _clock = rig
     for scope in ('status', 'users', 'peer', 'identities'):
         assert runtime.request(scope)
     for number in range(128):

@@ -22,10 +22,10 @@ def test_incomplete_sidebar_inventory_retains_only_same_session_rows(tmp_path):
 import assert from 'node:assert/strict';
 const binding=(viewer='alice', generation='1')=>({instance_id:'app',session_generation:generation,viewer});
 const Mesh={state:null};
-const build=new Function('Mesh','viewReadMayApply','advanceWarmCounter','monotonicNow',
-  `let appliedMeshReadSequence=0,meshStateGeneration=0,meshStateAcceptedAt=null;
+const build=new Function('Mesh','viewReadMayApply','advanceViewCounter',
+  `let appliedMeshReadSequence=0,meshStateGeneration=0;
    ${__BODY__};return applyMeshState;`);
-const apply=build(Mesh,()=>true,n=>n+1,()=>0);
+const apply=build(Mesh,()=>true,n=>n+1);
 const ticket={epoch:1};
 let sequence=0;
 const receive=(response)=>apply(ticket,response,{session:{epoch:1},readSequence:++sequence});
@@ -101,6 +101,17 @@ requests.shift().resolve(response());
 await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(bars.at(-1),{chat:'room',asks:['r1','p1'],timers:['t1']});
 assert.deepEqual(notified,['r1','p1']);
+
+// Missing protocol binding or completion evidence never replaces verified cards.
+for(const invalid of [
+  {session_binding:undefined}, {rooms_complete:undefined}, {peer_complete:undefined},
+  {timers_complete:undefined}, {resolved_room_ids:undefined}, {rooms_complete:'true'},
+]) {
+  const before={bars:bars.length,dots:dots.length,notifications:notified.length};
+  tick();requests.shift().resolve(response({...invalid,asks:[{id:'unverified',chat_id:'room'}]}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual({bars:bars.length,dots:dots.length,notifications:notified.length},before);
+}
 
 tick();
 requests.shift().resolve(response({asks:[

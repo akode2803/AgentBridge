@@ -34,8 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import __version__
-from ..core.config import DEFAULT_HOME, configured_machine, load_app_config
-from ..core.errors import ValidationError
+from ..core.config import DEFAULT_HOME, configured_machine, load_app_config, validate_root_spec
+from ..core.errors import ConfigError, ValidationError
 from ..core.lock import SingleInstance as FleetInstance
 from ..core.models import ChatKind, UserKind
 from ..core.runstate import clear_beat, write_beat
@@ -43,6 +43,7 @@ from ..mesh import authz
 from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
+from ..transport.base import Transport
 from .capabilities import validate_model_capability_ceiling
 from .adapters.codex_compat import BridgeCompatibilityError
 from .adapters.native import validate_native_authority_facts
@@ -107,7 +108,7 @@ class _AttachmentBatch:
 class AgentRunner:
     def __init__(
         self,
-        root: Path | str,
+        root: str | Transport,
         agent: str,
         *,
         home: Path | str | None = None,
@@ -116,6 +117,8 @@ class AgentRunner:
         responder: Responder | None = None,
         poll_s: float = 5.0,
     ) -> None:
+        if not isinstance(root, Transport):
+            root = validate_root_spec(root)
         self.agent = agent
         self.home = Path(home) if home else DEFAULT_HOME
         self.machine = machine or platform.node() or "harness"
@@ -1416,7 +1419,7 @@ def hosted_agents(root, machine: str, *, tx=None) -> list[str]:
     from ..mesh.directory import Directory
     from ..transport import make_transport
 
-    directory = Directory(tx if tx is not None else make_transport(root))
+    directory = Directory(tx if tx is not None else make_transport(validate_root_spec(root)))
     out = []
     for name in directory.names():
         acc = directory.get(name)
@@ -1442,6 +1445,7 @@ def supervise_all(root, machine: str, argv: list[str],
     retries on a slow leash instead of hot-looping."""
     from ..transport import make_transport
 
+    root = validate_root_spec(root)
     passthru = [a for a in argv if a != "--all"]
     children: dict[str, subprocess.Popen] = {}
     cooldown: dict[str, float] = {}      # name -> not-before (monotonic)
@@ -1546,8 +1550,10 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root or cfg.get("mesh_root")
     if not root:
         ap.error("no --root given and none remembered in config.json")
-    # a scheme spec (supabase://…) stays a string; Path() would mangle it
-    root = root if "://" in str(root) else Path(root)
+    try:
+        root = validate_root_spec(root)
+    except ConfigError as exc:
+        ap.error(str(exc))
 
     if args.all:
         machine = args.machine

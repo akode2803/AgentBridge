@@ -18,9 +18,12 @@ import mimetypes
 import os
 import re
 import secrets
+import stat
+import threading
 import time
 from pathlib import Path
 
+from ..core.lock import SingleInstance
 from ..mesh.paths import P
 from ..mesh.attachments import attachment_path
 from . import desktop
@@ -210,22 +213,40 @@ def _current_handoff(app, token):
     return not app.lock.expire_if_idle() and app.validate_session_read(token)
 
 
-def _write_private(path: Path, data: bytes) -> None:
-    """Create only our own 0600 file, removing partial bytes on write failure."""
+def _write_private(path: Path, data: bytes, *, unlink_on_error=True) -> None:
+    """Create our own 0600 file; shared destinations are scrubbed only by fd.
+
+    An untrusted directory entry cannot be identity-checked and unlinked
+    atomically. Shared save failures may leave an empty reserved filename.
+    """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     identity = os.fstat(fd)
     try:
-        with os.fdopen(fd, 'wb') as handle:
+        # Unbuffered writes let failure cleanup truncate the held descriptor
+        # without a later buffer flush restoring partial plaintext.
+        with os.fdopen(fd, 'wb', buffering=0) as handle:
+            owned_fd = fd
             fd = -1  # the context now owns and closes this descriptor
-            if handle.write(data) != len(data):
-                raise OSError('short file write')
+            try:
+                if handle.write(data) != len(data):
+                    raise OSError('short file write')
+                handle.flush()
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                    raise OSError('file replaced during write')
+            except BaseException:
+                if not unlink_on_error:
+                    with contextlib.suppress(OSError):
+                        os.ftruncate(owned_fd, 0)
+                raise
     except BaseException:
         if fd >= 0:
             os.close(fd)
-        with contextlib.suppress(OSError):
-            current = path.stat(follow_symlinks=False)
-            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
-                path.unlink()
+        if unlink_on_error:
+            with contextlib.suppress(OSError):
+                current = path.stat(follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    path.unlink()
         raise
 
 
@@ -330,6 +351,103 @@ def clear_group_avatar(app, req, mesh) -> dict:
 
 
 # --------------------------------------------------------------- OS handoff
+_HANDOFF_LOCK = threading.Lock()
+
+
+def _cache_identity(info):
+    # CPython 3.12 Windows lstat uses creation time for ctime, while fstat can
+    # report change time. Birth time is comparable across both APIs there.
+    generation = getattr(info, 'st_birthtime_ns', info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, generation)
+
+
+def _verified_cache_identity(path, size, digest):
+    """Verify a private regular cache file without another full-size allocation.
+
+    Windows privacy relies on the existing trusted app-home ACL boundary;
+    st_mode there does not describe ACLs. Reject reparse points on that platform.
+    """
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size != size
+                or getattr(before, 'st_file_attributes', 0)
+                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
+            return None
+        if os.name != 'nt' and (before.st_uid != os.getuid() or before.st_mode & 0o077):
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        flags |= getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as handle:
+            opened = os.fstat(handle.fileno())
+            if _cache_identity(opened) != _cache_identity(before):
+                return None
+            observed = hashlib.sha256()
+            remaining = size
+            while remaining:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    return None
+                observed.update(chunk)
+                remaining -= len(chunk)
+            extra = handle.read(1)
+            after = os.fstat(handle.fileno())
+            if (extra or observed.hexdigest() != digest
+                    or _cache_identity(after) != _cache_identity(before)
+                    # Compare change time within the same descriptor API;
+                    # normalization must not hide mutations during hashing.
+                    or after.st_ctime_ns != opened.st_ctime_ns
+                    or (after.st_mode, after.st_nlink, after.st_uid)
+                    != (opened.st_mode, opened.st_nlink, opened.st_uid)
+                    or _cache_identity(path.lstat()) != _cache_identity(before)):
+                return None
+        return _cache_identity(before)
+    except OSError:
+        return None
+
+
+def _unlink_cache_identity(path, identity):
+    # A handler may still own the file. Cleanup must not break a successful open.
+    try:
+        if identity is not None and _cache_identity(path.lstat()) == identity:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _cache_handoff_target(target, raw, digest):
+    """At most one canonical copy and one fallback per attachment, under lock."""
+    fallback = target.with_name(f'.{target.stem}.handoff{target.suffix}')
+    # Keep a handed-off fallback even after canonical replacement becomes
+    # possible: an asynchronous OS handler may not have opened that path yet.
+    # Reusing one fixed slot bounds retention without guessing reader lifetimes.
+    if _verified_cache_identity(target, len(raw), digest) is not None:
+        return target, None
+    temp = target.with_name(f'.{target.name}.{secrets.token_hex(8)}.tmp')
+    identity = None
+    try:
+        _write_private(temp, raw)
+        identity = _cache_identity(temp.lstat())
+        try:
+            os.replace(temp, target)
+        except PermissionError:
+            if _verified_cache_identity(fallback, len(raw), digest) is not None:
+                return fallback, None
+            # Exclusive creation: unsafe or stale collisions are never replaced.
+            try:
+                fallback.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(errno.EEXIST, 'attachment cache slot is occupied',
+                                      str(fallback)) from None
+            _write_private(fallback, raw)
+            return fallback, _cache_identity(fallback.lstat())
+        return target, None
+    finally:
+        _unlink_cache_identity(temp, identity)
+
+
 @authed_read_token
 def open_file(app, req, mesh, token) -> dict:
     """Decrypt to the local cache and open with the OS default handler."""
@@ -345,16 +463,24 @@ def open_file(app, req, mesh, token) -> dict:
     cache = app.home / "files_cache" / chat_id
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / cache_filename(rec.get("name") or "file", blob_id)
-    temp = target.with_name(f'.{target.name}.{secrets.token_hex(8)}.tmp')
-    try:
-        _write_private(temp, raw)
-        os.replace(temp, target)  # same-sized stale bytes must be replaced too
-    finally:
-        temp.unlink(missing_ok=True)
-    if not _current_handoff(app, token):
-        return {"error": "session changed"}
-    desktop.open_path(target)
-    return {"ok": True}
+    # Serialize publication through the OS handoff, including other GUI
+    # processes using this home. Keep the lock file: unlinking it splits locks.
+    with _HANDOFF_LOCK, SingleInstance(app.home / 'files_cache.lock', fail_open=False) as guard:
+        if not guard.acquired:
+            return {"error": "Attachment cache is busy; try again"}
+        if not _current_handoff(app, token):
+            return {"error": "session changed"}
+        selected, created = _cache_handoff_target(target, raw, rec['sha256'])
+        handed_off = False
+        try:
+            if not _current_handoff(app, token):
+                return {"error": "session changed"}
+            desktop.open_path(selected)
+            handed_off = True
+            return {"ok": True}
+        finally:
+            if not handed_off:
+                _unlink_cache_identity(selected, created)
 
 
 @authed_read_token
@@ -387,36 +513,22 @@ def save(app, req, mesh, token) -> dict:
         name = safe_name(rec.get('name') or item['id'])
         if not _current_handoff(app, token):
             return {"error": "session changed", "saved": saved}
-        temp = dest_dir / f'.agentbridge-{secrets.token_hex(16)}.tmp'
         try:
-            _write_private(temp, raw)
-            if not _current_handoff(app, token):
-                return {"error": "session changed", "saved": saved}
             for i in range(1000):
                 stem, dot, suf = name.rpartition('.')
                 candidate = (name if i == 0 else
                              f'{stem} ({i}).{suf}' if dot else f'{name} ({i})')
                 output = dest_dir / candidate
+                if not _current_handoff(app, token):
+                    return {"error": "session changed", "saved": saved}
                 try:
-                    # Same-directory hardlink publishes complete bytes without
-                    # overwriting a name that another process just created.
-                    os.link(temp, output)
+                    # A shared directory can replace a closed staging pathname.
+                    # Write verified bytes only through our exclusive output
+                    # descriptor, as on filesystems without hardlink support.
+                    _write_private(output, raw, unlink_on_error=False)
                     break
                 except FileExistsError:
                     continue
-                except OSError as link_error:
-                    if link_error.errno not in (errno.EPERM, errno.EACCES,
-                                                errno.ENOTSUP, errno.EOPNOTSUPP,
-                                                errno.ENOSYS, errno.EXDEV):
-                        raise
-                    # FAT/exFAT and some cloud folders lack hardlinks. Keep
-                    # exclusive naming and remove a partial write only while
-                    # the path still names our own newly created file.
-                    try:
-                        _write_private(output, raw)
-                    except FileExistsError:
-                        continue
-                    break
             else:
                 return {"error": "file name collision limit", "saved": saved,
                         "dest": str(dest_dir)}
@@ -424,31 +536,19 @@ def save(app, req, mesh, token) -> dict:
             total += len(raw)
         except OSError:
             return {"error": "file write failed", "saved": saved, "dest": str(dest_dir)}
-        finally:
-            with contextlib.suppress(OSError):
-                temp.unlink(missing_ok=True)
     return {"ok": True, "saved": saved, "dest": str(dest_dir)}
 
 
 def open_target(app, req) -> dict:
     """The Settings → Connection 'open' buttons (v1 parity — the route was
     missing in v2, leaving them dead). Targets are FIXED names, never a
-    client-supplied path: 'home' = the local config dir, 'shared' = a folder
-    mesh root. A cloud root has no folder to open."""
+    client-supplied path: 'home' = the local config dir."""
     lock = getattr(app, "lock", None)   # V111: opens Explorer — locked = no
     if lock is not None and lock.locked:
         return {"error": "App is locked", "locked": True}
     target = (req.data.get("target") or "").strip()
     if target == "home":
         desktop.open_path(app.home)
-        return {"ok": True}
-    if target == "shared":
-        from pathlib import Path
-
-        if not isinstance(app.root, Path):
-            return {"error": "The mesh lives in a cloud service — there is "
-                             "no folder to open"}
-        desktop.open_path(app.root)
         return {"ok": True}
     return {"error": f"unknown open target {target!r}"}
 

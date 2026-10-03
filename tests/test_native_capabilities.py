@@ -200,15 +200,14 @@ def test_native_authority_digest_binds_catalog_and_deny_template(
 
 
 @pytest.fixture()
-def native_run(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def native_run(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("helper", harness={"adapter": "claude"})
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home,
+    agent = Mesh(clouds.bare(root), "helper", "box", encrypt=True, home=home,
                  store_path=tmp_path / "agent.sqlite")
     chat = owner.create_chat("Native", members=["helper"])
     owner.outbox.flush_once()

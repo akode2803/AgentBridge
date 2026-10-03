@@ -63,7 +63,7 @@ that instance while preserving existing serving behavior. Recreating the mirror
 creates a new nonce; it does not repair or prove any remote state.
 
 This API is not a durable publication protocol. No Store sink, cross-process
-ordering, source retirement, gap/echo reconciliation, folder snapshot parity,
+ordering, source retirement, gap/echo reconciliation,
 trust/key/session coordination or cache admission is implemented here. Local
 nonce/revision pairs and provider cursors must not be used as authorization or
 substituted for durable Store generations. Existing transport reads remain the

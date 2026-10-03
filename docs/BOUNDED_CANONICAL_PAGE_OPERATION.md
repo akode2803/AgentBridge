@@ -4,9 +4,9 @@
 canonical fold, membership round and bounded epoch owner. `prepare()` computes
 outside GUI locks. Its private one-use finalizer checks all consumed inputs
 again. `GuiApp.finalize_page_read()` supplies the outer session and screen-lock
-gate. The local paging endpoint and capability-gated browser route invoke it;
-production `serve()` now requests local inputs, while the library `GuiApp`
-constructor still defaults to legacy behavior. See
+gate. The mandatory local paging endpoint and browser route invoke it;
+`GuiApp` defaults to and requires local inputs. Session binding and paging
+capabilities are mandatory. See
 [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
 
 ## Request and continuation

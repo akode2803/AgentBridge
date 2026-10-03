@@ -17,15 +17,14 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture()
-def secure_meshes(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def secure_meshes(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home,
+    agent = Mesh(clouds.bare(root), "helper", "box", encrypt=True, home=home,
                  store_path=tmp_path / "agent.sqlite")
     chat = owner.create_chat("Secure", members=["helper"])
     other = owner.create_chat("Other", members=["helper"])
@@ -46,7 +45,7 @@ def publish(agent, chat_id, *, timeout_s=30.0):
     )
 
 
-def test_pairwise_encrypted_roundtrip_and_durable_one_use(secure_meshes):
+def test_pairwise_encrypted_roundtrip_and_durable_one_use(secure_meshes, clouds):
     owner, agent, chat_id, _ = secure_meshes
     lane = PermissionLane(agent, "helper")
     ask = publish(agent, chat_id)
@@ -68,7 +67,7 @@ def test_pairwise_encrypted_roundtrip_and_durable_one_use(secure_meshes):
     assert lane.read_decision(ask)["verdict"] == "deny"
 
     # Consumption survives a fresh Mesh/Store connection to the same DB.
-    reopened = Mesh(agent.tx, "helper", "box", encrypt=True, home=agent.home,
+    reopened = Mesh(clouds.bare(agent.tx.root), "helper", "box", encrypt=True, home=agent.home,
                     store_path=agent.store.path)
     try:
         assert PermissionLane(reopened, "helper").read_decision(ask)["verdict"] == "deny"

@@ -28,13 +28,15 @@ export async function api(path, body, options = {}) {
     if (requestRef) opts.headers = {...opts.headers, "X-AgentBridge-Diagnostic":requestRef};
     const r = await fetch(path, opts);
     out = await r.json();
-    endDiagnosticRequest(requestRef, path, body, out);
-    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+    const diagnosticOwned = endDiagnosticRequest(requestRef, path, body, out);
+    if (diagnosticOwned) diagnostic("client_request", {route:path, request_ref:requestRef,
+      duration_ms:performance.now() - started,
       status:out?.error ? "error" : out?.status || "ok", reason:out?.reason,
       rows:Array.isArray(out?.messages) ? out.messages.length : undefined});
   } catch (error) {
-    endDiagnosticRequest(requestRef, path, body, null, true);
-    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+    const diagnosticOwned = endDiagnosticRequest(requestRef, path, body, null, true);
+    if (diagnosticOwned) diagnostic("client_request", {route:path, request_ref:requestRef,
+      duration_ms:performance.now() - started,
       status:"error", error_type:error?.name === "AbortError" ? "AbortError" : "Error"});
     throw error;
   } finally {

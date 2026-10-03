@@ -22,7 +22,7 @@ const Mesh={chatId:'room', renderedChat:'room',state:null};
 const App={page:'chats',state:{user:'alice'}};
 const $=s=>s==='#transcript' ? transcript : null;
 const BrowserSession={snapshot:()=>({binding:{viewer:'alice'}})};
-const restartIntent=()=>false, isInitialSelectedViewReady=()=>false;
+const restartIntent=()=>false;
 const document={getElementById:id=>id==='boot'?{
  classList:{add:value=>{assert.equal(value,'done');done=true;}},remove:()=>{removed=true;}
 }:null};

@@ -10,16 +10,15 @@ import pytest
 from agentbridge.store import lifecycle_heads, lifecycle_inputs, membership_suffix
 from agentbridge.store.db import Store
 from agentbridge.transport import authority_observation as authority
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
 META = f"chats/{CHAT}/meta.json"
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     scheme = "fence-fake"
     profile = TransportProfile(supports_doc_delta=True)
 

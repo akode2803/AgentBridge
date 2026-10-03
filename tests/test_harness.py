@@ -1,8 +1,7 @@
 """The agent harness core (R15): queue durability, the answered-guard,
 sender batching + parallel groups, catch-up policy, edit re-triggers, timers,
-stand-down, identity checks, and adoption. Everything runs over a real
-folder-transport scratch root with E2EE on — the same stack the live mesh
-uses — with a scripted Responder standing in for R16's adapters.
+stand-down, identity checks, and adoption. Real Supabase drivers share isolated
+offline backing with E2EE enabled; a scripted Responder replaces the adapters.
 """
 
 from __future__ import annotations
@@ -44,13 +43,13 @@ class Scripted:
         return self.fn(delivery)
 
 
-def test_all_fleet_master_is_single_instance_per_home(tmp_path):
+def test_all_fleet_master_is_single_instance_per_home(tmp_path, clouds):
     lock = SingleInstance(tmp_path / "harness-all.lock")
     assert lock.acquire() is True
     try:
         assert runner_module.main([
             "--all", "--home", str(tmp_path),
-            "--root", str(tmp_path / "mesh"),
+            "--root", clouds.root(tmp_path / "mesh"),
         ]) == runner_module.EXIT_ALREADY_RUNNING
     finally:
         lock.release()
@@ -108,11 +107,10 @@ def test_standalone_supervisor_starts_runner_in_own_posix_session(monkeypatch):
     assert seen["kwargs"]["start_new_session"] is True
 
 
-def test_fleet_forwards_stable_configured_machine(tmp_path, monkeypatch):
+def test_fleet_forwards_stable_configured_machine(tmp_path, monkeypatch, clouds):
     from agentbridge.harness import runner as runner_module
 
-    root = tmp_path / "mesh"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
     home.mkdir()
     from agentbridge.core.config import save_app_config
@@ -133,28 +131,29 @@ def test_fleet_forwards_stable_configured_machine(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def hrig(tmp_path):
+def hrig(tmp_path, clouds):
     """A human owner + an agent on ONE machine sharing one home (exactly the
     production layout: the GUI and the harness share ~/.agentbridge)."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    rig = SimpleNamespace(root=root, home=home, owner=owner, runners=[])
+    rig = SimpleNamespace(root=root, home=home, owner=owner, runners=[], clouds=clouds)
 
     def make_runner(responder=None, agent="helper", machine="devbox"):
-        r = AgentRunner(root, agent, home=home, machine=machine,
+        r = AgentRunner(clouds.bare(root), agent, home=home, machine=machine,
                         responder=responder, poll_s=0.2)
         rig.runners.append(r)
         return r
 
     rig.make_runner = make_runner
-    yield rig
-    for r in rig.runners:
-        r.close()
-    owner.close()
+    try:
+        yield rig
+    finally:
+        for r in rig.runners:
+            r.close()
+        owner.close()
 
 
 def ripple(rig, runner, chat_id):
@@ -376,7 +375,7 @@ def test_sender_burst_gets_one_reply(hrig):
 
 
 def test_two_senders_answered_in_parallel_groups(hrig):
-    fable = Mesh(hrig.root, "fable", "devbox", encrypt=True, home=hrig.home)
+    fable = Mesh(hrig.clouds.bare(hrig.root), "fable", "devbox", encrypt=True, home=hrig.home)
     fable.accounts.create_human("fable", "fablepass")
     try:
         snap = hrig.owner.create_chat("Busy", members=["helper", "fable"])
@@ -645,7 +644,7 @@ def test_rule_all_own_tail_damping(hrig):
 
 def test_rate_cap_defers_the_second_group(hrig):
     hrig.owner.accounts.set_agent_harness("helper", {"max_replies_per_hour": 1})
-    fable = Mesh(hrig.root, "fable", "devbox", encrypt=True, home=hrig.home)
+    fable = Mesh(hrig.clouds.bare(hrig.root), "fable", "devbox", encrypt=True, home=hrig.home)
     fable.accounts.create_human("fable", "fablepass")
     try:
         snap = hrig.owner.create_chat("Capped", members=["helper", "fable"])
@@ -1133,16 +1132,15 @@ def test_identity_checks_and_adoption(hrig):
     assert acc.agent.machine == "devbox" and acc.keys.sign_pub
 
 
-def test_adopt_refuses_keyed_agent_from_elsewhere(tmp_path):
-    root = tmp_path / "mesh2"
-    root.mkdir()
+def test_adopt_refuses_keyed_agent_from_elsewhere(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh2")
     other_home = tmp_path / "other-home"
-    other = Mesh(root, "aryan", "otherbox", encrypt=True, home=other_home)
+    other = Mesh(clouds.bare(root), "aryan", "otherbox", encrypt=True, home=other_home)
     other.accounts.create_human("aryan", "hunter2x")
     other.accounts.create_agent("roamer")              # keys live on otherbox
     other.close()
 
-    here = Mesh(root, "aryan", "devbox", encrypt=True,
+    here = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True,
                 home=tmp_path / "home")
     try:
         with pytest.raises(ValidationError):
@@ -1786,9 +1784,9 @@ def test_deleted_agent_runner_stands_down(hrig):
     of idling forever."""
     from agentbridge.harness.runner import hosted_agents
 
-    assert hosted_agents(hrig.root, "devbox") == ["helper"]
+    assert hosted_agents(hrig.root, "devbox", tx=hrig.owner.tx) == ["helper"]
     hrig.owner.delete_agent("helper")
-    assert hosted_agents(hrig.root, "devbox") == []
+    assert hosted_agents(hrig.root, "devbox", tx=hrig.owner.tx) == []
 
     runner = hrig.make_runner(Scripted())
     runner.mesh.sync.sync_once()

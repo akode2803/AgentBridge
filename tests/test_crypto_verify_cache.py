@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from conftest import refresh_cloud
+
 from agentbridge import crypto
 from agentbridge.gui.context import GuiApp
 from agentbridge.mesh.lifecycle import LifecycleUnavailable
@@ -240,9 +242,10 @@ def _stop_background(app: GuiApp) -> None:
     assert not (mesh.presence._thread and mesh.presence._thread.is_alive())
 
 
-def test_warm_verification_cache_preserves_lifecycle_unavailable(tmp_path, monkeypatch):
-    root, home = tmp_path / "mesh", tmp_path / "home"
-    root.mkdir()
+def test_warm_verification_cache_preserves_lifecycle_unavailable(
+        tmp_path, monkeypatch, clouds):
+    clouds.factory_auto_refresh = False
+    root, home = clouds.root(tmp_path / "mesh"), tmp_path / "home"
     home.mkdir()
     app = GuiApp(root, home=home, machine="r194-authority", encrypt=True,
                  poll_s=0.05)
@@ -254,6 +257,9 @@ def test_warm_verification_cache_preserves_lifecycle_unavailable(tmp_path, monke
         mesh.post(chat.id, "probe-first")
         mesh.post(chat.id, "probe-second")
         _stop_background(app)
+        mesh.messaging.flush_outbox()
+        refresh_cloud(app)
+        mesh.sync.sync_once([chat.id])
         messages = mesh.messages_for(chat.id)
         assert [message.body for message in messages if message.body] == [
             "probe-first", "probe-second",

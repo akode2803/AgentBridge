@@ -8,6 +8,7 @@ def test_realtime_refresh_is_coalesced_and_visibility_scoped():
     main = (ROOT / "main.js").read_text(encoding="utf-8")
     realtime = (ROOT / "realtime.js").read_text(encoding="utf-8")
     chat = (ROOT / "chat.js").read_text(encoding="utf-8")
+    diagnostics = (ROOT / "diagnostics.js").read_text(encoding="utf-8")
     settings = (ROOT / "settings.js").read_text(encoding="utf-8")
 
     assert "if (refreshPromise)" in main
@@ -26,10 +27,19 @@ def test_realtime_refresh_is_coalesced_and_visibility_scoped():
     assert 'observe("render_completed"' in realtime
     assert "window.agentBridgeRealtimeMetrics = realtimeMetrics" in realtime
     assert "window.agentBridgeChatOpenMetrics = chatOpenMetrics" in chat
-    assert "sidebar_fetch_ms" in chat
-    assert "chat_fetch_ms" in chat
-    assert "aux_fetch_ms" in chat
-    assert "first_painted_ms" in chat
+    assert 'recordChatOpen({v:1,mode:"paged"' in chat
+    assert "chat_fetch_ms:performance.now() - started" in chat
+    assert "messages:result.messages.length" in chat
+    assert 'diagnostic("page_read"' in chat
+    assert 'diagnostic("page_paint"' in chat
+    assert "if (!painted || pageOwner !== owner || !owner.current()) return;" in chat
+    assert "canonicalDeliveryDom(chatId, result.messages, tr);" in chat
+    assert chat.index('diagnostic("page_paint"') < chat.index("canonicalDeliveryDom(chatId")
+    assert 'phase:"canonical_dom"' in diagnostics
+    assert 'phase:"native_ack"' in diagnostics
+    assert 'phase:"refresh_started"' in realtime
+    assert 'phase:"refresh_finished"' in realtime
+    assert "diagnosticObservationMayApply(diagnosticOwner)" in realtime
     assert "openTrace.chat_id" not in chat
     assert "openTrace.body" not in chat
     assert "Date.now() - Math.round(Number(frame.server_ns)" not in realtime

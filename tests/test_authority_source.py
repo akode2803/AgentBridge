@@ -15,9 +15,8 @@ from agentbridge.mesh.authority_source import (
 )
 from agentbridge.store import lifecycle_inputs
 from agentbridge.store.db import DocumentObservationConflict, Store
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
@@ -27,7 +26,7 @@ BOB = "users/bob.json"
 ALICE_LIFECYCLE = "lifecycle/alice/0001.json"
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     scheme = "fake"
     profile = TransportProfile(supports_doc_delta=True)
 

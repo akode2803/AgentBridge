@@ -556,16 +556,15 @@ def test_bridge_delegate_agent_is_bounded_and_optional(tmp_path):
 
 # -------------------------------------------------- capability tools (R19)
 
-def test_capability_tools_ride_the_agents_own_gates(tmp_path):
+def test_capability_tools_ride_the_agents_own_gates(tmp_path, clouds):
     """pin/star/react/forward/create/timer over real http, as the agent's
     own identity — membership and the owner's R6 rules gate every call."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Main", members=["helper"])
         other = owner.create_chat("Side", members=["helper"])
@@ -618,14 +617,13 @@ def test_capability_tools_ride_the_agents_own_gates(tmp_path):
         owner.close()
 
 
-def test_bridge_attachment_forward_uses_durable_manifest(tmp_path, monkeypatch):
-    root = tmp_path / "mesh2"
-    root.mkdir()
+def test_bridge_attachment_forward_uses_durable_manifest(tmp_path, clouds, monkeypatch):
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         source = owner.create_chat("Source", members=["helper"])
         target = owner.create_chat("Target", members=["helper"])
@@ -704,19 +702,18 @@ def test_tidy_workspace_is_workspace_scoped(tmp_path):
         assert "missing.txt (not found)" in out
 
 
-def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
+def test_cancel_timer_is_chat_scoped_and_live(tmp_path, clouds):
     """V87: cancel_timer removes one of THIS chat's pending wake-ups from
     the runner's durable list, live; ids from other chats refuse; the tool
     is absent entirely when no TimerService is bound (bare bridges)."""
     from agentbridge.harness.timers import TimerService
 
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Main", members=["helper"])
         other = owner.create_chat("Side", members=["helper"])
@@ -767,16 +764,15 @@ def test_cancel_timer_is_chat_scoped_and_live(tmp_path):
         owner.close()
 
 
-def test_read_status_tool_is_privacy_gated(tmp_path):
+def test_read_status_tool_is_privacy_gated(tmp_path, clouds):
     """R35: the agent can query a member's availability on demand, but only
     the fields that member shares with it."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         owner.set_status("dnd", "heads-down on the migration")
         chat = owner.create_chat("Main", members=["helper"])
@@ -803,17 +799,16 @@ def test_read_status_tool_is_privacy_gated(tmp_path):
         owner.close()
 
 
-def test_agent_profile_and_permission_tools(tmp_path):
+def test_agent_profile_and_permission_tools(tmp_path, clouds):
     """R38: set_status/set_about keep the agent's OWN profile current (owner
     and agent both write, most recent wins), and read_permissions returns its
     own owner-set rules — but only the PUBLIC gates for anyone else."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         owner.set_privacy({"messaging": "members"})       # aryan's public gate
         owner.set_agent_rules("helper", {"messaging": "members"})
@@ -854,16 +849,15 @@ def test_agent_profile_and_permission_tools(tmp_path):
         owner.close()
 
 
-def test_agent_edits_and_deletes_only_its_own_messages(tmp_path):
+def test_agent_edits_and_deletes_only_its_own_messages(tmp_path, clouds):
     """R33: an agent gets edit_message/delete_message over its OWN messages
     (author-only, like a human) — never over another member's."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Main", members=["helper"])
         theirs = owner.post(chat.id, "the owner's message")
@@ -900,15 +894,14 @@ def test_agent_edits_and_deletes_only_its_own_messages(tmp_path):
         owner.close()
 
 
-def test_capability_creates_are_gated_and_capped(tmp_path):
-    root = tmp_path / "mesh2"
-    root.mkdir()
+def test_capability_creates_are_gated_and_capped(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
     owner.accounts.create_human("sudhir", "sudhir-pw-1")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Main", members=["helper"])
         agent.sync.sync_once()
@@ -1023,17 +1016,16 @@ def _real_answer(tx, verdict, text="", delay=0.1):
     return t
 
 
-def test_chat_member_tools_flags_and_group_edits(tmp_path):
+def test_chat_member_tools_flags_and_group_edits(tmp_path, clouds):
     """V53: mute/archive write the agent's OWN overlay; group edits ride
     the real authz gates (default all-members, refused once admins-only);
     message_info returns receipts for its own message only."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Main", members=["helper"])
         m = owner.post(chat.id, "note for receipts")
@@ -1086,16 +1078,15 @@ def test_chat_member_tools_flags_and_group_edits(tmp_path):
         owner.close()
 
 
-def test_leave_and_clear_are_owner_gated(tmp_path):
+def test_leave_and_clear_are_owner_gated(tmp_path, clouds):
     """V53: leave_chat/clear_chat ask the owner. No answer = refusal;
     allow = clear executes now, leave is DEFERRED (flag for the runner)."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Gated", members=["helper"])
         owner.post(chat.id, "history line")
@@ -1148,7 +1139,7 @@ def test_leave_and_clear_are_owner_gated(tmp_path):
     (False, "including starred messages"),
 ))
 def test_secure_clear_chat_binds_grant_to_canonical_effect(
-        tmp_path, monkeypatch, keep_starred, expected_detail):
+        tmp_path, clouds, monkeypatch, keep_starred, expected_detail):
     """R142: an AgentBridge-owned clear has one global claim and receipt."""
     from agentbridge.harness.runtime.effects import EffectLedger
     from agentbridge.harness.runtime.models import EffectState
@@ -1158,13 +1149,12 @@ def test_secure_clear_chat_binds_grant_to_canonical_effect(
     from agentbridge.harness.runtime.runs import RunLedger
     from agentbridge.harness.runtime.tasks import TaskLedger
 
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     original_create = agent.tx.create_doc
     claim_lock = threading.Lock()
 
@@ -1267,7 +1257,7 @@ def test_partial_effect_authority_never_downgrades_to_legacy(tmp_path):
         )
 
 
-def test_context_and_files_parity_c(tmp_path):
+def test_context_and_files_parity_c(tmp_path, clouds):
     """V54 (parity c): list_chats carries unread + own flags; list_files
     inventories the chat; fetch_file decrypts an older blob into the
     workspace inbox; reactions/genesis/roles ride the rendered context."""
@@ -1276,13 +1266,12 @@ def test_context_and_files_parity_c(tmp_path):
     from agentbridge.harness.queue import WorkGroup, WorkItem
     from agentbridge.harness.settings import HarnessSettings
 
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
     try:
         chat = owner.create_chat("Facts", members=["helper"])
         m = owner.post(chat.id, "hey @helper look at this")

@@ -9,7 +9,6 @@ import pytest
 
 from agentbridge.store import local_source
 from agentbridge.store.mutation_coordinator import MutationCoordinator
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
 from test_mutation_coordinator import S, _definition, _publish, _store
 
@@ -22,9 +21,10 @@ def _busy(code):
 
 @pytest.mark.parametrize('code', [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
                                   sqlite3.SQLITE_BUSY | 256, sqlite3.SQLITE_LOCKED | 256])
-def test_busy_completion_retries_only_current_intent_and_provider_once(tmp_path, monkeypatch, code):
+def test_busy_completion_retries_only_current_intent_and_provider_once(
+        tmp_path, monkeypatch, code, clouds):
     root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
-    provider = FolderTransport(tmp_path / 'provider')
+    provider = clouds.bare(tmp_path / 'provider')
     tx = LocalMutationTransport(provider, root)
     older = root.begin((S('doc_exact', 'doc.json'),))
     original = root._finish
@@ -42,6 +42,7 @@ def test_busy_completion_retries_only_current_intent_and_provider_once(tmp_path,
     monkeypatch.setattr(provider, 'put_doc', counted)
     tx.put_doc('doc.json', {'value': 1})
     assert writes == ['doc.json']
+    assert provider.get_doc('doc.json') == {'value': 1}
     assert len(calls) == 3 and all(value == calls[0] for value in calls)
     with sqlite3.connect(root.path) as conn:
         assert conn.execute('SELECT token FROM mutation_intents').fetchall() == [(older.token,)]

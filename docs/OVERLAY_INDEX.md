@@ -1,9 +1,9 @@
-# Indexed overlay inputs (inactive paging prerequisite)
+# Indexed overlay inputs
 
 This layer prepares bounded target lookups over the R203 observed overlay source.
-It is not used by chat routes, background scheduling or the browser yet. The
-existing full canonical read remains unchanged. Bare-folder accepted-source
-publication and transport-neutral ingestion remain prerequisites.
+The index holds raw candidates, not reusable permission verdicts. The
+core full canonical read remains available. Production roots select Supabase;
+current GUI integration uses the staged local-input owner and mandatory paging.
 
 ## Ownership and authority
 
@@ -71,14 +71,13 @@ capture must use one coherent Store snapshot or a fully bracketed immutable buil
 contract and must still run current authority checks. None of these results is a
 continuing lease after its capture point.
 
-## Remaining activation gates
+## Integration boundary
 
-Coalesced generation-aware workers, per-chat source readiness, folder ingestion /
-local-write invalidation, membership suffix readiness, coherent proof/message /
-raw-overlay capture, canonical derivative dependencies (pins, unread, receipts),
-reverse keyset page selection and browser invalidation/scroll/memory behavior are
-still required. Phase2 remote recent-tail ingestion remains separate. No page or
-browser performance claim follows from the indexed lookup microbenchmark.
+The mandatory GUI page path composes staged raw/index publication, local-write
+invalidation, canonical membership/proof checks, bounded derivatives and reverse
+keyset selection. Browser continuation ownership and retention are described in
+LOCAL_PAGE_GUI_INTEGRATION.md. Remote recent-tail ingestion remains separate. No
+page or browser performance claim follows from the indexed lookup microbenchmark.
 
 Schema 2 extends this representation with independent source-shape evidence and
 an optional bounded complete reaction manifest. Exact schema-1 migration retains

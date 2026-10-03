@@ -16,15 +16,14 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture()
-def run_meshes(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def run_meshes(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home,
+    agent = Mesh(clouds.bare(root), "helper", "box", encrypt=True, home=home,
                  store_path=tmp_path / "agent.sqlite")
     chat = owner.create_chat("Runtime", members=["helper"])
     owner.outbox.flush_once()
@@ -203,7 +202,7 @@ def test_delivered_terminal_does_not_fail_run_when_outbox_delete_is_late(
     assert agent.outbox.flush_once() >= 1
 
 
-def test_open_run_recovers_as_interrupted_after_restart(run_meshes):
+def test_open_run_recovers_as_interrupted_after_restart(run_meshes, clouds):
     _owner, agent, chat_id = run_meshes
     ledger = RunLedger(agent)
     started = ledger.start(
@@ -211,7 +210,7 @@ def test_open_run_recovers_as_interrupted_after_restart(run_meshes):
         provider="codex", model="gpt-test",
     )
 
-    reopened = Mesh(agent.tx, "helper", "box", encrypt=True, home=agent.home,
+    reopened = Mesh(clouds.bare(agent.tx.root), "helper", "box", encrypt=True, home=agent.home,
                     store_path=agent.store.path)
     try:
         recovery = RunLedger(reopened)

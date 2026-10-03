@@ -37,15 +37,17 @@ def test_bootstrap_binding_is_present_signed_out_signed_in_and_while_locked(rig)
     _assert_binding(locked, rig.app, "aryan")
 
 
-def test_mesh_state_and_chat_bind_the_exact_captured_viewer_session(rig):
+def test_current_bounded_reads_bind_the_exact_captured_viewer_session(rig):
     rig.signup()
     chat_id = rig.post("/api/mesh/create_chat", name="R188", members=[])["chat"]["id"]
-    state = rig.get("/api/mesh/state")
-    chat = rig.get("/api/mesh/chat", id=chat_id)
+    state = rig.sidebar()
+    chat = rig.page(chat_id)
     state_binding = _assert_binding(state, rig.app, "aryan")
-    chat_binding = _assert_binding(chat, rig.app, "aryan")
-    assert state_binding == chat_binding
-    assert chat["me"] == chat_binding["viewer"]
+    for payload in (chat, rig.aux(chat_id), rig.summary(chat_id),
+                    rig.collection(chat_id, "starred")):
+        assert _assert_binding(payload, rig.app, "aryan") == state_binding
+    assert chat["me"] == state_binding["viewer"]
+    assert state['caps']['chat_page_v1'] is True
 
 
 def test_late_bridge_state_drops_captured_payload_after_password_logout(rig, monkeypatch):

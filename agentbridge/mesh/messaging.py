@@ -315,7 +315,7 @@ class MessagingService:
     def redact(self, chat_id: str, msg_ids: list[str]) -> None:
         """Delete-for-everyone: the sender — or their responsible member for
         an agent's message (R44) — tombstoned in place (v1 rule). The
-        tombstone is Ed25519-SIGNED by the actor (R25) so a folder writer
+        tombstone is Ed25519-SIGNED by the actor (R25) so a transport writer
         can't forge a redaction of someone else's message — the read model
         verifies signature AND authorization before honoring it."""
         self._require_member(chat_id)
@@ -604,7 +604,7 @@ class MessagingService:
         so redactions stay presence-based there). A redaction counts only when
         it is SIGNED by an AUTHORIZED actor — the original sender, or the
         sender's responsible member for an agent's message (R44) — a forged/
-        unsigned overlay dropped on the shared folder is ignored (R25).
+        unsigned overlay written to shared storage is ignored (R25).
         A doc carrying a VALID signed ``void`` (bound to this redaction's ns,
         same authorization) reads as not-deleted; an INVALID void is ignored
         and the underlying redaction still tombstones — a forger can neither

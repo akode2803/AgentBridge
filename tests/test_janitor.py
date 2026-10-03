@@ -1,6 +1,6 @@
 """V63 / R65: the storage janitor — verified-redaction blob reclamation
 (grace + undo + forgery safe) and terminal-chat purges, over the real
-folder transport with E2EE on.
+Supabase transport with E2EE on.
 """
 
 from __future__ import annotations
@@ -16,17 +16,16 @@ from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx_seed = __import__("agentbridge.transport.folder",
-                         fromlist=["FolderTransport"]).FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx_seed = clouds.bare(root)
     bundles = {n: seed_account(tx_seed, n) for n in ("aryan", "fable")}
 
     def mk(user):
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
-        from agentbridge.transport.folder import FolderTransport
-        return Mesh(FolderTransport(root), user, "mach1", home=home,
+
+        return Mesh(clouds.bare(root), user, "mach1", home=home,
                     encrypt=True)
 
     meshes = {u: mk(u) for u in ("aryan", "fable")}

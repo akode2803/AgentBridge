@@ -20,7 +20,6 @@ from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport import raw_documents
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import root_identity
 
 
@@ -42,9 +41,8 @@ def _message(ident, ns, sender="aryan"):
 
 
 @pytest.fixture
-def world(tmp_path):
-    provider = FolderTransport(tmp_path / "mesh")
-    provider.cache_key = "page-operation-cache"
+def world(tmp_path, clouds):
+    provider = clouds.bare(tmp_path / "mesh")
     mirror = CachingTransport(provider, auto_refresh=False)
     mesh = Mesh(mirror, "aryan", "page-box", home=tmp_path / "home")
     try:

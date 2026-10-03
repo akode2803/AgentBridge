@@ -1,7 +1,6 @@
 # Transport failure and recovery contract
 
-This is the durable error matrix for cloud, synced-folder and local-folder
-deployments. It complements `ARCHITECTURE.md`; code values live in
+This is the durable error matrix for the Supabase-only production transport. It complements `ARCHITECTURE.md`; code values live in
 `agentbridge/transport/health.py` and `CachingTransport.mirror_status()`.
 
 ## Product contract
@@ -81,28 +80,18 @@ The current realtime Python wrapper swallows channel failures and degrades to
 polling. A later improvement should feed its terminal/auth/rate-limit reason into
 the same mirror state without making the websocket authoritative.
 
-## Folder deployments
+## Configured roots and local storage
 
-A **local folder** is authoritative storage for one machine. It requires no
-internet, has folder-speed message passing between local harness processes, and
-keeps the same UI, human oversight, E2EE, memberships, approvals and sandboxed
-agent execution. This is a first-class deployment, not a degraded cloud mode.
+Configured roots must pass `core.config.validate_root_spec`: only
+`supabase://<label>` is supported. Empty labels, path/URL syntax, whitespace,
+control characters and oversized labels are rejected with a sanitized error.
+Remembered filesystem roots fail validation before transport activation; there
+is no Folder constructor, root creation or Folder connection probe.
 
-A **synced folder** uses the same authoritative local files plus a replication
-client such as OneDrive. If internet or the sync client stops, local reads and
-writes continue; only cross-machine convergence pauses. The UI therefore says
-`sync_paused - using local data`, not `offline`.
-
-| Folder failure | Current handling | Product state / follow-up |
-|---|---|---|
-| Root missing/unmounted | Folder constructor creates configured local roots; runtime probe reports missing | `folder_unavailable`; do not silently initialize removable/network volumes in a future setup flow. |
-| Read-only/permission denied | Writes retry transient locks, then raise `TransportError` | `folder_read_only` from capability probe; surface write failure. |
-| Sync-client lock | Atomic JSON and append paths retry with exponential delay | Keep local state; next operation/poll heals. |
-| Partial JSON/JSONL sync | JSON reads tolerate corruption; incomplete trailing log lines are not consumed | Next poll reads the completed file. |
-| File shrink/conflict | Log offset resets and message IDs deduplicate | Keep; add explicit conflict diagnostics if a provider exposes them. |
-| Sync client stopped | Files remain available | `sync_paused`; cross-machine delivery delayed. |
-| Disk full/quota/file-count/path-length | Underlying write fails | Classify separately in a future folder health reporter; never report success. |
-| Network share stalls | Filesystem calls may block at the OS layer | Prefer desktop-sync/local roots; future remote-filesystem support needs bounded worker calls. |
+SQLite Stores, mirror snapshots, outboxes, keys, diagnostics and attachment
+downloads remain local storage. They do not provide an offline authoritative
+Folder deployment. Cached reads retain the same canonical and session gates;
+only the message outbox has the supported deferred-write contract above.
 
 ## Existing-project decision
 
@@ -123,8 +112,8 @@ No surveyed project replaces the whole AgentBridge core:
 For the narrow goal "let local agents talk," a Unix socket, SQLite WAL queue or
 NATS server would be smaller. AgentBridge is justified when the human needs a
 durable visible transcript, memberships, approvals, files, agent status and the
-ability to intervene. The local-folder transport already provides that with no
-new daemon or third-party runtime dependency.
+ability to intervene. Supabase supplies the current shared delivery substrate;
+a lean local relay remains a future capability.
 
 ## Release checks
 
@@ -136,6 +125,6 @@ Every transport-state change must cover:
 4. Terminal failures do not create retry storms; transient recovery clears state.
 5. Cached UI never bypasses `messages_for()` or membership filtering.
 6. Message outbox survives; generic mutations do not claim to be queued.
-7. Local and synced folders remain writable offline; missing/read-only folders are visible.
+7. Invalid cloud roots fail before activation; local caches and downloads remain independent.
 8. Header, About and API payload agree; browser console stays clean.
-9. GUI and harness are restarted after transport/backend edits.
+9. Changed process-lifecycle behavior is verified at a scoped activation checkpoint.

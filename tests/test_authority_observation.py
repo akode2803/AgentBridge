@@ -8,16 +8,15 @@ import pytest
 
 from agentbridge.transport import authority_observation as authority
 from agentbridge.transport import cache as cache_module
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
 META = f"chats/{CHAT}/meta.json"
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     scheme = "authority-fake"
     profile = TransportProfile(supports_doc_delta=True)
 
@@ -349,7 +348,7 @@ def test_wrong_selectors_and_tokens_reject():
         authority.capture_lookup_policy(mirror, CHAT, expected=wrong)
 
 
-def test_cold_bootstrap_and_bare_transports_are_unavailable(tmp_path):
+def test_cold_bootstrap_and_bare_transports_are_unavailable(tmp_path, clouds):
     provider = FakeProvider()
     cold = CachingTransport(provider, auto_refresh=False)
     for call in (
@@ -374,7 +373,7 @@ def test_cold_bootstrap_and_bare_transports_are_unavailable(tmp_path):
                        match="authority_mirror_pending"):
         authority.capture_authority_documents(bootstrap, CHAT)
 
-    bare = FolderTransport(tmp_path / "bare")
+    bare = clouds.bare(tmp_path / "bare")
     for call in (
         lambda: authority.capture_authority_documents(bare, CHAT),
         lambda: authority.capture_lookup_policy(bare, CHAT),

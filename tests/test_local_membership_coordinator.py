@@ -17,7 +17,7 @@ from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport import raw_documents
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.supabase import SupabaseTransport
 from agentbridge.transport.local_mutations import root_identity
 
 
@@ -26,8 +26,8 @@ OUTER = "claude"
 
 
 @pytest.fixture
-def world(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def world(tmp_path, clouds):
+    provider = clouds.cached(tmp_path / "provider")
     mesh = Mesh(provider, "aryan", "local-box", home=tmp_path / "mesh-home")
     try:
         mesh.store.prepare_terminal_observation()
@@ -54,6 +54,7 @@ def _target(mesh, chat):
 
 def _publish(world, *, observed_ns=None):
     mesh, provider, _root, reader, publisher, chat = world
+    provider.refresh()
     captured = publisher.capture()
     documents = raw_documents.collect_documents(provider, reader.definition)
     publisher.publish(captured, documents,
@@ -132,8 +133,8 @@ def test_missing_required_account_denies_suffix_event_without_provider_readthrou
     assert json.loads(result.candidate.snapshot_json)["name"] == "Local coordinator"
 
 
-def test_local_recursive_lifecycle_publishes_retained_head_then_restarts(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def test_local_recursive_lifecycle_publishes_retained_head_then_restarts(tmp_path, clouds):
+    provider = clouds.cached(tmp_path / "provider")
     mesh = Mesh(provider, "aryan", "local-box", home=tmp_path / "mesh-home")
     try:
         mesh.store.prepare_terminal_observation()
@@ -164,6 +165,7 @@ def test_local_recursive_lifecycle_publishes_retained_head_then_restarts(tmp_pat
         root.register_store(mesh.store)
         reader = local_page_source.LocalPageSource(root, mesh.store, CHAT)
         publisher = SourcePublisher(root, mesh.store, reader.definition)
+        provider.refresh()
         captured = publisher.capture()
         publisher.publish(captured, raw_documents.collect_documents(provider, reader.definition),
                           observed_ns=time.time_ns())
@@ -217,10 +219,10 @@ def test_changes_between_capture_and_final_are_rejected(
     assert (result.status, result.reason) == ("unavailable", reason)
 
 
-def test_wrong_transport_root_is_blocked(world, tmp_path):
+def test_wrong_transport_root_is_blocked(world, tmp_path, clouds):
     mesh, _provider, root, reader, _publisher, _chat = world
     receipt = _publish(world)
-    other = FolderTransport(tmp_path / "other-provider")
+    other = clouds.cached(tmp_path / "other-provider")
     original = mesh.tx
     mesh.tx = other
     try:
@@ -232,12 +234,12 @@ def test_wrong_transport_root_is_blocked(world, tmp_path):
     assert root.identity != root_identity(other)
 
 
-def test_transport_owner_replacement_between_capture_and_final_is_rejected(world, monkeypatch):
+def test_transport_owner_replacement_between_capture_and_final_is_rejected(world, monkeypatch, clouds):
     mesh, _provider, _root, reader, _publisher, _chat = world
     receipt = _publish(world)
     from agentbridge.mesh import membership_coordinator as module
     original = module._Round.final
-    replacement = FolderTransport(mesh.home / "replacement-provider")
+    replacement = clouds.cached(mesh.home / "replacement-provider")
 
     def replace_before_final(round_, snapshot, proposal, *, page=None):
         previous = mesh.tx
@@ -255,8 +257,8 @@ def test_transport_owner_replacement_between_capture_and_final_is_rejected(world
     )
 
 
-def test_local_lifecycle_postwrite_source_change_rolls_back(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def test_local_lifecycle_postwrite_source_change_rolls_back(tmp_path, clouds):
+    provider = clouds.cached(tmp_path / "provider")
     mesh = Mesh(provider, "aryan", "local-box", home=tmp_path / "mesh-home")
     try:
         mesh.store.prepare_terminal_observation()
@@ -287,6 +289,7 @@ def test_local_lifecycle_postwrite_source_change_rolls_back(tmp_path):
         root.register_store(mesh.store)
         reader = local_page_source.LocalPageSource(root, mesh.store, CHAT)
         publisher = SourcePublisher(root, mesh.store, reader.definition)
+        provider.refresh()
         captured = publisher.capture()
         publisher.publish(captured, raw_documents.collect_documents(provider, reader.definition),
                           observed_ns=time.time_ns())
@@ -310,24 +313,20 @@ def test_local_lifecycle_postwrite_source_change_rolls_back(tmp_path):
         mesh.close()
 
 
-def test_folder_and_honest_cache_sources_produce_same_candidate(tmp_path):
+def test_independent_cloud_cache_sources_produce_same_candidate(tmp_path, clouds):
     results = []
-    for mode in ("folder", "cache"):
+    for mode in ("first", "second"):
         base = tmp_path / mode
-        provider = FolderTransport(base / "provider")
-        tx = provider if mode == "folder" else CachingTransport(provider, auto_refresh=False)
-        if mode == "cache":
-            tx.refresh()
+        provider = clouds.cached(base / "provider")
+        tx = provider
         mesh = Mesh(tx, "aryan", "local-box", home=base / "mesh-home")
         try:
             mesh.store.prepare_terminal_observation()
             mesh.accounts.create_human("aryan", "aryan-pass")
             mesh.accounts.create_human("fable", "fable-pass")
-            if mode == "cache":
-                tx.refresh()
+            tx.refresh()
             chat = mesh.membership.create_chat("Parity", members=["fable"])
-            if mode == "cache":
-                tx.refresh()
+            tx.refresh()
             mesh.sync.sync_once([chat.id])
             mesh.store.prepare_membership_suffix_index()
             lifecycle_inputs.prepare(mesh.store._conn())
@@ -352,9 +351,9 @@ def test_folder_and_honest_cache_sources_produce_same_candidate(tmp_path):
     assert results[0] == results[1]
 
 
-def test_cached_folder_owner_is_pinned_and_distinct_between_roots(tmp_path):
-    first_inner = FolderTransport(tmp_path / "first")
-    second_inner = FolderTransport(tmp_path / "second")
+def test_cached_cloud_owner_is_pinned_and_distinct_between_roots(tmp_path, clouds):
+    first_inner = clouds.bare(tmp_path / "first")
+    second_inner = clouds.bare(tmp_path / "second")
     first = CachingTransport(first_inner, auto_refresh=False)
     second = CachingTransport(second_inner, auto_refresh=False)
     try:
@@ -366,7 +365,7 @@ def test_cached_folder_owner_is_pinned_and_distinct_between_roots(tmp_path):
         assert second_observed.root_identity == str(second_inner.root)
         assert first_observed.root_identity != second_observed.root_identity
         assert root_identity(first) == root_identity(first_inner)
-        first_inner.root = tmp_path / "moved"
+        first_inner.root = "moved-root"
         with pytest.raises(ValueError, match="cache identity changed"):
             root_identity(first)
     finally:
@@ -374,15 +373,18 @@ def test_cached_folder_owner_is_pinned_and_distinct_between_roots(tmp_path):
         second.close()
 
 
-def test_unknown_provider_path_identity_is_not_stringified(tmp_path):
+def test_unknown_provider_path_identity_is_not_stringified(tmp_path, clouds):
     class ExplosivePath:
         def __str__(self):
             raise AssertionError("unknown provider identity was coerced")
 
-    class UnknownFolder(FolderTransport):
+    class UnknownProvider(SupabaseTransport):
         pass
 
-    unknown = UnknownFolder(tmp_path / "unknown")
+    unknown = UnknownProvider(
+        "unknown", env={"SUPABASE_URL": "https://offline.invalid"},
+        client=clouds.client(tmp_path / "unknown"),
+    )
     unknown.root = ExplosivePath()
     cached = CachingTransport(unknown, auto_refresh=False)
     try:

@@ -27,7 +27,7 @@ class ConfigError(AgentBridgeError):
 
 
 class TransportError(AgentBridgeError):
-    """The storage transport failed (sync folder IO, cloud request, ...)."""
+    """The storage transport failed (cloud request, provider IO, ...)."""
 
 
 class StoreError(AgentBridgeError):

@@ -13,9 +13,8 @@ from agentbridge.mesh.overlay_source import (
     publish_overlay_source,
 )
 from agentbridge.store.db import DocumentObservationConflict, Store
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
@@ -33,7 +32,7 @@ OVERLAYS = {
 }
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     """Memory provider with real CachingTransport ownership semantics."""
 
     scheme = "fake"
@@ -354,8 +353,8 @@ def test_pending_or_competing_sqlite_publication_prevents_old_receipt_read(
     ).documents() == {EDIT: {"body": "competitor"}}
 
 
-def test_bare_folder_is_honestly_unsupported_and_store_unchanged(tmp_path):
-    transport = FolderTransport(tmp_path / "folder")
+def test_bare_cloud_is_honestly_unsupported_and_store_unchanged(tmp_path, clouds):
+    transport = clouds.bare(tmp_path / "cloud")
     store = Store(tmp_path / "store.sqlite")
     try:
         before = store.capture_document_position("unrelated")

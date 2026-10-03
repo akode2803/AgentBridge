@@ -19,16 +19,12 @@ from agentbridge.mesh.membership_read import (
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def admitted_mesh(tmp_path):
-    provider = FolderTransport(tmp_path / "mesh")
-    provider.cache_key = "admission-cache"
+def admitted_mesh(tmp_path, clouds):
+    provider = clouds.bare(tmp_path / "mesh")
     mirror = CachingTransport(provider, auto_refresh=False)
-    mirror._mirror_root_identity = "admission-root"
-    mirror._mirror_cache_identity = "admission-cache"
     mesh = Mesh(mirror, "aryan", "admission-box", home=tmp_path / "home")
     try:
         mesh.accounts.create_human("aryan", "aryan-pass")
@@ -345,14 +341,15 @@ def test_actual_recursive_lifecycle_closure_is_lazy_and_dependency_bounded(admit
         bounded._state("aryan")
 
 
-def test_folder_transport_is_unsupported_and_continues_canonical(tmp_path):
-    provider = FolderTransport(tmp_path / "folder")
+def test_bare_cloud_transport_is_unsupported_and_continues_canonical(tmp_path, clouds):
+    provider = clouds.bare(tmp_path / "bare")
     writer = Mesh(provider, "aryan", "writer", home=tmp_path / "writer-home")
     try:
         writer.accounts.create_human("aryan", "aryan-pass")
-        chat = writer.membership.create_chat("Folder admission")
+        chat = writer.membership.create_chat("Bare cloud admission")
     finally:
         writer.close()
+    provider = clouds.bare(tmp_path / "bare")
     reader = Mesh(provider, "aryan", "reader", home=tmp_path / "reader-home")
     try:
         result = _read(reader, chat.id)
@@ -362,17 +359,16 @@ def test_folder_transport_is_unsupported_and_continues_canonical(tmp_path):
         reader.close()
 
 
-def test_cold_cache_falls_back_without_candidate_provider_warmup(tmp_path, monkeypatch):
-    provider = FolderTransport(tmp_path / "cold")
+def test_cold_cache_falls_back_without_candidate_provider_warmup(tmp_path, monkeypatch, clouds):
+    provider = clouds.bare(tmp_path / "cold")
     writer = Mesh(provider, "aryan", "writer", home=tmp_path / "writer-home")
     try:
         writer.accounts.create_human("aryan", "aryan-pass")
         chat = writer.membership.create_chat("Cold admission")
     finally:
         writer.close()
+    provider = clouds.bare(tmp_path / "cold")
     cold = CachingTransport(provider, auto_refresh=False)
-    cold._mirror_root_identity = "cold-root"
-    cold._mirror_cache_identity = "cold-cache"
     reader = Mesh(cold, "aryan", "reader", home=tmp_path / "reader-home")
     try:
         snapshot_docs = provider.snapshot_docs

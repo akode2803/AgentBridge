@@ -21,7 +21,6 @@ from agentbridge.mesh.lifecycle_evaluation import (
 )
 from agentbridge.mesh.service import Mesh
 from agentbridge.core.jsonkit import canonical_json_bytes
-from agentbridge.transport.folder import FolderTransport
 
 
 def _json(value):
@@ -29,8 +28,8 @@ def _json(value):
 
 
 @pytest.fixture
-def mesh(tmp_path):
-    instance = Mesh(FolderTransport(tmp_path / "mesh"), "aryan", "workstation",
+def mesh(clouds, tmp_path):
+    instance = Mesh(clouds.bare(tmp_path / "mesh"), "aryan", "workstation",
                     home=tmp_path / "home")
     instance.accounts.create_human("aryan", "aryan-pass")
     instance.accounts.create_human("fable", "fable-pass")

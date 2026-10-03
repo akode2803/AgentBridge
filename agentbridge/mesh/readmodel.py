@@ -196,7 +196,7 @@ def _build_messages_with_redactions(
 
             # redaction WINS over edit — but only an AUTHENTIC one (R25). Under
             # E2EE the caller passes a verifier (valid sig from the ORIGINAL
-            # sender); a forged/unsigned redaction dropped on the shared folder
+            # sender); a forged/unsigned redaction written to shared storage
             # is ignored and the message stays visible. verify_redaction is None
             # only for plaintext/dev meshes, where there's no crypto boundary.
             red = redactions.get(env.id)

@@ -5,7 +5,6 @@ from agentbridge.mesh.sync import SyncEngine
 from agentbridge.store.db import Store
 from agentbridge.core.latency import sink_for_store
 from agentbridge.transport.base import Transport, Watcher
-from agentbridge.transport.folder import FolderTransport
 
 
 def seed(tx, chat_id, sender, n, start=1):
@@ -16,8 +15,8 @@ def seed(tx, chat_id, sender, n, start=1):
                       {"id": f"{chat_id}-m{start + i}", "ns": start + i, "from": sender})
 
 
-def test_parallel_catchup_across_chats(tmp_path):
-    tx = FolderTransport(tmp_path / "mesh2")
+def test_parallel_catchup_across_chats(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "mesh2")
     for c in range(6):
         seed(tx, f"chat{c}", "ann", 10)
     store = Store(tmp_path / "cache.sqlite")
@@ -29,21 +28,30 @@ def test_parallel_catchup_across_chats(tmp_path):
     store.close()
 
 
-def test_membership_gate_never_fetches_foreign_chats(tmp_path):
+def test_membership_gate_never_fetches_foreign_chats(tmp_path, clouds, monkeypatch):
     """Requirement: the mesh fetches ONLY what this identity needs."""
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "mine", "ann", 3)
     seed(tx, "theirs", "sue", 3)
     store = Store(tmp_path / "cache.sqlite")
+    reads = []
+    original = tx.read_log
+
+    def read_log(chat_id, log_name, offset=0):
+        reads.append(chat_id)
+        return original(chat_id, log_name, offset)
+
+    monkeypatch.setattr(tx, "read_log", read_log)
     eng = SyncEngine(tx, store, is_member=lambda c: c == "mine")
     assert eng.my_chat_ids() == ["mine"]
     assert eng.sync_once() == 3
-    assert store.message_count("theirs") == 0  # never even read
+    assert store.message_count("theirs") == 0
+    assert reads and set(reads) == {"mine"}
     store.close()
 
 
-def test_incremental_appends_only_new(tmp_path):
-    tx = FolderTransport(tmp_path / "mesh2")
+def test_incremental_appends_only_new(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 5)
     store = Store(tmp_path / "cache.sqlite")
     eng = SyncEngine(tx, store)
@@ -55,8 +63,8 @@ def test_incremental_appends_only_new(tmp_path):
     store.close()
 
 
-def test_sync_observation_is_once_and_names_discovery_lane(tmp_path):
-    tx = FolderTransport(tmp_path / "mesh2")
+def test_sync_observation_is_once_and_names_discovery_lane(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 1)
     store = Store(tmp_path / "cache.sqlite")
     eng = SyncEngine(tx, store)
@@ -71,10 +79,10 @@ def test_sync_observation_is_once_and_names_discovery_lane(tmp_path):
     store.close()
 
 
-def test_progress_wakes_after_first_log_before_later_log_finishes(tmp_path):
+def test_progress_wakes_after_first_log_before_later_log_finishes(tmp_path, clouds):
     import threading
 
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 1)
     seed(tx, "c1", "bob", 1, start=2)
     store = Store(tmp_path / "cache.sqlite")
@@ -100,10 +108,10 @@ def test_progress_wakes_after_first_log_before_later_log_finishes(tmp_path):
     store.close()
 
 
-def test_progress_wake_precedes_slow_record_pump(tmp_path):
+def test_progress_wake_precedes_slow_record_pump(tmp_path, clouds):
     import threading
 
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 1)
     store = Store(tmp_path / "cache.sqlite")
     progress = threading.Event()
@@ -132,28 +140,31 @@ def test_progress_wake_precedes_slow_record_pump(tmp_path):
     store.close()
 
 
-def test_shrunken_log_heals_via_dedup(tmp_path):
-    tx = FolderTransport(tmp_path / "mesh2")
+def test_replayed_provider_rows_do_not_duplicate_cached_messages(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 5)
     store = Store(tmp_path / "cache.sqlite")
-    eng = SyncEngine(tx, store)
-    eng.sync_chat("c1")
+    try:
+        eng = SyncEngine(tx, store)
+        assert eng.sync_chat("c1") == 5
+        # A provider repair republishes an old record under a fresh row cursor.
+        clouds.replace_log(tmp_path / "mesh2", "c1", "ann@m", [
+            {"id": "c1-m1", "ns": 1, "from": "ann"},
+        ])
+        assert eng.sync_chat("c1") == 0
+        assert store.message_count("c1") == 5
+        seed(tx, "c1", "ann", 1, start=6)
+        assert eng.sync_chat("c1") == 1
+        assert store.message_count("c1") == 6
+    finally:
+        store.close()
 
-    # sync conflict rewrites the file with only the first record
-    p = tx.local_path("chats/c1/msgs/ann@m.jsonl")
-    first_line = p.read_bytes().split(b"\n")[0] + b"\n"
-    p.write_bytes(first_line)
 
-    assert eng.sync_chat("c1") == 0  # re-read all, everything already cached
-    assert store.message_count("c1") == 5  # nothing lost locally
-    store.close()
-
-
-def test_run_loop_stops_cleanly(tmp_path):
+def test_run_loop_stops_cleanly(tmp_path, clouds):
     import threading
     import time
 
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     seed(tx, "c1", "ann", 2)
     store = Store(tmp_path / "cache.sqlite")
     eng = SyncEngine(tx, store)
@@ -171,11 +182,11 @@ def test_run_loop_stops_cleanly(tmp_path):
     store.close()
 
 
-def test_ingestion_drops_records_claiming_another_identity(tmp_path):
+def test_ingestion_drops_records_claiming_another_identity(tmp_path, clouds):
     """R13.5: a per-device log is single-writer, so sync drops any record whose
     `from` isn't the log's owner — a client can't smuggle records attributed
     to someone else through its own log."""
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     # eve's log carries one honest record and one spoofed as "ann"
     tx.append_log("c1", "eve@m", {"id": "ok", "ns": 1, "from": "eve"})
     tx.append_log("c1", "eve@m", {"id": "spoof", "ns": 2, "from": "ann"})
@@ -184,6 +195,7 @@ def test_ingestion_drops_records_claiming_another_identity(tmp_path):
     eng.sync_chat("c1")
     ids = {r.get("id") for r in store.messages("c1")}
     assert ids == {"ok"}   # the spoofed record never entered the store
+    store.close()
 
 
 # --------------------------------------------------- the change feed (R30)

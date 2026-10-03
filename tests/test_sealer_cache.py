@@ -9,17 +9,16 @@ import pytest
 from agentbridge import crypto
 from agentbridge.core.models import BodyRecord, Envelope
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def encrypted_pair(tmp_path):
-    """Two identities with separate keystores over one real folder mesh."""
-    root = tmp_path / "mesh"
+def encrypted_pair(clouds, tmp_path):
+    """Two identities with separate keystores over one real Supabase mesh."""
+    root = clouds.root(tmp_path / "mesh")
 
     def make(user: str) -> Mesh:
         return Mesh(
-            FolderTransport(root),
+            clouds.bare(root),
             user,
             "cache-test",
             encrypt=True,

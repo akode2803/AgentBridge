@@ -17,27 +17,29 @@ from agentbridge.mesh.pins import KeyPinStore
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
 from agentbridge.store import lifecycle_heads, local_membership_inputs, shadow_slot
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "membership-room"
-SOURCE = shadow_slot.ShadowSource("fixture-root", "fixture-cache", "fixture-nonce")
+def _source(mesh):
+    return shadow_slot.ShadowSource(
+        mesh.tx.root, mesh.tx.cache_key, mesh.tx._mirror_instance_nonce,
+    )
 
 
 @pytest.fixture
-def membership_mesh(tmp_path):
+def membership_mesh(tmp_path, clouds):
     root = tmp_path / "mesh"
     home = tmp_path / "home"
-    mesh = Mesh(FolderTransport(root), "aryan", "machine", home=home)
+    mesh = Mesh(clouds.cached(root), "aryan", "machine", home=home)
     try:
         position = mesh.store.acquire_shadow(
-            mesh.store.inspect_shadow_position(), "fixture-publisher", SOURCE,
+            mesh.store.inspect_shadow_position(), "fixture-publisher", _source(mesh),
         )
         meta = ChatSnapshot(id=CHAT, kind=ChatKind.GROUP, name="Fixture").to_dict()
         position = mesh.store.publish_shadow(
             position,
             shadow_slot.ShadowSnapshot(
-                SOURCE, 1, 0, "bootstrap_unverified", (CHAT,),
+                _source(mesh), 1, 0, "bootstrap_unverified", (CHAT,),
                 ((f"chats/{CHAT}/meta.json", json.dumps(meta)),),
             ),
         )
@@ -81,7 +83,8 @@ def test_capture_is_one_pin_locked_sqlite_cut_and_does_not_mutate_journal(
 
     def coordinated_writer():
         writer = Store(mesh.store.path)
-        second_pins = KeyPinStore(mesh.home, str(mesh.tx.root))
+        second_pins = KeyPinStore(mesh.home, mesh.tx.cache_key)
+        assert second_pins.path == pins.path
         try:
             with writer._conn() as conn:
                 conn.execute("UPDATE docs SET payload=? WHERE path=?",

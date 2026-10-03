@@ -2,8 +2,8 @@
 
 R14 cutover: this now launches the v2 server (`agentbridge.gui`) in the
 project's virtualenv, which has the backend's dependencies. The mesh root is
-remembered in ``~/.agentbridge/config.json`` (the migration set it to the v2
-``mesh2`` folder), so no path is hard-coded here — a bare launch reuses it and
+remembered as a ``supabase://`` specification in local configuration,
+so no provider root is hard-coded here — a bare launch reuses it and
 opens the app window itself.
 
 The shared launcher selects this checkout's virtualenv on Windows, macOS, and

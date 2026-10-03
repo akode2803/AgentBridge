@@ -6,8 +6,7 @@ the archived procedure. User instructions govern. Use judgment and show evidence
 
 ## Mission and context
 
-Build product-ready human/agent chat with WhatsApp/Telegram-grade UX across folder
-and cloud transports, a local web GUI, and per-agent harnesses. Continue the
+Build product-ready human/agent chat with WhatsApp/Telegram-grade UX on Supabase, a local web GUI, and per-agent harnesses. Continue the
 modular rewrite. Models are configuration, not hardcoded provider assumptions.
 Preserve performance and parallel harness work; memory/retrieval/knowledge graphs
 and summarization; reliable delivery and receipts; group privacy and human-owned
@@ -69,12 +68,12 @@ evidence. Do not repeatedly reload every ledger or duplicate the same update.
   observations, SQLite generations and successful captures are not permission,
   completeness or cache-admission proofs. Distribution is not implemented yet.
 
-## Product direction (2026-09-30)
+## Product direction (2026-10-03)
 
 Prioritize an instant-messaging experience on Supabase, including Realtime and
-scoped incremental updates. Folder transport remains in the repository but is
-deprecated as a compatibility constraint; it must not block this work. General
-relational portability is secondary. Preserve fresh canonical authority checks:
+scoped incremental updates. Production Folder transport has been removed; configured
+roots must be valid `supabase://<label>` specifications. Bound GUI sessions and
+local transcript paging are mandatory. General relational portability is secondary. Preserve fresh canonical authority checks:
 Realtime notifications and local cached state are not authorization. A lean local
 server/relay and private self-hosted Supabase are future capabilities, not current
 delivery or latency guarantees. Measure actual-instance behavior before claiming

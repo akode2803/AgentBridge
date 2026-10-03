@@ -100,6 +100,16 @@ class OutboxWorker:
         handler = self.handlers.get(item.kind)
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")
+            try:
+                payload = item.payload if isinstance(item.payload, dict) else {}
+                envelope = payload.get("envelope")
+                payload = envelope if isinstance(envelope, dict) else payload
+                message = payload.get("id")
+                delivery_trace.emit('outbox_dead',
+                                    message=message if isinstance(message, str) else '',
+                                    status='error')
+            except Exception:  # noqa: BLE001 — tracing never changes a dead outcome
+                pass
             return 0
         payload = item.payload.get("envelope") \
             if isinstance(item.payload.get("envelope"), dict) else item.payload

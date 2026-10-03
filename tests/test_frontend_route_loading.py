@@ -39,10 +39,10 @@ function setup({chatId=null, rendered=null, transcript=false, state={available:t
   const paintHome=new Function('$','App','Mesh','renderEmptyChat',homeSource);
   const PAGES={chats:()=>{reads++;paintHome($,App,Mesh,renderEmptyChat);return held;},settings:()=>held,new:()=>held};
   const factory=new Function('$','App','Mesh','Settings','document','location','PAGES','beginLoading','endLoading',
-    'cancelInitialSelectedView','resetSubviews','renderChrome','captureViewRead','viewReadMayApply','renderSidebar','syncSidebarSelection',
+    'resetSubviews','renderChrome','captureViewRead','viewReadMayApply','renderSidebar','syncSidebarSelection',
     `let sessionRoutePending=false; ${routeSource}; return route;`);
   const noop=()=>{};
-  const route=factory($,App,Mesh,Settings,document,location,PAGES,beginLoading,noop,noop,noop,noop,noop,()=>true,noop,noop);
+  const route=factory($,App,Mesh,Settings,document,location,PAGES,beginLoading,noop,noop,noop,noop,()=>true,noop,noop);
   return {go(hash){location.hash=hash;route();},App,Mesh,content,classes,get cues(){return cues;},get reads(){return reads;},get paints(){return paints;}};
 }
 // Settings replaced an earlier home, but the render signature still says empty.

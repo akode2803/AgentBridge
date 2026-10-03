@@ -29,7 +29,7 @@ function deferred() { let resolve,reject; const promise=new Promise((yes,no)=>{r
   return {promise,resolve,reject}; }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const binding={instance_id:'app',session_generation:'1',viewer:'viewer'};
-function fixture({mode='bound',freshCaps={chat_page_v1:true},globalCaps={},bootstrapCaps={}}={}) {
+function fixture({freshCaps={chat_page_v1:true},globalCaps={},bootstrapCaps={}}={}) {
   let identity={session:1,route:1,page:'chats',chat:'A',details:true,selection:1,lock:1};
   let locked=false,modalOwner={},active=null;
   const calls=[],opened=[],events=[],toasts=[],rows=[],picked=[];
@@ -40,7 +40,7 @@ function fixture({mode='bound',freshCaps={chat_page_v1:true},globalCaps={},boots
   const captureModalRead=()=>({owner:modalOwner,view:{...identity}});
   const modalReadMayApply=(ticket,response)=>ticket?.owner===modalOwner && !locked
     && Object.keys(identity).every(key=>ticket.view[key]===identity[key])
-    && (response===undefined || mode==='legacy' || JSON.stringify(response?.session_binding)===JSON.stringify(binding));
+    && (response===undefined || JSON.stringify(response?.session_binding)===JSON.stringify(binding));
   const closeModal=()=>{modalOwner={};if(active)active.isConnected=false;active=null;};
   const beginModalRead=()=>{closeModal();return captureModalRead();};
   const openModal=html=>{closeModal();const controls=new Map();
@@ -56,7 +56,6 @@ function fixture({mode='bound',freshCaps={chat_page_v1:true},globalCaps={},boots
     caps:freshCaps,session_binding:binding});
   const meta=()=>({id:'A',members:['alpha','viewer','zed'],admins:['viewer'],roles:{viewer:'admin'}});
   const summary=(changes={})=>({status:'ready',chat_id:'A',meta:meta(),session_binding:binding,...changes});
-  const legacy=(changes={})=>({meta:meta(),session_binding:binding,...changes});
   const deps={api,Mesh,meshCaps,beginModalRead,captureModalRead,modalReadMayApply,openModal,closeModal,
     bindModalFilter(){},bindPicker(box,fn){box.pick=fn;picked.push(box);},
     pickerRow(value){rows.push(value);return `<row>${value.value}</row>`;},
@@ -66,11 +65,11 @@ function fixture({mode='bound',freshCaps={chat_page_v1:true},globalCaps={},boots
     agentIdentityBadge:()=>'<agent/>',V:{renderChats(){events.push('render');}},
     document:{dispatchEvent(event){events.push(event.type);}},CustomEvent:class {constructor(type){this.type=type;}}};
   const build=new Function(...Object.keys(deps),__SOURCE__+`;
-    return {showAddMembers,showSearchMembers,readMemberMetadata,memberSummarySupported,
+    return {showAddMembers,showSearchMembers,readMemberMetadata,
       afterRead(fn){const original=readMemberMetadata;readMemberMetadata=async(...args)=>{
         const result=await original(...args);fn(result);return result;};}};`);
   const funcs=build(...Object.values(deps));
-  return {funcs,calls,opened,events,toasts,rows,picked,Mesh,App,state,meta,summary,legacy,
+  return {funcs,calls,opened,events,toasts,rows,picked,Mesh,App,state,meta,summary,
     enqueue(...items){queue.push(...items);},get active(){return active;},get queued(){return queue.length;},
     close:closeModal,mutate(key){if(key==='modal')closeModal();else if(key==='locked')locked=true;
       else identity[key]=typeof identity[key]==='number'?identity[key]+1:String(identity[key])+'-new';},
@@ -89,13 +88,11 @@ for(const kind of ['add','search'])for(const config of [
   {freshCaps:{},globalCaps:{chat_page_v1:true},expected:'chat_summary'},
   {freshCaps:{chat_page_v1:false},globalCaps:{chat_page_v1:true},expected:'chat_summary'},
   {freshCaps:null,globalCaps:null,bootstrapCaps:{chat_page_v1:true},expected:'chat_summary'},
-  {freshCaps:{},globalCaps:{},bootstrapCaps:{chat_page_v1:true},expected:'chat'},
-  {freshCaps:{chat_page_v1:false},expected:'chat'},
-  {mode:'legacy',freshCaps:{},expected:'chat'},
+  {freshCaps:{},globalCaps:{},bootstrapCaps:{chat_page_v1:true},expected:'chat_summary'},
+  {freshCaps:{chat_page_v1:false},expected:'chat_summary'},
 ]) {
-  const f=fixture(config);const data=config.expected==='chat_summary'?f.summary():f.legacy();
-  if(config.mode==='legacy'){delete data.session_binding;}
-  const state=f.state();if(config.mode==='legacy'){delete state.session_binding;}
+  const f=fixture(config);const data=f.summary();
+  const state=f.state();
   f.enqueue(state,data);await invoke(f,kind);
   assert.deepEqual(paths(f),['/api/mesh/state',`/api/mesh/${config.expected}?id=A`]);
   assert.equal(f.opened.length,1);assert.equal(f.Mesh.state?.marker??'global-original','global-original');
@@ -105,9 +102,6 @@ for(const kind of ['add','search'])for(const config of [
     assert.ok(html.indexOf('@viewer')<html.indexOf('@zed'),'preserve server canonical order');
     assert.ok(!html.includes('owner-chip'),'admins never become an invented owner');}
 }
-// The optional single-owner field remains a legacy presentation input only.
-const old=fixture({mode:'legacy',freshCaps:{}});const legacy=old.legacy();legacy.meta.owner='zed';
-old.enqueue(old.state(),legacy);await invoke(old,'search');assert.ok(old.active.html.includes('owner-chip'));
 ''')
 
 
@@ -127,6 +121,9 @@ for(const kind of ['add','search'])for(const changes of [
   assert.ok(!paths(f).includes('/api/mesh/chat?id=A'));
 }
 for(const kind of ['add','search'])for(const stage of ['state','metadata'])for(const reply of [
+  {session_binding:undefined},
+  {user:'viewer',users:{}},
+  {status:'ready',chat_id:'A',meta:{id:'A',members:['secret-unbound']}},
   {session_binding:{...binding,viewer:'other'}},
   {error:'foreign',session_binding:{...binding,session_generation:'2'}},
   {error:'locked',locked:true,session_binding:{...binding,viewer:'other'}},
@@ -144,7 +141,8 @@ for(const kind of ['add','search'])for(const value of [new Error('offline'),{err
   const f=fixture();f.enqueue(f.state(),value);await invoke(f,kind);
   assert.ok(f.active.html.includes('mr-retry'));assert.equal(f.calls.length,2);
 }
-for(const value of [{error:'locked',locked:true},{status:'locked',session_binding:binding}]){
+for(const value of [{error:'locked',locked:true},{status:'locked'},
+  {status:'locked',session_binding:binding}]){
   const f=fixture();f.enqueue(f.state(),value);await invoke(f,'search');
   assert.equal(f.opened.length,0);assert.deepEqual(f.events,['ab:locked']);
 }
@@ -162,6 +160,15 @@ for(const rejection of [false,true]){
   await pending;assert.equal(f.opened.length,0,`${kind}/${stage}/${change}`);assert.deepEqual(f.events,[]);
   assert.equal(f.calls.length,stage==='state'?1:2);
 }
+// Error-only replies have no binding, so their side effects require current ownership.
+for(const kind of ['add','search'])for(const stage of ['state','metadata'])
+for(const change of ['session','route','page','chat','details','selection','lock','locked','modal'])
+for(const reply of [{error:'server failed'},{error:'locked',locked:true},{status:'locked'}]){
+  const f=fixture();const held=deferred();f.enqueue(...(stage==='state'?[held]:[f.state(),held]));
+  const pending=invoke(f,kind);await tick();f.mutate(change);held.resolve(reply);
+  await pending;assert.equal(f.opened.length,0);assert.deepEqual(f.events,[]);
+  assert.equal(f.calls.length,stage==='state'?1:2);
+}
 // A helper is an extra await boundary: the consumer must also check ownership.
 for(const kind of ['add','search'])for(const change of ['session','route','modal']){
   const f=fixture();f.funcs.afterRead(()=>f.mutate(change));f.enqueue(f.state(),f.summary());
@@ -175,22 +182,23 @@ assert.equal(f.active,current);assert.equal(f.opened.length,1);assert.ok(current
 ''')
 
 
-def test_member_capability_upgrade_and_no_downgrade_after_failure(tmp_path):
+def test_member_summary_never_downgrades_when_display_capabilities_change(tmp_path):
     _run(tmp_path, r'''
 for(const kind of ['add','search'])for(const outcome of ['ready','error','rejection']){
-  const f=fixture({freshCaps:{},globalCaps:{}}),held=deferred();f.enqueue(f.state(),held,f.summary());
+  const f=fixture({freshCaps:{},globalCaps:{}}),held=deferred();f.enqueue(f.state(),held);
   const pending=invoke(f,kind);await tick();f.Mesh.state.caps={chat_page_v1:true};
-  if(outcome==='rejection')held.reject(new Error('old failure'));
-  else held.resolve(outcome==='error'?{error:'old failure'}:f.legacy());
-  await pending;assert.deepEqual(paths(f),['/api/mesh/state','/api/mesh/chat?id=A','/api/mesh/chat_summary?id=A']);
-  assert.equal(f.opened.length,1);assert.ok(!f.active.html.includes('mr-retry'));
+  if(outcome==='rejection')held.reject(new Error('summary failure'));
+  else held.resolve(outcome==='error'?{error:'summary failure'}:f.summary());
+  await pending;assert.deepEqual(paths(f),['/api/mesh/state','/api/mesh/chat_summary?id=A']);
+  assert.equal(f.opened.length,1);
+  assert.equal(f.active.html.includes('mr-retry'),outcome!=='ready');
 }
-// Capability can change after the loader resolves but before its consumer paints.
+// A display capability change at the helper handoff does not reacquire history.
 for(const kind of ['add','search']){
-  const f=fixture({freshCaps:{},globalCaps:{}});let n=0;
-  f.funcs.afterRead(()=>{f.Mesh.state.caps=n++===0?{chat_page_v1:true}:{};});
-  f.enqueue(f.state(),f.legacy(),f.summary());await invoke(f,kind);
-  assert.deepEqual(paths(f),['/api/mesh/state','/api/mesh/chat?id=A','/api/mesh/chat_summary?id=A']);
+  const f=fixture({freshCaps:{},globalCaps:{}});
+  f.funcs.afterRead(()=>{f.Mesh.state.caps={};});
+  f.enqueue(f.state(),f.summary());await invoke(f,kind);
+  assert.deepEqual(paths(f),['/api/mesh/state','/api/mesh/chat_summary?id=A']);
   assert.equal(f.opened.length,1);
 }
 for(const kind of ['add','search'])for(const outcome of ['pending','forbidden','unavailable','rejection']){
@@ -201,8 +209,8 @@ for(const kind of ['add','search'])for(const outcome of ['pending','forbidden','
   assert.ok(f.active.html.includes('mr-retry'));
 }
 const stale=fixture({freshCaps:{}}),held=deferred();stale.enqueue(stale.state(),held);
-const pending=invoke(stale,'search');await tick();stale.Mesh.state.caps={chat_page_v1:true};stale.close();
-held.resolve(stale.legacy());await pending;assert.equal(stale.calls.length,2);assert.equal(stale.opened.length,0);
+const pending=invoke(stale,'search');await tick();stale.close();
+held.resolve(stale.summary());await pending;assert.equal(stale.calls.length,2);assert.equal(stale.opened.length,0);
 ''')
 
 

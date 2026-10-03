@@ -3,7 +3,7 @@
 One GuiApp = one machine's GUI = at most ONE signed-in human (v1 semantics,
 kept). The Mesh facade instance exists only while someone is signed in; the
 session survives restarts via ``gui_session.json`` in the LOCAL home dir
-(never the synced folder) — the E2EE identity bundle already lives in the
+(never the cloud mesh) — the E2EE identity bundle already lives in the
 local keystore, so restoring a session never needs the password again.
 """
 
@@ -16,7 +16,7 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
+from ..core.config import DEFAULT_HOME, atomic_write_json, read_json, validate_root_spec
 from ..core.latency import LatencySink
 from ..core.errors import ValidationError
 from ..core.timekit import utcnow_iso
@@ -81,22 +81,18 @@ class GuiApp:
 
     def __init__(
         self,
-        root: Path | str,
+        root: str,
         *,
         home: Path | str | None = None,
         machine: str = "",
         encrypt: bool = True,
         static_dir: Path | str | None = None,
         app_version: str = "",
-        local_inputs: bool = False,
+        local_inputs: bool = True,
         poll_s: float = 4.0,
         sse_ping_s: float = 15.0,
     ) -> None:
-        # a scheme spec (supabase://…) MUST stay a string — Path() collapses the
-        # double slash into `supabase:\…` and mkdir fails (R23; folder roots
-        # stay Paths). Mirrors app.main()'s as_root — the GuiApp was the one
-        # cloud-wiring site R23 missed.
-        self.root = root if (isinstance(root, str) and "://" in root) else Path(root)
+        self.root = validate_root_spec(root)
         self.home = Path(home) if home else DEFAULT_HOME
         self.machine = machine or platform.node() or "gui"
         self.encrypt = encrypt
@@ -117,7 +113,9 @@ class GuiApp:
         self.frontend_revision = frontend_revision(self.static_dir)
         if type(local_inputs) is not bool:
             raise ValueError('local_inputs must be a bool')
-        self.local_inputs_enabled = local_inputs
+        if not local_inputs:
+            raise ValueError('GUI requires local_inputs=True')
+        self.local_inputs_enabled = True
         from .diagnostics import Diagnostics
         self.diagnostics = Diagnostics(self.home)
         from .page_cursors import PageCursorRegistry
@@ -131,8 +129,6 @@ class GuiApp:
         self._session_reads_exhausted = False
         self._session_read_ready = False
         # pre-auth reads (login screen, name checks) — directory only, no store.
-        # make_transport so the login screen works on a cloud root too, not just
-        # a folder (the FolderTransport hard-wire here broke supabase:// roots).
         self._tx0 = make_transport(self.root, home=self.home, offline_cache=True)
         self.directory0 = Directory(self._tx0)
         # cloud roots: start the mirror's first bulk load NOW so the first

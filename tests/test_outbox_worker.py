@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agentbridge.core.errors import ValidationError
+from agentbridge.core import delivery_trace
 from agentbridge.store.db import Store
 from agentbridge.store.outbox import OutboxWorker
 
@@ -86,6 +87,24 @@ def test_unknown_kind_goes_dead_not_lost(store):
     store.outbox_add("teleport", "c1", {"id": "m1"})
     assert w.flush_once() == 0
     assert store.outbox_counts() == {"dead": 1}  # inspectable, not silently dropped
+
+
+def test_unknown_kind_logging_fault_cannot_change_committed_dead_state(store, monkeypatch):
+    calls = []
+    original_emit = delivery_trace.emit
+
+    def failed_trace(phase, **fields):
+        if phase != 'outbox_dead':
+            return original_emit(phase, **fields)
+        assert store.outbox_counts() == {"dead": 1}, 'observe only a successful dead transition'
+        calls.append((phase, fields))
+        raise RuntimeError('PRIVATE_DIAGNOSTIC_FAILURE')
+
+    monkeypatch.setattr('agentbridge.store.outbox.delivery_trace.emit', failed_trace)
+    store.outbox_add('unknown', 'target', {'id': 'm1'})
+    assert OutboxWorker(store, {}).flush_once() == 0
+    assert store.outbox_counts() == {"dead": 1}
+    assert calls == [('outbox_dead', {'message': 'm1', 'status': 'error'})]
 
 
 def test_validation_error_goes_dead(store):

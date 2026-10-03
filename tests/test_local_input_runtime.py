@@ -12,8 +12,6 @@ from agentbridge.mesh.sealer import PlainSealer
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source
 from agentbridge.store.db import Store
-from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport,
     owned_transport,
@@ -38,8 +36,8 @@ def _documents(value=1):
 
 
 @pytest.fixture
-def rig(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def rig(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / "provider")
     for path, value in _documents().items():
         provider.put_doc(path, value)
     mesh = Mesh(
@@ -52,20 +50,20 @@ def rig(tmp_path):
         mesh.close()
 
 
-def test_opt_in_initializes_schema_preserves_namespace_and_owns_all_services(tmp_path):
-    root = tmp_path / "provider"
+def test_opt_in_initializes_schema_preserves_namespace_and_owns_all_services(clouds, tmp_path):
+    root = clouds.root(tmp_path / "provider")
     home = tmp_path / "home"
-    legacy_tag = hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:12]
+    legacy_tag = hashlib.sha1(clouds.cached(root).cache_key.encode()).hexdigest()[:12]
     legacy_path = home / "cache" / f"alice@machine-{legacy_tag}.sqlite"
     seeded = Store(legacy_path)
     seeded.cache_doc("sentinel.json", {"legacy": True})
     seeded.close()
 
-    plain = Mesh(FolderTransport(root), "plain", "machine", home=home)
+    plain = Mesh(clouds.cached(root), "plain", "machine", home=home)
     assert plain.local_inputs is None
     plain.close()
 
-    provider = FolderTransport(root)
+    provider = clouds.cached(root)
     mesh = Mesh(provider, "alice", "machine", home=home, local_inputs=True)
     try:
         assert mesh.store.path == legacy_path
@@ -89,8 +87,8 @@ def test_opt_in_initializes_schema_preserves_namespace_and_owns_all_services(tmp
         mesh.close()
 
 
-def test_borrowed_owner_is_reused_and_explicit_sealer_is_rejected(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def test_borrowed_owner_is_reused_and_explicit_sealer_is_rejected(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / "provider")
     owner = owned_transport(provider, tmp_path / "owner-home")
     mesh = Mesh(
         owner, "alice", "machine", home=tmp_path / "mesh-home",
@@ -104,22 +102,22 @@ def test_borrowed_owner_is_reused_and_explicit_sealer_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="Mesh-owned sealer"):
         Mesh(
-            FolderTransport(tmp_path / "other-provider"), "alice", "machine",
+            clouds.cached(tmp_path / "other-provider"), "alice", "machine",
             home=tmp_path / "other-home", local_inputs=True,
             sealer=PlainSealer(),
         )
 
 
-def test_cached_folder_runtime_matches_direct_admission_and_stable_poll(tmp_path):
+def test_independent_cloud_caches_match_admission_and_stable_poll(clouds, tmp_path):
     root = tmp_path / "provider"
-    provider = FolderTransport(root)
+    provider = clouds.cached(root)
     for path, value in _documents().items():
         provider.put_doc(path, value)
     direct = Mesh(
-        FolderTransport(root), "alice", "direct", home=tmp_path / "direct-home",
+        clouds.cached(root), "alice", "direct", home=tmp_path / "direct-home",
         store_path=tmp_path / "direct.sqlite", local_inputs=True,
     )
-    cached_transport = CachingTransport(FolderTransport(root), auto_refresh=False)
+    cached_transport = clouds.cached(root)
     cached_transport.refresh()
     cached = Mesh(
         cached_transport, "alice", "cached", home=tmp_path / "cached-home",
@@ -149,7 +147,7 @@ def test_cached_folder_runtime_matches_direct_admission_and_stable_poll(tmp_path
         direct.close()
 
 
-def test_ingest_inputs_health_unchanged_and_restart_reuse_persisted_index(rig, monkeypatch):
+def test_ingest_inputs_health_unchanged_and_restart_reuse_persisted_index(clouds, rig, monkeypatch):
     mesh, provider = rig
     runtime = mesh.local_inputs
     assert runtime.ingest(CHAT) is True
@@ -175,7 +173,7 @@ def test_ingest_inputs_health_unchanged_and_restart_reuse_persisted_index(rig, m
     store_path, home, root = mesh.store.path, mesh.home, provider.root
     mesh.close()
     reopened = Mesh(
-        FolderTransport(root), "alice", "machine", home=home,
+        clouds.cached(root), "alice", "machine", home=home,
         store_path=store_path, local_inputs=True,
     )
     try:
@@ -221,14 +219,15 @@ def test_owned_write_invalidates_before_provider_call_and_failed_write_stays_pen
         assert conn.execute("SELECT count(*) FROM mutation_intents").fetchone() == (1,)
 
 
-def test_malformed_collection_retires_readiness_and_persists_bounded_health(rig):
+def test_unsafe_collection_retires_readiness_and_persists_bounded_health(rig):
     mesh, provider = rig
     runtime = mesh.local_inputs
     runtime.ingest(CHAT)
     before = runtime.health(CHAT)
-    provider.local_path(META).write_bytes(b"{not-json")
+    with provider._lock:
+        provider._authority_unsafe.add(META)
 
-    with pytest.raises(RawCollectionUnavailable, match="malformed_document"):
+    with pytest.raises(RawCollectionUnavailable, match="unsafe_cached_value"):
         runtime.ingest(CHAT)
     failed = runtime.health(CHAT)
     assert failed == {
@@ -264,7 +263,7 @@ def test_request_run_due_failure_finishes_scheduler_lease(rig, monkeypatch):
     mesh, _provider = rig
     runtime = mesh.local_inputs
     clock = iter((10.0, 11.0, 12.0))
-    monkeypatch.setattr(local_input_runtime.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(local_input_runtime.time, "monotonic", lambda: next(clock, 12.0))
     assert runtime.request(CHAT, selected=True, activity=True)
 
     def fail(_chat):
@@ -520,7 +519,6 @@ def test_persistent_mutation_pending_never_collects_or_publishes(rig, monkeypatc
     assert runtime.schedule._states[CHAT].failures == 0
     with runtime.coordinator._transaction() as conn:
         assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (1,)
-
 
 
 def test_route_selection_controls_preparation_priority_without_queuing_or_io(rig, monkeypatch):

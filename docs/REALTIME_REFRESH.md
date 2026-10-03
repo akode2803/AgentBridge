@@ -3,8 +3,9 @@
 This slice deprecates the unconditional broad browser refresh **only when** a
 Supabase-backed local-input GUI advertises `sse_refresh_v1` and its SSE connection
 is live. Both bootstrap and hydrated sidebar capability documents carry the same
-gate. Generic `sse` support alone is insufficient; legacy/folder servers retain
-their prior recovery behavior. This is not a claim that the product is polling-free.
+gate. Generic `sse` support alone is insufficient; unsupported or broken streams
+retain their recovery behavior. Bound sessions and transcript paging remain
+mandatory regardless of SSE health. This is not a claim that the product is polling-free.
 
 ## Removed and retained timers
 
@@ -44,7 +45,8 @@ Retained deliberately:
 
 This patch does not redesign the Supabase schema, create accounts, copy
 credentials, change RLS, or rewrite transport ownership. The broader
-Supabase-first simplification belongs to a separately reviewed migration plan.
+Supabase-only root validation and mandatory GUI paging are implemented in the
+current source; actual-instance acceptance remains separate.
 
 ## Publication ordering and bounded recovery
 

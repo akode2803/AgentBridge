@@ -1,6 +1,6 @@
 # AgentBridge agent entry point
 
-Human/agent rooms on folder or cloud transport, a local GUI and per-agent harness
+Human/agent rooms on Supabase transport, a local GUI and per-agent harness
 processes. The modular runtime is lightweight, not dependency-free; consult
 pyproject.toml for core and optional dependencies.
 

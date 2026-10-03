@@ -11,6 +11,7 @@ from contextvars import ContextVar
 
 _recorder = None
 _context = ContextVar('delivery_context', default=None)
+_ownership = ContextVar('delivery_ownership', default=None)
 _buffer = ContextVar('delivery_db_buffer', default=None)
 _holders = {}
 _lock = threading.Lock()
@@ -47,6 +48,35 @@ def recorder():
         return None
 
 
+def _owned(sink):
+    ownership = _ownership.get()
+    return (ownership is None or
+            (ownership[0]() is sink and ownership[1] == sink.generation))
+
+
+def _reset_ownership(token):
+    if token is not None:
+        try:
+            _ownership.reset(token)
+        except Exception:
+            try:
+                _ownership.set(None)
+            except Exception:
+                pass
+
+
+@contextmanager
+def _owned_scope(sink, generation):
+    # Keep identity outside event metadata, and retain any enclosing ownership.
+    token = None
+    try:
+        if _ownership.get() is None:
+            token = _ownership.set((weakref.ref(sink), generation))
+        yield
+    finally:
+        _reset_ownership(token)
+
+
 def elapsed_ms(started):
     try:
         return (time.perf_counter()-started)*1000 if started is not None else None
@@ -73,7 +103,7 @@ def emit(phase, *, message='', chat='', status='ok', duration_ms=None, **fields)
     """No exceptions or disk I/O while inside an observed transaction scope."""
     try:
         sink = recorder()
-        if sink is None or phase not in PHASES:
+        if sink is None or phase not in PHASES or not _owned(sink):
             return
         context = _context.get() or {}
         if context.get('_generation', sink.generation) != sink.generation:
@@ -105,14 +135,22 @@ def emit(phase, *, message='', chat='', status='ok', duration_ms=None, **fields)
 @contextmanager
 def request_context(request_ref=None, request_seq=None):
     token = None
+    sink = None
+    generation = None
     try:
-        if recorder() is not None:
+        sink = recorder()
+        if sink is not None:
+            generation = sink.generation
             token = _context.set({'request_ref': request_ref, 'request_seq': request_seq,
-                                  '_generation': recorder().generation})
+                                  '_generation': generation})
     except Exception:
         pass
     try:
-        yield
+        if sink is not None:
+            with _owned_scope(sink, generation):
+                yield
+        else:
+            yield
     finally:
         if token is not None:
             try:
@@ -127,23 +165,24 @@ def observed(phase, *, chat_arg=None):
         @functools.wraps(function)
         def call(*args, **kwargs):
             sink = recorder()
-            if sink is None:
+            if sink is None or not _owned(sink):
                 return function(*args, **kwargs)
             generation = sink.generation
             started = queue_clock()
             chat = args[chat_arg] if chat_arg is not None and len(args) > chat_arg else ''
             failed = False
             error_type = None
-            try:
-                return function(*args, **kwargs)
-            except BaseException as exc:
-                error_type = type(exc).__name__
-                failed = True
-                raise
-            finally:
-                if recorder() is sink and sink.generation == generation:
-                    emit(phase, chat=chat, status='error' if failed else 'ok', error_type=error_type,
-                         duration_ms=elapsed_ms(started))
+            with _owned_scope(sink, generation):
+                try:
+                    return function(*args, **kwargs)
+                except BaseException as exc:
+                    error_type = type(exc).__name__
+                    failed = True
+                    raise
+                finally:
+                    if recorder() is sink and sink.generation == generation:
+                        emit(phase, chat=chat, status='error' if failed else 'ok', error_type=error_type,
+                             duration_ms=elapsed_ms(started))
         return call
     return wrap
 
@@ -230,6 +269,7 @@ class Transaction:
         self.owner_ref = secrets.token_hex(8)
         self.acquired = None
         self.token = None
+        self.owner_token = None
         self.rows = None
         sink = recorder()
         self.sink_ref = weakref.ref(sink) if sink is not None else lambda: None
@@ -237,10 +277,13 @@ class Transaction:
 
     def active(self):
         sink = recorder()
-        return sink is not None and sink is self.sink_ref() and sink.generation == self.generation
+        return (sink is not None and sink is self.sink_ref()
+                and sink.generation == self.generation and _owned(sink))
 
     def __enter__(self):
         try:
+            if _ownership.get() is None:
+                self.owner_token = _ownership.set((self.sink_ref, self.generation))
             if _buffer.get() is None:
                 self.rows = _Deferred()
                 self.token = _buffer.set(self.rows)
@@ -264,8 +307,8 @@ class Transaction:
 
     def __exit__(self, kind, value, tb):
         self.release()
-        if self.token is not None:
-            try:
+        try:
+            if self.token is not None:
                 _buffer.reset(self.token)
                 sink = recorder()
                 if self.active():
@@ -273,8 +316,10 @@ class Transaction:
                         sink.note_drop("context", self.rows.dropped)
                     for row in self.rows:
                         sink.flight_record(row)
-            except Exception:
-                pass
+        except Exception:
+            pass
+        finally:
+            _reset_ownership(self.owner_token)
         return False
 
 
@@ -293,6 +338,7 @@ _disabled = _DisabledTransaction()
 
 def transaction(kind, path):
     try:
-        return Transaction(kind, path) if recorder() is not None else _disabled
+        sink = recorder()
+        return Transaction(kind, path) if sink is not None and _owned(sink) else _disabled
     except Exception:
         return _disabled

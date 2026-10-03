@@ -1,7 +1,7 @@
 # Local raw-input staging
 
-The opt-in local ingestion runtime collects folder or cached transport documents
-into SQLite in bounded batches. This is an eventual-delivery snapshot of admitted
+The local ingestion runtime collects documents from the exact built-in
+`CachingTransport` over exact `SupabaseTransport` into SQLite in bounded batches. This is an eventual-delivery snapshot of admitted
 raw inputs, not a remote atomic snapshot or a permission cache. Message-log
 admission remains separate. Canonical page requests still recompute membership,
 history-on-join, trust, keys, lifecycle, overlays and visibility.
@@ -24,8 +24,8 @@ bindings. Physical positions alone do not authorize a request.
    through a claim.
 3. Enumerate the complete declared scope, delivering bounded document batches.
    Partial enumeration never establishes absence. Cached collection checks its
-   initial revision throughout; folder collection retains native handle-relative
-   traversal. Neither mechanism promises remote freshness or atomic publication.
+   initial revision throughout. It does not promise remote freshness or atomic
+   multi-document provider publication.
 4. Append raw documents and normalized overlay candidates together. Raw generation
    and index mutation counters detect changes outside the owning append transaction.
    Normalization records signature inputs and shape facts, never authority verdicts.
@@ -68,18 +68,19 @@ failure-record transaction can commit.
 Cleanup runs between scheduled scans and rechecks foreground-selected work between
 chunks. The runtime does not rebuild or fold complete history on a page request.
 
-## Current additive integration
+## Current GUI integration
 
-An opt-in GUI endpoint now uses this staged owner with bounded canonical page
+The mandatory GUI page endpoint uses this staged owner with bounded canonical page
 reads. Raw-only `kind='raw'` stages support a separate presence-floor source;
 legacy chat-stage rows migrate to explicit `kind='chat'`. Raw stages share the
 document, byte and cleanup budgets but have no chat identity or overlay-index
 readiness. A complete raw seal, derived presence index and exact logical owner
 CAS precede atomic pointer/readiness admission. Background discovery and page
-preparation use bounded work; the live browser route and DOM paging remain
-unchanged. See [Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
+preparation use bounded work; the browser acquires bounded canonical pages
+and retains bounded transcript data/DOM. See
+[Local page GUI integration](LOCAL_PAGE_GUI_INTEGRATION.md).
 
 This still does not implement remote-tail ingestion, a hard remote-staleness
-bound or coherent multi-document folder manifests. Keeping the last admitted
+bound or coherent multi-document provider manifests. Keeping the last admitted
 snapshot readable during background collection is the user-approved availability
 contract. It never weakens invalidation before locally initiated external writes.

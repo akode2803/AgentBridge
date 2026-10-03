@@ -12,7 +12,6 @@ from agentbridge.mesh.page_preparation import PagePreparation
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 
 
 def _mesh(store, *, user='viewer', machine='laptop'):
@@ -132,8 +131,8 @@ def test_stop_discards_work_and_fairly_services_proofs(tmp_path, monkeypatch):
         store.close()
 
 
-def test_runtime_owns_worker_execution_and_stops_page_work(tmp_path, monkeypatch):
-    mesh = Mesh(FolderTransport(tmp_path / 'provider'), 'viewer', 'laptop',
+def test_runtime_owns_worker_execution_and_stops_page_work(tmp_path, monkeypatch, clouds):
+    mesh = Mesh(clouds.cached(tmp_path / 'provider'), 'viewer', 'laptop',
                 home=tmp_path / 'home', store_path=tmp_path / 'mesh.sqlite',
                 local_inputs=True)
     runtime = mesh.local_inputs
@@ -422,7 +421,6 @@ def test_selected_preparation_hint_rejects_invalid_room_without_io(tmp_path, sel
         assert not prep._terminals and not prep._proofs
     finally:
         store.close()
-
 
 
 def test_proof_jobs_do_not_reset_selected_terminal_fairness(tmp_path, monkeypatch):

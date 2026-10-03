@@ -1,8 +1,10 @@
 # Supabase-first responsiveness: next implementation checkpoints
 
-User decision, 2026-09-30: Supabase is the primary product transport. Folder code
-remains but folder parity must not block IM improvements. General relational
-portability is secondary. A lean local relay/node is a later capability, not a
+User decision, 2026-10-03: Supabase is the only production transport. Configured
+roots require `supabase://<label>`. The GUI requires session bindings and local
+canonical transcript paging; full-history HTTP compatibility routes are retired.
+Local SQLite, snapshots, outboxes and attachment downloads remain supported.
+General relational portability is secondary. A lean local relay/node is a later capability, not a
 reason to duplicate the entire remote database now.
 
 ## Measured incident, not a latency guarantee

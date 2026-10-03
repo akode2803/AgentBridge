@@ -63,13 +63,10 @@ holding the mirror mutex across SQLite, provider reads or crypto. Mutations afte
 that point require future page invalidation; the result is not a continuing
 access lease. The reader neither warms the transport nor fetches a provider.
 
-Bare FolderTransport explicitly reports unsupported for this mirror-current
-contract. A CachingTransport over a folder can exercise the same contract in
-disposable tests, but this does not change the production folder transport or
-claim immediate visibility of external filesystem writes. Phase 1 may eventually
-use explicitly accepted local overlay generations for both transports; its
-remote-ingestion and local read-your-write semantics must be integrated before
-activation. Cached bootstrap data is not accepted as a new live binding.
+This mirror-current contract requires the exact `CachingTransport` owner and
+provider-observed inputs. Production roots select Supabase. Current GUI paging
+uses the staged local-input owner described in LOCAL_INPUT_STAGING.md; cached
+bootstrap data is not accepted as a new live binding.
 
 ## Costs and remaining prerequisites
 
@@ -88,7 +85,7 @@ Next steps, before canonical serving:
 
 1. Atomic owner-defined derived indices/readiness, indexed byte sizes and pure
    exact-key signature evidence, with current authority independently rechecked.
-2. Folder/cloud ingestion wiring, local write invalidation, coalesced background
+2. Supabase ingestion wiring, local write invalidation, coalesced background
    rebuilds and bounded cleanup; granular source invalidation under churn.
 3. Bounded membership/receipt/unread/creation dependencies, reverse keyset pages
    and exact off-page targets, preserving the existing canonical fold.

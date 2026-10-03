@@ -8,7 +8,6 @@ from agentbridge.core.models import ChatKind, ChatSnapshot, Member, Role
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 
 
 _CASES = [
@@ -53,11 +52,11 @@ def test_indexed_value_matches_legacy_delete_numeric_cutoff(tmp_path, records, e
 
 
 @pytest.fixture
-def private_room(tmp_path):
-    provider = FolderTransport(tmp_path / 'synthetic-root')
+def private_room(clouds, tmp_path):
+    provider = clouds.bare(tmp_path / 'synthetic-root')
     viewer = Mesh(provider, 'viewer', 'box', encrypt=True,
                   home=tmp_path / 'viewer-home', store_path=tmp_path / 'viewer.sqlite')
-    outsider = Mesh(provider, 'outsider', 'box', encrypt=True,
+    outsider = Mesh(clouds.bare(tmp_path / 'synthetic-root'), 'outsider', 'box', encrypt=True,
                     home=tmp_path / 'outsider-home', store_path=tmp_path / 'outsider.sqlite')
     try:
         viewer.accounts.create_human('viewer', 'test-password')

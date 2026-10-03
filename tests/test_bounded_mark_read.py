@@ -7,7 +7,6 @@ from agentbridge.core.errors import NotAMember, ValidationError
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 
 
 def test_latest_ns_is_indexed_and_does_not_copy_payloads(tmp_path):
@@ -49,11 +48,11 @@ def test_latest_ns_is_indexed_and_does_not_copy_payloads(tmp_path):
         store.close()
 
 
-def test_mark_read_preserves_membership_gate_and_viewer_state(tmp_path, monkeypatch):
-    provider = FolderTransport(tmp_path / 'folder')
+def test_mark_read_preserves_membership_gate_and_viewer_state(clouds, tmp_path, monkeypatch):
+    provider = clouds.bare(tmp_path / 'provider')
     viewer = Mesh(provider, 'viewer', 'box', encrypt=False,
                   home=tmp_path / 'viewer-home', store_path=tmp_path / 'viewer.sqlite')
-    outsider = Mesh(provider, 'outsider', 'box', encrypt=False,
+    outsider = Mesh(clouds.bare(tmp_path / 'provider'), 'outsider', 'box', encrypt=False,
                     home=tmp_path / 'outsider-home', store_path=tmp_path / 'outsider.sqlite')
     try:
         viewer.accounts.create_human('viewer', 'password')

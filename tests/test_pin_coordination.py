@@ -13,7 +13,6 @@ from agentbridge.core.timekit import next_ns
 from agentbridge.mesh.pin_storage import PinFileCoordinator, PinStoreUnavailable
 from agentbridge.mesh.pins import KeyPinStore, rekey_signing_bytes
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 def _pair():
@@ -167,8 +166,8 @@ def test_conflicting_pending_branch_blocks_every_public_operation(tmp_path, monk
             call()
 
 
-def test_nested_lifecycle_actor_pin_unavailable_never_falls_back_to_raw_fields(tmp_path, monkeypatch):
-    mesh = Mesh(FolderTransport(tmp_path / "mesh"), "aryan", "machine", home=tmp_path / "home")
+def test_nested_lifecycle_actor_pin_unavailable_never_falls_back_to_raw_fields(clouds, tmp_path, monkeypatch):
+    mesh = Mesh(clouds.bare(tmp_path / "mesh"), "aryan", "machine", home=tmp_path / "home")
     try:
         mesh.accounts.create_human("aryan", "password")
         mesh.accounts.create_agent("claude")

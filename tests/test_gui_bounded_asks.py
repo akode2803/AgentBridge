@@ -15,24 +15,28 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
 from types import SimpleNamespace
 
+from conftest import refresh_cloud
+
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='viewer-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='viewer-box',
                  encrypt=True, local_inputs=True)
     remote = manager = None
     try:
         assert app.signup('viewer', '', 'secret')['ok']
         # Host the owned agent on another machine so process truth correctly
         # leaves its pending ask visible in this GUI.
-        remote = Mesh(app.root, 'viewer', 'remote-box', encrypt=True,
+        remote = Mesh(clouds.bare(app.root), 'viewer', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'remote-owner.sqlite')
         remote.accounts.create_agent('manager', harness={'agent_tools_enabled': True})
+        refresh_cloud(app)
         chat = app.mesh.create_chat('Asks', members=['manager']).id
         app.mesh.outbox.flush_once()
-        manager = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+        manager = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                        home=app.home, store_path=tmp_path / 'manager.sqlite')
         manager.sync.sync_once([chat])
         ask = PermissionLane(manager, 'manager').publish_ask(
@@ -48,6 +52,7 @@ def world(tmp_path, monkeypatch):
 
 
 def _ingest(app, chat, *, room=True, companions=True):
+    refresh_cloud(app)
     runtime = app.mesh.local_inputs
     runtime.prepare_one()
     if room:
@@ -119,7 +124,7 @@ def test_room_aux_mutation_after_prepare_invalidates_before_handoff(world):
     assert pending['rooms_complete'] is False
 
 
-def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
+def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world, clouds):
     app, chat, first_ask = world
     app.mesh.tx.put_doc('status/manager_harness.json', {'timers': [
         {'id': 'wake-1', 'chat_id': chat,
@@ -127,7 +132,7 @@ def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
     ]})
     second_chat = app.mesh.create_chat('Another ask room', members=['manager']).id
     app.mesh.outbox.flush_once()
-    manager = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+    manager = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                    home=app.home, store_path=app.home / 'manager-second.sqlite')
     try:
         manager.sync.sync_once([second_chat])
@@ -154,26 +159,27 @@ def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
         manager.close()
 
 
-def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch):
+def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='viewer-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='viewer-box',
                  encrypt=True, local_inputs=True)
     meshes = []
     try:
         assert app.signup('viewer', '', 'secret')['ok']
         app.mesh.accounts.create_human('fable', 'fable-pass')
-        remote = Mesh(app.root, 'viewer', 'remote-box', encrypt=True,
+        remote = Mesh(clouds.bare(app.root), 'viewer', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'remote-owner.sqlite')
         meshes.append(remote)
         remote.accounts.create_agent('manager')
-        fable = Mesh(app.root, 'fable', 'fable-box', encrypt=True,
+        fable = Mesh(clouds.bare(app.root), 'fable', 'fable-box', encrypt=True,
                      home=app.home, store_path=tmp_path / 'fable.sqlite')
         meshes.append(fable)
         fable.accounts.create_agent('ops')
-        target = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+        target = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'manager.sqlite')
-        requester = Mesh(app.root, 'ops', 'remote-box', encrypt=True,
+        requester = Mesh(clouds.bare(app.root), 'ops', 'remote-box', encrypt=True,
                          home=app.home, store_path=tmp_path / 'ops.sqlite')
         meshes.extend((target, requester))
         PeerService(requester).request('manager', 'status')
@@ -184,6 +190,7 @@ def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch):
             {'id': 'chatless-wake', 'chat_id': '', 'at_ns': time.time_ns() + 60_000_000_000,
              'note': 'Check status'},
         ]})
+        refresh_cloud(app)
         for scope in ('identities', 'status', 'peer'):
             app.mesh.local_inputs.auxiliary.ingest(scope)
 
@@ -260,17 +267,19 @@ def test_unresolved_room_timer_is_pending_not_disclosed(world):
     assert result['timers'] == []
 
 
-def test_identity_source_over_2048_is_structured_incomplete_not_internal_error(tmp_path, monkeypatch):
+def test_identity_source_over_2048_is_structured_incomplete_not_internal_error(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='capacity-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='capacity-box',
                  encrypt=False, local_inputs=True)
     try:
         assert app.signup('viewer', '', 'secret')['ok']
-        provider = app.mesh.tx._transport
-        for index in range(2048):
-            name = f'other-{index:04d}'
-            provider.put_doc(f'users/{name}.json', {'name': name, 'kind': 'human'})
+        clouds.seed_documents(app.root, {
+            f'users/other-{index:04d}.json': {'name': f'other-{index:04d}', 'kind': 'human'}
+            for index in range(2048)
+        })
+        refresh_cloud(app)
         app.mesh.local_inputs.auxiliary.ingest('identities')
         result = _asks(app)
         assert result['ok'] and result['asks'] == [] and result['timers'] == []

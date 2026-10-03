@@ -6,7 +6,8 @@ import { Mesh, isV2, meshCaps, captureSessionEpoch, sessionMayApply,
 import { api } from "./api.js";
 import { handleNotifyFrame } from "./notify.js";
 import { V } from "./views.js";
-import { diagnostic, receivedDelivery } from "./diagnostics.js";
+import { diagnostic, receivedDelivery, captureDiagnosticObservation,
+         diagnosticObservationMayApply } from "./diagnostics.js";
 
 let source = null;
 let connected = false;
@@ -76,30 +77,37 @@ function scheduleFlush(current) {
   if (flushTimer !== null || flushing || !pendingFrames.length) return;
   const owner = generation;
   flushTimer = setTimeout(async () => {
-    flushTimer = null;
     if (owner !== generation || !current()) return;
+    flushTimer = null;
     const frames = pendingFrames;
     const queuedAt = pendingQueuedAt;
     pendingQueuedAt = null;
     pendingFrames = [];
     flushing = true;
     const started = performance.now();
-    diagnostic("delivery", {phase:"refresh_started", outcome:"started",
-      queue_wait_ms:queuedAt === null ? undefined : Math.max(0, started-queuedAt)});
+    const diagnosticOwner = captureDiagnosticObservation();
+    if (diagnosticObservationMayApply(diagnosticOwner)) {
+      diagnostic("delivery", {phase:"refresh_started", outcome:"started",
+        queue_wait_ms:queuedAt === null ? undefined : Math.max(0, started-queuedAt)});
+    }
     const scoped = meshCaps().sse_refresh_v1 === true && typeof V.refreshRealtime === "function";
+    let ownsFlush = true;
     try {
       const completion = scoped ? V.refreshRealtime(frames) : V.refresh(false);
       if (scoped) {
         // The view owns independent bounded page/sidebar/aux lanes. Never
         // serialize a selected-chat wake behind an earlier sidebar request.
         flushing = false;
+        ownsFlush = false;
         scheduleFlush(current);
       }
       await completion;
       if (!current()) return;
       lastRefreshMs = Math.max(0, performance.now() - started);
-      diagnostic("realtime", {outcome:"completed", duration_ms:lastRefreshMs});
-      diagnostic("delivery", {phase:"refresh_finished", outcome:"completed", duration_ms:lastRefreshMs});
+      if (diagnosticObservationMayApply(diagnosticOwner)) {
+        diagnostic("realtime", {outcome:"completed", duration_ms:lastRefreshMs});
+        diagnostic("delivery", {phase:"refresh_finished", outcome:"completed", duration_ms:lastRefreshMs});
+      }
       // Compatibility names: these are attempt settlement/frame opportunity,
       // not evidence that a canonical message was accepted or visibly painted.
       for (const frame of frames) {
@@ -109,9 +117,14 @@ function scheduleFlush(current) {
           if (current()) observe("render_completed", ref);
         }));
       }
-    } catch { /* canonical readers own bounded retries and pending states */ }
-    finally {
-      if (!scoped && owner === generation) {
+    } catch {
+      if (current() && diagnosticObservationMayApply(diagnosticOwner)) {
+        diagnostic("delivery", {phase:"refresh_finished", status:"error", outcome:"failed",
+          duration_ms:Math.max(0, performance.now()-started)});
+      }
+      // Canonical readers still own bounded retries and pending states.
+    } finally {
+      if (ownsFlush && owner === generation) {
         flushing = false;
         scheduleFlush(current);
       }

@@ -30,8 +30,8 @@ jobs:
       - name: Frontend module check
         run: uv run python devtools/check_frontend.py
       # Fail native ABI/filesystem regressions before the long Windows suite.
-      - name: Windows local-input boundary
+      - name: Windows attachment handoff boundary
         if: runner.os == 'Windows'
-        run: uv run pytest -q tests/test_folder_raw_windows.py tests/test_raw_documents.py
+        run: uv run pytest -q tests/test_gui_attachment_cache.py tests/test_gui_attachment_read.py tests/test_gui_cache_filename.py
       - name: Tests
         run: uv run pytest -q

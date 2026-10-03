@@ -22,7 +22,9 @@ from pathlib import Path
 
 from ..core.config import (
     DEFAULT_HOME, configured_machine, load_app_config, save_app_config,
+    validate_root_spec,
 )
+from ..core.errors import ConfigError
 
 __all__ = ["main", "build_parser"]
 
@@ -31,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="agentbridge-gui",
                                  description="AgentBridge GUI server (v2)")
     ap.add_argument("--root", default="",
-                    help="mesh root (the synced folder); remembered after the "
+                    help="Supabase mesh root (supabase://NAME); remembered after the "
                          "first run, so a bare launch reuses it")
     ap.add_argument("--home", default="",
                     help="local home dir (default: ~/.agentbridge)")
@@ -60,18 +62,15 @@ def main(argv: list[str] | None = None) -> int:
         args.machine = configured_machine(
             cfg, platform.node() or "gui")
 
-    def as_root(text: str):
-        # a scheme spec (supabase://…) must stay a STRING — Path() collapses
-        # the double slash and mangles it (R23); folder roots stay Paths
-        return text if "://" in text else Path(text)
-
-    if args.root:
-        root = as_root(args.root)
-        save_app_config({**cfg, "mesh_root": str(args.root)}, home)
-    elif cfg.get("mesh_root"):
-        root = as_root(cfg["mesh_root"])
-    else:
+    spec = args.root or cfg.get("mesh_root")
+    if not spec:
         ap.error("no --root given and none remembered in config.json")
+    try:
+        root = validate_root_spec(spec)
+    except ConfigError as exc:
+        ap.error(str(exc))
+    if args.root:
+        save_app_config({**cfg, "mesh_root": root}, home)
 
     # single-instance guard (R45): a double-clicked AgentBridge.pyw beside
     # the supervised fleet would otherwise co-bind :7787 (Windows

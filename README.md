@@ -34,8 +34,8 @@ participants, not a hidden backend.
   rooms they are not in, and do not silently escape their workspace.
 - **Useful agent runtime**: per-chat workspaces, per-audience model routing,
   MCP tooling, memory, timers, retrieval, and multi-agent delegation.
-- **Transport flexibility**: synced-folder mode for private setups, cloud mode
-  for real-time multi-device use, one product model either way.
+- **Supabase delivery**: shared cloud storage, Realtime hints, and local
+  cached inputs for responsive multi-device use.
 - **A product, not a demo**: restart flows, updates, account lifecycle, lock
   screen, notification controls, attachment handling, and real recovery paths.
 
@@ -44,8 +44,9 @@ participants, not a hidden backend.
 The app under `agentbridge/` is the current product surface, and the public
 repo tracks only the code and docs that support it directly.
 
-- **Primary transport:** Supabase (`supabase://mesh2`) with the synced-folder
-  transport kept as a rollback and private-deployment path.
+- **Supported transport:** Supabase (`supabase://mesh2`). Configured roots
+  require `supabase://<label>` with at most 1 KiB of UTF-8 label data;
+  filesystem roots are rejected.
 - **Security model:** message bodies and files are E2EE-sealed; permissions,
   visibility, and transport access are enforced separately.
 - **Core invariant:** **visibility = membership**. Humans and agents read only
@@ -53,7 +54,7 @@ repo tracks only the code and docs that support it directly.
 - **Agent harness:** owner-gated permissions, per-chat workspaces, run feed,
   memory/retrieval seams, timers, MCP bridge, and multiple adapter presets.
 - **Interfaces:** local GUI app, CLI, and MCP surface over the same mesh
-  facade.
+  facade. The GUI requires bound sessions and canonical local transcript paging.
 
 ## What using it should feel like
 
@@ -83,7 +84,7 @@ services: messaging, membership, privacy, accounts, presence, receipts, sync
           |
 transport + local cache + crypto
           |
- synced folder or Supabase
+ Supabase
 ```
 
 Important consequences:
@@ -91,7 +92,8 @@ Important consequences:
 - the GUI, CLI, and harness do not reach around the mesh layer
 - permissions are enforced in one place instead of reimplemented per surface
 - agents never read raw transport state directly
-- transport can change without changing the product model
+- configured roots select Supabase; local SQLite and attachment storage serve
+  separate cache and download responsibilities
 
 ## Repo map
 
@@ -110,6 +112,12 @@ uv sync --extra cloud --extra mcp
 python -m agentbridge.gui
 ```
 
+Configure a valid `supabase://<label>` root and member credentials using the
+[Supabase setup runbook](docs/SECURITY_RLS.md). The GUI requires
+`session_binding_v1=true` and `chat_page_v1=true`; it has no full-history
+HTTP fallback. Local caches and downloads remain local data, separate from
+the configured cloud root.
+
 To host the agents assigned to this machine:
 
 ```bash
@@ -126,10 +134,10 @@ instead of opening another one.
 CLI examples:
 
 ```bash
-python -m agentbridge.cli --root /path/to/mesh2 --user aryan --password '***' chats
-python -m agentbridge.cli --root /path/to/mesh2 --user aryan --password '***' read <chat-id>
-python -m agentbridge.cli --root /path/to/mesh2 --user aryan --password '***' send <chat-id> "message"
-python -m agentbridge.cli --root /path/to/mesh2 --user agentname mcp
+python -m agentbridge.cli --root supabase://mesh2 --user aryan --password '***' chats
+python -m agentbridge.cli --root supabase://mesh2 --user aryan --password '***' read <chat-id>
+python -m agentbridge.cli --root supabase://mesh2 --user aryan --password '***' send <chat-id> "message"
+python -m agentbridge.cli --root supabase://mesh2 --user agentname mcp
 ```
 
 If no `--root` is provided to the harness, it uses the remembered root from the
@@ -139,7 +147,7 @@ app config.
 
 The app already covers the core product model: shared human/agent rooms,
 membership-scoped visibility, E2EE message storage, approvals, workspaces,
-timers, and multiple transports. Ongoing work is mainly packaging, setup,
+timers, and Supabase delivery. Ongoing work is mainly packaging, setup,
 connector expansion, polish, and documentation consistency.
 
 Good entry points if you are reading the repo fresh:

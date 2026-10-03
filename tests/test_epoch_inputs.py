@@ -15,7 +15,6 @@ from agentbridge.mesh.epoch_inputs import (
 from agentbridge.mesh.keyring import ChatKeyService, KeyStore
 from agentbridge.mesh.paths import P
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT, VIEWER, EPOCH = "r216-room", "aryan", 7
@@ -27,13 +26,10 @@ def _write_legacy_identity(service, bundle):
 
 
 @pytest.fixture
-def epoch_world(tmp_path):
+def epoch_world(tmp_path, clouds):
     root = tmp_path / "provider"
-    root.mkdir()
-    provider = FolderTransport(root)
+    provider = clouds.bare(root)
     mirror = CachingTransport(provider, auto_refresh=False)
-    mirror._mirror_root_identity = "r216-root"
-    mirror._mirror_cache_identity = "r216-cache"
     mirror.refresh()
     store = KeyStore(tmp_path / "home")
     bundle = crypto.generate_identity()

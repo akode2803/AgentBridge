@@ -1,70 +1,71 @@
-"""P0 content-free projection observations and endpoint characterization."""
+"""Current page diagnostics and retained core projection observations stay private."""
 
 from __future__ import annotations
 
 import json
+from itertools import count
+from types import SimpleNamespace
 
+from agentbridge.gui import diagnostics
 from agentbridge.gui.projection_perf import ProjectionObservation
-from agentbridge.mesh.service import Mesh
 
 
-def _records(home):
-    path = home / "gui" / "perf" / "projections.jsonl"
-    return [json.loads(line) for line in path.read_text(encoding="ascii").splitlines()]
+def _records(recorder):
+    recorder.flush()
+    paths = [recorder.directory / f"events.{n}.jsonl" for n in (2, 1)] + [recorder.path]
+    return [json.loads(line) for path in paths if path.exists()
+            for line in path.read_text().splitlines()]
 
 
-def test_chat_and_sidebar_observations_are_content_free_and_detect_one_fold(rig):
+def test_chat_and_sidebar_diagnostics_are_content_free_and_detect_bounded_work(rig, monkeypatch):
     rig.signup()
     cid = rig.post("/api/mesh/create_chat", name="Observed", members=[])["chat"]["id"]
     rig.post("/api/mesh/post", chat_id=cid, body="projection-private-body")
-
-    sidebar = rig.get("/api/mesh/state")
-    chat = rig.get("/api/mesh/chat", id=cid)
-    assert set(chat) == {
-        "meta", "messages", "me", "starred", "read_ns", "total",
-        "session_binding", "presentation",
-    }
-    assert chat["session_binding"] == {
-        "instance_id": rig.app.instance_id,
-        "session_generation": str(rig.app._session_generation),
-        "viewer": "aryan",
-    }
+    # Complete fixture preparation before measuring the bounded HTTP reads.
+    assert rig.sidebar()["chats_complete"]
+    assert rig.page(cid)["status"] == "page"
+    # Model sparse observations for retained-stage coverage. Separate diagnostic
+    # tests cover burst dropping under the unchanged production rate limit.
+    real_clock = diagnostics.time
+    sparse_clock = SimpleNamespace(
+        monotonic=count(real_clock.monotonic(), 0.025).__next__,
+        perf_counter=real_clock.perf_counter,
+        sleep=real_clock.sleep,
+    )
+    with monkeypatch.context() as scoped:
+        scoped.setattr(diagnostics, "time", sparse_clock)
+        assert rig.app.diagnostics.set_enabled(True, sample_rate=1)
+        sidebar = rig.get("/api/mesh/state")
+        chat = rig.get("/api/mesh/chat_page", id=cid)
+    assert chat["status"] == "page"
+    assert chat["session_binding"] == sidebar["session_binding"]
     assert chat["messages"][-1]["body"] == "projection-private-body"
+    assert chat["starred_scope"] == "page"
     assert next(item for item in sidebar["chats"] if item["id"] == cid)["last"]
-
-    rows = _records(rig.home)
-    sidebar_row = next(row for row in reversed(rows) if row["scope"] == "sidebar")
-    chat_row = next(row for row in reversed(rows) if row["scope"] == "chat")
-    assert sidebar_row["outcome"] == chat_row["outcome"] == "ok"
-    assert sidebar_row["counts"]["room_count"] >= 1
-    assert chat_row["counts"]["fold_calls"] == 1
-    assert chat_row["counts"]["raw_messages"] >= chat["total"]
-    assert chat_row["stages_s"]["transcript_fold"] >= 0
-    assert chat_row["stages_s"]["receipts_fold"] >= 0
-    assert chat_row["stages_s"]["selected_presentation"] >= 0
+    rows = _records(rig.app.diagnostics)
+    assert rig.app.diagnostics.configuration()["rate_dropped"] == 0
+    assert any(row.get("route") == "/api/mesh/chat_page" and row.get("phase") == "finalize"
+               and row.get("status") == "page" and row["raw_examined"] <= 1000 for row in rows)
+    assert any(row.get("route") == "/api/mesh/state" and row.get("event") == "server_request"
+               and row["chats_complete"] for row in rows)
     encoded = json.dumps(rows)
     for private in ("projection-private-body", cid, "aryan", "Observed"):
         assert private not in encoded
 
 
-def test_denied_chat_observation_has_no_room_correlation_or_counts(rig):
+def test_denied_chat_diagnostics_have_no_room_plaintext_or_payload(rig):
     rig.signup()
     rig.peer_account("fable")
-    outsider = Mesh(
-        rig.root, "fable", "peerbox", home=rig.home,
-        store_path=rig.home / "fable-observation.sqlite",
-    )
-    try:
+    with rig.peer_mesh("fable") as outsider:
         private = outsider.create_chat("Private", []).id
-    finally:
-        outsider.close()
-    denied = rig.get("/api/mesh/chat", id=private)
-    assert "error" in denied
-    assert "presentation" not in denied
-    row = _records(rig.home)[-1]
-    assert row["scope"] == "chat" and row["outcome"] == "denied_or_error"
-    assert row["counts"] == {}
-    assert private not in json.dumps(row)
+    assert rig.page(private)["status"] == "forbidden"
+    assert rig.app.diagnostics.set_enabled(True, sample_rate=1)
+    denied = rig.get("/api/mesh/chat_page", id=private)
+    assert denied["status"] == "forbidden"
+    assert "messages" not in denied and "users" not in denied
+    rows = _records(rig.app.diagnostics)
+    assert any(row.get("route") == "/api/mesh/chat_page" and row.get("status") == "forbidden" for row in rows)
+    assert private not in json.dumps(rows)
 
 
 def test_projection_observer_failure_never_changes_filtered_messages(rig):

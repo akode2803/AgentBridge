@@ -15,11 +15,10 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture
-def xrig(tmp_path):
-    root = tmp_path / "mesh2"
-    root.mkdir()
+def xrig(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    m = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    m = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     m.accounts.create_human("aryan", "hunter2x")
     yield m, root, home, tmp_path
     m.close()
@@ -47,10 +46,10 @@ def test_export_reflects_the_read_model(xrig):
     assert "a message was deleted" in text
 
 
-def test_export_is_membership_gated(xrig):
+def test_export_is_membership_gated(xrig, clouds):
     m, root, home, tmp_path = xrig
     other_home = tmp_path / "other-home"
-    fable = Mesh(root, "fable", "devbox", encrypt=True, home=other_home)
+    fable = Mesh(clouds.bare(root), "fable", "devbox", encrypt=True, home=other_home)
     fable.accounts.create_human("fable", "fablepass")
     private = fable.create_chat("Private")
     fable.post(private.id, "not for aryan")

@@ -23,6 +23,7 @@ from agentbridge.store.page_inputs import MessageKey
 
 from test_gui_chat_pages import _ready, _settled_page, page_app as page_app
 from test_gui_page_cursors import ViewerMesh, selection as cursor_selection
+from conftest import refresh_cloud
 
 
 READ_ROUTE = '/api/mesh/chat_page_read'
@@ -184,7 +185,7 @@ def test_later_message_and_edit_remain_above_acknowledged_cut(page_app, monkeypa
     assert shown['unseen arrival']['ns'] > state['read_ns']
 
 
-def test_peer_edit_is_read_but_later_arrival_and_edit_are_unread(page_app, monkeypatch):
+def test_peer_edit_is_read_but_later_arrival_and_edit_are_unread(page_app, monkeypatch, clouds):
     app, _original_chat = page_app
     app.mesh.accounts.create_human('peer', 'peer-pass')
     chat = api_chats.create_chat(app, Request(data={
@@ -192,7 +193,7 @@ def test_peer_edit_is_read_but_later_arrival_and_edit_are_unread(page_app, monke
     }))['chat']['id']
     seed = app.mesh.post(chat, 'clock base')
     _ready(app, chat)
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-read-ack.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -202,6 +203,7 @@ def test_peer_edit_is_read_but_later_arrival_and_edit_are_unread(page_app, monke
             peer.outbox.flush_once()
             patch.setattr(messaging, 'next_ns', lambda: seed.ns + 30)
             peer.edit(chat, message.id, 'peer painted edit')
+        refresh_cloud(app)
         app.mesh.sync.sync_once([chat])
         _ready(app, chat)
         page = _settled_page(app, chat, limit='1')
@@ -215,6 +217,7 @@ def test_peer_edit_is_read_but_later_arrival_and_edit_are_unread(page_app, monke
             peer.outbox.flush_once()
             patch.setattr(messaging, 'next_ns', lambda: seed.ns + 32)
             peer.edit(chat, message.id, 'unseen later edit')
+        refresh_cloud(app)
         app.mesh.sync.sync_once([chat])
         assert _state(app, chat)['read_ns'] == seed.ns + 30
         assert app.mesh.chat_overview(chat)['unread'] == 2

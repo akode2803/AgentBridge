@@ -10,6 +10,7 @@ import pytest
 from agentbridge.gui import sse
 from agentbridge.mesh import eventbus
 from agentbridge.mesh.read_events import MAX_DEADLINES, ReadEvents
+from conftest import refresh_cloud
 
 
 class _Lock:
@@ -190,6 +191,9 @@ def test_two_client_edit_wake_before_admission_heals_without_broad_poll(two_clie
         before = _settled_page(app, chat)
         assert any(row['id'] == message.id and row['body'] == 'original peer body'
                    for row in before['messages'])
+        # Observe the peer's provider write in background only after the early
+        # HTTP read proves the hint itself supplied no new authority/input.
+        refresh_cloud(app)
         assert runtime.ingest(chat)
         admitted = list(sub.drain())
         assert any(e.type == eventbus.READ_MODEL and e.chat_id == chat
@@ -267,9 +271,9 @@ def test_event_first_capability_matches_bootstrap_and_sidebar_only_for_supabase(
 
     app, _chat = page_app
     token = app.capture_session_read()
-    assert api_chats._bridge_state_captured(app, token)['caps']['sse_refresh_v1'] is False
-    assert api_chats.state(app, Request())['caps']['sse_refresh_v1'] is False
-    # Capability wiring only: do not contact or claim to test a remote provider.
-    monkeypatch.setattr(type(app.mesh.tx), 'scheme', property(lambda _self: 'supabase'))
     assert api_chats._bridge_state_captured(app, token)['caps']['sse_refresh_v1'] is True
     assert api_chats.state(app, Request())['caps']['sse_refresh_v1'] is True
+    # Capability wiring only; the exact root is already an offline cloud.
+    monkeypatch.setattr(type(app.mesh.tx), 'scheme', property(lambda _self: 'folder'))
+    assert api_chats._bridge_state_captured(app, token)['caps']['sse_refresh_v1'] is False
+    assert api_chats.state(app, Request())['caps']['sse_refresh_v1'] is False

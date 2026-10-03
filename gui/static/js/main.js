@@ -7,8 +7,7 @@ import { configureDiagnostics, diagnostic } from "./diagnostics.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { App, Mesh, Settings, meshCaps, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
-         applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState, isInitialSelectedViewReady,
-         isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
+         applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { renderSidebar, clearSidebar, syncSidebarSelection, renderSideLoading } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
@@ -255,7 +254,6 @@ async function refreshOnce(rerender) {
   // window used to sit on the dropped boot cover forever, reading as a
   // sign-out. Kick a full chats render; its own fetch fills Mesh.state.
   else if (!Mesh.state && PAGES[App.page]) {
-    if (isInitialSelectedViewPending()) return;
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
   }
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
@@ -322,7 +320,6 @@ const PAGES = {
 function route() {
   ["#content", "#side-chats", "#details-pane"].forEach((id) => endLoading($(id)));
   sessionRoutePending = false;
-  cancelInitialSelectedView();
   App.routeSeq = (App.routeSeq || 0) + 1;
   const hash = location.hash.replace("#/", "");
   const [page0, sub, sub2] = hash.split("/");
@@ -528,7 +525,7 @@ function routeInitialLocation() {
       // cover onto a bare shell mid-boot read as "the app signed out".
       // V111: the lock page IS a real first view — fade onto it.
       // V125: so is the connecting page (blind restore in progress).
-      if (!Mesh.state && !signedInHome && !isInitialSelectedViewReady() && !isPagedChatViewReady()
+      if (!Mesh.state && !signedInHome && !isPagedChatViewReady()
           && !document.getElementById("lock")
           && !document.getElementById("connecting")
           && App.page === "chats" && Date.now() - t0 < 45000) {

@@ -71,8 +71,8 @@ round. Neither sealer is itself a membership gate.
 ## Remaining integration
 
 The key-wrap observation currently supports the exact `CachingTransport` owner
-with provider-observed provenance. Direct folder owner support and its coherent
-membership source remain required before transport-parity activation. An outer
+with provider-observed provenance. Production roots select Supabase; Folder
+parity is no longer an activation requirement. An outer
 operation must cap epochs, cumulative bytes, crypto work, progress/retry rounds
 and read-through work; repeated single-epoch calls are not a bounded operation.
 Page inputs, membership suffix, all overlay proofs, current account/pin/lifecycle

@@ -7,16 +7,15 @@ import pytest
 from agentbridge.applink.update import UpdateService
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {
         "aryan": seed_account(tx, "aryan"),
         "fable": seed_account(tx, "fable"),
@@ -27,7 +26,7 @@ def world(tmp_path):
     def mk(user, machine, **kw):
         home = tmp_path / f"home-{user}-{machine}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, machine, home=home, **kw)
+        return Mesh(clouds.bare(root), user, machine, home=home, **kw)
 
     yield mk
     # meshes are closed by each test
@@ -259,9 +258,9 @@ def test_update_apply_requires_confirm_and_verifies_digest(world):
 
 # ------------------------------------------------------------- setup-assist
 
-def test_setup_assist_unsigned_permission_fails_closed(world, tmp_path):
+def test_setup_assist_unsigned_permission_fails_closed(clouds, world, tmp_path):
     # grant claude the setup_assist capability (owner-set)
-    tx = FolderTransport(tmp_path / "mesh2")
+    tx = clouds.bare(tmp_path / "mesh2")
     doc = tx.get_doc(P.user("claude"))
     doc["agent_rules"] = {"setup_assist": True}
     tx.put_doc(P.user("claude"), doc)

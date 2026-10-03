@@ -365,11 +365,13 @@ class Diagnostics:
                          or event.get('status') in ('error', 'forbidden', 'locked', 'unavailable')
                          or event.get('outcome') in ('failed', 'aborted')
                          or event.get('event') == 'client_error')
-                slow = event.get('duration_ms', 0) >= self.slow_ms
+                slow = (event.get('duration_ms', 0) >= self.slow_ms
+                        or event.get('queue_wait_ms', 0) >= self.slow_ms)
                 breadcrumb = phase in ('origin_minted', 'local_commit', 'outbox_attempt',
                     'append_ack_observed', 'outbox_retry', 'outbox_dead', 'canonical_dom',
                     'native_ack', 'send_reconciled', 'abandoned', 'shutdown') or (
-                    phase == 'request_started' and event.get('route') == '/api/mesh/post')
+                    phase == 'request_started' and event.get('route') == '/api/mesh/post') or (
+                    event.get('event') == 'route' and event.get('outcome') in ('enabled', 'changed'))
                 ref = event.get('request_ref') or event.get('trace_ref')
                 if ref is None and event.get('request_seq') is not None:
                     ref = self.chat_ref(str(event['request_seq']))
@@ -462,8 +464,7 @@ class Diagnostics:
     def collect(self, events) -> tuple[int, int]:
         if type(events) is not list:
             return 0, 1
-        accepted = sum((self.record(event, client=True) if event.get('event') == 'route'
-                        else self.flight_record(event, client=True))
+        accepted = sum(self.flight_record(event, client=True)
                        for event in events[:MAX_CLIENT_EVENTS] if type(event) is dict)
         return accepted, len(events) - accepted
 

@@ -1,9 +1,9 @@
 # Phase 1: coherent local raw inputs
 
-Accepted product contract: folder and Supabase are eventual delivery transports.
+Accepted product contract: Supabase is the only production delivery transport.
 Paging evaluates the latest successfully ingested local SQLite input snapshot.
-External folder changes become effective after ingestion, rather than the next
-direct file read. Private folder transport remains a supported capability.
+Remote changes become effective after ingestion. Configured filesystem roots
+are rejected; local SQLite and snapshots remain cache infrastructure.
 
 Membership, history-on-join, trust, keys, lifecycle, redactions, overlays and
 visibility are evaluated from captured raw inputs on every request. Never store
@@ -20,7 +20,7 @@ can complete the intent, but cannot itself make the source ready: a new complete
 raw publication and admission are still required. A failed republish or crash
 must not restore the previous ready generation.
 
-The opt-in `store.local_source` owner installs a separate raw admission namespace,
+The `store.local_source` owner installs a separate raw admission namespace,
 uses FULL-synchronous write transactions, and binds readiness to both owner
 revision/epoch and exact current raw document
 position. It does not install transport hooks, supply scope-completeness evidence,
@@ -72,13 +72,14 @@ and bounded failure categories. Keep provider exception details and credentials
 out of UI health data. A timestamp reports observation history; it does not imply
 a hard remote-staleness bound or permission to retain a page indefinitely.
 
-## Remaining activation work
+## Current GUI integration
 
-The opt-in endpoint, bounded pins/receipts, raw presence companion and opaque
-continuations are implemented as an additive path. The live browser route still
-uses its existing transcript renderer. Activation requires upward paging,
-scroll anchoring, bounded DOM/resource retention and route/session behavior,
-followed by deterministic, browser and provider-equivalence validation.
+The production GUI requires the local canonical page endpoint, bounded
+pins/receipts, raw presence companion and opaque continuations. The browser
+uses upward paging, scroll anchoring and bounded retained data/DOM. Session
+bindings and paging capabilities are mandatory; cold or failed inputs cannot
+select a full-history HTTP fallback. Actual-instance and native acceptance
+remain separate from deterministic fixtures.
 The background last-admitted availability contract is approved. Ambiguous-write
 recovery remains separate and must not infer
 quiescence from elapsed time. No foreground full-fold fallback is permitted.
@@ -90,10 +91,10 @@ ordering, not completeness. It remains separate from Phase 1 local paging.
 
 Immutable manifests/coherent source generations remain future architecture for
 multi-mirror replication, atomic multi-document publication, backup/restore and
-stronger snapshot guarantees. They are not a prerequisite for private-folder
-paging under the accepted local snapshot contract.
+stronger snapshot guarantees. They are not prerequisites for the accepted local
+Supabase input-snapshot contract.
 
-## Cross-process local coordination (opt-in implementation)
+## Cross-process local coordination
 
 GUI and harness Stores are keyed by user and machine, so one writer's Store is
 not the only local reader. `store.mutation_coordinator` registers their exact
@@ -123,14 +124,14 @@ proof are required; elapsed time, PID death, an available lock, or a later retry
 alone do not establish remote quiescence. Until proven, affected paging stays
 pending and health reporting must explain the unresolved local mutation.
 
-The opt-in path now composes the transport interceptor, source collection and
+The local-input path composes the transport interceptor, source collection and
 publication owner, reader gates and scheduler loop. In particular,
 raw serialization/verification runs outside the root publication gate; the final
 bounded admission checks inside it retain the original scan's Store/owner CAS.
 
 ### Current implementation boundary
 
-The opt-in `transport.local_mutations` wrapper mediates document, effect,
+The `transport.local_mutations` wrapper mediates document, effect,
 log, chat and arbitrary blob writes. Blob APIs can overwrite document/log paths,
 so they cannot bypass retirement merely because ordinary attachments are not
 canonical inputs. Reviewed read, status, wake and optional close behavior is
@@ -142,9 +143,8 @@ Production composition must use `owned_transport`, which derives the coordinator
 root from the built-in driver before writable references escape. The explicit
 constructor remains a trusted testing seam. Provider identities exclude member
 credentials, normalize origin spelling, and reject credential-bearing/non-origin
-URLs. A folder uses its resolved normalized configured path; callers must use one
-canonical spelling on case-insensitive POSIX volumes until a filesystem-identity
-binding is added. Unknown drivers need an explicit identity contract.
+URLs. Supported production ownership is bound to the exact Supabase provider
+and configured root; unsupported drivers are rejected.
 
 The legacy whole-batch `store.source_publication.SourcePublisher` registers and captures the source
 before collection, retires its exact original revision under the root gate,
@@ -155,17 +155,16 @@ document paths; the collector is responsible for completeness, not the DTO.
 The staged runtime uses only its capture step, then atomically admits an invisible
 candidate as described in [Local raw-input staging](LOCAL_INPUT_STAGING.md).
 
-The opt-in `transport.raw_documents` collector distinguishes exact absence from
-malformed/unreadable folder input, bounds traversal and reads before JSON parsing,
-and refuses symlinks in the selected tree rather than claiming a complete scan.
-Its cache path requires provider-observed owned inputs, captures bounded references
+The `transport.raw_documents` collector accepts only the exact built-in
+`CachingTransport` over exact `SupabaseTransport`. It requires provider-observed
+owned inputs, captures bounded references
 under the mirror lock and copies with byte/structure budgets outside it. This
 captures raw document scope only; ordinary verified log ingestion remains separate.
 It does not establish an atomic multi-file remote cut or continuing authority.
 
 The bounded `mesh.source_schedule` policy implements selected/background cadence,
-coalescing, rotating discovery admission and idle/failure backoff. The opt-in Mesh
-worker composes it with local-input collection and bounded proof preparation;
-`GuiApp(local_inputs=True)` exposes the additive page route. The default GUI
-remains unchanged, and scheduling hints do not grant membership. Browser
-activation, ambiguous-write recovery and remote completeness remain separate.
+coalescing, rotating discovery admission and idle/failure backoff. The Mesh
+worker composes it with local-input collection and bounded proof preparation.
+`GuiApp` requires `local_inputs=True` and exposes the canonical page route.
+Scheduling hints do not grant membership. Ambiguous-write recovery and remote
+completeness remain separate.

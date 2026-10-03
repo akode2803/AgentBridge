@@ -18,7 +18,6 @@ from agentbridge.mesh.lifecycle import publish_change
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import lifecycle_heads, lifecycle_inputs
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 
 
 SUBJECT = "claude"
@@ -238,9 +237,9 @@ def _captured(mesh, names):
     return CapturedLifecycleInputs(2**63 - 1, tuple(accounts), tuple(subjects))
 
 
-def test_nested_active_human_proposal_is_next_while_public_tuple_stays_sorted(tmp_path):
+def test_nested_active_human_proposal_is_next_while_public_tuple_stays_sorted(clouds, tmp_path):
     mesh = Mesh(
-        FolderTransport(tmp_path / "mesh"), "zara", "workstation",
+        clouds.bare(tmp_path / "mesh"), "zara", "workstation",
         home=tmp_path / "home",
     )
     try:
@@ -288,9 +287,9 @@ def test_nested_active_human_proposal_is_next_while_public_tuple_stays_sorted(tm
         mesh.close()
 
 
-def test_work_returns_inner_proposal_before_later_outer_dependency_failure(tmp_path):
+def test_work_returns_inner_proposal_before_later_outer_dependency_failure(clouds, tmp_path):
     mesh = Mesh(
-        FolderTransport(tmp_path / "mesh-later-failure"),
+        clouds.bare(tmp_path / "mesh-later-failure"),
         "zara", "workstation", home=tmp_path / "home-later-failure",
     )
     try:

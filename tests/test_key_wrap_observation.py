@@ -8,9 +8,8 @@ import pytest
 
 from agentbridge.transport import cache as cache_module
 from agentbridge.transport.authority_observation import AuthorityObservationUnavailable
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.key_observation import (
     capture_key_wrap,
     locked_matching_key_wrap,
@@ -26,7 +25,7 @@ PATH = f"chats/{CHAT}/keys/{EPOCH}.json"
 VALID = {"eph": "e", "nonce": "n", "ct": "c"}
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     scheme = "key-observation-fake"
     profile = TransportProfile(supports_doc_delta=True)
 
@@ -175,9 +174,9 @@ def test_lookup_modes_change_independently_at_the_same_mirror_revision():
     assert matches_key_wrap(mirror, offline)
 
 
-def test_only_provider_observed_caching_transport_is_eligible(tmp_path):
+def test_only_provider_observed_caching_transport_is_eligible(tmp_path, clouds):
     with pytest.raises(AuthorityObservationUnavailable, match="unsupported"):
-        capture_key_wrap(FolderTransport(tmp_path / "bare"), CHAT, EPOCH, VIEWER)
+        capture_key_wrap(clouds.bare(tmp_path / "bare"), CHAT, EPOCH, VIEWER)
 
     provider = FakeProvider({PATH: {"wrapped": {VIEWER: VALID}}})
     cold = CachingTransport(provider, auto_refresh=False)

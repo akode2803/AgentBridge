@@ -16,17 +16,16 @@ from agentbridge.mesh.events import signing_bytes
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.pins import KeyPinStore, rekey_signing_bytes
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(clouds, tmp_path):
     """aryan / fable on their OWN homes (own keystores + own pin files) —
-    the stand-in for two machines syncing one shared folder."""
-    root = tmp_path / "mesh2"
+    the stand-in for two machines syncing one shared provider."""
+    root = clouds.root(tmp_path / "mesh2")
 
     def mk(user):
-        return Mesh(FolderTransport(root), user, "m1", encrypt=True,
+        return Mesh(clouds.bare(root), user, "m1", encrypt=True,
                     home=tmp_path / f"home-{user}")
 
     for u in ("aryan", "fable"):
@@ -164,7 +163,7 @@ def test_ack_clears_alert_keeps_pin(tmp_path):
 # ============================== mesh integration ============================
 
 def test_overwritten_keys_are_neutralized(world):
-    """A folder writer replaces fable's published keys with their own pair.
+    """A provider writer replaces fable's published keys with their own pair.
     For aryan (who already knows fable) nothing changes: the pinned keys keep
     verifying fable's real messages, the attacker's signed-as-fable info event
     never folds, and an alert surfaces."""
@@ -304,5 +303,5 @@ def test_mark_verified_round_trip(world):
     aryan.mark_key_verified("fable")
     assert aryan.key_fingerprint("fable")["verified"] != ""
     # a fresh store over the same file keeps it (machine-local, durable)
-    fresh = KeyPinStore(aryan.home, str(aryan.tx.root))
+    fresh = KeyPinStore(aryan.home, str(aryan.tx.cache_key))
     assert fresh.verified("fable") != ""

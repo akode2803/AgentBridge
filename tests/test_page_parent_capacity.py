@@ -8,19 +8,23 @@ from agentbridge.gui.context import GuiApp
 from agentbridge.gui.routing import Request
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.service import Mesh
+from conftest import refresh_cloud
 
 
-def test_full_raw_window_plus_outside_reply_and_pin_uses_bounded_targets(tmp_path, monkeypatch):
-    # The actual folder provider and mutation owner are used; background work
+def test_full_raw_window_plus_outside_reply_and_pin_uses_bounded_targets(tmp_path, monkeypatch, clouds):
+    # The actual cloud provider and mutation owner are used; background work
     # is driven explicitly so the target-cap regression is deterministic.
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kw: None)
-    app = GuiApp(tmp_path / 'provider', home=tmp_path / 'home', machine='capacity',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'provider'), home=tmp_path / 'home', machine='capacity',
                  encrypt=False, local_inputs=True)
     try:
         assert app.signup('viewer', '', 'fixture-pass')['ok']
+        refresh_cloud(app)
         chat = api_chats.create_chat(app, Request(data={
             'name': 'Large target window', 'members': [],
         }))['chat']['id']
+        refresh_cloud(app)
         anchor = app.mesh.post(chat, 'seed')
         app.mesh.outbox.flush_once()
         rows = []
@@ -36,6 +40,7 @@ def test_full_raw_window_plus_outside_reply_and_pin_uses_bounded_targets(tmp_pat
             })
         app.mesh.store.upsert_messages(chat, rows)
         app.mesh.pin(chat, 'row-000')
+        refresh_cloud(app)
         seen = []
         original = LocalPageSource.capture_page
 

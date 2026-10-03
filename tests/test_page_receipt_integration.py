@@ -12,12 +12,12 @@ from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sealer import E2EESealer
 from agentbridge.store import lifecycle_inputs, local_source
-from agentbridge.transport.folder import FolderTransport
+from fake_cloud import refresh_transport
 
 
 @pytest.fixture(params=[False, True], ids=['plain', 'encrypted'])
-def world(tmp_path, request):
-    provider = FolderTransport(tmp_path / 'provider')
+def world(tmp_path, request, clouds):
+    provider = clouds.cached(tmp_path / 'provider')
     mesh = Mesh(provider, 'aryan', 'receipt-box', encrypt=request.param,
                 home=tmp_path / 'home', local_inputs=True)
     try:
@@ -43,6 +43,7 @@ def _presence_runtime(mesh):
 
 
 def _ingest(mesh, chat, *, presence=True):
+    refresh_transport(mesh.tx)
     mesh.local_inputs.ingest(chat)
     mesh.store.refresh_terminal_observation(
         f'{chat}|{P.log_name(mesh.messaging.user, mesh.messaging.machine)}')

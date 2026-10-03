@@ -7,8 +7,7 @@ and selected-view generation. Forced selected renders advance that generation;
 ordinary safety polls do not.
 
 A global state request captures `captureMeshStateRead` immediately before its
-transport starts, including inside the navigation coordinator's callback. The
-warm variant adds eligibility to seed the bounded legacy presentation context.
+transport starts, including inside the navigation coordinator's callback.
 `applyMeshState(session, response, request)` requires the request argument and
 checks the complete owner before modifying state, generation, or accepted-state
 events. Session-only admission is no longer supported.

@@ -897,13 +897,13 @@ class CliResponder:
     # ------------------------------------------------------------ plumbing
     def _deny_roots(self) -> list[Path]:
         """Paths no run may touch even with an owner's click: the harness
-        home (keystore, caches, config) and the shared mesh folder — the
-        workspace subtree is exempted by the broker's first rule. A cloud
-        transport's root is a name, not a directory — nothing local to deny."""
+        home (keystore, caches, config) and any provider filesystem root.
+        The workspace subtree is exempted by the broker's first rule.
+        Supabase root names do not name local directories."""
         roots = [self.home]
-        mesh_root = getattr(self.mesh.tx, "root", None)
-        if mesh_root and Path(str(mesh_root)).is_dir():
-            roots.append(Path(mesh_root))
+        mesh_root = self.mesh.tx.local_path("")
+        if isinstance(mesh_root, Path):
+            roots.append(mesh_root)
         return roots
 
     def _category(self, delivery: Delivery, acc) -> str:

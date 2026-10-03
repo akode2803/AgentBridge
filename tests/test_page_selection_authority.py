@@ -13,16 +13,16 @@ from agentbridge.mesh.page_selection import select_message_page
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.readmodel import build_messages, transcript_visible
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
+from fake_cloud import refresh_transport
 
 
 @pytest.fixture
-def encrypted_world(tmp_path):
+def encrypted_world(tmp_path, clouds):
     root = tmp_path / "mesh"
 
     def opened(user, home=None):
         return Mesh(
-            FolderTransport(root), user, "m1", encrypt=True,
+            clouds.cached(root), user, "m1", encrypt=True,
             home=home or tmp_path / f"home-{user}",
         )
 
@@ -38,6 +38,7 @@ def encrypted_world(tmp_path):
     def ripple(sender, *receivers):
         sender.outbox.flush_once()
         for mesh in (sender, *receivers):
+            refresh_transport(mesh.tx)
             mesh.sync.sync_once([chat.id])
 
     ripple(aryan, fable, helper)
@@ -66,6 +67,7 @@ def encrypted_world(tmp_path):
 
 
 def _fold_inputs(mesh, chat_id, **overrides):
+    refresh_transport(mesh.tx)
     snapshot = mesh._require_member(chat_id)
     overlays = ChatOverlays(mesh.tx, chat_id)
     values = {
@@ -130,11 +132,13 @@ def test_authorized_forged_owner_and_void_overlays_match_full_fold(encrypted_wor
     )
     assert _message(_assert_page_matches_full(world), agent.id).body == "agent original"
 
+    refresh_transport(aryan.tx)
     aryan.edit(chat.id, agent.id, "owner edit")
     assert _message(_assert_page_matches_full(world), agent.id).body == "owner edit"
 
     aryan.redact(chat.id, [agent.id])
     assert _message(_assert_page_matches_full(world), agent.id).deleted is True
+    refresh_transport(fable.tx)
     valid_redaction = aryan.tx.get_doc(P.redaction(chat.id, agent.id))
 
     forged = dict(valid_redaction)
@@ -148,6 +152,7 @@ def test_authorized_forged_owner_and_void_overlays_match_full_fold(encrypted_wor
     assert _message(_assert_page_matches_full(world), agent.id).deleted is True
 
     fable.tx.put_doc(P.redaction(chat.id, agent.id), valid_redaction)
+    refresh_transport(aryan.tx)
     aryan.unredact(chat.id, agent.id)
     restored = _message(_assert_page_matches_full(world), agent.id)
     assert not restored.deleted and restored.body == "owner edit"

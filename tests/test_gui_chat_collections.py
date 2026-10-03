@@ -5,19 +5,22 @@ import json
 
 import pytest
 
+from agentbridge.core.models import BodyRecord, Envelope, MsgKind
 from agentbridge.gui import api_collections
 from agentbridge.gui import api_chats
 from agentbridge.gui.context import GuiApp
 from agentbridge.gui.routing import Request
 from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
+from agentbridge.gui.serialize import chat_json
 
 from test_gui_chat_pages import _ready, page_app as _shared_page_app
+from conftest import refresh_cloud
 
 
 @pytest.fixture(name='page_app')
-def _page_fixture(tmp_path, monkeypatch):
-    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch)
+def _page_fixture(tmp_path, monkeypatch, clouds):
+    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch, clouds)
 
 
 def _call(app, chat, kind=None, **params):
@@ -69,7 +72,7 @@ def test_summary_stays_ready_when_latest_raw_row_is_hidden(page_app, monkeypatch
     assert examined == [(1, ())]
 
 
-def test_summary_roster_matches_legacy_after_membership_and_role_changes(page_app):
+def test_summary_roster_matches_canonical_projection_after_membership_and_role_changes(page_app):
     app, chat = page_app
     mesh = app.mesh
     for name in ('zulu', 'alpha'):
@@ -81,21 +84,21 @@ def test_summary_roster_matches_legacy_after_membership_and_role_changes(page_ap
 
     def assert_roster(expected_members, expected_admins):
         _ready(app, chat)
-        legacy = api_chats.chat(app, Request(params={'id': chat}))['meta']
+        canonical = chat_json(mesh.conversation_projection(chat).snapshot, full=True)
         result = _call(app, chat)
         assert result['status'] == 'ready', result
         meta = result['meta']
-        assert legacy['members'] == expected_members
+        assert canonical['members'] == expected_members
         assert meta['members'] == sorted(expected_members)
-        assert set(meta['members']) == set(legacy['members'])
-        assert set(meta['admins']) == set(legacy['admins']) == set(expected_admins)
-        assert meta['roles'] == legacy['roles'] == {
+        assert set(meta['members']) == set(canonical['members'])
+        assert set(meta['admins']) == set(canonical['admins']) == set(expected_admins)
+        assert meta['roles'] == canonical['roles'] == {
             name: 'admin' if name in expected_admins else 'member'
             for name in expected_members
         }
-        assert meta['permissions'] == legacy['permissions']
+        assert meta['permissions'] == canonical['permissions']
         # The v2 model has multiple admins; neither read invents a sole owner.
-        assert 'owner' not in meta and 'owner' not in legacy
+        assert 'owner' not in meta and 'owner' not in canonical
         assert result['chat_id'] == meta['id'] == chat
         assert 'messages' not in result
 
@@ -146,7 +149,7 @@ def test_summary_foreground_uses_no_provider_or_full_history_reads(page_app, mon
     assert 'private-message-body-' not in json.dumps(result)
 
 
-def test_summary_rejects_removed_viewer_without_roster_payload(page_app):
+def test_summary_rejects_removed_viewer_without_roster_payload(page_app, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
@@ -154,7 +157,7 @@ def test_summary_rejects_removed_viewer_without_roster_payload(page_app):
     owner.membership.grant_admin(chat, 'peer')
     _ready(app, chat)
     assert _call(app, chat)['status'] == 'ready'
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-summary.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -379,7 +382,7 @@ def test_redaction_between_pages_resets_cursor(page_app):
     assert _call(app, chat, 'links')['items'] == []
 
 
-def test_membership_removal_forbids_further_page(page_app):
+def test_membership_removal_forbids_further_page(page_app, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
@@ -388,7 +391,7 @@ def test_membership_removal_forbids_further_page(page_app):
     owner.post(chat, ' '.join(['https://example.test/x'] * 55))
     _ready(app, chat)
     token = _call(app, chat, 'links')['continuation']
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-collection.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -401,10 +404,11 @@ def test_membership_removal_forbids_further_page(page_app):
         peer.close()
 
 
-def test_equal_ns_different_senders_keep_composite_order(tmp_path, monkeypatch):
+def test_equal_ns_different_senders_keep_composite_order(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kw: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kw: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='fixture',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='fixture',
                  encrypt=False, local_inputs=True)
     try:
         assert app.signup('viewer', '', 'secret')['ok']
@@ -413,11 +417,17 @@ def test_equal_ns_different_senders_keep_composite_order(tmp_path, monkeypatch):
                                                         'members': ['peer']}))['chat']['id']
         _ready(app, chat)
         base = max(row['ns'] for row in app.mesh.store.messages(chat)) + 100
-        app.mesh.store.upsert_messages(chat, [
-            {'id': f'tie-{sender}', 'ns': base, 'ts': '2026-09-30T00:00:00Z',
-             'from': sender, 'kind': 'message', 'epoch': 0, 'nonce': '',
-             'ct': json.dumps({'body': f'https://example.test/{sender}'}), 'sig': ''}
-            for sender in ('peer', 'viewer')])
+        for sender in ('peer', 'viewer'):
+            ident = f'tie-{sender}'
+            app.mesh.tx.append_log(chat, sender, Envelope(
+                id=ident, ns=base, ts='2026-09-30T00:00:00Z', from_=sender,
+                kind=MsgKind.MESSAGE,
+                **app.mesh.sealer.seal(chat, ident, base,
+                    BodyRecord(body=f'https://example.test/{sender}')),
+            ).to_dict())
+        refresh_cloud(app)
+        app.mesh.sync.sync_once([chat])
+        _ready(app, chat)
         monkeypatch.setattr(api_collections, 'MAX_RAW_SCAN', 1)
         first = _call(app, chat, 'links')
         assert first['status'] == 'page', first

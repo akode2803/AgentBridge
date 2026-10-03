@@ -4,6 +4,41 @@ The design record and the runbook. Read this before touching the Supabase
 policies or the transport's auth path. Companion: `docs/supabase_schema.sql`
 §R84 (the SQL) and `THREAT_MODEL.md`.
 
+## Current deployment contract (2026-10-03)
+
+Production configuration accepts only `supabase://<label>`; the label identifies
+one mesh root and contains no provider URL or credentials. The GUI requires
+bound v2 sessions and local canonical paging. Folder roots and full-history GUI
+HTTP compatibility routes are retired; local SQLite, snapshots, outboxes and
+attachment downloads remain independent local storage.
+
+The checked-in transport consumes these project resources:
+
+- `public.ab_docs`, including `seq` and `deleted` for document deltas;
+  `public.ab_logs`; and `public.ab_members` for member/root identity.
+- `ab_chat_ids(p_root)` and `ab_list_logs(p_root, p_chat)` RPCs.
+- `ab_effects_ready()` returning `1` and
+  `ab_effect_transition(p_root, p_path, p_data, p_grant_ask, p_grant_decision)`
+  for the member-authenticated effect path. Missing protocol or service auth
+  disables that path; it is not replaced by ordinary document writes.
+- Storage bucket `ab-mesh` with object keys `<root>/<path>` and the matching
+  policies in `supabase_schema.sql`. The driver attempts bucket creation, but
+  suppresses that setup error; the attempt does not prove that storage exists
+  or that the member can upload/read it.
+- Realtime Broadcast channel `ab-<root>`, event `change`, used as a content-free
+  wake hint. Its failure degrades to polling; it is not durable replay or access
+  authority.
+
+Use the complete checked-in `supabase_schema.sql` for its tables, functions,
+triggers and policies; the older verification records below are historical,
+not evidence that a new project has those resources deployed. Credentials load
+from `supabase.env` or process environment. The driver prefers a complete member
+credential, but still has service-key compatibility and sign-in-failure fallback
+when a secret key is configured. Member authorization acceptance must verify
+actual member mode and policies, rather than infer RLS from an offline fake or a
+successful privileged call. Native and real-instance acceptance remain pending
+for the current removal work.
+
 ## 1. Why
 
 The original Supabase setup enabled RLS with **zero policies**, and every

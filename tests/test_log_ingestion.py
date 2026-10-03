@@ -14,7 +14,6 @@ import pytest
 from agentbridge.mesh.sync import CURSOR_DOC, SyncEngine
 from agentbridge.store.db import LogIngestionConflict, Store
 from agentbridge.transport.base import Transport
-from agentbridge.transport.folder import FolderTransport
 
 
 def _record(message_id: str, ns: int, sender: str = "ann") -> dict:
@@ -254,8 +253,8 @@ def test_ingest_log_nested_begin_does_not_rollback_callers_transaction(store):
     assert store.message_count("chat") == 0
 
 
-def test_sync_filtered_folder_batch_still_advances_offset(tmp_path, monkeypatch):
-    tx = FolderTransport(tmp_path / "mesh")
+def test_sync_filtered_cloud_batch_still_advances_offset(clouds, tmp_path, monkeypatch):
+    tx = clouds.bare(tmp_path / "mesh")
     tx.append_log("chat", "ann@box", _record("spoofed", 1, sender="eve"))
     store = Store(tmp_path / "cache.sqlite")
     calls = 0
@@ -280,10 +279,10 @@ def test_sync_filtered_folder_batch_still_advances_offset(tmp_path, monkeypatch)
         store.close()
 
 
-def test_sync_callbacks_and_telemetry_observe_committed_folder_ingest(
+def test_sync_callbacks_and_telemetry_observe_committed_cloud_ingest(clouds,
     tmp_path, monkeypatch,
 ):
-    tx = FolderTransport(tmp_path / "mesh")
+    tx = clouds.bare(tmp_path / "mesh")
     tx.append_log("chat", "ann@box", _record("m1", 1))
     path = tmp_path / "cache.sqlite"
     store = Store(path)

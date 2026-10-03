@@ -7,7 +7,6 @@ import pytest
 
 from agentbridge.transport import mirror_observation as observation
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.mirror_observation import (
     MirrorCaptureUnavailable, MirrorSelection, MirrorSelectionRequest,
 )
@@ -130,7 +129,8 @@ def test_request_and_position_are_detached_before_mutex(selected_cache, monkeypa
     assert result.position.revision + 1 == query.expected.revision
 
 
-def test_unsupported_cold_and_warm_selection_do_not_read_provider(tmp_path, selected_cache):
+def test_unsupported_cold_and_warm_selection_do_not_read_provider(
+        tmp_path, selected_cache, clouds):
     provider, cache = selected_cache
     calls = provider.calls
     assert type(cache.capture_mirror_selection(request())) is MirrorSelection
@@ -141,7 +141,7 @@ def test_unsupported_cold_and_warm_selection_do_not_read_provider(tmp_path, sele
         assert cold.capture_mirror_selection(request()).reason == "cold"
         assert cold_provider.calls == 0
         assert provider.capture_mirror_selection(request()).reason == "unsupported"
-        assert FolderTransport(tmp_path).capture_mirror_selection(request()).reason == "unsupported"
+        assert clouds.bare(tmp_path).capture_mirror_selection(request()).reason == "unsupported"
     finally:
         cold.close()
 

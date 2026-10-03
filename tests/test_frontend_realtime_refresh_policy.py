@@ -58,7 +58,14 @@ const isV2=()=>true,meshCaps=()=>caps,captureSessionEpoch=()=>({epoch});
 const sessionMayApply=t=>t.epoch===epoch;
 const meshStateSnapshot=()=>({locked,lockEpoch});
 let activity=0,broad=0,scoped=[],notifications=[];
-const api=async()=>{activity++;return {}},diagnostic=()=>{};
+const diagnostics=[];
+let diagnosticsEnabled=true,diagnosticEpoch={};
+const captureDiagnosticObservation=()=>diagnosticsEnabled?diagnosticEpoch:null;
+const diagnosticObservationMayApply=token=>diagnosticsEnabled&&token!==null&&token===diagnosticEpoch;
+const api=async()=>{activity++;return {}},diagnostic=(event,fields)=>{
+ if(diagnosticsEnabled)diagnostics.push({event,...fields});
+};
+const receivedDelivery=()=>{};
 const handleNotifyFrame=frame=>notifications.push(frame);
 const requestAnimationFrame=fn=>fn();
 const V={refresh:async()=>{broad++},refreshRealtime:async frames=>{scoped.push(frames)}};
@@ -203,4 +210,102 @@ assert.equal(locked,false);
 lockEpoch++;document.dispatchEvent(new CustomEvent('ab:lock-epoch'));
 assert.equal(src.closed,true);assert.equal(realtimeActive(),false);
 locked=true;src.onopen();assert.equal(realtimeActive(),false);
+''')
+
+
+@pytest.mark.parametrize('scoped', [False, True])
+@pytest.mark.parametrize('failure', ['throw', 'reject'])
+def test_refresh_failure_settles_content_free_batch_and_later_frames_progress(tmp_path, scoped, failure):
+    script = _JS_ENV + _realtime_source() + r'''
+caps.sse_refresh_v1=__SCOPED__;
+startRealtime();const src=EventSource.instances[0];src.onopen();await tick(0);
+let calls=0;
+const attempt=frames=>{
+ calls++;
+ if(calls===1){
+  now+=37;
+  const error=Object.assign(new Error('PRIVATE_ERROR'),{frame:frames,stack:'PRIVATE_STACK'});
+  if('__FAILURE__'==='throw')throw error;
+  return Promise.reject(error);
+ }
+ return Promise.resolve();
+};
+if(caps.sse_refresh_v1)V.refreshRealtime=attempt;else V.refresh=attempt;
+diagnostics.length=0;
+for(const id of ['PRIVATE_ONE','PRIVATE_TWO']) {
+ src.onmessage({data:JSON.stringify({type:'message',id,chat_id:'PRIVATE_CHAT',
+  diagnostic_ref:'a'.repeat(16),body:'PRIVATE_BODY'})});
+}
+now+=23;await tick(0);
+assert.equal(calls,1,'coalesced batch gets one attempt');
+const started=diagnostics.filter(e=>e.phase==='refresh_started');
+const finished=diagnostics.filter(e=>e.phase==='refresh_finished');
+assert.equal(started.length,1);assert.equal(started[0].queue_wait_ms,23);
+assert.deepEqual(finished,[{event:'delivery',phase:'refresh_finished',status:'error',outcome:'failed',duration_ms:37}]);
+assert.equal(diagnostics.filter(e=>e.event==='realtime'&&e.outcome==='completed').length,0);
+assert.equal(realtimeMetrics().observations.filter(e=>e.stage==='refetch_completed').length,0);
+assert.ok(!('trace_ref' in started[0])&&!('trace_ref' in finished[0]),'batch has no single message attribution');
+assert.doesNotMatch(JSON.stringify(diagnostics),/PRIVATE_/);
+src.onmessage({data:JSON.stringify({type:'message',id:'later'})});await tick(0);
+assert.equal(calls,2,'settled failure permits later frames');
+assert.equal(diagnostics.filter(e=>e.phase==='refresh_finished'&&e.outcome==='completed').length,1);
+stopRealtime();
+'''
+    _run(tmp_path, script.replace('__SCOPED__', json.dumps(scoped)).replace('__FAILURE__', failure))
+
+
+@pytest.mark.parametrize('edge', ['off_on', 'disabled_start', 'session_reset', 'lock_epoch', 'stream_owner', 'navigation'])
+def test_refresh_late_success_and_failure_observations_are_fenced(tmp_path, edge):
+    script = _JS_ENV + _realtime_source() + r'''
+for(const fail of [false,true]) {
+ diagnosticsEnabled=true;diagnosticEpoch={};locked=false;
+ startRealtime();let src=EventSource.instances.at(-1);src.onopen();await tick(0);
+ let settle;
+ V.refreshRealtime=()=>new Promise((resolve,reject)=>{settle={resolve,reject}});
+ if('__EDGE__'==='disabled_start')diagnosticsEnabled=false;
+ diagnostics.length=0;
+ src.onmessage({data:JSON.stringify({type:'message',id:'old'})});await tick(0);
+ assert.equal(diagnostics.filter(e=>e.phase==='refresh_started').length,'__EDGE__'==='disabled_start'?0:1);
+ switch('__EDGE__') {
+  case 'off_on':diagnosticsEnabled=false;diagnosticEpoch={};diagnosticsEnabled=true;break;
+  case 'disabled_start':diagnosticsEnabled=true;diagnosticEpoch={};break;
+  case 'session_reset':epoch++;document.dispatchEvent(new CustomEvent('ab:session-reset'));diagnosticEpoch={};break;
+  case 'lock_epoch':lockEpoch++;document.dispatchEvent(new CustomEvent('ab:lock-epoch'));diagnosticEpoch={};break;
+  case 'stream_owner':stopRealtime();startRealtime();break;
+  case 'navigation':diagnosticEpoch={};break;
+ }
+ now+=91;
+ if(fail)settle.reject(new Error('PRIVATE_OLD_ERROR'));else settle.resolve();
+ await flush();
+ assert.equal(diagnostics.filter(e=>e.phase==='refresh_finished').length,0,'__EDGE__'+': old settlement fenced');
+ assert.equal(diagnostics.filter(e=>e.event==='realtime'&&e.outcome==='completed').length,0);
+ assert.doesNotMatch(JSON.stringify(diagnostics),/PRIVATE_OLD_ERROR/);
+ // A fresh attempt still owns both observations after the boundary.
+ startRealtime();src=EventSource.instances.at(-1);src.onopen();await tick(0);
+ V.refreshRealtime=async()=>{};
+ diagnostics.length=0;
+ src.onmessage({data:JSON.stringify({type:'message',id:'new'})});await tick(0);
+ assert.equal(diagnostics.filter(e=>e.phase==='refresh_started').length,1);
+ assert.equal(diagnostics.filter(e=>e.phase==='refresh_finished'&&e.outcome==='completed').length,1);
+ stopRealtime();
+}
+'''
+    _run(tmp_path, script.replace('__EDGE__', edge))
+
+
+def test_old_scoped_completion_cannot_release_new_compatibility_flush(tmp_path):
+    _run(tmp_path, _JS_ENV + _realtime_source() + r'''
+startRealtime();const src=EventSource.instances[0];src.onopen();await tick(0);
+let releaseScoped,releaseBroad;
+V.refreshRealtime=()=>new Promise(resolve=>{releaseScoped=resolve});
+src.onmessage({data:JSON.stringify({type:'message',id:'scoped'})});await tick(0);
+caps.sse_refresh_v1=false;let broadAttempts=0;
+V.refresh=()=>{broadAttempts++;return new Promise(resolve=>{releaseBroad=resolve})};
+src.onmessage({data:JSON.stringify({type:'message',id:'compatibility'})});await tick(0);
+src.onmessage({data:JSON.stringify({type:'message',id:'later'})});
+releaseScoped();await flush();
+assert.ok(![...timers.values()].some(t=>t.ms===0),'older scoped settlement preserves busy compatibility owner');
+assert.equal(broadAttempts,1);
+releaseBroad();await flush();await tick(0);assert.equal(broadAttempts,2);
+releaseBroad();await flush();stopRealtime();
 ''')

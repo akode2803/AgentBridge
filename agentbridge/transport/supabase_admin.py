@@ -40,6 +40,8 @@ import secrets
 import sys
 from pathlib import Path
 
+from ..core.config import DEFAULT_HOME, load_app_config, validate_root_spec
+from ..core.errors import ConfigError
 from .supabase import ENV_FILE, load_supabase_env
 
 __all__ = ["main", "join_mesh"]
@@ -213,7 +215,7 @@ def revoke(env: dict[str, str], username: str, root: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agentbridge-supabase-admin")
-    ap.add_argument("--root", default="")
+    ap.add_argument("--root", default="", help="Supabase mesh root (supabase://NAME)")
     ap.add_argument("--home", default="")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="this machine joins the mesh as <username>")
@@ -228,16 +230,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     home = Path(args.home) if args.home else None
-    env = load_supabase_env(home)
-    root = args.root
-    if not root:
-        from ..core.config import load_app_config
-
-        spec = str(load_app_config(home).get("mesh_root") or "")
-        root = spec.split("://", 1)[1].strip("/ ") if "://" in spec else ""
-    if not root:
+    spec = args.root or load_app_config(home).get("mesh_root")
+    if not spec:
         ap.error("no --root given and none remembered in config.json")
-    from ..core.config import DEFAULT_HOME
+    try:
+        root = validate_root_spec(spec)[len("supabase://"):]
+    except ConfigError as exc:
+        ap.error(str(exc))
+    env = load_supabase_env(home)
 
     env_path = (home or DEFAULT_HOME) / ENV_FILE
     name = args.username.strip().lower()

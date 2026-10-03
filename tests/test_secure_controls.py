@@ -25,14 +25,13 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture
-def controls(tmp_path):
-    root = tmp_path / "mesh2"
-    root.mkdir()
+def controls(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "devbox", encrypt=True, home=home,
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home,
                  store_path=home / "helper-controls.sqlite")
     yield owner, agent
     agent.close()
@@ -267,9 +266,9 @@ def test_tampered_pause_and_wrong_path_are_inert(controls):
     ) is False
 
 
-def test_room_pause_requires_current_member(controls):
+def test_room_pause_requires_current_member(controls, clouds):
     owner, _ = controls
-    bob = Mesh(owner.tx.root, "bob", "otherbox", encrypt=True, home=owner.home,
+    bob = Mesh(clouds.bare(owner.tx.root), "bob", "otherbox", encrypt=True, home=owner.home,
                store_path=owner.home / "bob.sqlite")
     try:
         bob.accounts.create_human("bob", "bob-password")

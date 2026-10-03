@@ -142,6 +142,7 @@ def test_pin_source_change_after_prepare_rejects_finalizer(world):
                                  inputs, mesh)
     assert prepared.status == 'prepared', history
     mesh.messaging.unpin(chat, old)
+    provider.refresh()
     publisher.publish(publisher.capture(), raw_documents.collect_documents(provider, reader.definition),
                       observed_ns=time.time_ns())
     finalized = prepared.prepared.finalize()

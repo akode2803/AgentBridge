@@ -33,7 +33,7 @@ Canonical exceptions propagate unchanged.
 
 `MembershipAdmissionScope` is an explicit assertion by the owner that this exact
 mesh, cache, Store, and pin file use the cooperating protocols. It is not evidence
-that external writers comply. Folder transport, pre-R180 or unlocked pin writers,
+that external writers comply. Unsupported owners, pre-R180 or unlocked pin writers,
 arbitrary DDL, full database rollback to an old identical namespace, direct cache
 mutation, provider-only changes, and adversarial clock jumps are outside scope.
 

@@ -4,8 +4,8 @@ serving the last good snapshot instead of "missing" (stability).
 
 A CountingTransport (a real in-memory transport that tallies calls) proves
 the read collapse without any network; a Bulk variant adds ``get_docs`` to
-exercise the one-query snapshot path and its failure modes; the factory test
-proves the folder stays bare and a supabase root gets wrapped.
+exercise the one-query snapshot path and its failure modes. Factory tests
+require an explicit valid Supabase root and preserve Transport-instance injection.
 """
 
 from __future__ import annotations
@@ -18,7 +18,9 @@ import pytest
 
 from agentbridge.core.models import ChatKind, ChatSnapshot
 import agentbridge.transport.cache as cache_module
-from agentbridge.transport import CachingTransport, FolderTransport, make_transport
+from agentbridge.transport import CachingTransport, make_transport
+from agentbridge.core.errors import ConfigError
+from agentbridge.transport.supabase import SupabaseTransport
 from agentbridge.transport.base import Transport, Watcher
 from agentbridge.transport.mirror_observation import (
     MirrorCaptureUnavailable, MirrorObservation,
@@ -614,16 +616,61 @@ def test_change_feed_delegates_through_the_wrapper():
 
 # ------------------------------------------------------------------ factory
 
-def test_folder_root_is_not_wrapped(tmp_path):
-    tx = make_transport(tmp_path / "mesh2")
-    assert isinstance(tx, FolderTransport)   # local folder stays bare
+@pytest.mark.parametrize("spec", [
+    "", ".", "..", "mesh2", "folder://mesh2", "https://example.invalid/team",
+    "supabase://", "supabase://.", "supabase://..", "supabase://a/b",
+    "supabase://a\\b", "supabase://a b", "supabase://a\n",
+    "supabase://team?token=x", "supabase://team#fragment",
+    "supabase://user@team", "supabase://team:5432", "supabase://" + "x" * 1025,
+    "supabase://" + "é" * 513,
+])
+def test_factory_rejects_noncloud_or_invalid_roots_before_driver_io(spec, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid root reached provider construction")
+
+    monkeypatch.setattr(SupabaseTransport, "__init__", forbidden)
+    with pytest.raises(ConfigError):
+        make_transport(spec)
 
 
-def test_supabase_root_is_wrapped(tmp_path):
-    tx = make_transport("supabase://team", home=tmp_path)
-    assert isinstance(tx, CachingTransport)
-    assert tx.scheme == "supabase"
-    assert tx.root == "team"
+def test_factory_rejects_local_path_before_driver_io(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("local root reached provider construction")
+
+    monkeypatch.setattr(SupabaseTransport, "__init__", forbidden)
+    with pytest.raises(ConfigError):
+        make_transport(tmp_path / "mesh2")
+
+
+@pytest.mark.parametrize("root", ["team", "équipe", "x" * 1024, "é" * 512])
+def test_supabase_root_is_wrapped(tmp_path, monkeypatch, root):
+    from fake_cloud import FakeClient
+
+    original_init = SupabaseTransport.__init__
+    client = FakeClient()
+    received = []
+
+    def offline_init(self, selected_root, *, home=None):
+        received.append((selected_root, home))
+        original_init(self, selected_root, home=home,
+                      env={"SUPABASE_URL": "https://offline.invalid"}, client=client)
+        self._ensure_rt = lambda: None
+
+    monkeypatch.setattr(SupabaseTransport, "__init__", offline_init)
+    tx = make_transport("supabase://" + root, home=tmp_path)
+    try:
+        assert type(tx) is CachingTransport
+        assert type(tx.inner) is SupabaseTransport
+        assert tx.scheme == "supabase" and tx.root == root
+        assert tx.inner._client is client
+        assert received == [(root, tmp_path)]
+    finally:
+        tx.close()
+
+
+def test_factory_preserves_explicit_transport_instance():
+    tx = CountingTransport()
+    assert make_transport(tx) is tx
 
 
 # ------------------------------------------- R76 delta refresh + cadence
@@ -1011,7 +1058,7 @@ def _state_sweep(tx):
 
 def test_state_sweep_needs_zero_transport_reads_once_warm():
     """Same sweep, mirrored vs bare: warm mirror = the whole /api/mesh/state
-    metadata sweep touches the transport ZERO times — folder-grade latency on
+    metadata sweep touches the transport ZERO times on
     a cloud root, the whole point of this round."""
     bare = BulkTransport()
     _seed_directory(bare)
@@ -1027,3 +1074,28 @@ def test_state_sweep_needs_zero_transport_reads_once_warm():
     inner.reset_reads()
     _state_sweep(cached)
     assert sum(inner.reads.values()) == 0
+
+
+@pytest.mark.parametrize("label", ["x" * 1024, "é" * 512, '"' * 1024])
+def test_root_budget_fits_actual_local_input_composition(tmp_path, monkeypatch, label):
+    from fake_cloud import FakeClient
+    from agentbridge.mesh.service import Mesh
+    from agentbridge.transport.local_mutations import root_identity, LocalMutationTransport
+
+    original = SupabaseTransport.__init__
+    def initialize(self, root, *, home=None):
+        original(self, root, home=home, env={"SUPABASE_URL": "https://offline.invalid"},
+                 client=FakeClient())
+        self._ensure_rt = lambda: None
+    monkeypatch.setattr(SupabaseTransport, "__init__", initialize)
+    tx = make_transport("supabase://" + label, home=tmp_path)
+    try:
+        assert len(root_identity(tx).encode("utf-8")) <= 4096
+        mesh = Mesh(tx, "owner", "box", home=tmp_path, local_inputs=True)
+        try:
+            assert type(mesh.tx) is LocalMutationTransport
+            assert mesh.local_inputs is not None
+        finally:
+            mesh.close()
+    finally:
+        tx.close()

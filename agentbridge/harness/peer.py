@@ -1,8 +1,8 @@
 """Peer harness access (R22) — with its owner's grant, another agent may
 reach THIS agent's harness to diagnose it ("remote access, almost").
 
-Everything crosses the synced folder as SIGNED docs (Ed25519, the info-event
-model): a forged request — a folder writer impersonating another agent —
+Everything crosses the shared transport as SIGNED docs (Ed25519, the info-event
+model): a forged request — a transport writer impersonating another agent —
 fails verification and is dropped. One writer per doc:
 - ``peer/<target>/req/<requester>.json``   — the requester writes; the
   target lists the dir and reads them;

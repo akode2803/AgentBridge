@@ -86,7 +86,7 @@ def check_name(app: GuiApp, req) -> dict:
     lookup_complete = True
     lookup_state = "online"
     tx = app.transport
-    if not taken and getattr(tx, "scheme", "folder") != "folder":
+    if not taken:
         status_fn = getattr(tx, "mirror_status", None)
         try:
             status = status_fn() if callable(status_fn) else {}

@@ -22,15 +22,14 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture()
-def task_meshes(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def task_meshes(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home,
+    agent = Mesh(clouds.bare(root), "helper", "box", encrypt=True, home=home,
                  store_path=tmp_path / "agent.sqlite")
     chat = owner.create_chat("Runtime tasks", members=["helper"])
     owner.outbox.flush_once()
@@ -87,7 +86,7 @@ def test_immutable_delivery_skips_preflight_only_for_exclusive_transport():
     deliver_immutable(same, "runtime/run.json", {"signed": True})
 
     conflict = ResponseLost({"signed": False})
-    with pytest.raises(OSError, match="response lost"):
+    with pytest.raises(ValidationError, match="already differs"):
         deliver_immutable(conflict, "runtime/run.json", {"signed": True})
 
 
@@ -319,12 +318,12 @@ def test_rotated_room_key_invalidates_old_task_projection(task_meshes):
     assert tasks.read(chat_id, "run-old-key", "task-old-key") == []
 
 
-def test_restart_recovers_task_then_run_as_interrupted(task_meshes):
+def test_restart_recovers_task_then_run_as_interrupted(task_meshes, clouds):
     _owner, agent, chat_id = task_meshes
     _runs, tasks = _ledgers(agent)
     _start(tasks, chat_id, "crashed")
 
-    reopened = Mesh(agent.tx, "helper", "box", encrypt=True, home=agent.home,
+    reopened = Mesh(clouds.bare(agent.tx.root), "helper", "box", encrypt=True, home=agent.home,
                     store_path=agent.store.path)
     try:
         reopened_runs, reopened_tasks = _ledgers(reopened)
@@ -431,3 +430,20 @@ def test_policy_drift_invalidates_task_without_relabelling_terminal(task_meshes)
 
     assert terminal.meta.policy_revision == started.meta.policy_revision
     assert tasks.read(chat_id, "run-policy", "task-policy") == []
+
+
+@pytest.mark.parametrize("readback_unavailable", [False, True])
+def test_immutable_delivery_preserves_original_failure_without_proven_conflict(
+        readback_unavailable):
+    original = OSError("create failed")
+    class Transient:
+        supports_exclusive_create = True
+        def create_doc(self, _path, _doc):
+            raise original
+        def get_doc(self, _path, default=None):
+            if readback_unavailable:
+                raise TimeoutError("readback unavailable")
+            return default
+    with pytest.raises(OSError) as failed:
+        deliver_immutable(Transient(), "runtime/run.json", {"signed": True})
+    assert failed.value is original

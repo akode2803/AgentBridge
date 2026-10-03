@@ -13,9 +13,8 @@ from agentbridge.mesh.lifecycle_source import (
 )
 from agentbridge.store import lifecycle_inputs
 from agentbridge.store.db import DocumentObservationConflict, Store
-from agentbridge.transport.base import TransportProfile, Watcher
+from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 ALICE_ONE = "lifecycle/alice/0001.json"
@@ -28,7 +27,7 @@ LIFECYCLE = {
 }
 
 
-class FakeProvider(FolderTransport):
+class FakeProvider(Transport):
     scheme = "fake"
     profile = TransportProfile(supports_doc_delta=True)
 
@@ -142,14 +141,14 @@ def test_full_republication_removes_departed_subject_range(environment):
     ]
 
 
-def test_bare_cold_and_bootstrap_only_transports_are_rejected(tmp_path):
+def test_bare_cold_and_bootstrap_only_transports_are_rejected(tmp_path, clouds):
     store = Store(tmp_path / "store.sqlite")
     lifecycle_inputs.prepare(store._conn())
     provider = FakeProvider(LIFECYCLE)
     cold = CachingTransport(provider, auto_refresh=False)
     try:
         with pytest.raises(LifecycleSourceUnavailable, match="unsupported"):
-            publish_lifecycle_source(FolderTransport(tmp_path / "folder"), store)
+            publish_lifecycle_source(clouds.bare(tmp_path / "cloud"), store)
         with pytest.raises(LifecycleSourceUnavailable):
             publish_lifecycle_source(cold, store)
 

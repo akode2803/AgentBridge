@@ -45,4 +45,4 @@ assert.equal(decide(meta,{user:'alice',users:{}}),'absent');
     assert 'Mute status loading…' in source
     assert 'permissionEntry === "ready"' in source
     assert 'permissionEntry === "pending"' in source
-    assert 'data._paged ? {mute:meta.mute}' in source
+    assert 'const isMuted = meshMuteActive({mute:meta.mute});' in source

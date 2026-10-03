@@ -17,7 +17,10 @@ def test_api_external_abort_timeout_and_listener_cleanup(tmp_path):
         (ROOT / 'gui/static/js/api.js').read_text(encoding='utf-8').replace(
             'from "./util.js"', 'from "./util.mjs"').replace(
             'from "./files.js"', 'from "./files.mjs"'), encoding='utf-8')
-    (tmp_path / 'diagnostics.js').write_text('export const diagnostic = () => {};\n', encoding='utf-8')
+    (tmp_path / 'diagnostics.js').write_text(
+        'export const diagnostic = () => {};\n'
+        'export const beginDiagnosticRequest = () => null;\n'
+        'export const endDiagnosticRequest = () => {};\n', encoding='utf-8')
     (tmp_path / 'files.mjs').write_text(
         (ROOT / 'gui/static/js/files.js').read_text(encoding='utf-8'), encoding='utf-8')
     (tmp_path / 'util.mjs').write_text('export const toast = () => {};\n', encoding='utf-8')

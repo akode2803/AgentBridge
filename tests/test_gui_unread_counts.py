@@ -20,7 +20,7 @@ from test_gui_chat_pages import _ready, _settled_page, page_app as page_app
 
 
 @pytest.fixture
-def unread_world(page_app):
+def unread_world(page_app, clouds):
     """Real signed peer messages, with all asynchronous owners under test control."""
     app, original_chat = page_app
     app.mesh.accounts.create_human('peer', 'peer-pass')
@@ -29,7 +29,7 @@ def unread_world(page_app):
     }))['chat']['id']
     _ready(app, original_chat)
     _ready(app, chat)
-    peer = Mesh(app.root, 'peer', 'unread-peer', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'unread-peer', encrypt=True, home=app.home,
                 store_path=app.home / 'unread-peer.sqlite')
     try:
         peer.sync.sync_once([chat])

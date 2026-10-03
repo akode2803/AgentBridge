@@ -16,7 +16,6 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.store import lifecycle_heads, lifecycle_inputs
 from agentbridge.transport import authority_observation
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "lifecycle-room"
@@ -25,12 +24,9 @@ OUTER = "claude"
 
 
 @pytest.fixture
-def lifecycle_world(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
-    provider.cache_key = "r214-cache"
+def lifecycle_world(tmp_path, clouds):
+    provider = clouds.bare(tmp_path / "provider")
     mirror = CachingTransport(provider, auto_refresh=False)
-    mirror._mirror_root_identity = "r214-root"
-    mirror._mirror_cache_identity = "r214-cache"
     mesh = Mesh(mirror, "aryan", "r214-box", home=tmp_path / "home")
     try:
         mesh.store.prepare_terminal_observation()

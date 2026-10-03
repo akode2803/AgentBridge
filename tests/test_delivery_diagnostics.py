@@ -1,12 +1,15 @@
 import json
 import sqlite3
 import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 from agentbridge.core import delivery_trace as trace
 from agentbridge.gui.diagnostics import Diagnostics
 from agentbridge.gui.routing import Request, dispatch
+from agentbridge.store.db import Store
+from agentbridge.store.outbox import OutboxWorker
 
 
 def rows(sink):
@@ -200,6 +203,161 @@ def test_late_observed_completion_and_overflow_are_fenced(tmp_path, monkeypatch)
     assert calls and calls[0] == ("context", 22)
 
 
+@pytest.mark.parametrize("replacement", [False, True], ids=["off-on", "new-recorder"])
+@pytest.mark.parametrize("request_scope", [False, True], ids=["background", "request"])
+def test_nested_outbox_completions_keep_original_recorder_ownership(
+    tmp_path, replacement, request_scope
+):
+    store = Store(tmp_path / "private.sqlite")
+    store.outbox_add("post", "private-room", {"id": "old-message"})
+    sink = Diagnostics(tmp_path / "first")
+    assert sink.set_enabled(True, sample_rate=1)
+    active_sink = sink
+    started, release = threading.Event(), threading.Event()
+    results, failures = [], []
+
+    @trace.observed("page_prepare")
+    def nested():
+        with trace.transaction("root", store.path) as tx:
+            with tx.acquiring():
+                pass
+            trace.emit("transport_read", message="private-message")
+            with tx.finishing("db_commit"):
+                pass
+
+    def provider(_target, payload):
+        if payload["id"] == "old-message":
+            started.set()
+            assert release.wait(2), "test must release the blocked provider"
+        # A fresh nested decorator/transaction must retain the stale outer owner.
+        nested()
+
+    worker = OutboxWorker(store, {"post": provider})
+
+    def flush():
+        try:
+            scope = trace.request_context("a" * 16, 1) if request_scope else nullcontext()
+            with scope:
+                results.append(worker.flush_once())
+            # Same-thread work after scope exit must be admitted without request leakage.
+            trace.emit("preparation", message="fresh-after-scope")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=flush, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(2)
+        before = rows(sink)
+        assert [row["phase"] for row in before] == ["outbox_attempt"]
+        assert before[0].get("request_ref") == ("a" * 16 if request_scope else None)
+        if replacement:
+            active_sink = Diagnostics(tmp_path / "replacement")
+            assert active_sink.set_enabled(True, sample_rate=1)
+            assert active_sink.generation == sink.generation
+        else:
+            assert sink.set_enabled(False)
+            assert sink.set_enabled(True)
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive() and not failures and results == [1]
+        assert store.outbox_counts() == {}, "tracing never changes delivery completion"
+        completed = rows(active_sink)
+        if replacement:
+            assert rows(sink) == before
+        else:
+            completed = completed[len(before):]
+        assert [row["phase"] for row in completed] == ["preparation"]
+        assert "request_ref" not in completed[0]
+
+        # Fresh work records all nested phases and retains its enclosing request tag.
+        store.outbox_add("post", "private-room", {"id": "new-message"})
+        with trace.request_context("c" * 16, 2):
+            assert worker.flush_once() == 1
+        fresh = [row for row in rows(active_sink) if row.get("request_ref") == "c" * 16]
+        assert {row["phase"] for row in fresh} == {
+            "outbox_attempt", "transport_read", "page_prepare", "db_acquire",
+            "db_body", "db_commit", "transport_append", "append_ack_observed", "outbox_batch",
+        }
+        assert all(row.get("request_seq") == 2 for row in fresh)
+        assert not trace._holders
+        assert "private-room" not in active_sink.path.read_text()
+    finally:
+        release.set()
+        thread.join(2)
+        store.close()
+        sink.close()
+        if active_sink is not sink:
+            active_sink.close()
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["off-on", "new-recorder"])
+def test_request_context_retains_owner_across_nested_request(tmp_path, replacement):
+    sink = Diagnostics(tmp_path / "first")
+    assert sink.set_enabled(True, sample_rate=1)
+    active_sink = sink
+    try:
+        with trace.request_context("a" * 16, 1):
+            if replacement:
+                active_sink = Diagnostics(tmp_path / "replacement")
+                assert active_sink.set_enabled(True, sample_rate=1)
+                assert active_sink.generation == sink.generation
+            else:
+                assert sink.set_enabled(False)
+                assert sink.set_enabled(True)
+            # A nested request can update correlation, but cannot reopen admission.
+            with trace.request_context("b" * 16, 2):
+                trace.emit("request_started")
+            trace.emit("request_finished")
+        trace.emit("native_ack")
+        result = rows(active_sink)
+        assert [row["phase"] for row in result] == ["native_ack"]
+        assert "request_ref" not in result[0]
+        if replacement:
+            assert rows(sink) == []
+    finally:
+        sink.close()
+        if active_sink is not sink:
+            active_sink.close()
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["off-on", "new-recorder"])
+def test_observed_restores_ownership_after_original_base_exception(tmp_path, replacement):
+    sink = Diagnostics(tmp_path / "first")
+    assert sink.set_enabled(True, sample_rate=1)
+    active_sink = sink
+    failure = KeyboardInterrupt("original private failure")
+
+    @trace.observed("ingestion")
+    def failing():
+        nonlocal active_sink
+        if replacement:
+            active_sink = Diagnostics(tmp_path / "replacement")
+            assert active_sink.set_enabled(True, sample_rate=1)
+            assert active_sink.generation == sink.generation
+        else:
+            assert sink.set_enabled(False)
+            assert sink.set_enabled(True)
+        with trace.request_context("b" * 16, 9):
+            trace.emit("transport_read")
+        raise failure
+
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            failing()
+        assert caught.value is failure
+        trace.emit("native_ack")
+        result = rows(active_sink)
+        assert [row["phase"] for row in result] == ["native_ack"]
+        assert "request_ref" not in result[0]
+        if replacement:
+            assert rows(sink) == []
+    finally:
+        sink.close()
+        if active_sink is not sink:
+            active_sink.close()
+
+
 def test_delivery_admission_never_waits_for_log_disk(tmp_path, monkeypatch):
     sink = Diagnostics(tmp_path)
     sink.set_enabled(True, sample_rate=1)
@@ -251,3 +409,79 @@ def test_fast_sender_reconciliation_is_retained_without_sampling(tmp_path):
     assert sink.flight_record({'event':'delivery', 'phase':'send_reconciled',
                               'trace_ref':'f'*16, 'duration_ms':1, 'flow':'sent'})
     assert any(row.get('phase') == 'send_reconciled' for row in rows(sink))
+
+
+@pytest.mark.parametrize("client,phase", [(False, "preparation_claimed"), (True, "refresh_started")])
+def test_slow_queue_wait_retains_private_context_without_sampling(tmp_path, client, phase):
+    sink = Diagnostics(tmp_path)
+    assert sink.set_enabled(True, slow_ms=100, sample_rate=0)
+    try:
+        common = {"event": "delivery", "chat_ref": "c" * 16,
+                  "body": "PRIVATE_BODY", "sql": "PRIVATE_SQL"}
+        assert sink.flight_record({**common, "phase": "preparation_queued"}, client=client)
+        # Nested or overlapping intervals must not be summed into a slow trigger.
+        assert sink.flight_record({**common, "phase": phase, "duration_ms": 60,
+                                   "queue_wait_ms": 60}, client=client)
+        for invalid in (-1, float("nan"), float("inf"), "PRIVATE_WAIT"):
+            assert sink.flight_record({**common, "phase": phase, "queue_wait_ms": invalid},
+                                      client=client)
+        assert rows(sink) == []
+        assert sink.flight_record({**common, "phase": phase, "duration_ms": 1,
+                                   "queue_wait_ms": 100}, client=client)
+        retained = rows(sink)
+        assert any(row.get("queue_wait_ms") == 100 for row in retained)
+        assert any(row.get("phase") == "preparation_queued" for row in retained)
+        assert len(retained) <= 48
+        assert all("PRIVATE" not in json.dumps(row) for row in retained)
+    finally:
+        sink.close()
+
+
+@pytest.mark.parametrize("payload,message", [
+    ({"id": "PRIVATE_MESSAGE", "body": "PRIVATE_BODY"}, "PRIVATE_MESSAGE"),
+    ({"envelope": {"id": "PRIVATE_MESSAGE", "body": "PRIVATE_BODY"}}, "PRIVATE_MESSAGE"),
+    ({"id": 123, "body": "PRIVATE_BODY"}, None),
+    (["PRIVATE_BODY"], None),
+])
+def test_missing_outbox_handler_retains_sanitized_dead_outcome(tmp_path, payload, message):
+    store = Store(tmp_path / "PRIVATE_STORE.sqlite")
+    sink = Diagnostics(tmp_path / "diagnostics")
+    assert sink.set_enabled(True, sample_rate=0)
+    try:
+        store.outbox_add("PRIVATE_KIND", "PRIVATE_TARGET", payload)
+        worker = OutboxWorker(store, {})
+        assert worker.flush_once() == 0
+        assert store.outbox_counts() == {"dead": 1}
+        assert worker.flush_once() == 0
+        retained = rows(sink)
+        dead = [row for row in retained if row.get("phase") == "outbox_dead"]
+        assert len(dead) == 1 and dead[0]["status"] == "error"
+        assert dead[0].get("trace_ref") == (sink.chat_ref(message) if message else None)
+        assert not any(row.get("phase") == "outbox_attempt" for row in retained)
+        assert "PRIVATE" not in sink.path.read_text()
+    finally:
+        store.close()
+        sink.close()
+
+
+def test_missing_handler_failed_dead_transition_keeps_original_error(tmp_path, monkeypatch):
+    store = Store(tmp_path / "cache.sqlite")
+    sink = Diagnostics(tmp_path / "diagnostics")
+    assert sink.set_enabled(True, sample_rate=0)
+    failure = OSError("PRIVATE_DEAD_FAILURE")
+
+    def fail_dead(*_):
+        raise failure
+
+    try:
+        store.outbox_add("unknown", "target", {"id": "PRIVATE_MESSAGE"})
+        monkeypatch.setattr(store, "outbox_dead", fail_dead)
+        with pytest.raises(OSError) as caught:
+            OutboxWorker(store, {}).flush_once()
+        assert caught.value is failure
+        assert store.outbox_counts() == {"pending": 1}
+        assert not any(row.get("phase") == "outbox_dead" for row in rows(sink))
+        assert "PRIVATE" not in sink.path.read_text()
+    finally:
+        store.close()
+        sink.close()

@@ -1,6 +1,6 @@
 """agentbridge CLI (R12) — one install, two entry points (account-model v2):
 
-  python -m agentbridge.cli mcp   --root PATH --user NAME [--machine M] [--encrypt]
+  python -m agentbridge.cli mcp   --root supabase://NAME --user NAME [--machine M] [--encrypt]
       run the MCP server on stdio for this identity (agents' default mode;
       no password — agents never authenticate, their identity is the machine)
 
@@ -31,7 +31,8 @@ import json
 import platform
 import sys
 
-from ..core.errors import PermissionDenied
+from ..core.config import validate_root_spec
+from ..core.errors import ConfigError, PermissionDenied
 from ..core.models import UserKind
 from ..mesh.notify import CommandHook, Notification
 from ..mesh.service import Mesh
@@ -39,7 +40,7 @@ from ..mesh.service import Mesh
 
 def _mesh(args) -> Mesh:
     return Mesh(
-        args.root, args.user, args.machine or platform.node() or "cli",
+        validate_root_spec(args.root), args.user, args.machine or platform.node() or "cli",
         encrypt=args.encrypt,
     )
 
@@ -90,7 +91,7 @@ def _require_human_login(mesh: Mesh, password: str | None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agentbridge")
-    ap.add_argument("--root", required=True, help="path to the mesh2 root")
+    ap.add_argument("--root", required=True, help="Supabase mesh root (supabase://NAME)")
     ap.add_argument("--user", required=True)
     ap.add_argument("--machine", default="")
     ap.add_argument("--encrypt", action="store_true", help="use E2EE sealing")
@@ -114,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
                          help="command to run per notification (after --)")
 
     args = ap.parse_args(argv)
+    try:
+        args.root = validate_root_spec(args.root)
+    except ConfigError as exc:
+        ap.error(str(exc))
     mesh = _mesh(args)
     try:
         if args.cmd == "mcp":

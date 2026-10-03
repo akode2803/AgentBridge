@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_paged_read_eyes_latest_scroll_and_pending_receipt_guards(tmp_path):
     source = (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8')
-    mark = source[source.index('let legacyReadAck = null;'):
+    mark = source[source.index('document.addEventListener("ab:manual-mark-unread",'):
                   source.index('// reading needs eyes:', source.index('function markReadNow(chatId)'))]
     ticks = source[source.index('function syncReceiptTicks('):
                    source.index('function receiptTicks(', source.index('function syncReceiptTicks('))]
@@ -26,7 +26,7 @@ let paged = true, requests = [], sidebarPaints = 0;
 let tr = {scrollHeight:1000, clientHeight:200, scrollTop:250};
 let pageOwner = {ready:true, chatId:'room', browsing:false, current:()=>true,
                  visibleReadNs:'100',visibleReadToken:'a'.repeat(64),visibleReadVersion:'v1'};
-let Mesh = {chatId:'room',pendingRead:null, readTail:{}, state:{chats:[
+let Mesh = {chatId:'room',pendingRead:null,  state:{chats:[
   {id:'room', last:{ns:150}, unread:5, forced_unread:true},
 ]}};
 const meshCaps = () => ({chat_page_v1:paged});
@@ -66,7 +66,7 @@ assert.equal(Mesh.state.chats[0].forced_unread,true);
 await Promise.resolve();await Promise.resolve();
 assert.equal(Mesh.pendingRead,null);
 assert.equal(boundedSidebarReads,1);
-assert.equal(Mesh.readTail.room,undefined);
+assert.equal(Object.hasOwn(Mesh,'readTail'),false);
 assert.equal(Mesh.state.chats[0].unread,5); // a newer sidebar tail was not seen
 assert.equal(Mesh.state.chats[0].forced_unread,true);
 Mesh.state.chats[0].last.ns=90;
@@ -79,16 +79,6 @@ assert.equal(requests.length,1); // historical window never advances read
 pageOwner.browsing=false;
 markReadNow('different');
 assert.equal(requests.length,1);
-paged=false;
-markReadNow('room');
-assert.deepEqual(requests[1],{path:'/api/mesh/read',body:{chat_id:'room'}});
-assert.equal(Mesh.state.chats[0].unread,5); // legacy badges also wait for success
-assert.equal(Mesh.readTail.room,undefined);
-await Promise.resolve();await Promise.resolve();
-assert.equal(Mesh.readTail.room,90);
-assert.equal(Mesh.state.chats[0].unread,0);
-assert.equal(sidebarPaints,1);
-
 const slot = {innerHTML:'<span>Sent</span>', _receiptHtml:'<span>Sent</span>'};
 const row = {querySelector:()=>slot};
 const transcript = {_rows:new Map([['m:own',{el:row}]])};

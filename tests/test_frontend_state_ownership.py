@@ -84,7 +84,7 @@ def test_modal_consumers_keep_state_local_and_capture_post_open_action_owner():
         body = source[start:]
         begin = body.index("const ticket = beginModalRead()")
         if filename == "members.js":
-            state = body.index("await readMemberMetadata(chatId, ticket, null, requireSummary)", begin)
+            state = body.index("await readMemberMetadata(chatId, ticket)", begin)
             validate = body.index("modalReadMayApply(ticket)", state)
             helper = _function_source(source, "async function readMemberMetadata")
             assert helper.index('await api("/api/mesh/state"') < helper.index("modalReadMayApply(ticket, ms)")
@@ -108,7 +108,6 @@ def test_old_member_search_and_forward_state_cannot_continue_after_navigation(tm
         [
             _function_source(members, "function userRow"),
             _function_source(members, "function pickerSections"),
-            _function_source(members, "function memberSummarySupported"),
             _function_source(members, "function memberResponseCurrent"),
             _function_source(members, "function memberReadStatus"),
             _function_source(members, "async function readMemberMetadata"),
@@ -249,7 +248,7 @@ const funcs = factory(meshCaps, api, beginModalRead, captureModalRead, modalRead
   closeModal, bindModalFilter, bindPicker, pickerRow, pickerSection, pickerFooter, esc, toast,
   ICONS, Mesh, meshDn, meshAvatarInner, meshChatAvatarInner, V);
 const state = {user: "aryan", users: {aryan: {username: "aryan", display: "Aryan", kind: "human"}}, chats: []};
-const chat = {meta: {id: "A", members: []}};
+const chat = {status:"ready",chat_id:"A",meta:{id:"A",members:[]}};
 
 for (const [name, invoke] of [
   ["add", () => funcs.showAddMembers("A")],
@@ -266,8 +265,8 @@ for (const [name, invoke] of [
 
 // Current owners still complete: add/search fetch their room and all three open.
 for (const [name, invoke, expected, queued] of [
-  ["add", () => funcs.showAddMembers("A"), ["/api/mesh/state", "/api/mesh/chat?id=A"], [state, chat]],
-  ["search", () => funcs.showSearchMembers("A"), ["/api/mesh/state", "/api/mesh/chat?id=A"], [state, chat]],
+  ["add", () => funcs.showAddMembers("A"), ["/api/mesh/state", "/api/mesh/chat_summary?id=A"], [state, chat]],
+  ["search", () => funcs.showSearchMembers("A"), ["/api/mesh/state", "/api/mesh/chat_summary?id=A"], [state, chat]],
   ["forward", () => funcs.openForwardPicker("A", ["m1"]), ["/api/mesh/state"], [state]],
 ]) {
   calls = []; opened = 0; responses = queued; await invoke();

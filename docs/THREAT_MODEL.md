@@ -6,12 +6,15 @@ the code in `agentbridge/crypto/` +
 
 ## The setting
 
-The transport is a **shared store every member's machine syncs in full** (a
-OneDrive/Drive folder today; Supabase later). So the design assumption is the
-strongest realistic one: **an adversary can read and write every byte at
-rest.** Confidentiality and authenticity therefore cannot rest on access
-control — they rest on cryptography. (Supabase adds server-side RLS on top,
-but we never rely on it for secrecy: the server only ever stores ciphertext.)
+The production transport is Supabase, with local cached document and message
+inputs. Per-member RLS policies and canonical mesh checks define transport access
+and membership visibility; real-instance policy deployment still needs acceptance.
+E2EE separately protects sealed message and file content.
+The cryptographic threat model includes an adversary with broad transport access,
+so confidentiality and authenticity cannot rely solely on provider access control.
+Plaintext metadata and deliberately plaintext/dev meshes are outside content
+secrecy. Historical Folder-era reviews below explain earlier design decisions;
+Folder transport is no longer a supported production deployment.
 
 ## Keys
 
@@ -76,10 +79,10 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
 
 ## What is NOT protected (accepted, documented)
 
-- **Metadata is in the clear to folder members.** Who is in which chat, message
+- **Metadata is plaintext for authorized transport readers.** Who is in which chat, message
   ids/ns/sender/timestamps, membership/rename/permission INFO events, presence,
   read cursors, reaction/star/pin existence, avatars — all readable. E2EE
-  covers *content*; the permission layer + (on cloud) RLS cover *metadata
+  covers *content*; the permission layer and Supabase RLS cover *metadata
   policy*. This is a deliberate v1 scope line: encrypting the social graph is a
   much larger project.
 - **No per-message forward secrecy / post-compromise security.** We rotate on
@@ -104,16 +107,16 @@ but we never rely on it for secrecy: the server only ever stores ciphertext.)
   trust — MOSTLY CLOSED by R27 key pinning (see "CLOSED R27" below).**
   `users/<name>.json` holds the `sign_pub`/`agree_pub` that every signature
   check (`events._authentic`) and every epoch-key wrap (`keyring._wrap_for`)
-  trust, yet the doc is plaintext and the transport enforces no per-path write
-  authz. Before R27, a folder (or Supabase-secret) writer could rewrite a
+  trust. The doc is plaintext; per-member write policies are documented in
+  SECURITY_RLS.md. Before R27, a Folder or Supabase-secret writer could rewrite a
   victim's published keys and thereafter sign info events "from" them and
   receive their epoch-key wraps. R27 pins the first keys each machine sees for
   a name and resolves all key reads through the pin, so a rewrite is inert for
   every device that already knew the account (and raises a change alarm). The
   remaining residual is narrow: a device that has **never** seen an account
-  pins whatever it reads first (documented under R27). On the folder transport
-  the write-access itself is inherent to "all members share the folder"; on
-  Supabase it rides the same secret-key trust boundary below.
+  pins whatever it reads first (documented under R27). The retired Folder
+  transport granted broad shared write access; a Supabase secret-key writer
+  retains the privileged trust boundary described below.
 - **Reaction/pin overlay FABRICATION — CLOSED R31**; **per-user STATE doc
   fabrication — CLOSED R31.5** (see the R31/R31.5 sections below). The state
   doc was the sharpest of the three — dropped-in `hidden`/`cleared` blanked
@@ -185,7 +188,7 @@ membership-service op re-checks authority at fold time). Four holes were closed:
 
 - **Redaction (delete-for-everyone) is now AUTHENTICATED.** Previously the read
   model tombstoned a message on the mere PRESENCE of an overlay doc
-  (`chats/<id>/overlays/redactions/<msg-id>.json`), so any folder writer could
+  (`chats/<id>/overlays/redactions/<msg-id>.json`), so a historical Folder writer could
   censor any member's message. Redactions are now Ed25519-signed by the
   original sender over `chat|redact|msg-id|by|ns` (`events.redaction_signing_bytes`);
   the read model honors a tombstone only when the signature verifies against the
@@ -302,9 +305,10 @@ closed redactions:
   tombstones were considered and deliberately SKIPPED (R32 decision): a
   delete-capable adversary deletes the tombstone too, so signatures cannot
   authenticate absence — the real close is transport-side write authz, which
-  arrives with the queued per-member Supabase RLS round (non-owners lose
-  delete/overwrite on others' docs). On the folder transport the class stays
-  open by nature: sharing the folder IS full control.
+  is specified by the per-member Supabase policies in SECURITY_RLS.md. The
+  historical Folder transport gave shared writers full deletion control; that
+  production transport is retired. Offline fixtures do not prove real-instance
+  policy deployment or authorization behavior.
 - **First-contact fingerprints** (the R27 residual's answer) are described in
   the R27 section above.
 

@@ -34,7 +34,7 @@ let readToken = 'a'.repeat(64);
 const App = {page:'chats',routeSeq:3};
 const Mesh = {chatId:'room',state:{user:'alice',chats:[
   {id:'room',last:{ns:60},unread:2,forced_unread:true},
-]},select:{ids:new Set()},msgExpand:{},readTail:{},pendingRead:null};
+]},select:{ids:new Set()},msgExpand:{},pendingRead:null};
 let anchorCaptures=0,anchorRestores=0,prunes=0,paints=0,sidebar=0;
 const calls=[], modes=[];
 let paintAllowed=true;
@@ -139,7 +139,7 @@ assert.equal(getOwner().readAck.lastSuccess,cutoff);
 assert.equal(sidebar,0); // Decimal cutoff never does optimistic Number math.
 assert.equal(Mesh.state.chats[0].unread,2);
 assert.equal(Mesh.state.chats[0].forced_unread,true);
-assert.equal(Mesh.readTail.room,undefined);
+assert.equal(Object.hasOwn(Mesh,'readTail'),false);
 
 // A historical page preserves its position, does not advance the read cursor,
 // and its scroll listener fetches older only at the top while idle.

@@ -12,7 +12,7 @@ from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.local_mutations import root_identity
 from agentbridge.transport.key_observation import (
     AuthorityObservationUnavailable,
     capture_key_wrap,
@@ -27,11 +27,12 @@ VALID = {"eph": "ephemeral-secret", "nonce": "nonce-secret", "ct": "cipher-secre
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, clouds):
     store = Store(tmp_path / "store.sqlite")
     local_source.initialize(store)
     source_selectors.initialize(store)
-    root = MutationCoordinator(tmp_path / "owner", "local-key-root")
+    owner = clouds.cached(tmp_path / "local-key-owner")
+    root = MutationCoordinator(tmp_path / "owner", root_identity(owner))
     root.register_store(store)
     reader = local_page_source.LocalPageSource(root, store, CHAT)
     publisher = SourcePublisher(root, store, reader.definition)
@@ -58,8 +59,8 @@ def _capture(rig, value_marker=..., **kwargs):
     return receipt, value, charges
 
 
-def _mirror(tmp_path, value_marker=...):
-    provider = FolderTransport(tmp_path / "provider")
+def _mirror(tmp_path, clouds, value_marker=...):
+    provider = clouds.bare(tmp_path / "provider")
     if value_marker is not ...:
         provider.put_doc(PATH, value_marker)
     mirror = CachingTransport(provider, auto_refresh=False)
@@ -84,9 +85,9 @@ def _mirror(tmp_path, value_marker=...):
     ],
 )
 def test_local_and_mirror_shape_field_and_selected_byte_parity(
-        rig, tmp_path, document, shape):
+        rig, tmp_path, document, shape, clouds):
     _receipt, local, charges = _capture(rig, document)
-    mirror = _mirror(tmp_path, document)
+    mirror = _mirror(tmp_path, clouds, document)
     try:
         observed = capture_key_wrap(mirror, CHAT, EPOCH, VIEWER)
     finally:
@@ -99,9 +100,9 @@ def test_local_and_mirror_shape_field_and_selected_byte_parity(
     assert charges == [local.source_bytes]
 
 
-def test_local_and_mirror_absence_parity(rig, tmp_path):
+def test_local_and_mirror_absence_parity(rig, tmp_path, clouds):
     _receipt, local, charges = _capture(rig)
-    mirror = _mirror(tmp_path)
+    mirror = _mirror(tmp_path, clouds)
     try:
         observed = capture_key_wrap(mirror, CHAT, EPOCH, VIEWER)
     finally:

@@ -17,50 +17,32 @@ from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import TaskLedger
 from agentbridge.mesh.service import Mesh
 
+from fake_cloud import CloudRegistry
+
 
 @pytest.fixture()
-def effect_meshes(tmp_path, monkeypatch):
-    root = tmp_path / "mesh"
-    root.mkdir()
-    home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
-                 store_path=tmp_path / "owner.sqlite")
-    owner.accounts.create_human("owner", "correct-horse")
-    owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home,
-                 store_path=tmp_path / "agent.sqlite")
-    chat = owner.create_chat("Effects", members=["helper"])
-    owner.outbox.flush_once()
-    agent.sync.sync_once([chat.id])
-
-    # Model Supabase's unique (root,path) INSERT while retaining the fast local
-    # mesh fixture. FolderTransport deliberately does not claim this capability.
-    original = agent.tx.create_doc
-    claim_lock = threading.Lock()
-
-    def exclusive(path, data, *, ask_envelope=None, decision_envelope=None):
-        if "/runtime/effects/" not in path:
-            return original(path, data)
-        with claim_lock:
-            current = agent.tx.get_doc(path, default=None)
-            if current is not None:
-                if current == data:
-                    return None
-                raise FileExistsError(path)
-            base = path.rsplit("/", 1)[0]
-            if ask_envelope is not None:
-                original(f"{base}/grant-ask.json", ask_envelope)
-            if decision_envelope is not None:
-                original(f"{base}/grant-decision.json", decision_envelope)
-            return original(path, data)
-
-    monkeypatch.setattr(agent.tx, "effect_claims_ready", lambda: True)
-    monkeypatch.setattr(agent.tx, "create_effect_doc", exclusive)
-    try:
-        yield owner, agent, chat.id
-    finally:
-        agent.close()
-        owner.close()
+def effect_meshes(tmp_path):
+    with CloudRegistry(effects_ready=True) as clouds:
+        root = clouds.root(tmp_path / "mesh")
+        home = tmp_path / "home"
+        owner_tx, agent_tx = clouds.bare(root), clouds.bare(root)
+        # The offline client bypasses login. Declare its synthetic member mode
+        # so readiness and transitions use the real driver's RPC protocol.
+        owner_tx.auth_mode = agent_tx.auth_mode = "member:offline-fixture"
+        owner = Mesh(owner_tx, "owner", "box", encrypt=True, home=home,
+                     store_path=tmp_path / "owner.sqlite")
+        owner.accounts.create_human("owner", "correct-horse")
+        owner.accounts.create_agent("helper")
+        agent = Mesh(agent_tx, "helper", "box", encrypt=True, home=home,
+                     store_path=tmp_path / "agent.sqlite")
+        chat = owner.create_chat("Effects", members=["helper"])
+        owner.outbox.flush_once()
+        agent.sync.sync_once([chat.id])
+        try:
+            yield owner, agent, chat.id
+        finally:
+            agent.close()
+            owner.close()
 
 
 def _parent(agent, chat_id):
@@ -253,16 +235,17 @@ def test_recovery_preserves_history_after_policy_drift(effect_meshes):
     ]
 
 
-def test_folder_transport_and_authority_drift_fail_closed(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def test_cloud_without_effect_protocol_and_authority_drift_fail_closed(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home)
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("helper")
-    agent = Mesh(root, "helper", "box", encrypt=True, home=home)
+    agent = Mesh(clouds.bare(root), "helper", "box", encrypt=True, home=home)
+    owner.tx.auth_mode = agent.tx.auth_mode = "member:offline-fixture"
+    assert agent.tx.effect_claims_ready() is False
     try:
-        chat = owner.create_chat("Folder effect", members=["helper"])
+        chat = owner.create_chat("Unavailable cloud effect", members=["helper"])
         owner.outbox.flush_once()
         agent.sync.sync_once([chat.id])
         run, task = _parent(agent, chat.id)

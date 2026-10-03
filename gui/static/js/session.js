@@ -44,28 +44,6 @@ function sameBinding(a, b) {
     && a.session_generation === b.session_generation && a.viewer === b.viewer;
 }
 
-function legacyBootstrap(payload) {
-  const caps = payload?.caps;
-  if (caps !== undefined
-      && (!caps || typeof caps !== "object" || Array.isArray(caps))) return false;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)
-      || "session_binding" in payload
-      || (caps && "session_binding_v1" in caps)) return false;
-  // The shared assets can be re-read from disk by a still-running server.  Admit
-  // only the two server shapes known to predate this protocol: the old bridge
-  // (no `v`) and recognized unbound v2 releases through 0.24.272. This mode carries no R188
-  // guarantee and cannot be entered after a bound bootstrap was accepted.
-  if (typeof payload.configured === "boolean" && !("v" in payload)
-      && typeof payload.gui_version === "string"
-      && typeof payload.bridge_version === "string") return true;
-  const match = typeof payload.gui_version === "string"
-    ? /^0\.24\.(\d+)$/.exec(payload.gui_version) : null;
-  return payload.v === 2 && typeof payload.configured === "boolean"
-    && typeof payload.instance_id === "string" && payload.instance_id
-    && (payload.user === null || typeof payload.user === "string")
-    && !!match && Number(match[1]) <= 272;
-}
-
 export function createSessionBoundary({ maxRetiredInstances = 64 } = {}) {
   if (!Number.isInteger(maxRetiredInstances) || maxRetiredInstances < 1) {
     throw new TypeError("maxRetiredInstances must be a positive integer");
@@ -119,17 +97,13 @@ export function createSessionBoundary({ maxRetiredInstances = 64 } = {}) {
         || ticket.sequence !== latestSequence || ticket.sequence <= adoptedSequence) {
       return reject("stale_bootstrap");
     }
-    const capability = payload?.caps?.session_binding_v1 === true;
-    if (!capability) {
-      if ((mode === "undecided" || mode === "legacy") && legacyBootstrap(payload)) {
-        mode = "legacy";
-        ready = true;
-        adoptedSequence = ticket.sequence;
-        return Object.freeze({ accepted: true, transition: false,
-          binding: null, mode });
-      }
+    const caps = payload?.caps;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)
+        || !caps || typeof caps !== "object" || Array.isArray(caps)
+        || caps.session_binding_v1 !== true) {
       return reject("binding_capability_missing");
     }
+    if (caps.chat_page_v1 !== true) return reject("paging_capability_missing");
     const candidate = parseSessionBinding(payload.session_binding);
     if (!candidate || payload.v !== 2) return reject("malformed_binding");
     if (payload.instance_id !== candidate.instance_id
@@ -163,21 +137,13 @@ export function createSessionBoundary({ maxRetiredInstances = 64 } = {}) {
           return reject("viewer_mismatch");
         }
       }
-      const transition = mode === "legacy";
-      if (transition) {
-        if (epoch >= Number.MAX_SAFE_INTEGER) {
-          exhausted = true;
-          return reject("exhausted", true);
-        }
-        epoch += 1;
-      }
       binding = candidate;
       generationFloor = candidate;
       expectedInstance = null;
       mode = "bound";
       ready = true;
       adoptedSequence = ticket.sequence;
-      return Object.freeze({ accepted: true, transition,
+      return Object.freeze({ accepted: true, transition: false,
         binding: publicBinding(binding), mode });
     }
     if (candidate.instance_id !== binding.instance_id) {
@@ -224,7 +190,7 @@ export function createSessionBoundary({ maxRetiredInstances = 64 } = {}) {
   function mayApply(ticket, source) {
     if (exhausted || !validEpochTicket(ticket)) return false;
     if (source === undefined) return ready;
-    if (mode !== "bound" || !binding) return mode === "legacy" && ready;
+    if (mode !== "bound" || !binding) return false;
     const raw = source && typeof source === "object" && "session_binding" in source
       ? source.session_binding : source;
     return sameBinding(binding, parseSessionBinding(raw));

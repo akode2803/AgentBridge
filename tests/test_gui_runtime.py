@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import urllib.error
+
+import pytest
+
+from agentbridge.harness.runtime.handoffs import HandoffLedgerError
+from agentbridge.harness.runtime.runs import RunLedgerError
+
 from agentbridge.harness.runtime.handoffs import (
     HandoffLedger,
     handoff_prefix,
@@ -9,10 +16,8 @@ from agentbridge.harness.runtime.handoffs import (
 from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import TaskLedger
 from agentbridge.harness.adapters.native import codex_native_policy
-from agentbridge.gui.api_runtime import authority_rows
+from agentbridge.gui.api_runtime import authority_rows, contributor_rows
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 def _ledgers(mesh):
@@ -31,17 +36,36 @@ def test_latency_diagnostics_are_bounded_local_metadata(rig):
     assert "chat_id" not in str(out["runner"])
 
 
-def test_runtime_tasks_requires_auth_and_current_room_membership(rig):
-    assert rig.get("/api/mesh/runtime_tasks", id="missing")["error"] == (
-        "Sign in first"
-    )
+def test_runtime_aux_requires_auth_and_current_room_membership(rig):
+    assert rig.get("/api/mesh/chat_aux", id="missing")["error"] == "Sign in first"
     rig.signup()
     rig.peer_account("fable")
     with rig.peer_mesh("fable") as fable:
         private = fable.create_chat("Private", members=[])
-    out = rig.get("/api/mesh/runtime_tasks", id=private.id)
-    assert "error" in out
-    assert "error" in rig.get("/api/mesh/runtime_authority", id=private.id)
+    out = rig.aux(private.id)
+    assert out["status"] == "forbidden"
+    assert "tasks" not in out and "runs" not in out
+
+
+def test_runtime_http_wrappers_are_retired(rig):
+    for route in ("/api/mesh/runtime_tasks", "/api/mesh/runtime_authority",
+                  "/api/mesh/chat", "/api/mesh/chat_info", "/api/mesh/livefeed"):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            rig.get(route, id="missing")
+        assert error.value.code == 404
+    with pytest.raises(urllib.error.HTTPError) as error:
+        rig.post("/api/mesh/runtime_authority", chat_id="missing", run_ids=["r-1-abcdef12"])
+    assert error.value.code == 404
+
+
+def _tasks(rig, chat):
+    rig.prepare(chat)
+    return contributor_rows(rig.app.mesh, chat)
+
+
+def _authority(rig, chat, **params):
+    rig.prepare(chat)
+    return authority_rows(rig.app.mesh, chat, **params)
 
 
 def test_runtime_authority_projects_only_signed_nonsecret_facts(
@@ -53,7 +77,7 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
         members=["manager"],
     )["chat"]["id"]
     manager = Mesh(
-        rig.root, "manager", "guibox", encrypt=True, home=rig.home,
+        rig.clouds.bare(rig.root), "manager", "guibox", encrypt=True, home=rig.home,
         store_path=rig.home / "manager-authority.sqlite",
     )
     try:
@@ -93,9 +117,7 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
         )
         handlers = dict(rig.app.mesh.outbox.handlers)
         dead_hooks = dict(rig.app.mesh.outbox.dead_hooks)
-        rows = rig.get(
-            "/api/mesh/runtime_authority", id=chat_id,
-        )["runs"]
+        rows = _authority(rig, chat_id)
         assert len(rows) == 1
         row = rows[0]
         assert row["run_id"] == "r-1-abcdef12"
@@ -128,24 +150,13 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
         assert rig.app.mesh.outbox.handlers == handlers
         assert rig.app.mesh.outbox.dead_hooks == dead_hooks
 
-        current = rig.post(
-            "/api/mesh/runtime_authority", chat_id=chat_id,
-            run_ids=["r-1-abcdef12"],
-        )["runs"]
+        current = _authority(rig, chat_id, run_ids=("r-1-abcdef12",), current_only=True)
         assert [(item["run_id"], item["manager"], item["state"])
                 for item in current] == [
             ("r-1-abcdef12", "manager", "running"),
         ]
-        assert "error" in rig.post(
-            "/api/mesh/runtime_authority", chat_id=chat_id,
-            run_ids=["run-authority"],
-        )
-
-        # The exact active projection lists only the requested local-mirror
-        # prefix. A cloud driver's live read methods are never touched.
-        cached = CachingTransport(
-            FolderTransport(rig.root), auto_refresh=False,
-        )
+        # Captured active projection reads only the requested mirror prefix.
+        cached = rig.clouds.cached(rig.root, auto_refresh=False)
         cached.refresh()
         viewer = Mesh(
             cached, "aryan", "guibox", encrypt=True, home=rig.home,
@@ -172,10 +183,7 @@ def test_runtime_authority_projects_only_signed_nonsecret_facts(
             viewer.close()
 
         ledger.finish("r-1-abcdef12", "done", "Reply posted")
-        assert rig.post(
-            "/api/mesh/runtime_authority", chat_id=chat_id,
-            run_ids=["r-1-abcdef12"],
-        )["runs"] == []
+        assert _authority(rig, chat_id, run_ids=("r-1-abcdef12",), current_only=True) == []
     finally:
         manager.close()
 
@@ -190,10 +198,10 @@ def test_runtime_tasks_fail_closed_when_room_snapshot_exceeds_budget(
         rig.app.mesh.tx, "cached_docs_bounded",
         lambda _prefix, _limit: (_ for _ in ()).throw(OverflowError("full")),
     )
-    out = rig.get("/api/mesh/runtime_tasks", id=chat_id)
-    assert "bounded GUI projection" in out["error"]
-    out = rig.get("/api/mesh/runtime_authority", id=chat_id)
-    assert "bounded GUI projection" in out["error"]
+    with pytest.raises(HandoffLedgerError, match="bounded GUI projection"):
+        contributor_rows(rig.app.mesh, chat_id)
+    with pytest.raises(RunLedgerError, match="bounded GUI projection"):
+        authority_rows(rig.app.mesh, chat_id)
 
 
 def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
@@ -208,11 +216,11 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
     )["chat"]["id"]
 
     manager = Mesh(
-        rig.root, "manager", "guibox", encrypt=True, home=rig.home,
+        rig.clouds.bare(rig.root), "manager", "guibox", encrypt=True, home=rig.home,
         store_path=rig.home / "manager-runtime.sqlite",
     )
     specialist = Mesh(
-        rig.root, "specialist", "guibox", encrypt=True, home=rig.home,
+        rig.clouds.bare(rig.root), "specialist", "guibox", encrypt=True, home=rig.home,
         store_path=rig.home / "specialist-runtime.sqlite",
     )
     try:
@@ -235,7 +243,7 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
         }
 
         def projected_state():
-            rows = rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"]
+            rows = _tasks(rig, chat_id)
             assert len(rows) == 1 and set(rows[0]) == expected_keys
             assert "secret" not in str(rows).lower()
             assert rows[0]["manager"] == "manager"
@@ -294,9 +302,9 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
             chat_id=chat_id, run_id="run-clear", handoff_id=second_id,
             manifest={"messages": []},
         )
-        assert len(rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"]) == 2
+        assert len(_tasks(rig, chat_id)) == 2
         rig.post("/api/mesh/clear_chat", chat_id=chat_id)
-        assert rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"] == []
+        assert _tasks(rig, chat_id) == []
         specialist_handoffs.return_result(
             chat_id=chat_id, run_id="run-clear", handoff_id=second_id,
             contribution="late secret", prompt_digest="sha256:late",
@@ -304,7 +312,7 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
         manager_handoffs.consume(
             chat_id=chat_id, run_id="run-clear", handoff_id=second_id,
         )
-        assert rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"] == []
+        assert _tasks(rig, chat_id) == []
 
         # Clear stores exact row ids, not a wall-clock cutoff: future rows
         # remain visible, and a declined terminal survives parent completion.
@@ -326,7 +334,7 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
         manager_tasks.finish_with_run(
             "task-decline", "run-decline", "done", "Completed",
         )
-        visible = rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"]
+        visible = _tasks(rig, chat_id)
         assert [(row["id"], row["state"]) for row in visible] == [
             (declined_id, "declined"),
         ]
@@ -337,9 +345,7 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
             f"{handoff_prefix(chat_id, 'run-forged', 'handoff-9999999999999999999-forged')}/x.json",
             {"plaintext": "secret forged body"},
         )
-        rows = rig.get(
-            "/api/mesh/runtime_tasks", id=chat_id, limit=9999,
-        )["tasks"]
+        rows = _tasks(rig, chat_id)
         assert [(row["id"], row["state"]) for row in rows] == [
             (declined_id, "declined"),
         ]
@@ -362,7 +368,7 @@ def test_runtime_tasks_projects_only_canonical_minimized_lifecycle(
                     AssertionError("runtime GUI document read through"),
                 ),
             )
-        assert rig.get("/api/mesh/runtime_tasks", id=chat_id)["tasks"] == rows
+        assert contributor_rows(rig.app.mesh, chat_id) == rows
         assert rig.app.mesh.outbox.handlers == handlers
         assert rig.app.mesh.outbox.dead_hooks == dead_hooks
     finally:

@@ -12,12 +12,13 @@ from agentbridge.transport.raw_documents import collect_document_batches
 
 
 @pytest.mark.parametrize('extra_overlays', [0, 20_031])
-def test_staged_canonical_page_cost_ignores_unrelated_overlay_history(world, extra_overlays, record_property):
+def test_staged_canonical_page_cost_ignores_unrelated_overlay_history(clouds, world, extra_overlays, record_property):
     mesh, provider, root, reader, publisher, chat, encrypted = world
-    directory = provider.root / 'chats' / chat / 'overlays' / 'edits'
-    directory.mkdir(parents=True, exist_ok=True)
-    for n in range(extra_overlays):
-        (directory / f'old-{n:05}.json').write_bytes(b'{}')
+    clouds.seed_documents(provider.root, {
+        f'chats/{chat}/overlays/edits/old-{n:05}.json': {}
+        for n in range(extra_overlays)
+    })
+    provider.refresh()
     captured = publisher.capture()
     with root.publication_gate(mesh.store, reader.definition):
         retired = local_source.retire_for_publication(mesh.store, captured.source)

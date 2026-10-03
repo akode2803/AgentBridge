@@ -26,7 +26,7 @@ def test_aux_response_stale_guards_and_paged_captured_inputs(tmp_path):
     reads = source[reads_start:source.index('if (prepared?.guard', reads_start)]
     authority_start = source.index('const authorityRuns =', reads_start)
     authority = source[authority_start:source.index(';', authority_start) + 1]
-    pause_start = source.index('const down = data._paged ? !b._paused')
+    pause_start = source.index('const down = !b._paused')
     pause_choice = source[pause_start:source.index(';', pause_start) + 1]
     script = r'''
 import assert from 'node:assert/strict';
@@ -133,7 +133,6 @@ pending=refreshPagedAux(owner,2,'v1',pageData);
 calls.shift().resolve(response());await pending;
 assert.equal(paints.length,1);
 const supplied=paints[0];
-assert.equal(supplied.warmBase,true);
 assert.equal(supplied.paged,true);
 assert.equal(supplied.historyRead,true); // never mark-read from aux paint
 assert.deepEqual(supplied.aux,{feeds:[{agent:'bot'}],tasks:[{id:'task'}],
@@ -173,14 +172,14 @@ assert.equal(pause.disabled,true);
 assert.equal(pause._paused,null);
 assert.equal(title.badge,null); // Pending never leaves a false ready badge.
 
-// Paged render consumes supplied arrays even if warmBase is false; it must
+// Paged render consumes only supplied arrays; it must
 // never invoke livefeed/runtime_tasks/currentRunAuthority fallbacks.
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 const extract=new AsyncFunction('prepared','chatId','api','currentRunAuthority',
   __READS__ + ';const feeds=feedData.feeds||[];' + __AUTHORITY__ +
   ';return {feedData,runtimeData,authorityRuns};');
 const noLegacy=()=>{throw Error('legacy runtime read');};
-const compact=await extract({paged:true,warmBase:false,
+const compact=await extract({paged:true,
   aux:{feeds:[{agent:'bot'}],tasks:[{id:'task'}],runs:[{run_id:'run'}]}},
   'room',noLegacy,noLegacy);
 assert.deepEqual(compact.feedData,{feeds:[{agent:'bot'}]});

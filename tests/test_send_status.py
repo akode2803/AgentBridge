@@ -10,7 +10,7 @@ import pytest
 from agentbridge.core.errors import NotAMember
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
+
 
 from conftest import install_key, seed_account
 
@@ -20,15 +20,15 @@ CLIENT_REF = "0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture
-def receipt_world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def receipt_world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {name: seed_account(tx, name) for name in ("aryan", "fable", "eve")}
 
     def make(user: str) -> Mesh:
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, "mach1", home=home)
+        return Mesh(clouds.bare(root), user, "mach1", home=home)
 
     meshes = {name: make(name) for name in bundles}
     yield meshes
