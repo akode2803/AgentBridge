@@ -516,6 +516,8 @@ def test_result_ready_restart_settles_when_return_is_no_longer_allowed(
     assert specialist.store.cached_doc(path)["state"] == "interrupted"
 
 
+# Bound the full encrypted harness while allowing slow filesystem preparation.
+@pytest.mark.timeout(120)
 def test_shutdown_cancels_an_executing_child(delegation_meshes):
     _owner, manager, specialist, chat_id = delegation_meshes
     _source_handoffs, destination_handoffs, _source, _destination, work = (
