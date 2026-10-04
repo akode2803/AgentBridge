@@ -12,6 +12,16 @@ from agentbridge.mesh.profile_presentation import project_profile
 from conftest import seed_account
 
 
+@pytest.fixture
+def manual_presentation_owners(monkeypatch):
+    """These boundary tests own publication through rig.prepare, serially."""
+    from agentbridge.mesh.service import Mesh
+    from agentbridge.mesh.sync import SyncEngine
+
+    monkeypatch.setattr(Mesh, 'start', lambda self, **kwargs: None)
+    monkeypatch.setattr(SyncEngine, 'run', lambda self, **kwargs: None)
+
+
 def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
     rig.signup()
     rig.peer_account('member')
@@ -34,6 +44,7 @@ def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
     assert rig.aux(chat)['users']['member']['display'] == 'Changed later'
 
 
+@pytest.mark.usefixtures('manual_presentation_owners')
 def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
     rig.signup()
     names = [f'u{i:03d}' for i in range(70)]
@@ -55,6 +66,7 @@ def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
 
 
 @pytest.mark.parametrize('fault', ['expired', 'rollback'])
+@pytest.mark.usefixtures('manual_presentation_owners')
 def test_selected_presentation_withholds_payload_on_clock_fault(rig, monkeypatch, fault):
     from agentbridge.gui.api_page_aux import AuxiliaryPageOperation
     from agentbridge.mesh import membership_coordinator
