@@ -81,7 +81,10 @@ def browser_collector(tmp_path):
                 if not release_response.wait(timeout=10):
                     self.send_error(504)
                     return
-                self.reply({'status': 'ok', 'messages': ['PRIVATE_MESSAGE']})
+                try:
+                    self.reply({'status': 'ok', 'messages': ['PRIVATE_MESSAGE']})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # This endpoint deliberately exercises browser cancellation.
             elif self.path == "/synthetic/incoming":
                 self.reply({"type": "message", "id": RECEIVED_ID,
                             "ns": int(RECEIVED_NS), "chat_id": PRIVATE_CHAT,
@@ -178,20 +181,31 @@ def browser_collector(tmp_path):
 
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize('mode', ['off_on', 'session_reset', 'disabled_start', 'owned'])
-def test_real_chromium_completion_ownership_across_diagnostic_generations(browser_collector, mode):
+@pytest.mark.parametrize('cancel', [False, True])
+def test_real_chromium_completion_ownership_across_diagnostic_generations(browser_collector, mode, cancel):
     rig = browser_collector
     page = rig.page
     page.expose_function('requestArrived', rig.delayed_request.is_set)
     page.evaluate("""mode => {
         d.configureDiagnostics(mode !== 'disabled_start');
         window.completed = false;
-        window.pending = api('/api/state?secret=PRIVATE_QUERY').then(out => {
+        window.controller = new AbortController();
+        window.pending = api('/api/state?secret=PRIVATE_QUERY', undefined,
+                             {signal:controller.signal}).then(out => {
             window.result = out; window.completed = true;
+        }).catch(error => {
+            window.errorName = error.name; window.completed = true;
         });
     }""", mode)
     # Keep Playwright's event loop pumping its route callback while the actual
     # server waits; a blocking Python Event.wait would prevent request dispatch.
-    page.wait_for_function('async () => await window.requestArrived()', timeout=3000)
+    page.evaluate("""async () => {
+        const deadline = performance.now() + 3000;
+        while (!await window.requestArrived()) {
+            if (performance.now() >= deadline) throw new Error('loopback receipt deadline');
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }""")
     request_ref = rig.delayed_headers[0]
     if mode == 'disabled_start':
         assert request_ref is None
@@ -202,9 +216,14 @@ def test_real_chromium_completion_ownership_across_diagnostic_generations(browse
         if (mode === 'session_reset') document.dispatchEvent(new Event('ab:session-reset'));
         if (mode === 'disabled_start') d.configureDiagnostics(true);
     }""", mode)
+    if cancel:
+        page.evaluate('window.controller.abort()')
+        page.wait_for_function('window.completed')
+        assert page.evaluate('window.errorName') == 'AbortError'
     rig.release_response.set()
     page.wait_for_function('window.completed')
-    assert page.evaluate('window.result') == {'status': 'ok', 'messages': ['PRIVATE_MESSAGE']}
+    if not cancel:
+        assert page.evaluate('window.result') == {'status': 'ok', 'messages': ['PRIVATE_MESSAGE']}
     # Fence on the postcompletion marker's own upload, rather than an older
     # batch whose response could race the collector's one-second timer.
     with page.expect_response(lambda response:
@@ -213,11 +232,15 @@ def test_real_chromium_completion_ownership_across_diagnostic_generations(browse
                                       for event in response.request.post_data_json['events'])):
         page.evaluate("d.diagnostic('client_error', {error_type:'Error'})")
     events = [event for upload in rig.uploads for event in upload['events']]
-    completions = [event for event in events if event.get('phase') == 'browser_response']
+    completions = [event for event in events
+                   if event.get('phase') in ('browser_response', 'browser_request_failed')]
     legacy = [event for event in events if event.get('event') == 'client_request']
     if mode == 'owned':
         assert len(completions) == len(legacy) == 1
         assert completions[0]['request_ref'] == legacy[0]['request_ref'] == request_ref
+        assert completions[0]['phase'] == ('browser_request_failed' if cancel else 'browser_response')
+        if cancel:
+            assert legacy[0]['status'] == 'error' and legacy[0]['error_type'] == 'AbortError'
     else:
         assert completions == legacy == [], 'abandoned request regained diagnostic ownership'
     assert 'PRIVATE' not in json.dumps(rig.uploads)
