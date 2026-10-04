@@ -11,17 +11,16 @@ from agentbridge.mesh import messaging
 from agentbridge.mesh.overlays import UserState
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room1"
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(clouds, tmp_path):
     """Three plaintext viewers on a disposable shared room."""
-    root = tmp_path / "mesh"
-    tx = FolderTransport(root)
+    root = clouds.root(tmp_path / "mesh")
+    tx = clouds.bare(root)
     tx.put_doc(P.meta(CHAT), ChatSnapshot(
         id=CHAT,
         kind=ChatKind.GROUP,
@@ -32,7 +31,7 @@ def world(tmp_path):
         },
     ).to_dict())
     meshes = {
-        name: Mesh(FolderTransport(root), name, "m1", home=tmp_path / f"{name}-home")
+        name: Mesh(clouds.bare(root), name, "m1", home=tmp_path / f"{name}-home")
         for name in ("ann", "bob", "eve")
     }
     try:
@@ -157,13 +156,13 @@ def test_overview_does_not_sanitize_unused_hidden_runtime_field(world):
     assert overview["deleted"] is False
 
 
-def test_projection_uses_verified_state_not_forged_overlay(tmp_path):
+def test_projection_uses_verified_state_not_forged_overlay(clouds, tmp_path):
     """The new public state view must not bypass UserState's signature gate."""
-    root = tmp_path / "root"
+    root = clouds.root(tmp_path / "root")
     homes = {name: tmp_path / f"home-{name}" for name in ("aryan", "fable")}
 
     def open_mesh(name):
-        return Mesh(FolderTransport(root), name, "m1", encrypt=True, home=homes[name])
+        return Mesh(clouds.bare(root), name, "m1", encrypt=True, home=homes[name])
 
     for name in homes:
         mesh = open_mesh(name)

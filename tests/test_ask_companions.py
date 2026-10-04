@@ -14,7 +14,6 @@ from agentbridge.mesh.keyring import KeyStore
 from agentbridge.mesh.lifecycle import publish_change
 from agentbridge.mesh.membership_coordinator import _Stop
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 class _Lock:
@@ -44,22 +43,24 @@ def _settings():
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / 'provider'
-    owner = Mesh(FolderTransport(root), 'aryan', 'owner-box',
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / 'provider')
+    owner = Mesh(clouds.cached(root), 'aryan', 'owner-box',
                  home=tmp_path / 'owner-home', local_inputs=True)
     owner.accounts.create_human('aryan', 'owner-pass')
     owner.accounts.create_human('fable', 'fable-pass')
     owner.accounts.create_agent('claude')
     fable_home = tmp_path / 'fable-home'
     KeyStore(fable_home).save('fable', owner.keystore.load('fable'))
-    fable = Mesh(FolderTransport(root), 'fable', 'fable-box', home=fable_home)
+    fable = Mesh(clouds.bare(root), 'fable', 'fable-box', home=fable_home)
     fable.accounts.create_agent('ops')
     target_home, requester_home = tmp_path / 'target-home', tmp_path / 'requester-home'
     KeyStore(target_home).save('claude', owner.keystore.load('claude'))
     KeyStore(requester_home).save('ops', fable.keystore.load('ops'))
-    target = Mesh(FolderTransport(root), 'claude', 'remote-box', home=target_home)
-    requester = Mesh(FolderTransport(root), 'ops', 'remote-box', home=requester_home)
+    target = Mesh(clouds.bare(root), 'claude', 'remote-box', home=target_home)
+    requester = Mesh(clouds.bare(root), 'ops', 'remote-box', home=requester_home)
+    # Admit bootstrap writes from the separate remote identities explicitly.
+    owner.tx._transport.refresh()
     app = _App(owner, tmp_path)
     token = SimpleNamespace(mesh=owner)
     try:
@@ -70,6 +71,8 @@ def world(tmp_path):
 
 
 def _ingest(owner):
+    # Remote peer/status writes enter the mirror before local source admission.
+    owner.tx._transport.refresh()
     auxiliary = owner.local_inputs.auxiliary
     for scope in ('identities', 'status', 'peer'):
         assert auxiliary.ingest(scope).ready
@@ -146,6 +149,7 @@ def test_signed_transfer_requires_new_complete_identity_admission(world):
     # Another process's write has not entered this machine's admitted raw
     # input yet. It is neither a synchronous local mutation nor remote proof.
     assert api_ask_companions.capture_companions(app, owner, token)['peer_asks']
+    owner.tx._transport.refresh()
     owner.local_inputs.auxiliary.ingest('identities')
     settled = api_ask_companions.capture_companions(app, owner, token)
     assert settled['peer_asks'] == []

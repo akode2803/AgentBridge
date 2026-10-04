@@ -6,16 +6,15 @@ import pytest
 from agentbridge.mesh.aux_input_runtime import AuxInputRuntime
 from agentbridge.store import document_observation as docs, local_source
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import owned_transport
 
 
-def test_users_peer_and_two_prefix_identity_scopes_are_distinct(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    folder.put_doc('users/alice.json', {'name': 'alice', 'kind': 'human'})
-    folder.put_doc('lifecycle/alice/one.json', {'event': 'active'})
-    folder.put_doc('runtime/owner-control/alice/commands/one.json', {'id': 'one'})
-    owned = owned_transport(folder, tmp_path / 'owner')
+def test_users_peer_and_two_prefix_identity_scopes_are_distinct(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    provider.put_doc('users/alice.json', {'name': 'alice', 'kind': 'human'})
+    provider.put_doc('lifecycle/alice/one.json', {'event': 'active'})
+    provider.put_doc('runtime/owner-control/alice/commands/one.json', {'id': 'one'})
+    owned = owned_transport(provider, tmp_path / 'owner')
     store = Store(tmp_path / 'cache.sqlite')
     runtime = AuxInputRuntime(owned, store)
     try:

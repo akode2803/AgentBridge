@@ -16,16 +16,12 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.store import lifecycle_inputs, membership_suffix, terminal_observation
 from agentbridge.transport import authority_observation
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def world(tmp_path):
-    provider = FolderTransport(tmp_path / "mesh")
-    provider.cache_key = "coordinator-cache"
+def world(tmp_path, clouds):
+    provider = clouds.bare(tmp_path / "mesh")
     mirror = CachingTransport(provider, auto_refresh=False)
-    mirror._mirror_root_identity = "coordinator-root"
-    mirror._mirror_cache_identity = "coordinator-cache"
     mesh = Mesh(mirror, "aryan", "coordinator-box", home=tmp_path / "home")
     try:
         mesh.store.prepare_terminal_observation()
@@ -71,7 +67,13 @@ def _signed_rename(mesh, chat, actor, bundle, name):
 def test_no_suffix_shortcut_returns_candidate_without_full_fold_or_provider(world, monkeypatch):
     mesh, mirror, provider, chat = world
     receipt = _receipt(mesh, mirror, chat)
-    calls = getattr(provider, "_calls", None)
+    for method in ("get_doc", "list_docs", "snapshot_docs"):
+        monkeypatch.setattr(
+            provider, method,
+            lambda *_a, _method=method, **_k: pytest.fail(
+                f"coordinator invoked provider {_method}"
+            ),
+        )
     monkeypatch.setattr(
         mesh.messaging,
         "snapshot",
@@ -81,8 +83,6 @@ def test_no_suffix_shortcut_returns_candidate_without_full_fold_or_provider(worl
     assert result.status == "candidate" and result.candidate is not None
     assert json.loads(result.candidate.snapshot_json)["name"] == "Coordinator"
     assert result.candidate.suffix.rows == ()
-    if calls is not None:
-        assert provider._calls == calls
 
 
 def test_signed_suffix_candidate_matches_canonical_snapshot(world, monkeypatch):
@@ -110,7 +110,7 @@ def test_signed_suffix_candidate_matches_canonical_snapshot(world, monkeypatch):
     assert json.loads(result.candidate.snapshot_json)["name"] == "After"
 
 
-def test_online_unknown_account_returns_exact_readthrough_without_provider(world):
+def test_online_unknown_account_returns_exact_readthrough_without_provider(world, monkeypatch):
     mesh, mirror, provider, chat = world
     _newer_rename(mesh, mirror, chat)
     with mirror._lock:
@@ -119,14 +119,18 @@ def test_online_unknown_account_returns_exact_readthrough_without_provider(world
         mirror._mirror_revision += 1
     mesh.store.refresh_terminal_observation(_target(mesh, chat))
     receipt = authority_source.publish_authority_source(mirror, mesh.store, chat)
-    calls = getattr(provider, "_calls", None)
+    for method in ("get_doc", "list_docs", "snapshot_docs"):
+        monkeypatch.setattr(
+            provider, method,
+            lambda *_a, _method=method, **_k: pytest.fail(
+                f"coordinator invoked provider {_method}"
+            ),
+        )
 
     result = run_membership_round(mesh, receipt)
     assert (result.status, result.work_path, result.reason) == (
         "readthrough", P.user("aryan"), "account_readthrough_required",
     )
-    if calls is not None:
-        assert provider._calls == calls
 
 
 def test_first_sight_pin_progress_restarts_before_candidate(world):

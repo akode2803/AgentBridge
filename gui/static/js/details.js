@@ -512,7 +512,7 @@ async function renderChatDetails() {
         return;
       }
       // keep the NEW name in place and swap the ✓ for a spinner while the
-      // write commits (the shared folder can lag) — the row never flickers to
+      // write commits (cloud observation can lag) — the row never flickers to
       // empty, and the `.ci-saving` guard freezes polls until we redraw.
       $("#ci-name-row").innerHTML = `
         <span class="ci-name">${esc(name)}</span>

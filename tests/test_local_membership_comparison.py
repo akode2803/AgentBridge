@@ -17,11 +17,13 @@ from agentbridge.mesh.lifecycle_evaluation import LifecycleInputsIncomplete
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_membership_inputs, shadow_slot
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "captured-membership"
-SOURCE = shadow_slot.ShadowSource("fixture-root", "fixture-cache", "fixture-nonce")
+def _source(mesh):
+    return shadow_slot.ShadowSource(
+        mesh.tx.root, mesh.tx.cache_key, mesh.tx._mirror_instance_nonce,
+    )
 
 
 def _json(value):
@@ -29,8 +31,8 @@ def _json(value):
 
 
 @pytest.fixture
-def fixture_mesh(tmp_path):
-    mesh = Mesh(FolderTransport(tmp_path / "mesh"), "aryan", "machine",
+def fixture_mesh(tmp_path, clouds):
+    mesh = Mesh(clouds.cached(tmp_path / "mesh"), "aryan", "machine",
                 home=tmp_path / "home")
     mesh.accounts.create_human("aryan", "aryan-pass")
     # Seed the accepted retained head before any test mutates published trust.
@@ -67,10 +69,10 @@ def _publish(mesh, meta, accounts):
         for path in mesh.tx.list_docs(f"lifecycle/{name}/"):
             records.append((path, _json(mesh.tx.get_doc(path))))
     position = mesh.store.acquire_shadow(
-        mesh.store.inspect_shadow_position(), "fixture-publisher", SOURCE,
+        mesh.store.inspect_shadow_position(), "fixture-publisher", _source(mesh),
     )
     return mesh.store.publish_shadow(position, shadow_slot.ShadowSnapshot(
-        SOURCE, 1, 0, "provider_observed", (CHAT,), tuple(sorted(records)),
+        _source(mesh), 1, 0, "provider_observed", (CHAT,), tuple(sorted(records)),
     ))
 
 
@@ -152,8 +154,8 @@ def test_nonkeep_trust_is_unavailable_but_canonical_records_alert(
     assert alerts and alerts[-1]["name"] == "aryan"
 
 
-def test_unpinned_published_key_and_keyless_without_pin_take_distinct_paths(tmp_path):
-    mesh = Mesh(FolderTransport(tmp_path / "mesh"), "viewer", "machine",
+def test_unpinned_published_key_and_keyless_without_pin_take_distinct_paths(tmp_path, clouds):
+    mesh = Mesh(clouds.cached(tmp_path / "mesh"), "viewer", "machine",
                 home=tmp_path / "home")
     try:
         mesh.accounts.create_human("viewer", "viewer-pass")
@@ -183,7 +185,7 @@ def test_unpinned_published_key_and_keyless_without_pin_take_distinct_paths(tmp_
         keyless = {"name": "nobody", "kind": "human", "active": True,
                    "keys": {"sign_pub": "", "agree_pub": ""}}
         position = mesh.store.publish_shadow(position, shadow_slot.ShadowSnapshot(
-            SOURCE, 2, 0, "provider_observed", (CHAT,), tuple(sorted((
+            _source(mesh), 2, 0, "provider_observed", (CHAT,), tuple(sorted((
                 (P.meta(CHAT), _json(meta)),
                 (P.user("viewer"), _json(mesh.tx.get_doc(P.user("viewer")))),
                 (P.user("nobody"), _json(keyless)),

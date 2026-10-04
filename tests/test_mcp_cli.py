@@ -1,5 +1,5 @@
 """mesh-cli v2 (R12): the MCP tool surface, exercised through a real
-in-memory client session against a real folder-backed mesh."""
+in-memory client session against a real Supabase-backed mesh."""
 
 import json
 
@@ -14,16 +14,15 @@ from mcp.shared.memory import (  # noqa: E402 — after the importorskip
 
 from agentbridge.cli.server import build_mcp  # noqa: E402
 from agentbridge.mesh.service import Mesh  # noqa: E402
-from agentbridge.transport.folder import FolderTransport  # noqa: E402
 
 
 from conftest import install_key, seed_account  # noqa: E402
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {
         "aryan": seed_account(tx, "aryan"),
         "fable": seed_account(tx, "fable"),
@@ -33,7 +32,7 @@ def world(tmp_path):
     def mk(user):
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, "mach1", home=home)
+        return Mesh(clouds.bare(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "claude")}
     yield meshes

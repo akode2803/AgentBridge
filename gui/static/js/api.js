@@ -3,7 +3,7 @@
 
 import { toast } from "./util.js";
 import { bindFilePreview } from "./files.js";
-import { diagnostic } from "./diagnostics.js";
+import { diagnostic, beginDiagnosticRequest, endDiagnosticRequest } from "./diagnostics.js";
 
 export async function api(path, body, options = {}) {
   const started = performance.now();
@@ -12,6 +12,7 @@ export async function api(path, body, options = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   };
+  let requestRef = null;
   const timeoutMs = Number(options.timeoutMs) || 0;
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const signal = options.signal;
@@ -23,13 +24,19 @@ export async function api(path, body, options = {}) {
     ? setTimeout(() => controller.abort(), timeoutMs) : null;
   let out;
   try {
+    requestRef = beginDiagnosticRequest(path, body);
+    if (requestRef) opts.headers = {...opts.headers, "X-AgentBridge-Diagnostic":requestRef};
     const r = await fetch(path, opts);
     out = await r.json();
-    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+    const diagnosticOwned = endDiagnosticRequest(requestRef, path, body, out);
+    if (diagnosticOwned) diagnostic("client_request", {route:path, request_ref:requestRef,
+      duration_ms:performance.now() - started,
       status:out?.error ? "error" : out?.status || "ok", reason:out?.reason,
       rows:Array.isArray(out?.messages) ? out.messages.length : undefined});
   } catch (error) {
-    diagnostic("client_request", {route:path, duration_ms:performance.now() - started,
+    const diagnosticOwned = endDiagnosticRequest(requestRef, path, body, null, true);
+    if (diagnosticOwned) diagnostic("client_request", {route:path, request_ref:requestRef,
+      duration_ms:performance.now() - started,
       status:"error", error_type:error?.name === "AbortError" ? "AbortError" : "Error"});
     throw error;
   } finally {

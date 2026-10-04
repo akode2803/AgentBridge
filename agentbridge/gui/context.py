@@ -3,7 +3,7 @@
 One GuiApp = one machine's GUI = at most ONE signed-in human (v1 semantics,
 kept). The Mesh facade instance exists only while someone is signed in; the
 session survives restarts via ``gui_session.json`` in the LOCAL home dir
-(never the synced folder) — the E2EE identity bundle already lives in the
+(never the cloud mesh) — the E2EE identity bundle already lives in the
 local keystore, so restoring a session never needs the password again.
 """
 
@@ -13,10 +13,10 @@ import platform
 import hashlib
 import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..core.config import DEFAULT_HOME, atomic_write_json, read_json
+from ..core.config import DEFAULT_HOME, atomic_write_json, read_json, validate_root_spec
 from ..core.latency import LatencySink
 from ..core.errors import ValidationError
 from ..core.timekit import utcnow_iso
@@ -81,22 +81,18 @@ class GuiApp:
 
     def __init__(
         self,
-        root: Path | str,
+        root: str,
         *,
         home: Path | str | None = None,
         machine: str = "",
         encrypt: bool = True,
         static_dir: Path | str | None = None,
         app_version: str = "",
-        local_inputs: bool = False,
+        local_inputs: bool = True,
         poll_s: float = 4.0,
         sse_ping_s: float = 15.0,
     ) -> None:
-        # a scheme spec (supabase://…) MUST stay a string — Path() collapses the
-        # double slash into `supabase:\…` and mkdir fails (R23; folder roots
-        # stay Paths). Mirrors app.main()'s as_root — the GuiApp was the one
-        # cloud-wiring site R23 missed.
-        self.root = root if (isinstance(root, str) and "://" in root) else Path(root)
+        self.root = validate_root_spec(root)
         self.home = Path(home) if home else DEFAULT_HOME
         self.machine = machine or platform.node() or "gui"
         self.encrypt = encrypt
@@ -117,11 +113,15 @@ class GuiApp:
         self.frontend_revision = frontend_revision(self.static_dir)
         if type(local_inputs) is not bool:
             raise ValueError('local_inputs must be a bool')
-        self.local_inputs_enabled = local_inputs
+        if not local_inputs:
+            raise ValueError('GUI requires local_inputs=True')
+        self.local_inputs_enabled = True
         from .diagnostics import Diagnostics
         self.diagnostics = Diagnostics(self.home)
         from .page_cursors import PageCursorRegistry
         self.page_cursors = PageCursorRegistry()
+        from .page_read_tokens import PageReadTokens
+        self.page_read_tokens = PageReadTokens()
         from .collection_cursors import CollectionCursorRegistry
         self.collection_cursors = CollectionCursorRegistry()
         self.mesh: Mesh | None = None
@@ -129,8 +129,6 @@ class GuiApp:
         self._session_reads_exhausted = False
         self._session_read_ready = False
         # pre-auth reads (login screen, name checks) — directory only, no store.
-        # make_transport so the login screen works on a cloud root too, not just
-        # a folder (the FolderTransport hard-wire here broke supabase:// roots).
         self._tx0 = make_transport(self.root, home=self.home, offline_cache=True)
         self.directory0 = Directory(self._tx0)
         # cloud roots: start the mirror's first bulk load NOW so the first
@@ -192,7 +190,8 @@ class GuiApp:
                 and (mesh is None or self._session_read_ready)
             )
 
-    def finalize_page_read(self, token: SessionReadToken, prepared):
+    def finalize_page_read(self, token: SessionReadToken, prepared, *,
+                           mutation=None, expected_trust_version=None):
         """Inactive page handout seam; retain GUI gates through mesh validation.
 
         Computation has already finished outside these locks. Order is screen
@@ -210,18 +209,62 @@ class GuiApp:
                 if (not self.validate_session_read(token) or token.mesh is None
                         or token.mesh is not prepared._operation.mesh):
                     return PageWorkResult('unavailable', 'session_changed')
-                result = prepared.finalize()
+                candidate = prepared._operation.unread_candidate
+                if candidate is not None:
+                    from ..mesh.unread_counts import UnreadSession
+                    if candidate.session != UnreadSession(token.app_identity, token.generation, token.mesh.user):
+                        return PageWorkResult('unavailable', 'unread_session_changed')
+                if mutation is not None:
+                    from ..store.mutation_reservation import FinalizationMutation
+                    from ..store.source_selectors import Selector
+                    from ..mesh.paths import P
+                    op = prepared._operation
+                    if (type(mutation) is not FinalizationMutation or op.source_reader is None
+                            or mutation.coordinator is not op.source_reader.coordinator
+                            or mutation.changes != (Selector('doc_exact', P.state(op.chat, op.viewer)),)):
+                        raise ValueError('invalid read-state reservation')
+                result = (prepared.finalize() if mutation is None and expected_trust_version is None
+                          else prepared.finalize(mutation=mutation,
+                              expected_trust_version=expected_trust_version))
                 # A deadline may expire during bounded final verification. Its
                 # postcheck can only withhold a response; it never revives one.
-                if self.lock._expire_if_idle_locked():
-                    return PageWorkResult('locked', 'app_locked')
-                return result
+                release = False
+                try:
+                    if self.lock._expire_if_idle_locked():
+                        return PageWorkResult('locked', 'app_locked')
+                    if (result.status == 'page' and candidate is not None
+                            and candidate.complete and result.result is not None
+                            and result.result.unread is not None):
+                        runtime = token.mesh.local_inputs
+                        if (runtime is None or runtime.unread is None
+                                or not runtime.unread.accept(candidate,
+                                    result.result.validated_now_ns)):
+                            # The normal canonical summary remains valid; a
+                            # replaced job or concurrent newer handout removes
+                            # only its optional exact-count decoration.
+                            result = replace(result, result=replace(result.result, unread=None))
+                    release = result.status == 'page'
+                    return result
+                finally:
+                    # Only a successful page may expose a reserved ticket. A
+                    # failed postcheck/exception cancels this unattempted write.
+                    if (mutation is not None and mutation._state == 'reserved'
+                            and not release):
+                        mutation.abort_unstarted()
 
     def _advance_session_generation(self) -> None:
         self.page_cursors.clear()
+        self.page_read_tokens.clear()
         self.collection_cursors.clear()
         if self.mesh is not None and self.mesh.local_inputs is not None:
             self.mesh.local_inputs.clear_selection()
+            if self.mesh.local_inputs.unread is not None:
+                from ..mesh.unread_counts import UnreadSession
+                session = (UnreadSession(self.instance_id, self._session_generation + 1,
+                                          self.mesh.user)
+                           if type(self._session_generation) is int
+                           and 0 <= self._session_generation < _MAX_SESSION_GENERATION else None)
+                self.mesh.local_inputs.unread.clear(session=session)
         self._session_read_ready = False
         if type(self._session_generation) is not int \
                 or not 0 <= self._session_generation < _MAX_SESSION_GENERATION:
@@ -455,6 +498,9 @@ class GuiApp:
             return out
 
     def close(self) -> None:
+        from ..core.delivery_trace import emit
+        emit('shutdown', outcome='completed')
+        self.diagnostics.close()
         with self._lock:
             self._detach()
 

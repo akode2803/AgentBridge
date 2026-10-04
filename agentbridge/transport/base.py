@@ -1,9 +1,8 @@
 """Transport interface — the ONLY layer that touches bytes-at-rest.
 
-A transport moves the logical records over some shared storage. Drivers:
-``folder`` (OneDrive/Drive/SharePoint synced folder — files)
-today, ``supabase`` (tables + storage + realtime) in R23. Everything above
-this layer is storage-agnostic.
+A transport moves logical records over shared storage. The production driver
+is ``supabase`` (tables + storage + realtime), wrapped by a local read mirror.
+Everything above this layer uses the transport contract.
 
 Contract highlights (the parts that make a sync transport reliable):
 - ``put_doc`` is ATOMIC and retries transient locks; readers never see half a
@@ -17,8 +16,8 @@ Contract highlights (the parts that make a sync transport reliable):
 - Paths are POSIX-style, RELATIVE, and validated — a transport must refuse
   any path that escapes its root.
 
-Adding a connector = subclass Transport, implement the abstract methods, and
-register the scheme in ``make_transport``. The REQUIRED surface is enough for
+Internal transport seams subclass Transport and implement its abstract methods.
+Configured production roots are validated as ``supabase://<label>``. The REQUIRED surface is enough for
 full correctness; two OPTIONAL fast paths make a high-RTT (cloud) driver feel
 local, and both degrade gracefully when absent:
 - ``get_docs(prefix)`` — bulk-read every doc in one round-trip. The default
@@ -57,10 +56,9 @@ __all__ = ["Transport", "TransportProfile", "Watcher"]
 class TransportProfile:
     """A connector's declared ECONOMICS (R76 — docs/SCALING.md §4). Every
     cadence in the app reads from here; no caller may hard-code a poll rate.
-    The synced-folder defaults keep today's behaviour: polling a local folder
-    is free, so nothing slows down. A metered (cloud API) driver declares
-    itself and the mirror/sync/presence layers adapt: hint-woken pulls with
-    slow safety polls instead of fast fixed loops."""
+    The defaults describe unmetered internal/test owners. The metered Supabase
+    driver declares its costs so mirror/sync/presence layers use hint-woken pulls
+    with slow safety polls instead of fast fixed loops."""
 
     metered: bool = False          # polls cost real quota (egress/requests)?
     supports_doc_delta: bool = False  # get_docs_delta(cursor) implemented?
@@ -95,8 +93,8 @@ class Transport(ABC):
 
     # True only when create_doc is a globally exclusive compare-and-create.
     # Effect grants must never infer this from an implementation detail: the
-    # synced-folder implementation is atomic per file but not a cross-machine
-    # claim primitive.
+    # atomic document writes alone do not establish a cross-machine claim
+    # primitive.
     supports_exclusive_create: bool = False
 
     def effect_claims_ready(self) -> bool:
@@ -110,9 +108,8 @@ class Transport(ABC):
         del ask_envelope, decision_envelope
         raise RuntimeError("authoritative effect claims are unavailable")
 
-    # Ceiling is a property of the TRANSPORT, not the app: a synced folder
-    # pushes every attachment to each member's machine; an API store has its
-    # own service limits. The GUI names this limit in the too-large dialog.
+    # Ceiling is a property of the TRANSPORT, not the app: the provider has
+    # its own service limits. The GUI names this limit in the too-large dialog.
     max_upload_bytes: int = 512 * 1024 * 1024
 
     # the declared economics (R76) — see TransportProfile above. The default
@@ -304,8 +301,8 @@ class Transport(ABC):
         supported — the janitor then reclaims nothing on this transport."""
 
     def local_path(self, path: str) -> Path | None:
-        """Real filesystem path for folder-backed stores, else None — the seam
-        where open-with-OS / preview features degrade for API backends."""
+        """Optional local byte-path seam for internal owners; API-backed production
+        storage returns None and downloads attachments separately."""
         return None
 
     # ---------------------------------------------------------------- events

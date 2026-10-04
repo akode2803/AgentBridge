@@ -28,42 +28,52 @@ _RUNNER = r'''
 import assert from 'node:assert/strict';
 import {createLatestRead} from './latest-read.mjs';
 const source = __SOURCE__;
-function fixture() {
-  const App={page:'chats',routeSeq:1}, Mesh={chatId:'room',detailsView:false,
+function fixture({selected=false,paged=false}={}) {
+  const App={page:'chats',routeSeq:1}, Mesh={chatId:selected?'room':null,detailsView:false,
     state:{available:true,user:'alice',chats:[]}};
   let lockEpoch=0, session=0, calls=0, sidebar=0, transcript=0;
+  let homes=0,empty=false,details=0;
   const next={available:true,user:'alice',chats:[{id:'room',preview:'new message'}]};
-  const pane={hidden:true};
+  const pane={hidden:true,classList:{remove(){},add(){}}};
   const env={App,Mesh,window:{},BrowserSession:{snapshot:()=>({})},
-    meshCaps:()=>({chat_page_v1:false}),pageOwner:null,
+    meshCaps:()=>({chat_page_v1:paged}),pageOwner:null,
     sidebarRead:createLatestRead(10), SIDEBAR_TIMEOUT_MS:100,
-    isInitialSelectedViewPending:()=>false, captureSessionEpoch:()=>session,
+    captureSessionEpoch:()=>session, advanceSelectedView:()=>{},
     sessionMayApply:t=>t===session, meshStateSnapshot:()=>({lockEpoch}),
-    selectedChatContext:()=>null, warmContext:()=>null, restartIntent:()=>null,
-    captureWarmStateRequest:()=>({lockEpoch}),
+    restartIntent:()=>null, captureMeshStateRead:()=>({lockEpoch}),
     api:async()=>{calls++;return next;},
     applyMeshState:(ticket,fresh,request)=>{
       assert.equal(ticket,session);assert.equal(request.lockEpoch,lockEpoch);
       Mesh.state=fresh;return true;
     },
-    $:s=>s==='#details-pane'?pane:{},
+    $:s=>s==='#details-pane'?pane:s==='#content > .empty-state'?(empty?{}:null):{},
     renderSidebar:()=>{sidebar++;assert.equal(Mesh.state,next);},
-    startAskPoll:()=>{},renderMeshChat:async()=>{transcript++;},
-    V:{closeAuthPage:()=>{},closeConnectingPage:()=>{}},
+    startAskPoll:()=>{},
+    renderEmptyChat:()=>{homes++;empty=true;Mesh.listKey='empty';pane.hidden=true;},
+    renderPagedChat:()=>{assert.ok(Mesh.chatId);transcript++;},
+    V:{closeAuthPage:()=>{},closeConnectingPage:()=>{},renderChatDetails:async()=>{details++;}},
   };
   const render=new Function(...Object.keys(env),
-    `let warmOperationSeq=0,warmOperationsExhausted=false,chatsFetchSeq=0,skipWarmChatId=null;
+    `let chatsFetchSeq=0;
      ${source};return renderChats;`)(...Object.values(env));
   return {render,App,Mesh,counts:()=>({calls,sidebar,transcript}),
+    homes:()=>homes,details:()=>details,pane,
     lock:()=>{lockEpoch++;},session:()=>{session++;}};
 }
-// Already-visible chat uses the normal safety/event/mutation refresh path.
-{
- const f=fixture();await f.render(false);
- assert.deepEqual(f.counts(),{calls:1,sidebar:1,transcript:1},
-   'normal refresh must dispatch its state read and repaint both surfaces');
- await f.render(false);
- assert.deepEqual(f.counts(),{calls:2,sidebar:2,transcript:2});
+// The shared no-chat shell still paints once and refreshes only the sidebar,
+// independent of transient display capability metadata.
+for (const paged of [false,true]) {
+ const f=fixture({selected:false,paged});await f.render(false);await f.render(false);
+ assert.deepEqual(f.counts(),{calls:2,sidebar:2,transcript:0});
+ assert.equal(f.homes(),1);assert.equal(f.pane.hidden,true);
+}
+// Every selected chat refresh acquires a bounded page directly, including
+// details changes. Sidebar acquisition never delays selected-chat dispatch.
+for(const paged of [false,true]) {
+ const f=fixture({selected:true,paged});await f.render(false);
+ assert.deepEqual(f.counts(),{calls:0,sidebar:0,transcript:1});
+ f.Mesh.detailsView=true;f.Mesh.renderedChat='room';await f.render(true);
+ assert.deepEqual(f.counts(),{calls:0,sidebar:0,transcript:2});
 }
 // Queue admission uses the owner captured before enqueue, never a request
 // initialized only by the not-yet-dispatched read callback.

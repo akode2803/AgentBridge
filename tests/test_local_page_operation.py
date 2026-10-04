@@ -1,4 +1,4 @@
-"""Canonical page operations over one admitted direct-folder source."""
+"""Canonical page operations over one admitted cached cloud source."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,6 @@ from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport import raw_documents
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import root_identity
 
 
@@ -36,9 +35,9 @@ def _message(ident, ns):
 
 
 @pytest.fixture(params=[False, True], ids=["plain", "encrypted"])
-def world(tmp_path, request):
+def world(tmp_path, request, clouds):
     encrypt = request.param
-    provider = FolderTransport(tmp_path / "provider")
+    provider = clouds.cached(tmp_path / "provider")
     mesh = Mesh(
         provider, "aryan", "local-page-box", encrypt=encrypt,
         home=tmp_path / "mesh-home",
@@ -79,6 +78,7 @@ def _target(mesh, chat):
 
 def _inputs(world, *, observed_ns=None):
     mesh, provider, _root, reader, publisher, chat, _encrypted = world
+    provider.refresh()
     captured = publisher.capture()
     publisher.publish(
         captured, raw_documents.collect_documents(provider, reader.definition),
@@ -165,6 +165,7 @@ def test_delayed_local_changes_reject_prepared_finalizer(world, race):
         provider.put_doc(state, {
             "cleared": {"ns": time.time_ns(), "keep_starred": False},
         })
+        provider.refresh()
         captured = publisher.capture()
         publisher.publish(
             captured, raw_documents.collect_documents(provider, reader.definition),
@@ -213,7 +214,7 @@ def test_first_page_raw_work_is_independent_of_unexamined_old_history(world):
     ]
 
 
-def test_wrong_source_index_reader_and_transport_are_rejected(world, tmp_path):
+def test_wrong_source_index_reader_and_transport_are_rejected(world, tmp_path, clouds):
     mesh, _provider, root, reader, _publisher, chat, _encrypted = world
     receipt, _overlay, index = _inputs(world)
     wrong_index = replace(index, source=replace(index.source, source_id="wrong"))
@@ -239,7 +240,7 @@ def test_wrong_source_index_reader_and_transport_are_rejected(world, tmp_path):
         other_store.close()
 
     original = mesh.tx
-    mesh.tx = FolderTransport(tmp_path / "replacement")
+    mesh.tx = clouds.cached(tmp_path / "replacement")
     try:
         result = PageOperation(mesh, chat, source_reader=reader).prepare(
             receipt, receipt, index,
@@ -307,9 +308,9 @@ def test_current_viewer_membership_removal_is_forbidden(world):
 
 
 def test_local_lifecycle_write_triggering_raw_key_change_rolls_back(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, clouds):
     owner, agent, chat_id = "aryan", "claude", "local-lifecycle-page"
-    provider = FolderTransport(tmp_path / "provider")
+    provider = clouds.cached(tmp_path / "provider")
     mesh = Mesh(
         provider, owner, "local-page-box", encrypt=True,
         home=tmp_path / "mesh-home",
@@ -351,6 +352,7 @@ def test_local_lifecycle_write_triggering_raw_key_change_rolls_back(
         root.register_store(mesh.store)
         reader = local_page_source.LocalPageSource(root, mesh.store, chat_id)
         publisher = SourcePublisher(root, mesh.store, reader.definition)
+        provider.refresh()
         captured = publisher.capture()
         publisher.publish(
             captured, raw_documents.collect_documents(provider, reader.definition),

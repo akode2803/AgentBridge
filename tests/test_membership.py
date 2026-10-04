@@ -10,16 +10,15 @@ from agentbridge.core.models import ChatKind, ChatSnapshot, Role, UserKind
 from agentbridge.mesh import events
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {
         "aryan": seed_account(tx, "aryan"),
         "fable": seed_account(tx, "fable"),
@@ -34,7 +33,7 @@ def world(tmp_path):
         for agent, owner in (("claude", "aryan"), ("coco", "fable")):
             if user == owner:
                 install_key(home, agent, bundles[agent])
-        return Mesh(FolderTransport(root), user, "mach1", home=home)
+        return Mesh(clouds.bare(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude", "coco")}
     yield meshes
@@ -727,7 +726,7 @@ def test_refold_survives_transient_meta_write_failure(world, monkeypatch):
 # ----------------------------------------------------- R13.5 fold integrity
 
 def _forge(chat_id, ns, author, event, sig=""):
-    """A raw info-event record as it would land on the shared folder."""
+    """A raw info-event record as it would land on the shared provider."""
     rec = {"id": f"forge-{ns}", "ns": ns, "ts": "t", "from": author,
            "kind": "info", "event": event}
     if sig:

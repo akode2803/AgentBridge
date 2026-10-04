@@ -230,8 +230,8 @@ The target data plane has three deliberately separate projections:
 
 Every shared runtime record binds its signature and authenticated encryption to
 the room, record id, `ns`, actor, run/task/call id, schema version, policy
-revision, membership/ownership epoch, and key epoch. Supabase RLS, folder
-transport validation, cache/sync, E2EE sealing, tenure, old-client behavior,
+revision, membership/ownership epoch, and key epoch. Supabase RLS, cloud
+root validation, cache/sync, E2EE sealing, tenure, old-client behavior,
 retention, and deletion are designed before the first runtime record ships.
 
 Migration and rollback are properties of each stateful release: dual-read or
@@ -660,7 +660,7 @@ runtime feature.
   separate audience and retention rules.
 - [ ] Add runtime, policy, membership/ownership, backend and capability schema
   versions to every record.
-- [ ] Design transport paths, folder authentication, cache/sync behavior,
+- [ ] Design transport paths, Supabase authentication, cache/sync behavior,
   Supabase rows, RLS, delta feed and deletion/retention.
 - [ ] Define dual-read/dual-write, old-client behavior, active-run drain,
   incompatible-run termination and rollback for the first stateful release.
@@ -1971,7 +1971,7 @@ Estimate: **3-4.5 weeks**.
 grant for the first AgentBridge-owned effect; it is not duplicated into a
 second competing authority. Supabase member clients claim and advance strict
 append-only `EffectRecord` paths through a versioned authenticated RPC. Direct
-member writes are denied, folder/service-key/missing-schema modes fail closed,
+member writes are denied, unsupported-owner/service-key/missing-schema modes fail closed,
 and atomically copied ask+decision evidence is required when reading the effect.
 Ordinary permission records retain normal cleanup. The
 first integrated mutation is `clear_chat`; provider-native actions remain

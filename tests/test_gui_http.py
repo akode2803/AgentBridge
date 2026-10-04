@@ -26,7 +26,7 @@ def test_signup_login_logout(rig):
     assert out["ok"] and out["user"] == "aryan"
     assert len(out["recovery_code"]) >= 8  # shown once, then gone
 
-    st = rig.get("/api/mesh/state")
+    st = rig.sidebar()
     assert st["v"] == 2 and st["user"] == "aryan"
     assert st["caps"]["sse"] is True
     assert st["users"]["aryan"]["display"] == "Aryan"
@@ -34,11 +34,11 @@ def test_signup_login_logout(rig):
     # V68: sign-out is password-gated (the next sign-in claims this machine's
     # agents). Wrong/no password is refused and the session stays.
     assert "error" in rig.post("/api/mesh/logout")               # no password
-    assert rig.get("/api/mesh/state")["user"] == "aryan"          # still in
+    assert rig.sidebar()["user"] == "aryan"          # still in
     assert "error" in rig.post("/api/mesh/logout", password="nope")
-    assert rig.get("/api/mesh/state")["user"] == "aryan"
+    assert rig.sidebar()["user"] == "aryan"
     assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
-    assert rig.get("/api/mesh/state")["user"] is None            # signed out
+    assert rig.sidebar()["user"] is None            # signed out
 
     bad = rig.post("/api/mesh/login", username="aryan", password="wrong")
     assert "error" in bad
@@ -55,7 +55,7 @@ def test_login_refused_while_signed_in(rig):
     out = rig.post("/api/mesh/login", username="mallory",
                    password="mallory-pw1")
     assert "sign out first" in out.get("error", "")
-    assert rig.get("/api/mesh/state")["user"] == "aryan"    # session intact
+    assert rig.sidebar()["user"] == "aryan"    # session intact
     assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
     out = rig.post("/api/mesh/login", username="mallory",
                    password="mallory-pw1")
@@ -81,7 +81,7 @@ def test_restoring_flag_and_cold_directory_login(rig, monkeypatch):
     rig.app._restore_retrying = True
     assert (rig.home / "gui_session.json").exists()
     assert rig.get("/api/state")["restoring"] is True
-    ms = rig.get("/api/mesh/state")
+    ms = rig.sidebar()
     assert ms["user"] is None and ms["restoring"] is True
 
     class _Blind:
@@ -110,7 +110,7 @@ def test_signup_refused_while_signed_in(rig):
     out = rig.post("/api/mesh/signup", username="mallory",
                    password="mallory-pw1", display="Mallory")
     assert "sign out first" in out.get("error", "")
-    assert rig.get("/api/mesh/state")["user"] == "aryan"     # session intact
+    assert rig.sidebar()["user"] == "aryan"     # session intact
     assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
     out = rig.post("/api/mesh/signup", username="mallory",
                    password="mallory-pw1", display="Mallory")
@@ -123,6 +123,7 @@ def test_session_restores_across_server_restart(rig):
     app2 = GuiApp(rig.root, home=rig.home, machine="guibox", encrypt=True,
                   poll_s=0.25)
     try:
+        app2._tx0.refresh()
         app2.restore()
         assert app2.user == "aryan"
     finally:
@@ -155,6 +156,7 @@ def test_restore_refused_for_keyless_migrated_account(rig, tmp_path):
     app2 = GuiApp(rig.root, home=rig.home, machine="guibox", encrypt=True,
                   poll_s=0.25)
     try:
+        app2._tx0.refresh()
         app2.restore()
         assert app2.user is None  # refused — forced to log in + publish keys
     finally:
@@ -202,7 +204,7 @@ def test_post_read_and_member_gate(rig):
     sent = rig.post("/api/mesh/post", chat_id=cid, body="hello **mesh2**")
     assert sent["ok"] and sent["id"]
 
-    got = rig.get("/api/mesh/chat", id=cid)
+    got = rig.page(cid)
     bodies = [m["body"] for m in got["messages"] if m["kind"] == "message"]
     assert bodies == ["hello **mesh2**"]
     assert got["messages"][-1]["mine"] is True
@@ -217,12 +219,12 @@ def test_post_read_and_member_gate(rig):
         assert msgs[-1].body == "hello **mesh2**"
 
     # a chat aryan is not in reads as a polite error at the API
-    outsider = Mesh(rig.root, "fable", "peerbox", home=rig.home,
+    outsider = Mesh(rig.clouds.bare(rig.root), "fable", "peerbox", home=rig.home,
                     store_path=rig.home / "fable-b2.sqlite")
     solo = outsider.create_chat("Private", [])
     outsider.close()
-    denied = rig.get("/api/mesh/chat", id=solo.id)
-    assert "error" in denied
+    denied = rig.page(solo.id)
+    assert denied["status"] == "forbidden"
 
 
 def test_state_sidebar_shape(rig):
@@ -230,13 +232,14 @@ def test_state_sidebar_shape(rig):
     made = rig.post("/api/mesh/create_chat", name="Notes", members=[])
     cid = made["chat"]["id"]
     rig.post("/api/mesh/post", chat_id=cid, body="note to self")
-    st = rig.get("/api/mesh/state")
+    st = rig.sidebar()
     chat = next(c for c in st["chats"] if c["id"] == cid)
     assert chat["last"]["body"] == "note to self"
     assert chat["unread"] == 0  # my own messages never count
     assert chat["archived"] is False and chat["pinned"] is False
     me = st["users"]["aryan"]
-    assert me["handle"] == "aryan" and me["kind"] == "human"
+    assert me["username"] == "aryan" and me["kind"] == "human"
+    assert st["chats_complete"] and st["users_complete"]
 
 
 def test_sse_stream_delivers_peer_message(rig):
@@ -275,7 +278,7 @@ def test_sse_stream_delivers_peer_message(rig):
     conn.close()
 
     # and the transcript shows it decrypted
-    got = rig.get("/api/mesh/chat", id=cid)
+    got = rig.page(cid)
     assert got["messages"][-1]["body"] == "ping from fable"
     assert got["messages"][-1]["mine"] is False
 
@@ -292,9 +295,10 @@ def test_bridge_state_compat_shape(rig):
     assert st["caps"]["sse"] is True
     assert st["paused"] is False
     conn = st["connection"]
-    assert conn["scheme"] == "folder" and conn["root"]
-    assert conn["shared_ok"] is True     # the rig's folder root exists
-    assert "sync_client" in conn         # True/False/None (probe may not know)
+    assert conn["scheme"] == "supabase" and conn["root"] == rig.root
+    assert st["caps"]["chat_page_v1"] is True
+    assert st["caps"]["session_binding_v1"] is True
+    assert conn["mirror"]["warm"] is True
 
 
 def test_open_target_fixed_names_only(rig, monkeypatch):
@@ -305,8 +309,8 @@ def test_open_target_fixed_names_only(rig, monkeypatch):
     opened = []
     monkeypatch.setattr(api_files.desktop, "open_path", opened.append)
     assert rig.post("/api/open", target="home")["ok"]
-    assert rig.post("/api/open", target="shared")["ok"]
-    assert opened == [rig.app.home, rig.app.root]
+    assert "error" in rig.post("/api/open", target="shared")
+    assert opened == [rig.app.home]
     assert "error" in rig.post("/api/open", target="C:/Windows")
 
 
@@ -318,11 +322,11 @@ def test_chat_pins_are_a_list_with_body(rig):
     cid = rig.post("/api/mesh/create_chat", name="Pinned", members=[])["chat"]["id"]
     mid = rig.post("/api/mesh/post", chat_id=cid, body="pin this one")["id"]
     rig.post("/api/mesh/pin", chat_id=cid, msg_id=mid)
-    meta = rig.get("/api/mesh/chat", id=cid)["meta"]
+    meta = rig.page(cid)["meta"]
     assert isinstance(meta["pins"], list)
     assert meta["pins"][0]["id"] == mid
     assert meta["pins"][0]["body"] == "pin this one"
-    assert meta["created"] and meta["created_by"] == "aryan"
+    assert rig.summary(cid)["metadata_status"]["origin"] == "deferred"
 
 
 def test_sse_requires_session(rig):

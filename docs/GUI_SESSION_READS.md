@@ -67,10 +67,9 @@ mutations are never automatically retried because their old UI continuation was
 discarded. An auth receipt matching a session already adopted by a poll can still
 show its once-only recovery code without invalidating that session again.
 
-The shared frontend may be served by an older running backend. Initial legacy
-compatibility recognizes the bridge bootstrap shape or a v2 0.24.x backend through
-0.24.272 without a declared binding capability. This mode provides no R188 server
-binding guarantee. After binding is accepted, the browser never downgrades to
-legacy mode. Other auxiliary endpoints have local continuation guards where
+The frontend requires a v2 bootstrap with `session_binding_v1=true`,
+`chat_page_v1=true`, and a valid consistent `session_binding`. Missing or malformed
+capabilities/bindings are rejected; no legacy session mode is adopted. Other
+auxiliary endpoints have local continuation guards where
 converted, not an implied exact server binding. App-lock policy, cross-process
 trust, remote freshness, and a conversation API remain separate work.

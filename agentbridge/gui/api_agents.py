@@ -278,21 +278,6 @@ def runner_state(app, mesh, name: str):
     return runner_alive(app.home, name)
 
 
-def _ask_expired(doc: dict, a: dict, slack_s: float = 60.0) -> bool:
-    """Fallback ghost filter for agents this machine can't process-check:
-    an ask past its own timeout (doc write time + expires_in_s + slack)
-    was already denied-by-timeout on the harness side — never show it."""
-    from .api_messages import _age_s
-
-    age = _age_s(doc.get("updated", ""))
-    if age is None:
-        return False
-    try:
-        return age > float(a.get("expires_in_s") or 120.0) + slack_s
-    except (TypeError, ValueError):
-        return False
-
-
 @authed
 def asks(app, req, mesh) -> dict:
     """Pending permission asks + questions AND scheduled wake-up timers
@@ -302,104 +287,53 @@ def asks(app, req, mesh) -> dict:
     runner process is dead contributes NO asks (process truth beats the
     stale doc), and a remote agent's asks drop once past their own
     timeout."""
-    if getattr(app, 'local_inputs_enabled', False) and mesh.local_inputs is not None:
-        from .api_ask_companions import capture_companions
-        from .api_bounded_asks import capture_room_asks
-        from .context import session_read_binding
+    from .api_ask_companions import capture_companions
+    from .api_bounded_asks import capture_room_asks
+    from .context import session_read_binding
 
-        token = app.capture_session_read()
-        if token is None or token.mesh is not mesh:
-            return {'error': 'Session changed'}
-        chat_id = (req.params.get('chat') or '').strip()
-        rooms, rooms_complete, forbidden, resolved = capture_room_asks(
-            app, mesh, token, chat_id=chat_id)
-        if forbidden:
-            if not app.validate_session_read(token):
-                return {'error': 'Session changed'}
-            return {'ok': True, 'asks': [], 'timers': [], 'asks_complete': True,
-                    'rooms_complete': True, 'peer_complete': True,
-                    'timers_complete': True, 'forbidden': True,
-                    'resolved_room_ids': [],
-                    'session_binding': session_read_binding(token)}
-        companions = capture_companions(app, mesh, token, chat_id=chat_id)
-        asks = rooms + companions['peer_asks']
-        authorized = set(resolved)
-        timers = []
-        timer_room_pending = False
-        for timer in companions['timers']:
-            room = timer['chat_id']
-            if (room == chat_id if chat_id else room == '' or room in authorized):
-                timers.append(timer)
-            elif not rooms_complete:
-                timer_room_pending = True
-        peer_complete = companions['peer_complete']
-        timers_complete = companions['timers_complete'] and not timer_room_pending
-        complete = rooms_complete and peer_complete and timers_complete
+    token = app.capture_session_read()
+    if token is None or token.mesh is not mesh:
+        return {'error': 'Session changed'}
+    chat_id = (req.params.get('chat') or '').strip()
+    rooms, rooms_complete, forbidden, resolved = capture_room_asks(
+        app, mesh, token, chat_id=chat_id)
+    if forbidden:
         if not app.validate_session_read(token):
             return {'error': 'Session changed'}
-        import json
-
-        if (len(asks) > 1024 or len(timers) > 512
-                or len(json.dumps({'asks': asks, 'timers': timers},
-                                  ensure_ascii=False).encode()) > 2 * 1024 * 1024):
-            asks, timers, complete = [], [], False
-            rooms_complete = peer_complete = timers_complete = False
-            resolved = ()
-        return {'ok': True, 'asks': asks, 'timers': timers,
-                'asks_complete': complete, 'rooms_complete': rooms_complete,
-                'peer_complete': peer_complete, 'timers_complete': timers_complete,
-                'forbidden': False, 'resolved_room_ids': list(resolved),
+        return {'ok': True, 'asks': [], 'timers': [], 'asks_complete': True,
+                'rooms_complete': True, 'peer_complete': True,
+                'timers_complete': True, 'forbidden': True,
+                'resolved_room_ids': [],
                 'session_binding': session_read_binding(token)}
-    chat = (req.params.get("chat") or "").strip()
-    out = []
+    companions = capture_companions(app, mesh, token, chat_id=chat_id)
+    asks = rooms + companions['peer_asks']
+    authorized = set(resolved)
     timers = []
-    alive_by_agent = {}
-    from ..harness.runtime.peer_control import list_owner_asks as list_peer_asks
-    from ..harness.runtime.permissions import list_owner_asks
+    timer_room_pending = False
+    for timer in companions['timers']:
+        room = timer['chat_id']
+        if (room == chat_id if chat_id else room == '' or room in authorized):
+            timers.append(timer)
+        elif not rooms_complete:
+            timer_room_pending = True
+    peer_complete = companions['peer_complete']
+    timers_complete = companions['timers_complete'] and not timer_room_pending
+    complete = rooms_complete and peer_complete and timers_complete
+    if not app.validate_session_read(token):
+        return {'error': 'Session changed'}
+    import json
 
-    try:
-        out.extend(list_owner_asks(mesh, chat_id=chat))
-    except Exception:
-        pass
-    if not chat:
-        try:
-            for a in list_peer_asks(mesh):
-                repair = bool(a["repair"])
-                command = a["command"]
-                requester = a["requester"]
-                target = a["target"]
-                out.append({
-                    "id": a["id"], "agent": target, "kind": "peer",
-                    "tool": command, "chat_id": "", "repair": repair,
-                    "detail": (f"@{requester} wants to {command} "
-                               f"{target}'s harness" if repair else
-                               f"@{requester} wants a diagnostic session "
-                               f"({command})"),
-                    "peer": requester,
-                })
-        except Exception:
-            pass
-    for name in mesh.directory.names():
-        acc = mesh.directory.get(name)
-        if not (acc and acc.agent and acc.agent.owner == mesh.user):
-            continue
-        alive = runner_state(app, mesh, name)
-        alive_by_agent[name] = alive
-        hdoc = mesh.tx.get_doc(f"status/{name}_harness.json")
-        for t in (hdoc.get("timers") if isinstance(hdoc, dict) else None) or []:
-            if not isinstance(t, dict):
-                continue
-            if chat and t.get("chat_id") != chat:
-                continue
-            timers.append({"agent": name, "id": t.get("id"),
-                           "chat_id": t.get("chat_id"),
-                           "at_ns": t.get("at_ns"), "note": t.get("note"),
-                           # V88: only recurring timers carry the key
-                           **({"repeat": t["repeat"]}
-                              if t.get("repeat") else {})})
-    out = [a for a in out
-           if alive_by_agent.get(a.get("agent")) is not False]
-    return {"ok": True, "asks": out, "timers": timers}
+    if (len(asks) > 1024 or len(timers) > 512
+            or len(json.dumps({'asks': asks, 'timers': timers},
+                              ensure_ascii=False).encode()) > 2 * 1024 * 1024):
+        asks, timers, complete = [], [], False
+        rooms_complete = peer_complete = timers_complete = False
+        resolved = ()
+    return {'ok': True, 'asks': asks, 'timers': timers,
+            'asks_complete': complete, 'rooms_complete': rooms_complete,
+            'peer_complete': peer_complete, 'timers_complete': timers_complete,
+            'forbidden': False, 'resolved_room_ids': list(resolved),
+            'session_binding': session_read_binding(token)}
 
 
 @authed

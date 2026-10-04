@@ -16,8 +16,8 @@ that grant to the canonical active run/root task and the actual attempt.
 
 Provider-native approvals are excluded. Returning `allow` to a provider does
 not tell AgentBridge whether the provider subsequently performed its action, so
-no completion receipt is fabricated for that path. Folder transport is also
-excluded because a synced file cannot serialize a claim across machines.
+no completion receipt is fabricated for that path. The effect path requires the
+authoritative Supabase transition protocol; unsupported owners fail closed.
 
 ## State semantics
 
@@ -81,6 +81,6 @@ Only the responsible owner and agent can open the pairwise grant evidence.
 - First-class grant/revoke records beyond the signed one-use decision.
 - Deferred `leave_chat`, peer repair, timers and the broader capability catalog.
 - Target-side idempotency, reconciliation and manual unknown-outcome UX.
-- A folder-compatible single-writer authority.
+- A separate local single-writer authority.
 
 These are capability boundaries, not silent fallbacks.

@@ -14,12 +14,25 @@ MAX_ASKS = 512
 MAX_BYTES = 1024 * 1024
 
 
+def _pending_room(runtime, chat):
+    # Preparation is a scheduling hint. Ready reads still verify every gate;
+    # only an unresolved read needs to wake the existing bounded worker.
+    try:
+        runtime.request_page(chat)
+    except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
+            OSError, sqlite3.Error, ValueError, TypeError):
+        pass
+    return [], False, False
+
+
 def _room(app, mesh, token, chat):
     runtime = mesh.local_inputs
     try:
         chat = _part(chat)
+    except (ValueError, TypeError):
+        return [], False, False
+    try:
         runtime.request(chat, selected=False)
-        runtime.request_page(chat)
         reader, receipt, index = runtime.inputs(chat)
         operation = OwnerAskPageOperation(mesh, chat, source_reader=reader, app=app)
         for _ in range(4):
@@ -31,18 +44,19 @@ def _room(app, mesh, token, chat):
                 if value.reason == 'overlay_proofs':
                     runtime.request_page(chat, index=index, proofs=value.work)
                 else:
+                    runtime.request_page(chat)
                     runtime.request(chat, activity=True)
                 return [], False, False
             if value.status == 'forbidden':
                 return [], True, True
             if value.status != 'prepared':
-                return [], False, False
+                return _pending_room(runtime, chat)
             final = app.finalize_page_read(token, value.prepared)
             if final.status == 'restart':
                 reader, receipt, index = runtime.inputs(chat)
                 continue
             if final.status != 'page' or final.result is None:
-                return [], False, False
+                return _pending_room(runtime, chat)
             snapshot = json.loads(final.result.presentation.snapshot_json)
             if snapshot.get('deleted'):
                 return [], True, True
@@ -54,8 +68,8 @@ def _room(app, mesh, token, chat):
             return result['asks'], result['asks_complete'], False
     except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
             OSError, sqlite3.Error, ValueError, TypeError):
-        return [], False, False
-    return [], False, False
+        return _pending_room(runtime, chat)
+    return _pending_room(runtime, chat)
 
 
 def capture_room_asks(app, mesh, token, *, chat_id=''):

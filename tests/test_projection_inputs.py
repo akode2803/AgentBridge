@@ -17,16 +17,15 @@ from agentbridge.mesh.projection_version import (
     ProjectionVersionError, component_digest, frontier_digest,
 )
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.cache import CachingTransport
+from fake_cloud import refresh_transport
 
 
 @pytest.fixture()
-def projection_mesh(tmp_path):
+def projection_mesh(tmp_path, clouds):
     root = tmp_path / "mesh"
-    root.mkdir()
     home = tmp_path / "home"
     mesh = Mesh(
-        root, "owner", "box", encrypt=True, home=home,
+        clouds.cached(root), "owner", "box", encrypt=True, home=home,
         store_path=tmp_path / "owner.sqlite",
     )
     mesh.accounts.create_human("owner", "correct-horse")
@@ -34,6 +33,7 @@ def projection_mesh(tmp_path):
     chat = mesh.create_chat("Projection", members=[])
     message = mesh.post(chat.id, "projection body")
     mesh.outbox.flush_once()
+    refresh_transport(mesh.tx)
     try:
         yield mesh, chat.id, message.id
     finally:
@@ -103,11 +103,10 @@ def test_collector_is_membership_gated_content_free_and_honest(projection_mesh):
 
 
 def test_cross_source_race_stays_diagnostic_and_cannot_admit_cache(
-        projection_mesh, monkeypatch):
+        projection_mesh, monkeypatch, clouds):
     """An old mirror plus new SQLite cut is possible, but never trusted."""
     mesh, chat_id, _ = projection_mesh
-    mirror = CachingTransport(mesh.tx, auto_refresh=False)
-    mirror.refresh()
+    mirror = clouds.cached(mesh.tx.root)
     monkeypatch.setattr(mesh, "tx", mirror)
     collector = ProjectionInputCollector(mesh, server_generation="race")
     before = _parts(collector.collect(chat_id))
@@ -155,10 +154,10 @@ def test_cross_source_race_stays_diagnostic_and_cannot_admit_cache(
 
 
 def test_collector_rejects_nonmember_cold_oversized_and_membership_race(
-        projection_mesh, monkeypatch):
+        projection_mesh, monkeypatch, clouds):
     mesh, chat_id, _message_id = projection_mesh
     helper = Mesh(
-        mesh.tx.root, "helper", "box", encrypt=True, home=mesh.home,
+        clouds.cached(mesh.tx.root), "helper", "box", encrypt=True, home=mesh.home,
         store_path=mesh.home / "helper-projection.sqlite",
     )
     try:

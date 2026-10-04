@@ -16,26 +16,26 @@ import pytest
 from agentbridge.harness import AgentRunner, Reply
 from agentbridge.harness import queue as queue_mod
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
+
 
 from conftest import install_key, seed_account
 
 
-def mk_mesh(root, tmp_path, bundles, user, machine="mach1"):
+def mk_mesh(clouds, root, tmp_path, bundles, user, machine="mach1"):
     """Always E2EE — the production posture (a plain writer next to an E2EE
     reader is refused by design since R16.5, so a mixed world is a test bug)."""
     home = tmp_path / f"home-{user}"
     install_key(home, user, bundles[user])
-    return Mesh(FolderTransport(root), user, machine, home=home, encrypt=True)
+    return Mesh(clouds.bare(root), user, machine, home=home, encrypt=True)
 
 
 @pytest.fixture
-def storm_world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def storm_world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     users = [f"user{i}" for i in range(4)]
     bundles = {u: seed_account(tx, u) for u in users}
-    meshes = {u: mk_mesh(root, tmp_path, bundles, u) for u in users}
+    meshes = {u: mk_mesh(clouds, root, tmp_path, bundles, u) for u in users}
     yield root, users, meshes
     for m in meshes.values():
         m.close()
@@ -187,18 +187,18 @@ def test_crash_after_send_never_duplicates(storm_world):
 
 # ------------------------------------------------- cache rebuild from transport
 
-def test_cache_rebuild_from_transport(tmp_path):
+def test_cache_rebuild_from_transport(clouds, tmp_path):
     """Wipe the SQLite cache entirely: a fresh mesh rebuilds the identical
     transcript from the transport; per-user overlays (stars) survive because
     they live transport-side."""
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {u: seed_account(tx, u) for u in ("aryan", "fable")}
     home = tmp_path / "home-aryan"
     install_key(home, "aryan", bundles["aryan"])
     store_path = tmp_path / "cache-a.sqlite"
 
-    a = Mesh(FolderTransport(root), "aryan", "mach1", home=home,
+    a = Mesh(clouds.bare(root), "aryan", "mach1", home=home,
              store_path=store_path, encrypt=True)
     chat = a.create_chat("Rebuild", members=["fable"])
     for i in range(80):
@@ -211,7 +211,7 @@ def test_cache_rebuild_from_transport(tmp_path):
     a.close()
 
     store_path.unlink()                          # the cache is GONE
-    a2 = Mesh(FolderTransport(root), "aryan", "mach1", home=home,
+    a2 = Mesh(clouds.bare(root), "aryan", "mach1", home=home,
               store_path=tmp_path / "cache-a2.sqlite", encrypt=True)
     try:
         a2.sync.sync_once([chat.id])
@@ -237,17 +237,17 @@ class Echo:
         return Reply(body=f"ack from @{delivery.agent}")
 
 
-def test_ten_agents_answer_exactly_once(tmp_path):
+def test_ten_agents_answer_exactly_once(clouds, tmp_path):
     """The simulated 10-agent machine: one owner posts a tagged trigger to
     each agent in shared rooms; all ten runners tick CONCURRENTLY; every
     trigger gets exactly one reply, queues end empty."""
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     agents = [f"bot{i}" for i in range(10)]
     bundles = {"aryan": seed_account(tx, "aryan")}
     for name in agents:
         bundles[name] = seed_account(tx, name, "agent", owner="aryan")
-    owner = mk_mesh(root, tmp_path, bundles, "aryan")
+    owner = mk_mesh(clouds, root, tmp_path, bundles, "aryan")
 
     chats = []
     for i in range(5):                            # 2 agents per room
@@ -261,7 +261,7 @@ def test_ten_agents_answer_exactly_once(tmp_path):
         home = tmp_path / "home-shared"
         install_key(home, name, bundles[name])
         echo = Echo()
-        r = AgentRunner(root, name, home=home, machine="mach1",
+        r = AgentRunner(clouds.bare(root), name, home=home, machine="mach1",
                         responder=echo, poll_s=0.2)
         runners.append(r)
         echoes[name] = echo
@@ -302,15 +302,15 @@ def test_ten_agents_answer_exactly_once(tmp_path):
 
 # ------------------------------------------------- queue lease recovery
 
-def test_queue_recovers_from_a_crashed_claim(tmp_path, monkeypatch):
+def test_queue_recovers_from_a_crashed_claim(clouds, tmp_path, monkeypatch):
     """A runner claims work and dies without finishing; after the lease
     expires a fresh runner answers it — once."""
     monkeypatch.setattr(queue_mod, "LEASE_S", 0.2)
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {"aryan": seed_account(tx, "aryan"),
                "helper": seed_account(tx, "helper", "agent", owner="aryan")}
-    owner = mk_mesh(root, tmp_path, bundles, "aryan")
+    owner = mk_mesh(clouds, root, tmp_path, bundles, "aryan")
     home = tmp_path / "home-h"
     install_key(home, "helper", bundles["helper"])
 
@@ -318,7 +318,7 @@ def test_queue_recovers_from_a_crashed_claim(tmp_path, monkeypatch):
     owner.post(chat.id, "@helper are you alive?")
     owner.outbox.flush_once()
 
-    crashed = AgentRunner(root, "helper", home=home, machine="mach1",
+    crashed = AgentRunner(clouds.bare(root), "helper", home=home, machine="mach1",
                           responder=Echo(), poll_s=0.2)
     crashed.mesh.sync.sync_once([chat.id])
     crashed.scan_all()
@@ -327,7 +327,7 @@ def test_queue_recovers_from_a_crashed_claim(tmp_path, monkeypatch):
     crashed.mesh.close()                          # no finish, no release
 
     time.sleep(0.3)                               # lease expires
-    fresh = AgentRunner(root, "helper", home=home, machine="mach1",
+    fresh = AgentRunner(clouds.bare(root), "helper", home=home, machine="mach1",
                         responder=Echo(), poll_s=0.2)
     try:
         fresh.mesh.sync.sync_once([chat.id])

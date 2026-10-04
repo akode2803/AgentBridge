@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from ..core.errors import ValidationError
 from ..core.latency import sink_for_store
+from ..core import delivery_trace
 from .db import OutboxItem, Store
 
 __all__ = ["OutboxWorker"]
@@ -81,6 +82,7 @@ class OutboxWorker:
             except Exception:  # noqa: BLE001 — the loop must survive anything
                 pass
 
+    @delivery_trace.observed('outbox_batch')
     def flush_once(self) -> int:
         """Claim and dispatch every currently-due item. Returns how many were
         completed. Deterministic — tests and synchronous callers use this."""
@@ -98,6 +100,16 @@ class OutboxWorker:
         handler = self.handlers.get(item.kind)
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")
+            try:
+                payload = item.payload if isinstance(item.payload, dict) else {}
+                envelope = payload.get("envelope")
+                payload = envelope if isinstance(envelope, dict) else payload
+                message = payload.get("id")
+                delivery_trace.emit('outbox_dead',
+                                    message=message if isinstance(message, str) else '',
+                                    status='error')
+            except Exception:  # noqa: BLE001 — tracing never changes a dead outcome
+                pass
             return 0
         payload = item.payload.get("envelope") \
             if isinstance(item.payload.get("envelope"), dict) else item.payload
@@ -106,14 +118,20 @@ class OutboxWorker:
             self.latency.observe(
                 "outbox_attempt", trace_ref, lane="local",
                 outcome=f"attempt-{item.attempts + 1}")
+        started = delivery_trace.queue_clock()
         try:
             handler(item.target, item.payload)
         except ValidationError as e:
+            delivery_trace.emit("transport_append", message=trace_ref, status="error",
+                                duration_ms=delivery_trace.elapsed_ms(started))
             # structurally unprocessable — retrying can never help
             self.store.outbox_dead(item.seq, f"{type(e).__name__}: {e}")
+            delivery_trace.emit('outbox_dead', message=trace_ref, status='error')
             self._hook(self.dead_hooks, item)
             return 0
         except Exception as e:  # noqa: BLE001 — transient: retry forever
+            delivery_trace.emit("transport_append", message=trace_ref, status="error",
+                                duration_ms=delivery_trace.elapsed_ms(started))
             # Cap the exponent BEFORE converting to float. A poison row that
             # retried 1024 times used to raise OverflowError here and abort the
             # whole claimed batch, starving every newer unrelated message.
@@ -123,7 +141,10 @@ class OutboxWorker:
             )
             delay *= 1 + random.uniform(0, 0.1)  # jitter
             self.store.outbox_retry(item.seq, f"{type(e).__name__}: {e}", delay)
+            delivery_trace.emit("outbox_retry", message=trace_ref, status="error", retry_ms=delay*1000)
             return 0
+        delivery_trace.emit("transport_append", message=trace_ref, outcome="completed",
+                            duration_ms=delivery_trace.elapsed_ms(started))
         self.store.outbox_done(item.seq)
         if trace_ref:
             self.latency.observe(

@@ -23,6 +23,7 @@ class _State:
     idle: int = 0
     failures: int = 0
     rerun_at: float | None = None
+    blocked_until: float = 0.0
 
 
 class SourceSchedule:
@@ -105,7 +106,7 @@ class SourceSchedule:
                 if self._running is not None and self._running.chat_id == chat:
                     state.rerun_at = min(state.rerun_at or now + 0.05, now + 0.05)
                 else:
-                    state.due = min(state.due, now + 0.05)
+                    state.due = max(state.blocked_until, min(state.due, now + 0.05))
             return True
 
     def clear_selection(self):
@@ -132,20 +133,27 @@ class SourceSchedule:
             self._running = IngestionJob(chat, self._serial)
             return self._running
 
-    def finish(self, job, *, now, changed=False, success=True):
+    def finish(self, job, *, now, changed=False, success=True, blocked=False):
         now = self._time(now)
-        if type(changed) is not bool or type(success) is not bool:
+        if (type(changed) is not bool or type(success) is not bool
+                or type(blocked) is not bool or (blocked and success)):
             raise ValueError('invalid ingestion outcome')
         with self._lock:
             if job is not self._running or job is None:
                 raise ValueError('stale ingestion completion')
             state = self._states[job.chat_id]
             selected = job.chat_id == self._selected and now < self._lease_until
-            state.failures = 0 if success else min(8, state.failures + 1)
+            if not blocked:
+                state.failures = 0 if success else min(8, state.failures + 1)
             state.idle = 0 if changed or (selected and now < self._hot_until) else min(8, state.idle + 1)
             if changed and selected:
                 self._hot_until = now + 4.0
-            if not success:
+            if blocked:
+                # Durable overlapping writes are not IO failures. Retry the
+                # gate promptly for a selected lease, without admitting data
+                # or letting repeated activity hints turn it into a hot loop.
+                delay = 0.35 if selected else self.background
+            elif not success:
                 # Hints can request one rerun; repeated failures cannot create
                 # an uncontrolled hot polling loop without new signals.
                 delay = min(60.0, self.background * 2 ** (state.failures - 1))
@@ -153,9 +161,10 @@ class SourceSchedule:
                 delay = 0.35 if now < self._hot_until else min(self.background, 0.35 * 2 ** state.idle)
             else:
                 delay = self.background
+            state.blocked_until = now + delay if blocked else 0.0
             state.due = now + delay
             if state.rerun_at is not None:
-                state.due = min(state.due, max(now, state.rerun_at))
+                state.due = max(state.blocked_until, min(state.due, max(now, state.rerun_at)))
             state.rerun_at = None
             self._running = None
 

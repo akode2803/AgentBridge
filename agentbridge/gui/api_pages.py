@@ -10,9 +10,12 @@ import sqlite3
 
 from ..core.models import ChatSnapshot
 from ..mesh.page_operation import PageOperation
+from ..mesh.page_read_ack import read_cutoff
 from ..store import local_source, overlay_index
 from ..transport.authority_observation import _part
+from .api_page_read_ack import chat_page_read
 from .context import session_read_binding
+from .diagnostics import capture_inputs, record_page_stage
 from .routing import authed_read_token
 from .serialize import chat_json, message_json
 
@@ -49,18 +52,20 @@ def chat_page(app, req, mesh, token):
     # through canonical raw inputs and the final session/Store cut below.
     runtime.request(chat, selected=True)
     runtime.request_page(chat)
+    if runtime.unread is not None:
+        from ..mesh.unread_counts import UnreadSession
+        runtime.unread.request(chat, UnreadSession(token.app_identity, token.generation, mesh.user),
+                               selected=True)
     before = continuation.before if continuation else anchor.before if anchor else None
     expected = continuation.position if continuation else None
     operation = None
     defer_receipts = False
-    for _ in range(4):
+    for attempt in range(1, 5):
         try:
-            reader, receipt, index = runtime.inputs(chat)
+            reader, receipt, index = capture_inputs(
+                runtime, chat, app, req, attempt)
         except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
-                OSError, sqlite3.Error) as exc:
-            if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-                diagnostics.stage('/api/mesh/chat_page', chat, 'inputs',
-                                  'pending', str(exc), error_type=type(exc).__name__)
+                OSError, sqlite3.Error):
             result = _pending(token, 'local_inputs_pending')
             failure = runtime.preparation_health(chat)
             if failure == 'schema_preparation_failed':
@@ -74,9 +79,8 @@ def chat_page(app, req, mesh, token):
                                       expected_position=expected, limit=limit,
                                       defer_receipts=defer_receipts)
         work = operation.prepare(receipt, receipt, index)
-        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-            diagnostics.stage('/api/mesh/chat_page', chat, 'prepare',
-                              work.status, work.reason or 'none')
+        record_page_stage(app, req, chat, 'prepare', work.status,
+                          work.reason or 'none', attempt=attempt)
         if work.status == 'restart':
             continue
         if work.status == 'work':
@@ -92,10 +96,9 @@ def chat_page(app, req, mesh, token):
                 return _pending(token, work.reason, status='reset_required')
             return _pending(token, work.reason or 'page_unavailable', status='unavailable')
         final = app.finalize_page_read(token, work.prepared)
-        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-            diagnostics.stage('/api/mesh/chat_page', chat, 'finalize',
-                              final.status, final.reason or 'none',
-                              rows=(len(final.result.page.messages) if final.result is not None
+        record_page_stage(app, req, chat, 'finalize',
+                          final.status, final.reason or 'none', attempt=attempt,
+                          rows=(len(final.result.page.messages) if final.result is not None
                                     and final.result.page is not None else 0),
                               raw_examined=(final.result.page.raw_examined if final.result is not None
                                             and final.result.page is not None else 0))
@@ -129,7 +132,7 @@ def chat_page(app, req, mesh, token):
             'starred': list(presentation.starred), 'starred_scope': 'page',
             'read_ns': viewer.get('read_ns', 0),
             # Decimal text preserves nanoseconds beyond JS Number precision.
-            'read_cutoff_ns': str(max((message.ns for message in selected.messages), default=0)),
+            'read_cutoff_ns': str(read_cutoff(selected)),
             'has_more': selected.has_more, 'history_exhausted': selected.history_exhausted,
             'scan_budget_exhausted': selected.scan_budget_exhausted,
             'continuation': app.page_cursors.issue(token, chat, selected),
@@ -158,6 +161,9 @@ def chat_page(app, req, mesh, token):
             result['metadata_status']['receipts'] = 'ready'
         else:
             result['metadata_status']['receipts'] = 'pending'
+        result['read_ack_token'] = app.page_read_tokens.issue_read(
+            token, chat, selected, limit=limit, trust_version=final.result.local_trust_version,
+            page_version=result['page_version'])
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode()) > MAX_RESPONSE_BYTES:
             return _pending(token, 'response_byte_budget', status='unavailable')
         return result
@@ -165,4 +171,4 @@ def chat_page(app, req, mesh, token):
 
 
 GET = {'/api/mesh/chat_page': chat_page}
-POST = {}
+POST = {'/api/mesh/chat_page_read': chat_page_read}

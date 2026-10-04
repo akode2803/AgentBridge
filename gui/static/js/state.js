@@ -58,32 +58,22 @@ export const Mesh = {
   // mode = "select" (full action pane) or "forward" (forward-only pane).
   // Lives here so it survives the transcript's poll re-renders (see chat.js).
   select: { on: false, ids: new Set(), mode: "select" },
-  // V67: the newest ns we've marked read per chat. The read POST is fire-and-
-  // forget, so a chat switch's fresh /api/mesh/state can be computed before it
-  // persists and resurrect a badge we just cleared. We clamp such STALE unread
-  // to 0 while honoring genuinely newer messages (last.ns beyond what we read).
-  readTail: {},
 };
 window.Mesh = Mesh;
 
 export const Settings = { section: null };   // explicit #/settings/<section>
 
 let meshStateGeneration = 0;
-let meshStateAcceptedAt = null;
 let lockEpoch = 0;
 let observedLocked = false;
-let warmCountersExhausted = false;
-let initialSelectedViewReady = false;
-let initialSelectedViewOwner = null;
+let viewCountersExhausted = false;
 let selectedViewGeneration = 0;
 let meshReadSequence = 0;
 let appliedMeshReadSequence = 0;
 
-const monotonicNow = () => globalThis.performance?.now?.() ?? Number.NaN;
-
-function advanceWarmCounter(value) {
+function advanceViewCounter(value) {
   if (value >= Number.MAX_SAFE_INTEGER) {
-    warmCountersExhausted = true;
+    viewCountersExhausted = true;
     return value;
   }
   return value + 1;
@@ -92,10 +82,7 @@ function advanceWarmCounter(value) {
 export function observeLockState(locked, { force = false } = {}) {
   const next = !!locked;
   if (force || next !== observedLocked) {
-    lockEpoch = advanceWarmCounter(lockEpoch);
-    meshStateAcceptedAt = null;  // unlock requires a newly accepted state
-    initialSelectedViewOwner = null;
-    initialSelectedViewReady = false;
+    lockEpoch = advanceViewCounter(lockEpoch);
     if (typeof CustomEvent === "function") {
       globalThis.document?.dispatchEvent?.(new CustomEvent("ab:lock-epoch"));
     }
@@ -112,10 +99,7 @@ export function meshStateSnapshot() {
     lockEpoch,
     locked: observedLocked,
     stateGeneration: meshStateGeneration,
-    acceptedAt: meshStateAcceptedAt,
-    ageMs: meshStateAcceptedAt !== null ? monotonicNow() - meshStateAcceptedAt
-      : Number.POSITIVE_INFINITY,
-    exhausted: warmCountersExhausted,
+    exhausted: viewCountersExhausted,
     bound: adopted.mode === "bound" && adopted.ready && !!adopted.binding,
     viewer: adopted.mode === "bound" && adopted.ready
       ? adopted.binding?.viewer ?? null : null,
@@ -139,7 +123,6 @@ export function clearSessionCaches() {
   Mesh.detailsView = null;
   Mesh.renderedChat = null;
   Mesh.drafts = {};
-  Mesh.readTail = {};
   Mesh.pendingRead = null;
   Mesh.select = { on: false, ids: new Set(), mode: "select" };
   if (Mesh.newGroup?.avatarUrl) {
@@ -147,8 +130,6 @@ export function clearSessionCaches() {
   }
   Mesh.newGroup = { active: false, step: "members", members: new Set(), name: "" };
   Mesh.newChat = { open: false, name: "" };
-  Mesh.authorityCache = {};
-  Mesh.authorityPoll = {};
   Mesh.authorityExpand = {};
   Mesh.feedExpand = {};
   Mesh.msgExpand = {};
@@ -159,10 +140,7 @@ export function clearSessionCaches() {
   Mesh.timerDone = {};
   if (Mesh.askPollId) clearInterval(Mesh.askPollId);
   Mesh.askPollId = null;
-  initialSelectedViewReady = false;
-  initialSelectedViewOwner = null;
-  meshStateGeneration = advanceWarmCounter(meshStateGeneration);
-  meshStateAcceptedAt = null;
+  meshStateGeneration = advanceViewCounter(meshStateGeneration);
   observeLockState(observedLocked, { force: true });
   resetSubviews();
   document.dispatchEvent(new CustomEvent("ab:session-reset"));
@@ -178,52 +156,20 @@ export function captureSessionEpoch() {
   return BrowserSession.capture();
 }
 
-export function beginInitialSelectedView() {
-  const owner = Object.freeze({});
-  initialSelectedViewOwner = owner;
-  initialSelectedViewReady = false;
-  return owner;
-}
-
-export function cancelInitialSelectedView() {
-  initialSelectedViewOwner = null;
-  initialSelectedViewReady = false;
-}
-
-export function endInitialSelectedView(owner) {
-  if (owner !== initialSelectedViewOwner) return false;
-  initialSelectedViewOwner = null;
-  return true;
-}
-
-export function isInitialSelectedViewPending() {
-  return initialSelectedViewOwner !== null;
-}
-
-export function markInitialSelectedViewReady(owner) {
-  if (owner !== initialSelectedViewOwner) return false;
-  initialSelectedViewReady = true;
-  return true;
-}
-
-export function isInitialSelectedViewReady() {
-  return initialSelectedViewReady;
-}
-
 // These tickets describe local continuation ownership, never a provider revision.
 export function advanceSelectedView() {
-  selectedViewGeneration = advanceWarmCounter(selectedViewGeneration);
+  selectedViewGeneration = advanceViewCounter(selectedViewGeneration);
 }
 
 export function captureViewRead(ticket = captureSessionEpoch()) {
-  if (warmCountersExhausted || observedLocked) return null;
+  if (viewCountersExhausted || observedLocked) return null;
   return Object.freeze({ session: ticket, lockEpoch, selectedViewGeneration,
     routeSeq: App.routeSeq, page: App.page, chatId: Mesh.chatId,
     details: !!Mesh.detailsView });
 }
 
 export function viewReadMayApply(owner, response) {
-  return !!owner && !warmCountersExhausted && !observedLocked
+  return !!owner && !viewCountersExhausted && !observedLocked
     && owner.lockEpoch === lockEpoch
     && (owner.readSequence == null || owner.readSequence >= appliedMeshReadSequence)
     && owner.selectedViewGeneration === selectedViewGeneration
@@ -235,20 +181,15 @@ export function viewReadMayApply(owner, response) {
 export function captureMeshStateRead(ticket = captureSessionEpoch()) {
   const owner = captureViewRead(ticket);
   if (!owner) return null;
-  meshReadSequence = advanceWarmCounter(meshReadSequence);
-  if (warmCountersExhausted) return null;
+  meshReadSequence = advanceViewCounter(meshReadSequence);
+  if (viewCountersExhausted) return null;
   return Object.freeze({ ...owner, readSequence: meshReadSequence });
-}
-
-export function captureWarmStateRequest(ticket = captureSessionEpoch()) {
-  const owner = captureMeshStateRead(ticket);
-  return owner ? Object.freeze({ ...owner, warm: true }) : null;
 }
 
 export function sessionMayApply(ticket, response) {
   if (!BrowserSession.mayApply(ticket, response)) return false;
   const snap = BrowserSession.snapshot();
-  if (snap.mode !== "bound") return true;
+  if (snap.mode !== "bound" || !snap.binding) return false;
   const binding = snap.binding;
   if (Object.prototype.hasOwnProperty.call(response || {}, "instance_id")
       && response.instance_id !== binding.instance_id) return false;
@@ -256,6 +197,21 @@ export function sessionMayApply(ticket, response) {
       && response.user !== binding.viewer) return false;
   if (Object.prototype.hasOwnProperty.call(response || {}, "me")
       && response.me !== binding.viewer) return false;
+  return true;
+}
+
+// A current selected canonical denial retires display state, not authority.
+// Fence already captured sidebar reads so a late positive cannot resurrect it.
+export function retireDeniedMeshChat(chatId) {
+  const session = BrowserSession.snapshot();
+  if (observedLocked || App.page !== "chats" || Mesh.chatId !== chatId
+      || typeof chatId !== "string" || !chatId || session.mode !== "bound"
+      || Mesh.state?.user !== session.binding?.viewer) return false;
+  appliedMeshReadSequence = meshReadSequence;
+  if (Array.isArray(Mesh.state.chats)) {
+    Mesh.state = {...Mesh.state, chats:Mesh.state.chats.filter(row => row?.id !== chatId)};
+  }
+  meshStateGeneration = advanceViewCounter(meshStateGeneration);
   return true;
 }
 
@@ -305,8 +261,7 @@ export function applyMeshState(ticket, response, request) {
     response = {...response,chats:[...held.values()]};
   }
   Mesh.state = response;
-  meshStateGeneration = advanceWarmCounter(meshStateGeneration);
-  meshStateAcceptedAt = request.warm ? monotonicNow() : null;
+  meshStateGeneration = advanceViewCounter(meshStateGeneration);
   if (typeof CustomEvent === "function") {
     globalThis.document?.dispatchEvent?.(new CustomEvent(
       "ab:mesh-state-accepted",
@@ -458,10 +413,6 @@ export function currentDraftViewer() {
     const viewer = session.binding?.viewer;
     return typeof viewer === "string" && viewer ? viewer : null;
   }
-  if (session.mode === "legacy") {
-    const viewer = Mesh.state?.user;
-    return typeof viewer === "string" && viewer ? viewer : null;
-  }
   return null;
 }
 function draftKey(chatId) {
@@ -521,9 +472,6 @@ export function renderChrome() {
     permission_error: "Cloud access denied",
     configuration_error: "Cloud setup needs attention",
     service_error: "Reconnecting...",
-    folder_unavailable: "Waiting for folder...",
-    folder_read_only: "Folder is read-only",
-    sync_paused: "Sync paused - using local data",
   };
   const title = $("#side-head .side-title");
   if (title) {

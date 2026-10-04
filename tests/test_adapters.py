@@ -275,22 +275,21 @@ def test_claude_preset_declares_the_real_effort_levels():
     assert argv[argv.index("--effort") + 1] == "max"
 
 
-def test_mcp_only_adapter_runs_no_cli(tmp_path):
+def test_mcp_only_adapter_runs_no_cli(tmp_path, clouds):
     """Q21: adapter "none" = the agent connects via mesh-cli (MCP) itself —
     resolution refuses and --all spawns no runner for it."""
     reg = registry_with(tmp_path, stub_preset(tmp_path))
     with pytest.raises(ValidationError):
         reg.resolve(settings(adapter="none"), "humans")
-    root = tmp_path / "mesh2"
-    root.mkdir()
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=tmp_path / "home2")
+    root = clouds.root(tmp_path / "mesh2")
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=tmp_path / "home2")
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper")
     owner.accounts.create_agent("mcponly")
     owner.set_agent_harness("mcponly", {"adapter": "none"})
     try:
         from agentbridge.harness.runner import hosted_agents
-        assert hosted_agents(root, "devbox") == ["helper"]
+        assert hosted_agents(root, "devbox", tx=clouds.bare(root)) == ["helper"]
     finally:
         owner.close()
 
@@ -404,18 +403,17 @@ def test_prune_tmp_clears_only_stale_scratch(tmp_path):
 # ------------------------------------------------------- engine + end-to-end
 
 @pytest.fixture
-def arig(tmp_path):
+def arig(tmp_path, clouds):
     """Owner + agent + a stub-CLI preset installed via the home overlay."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
     (home / "adapters").mkdir(parents=True)
     (home / "adapters" / "stub.json").write_text(
         json.dumps(stub_preset(tmp_path)), encoding="utf-8")
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper", harness={"adapter": "stub"})
-    yield SimpleNamespace(root=root, home=home, owner=owner)
+    yield SimpleNamespace(root=root, home=home, owner=owner, clouds=clouds)
     owner.close()
 
 
@@ -424,7 +422,7 @@ def test_cli_responder_end_to_end_through_the_runner(arig):
     trig = arig.owner.post(snap.id, "@helper please run")
     arig.owner.outbox.flush_once()
 
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -476,7 +474,7 @@ def test_cli_contract_rollout_preserves_runner_reply(arig, monkeypatch, enabled)
     snap = arig.owner.create_chat(f"Contract {enabled}", members=["helper"])
     arig.owner.post(snap.id, "@helper contract check")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -501,7 +499,7 @@ def test_cli_contract_rollout_preserves_runner_reply(arig, monkeypatch, enabled)
 
 
 def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path):
-    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+    mesh = Mesh(arig.clouds.bare(arig.root), "helper", "devbox", encrypt=True, home=arig.home,
                 store_path=tmp_path / "prepare.sqlite")
     try:
         responder = CliResponder(ModelRegistry.load(arig.home), mesh, arig.home)
@@ -528,7 +526,7 @@ def test_cli_invocation_is_resolved_once_with_timer_owner_routing(arig, tmp_path
 
 
 def test_cli_contract_flag_is_sampled_when_invocation_is_prepared(arig, tmp_path):
-    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+    mesh = Mesh(arig.clouds.bare(arig.root), "helper", "devbox", encrypt=True, home=arig.home,
                 store_path=tmp_path / "contract-snapshot.sqlite")
     try:
         responder = CliResponder(ModelRegistry.load(arig.home), mesh, arig.home)
@@ -572,7 +570,7 @@ def test_codex_exact_policy_is_compiled_before_signed_run_metadata(
     monkeypatch.setattr(
         policy_module, "_codex_non_user_config_layers", inspect_layers,
     )
-    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+    mesh = Mesh(arig.clouds.bare(arig.root), "helper", "devbox", encrypt=True, home=arig.home,
                 store_path=tmp_path / "codex-prepare.sqlite")
     try:
         registry = ModelRegistry.load(arig.home)
@@ -629,12 +627,11 @@ def test_verified_popen_never_spawns_after_failed_check(monkeypatch):
     assert spawned == []
 
 
-def test_owner_stop_kills_the_run_cleanly(tmp_path, monkeypatch):
+def test_owner_stop_kills_the_run_cleanly(tmp_path, clouds, monkeypatch):
     """R36: the owner's stop doc kills the in-flight subprocess; the outcome
     is a deliberate stop — no reply, no error notice, feed state 'stopped',
     the trigger recorded handled so it never re-fires."""
-    root = tmp_path / "mesh2"
-    root.mkdir()
+    root = clouds.root(tmp_path / "mesh2")
     home = tmp_path / "home"
     (home / "adapters").mkdir(parents=True)
     # the stub sleeps 30s — plenty of window for the ~2.5s stop poll
@@ -642,7 +639,7 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path, monkeypatch):
     slow["args"] = [slow["args"][0], "--sleep", "{prompt}"]
     (home / "adapters" / "stub.json").write_text(json.dumps(slow),
                                                  encoding="utf-8")
-    owner = Mesh(root, "aryan", "devbox", encrypt=True, home=home)
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
     owner.accounts.create_human("aryan", "hunter2x")
     owner.accounts.create_agent("helper", harness={
         "adapter": "stub", "contract_cli_enabled": True,
@@ -651,7 +648,7 @@ def test_owner_stop_kills_the_run_cleanly(tmp_path, monkeypatch):
     owner.post(snap.id, "@helper take your time")
     owner.outbox.flush_once()
 
-    runner = AgentRunner(root, "helper", home=home,
+    runner = AgentRunner(clouds.bare(root), "helper", home=home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     import agentbridge.harness.adapters.cli as cli_module
@@ -709,7 +706,7 @@ def test_routing_gates_at_scan(arig):
     snap = arig.owner.create_chat("Off", members=["helper"])
     trig = arig.owner.post(snap.id, "@helper are you there?")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -750,7 +747,7 @@ def test_usage_error_falls_back_to_minimal_args(arig, tmp_path, monkeypatch):
     snap = arig.owner.create_chat("Fallback", members=["helper"])
     arig.owner.post(snap.id, "@helper still works?")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -783,7 +780,7 @@ def test_flag_off_does_not_build_unused_minimal_fallback(arig):
     snap = arig.owner.create_chat("No contract fallback", members=["helper"])
     arig.owner.post(snap.id, "@helper normal path only")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -816,7 +813,7 @@ def test_context_files_false_keeps_inline_adapter_out_of_workspace(
     snap = arig.owner.create_chat("Inline", members=["helper"])
     arig.owner.post(snap.id, "@helper respond without opening a file")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -861,7 +858,7 @@ def test_cli_contract_normalizes_failure_without_raw_provider_detail(
     snap = arig.owner.create_chat(f"Contract failure {code}", members=["helper"])
     arig.owner.post(snap.id, "@helper fail deterministically")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -885,7 +882,7 @@ def test_outbox_files_ride_back_except_empty_ones(arig, monkeypatch):
     monkeypatch.setenv("STUB_OUTBOX", "FROM_PROMPT")
     arig.owner.post(snap.id, "@helper make me a file")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -913,7 +910,7 @@ def test_failed_cli_files_are_retained_and_disclosed_next_run(arig, monkeypatch)
     snap = arig.owner.create_chat("Recovery", members=["helper"])
     arig.owner.post(snap.id, "@helper build the file")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -943,7 +940,7 @@ def test_preprocess_failure_also_retains_run_artifacts(arig, monkeypatch):
     snap = arig.owner.create_chat("Early failure", members=["helper"])
     arig.owner.post(snap.id, "@helper prepare it")
     arig.owner.outbox.flush_once()
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
 
@@ -975,7 +972,7 @@ def test_workspace_leaks_nothing_from_other_chats(arig):
     arig.owner.post(snap.id, "@helper hello there")
     arig.owner.outbox.flush_once()
 
-    runner = AgentRunner(arig.root, "helper", home=arig.home,
+    runner = AgentRunner(arig.clouds.bare(arig.root), "helper", home=arig.home,
                          machine="devbox", poll_s=0.2)
     runner.attach_cli_responder()
     try:
@@ -1003,7 +1000,7 @@ def test_workspace_leaks_nothing_from_other_chats(arig):
 
 def test_engine_timeout_kills_the_run(arig, tmp_path):
     reg = ModelRegistry.load(arig.home)
-    mesh = Mesh(arig.root, "helper", "devbox", encrypt=True, home=arig.home,
+    mesh = Mesh(arig.clouds.bare(arig.root), "helper", "devbox", encrypt=True, home=arig.home,
                 store_path=tmp_path / "timeout.sqlite")
     try:
         responder = CliResponder(reg, mesh, arig.home)

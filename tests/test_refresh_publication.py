@@ -8,21 +8,20 @@ import pytest
 from agentbridge.mesh import local_input_runtime, presence_input_runtime
 from agentbridge.store import local_source, presence_publication, staged_publication, staged_source
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import owned_transport
 
 import test_staged_runtime as chat_rig
 
 
-def test_chat_pointer_swap_rollback_and_failure_record_failure_keep_old_ready(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'atomic-chat')
+def test_chat_pointer_swap_rollback_and_failure_record_failure_keep_old_ready(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'atomic-chat')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
         reader, previous, index = runtime.inputs(chat_rig.CHAT)
-        folder.put_doc(chat_rig.META,
+        provider.put_doc(chat_rig.META,
                        {'id': chat_rig.CHAT, 'members': ['alice'], 'revision': 2})
         advance = staged_publication.owner._advance
         calls = 0
@@ -47,16 +46,16 @@ def test_chat_pointer_swap_rollback_and_failure_record_failure_keep_old_ready(tm
         mesh.close()
 
 
-def test_presence_pointer_swap_rollback_and_failure_record_failure_keep_old_ready(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    folder.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 5})
-    owned = owned_transport(folder, tmp_path / 'owner')
+def test_presence_pointer_swap_rollback_and_failure_record_failure_keep_old_ready(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    provider.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 5})
+    owned = owned_transport(provider, tmp_path / 'owner')
     store = Store(tmp_path / 'store.sqlite')
     runtime = presence_input_runtime.PresenceInputRuntime(owned, store)
     try:
         assert runtime.ingest().ready
         prior = runtime.inputs(('bob',))
-        folder.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 9})
+        provider.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 9})
         advance = presence_publication.owner._advance
         calls = 0
 
@@ -82,27 +81,27 @@ def test_presence_pointer_swap_rollback_and_failure_record_failure_keep_old_read
 
 
 @pytest.mark.parametrize('kind', ['chat', 'presence'])
-def test_post_pointer_ready_failure_rolls_back_old_admission_across_reopen(
+def test_post_pointer_ready_failure_rolls_back_old_admission_across_reopen(clouds,
         tmp_path, monkeypatch, kind):
-    folder = FolderTransport(tmp_path / 'provider')
+    provider = clouds.cached(tmp_path / 'provider')
     if kind == 'chat':
-        chat_rig._seed(folder)
-        owner = chat_rig._mesh(tmp_path, folder, 'late-chat')
+        chat_rig._seed(provider)
+        owner = chat_rig._mesh(tmp_path, provider, 'late-chat')
         runtime, store = owner.local_inputs, owner.store
         assert runtime.ingest(chat_rig.CHAT)
         original = runtime.inputs(chat_rig.CHAT)[1].source.raw
-        folder.put_doc(chat_rig.META,
+        provider.put_doc(chat_rig.META,
                        {'id': chat_rig.CHAT, 'members': ['alice'], 'revision': 3})
         module = staged_publication
         handler = local_input_runtime.local_source
     else:
-        folder.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 5})
-        owner = owned_transport(folder, tmp_path / 'owner')
+        provider.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 5})
+        owner = owned_transport(provider, tmp_path / 'owner')
         store = Store(tmp_path / 'store.sqlite')
         runtime = presence_input_runtime.PresenceInputRuntime(owner, store)
         assert runtime.ingest().ready
         original = runtime.inputs(('bob',))[1].source.raw
-        folder.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 9})
+        provider.put_doc('presence/bob.json', {'user': 'bob', 'last_seen_ns': 9})
         module = presence_publication
         handler = presence_input_runtime.local_source
     capture = module.owner.capture_in_transaction
@@ -133,7 +132,7 @@ def test_post_pointer_ready_failure_rolls_back_old_admission_across_reopen(
             owner.close()
         monkeypatch.setattr(module.owner, 'capture_in_transaction', capture)
     if kind == 'chat':
-        reopened = chat_rig._mesh(tmp_path, FolderTransport(folder.root), 'late-chat')
+        reopened = chat_rig._mesh(tmp_path, clouds.cached(provider.root), 'late-chat')
         try:
             reader, receipt, index = reopened.local_inputs.inputs(chat_rig.CHAT)
             assert receipt.source.ready and receipt.source.raw == original
@@ -143,7 +142,7 @@ def test_post_pointer_ready_failure_rolls_back_old_admission_across_reopen(
             reopened.close()
     else:
         reopened_store = Store(tmp_path / 'store.sqlite')
-        reopened_owner = owned_transport(FolderTransport(folder.root), tmp_path / 'owner')
+        reopened_owner = owned_transport(clouds.cached(provider.root), tmp_path / 'owner')
         reopened = presence_input_runtime.PresenceInputRuntime(reopened_owner, reopened_store)
         try:
             assert reopened.inputs(('bob',))[1].source.raw == original
@@ -154,10 +153,10 @@ def test_post_pointer_ready_failure_rolls_back_old_admission_across_reopen(
             reopened_owner.close()
 
 
-def test_failed_external_mutation_during_chat_collection_remains_pending(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'mutation-chat')
+def test_failed_external_mutation_during_chat_collection_remains_pending(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'mutation-chat')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
@@ -166,7 +165,7 @@ def test_failed_external_mutation_during_chat_collection_remains_pending(tmp_pat
         def cross(transport, definition, *, consume, **kwargs):
             def sink(batch):
                 consume(batch)
-                monkeypatch.setattr(folder, 'put_doc',
+                monkeypatch.setattr(provider, 'put_doc',
                                     lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('external write failed')))
                 mesh.tx.put_doc(chat_rig.META,
                                 {'id': chat_rig.CHAT, 'members': ['alice'], 'revision': 2})
@@ -185,10 +184,10 @@ def test_failed_external_mutation_during_chat_collection_remains_pending(tmp_pat
         mesh.close()
 
 
-def test_stale_candidate_and_failure_handler_do_not_retire_newer_chat_winner(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'stale-chat')
+def test_stale_candidate_and_failure_handler_do_not_retire_newer_chat_winner(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'stale-chat')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
@@ -197,7 +196,7 @@ def test_stale_candidate_and_failure_handler_do_not_retire_newer_chat_winner(tmp
         candidate = staged_source.begin(mesh.store, definition.source, chat_rig.CHAT,
                                         expected=old)
         staged_source.finish(mesh.store, candidate)
-        folder.put_doc(chat_rig.META,
+        provider.put_doc(chat_rig.META,
                        {'id': chat_rig.CHAT, 'members': ['alice'], 'revision': 2})
         assert runtime.ingest(chat_rig.CHAT)
         winner = runtime.inputs(chat_rig.CHAT)[1].source
@@ -211,10 +210,10 @@ def test_stale_candidate_and_failure_handler_do_not_retire_newer_chat_winner(tmp
         mesh.close()
 
 
-def test_live_builder_is_superseded_by_new_claim_without_retiring_old_snapshot(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'superseded-chat')
+def test_live_builder_is_superseded_by_new_claim_without_retiring_old_snapshot(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'superseded-chat')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
@@ -257,10 +256,10 @@ def test_live_builder_is_superseded_by_new_claim_without_retiring_old_snapshot(t
         mesh.close()
 
 
-def test_pending_mutation_forbids_new_collection_claim(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'pending-claim')
+def test_pending_mutation_forbids_new_collection_claim(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'pending-claim')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
@@ -280,15 +279,15 @@ def test_pending_mutation_forbids_new_collection_claim(tmp_path):
         mesh.close()
 
 
-def test_post_admission_cleanup_failure_cannot_retire_new_winner(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    chat_rig._seed(folder)
-    mesh = chat_rig._mesh(tmp_path, folder, 'cleanup-fault')
+def test_post_admission_cleanup_failure_cannot_retire_new_winner(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    chat_rig._seed(provider)
+    mesh = chat_rig._mesh(tmp_path, provider, 'cleanup-fault')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
         old = runtime.inputs(chat_rig.CHAT)[1].source.raw
-        folder.put_doc(chat_rig.META,
+        provider.put_doc(chat_rig.META,
                        {'id': chat_rig.CHAT, 'members': ['alice'], 'revision': 2})
         monkeypatch.setattr(staged_source, 'retire_generation',
                             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('cleanup failed')))

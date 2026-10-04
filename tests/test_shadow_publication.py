@@ -11,11 +11,11 @@ from agentbridge.mesh.shadow_publication import (
 from agentbridge.store.db import Store
 from agentbridge.store.shadow_slot import ShadowConflict, ShadowSource
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.base import Transport
 
 
-class SnapshotProvider(FolderTransport):
-    """In-memory snapshot provider; inherited filesystem methods must not run."""
+class SnapshotProvider(Transport):
+    """Generic snapshot-only probe; unexpected provider I/O fails explicitly."""
 
     def __init__(self):
         self.root = "diagnostic-root"
@@ -30,6 +30,13 @@ class SnapshotProvider(FolderTransport):
     def list_chat_ids(self):
         self.calls += 1
         return ["c"]
+
+    def _unexpected_io(self, *args, **kwargs):
+        pytest.fail("snapshot publication attempted unsupported provider I/O")
+
+    get_doc = put_doc = delete_doc = list_docs = _unexpected_io
+    list_logs = append_log = read_log = delete_chat = _unexpected_io
+    put_blob = put_blob_from = get_blob = blob_size = _unexpected_io
 
 
 @pytest.fixture

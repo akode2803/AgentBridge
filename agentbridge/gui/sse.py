@@ -2,7 +2,7 @@
 
 Frames are deliberately MINIMAL (type + chat + ids): the client refetches
 through the read model, so no body — encrypted or not — ever rides the
-stream. A dropped frame only delays a repaint until the fallback poll.
+stream. Queue gaps request a fresh catch-up, never replayed permission data.
 
 One exception (R42/Q26): frames that DESERVE a desktop notification carry a
 ``notify`` lane — chat name, sender, 120-char preview — decided by the R10
@@ -36,6 +36,10 @@ def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
         out["event"] = (ev.data.get("event") or {}).get("type", "")
     elif ev.type == eventbus.ADDED_TO_CHAT:
         out["by"] = ev.data.get("by", "")
+    elif ev.type == eventbus.READ_MODEL:
+        from ..mesh.read_events import SCOPES
+        scope = ev.data.get('scope')
+        out['scope'] = scope if type(scope) is str and scope in SCOPES else 'global'
     out["trace_ref"] = str(out.get("id") or f"{ev.type}-{ev.ns}")
     if notifier is not None and ev.type in (
         eventbus.MESSAGE, eventbus.ADDED_TO_CHAT, eventbus.REACTION,
@@ -51,23 +55,85 @@ def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
                 "from": note.from_, "preview": note.preview, "ns": note.ns,
                 "emoji": note.emoji,
             }
+    from ..core.delivery_trace import reference
+    diagnostic_ref = reference(out["trace_ref"])
+    if diagnostic_ref is not None:
+        out["diagnostic_ref"] = diagnostic_ref
     if latency is not None:
         latency.observe(
             "sse_frame", out["trace_ref"], lane="local")
     return out
 
 
-def stream(app: GuiApp, sub: Subscription, ping_s: float) -> Iterator[bytes]:
+def _reason(app, sub, token):
+    # Same lock order as canonical GUI handout; no notifier work under gates.
+    with app.lock._mx:
+        if app.lock._expire_if_idle_locked():
+            return 'locked'
+        with app._lock:
+            if (token is None or token.mesh is None or not app.validate_session_read(token)
+                    or sub._bus is not token.mesh.bus):
+                return 'session_changed'
+    return None
+
+
+def _control(reason):
+    return ('data: ' + json.dumps({'type': 'control', 'reason': reason}) + '\n\n').encode()
+
+
+def _health(app, mesh):
+    observe = getattr(mesh.tx, 'mirror_status', None)
+    try:
+        status = observe() if callable(observe) else {}
+        # Local cached health/config only; never a provider or broad page read.
+        return (status.get('state'), status.get('realtime'),
+                getattr(app.lock, 'enabled', False), getattr(app.lock, 'autolock_min', 0),
+                getattr(app, 'frontend_revision', None))
+    except Exception:
+        return 'unavailable', None
+
+
+def stream(app: GuiApp, sub: Subscription, ping_s: float, *, token=None) -> Iterator[bytes]:
     """Yield SSE frames until the session changes (logout) or the caller's
-    write fails (client gone). Idle gaps carry comment pings so proxies and
-    the client can tell a quiet stream from a dead one."""
-    mesh = app.mesh
+    write fails (client gone). Idle gaps carry content-free heartbeat frames
+    so the browser can distinguish a quiet stream from a half-open one."""
+    token = app.capture_session_read() if token is None else token
+    reason = _reason(app, sub, token)
+    if reason is not None:
+        yield _control(reason)
+        return
+    mesh = token.mesh
     yield b": connected\n\n"
-    while app.mesh is mesh:
-        ev = sub.get(timeout=ping_s)
-        if app.mesh is not mesh:
-            break
+    last_ping = time.monotonic()
+    health = _health(app, mesh)
+    while True:
+        reason = _reason(app, sub, token)
+        if reason is not None:
+            yield _control(reason)
+            return
+        current_health = _health(app, mesh)
+        if current_health != health:
+            health = current_health
+            yield _control('server_state_changed')
+        if sub.take_gap():
+            yield _control('resync')
+        # A local health check is not a broad read-model poll. It also applies
+        # idle lock deadlines when no data event arrives to wake this stream.
+        ev = sub.get(timeout=min(1.0, max(0.01, ping_s)))
+        reason = _reason(app, sub, token)
+        if reason is not None:
+            yield _control(reason)
+            return
         if ev is None:
-            yield b": ping\n\n"
+            if time.monotonic() - last_ping >= min(ping_s, 15.0):
+                last_ping = time.monotonic()
+                # Visible to JS so a half-open stream cannot masquerade as a
+                # healthy event source forever. This never requests a read.
+                yield b'data: {"type":"heartbeat"}\n\n'
             continue
-        yield f"data: {json.dumps(frame(ev, mesh.notifier, app.latency))}\n\n".encode()
+        encoded = f"data: {json.dumps(frame(ev, mesh.notifier, app.latency))}\n\n".encode()
+        reason = _reason(app, sub, token)
+        if reason is not None:
+            yield _control(reason)
+            return
+        yield encoded

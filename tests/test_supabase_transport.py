@@ -11,285 +11,11 @@ import types
 
 import pytest
 
-from agentbridge.core.errors import TransportError, ValidationError
-from agentbridge.transport import CachingTransport, FolderTransport, make_transport
+from agentbridge.core.errors import ConfigError, TransportError, ValidationError
+from agentbridge.transport import CachingTransport, make_transport
 from agentbridge.transport.supabase import SupabaseTransport
 
-
-# ------------------------------------------------------------ the fake client
-
-class FakeQuery:
-    """Models the parts of PostgREST the driver uses — including, since R76,
-    the migrated schema: ``ab_docs.seq`` (trigger-bumped from a global
-    counter on insert/update/upsert), ``deleted``, ``update``/``lt``, and
-    write kwargs (``returning=``). A db with ``_legacy=True`` raises the
-    PostgREST undefined-column error whenever seq/deleted is referenced,
-    exactly like a pre-migration project."""
-
-    def __init__(self, db, table):
-        self.db, self.table = db, table
-        self.filters = []
-        self._like = None
-        self._gt = None
-        self._lt = None
-        self._order = None
-        self._desc = False
-        self._limit = None
-        self._range = None
-        self._cols = ""
-        self._op = ("select", None)
-
-    def select(self, cols="*"):
-        self._cols = str(cols)
-        return self
-
-    def insert(self, row, **_kw):
-        self._op = ("insert", dict(row))
-        return self
-
-    def upsert(self, row, **_kw):
-        self._op = ("upsert", dict(row))
-        return self
-
-    def update(self, patch, **_kw):
-        self._op = ("update", dict(patch))
-        return self
-
-    def delete(self):
-        self._op = ("delete", None)
-        return self
-
-    def eq(self, col, val):
-        self.filters.append((col, val))
-        return self
-
-    def like(self, col, pat):
-        self._like = (col, pat.rstrip("%"))
-        return self
-
-    def gt(self, col, val):
-        self._gt = (col, val)
-        return self
-
-    def lt(self, col, val):
-        self._lt = (col, val)
-        return self
-
-    def order(self, col="id", desc=False):
-        self._order = col
-        self._desc = bool(desc)
-        return self
-
-    def limit(self, n):
-        self._limit = n
-        return self
-
-    def range(self, lo, hi):
-        self._range = (lo, hi)
-        return self
-
-    def _match(self, row):
-        for col, val in self.filters:
-            if row.get(col) != val:
-                return False
-        if self._like and not str(row.get(self._like[0], "")).startswith(self._like[1]):
-            return False
-        if self._gt and not row.get(self._gt[0], 0) > self._gt[1]:
-            return False
-        if self._lt and not str(row.get(self._lt[0], "")) < str(self._lt[1]):
-            return False
-        return True
-
-    def _legacy_guard(self, payload):
-        if not self.db.get("_legacy") or self.table != "ab_docs":
-            return
-        mentioned = set(self._cols.replace(" ", "").split(","))
-        mentioned |= {c for c, _ in self.filters}
-        mentioned |= set(payload or ())
-        if self._order:
-            mentioned.add(self._order)
-        if {"seq", "deleted"} & mentioned:
-            raise RuntimeError(
-                'column ab_docs.seq does not exist (42703)')
-
-    def _touch(self, row):
-        """The ab_docs_touch trigger: every insert/update bumps seq."""
-        if self.table == "ab_docs" and not self.db.get("_legacy"):
-            self.db["_docseq"] = self.db.get("_docseq", 0) + 1
-            row["seq"] = self.db["_docseq"]
-            row["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            row.setdefault("deleted", False)
-
-    def execute(self):
-        rows = self.db.setdefault(self.table, [])
-        op, payload = self._op
-        self._legacy_guard(payload if op in ("insert", "upsert", "update")
-                           else None)
-        if op == "insert":
-            payload = dict(payload)
-            if self.table == "ab_docs" and any(
-                r.get("root") == payload.get("root")
-                and r.get("path") == payload.get("path") for r in rows
-            ):
-                raise RuntimeError("duplicate key value violates unique constraint (23505)")
-            payload["id"] = self.db["_seq"] = self.db.get("_seq", 0) + 1
-            self._touch(payload)
-            rows.append(payload)
-            return FakeResult([payload])
-        if op == "upsert":
-            payload = dict(payload)
-            if (self.db.get("_deny_genesis_upsert")
-                    and self.table == "ab_docs"
-                    and str(payload.get("path", "")).startswith("chats/")
-                    and str(payload.get("path", "")).endswith("/meta.json")
-                    and not any(r.get("root") == payload.get("root")
-                                and r.get("path") == payload.get("path")
-                                for r in rows)):
-                raise RuntimeError(
-                    "new row violates row-level security policy for table "
-                    "ab_docs (42501)"
-                )
-            key = ("root", "path")
-            rows[:] = [r for r in rows
-                       if not all(r.get(k) == payload.get(k) for k in key)]
-            self._touch(payload)
-            rows.append(payload)
-            return FakeResult([payload])
-        if op == "update":
-            hit = []
-            for r in rows:
-                if self._match(r):
-                    r.update(payload)
-                    self._touch(r)
-                    hit.append(dict(r))
-            return FakeResult(hit)
-        if op == "delete":
-            keep = [r for r in rows if not self._match(r)]
-            gone = len(rows) - len(keep)
-            rows[:] = keep
-            return FakeResult([{"deleted": gone}])
-        out = [r for r in rows if self._match(r)]
-        if self._order:
-            out.sort(key=lambda r: r.get(self._order) or 0,
-                     reverse=self._desc)
-        if self._limit:
-            out = out[: self._limit]
-        if self._range:
-            lo, hi = self._range
-            out = out[lo:hi + 1]
-        return FakeResult([dict(r) for r in out])
-
-
-class FakeResult:
-    def __init__(self, data):
-        self.data = data
-
-
-class FakeBucketApi:
-    def __init__(self, objects):
-        self.objects = objects
-
-    def upload(self, key, data, file_options=None):
-        self.objects[key] = bytes(data)
-
-    def download(self, key):
-        if key not in self.objects:
-            raise KeyError(key)
-        return self.objects[key]
-
-    def list(self, parent):
-        out = []
-        for key, data in self.objects.items():
-            p, _, name = key.rpartition("/")
-            if p == parent:
-                out.append({"name": name, "metadata": {"size": len(data)}})
-        return out
-
-    def remove(self, keys):
-        removed = []
-        for k in keys:
-            if k in self.objects:
-                self.objects.pop(k)
-                removed.append({"name": k})
-        return removed
-
-
-class FakeStorage:
-    def __init__(self):
-        self.objects = {}
-        self.buckets = []
-
-    def list_buckets(self):
-        return [type("B", (), {"name": n}) for n in self.buckets]
-
-    def create_bucket(self, name):
-        self.buckets.append(name)
-
-    def from_(self, _bucket):
-        return FakeBucketApi(self.objects)
-
-
-class FakeClient:
-    def __init__(self, legacy: bool = False):
-        self.db = {"_legacy": legacy}
-        self.storage = FakeStorage()
-
-    def migrate(self):
-        """The dashboard SQL paste: columns appear, old rows backfill."""
-        self.db["_legacy"] = False
-        for r in self.db.get("ab_docs", []):
-            if "seq" not in r:
-                self.db["_docseq"] = self.db.get("_docseq", 0) + 1
-                r["seq"] = self.db["_docseq"]
-                r.setdefault("deleted", False)
-
-    def table(self, name):
-        return FakeQuery(self.db, name)
-
-    def rpc(self, fn, params=None):
-        params = params or {}
-        if fn == "ab_list_logs":
-            heads = {}
-            for r in self.db.get("ab_logs", []):
-                if r["root"] == params["p_root"] and r["chat_id"] == params["p_chat"]:
-                    heads[r["log_name"]] = max(heads.get(r["log_name"], 0), r["id"])
-            rows = [{"log_name": k, "head": v} for k, v in heads.items()]
-        elif fn == "ab_chat_ids":
-            ids = {r["chat_id"] for r in self.db.get("ab_logs", [])
-                   if r["root"] == params["p_root"]}
-            for r in self.db.get("ab_docs", []):
-                if r["root"] == params["p_root"] \
-                        and r["path"].startswith("chats/") \
-                        and not r.get("deleted"):
-                    ids.add(r["path"].split("/")[1])
-            rows = [{"chat_id": c} for c in ids]
-        elif fn == "ab_effects_ready":
-            rows = 1
-        elif fn == "ab_effect_transition":
-            path = params["p_path"]
-            existing = next((row for row in self.db.get("ab_docs", [])
-                             if row["root"] == params["p_root"]
-                             and row["path"] == path), None)
-            if existing is not None:
-                rows = existing["data"] == params["p_data"]
-            else:
-                self.db.setdefault("ab_docs", []).append({
-                    "root": params["p_root"], "path": path,
-                    "data": params["p_data"], "deleted": False,
-                    "seq": len(self.db.get("ab_docs", [])) + 1,
-                })
-                rows = True
-        else:  # pragma: no cover
-            rows = []
-        return FakeExec(rows)
-
-
-class FakeExec:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def execute(self):
-        return FakeResult(self._rows)
+from fake_cloud import FakeClient
 
 
 @pytest.fixture
@@ -339,14 +65,45 @@ def test_create_doc_uses_insert_when_genesis_upsert_is_denied(tx, monkeypatch):
 
 
 def test_effect_protocol_requires_member_auth_and_exact_rpc(tx):
+    path = "chats/c1/runtime/effects/run-1/call-1/claim.json"
+    malformed = {"meta": {"kind": "effect"}, "nonce": "n", "ct": "c", "sig": "s"}
     assert tx.effect_claims_ready() is False
+    with pytest.raises(ValidationError, match="protocol is unavailable"):
+        tx.create_effect_doc(path, malformed)
     tx.auth_mode = "member:aryan"
     tx._effects_reprobe = 0
     assert tx.effect_claims_ready() is True
-    path = "chats/c1/runtime/effects/run-1/call-1/claim.json"
-    doc = {"meta": {"kind": "effect"}, "nonce": "n", "ct": "c", "sig": "s"}
-    tx.create_effect_doc(path, doc)
+    tx.put_doc("users/fable.json", {
+        "kind": "agent", "active": True, "agent": {"owner": "aryan"},
+    })
+    tx.put_doc("chats/c1/meta.json", {"members": ["aryan", "fable"]})
+    _, cursor = tx.snapshot_docs()
+    base = path.rsplit("/", 1)[0]
+    with pytest.raises(ValidationError, match="rejected the effect transition"):
+        tx.create_effect_doc(path, malformed)
+    assert tx.list_docs(base) == []
+    assert tx.get_docs_delta(cursor) == ({}, set(), cursor)
+
+    doc = {"meta": {
+        "kind": "effect", "actor": "fable", "signer": "fable", "chat_id": "c1",
+        "run_id": "run-1", "root_run_id": "run-1", "call_id": "call-1",
+    }, "nonce": "n", "ct": "c", "sig": "s"}
+    ask = {"header": {
+        "kind": "permission_ask", "sender": "fable", "recipient": "aryan",
+        "agent": "fable", "chat_id": "c1",
+    }}
+    decision = {"header": {
+        "kind": "permission_decision", "sender": "aryan", "recipient": "fable",
+        "agent": "fable", "chat_id": "c1",
+    }}
+    tx.create_effect_doc(path, doc, ask_envelope=ask, decision_envelope=decision)
     assert tx.get_doc(path) == doc
+    assert tx.get_doc(f"{base}/grant-ask.json") == ask
+    assert tx.get_doc(f"{base}/grant-decision.json") == decision
+    changed, deleted, advanced = tx.get_docs_delta(cursor)
+    assert changed == {path: doc, f"{base}/grant-ask.json": ask,
+                       f"{base}/grant-decision.json": decision}
+    assert deleted == set() and advanced == cursor + 3
 
 
 def test_get_docs_bulk_read(tx):
@@ -490,8 +247,8 @@ def test_factory_picks_the_driver(tmp_path):
     assert isinstance(t, CachingTransport)
     assert isinstance(t.inner, SupabaseTransport)
     assert t.root == "team-a" and t.scheme == "supabase"
-    f = make_transport(tmp_path / "mesh2")
-    assert isinstance(f, FolderTransport)   # a local folder stays bare
+    with pytest.raises(ConfigError):
+        make_transport(tmp_path / "mesh2")
 
 
 def test_cache_key_unique_per_project():

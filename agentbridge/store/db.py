@@ -10,6 +10,8 @@ transport confirms the send (the "no message ever lost" guarantee).
 
 from __future__ import annotations
 
+from ..core import delivery_trace
+
 import json
 import sqlite3
 import threading
@@ -596,6 +598,7 @@ class Store:
             )
             return int(cur.lastrowid)
 
+    @delivery_trace.observed('store_send_commit', chat_arg=1)
     def cache_and_outbox_add(
         self, chat_id: str, record: dict[str, Any],
         kind: str, target: str, outbox_payload: dict[str, Any],

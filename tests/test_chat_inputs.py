@@ -1,6 +1,8 @@
 """Committed local capture boundaries, budgets and detached decoding."""
 
 import json
+import threading
+from contextlib import closing
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -152,20 +154,48 @@ def test_invalid_capture_arguments_are_rejected(store, options):
         store.capture_chat_inputs("chat", **options)
 
 
-def test_oversized_payload_is_rejected_before_materialization(store, monkeypatch):
+@pytest.mark.parametrize('noise', ['none', 'other_store', 'background_reader'])
+def test_oversized_payload_is_rejected_before_materialization(store, monkeypatch, noise):
     connect = chat_inputs.sqlite3.connect
     statements = []
     readers = []
+    capture_thread = threading.get_ident()
+    capture_uri = store.path.as_uri() + '?mode=ro'
 
     def open_reader(*args, **kwargs):
         conn = connect(*args, **kwargs)
-        conn.set_trace_callback(statements.append)
-        readers.append(conn)
+        # sqlite3 is a shared module: patching its connect function also sees
+        # unrelated background readers from other tests. Attribute the trace
+        # to this operation's thread and exact read-only Store connection.
+        if (threading.get_ident() == capture_thread and args
+                and args[0] == capture_uri and kwargs.get('uri') is True):
+            conn.set_trace_callback(statements.append)
+            readers.append(conn)
         return conn
 
     monkeypatch.setattr(chat_inputs.sqlite3, "connect", open_reader)
+    if noise == 'other_store':
+        with closing(chat_inputs.sqlite3.connect(':memory:')) as unrelated:
+            unrelated.execute("SELECT payload FROM (SELECT 'noise' AS payload)").fetchall()
+    elif noise == 'background_reader':
+        errors = []
+
+        def read_noise():
+            try:
+                for _ in range(32):
+                    with closing(chat_inputs.sqlite3.connect(capture_uri, uri=True)) as unrelated:
+                        unrelated.execute('SELECT payload FROM messages').fetchall()
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=read_noise)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
     with pytest.raises(OverflowError):
         store.capture_chat_inputs("chat", max_bytes=1)
+    assert len(readers) == 1 and statements, 'the intended capture must actually be traced'
     assert not any(sql.startswith("SELECT payload") for sql in statements)
     with pytest.raises(chat_inputs.sqlite3.ProgrammingError, match="closed"):
         readers[0].execute("SELECT 1")

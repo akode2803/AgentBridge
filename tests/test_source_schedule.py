@@ -205,3 +205,88 @@ def test_invalid_arguments(constructor, call, match):
             schedule.request(chat, now=value, selected=1)
         else:
             schedule.wait_s(now=0, maximum=value)
+
+
+@pytest.mark.parametrize('active', [True, False])
+def test_pending_retry_hints_cannot_shorten_floor(active):
+    schedule = SourceSchedule()
+    schedule.request('room', now=0, selected=active)
+    job = _take(schedule, 0.05, 'room')
+    schedule.request('room', now=0.1, activity=True)
+    schedule.finish(job, now=0.2, success=False, blocked=True)
+    delay = 0.35 if active else 4.0
+    assert schedule._states['room'].failures == 0
+    for now in (0.21, 0.3, 0.4):
+        schedule.request('room', now=now, activity=True)
+    assert schedule.take_due(now=0.2 + delay - 0.001) is None
+    assert _take(schedule, 0.2 + delay, 'room')
+
+
+def test_pending_retry_preserves_io_failures_and_success_resets():
+    schedule = SourceSchedule()
+    schedule.request('room', now=0, selected=True)
+    now = 0.05
+    for failures in (1, 2):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False)
+        assert schedule._states['room'].failures == failures
+        now += 4 * 2 ** (failures - 1)
+    schedule.request('room', now=now, selected=True)
+    for _ in range(3):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False, blocked=True)
+        assert schedule._states['room'].failures == 2
+        now += 0.35
+    job = _take(schedule, now, 'room')
+    schedule.finish(job, now=now, success=False)
+    assert schedule._states['room'].failures == 3
+    assert schedule.wait_s(now=now, maximum=100) == pytest.approx(16)
+    now += 16
+    job = _take(schedule, now, 'room')
+    schedule.finish(job, now=now)
+    assert schedule._states['room'].failures == 0
+
+
+@pytest.mark.parametrize('clear', [False, True])
+def test_pending_retry_expired_or_cleared_lease_uses_background(clear):
+    schedule = SourceSchedule(background_s=3)
+    schedule.request('room', now=0, selected=True)
+    if clear:
+        schedule.clear_selection()
+    now = 0.05 if clear else 15.1
+    job = _take(schedule, now, 'room')
+    schedule.finish(job, now=now, success=False, blocked=True)
+    schedule.request('room', now=now + 0.1, activity=True)
+    assert schedule.wait_s(now=now, maximum=100) == pytest.approx(3)
+
+
+def test_persistent_pending_retry_is_bounded_and_yields_to_background():
+    schedule = SourceSchedule()
+    schedule.request('selected', now=0, selected=True)
+    schedule.request('background', now=0)
+    seen = []
+    for now in (0.05, 0.4, 0.75):
+        job = schedule.take_due(now=now)
+        seen.append(job.chat_id)
+        schedule.finish(job, now=now, success=False, blocked=True)
+    assert seen == ['selected', 'selected', 'background']
+    for tick in range(76, 140):
+        now = tick / 100
+        schedule.request('selected', now=now, activity=True)
+        job = schedule.take_due(now=now)
+        if job:
+            assert job.chat_id == 'selected'
+            seen.append(job.chat_id)
+            schedule.finish(job, now=now, success=False, blocked=True)
+    assert len(seen) == 5
+    assert schedule._states['selected'].failures == 0
+
+
+@pytest.mark.parametrize('success,blocked', [(False, 1), (False, None), (True, True)])
+def test_invalid_blocked_outcome_retains_running_job(success, blocked):
+    schedule = SourceSchedule()
+    schedule.request('room', now=0)
+    job = _take(schedule, 0.05, 'room')
+    with pytest.raises(ValueError, match='outcome'):
+        schedule.finish(job, now=0.1, success=success, blocked=blocked)
+    assert schedule._running is job

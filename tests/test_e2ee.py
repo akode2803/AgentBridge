@@ -1,7 +1,7 @@
 """End-to-end encryption (R9): sealed envelopes, epochs, rotation, recovery.
 
-These exercise the real E2EESealer over the folder transport with per-identity
-keystores — the closest unit-level analogue to two machines sharing a folder.
+These exercise the real E2EESealer over the Supabase transport with per-identity
+keystores — the closest unit-level analogue to two machines sharing an untrusted cloud provider.
 """
 
 import json
@@ -11,20 +11,19 @@ import pytest
 from agentbridge import crypto
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(clouds, tmp_path):
     """Each identity gets its OWN home (its own keystore) — a faithful stand-in
-    for separate machines syncing one folder."""
-    root = tmp_path / "mesh2"
+    for separate machines syncing one cloud root."""
+    root = clouds.root(tmp_path / "mesh2")
     homes: dict[str, object] = {}
 
     def mk(user, machine="m1"):
         home = tmp_path / f"home-{user}"
         homes[user] = home
-        return Mesh(FolderTransport(root), user, machine, encrypt=True, home=home)
+        return Mesh(clouds.bare(root), user, machine, encrypt=True, home=home)
 
     # bootstrap accounts, each on its own mesh so keys land in its own keystore
     recovery: dict[str, str] = {}
@@ -48,15 +47,15 @@ def ripple(sender, chat_id, *others):
 
 # --------------------------------------------------------------- ciphertext
 
-def test_body_is_ciphertext_on_disk(world):
+def test_body_is_ciphertext_on_provider(clouds, world):
     meshes, _, _, root = world
     aryan, fable = meshes["aryan"], meshes["fable"]
     chat = aryan.create_chat("Secret", members=["fable"])
     aryan.post(chat.id, "the launch code is hunter2")
     aryan.outbox.flush_once()
 
-    # read the raw jsonl straight off the transport — no plaintext anywhere
-    raw = FolderTransport(root).read_log(chat.id, "aryan@m1")[0]
+    # read the raw envelopes straight off the transport — no plaintext anywhere
+    raw = clouds.bare(root).read_log(chat.id, "aryan@m1")[0]
     blob = json.dumps(raw)
     assert "hunter2" not in blob and "launch code" not in blob
     msg = next(r for r in raw if r.get("kind") == "message")
@@ -67,7 +66,7 @@ def test_body_is_ciphertext_on_disk(world):
     assert fable.messages_for(chat.id)[-1].body == "the launch code is hunter2"
 
 
-def test_roundtrip_and_signature_tamper_detected(world):
+def test_roundtrip_and_signature_tamper_detected(clouds, world):
     meshes, _, _, root = world
     aryan, fable = meshes["aryan"], meshes["fable"]
     chat = aryan.create_chat("Signed", members=["fable"])
@@ -77,13 +76,12 @@ def test_roundtrip_and_signature_tamper_detected(world):
 
     # forge the ciphertext in place -> AEAD/sig fails -> reader shows nothing,
     # never a wrong plaintext
-    tx = FolderTransport(root)
+    tx = clouds.bare(root)
     recs = tx.read_log(chat.id, "aryan@m1")[0]
     for r in recs:
         if r["id"] == env.id:
             r["ct"] = crypto.b64e(b"\x00" * len(crypto.b64d(r["ct"])))
-    p = tx.local_path(f"chats/{chat.id}/msgs/aryan@m1.jsonl")
-    p.write_text("\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+    clouds.replace_log(root, chat.id, "aryan@m1", recs)
 
     fable.store.forget_chat(chat.id)
     fable.sync.sync_once([chat.id])
@@ -91,16 +89,16 @@ def test_roundtrip_and_signature_tamper_detected(world):
     assert tampered.body == ""  # unopenable -> blank, not the old text
 
 
-def test_non_member_cannot_decrypt(world):
+def test_non_member_cannot_decrypt(clouds, world):
     meshes, _, _, root = world
     aryan, sudhir = meshes["aryan"], meshes["sudhir"]
     chat = aryan.create_chat("Members only", members=["fable"])
     env = aryan.post(chat.id, "not for sudhir")
     aryan.outbox.flush_once()
 
-    # sudhir reads raw ciphertext off the shared folder and has his own keys,
+    # sudhir reads raw ciphertext off the shared provider and has his own keys,
     # but the epoch key was never wrapped for him -> cannot open
-    recs = FolderTransport(root).read_log(chat.id, "aryan@m1")[0]
+    recs = clouds.bare(root).read_log(chat.id, "aryan@m1")[0]
     epoch = next(r["epoch"] for r in recs if r["id"] == env.id)
     key = sudhir.keys.my_key(chat.id, epoch)
     assert key is None
@@ -187,7 +185,7 @@ def test_leave_rotates_the_epoch_away_from_the_leaver(world):
     assert sudhir.keys.my_key(group.id, env.epoch) is not None  # remaining reads
 
 
-def test_ensure_distrusts_an_epoch_from_a_departed_creator(world):
+def test_ensure_distrusts_an_epoch_from_a_departed_creator(clouds, world):
     """R69 defense-in-depth: even when the newest epoch's wrapped set matches
     the current members, ensure() re-keys if its CREATOR is no longer a
     member — so a key a leaver minted (and might have kept) is never trusted
@@ -204,7 +202,7 @@ def test_ensure_distrusts_an_epoch_from_a_departed_creator(world):
     ep2, doc2 = aryan.keys.latest(group.id)      # remove_member rotated
     forged = dict(doc2)
     forged["by"] = "fable"  # a departed member's stamp
-    FolderTransport(root).put_doc(P.keys(group.id, ep2), forged)
+    clouds.bare(root).put_doc(P.keys(group.id, ep2), forged)
     aryan.keys._cache.clear()
     env = aryan.post(group.id, "after the plant")  # ensure() must re-key
     latest_epoch, latest_doc = aryan.keys.latest(group.id)
@@ -212,7 +210,7 @@ def test_ensure_distrusts_an_epoch_from_a_departed_creator(world):
     assert latest_doc["by"] == "aryan"
 
 
-def test_ensure_heals_after_clobbered_rotation(world):
+def test_ensure_heals_after_clobbered_rotation(clouds, world):
     """Two removals could race on the epoch file; ensure() guarantees the
     NEXT message is sealed under a members-only key regardless."""
     meshes, _, _, root = world
@@ -223,7 +221,7 @@ def test_ensure_heals_after_clobbered_rotation(world):
 
     # simulate a stale writer clobbering the latest epoch back to the old
     # 3-member wrap (the race): copy epoch1's doc over the newest epoch
-    tx = FolderTransport(root)
+    tx = clouds.bare(root)
     eps = aryan.keys.epochs(group.id)
     first = tx.get_doc(P.keys(group.id, eps[0][0]))
     tx.put_doc(P.keys(group.id, eps[-1][0]), first)   # newest now wraps sudhir
@@ -255,12 +253,12 @@ def test_history_on_join_off_is_cryptographic(world):
 
 # ---------------------------------------------------------- keys & recovery
 
-def test_locked_identity_cannot_send(world):
+def test_locked_identity_cannot_send(clouds, world):
     meshes, _, _, root = world
     aryan = meshes["aryan"]
     chat = aryan.create_chat("Locked test", members=["fable"])
     # a fresh device for aryan that never unlocked (no bundle in its keystore)
-    fresh = Mesh(FolderTransport(root), "aryan", "phone",
+    fresh = Mesh(clouds.bare(root), "aryan", "phone",
                  encrypt=True, home=_new_home(aryan))
     try:
         with pytest.raises(crypto.CryptoFail):
@@ -269,13 +267,13 @@ def test_locked_identity_cannot_send(world):
         fresh.close()
 
 
-def test_password_change_and_recovery_reunlock(world):
+def test_password_change_and_recovery_reunlock(clouds, world):
     meshes, mk, recovery, root = world
     aryan = meshes["aryan"]
 
     # change password: identity re-wraps, a fresh device unlocks with the new
     aryan.accounts.change_password("aryan-pass", "brand-new-pass")
-    dev2 = Mesh(FolderTransport(root), "aryan", "dev2", encrypt=True,
+    dev2 = Mesh(clouds.bare(root), "aryan", "dev2", encrypt=True,
                 home=_new_home(aryan))
     try:
         assert dev2.accounts.unlock("brand-new-pass") is True
@@ -285,7 +283,7 @@ def test_password_change_and_recovery_reunlock(world):
 
     # recovery code still works (untouched by the password change) and
     # unlocks on a brand-new device
-    dev3 = Mesh(FolderTransport(root), "aryan", "dev3", encrypt=True,
+    dev3 = Mesh(clouds.bare(root), "aryan", "dev3", encrypt=True,
                 home=_new_home(aryan))
     try:
         assert dev3.accounts.unlock_with_recovery(recovery["aryan"]) is True
@@ -339,7 +337,7 @@ def _plain_line(sender, ns, body):
     }
 
 
-def test_plaintext_and_plain_blobs_never_open(world):
+def test_plaintext_and_plain_blobs_never_open(clouds, world):
     """R16.5: the migrated era is over — an epoch-0 envelope reads as
     nothing everywhere (even in a chat with no epochs yet), and plain bytes
     are never served as chat files."""
@@ -347,7 +345,7 @@ def test_plaintext_and_plain_blobs_never_open(world):
 
     meshes, _, _, root = world
     aryan = meshes["aryan"]
-    tx = FolderTransport(root)
+    tx = clouds.bare(root)
     chat = aryan.create_chat("Sealed room", members=["fable"])
 
     line = _plain_line("fable", next_ns(), "plaintext line")

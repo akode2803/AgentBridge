@@ -65,7 +65,7 @@ def publish_overlay_source(
     All five overlay classes come from one mirror cut. Full publication retires
     removed rows; exact selection represents absence explicitly. Failure after invalidation leaves a pending source;
     callers schedule a new bounded attempt rather than retrying in this function.
-    Bare folder transport is explicitly unsupported by this mirror-current gate.
+    Only the exact caching owner is supported by this mirror-current gate.
     """
     if type(transport) is not CachingTransport:
         raise OverlaySourceUnavailable("unsupported")

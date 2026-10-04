@@ -6,6 +6,9 @@ operation and never clears an ambiguous intent based on age or process death.
 """
 from __future__ import annotations
 
+from ..core.input_phase_timings import span
+from ..core import delivery_trace
+
 import hashlib
 import json
 import re
@@ -80,20 +83,30 @@ class MutationCoordinator:
 
     @contextmanager
     def _transaction(self, *, create=False):
-        mode = 'rwc' if create else 'rw'
-        conn = sqlite3.connect(f'{self.path.as_uri()}?mode={mode}', uri=True, timeout=1)
-        try:
-            if create:
-                conn.execute('PRAGMA journal_mode=WAL')
-            conn.execute('PRAGMA synchronous=FULL')
-            conn.execute('BEGIN IMMEDIATE')
-            yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        with delivery_trace.transaction('root', self.path) as trace:
+            mode = 'rwc' if create else 'rw'
+            with span('root_open'):
+                conn = sqlite3.connect(f'{self.path.as_uri()}?mode={mode}', uri=True, timeout=1)
+            try:
+                if create:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                with span('root_setup'):
+                    conn.execute('PRAGMA synchronous=FULL')
+                with span('root_begin'):
+                    with trace.acquiring():
+                        conn.execute('BEGIN IMMEDIATE')
+                yield conn
+                with span('root_commit'):
+                    with trace.finishing('db_commit'):
+                        conn.commit()
+            except BaseException:
+                with span('root_rollback'):
+                    with trace.finishing('db_rollback'):
+                        conn.rollback()
+                raise
+            finally:
+                with span('root_close'):
+                    conn.close()
 
     def _schema(self, conn):
         tables = tuple(_SCHEMA) + tuple(_QUARANTINE_SCHEMA)
@@ -117,15 +130,25 @@ class MutationCoordinator:
             raise owner.SourceChanged('pending_selector_budget')
         if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
             raise owner.SourceChanged('invalid_pending_selector')
+        # Preflight above bounds every field before fetching values. Audit
+        # the same fresh cut in one bounded query rather than one per intent.
+        scope_rows = conn.execute(
+            'SELECT token,kind,value FROM mutation_scopes ORDER BY token,kind,value LIMIT ?',
+            (MAX_PENDING * 8 + 1,),
+        ).fetchall()
+        if len(scope_rows) > MAX_PENDING * 8:
+            raise owner.SourceChanged('pending_selector_budget')
+        grouped = {}
+        for token, kind, value in scope_rows:
+            grouped.setdefault(token, []).append((kind, value))
         sentinels = {}
         for (token,) in tokens:
-            rows = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9',
-                                (token,)).fetchall()
+            rows = grouped.get(token, ())
             if not 1 <= len(rows) <= 8:
                 raise owner.SourceChanged('pending_intent_scope_mismatch')
             if _SENTINEL_TOKEN.fullmatch(token):
                 sentinels[token] = tuple(rows)
-        if conn.execute('SELECT 1 FROM mutation_scopes s LEFT JOIN mutation_intents i ON s.token=i.token WHERE i.token IS NULL LIMIT 1').fetchone():
+        if set(grouped) != {token for (token,) in tokens}:
             raise owner.SourceChanged('orphan_mutation_scope')
         self._quarantine_audit(conn, sentinels)
         return row[1]
@@ -226,8 +249,10 @@ class MutationCoordinator:
                 conn.execute('UPDATE local_sources SET revision=revision+1,ready_incarnation=NULL,ready_generation=NULL,ready_cursor=NULL')
             root.execute('INSERT INTO mutation_stores VALUES(?,?,?)', (path, current.raw.incarnation, current.epoch))
 
-    def _retire(self, root, changes):
+    def _retire(self, root, changes, *, skip_path=None):
         for path, incarnation, epoch in self._stores(root):
+            if path == skip_path:
+                continue
             store = SimpleNamespace(path=Path(path))
             with owner._writer(store) as conn:
                 self._check_store(conn, store, incarnation, epoch)
@@ -242,20 +267,24 @@ class MutationCoordinator:
         changes = scopes.selectors(changes, limit=8)
         with self._transaction() as conn:
             self._schema(conn)
-            for kind, value in conn.execute("SELECT s.kind,s.value FROM mutation_scopes s JOIN mutation_intents i ON i.token=s.token WHERE substr(i.token,1,1)='q' LIMIT ?", (MAX_PENDING * 8 + 1,)):
-                blocked = scopes.selectors((scopes.Selector(kind, value),), limit=1)[0]
-                if any(_overlap(blocked, change) for change in changes):
-                    raise owner.SourceChanged('mutation_scope_quarantined')
-            count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM mutation_intents LIMIT ?)',
-                                 (MAX_PENDING,)).fetchone()[0]
-            if count >= MAX_PENDING:
-                raise owner.SourceChanged('pending_mutation_budget')
-            token = secrets.token_hex(32)
-            conn.execute('INSERT INTO mutation_intents VALUES(?)', (token,))
-            conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)', ((token, s.kind, s.value) for s in changes))
+            token = self._insert_intent(conn, changes)
             self._retire(conn, changes)
             result = MutationIntent(str(self.path), self.epoch, token, changes)
         return result
+
+    def _insert_intent(self, conn, changes):
+        for kind, value in conn.execute("SELECT s.kind,s.value FROM mutation_scopes s JOIN mutation_intents i ON i.token=s.token WHERE substr(i.token,1,1)='q' LIMIT ?", (MAX_PENDING * 8 + 1,)):
+            blocked = scopes.selectors((scopes.Selector(kind, value),), limit=1)[0]
+            if any(_overlap(blocked, change) for change in changes):
+                raise owner.SourceChanged('mutation_scope_quarantined')
+        count = conn.execute('SELECT count(*) FROM (SELECT 1 FROM mutation_intents LIMIT ?)',
+                             (MAX_PENDING,)).fetchone()[0]
+        if count >= MAX_PENDING:
+            raise owner.SourceChanged('pending_mutation_budget')
+        token = secrets.token_hex(32)
+        conn.execute('INSERT INTO mutation_intents VALUES(?)', (token,))
+        conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)', ((token, s.kind, s.value) for s in changes))
+        return token
 
     def quarantine(self, expected_tokens: tuple[str, ...]):
         """Operator CAS: preserve opaque intents and keep old-process fences.
@@ -312,6 +341,22 @@ class MutationCoordinator:
         Not a recovery API. Other pending intents, including earlier ambiguous
         retries of the same write, remain pending. Never restores readiness.
         """
+        # A definite provider success must not immediately become a remote
+        # replay because the local terminal cut briefly met a busy writer.
+        # Retry only this exact completion, with a fresh transaction/schema
+        # check each time. The bound is attempts, not elapsed wall time.
+        for attempt in range(3):
+            try:
+                return self._finish(value)
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, 'sqlite_errorcode', None)
+                if (type(code) is not int or code & 255 not in
+                        (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or attempt == 2):
+                    raise
+
+    def _finish(self, value):
+        # Internal terminal transition; also used by an in-process reservation
+        # that proves the external operation was never started.
         if type(value) is not MutationIntent:
             raise ValueError('invalid mutation intent')
         path, epoch, token = value.coordinator_path, value.epoch, value.token
@@ -362,7 +407,7 @@ class MutationCoordinator:
                 raise owner.SourceChanged('source_mutation_pending')
 
     @contextmanager
-    def finalization_cut(self, store, value, *, companions=()):
+    def finalization_cut(self, store, value, *, companions=(), mutation=None):
         """Internal root -> Store cut for bounded canonical final comparisons.
 
         Requires existing coverage and ready inputs; never registers, repairs or
@@ -372,6 +417,13 @@ class MutationCoordinator:
         inputs. We independently recheck source readiness/coverage before commit.
         Root exclusion lasts through the Store commit, including exception paths.
         """
+        from .mutation_reservation import FinalizationMutation
+
+        if mutation is not None:
+            if type(mutation) is not FinalizationMutation:
+                raise ValueError('invalid finalization mutation')
+            mutation._enter(self)
+        intent = None
         store = SimpleNamespace(path=Path(store.path).resolve())
         value = scopes._definition(value)
         if type(companions) is not tuple or len(companions) > 4:
@@ -382,18 +434,32 @@ class MutationCoordinator:
         if any(json.loads(item.serialized)[0] != self.identity for item in definitions):
             raise ValueError('definition belongs to another transport root')
         with self._transaction() as root:
-            self._schema(root)
-            row = self._registered_store(root, str(store.path))
-            for definition in definitions:
-                self._require_no_pending(root, definition)
+            with span('root_checks'):
+                self._schema(root)
+                row = self._registered_store(root, str(store.path))
+                for definition in definitions:
+                    self._require_no_pending(root, definition)
             with owner._writer(store) as conn:
-                self._check_store(conn, store, *row)
-                positions = tuple(scopes.require_registered_in_transaction(conn, store, item)
-                                  for item in definitions)
-                if any(not item.ready or item.writes_pending for item in positions):
-                    raise owner.SourceChanged('source_not_ready')
+                with span('source_checks'):
+                    self._check_store(conn, store, *row)
+                    positions = tuple(scopes.require_registered_in_transaction(conn, store, item)
+                                      for item in definitions)
+                    if any(not item.ready or item.writes_pending for item in positions):
+                        raise owner.SourceChanged('source_not_ready')
                 yield conn, positions[0]
-                self._check_store(conn, store, *row)
-                if tuple(scopes.require_registered_in_transaction(conn, store, item)
-                         for item in definitions) != positions:
-                    raise owner.SourceChanged('source_changed_during_finalization')
+                with span('source_rechecks'):
+                    self._check_store(conn, store, *row)
+                    if tuple(scopes.require_registered_in_transaction(conn, store, item)
+                             for item in definitions) != positions:
+                        raise owner.SourceChanged('source_changed_during_finalization')
+                if mutation is not None and mutation.accepted:
+                    changes = scopes.selectors(mutation.changes, limit=8)
+                    token = self._insert_intent(root, changes)
+                    scopes.retire_in_transaction(conn, store, changes)
+                    intent = MutationIntent(str(self.path), self.epoch, token, changes)
+            if intent is not None:
+                # The current writer committed before opening other Store writers.
+                # Root exclusion persists throughout fanout and the root commit.
+                self._retire(root, intent.selectors, skip_path=str(store.path))
+        if intent is not None:
+            mutation._committed(intent)

@@ -1,7 +1,9 @@
 # Canonical chat read ownership
 
 `MessagingService.conversation_projection()` owns the ordinary transcript fold used by
-the existing `/api/mesh/chat` response. It verifies membership, loads the room
+core, CLI, MCP, harness and export callers. The GUI full-history
+`/api/mesh/chat` route has been retired; its mandatory page endpoint has a
+separate bounded request owner. It verifies membership, loads the room
 snapshot and overlays, captures one verified per-viewer state document, and
 uses that detached private state for both message filtering and same-request
 viewer derivatives. The public projection exposes only the existing sanitized

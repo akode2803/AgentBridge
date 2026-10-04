@@ -6,84 +6,60 @@ import pytest
 from agentbridge.store import local_source, source_selectors
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
-from agentbridge.transport.folder import FolderTransport
+from agentbridge.transport.supabase import SupabaseTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
 
 
 S = source_selectors.Selector
 
 
-class RecordingFolder(FolderTransport):
-    def __init__(self, root):
-        super().__init__(root)
-        self.calls = []
-        self.before_write = None
-        self.fail = None
+def _recording_provider(clouds, path):
+    """Instrument the exact cloud owner without bypassing identity checks."""
+    inner = clouds.bare(path)
+    inner.auth_mode = "member:fixture"
+    clouds.client(path).db["_effects_ready"] = True
+    inner.calls = []
+    inner.before_write = None
+    inner.fail = None
 
-    def _record(self, name, *args):
-        self.calls.append((name, *args))
-        if self.before_write is not None:
-            self.before_write(name, *args)
-        if self.fail == name:
+    def record(name, *args):
+        inner.calls.append((name, *args))
+        if inner.before_write is not None:
+            inner.before_write(name, *args)
+        if inner.fail == name:
             raise RuntimeError("inner write failed")
 
-    def put_doc(self, path, data):
-        self._record("put_doc", path, data)
-        return super().put_doc(path, data)
+    def instrument(name):
+        method = getattr(SupabaseTransport, name)
 
-    def create_doc(self, path, data):
-        self._record("create_doc", path, data)
-        return FolderTransport.put_doc(self, path, data)
+        def operation(*args, **kwargs):
+            if name == "create_effect_doc":
+                record(name, *args, kwargs.get("ask_envelope"),
+                       kwargs.get("decision_envelope"))
+            else:
+                record(name, *args)
+            return method(inner, *args, **kwargs)
 
-    def delete_doc(self, path):
-        self._record("delete_doc", path)
-        return super().delete_doc(path)
+        setattr(inner, name, operation)
 
-    def create_effect_doc(self, path, data, *, ask_envelope=None,
-                          decision_envelope=None):
-        self._record(
-            "create_effect_doc", path, data, ask_envelope, decision_envelope,
-        )
-        return FolderTransport.put_doc(self, path, data)
-
-    def effect_claims_ready(self):
-        return True
-
-    def append_log(self, chat_id, log_name, record):
-        self._record("append_log", chat_id, log_name, record)
-        return super().append_log(chat_id, log_name, record)
-
-    def delete_chat(self, chat_id):
-        self._record("delete_chat", chat_id)
-        return super().delete_chat(chat_id)
-
-    def put_blob(self, path, data):
-        self._record("put_blob", path, data)
-        return super().put_blob(path, data)
-
-    def put_blob_from(self, local_src, path):
-        self._record("put_blob_from", local_src, path)
-        return super().put_blob_from(local_src, path)
-
-    def delete_blob(self, path):
-        self._record("delete_blob", path)
-        return super().delete_blob(path)
-
-    def note_log_poll(self, *, changed, hinted):
-        self.calls.append(("note_log_poll", changed, hinted))
-
-    def dangerous_mutate(self):
-        self.calls.append(("dangerous_mutate",))
+    for name in ("put_doc", "create_doc", "delete_doc", "create_effect_doc",
+                 "append_log", "delete_chat", "put_blob", "put_blob_from",
+                 "delete_blob"):
+        instrument(name)
+    inner.note_log_poll = lambda *, changed, hinted: inner.calls.append(
+        ("note_log_poll", changed, hinted))
+    inner.dangerous_mutate = lambda: inner.calls.append(("dangerous_mutate",))
+    return inner
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, clouds):
     store = Store(tmp_path / "store.sqlite")
     local_source.initialize(store)
     source_selectors.initialize(store)
     coordinator = MutationCoordinator(tmp_path / "home", "mesh-root")
     coordinator.register_store(store)
-    inner = RecordingFolder(tmp_path / "provider")
+    inner = _recording_provider(clouds, tmp_path / "provider")
     proxy = LocalMutationTransport(inner, coordinator)
     try:
         yield store, coordinator, inner, proxy
@@ -185,10 +161,28 @@ def test_create_doc_has_one_intent_and_one_direct_inner_create(rig, monkeypatch)
 
 
 def test_effect_creation_uses_one_union_intent_for_primary_ask_and_decision(
-        rig, monkeypatch):
+        rig, monkeypatch, clouds):
     store, coordinator, inner, proxy = rig
     path = "chats/c/runtime/effects/run/call/claim.json"
     parent = "chats/c/runtime/effects/run/call"
+    clouds.seed_documents(inner.root, {
+        "users/worker.json": {
+            "kind": "agent", "active": True, "agent": {"owner": "alice"},
+        },
+        "chats/c/meta.json": {"members": ["alice", "worker"]},
+    })
+    claim = {"meta": {
+        "kind": "effect", "actor": "worker", "signer": "worker",
+        "chat_id": "c", "run_id": "run", "root_run_id": "run", "call_id": "call",
+    }}
+    ask = {"header": {
+        "kind": "permission_ask", "sender": "worker", "recipient": "alice",
+        "agent": "worker", "chat_id": "c",
+    }}
+    decision = {"header": {
+        "kind": "permission_decision", "sender": "alice", "recipient": "worker",
+        "agent": "worker", "chat_id": "c",
+    }}
     definitions = (
         _definition(coordinator, "primary", S("doc_exact", path)),
         _definition(
@@ -210,8 +204,7 @@ def test_effect_creation_uses_one_union_intent_for_primary_ask_and_decision(
 
     monkeypatch.setattr(coordinator, "begin", begin)
     proxy.create_effect_doc(
-        path, {"claim": 1}, ask_envelope={"ask": 1},
-        decision_envelope={"decision": 1},
+        path, claim, ask_envelope=ask, decision_envelope=decision,
     )
     assert len(begun) == 1
     assert set(begun[0]) == {
@@ -221,6 +214,9 @@ def test_effect_creation_uses_one_union_intent_for_primary_ask_and_decision(
     }
     assert [call[0] for call in inner.calls] == ["create_effect_doc"]
     assert all(not local_source.capture(store, d.source).ready for d in definitions)
+    assert inner.get_doc(path) == claim
+    assert inner.get_doc(parent + "/grant-ask.json") == ask
+    assert inner.get_doc(parent + "/grant-decision.json") == decision
 
 
 def test_append_log_and_delete_chat_retire_declared_log_and_subtree(rig):
@@ -257,7 +253,7 @@ def test_reads_profile_and_poll_cadence_delegate_without_intents(rig):
     assert _pending(coordinator) == 0
 
 
-def test_blob_overwrite_retires_json_source_before_actual_folder_write(rig):
+def test_blob_write_retires_exact_json_source_before_actual_provider_write(rig):
     store, coordinator, inner, proxy = rig
     path = "accounts/alice.json"
     inner.put_doc(path, {"name": "old"})

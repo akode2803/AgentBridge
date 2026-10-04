@@ -15,9 +15,6 @@ from agentbridge.mesh.overlay_source import (
 from agentbridge.store.overlay_index import OverlayIndexUnavailable
 from agentbridge.mesh.overlays import UserState, reaction_map
 from agentbridge.store.db import DocumentObservationConflict, Store
-from agentbridge.transport.base import TransportProfile, Watcher
-from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
@@ -48,35 +45,6 @@ def _observation(store, documents, *, deleted_paths=()):
 def _document(prepared, path):
     return next(item for item in prepared.documents if item.path == path)
 
-
-class SnapshotProvider(FolderTransport):
-    """Disposable provider with stable identities and in-memory documents."""
-
-    scheme = "snapshot"
-    profile = TransportProfile()
-
-    def __init__(self, documents):
-        self.root = "overlay-index-root"
-        self.cache_key = "overlay-index-cache"
-        self.docs = dict(documents)
-
-    def snapshot_docs(self): return dict(self.docs), 1
-    def list_chat_ids(self): return [CHAT]
-    def get_doc(self, path, default=None): return self.docs.get(path, default)
-    def put_doc(self, path, data): self.docs[path] = data
-    create_doc = put_doc
-    def delete_doc(self, path): self.docs.pop(path, None)
-    def list_docs(self, prefix):
-        return sorted(path for path in self.docs if path.startswith(prefix))
-    def list_logs(self, chat_id): return []
-    def append_log(self, chat_id, log_name, record): return None
-    def read_log(self, chat_id, log_name, offset=0): return [], offset
-    def delete_chat(self, chat_id): return None
-    def put_blob(self, path, data): return None
-    def put_blob_from(self, local_src, path): return None
-    def get_blob(self, path): return None
-    def blob_size(self, path): return None
-    def watch(self): return Watcher()
 
 
 def test_reaction_candidates_match_reaction_map_and_existing_signing_recipe(store):
@@ -303,12 +271,12 @@ def test_malformed_hidden_or_starred_is_explicit_and_emits_no_partial_candidates
     assert prepared.candidates == ()
 
 
-def test_indexed_capture_requires_current_source_and_originating_mirror(tmp_path):
-    provider = SnapshotProvider({
+def test_indexed_capture_requires_current_source_and_originating_mirror(tmp_path, clouds):
+    root = tmp_path / "provider"
+    clouds.seed_documents(root, {
         REACTION: {"v": {"m1": "✅"}, "ns": 1, "sig": "invalid"},
     })
-    mirror = CachingTransport(provider, auto_refresh=False)
-    mirror.refresh()
+    mirror = clouds.cached(root)
     store = Store(tmp_path / "store.sqlite")
     try:
         receipt = publish_overlay_source(mirror, store, CHAT)
@@ -339,12 +307,12 @@ def test_indexed_capture_requires_current_source_and_originating_mirror(tmp_path
 
 
 def test_combined_helper_rejects_index_rebuilt_after_first_capture(
-        tmp_path, monkeypatch):
-    provider = SnapshotProvider({
+        tmp_path, monkeypatch, clouds):
+    root = tmp_path / "provider"
+    clouds.seed_documents(root, {
         REACTION: {"v": {"m1": "✅"}, "ns": 1, "sig": "invalid"},
     })
-    mirror = CachingTransport(provider, auto_refresh=False)
-    mirror.refresh()
+    mirror = clouds.cached(root)
     store = Store(tmp_path / "store.sqlite")
     try:
         receipt = publish_overlay_source(mirror, store, CHAT)

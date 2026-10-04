@@ -7,8 +7,6 @@ content, results, policy material, grants, or raw wire records.
 
 from __future__ import annotations
 
-import re
-
 from ..harness.runtime.handoffs import HandoffLedger
 from ..harness.runtime.runs import RunLedger, RunLedgerError
 from ..harness.runtime.tasks import TaskLedger
@@ -176,20 +174,6 @@ def authority_rows(mesh, chat_id: str, *, limit: int = 50,
 
 
 @authed
-def runtime_tasks(app, req, mesh) -> dict:
-    chat_id = str(req.params.get("id") or "")
-    limit = req.int_param("limit", 50, 1, 100)
-    return {"tasks": contributor_rows(mesh, chat_id, limit=limit)}
-
-
-@authed
-def runtime_authority(app, req, mesh) -> dict:
-    chat_id = str(req.params.get("id") or "")
-    limit = req.int_param("limit", 50, 1, 100)
-    return {"runs": authority_rows(mesh, chat_id, limit=limit)}
-
-
-@authed
 def latency_diagnostics(app, req, mesh) -> dict:
     """Bounded machine-local timing evidence; never shared room content."""
     limit = req.int_param("limit", 200, 1, 1000)
@@ -217,28 +201,7 @@ def latency_diagnostics(app, req, mesh) -> dict:
     }
 
 
-@authed
-def runtime_authority_current(app, req, mesh) -> dict:
-    chat_id = str(req.data.get("chat_id") or "")
-    raw_ids = req.data.get("run_ids")
-    if (not isinstance(raw_ids, list) or not raw_ids
-            or len(raw_ids) > 20):
-        raise ValidationError("run_ids must contain 1 to 20 active run ids")
-    run_ids = tuple(str(run_id) for run_id in raw_ids)
-    if (len(set(run_ids)) != len(run_ids)
-            or any(not re.fullmatch(r"r-[0-9]+-[0-9a-f]{8}", run_id)
-                   for run_id in run_ids)):
-        raise ValidationError("invalid active run ids")
-    return {"runs": authority_rows(
-        mesh, chat_id, run_ids=run_ids, current_only=True,
-    )}
-
-
 GET = {
-    "/api/mesh/runtime_tasks": runtime_tasks,
-    "/api/mesh/runtime_authority": runtime_authority,
     "/api/mesh/latency": latency_diagnostics,
 }
-POST = {
-    "/api/mesh/runtime_authority": runtime_authority_current,
-}
+POST = {}

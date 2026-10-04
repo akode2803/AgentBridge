@@ -11,21 +11,25 @@ from agentbridge.harness.runtime.permissions import ask_path
 from agentbridge.mesh.page_owner_asks import OwnerAskPageOperation
 from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
+from conftest import refresh_cloud
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='ask-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='ask-box',
                  encrypt=True, local_inputs=True)
     manager = None
     try:
         assert app.signup('viewer', '', 'secret')['ok']
+        refresh_cloud(app)
         app.mesh.accounts.create_agent('manager', harness={'agent_tools_enabled': True})
         chat = app.mesh.create_chat('Ask room', members=['manager']).id
         app.mesh.outbox.flush_once()
-        manager = Mesh(app.root, 'manager', 'manager-box', encrypt=True,
+        refresh_cloud(app)
+        manager = Mesh(clouds.bare(app.root), 'manager', 'manager-box', encrypt=True,
                        home=app.home, store_path=tmp_path / 'manager.sqlite')
         manager.sync.sync_once([chat])
         yield app, manager, chat
@@ -36,6 +40,7 @@ def world(tmp_path, monkeypatch):
 
 
 def _ready(app, chat, *, aux=True):
+    refresh_cloud(app)
     app.mesh.local_inputs.prepare_one()
     app.mesh.local_inputs.ingest(chat)
     if aux:
@@ -70,6 +75,7 @@ def _ask(manager, chat, *, tool='shell'):
 def test_room_owner_ask_matches_legacy_canonical_reader(world):
     app, manager, chat = world
     ask = _ask(manager, chat)
+    refresh_cloud(app)
     expected = list_owner_asks(app.mesh, chat_id=chat)
     assert [item['id'] for item in expected] == [ask.id]
     _ready(app, chat)
@@ -113,6 +119,7 @@ def test_forged_ask_envelope_is_dropped_after_fresh_source_ingestion(world):
     tampered = manager.tx.get_doc(path)
     tampered['ct'] = ('A' if tampered['ct'][:1] != 'A' else 'B') + tampered['ct'][1:]
     manager.tx.put_doc(path, tampered)
+    refresh_cloud(app)
     app.mesh.local_inputs.auxiliary.ingest('runtime', chat)
     result = _page(app, chat)
     assert result == {'asks': [], 'asks_complete': True}

@@ -1,6 +1,6 @@
 """Message-level operations: star/pin/edit/delete/clear/react/forward,
 chat flags (archive / pin-chat / hide-chat / mark-unread), message info,
-typing heartbeats and the livefeed.
+typing heartbeats. Bounded collections and page auxiliaries own read feeds.
 
 Every handler is a thin shim over the facade — the membership gate lives in
 the mesh services (``_require_member``), never re-implemented here.
@@ -8,16 +8,11 @@ the mesh services (``_require_member``), never re-implemented here.
 
 from __future__ import annotations
 
-import re
-
 from ..core.timekit import utcnow_iso
 from .context import session_read_binding
 from .routing import authed, authed_read_token
-from .serialize import chat_json, message_json
 
 __all__ = ["GET", "POST"]
-
-_LINK_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 
 
 # ------------------------------------------------------------ standard ops
@@ -32,19 +27,6 @@ def star(app, req, mesh) -> dict:
     else:
         mesh.unstar(d.get("chat_id") or "", ids)
     return {"ok": True, "starred": bool(d.get("starred", True))}
-
-
-@authed
-def starred(app, req, mesh) -> dict:
-    """One chat's stars, or (no id) every chat's — the Starred page."""
-    chat_id = req.params.get("id", "")
-    out = []
-    ids = [chat_id] if chat_id else [s.id for s in mesh.chats_for()]
-    for cid in ids:
-        for m in mesh.starred(cid):
-            out.append({**message_json(m, mesh.user), "chat_id": cid})
-    out.sort(key=lambda m: m["ns"])
-    return {"starred": out}
 
 
 @authed
@@ -225,39 +207,6 @@ def mute(app, req, mesh) -> dict:
     return {"ok": True, "mute": value}
 
 
-# ------------------------------------------------------- chat-info + feeds
-@authed_read_token
-def chat_info(app, req, mesh, token) -> dict:
-    """The info pane: meta + media/links walk in one pass (v1 shape)."""
-    from .api_chats import _created_by, _created_iso
-
-    chat_id = req.params.get("id", "")
-    snap = mesh.snapshot(chat_id)
-    msgs = mesh.messages_for(chat_id)  # gate + overlays
-    files, links = [], []
-    for m in msgs:
-        if m.event is not None or m.deleted:
-            continue
-        for f in m.files or []:
-            files.append({**f, "from": m.from_, "ts": m.ts, "msg_id": m.id})
-        for url in _LINK_RE.findall(m.body or ""):
-            links.append({"url": url, "from": m.from_, "ts": m.ts})
-    mine = mesh.my_state(chat_id)
-    return {
-        "session_binding": session_read_binding(token),
-        # the info pane's footer + danger card need what the transcript meta
-        # has: the chat's birth (R46 — the footer rendered "created by ,
-        # never" without them) and the viewer's archived flag
-        "meta": {**chat_json(snap, full=True), "pins": mesh.pins(chat_id),
-                 "created": _created_iso(msgs), "created_by": _created_by(msgs),
-                 "archived": mine["archived"]},
-        "files": files,
-        "links": links,
-        "count": len(msgs),
-        "starred": mine["starred"],
-    }
-
-
 @authed
 def typing(app, req, mesh) -> dict:
     """Composer heartbeat — one doc per user (single writer), readers drop
@@ -268,73 +217,6 @@ def typing(app, req, mesh) -> dict:
         "updated": utcnow_iso(),
     })
     return {"ok": True}
-
-
-@authed
-def livefeed(app, req, mesh) -> dict:
-    """Concurrent agent runs plus humans typing, for one chat or all mine."""
-    from .livefeed import expand_runs, suppress_superseded_preparing
-
-    chat_id = req.params.get("id", "")
-    if chat_id and not mesh.snapshot(chat_id).is_member(mesh.user):
-        return {"feeds": []}  # never leak who's typing where
-
-    # V128: the no-id lane filters by membership PER FEED — without this,
-    # every run doc mesh-wide leaked its chat_id + activity line to any
-    # member (visibility = membership, the one invariant)
-    member_of: dict[str, bool] = {}
-
-    def _mine(cid: str) -> bool:
-        if chat_id and cid == chat_id:
-            return True  # the with-id path proved membership above
-        if cid not in member_of:
-            try:
-                member_of[cid] = mesh.snapshot(cid).is_member(mesh.user)
-            except Exception:  # noqa: BLE001 — unreadable chat = not mine
-                member_of[cid] = False
-        return member_of[cid]
-
-    feeds = []
-    for path in mesh.tx.list_docs("status"):
-        doc = mesh.tx.get_doc(path)
-        if not isinstance(doc, dict):
-            continue
-        leaf = path.rsplit("/", 1)[-1]
-        runs = expand_runs(path, doc)
-        if runs:
-            for run in runs:
-                if run.get("state") != "running":
-                    continue
-                cid = run.get("chat_id") or ""
-                if (chat_id and cid != chat_id) or not _mine(cid):
-                    continue
-                age = _age_s(run.get("updated", ""))
-                if age is not None and age > 7200:
-                    continue  # a run that died without a finish write
-                # V109: a locally-hosted agent whose runner process is DEAD is
-                # not running, whatever its last doc write said.
-                from .api_agents import runner_state
-
-                who = run.get("agent") or ""
-                if runner_state(app, mesh, who) is False:
-                    continue
-                feeds.append({**run, "age_s": age})
-            continue
-        if leaf.startswith("typing_"):
-            age = _age_s(doc.get("updated", ""))
-            if not doc.get("user") or doc["user"] == mesh.user:
-                continue
-            cid = doc.get("chat_id") or ""
-            if (chat_id and cid != chat_id) or not _mine(cid):
-                continue
-            if age is None or age > 12:
-                continue  # heartbeat every ~3s while typing; stale = stopped
-            feeds.append({"agent": doc["user"], "human": True,
-                          "typing": True, "age_s": age})
-    feeds = suppress_superseded_preparing(feeds)
-    feeds.sort(key=lambda item: (not item.get("human"), item.get("agent", ""),
-                                 item.get("run_id", "")))
-    return {"feeds": feeds}
 
 
 def _age_s(updated: str) -> float | None:
@@ -356,10 +238,7 @@ def _open_file_blob(app, mesh, chat_id: str, f: dict) -> bytes | None:
 
 
 GET = {
-    "/api/mesh/starred": starred,
     "/api/mesh/message_info": message_info,
-    "/api/mesh/chat_info": chat_info,
-    "/api/mesh/livefeed": livefeed,
 }
 POST = {
     "/api/mesh/star": star,

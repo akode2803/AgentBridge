@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport,
     owned_transport,
@@ -16,19 +15,6 @@ from agentbridge.transport.supabase import SupabaseTransport
 def _cloud(url, root="mesh", **credentials):
     env = {"SUPABASE_URL": url, **credentials}
     return SupabaseTransport(root, env=env, client=object())
-
-
-def test_folder_absolute_dot_and_symlink_aliases_share_exact_identity(tmp_path):
-    root = tmp_path / "mesh"
-    direct = FolderTransport(root)
-    dotted = FolderTransport(root / ".")
-    alias = tmp_path / "mesh-alias"
-    alias.symlink_to(root, target_is_directory=True)
-    linked = FolderTransport(alias)
-
-    assert root_identity(direct) == root_identity(dotted) == root_identity(linked)
-    assert root_identity(FolderTransport(tmp_path / "other")) != root_identity(direct)
-    assert root_identity(direct).startswith('["local-root-v1","folder",')
 
 
 def test_cloud_identity_binds_canonical_endpoint_and_root_not_credentials():
@@ -91,15 +77,15 @@ def test_malformed_or_credential_bearing_cloud_urls_are_rejected(url):
         root_identity(_cloud(url))
 
 
-def test_unknown_nested_and_unknown_cached_transport_owners_are_rejected(tmp_path):
-    class UnknownFolder(FolderTransport):
+def test_unknown_nested_and_unknown_cached_transport_owners_are_rejected(clouds, tmp_path):
+    class UnknownCloud(SupabaseTransport):
         pass
 
-    unknown = UnknownFolder(tmp_path / "unknown")
+    unknown = UnknownCloud("unknown", env={"SUPABASE_URL": "https://example.test"}, client=clouds.client(tmp_path / "unknown"))
     with pytest.raises(ValueError, match="unsupported transport owner"):
         root_identity(unknown)
 
-    direct = FolderTransport(tmp_path / "mesh")
+    direct = clouds.bare(tmp_path / "mesh")
     wrapped = owned_transport(direct, tmp_path / "home")
     with pytest.raises(ValueError, match="unsupported transport owner"):
         root_identity(wrapped)
@@ -112,8 +98,8 @@ def test_unknown_nested_and_unknown_cached_transport_owners_are_rejected(tmp_pat
         unknown_cache.close()
 
 
-def test_cache_identity_must_still_match_its_captured_inner_owner(tmp_path):
-    inner = FolderTransport(tmp_path / "mesh")
+def test_cache_identity_must_still_match_its_captured_inner_owner(clouds, tmp_path):
+    inner = clouds.bare(tmp_path / "mesh")
     cached = CachingTransport(inner, auto_refresh=False)
     try:
         assert root_identity(cached) == root_identity(inner)
@@ -124,8 +110,8 @@ def test_cache_identity_must_still_match_its_captured_inner_owner(tmp_path):
         cached.close()
 
 
-def test_factory_uses_exact_root_identity_and_folder_close_is_safe(tmp_path):
-    inner = FolderTransport(tmp_path / "mesh")
+def test_factory_uses_exact_cloud_root_identity_and_close_is_safe(clouds, tmp_path):
+    inner = clouds.bare(tmp_path / "mesh")
     expected = root_identity(inner)
     wrapped = owned_transport(inner, tmp_path / "home")
     assert type(wrapped) is LocalMutationTransport
@@ -134,8 +120,7 @@ def test_factory_uses_exact_root_identity_and_folder_close_is_safe(tmp_path):
     assert wrapped._coordinator.path.parent == (tmp_path / "home").resolve() / (
         "local-input-owners"
     )
-    # FolderTransport owns no close hook. The outer factory must preserve that
-    # no-op lifecycle rather than exposing a method that raises AttributeError.
+    # The cloud lifecycle remains safely delegated through the outer owner.
     wrapped.close()
 
 

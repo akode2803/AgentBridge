@@ -58,7 +58,7 @@ def test_base_chat_is_interactive_and_repaints_do_not_stack_handlers(tmp_path: P
         _function(chat, "agentPermissionEntry"),
         _function(chat, "openAgentPermissionEntry"),
         _between(chat, "function bindTranscript(", "function openMsgMenu("),
-        _between(chat, "async function renderMeshChat(", "V.renderMeshChat = renderMeshChat;"),
+        _between(chat, "async function paintMeshChat(", "V.renderMeshChat = renderMeshChat;"),
     ])
     runner = tmp_path / "readiness.mjs"
     runner.write_text(_RUNNER.replace("__PRODUCTION__", json.dumps(production)), encoding="utf-8")
@@ -172,33 +172,45 @@ const meshChatAvatarInner = () => "", meshMuteActive = () => false;
 const esc = passthrough, md = passthrough, timeOnly = passthrough, dayLabel = () => "Today";
 const receiptTicks = () => "", rxBadge = () => "", replyQuote = () => "";
 const isImg = () => false, fileUrl = () => "", extIcon = () => "", fmtSize = () => "1 KB";
-const currentRunAuthority = () => [], runAccessDetails = () => "", presenceLine = () => "";
+const runAccessDetails = () => "", presenceLine = () => "";
 const noop = () => {}; const setTaggable = noop, syncDmHeaderPresence = noop, closeMenus = noop;
 const syncPinBanner = noop, captureRxSigs = () => [], animateRxChanges = noop;
 const clampLong = noop, jumpToMessage = noop, initComposer = noop, renderReplyArea = noop;
-const renderMeshPending = noop, startAskPoll = noop, markReadNow = noop, applySelectAfterRender = noop;
-const reconcileSends = noop, pendingSendRows = () => [];
+const composerSetup={pending:0,asks:0};
+const renderMeshPending=()=>composerSetup.pending++, startAskPoll=()=>composerSetup.asks++;
+const markReadNow=noop, applySelectAfterRender=noop;
+const readStarts = [];
+const reconcileSends = (_chat, _messages, started) => readStarts.push(started);
+const pendingSendRows = () => [];
 const clearSelectMode = noop, bindFilePreview = noop;
 const endLoading = noop;
 const toast = noop, enterSelect = noop, muteDialog = noop, clearChatDialog = noop, deleteChatDialog = noop;
 const innerWidth = 1200, innerHeight = 800, performance = {now: () => 0};
 
-const factory = new Function("deps", `with (deps) { ${__PRODUCTION__}; return {renderMeshChat}; }`);
-const {renderMeshChat} = factory({api, document, $, Mesh, App, V, location, ICONS, captureSessionEpoch,
+const factory = new Function("deps", `with (deps) { ${__PRODUCTION__}; return {paintMeshChat}; }`);
+const {paintMeshChat} = factory({api, document, $, Mesh, App, V, location, ICONS, captureSessionEpoch,
+  meshCaps:()=>({}),
   sessionMayApply, chatStructKey, isDmLike, chatAdmins, chatDisplay, meshDn, meshAvatarInner,
   meshInfoText, meshChatAvatarInner, meshMuteActive, esc, md, timeOnly, dayLabel, receiptTicks,
-  rxBadge, replyQuote, isImg, fileUrl, extIcon, fmtSize, currentRunAuthority, runAccessDetails,
+  rxBadge, replyQuote, isImg, fileUrl, extIcon, fmtSize, runAccessDetails,
   presenceLine, setTaggable, syncDmHeaderPresence, closeMenus, syncPinBanner, captureRxSigs,
   animateRxChanges, clampLong, jumpToMessage, initComposer, renderReplyArea, renderMeshPending,
   startAskPoll, markReadNow, applySelectAfterRender, toast, enterSelect, muteDialog,
   clearChatDialog, deleteChatDialog, innerWidth, innerHeight, performance, encodeURIComponent,
   Date, Map, Set, JSON, Object, Math, chatRenderSeq, clearSelectMode, endLoading,
   reconcileSends, pendingSendRows, bindFilePreview});
-const base = {me: "aryan", meta: {id: "room", kind: "dm", members: ["aryan", "bot"], pins: []},
+const base = {metadata_status:{receipts:"ready",mute:"pending",pause:"pending"}, me: "aryan", meta: {id: "room", kind: "dm", members: ["aryan", "bot"], pins: []},
   messages: [{id: "m1", from: "aryan", mine: true, ts: "2026-09-16T00:00:00Z", body: "file", files: [{id: "blob-1", name: "notes.txt", bytes: 4}]}], starred: []};
 const presentation = {user: "aryan", chats: [{id: "room"}], users: {aryan: {}, bot: {}}};
 
-await renderMeshChat(true, null, {data: base, presentation, warmBase: true});
+for (const missing of [undefined, null, {}, {data:null}]) {
+  await assert.rejects(paintMeshChat(true, null, missing), /requires acquired data/);
+}
+assert.deepEqual(calls, [], 'missing data must never start a compatibility read');
+await paintMeshChat(true, null, {data: base, presentation, paged:true});
+assert.deepEqual(calls, [], 'base painting must not acquire transcript or companion data');
+assert.deepEqual(composerSetup,{pending:1,asks:1},'canonical first paint restores attachments and bound ask UI');
+assert.equal(readStarts.at(-1), -1);
 const more = $("#chat-more"), menu = $("#chat-menu"), tr = $("#transcript"), file = tr.querySelector(".mesh-att");
 assert(more && menu && file, "base paint must expose options and canonical file action");
 await more.click(); assert.equal(menu.hidden, false, "base options must open immediately");
@@ -210,22 +222,28 @@ assert.equal(content.children.findIndex(x => x.id === "transcript"), 1, "verific
 
 // Hydration rebuild: same canonical rows, richer auxiliary state.
 Mesh.structKey = "";
-await renderMeshChat(true, null, {data: base, presentation, aux: [{feeds: []}, {tasks: []}]});
+await paintMeshChat(true, null, {data:base, presentation, paged:true, aux:{feeds:[],tasks:[],runs:[]}});
 const hydratedTr = $("#transcript"), hydratedFile = hydratedTr.querySelector(".mesh-att");
 assert.equal(hydratedFile.listeners.click.length, 1); assert.equal(hydratedTr.listeners.click.length, 1);
 
 // Partial reconciliation reuses m1; binders must neither vanish nor stack.
 const partial = {...base, messages: [...base.messages, {id: "m2", from: "bot", mine: false,
   ts: "2026-09-16T00:00:01Z", body: "hello", files: []}]};
-await renderMeshChat(false, null, {data: partial, presentation, aux: [{feeds: []}, {tasks: []}]});
+await paintMeshChat(false, null, {data:partial, presentation, paged:true, aux:{feeds:[],tasks:[],runs:[]}});
 assert.strictEqual($("#transcript"), hydratedTr);
 assert.strictEqual($("#transcript").querySelector(".mesh-att"), hydratedFile);
 assert.equal(hydratedFile.listeners.click.length, 1); assert.equal(hydratedTr.listeners.click.length, 1);
 
 // Signature skip must retain the same live elements and listener counts.
-await renderMeshChat(true, null, {data: partial, presentation, aux: [{feeds: []}, {tasks: []}]});
+await paintMeshChat(true, null, {data:partial, presentation, paged:true, aux:{feeds:[],tasks:[],runs:[]}});
 assert.strictEqual($("#transcript"), hydratedTr);
 assert.equal(hydratedFile.listeners.click.length, 1); assert.equal(hydratedTr.listeners.click.length, 1);
+assert.equal(calls.length, 1, 'only the explicit file click may issue an API call');
+assert.deepEqual(composerSetup,{pending:2,asks:2},'partial and unchanged page paints retain composer setup');
+assert(readStarts.every(started => started === -1));
+await paintMeshChat(true, null, {data:partial, presentation, paged:true,
+  aux:{feeds:[],tasks:[],runs:[]}, readStarted:0});
+assert.equal(readStarts.at(-1), 0, 'request start zero must remain an exact observation');
 '''
 
 

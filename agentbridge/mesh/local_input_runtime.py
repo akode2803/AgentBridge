@@ -6,6 +6,9 @@ Foreground inputs only read admitted SQLite state and never repair it.
 """
 from __future__ import annotations
 
+from ..core.input_phase_timings import span
+from ..core import delivery_trace
+
 import threading
 import time
 
@@ -39,21 +42,34 @@ class LocalInputRuntime:
         self._discovery_due = 0.0
         self.presence = None
         self.auxiliary = None
+        self.unread = None
+        self.read_events = None
 
     def bind_page_owner(self, mesh):
         from .page_preparation import PagePreparation
         from .source_discovery import SourceDiscovery
         from .presence_input_runtime import PresenceInputRuntime
         from .aux_input_runtime import AuxInputRuntime
+        from .unread_runtime import UnreadRuntime
+        from .read_events import ReadEvents
         if mesh.store is not self.store or mesh.tx is not self.transport:
             raise ValueError('foreign page preparation owner')
         with self._lock:
             if self._closed or self._page_preparation is not None:
                 raise RuntimeError('page preparation already bound or closed')
-            self._page_preparation = PagePreparation(mesh)
+            self.read_events = ReadEvents(mesh.bus)
+            self._page_preparation = PagePreparation(mesh, on_ready=self.read_events.changed)
             self._discovery = SourceDiscovery(self.store)
-            self.presence = PresenceInputRuntime(self.transport, self.store)
-            self.auxiliary = AuxInputRuntime(self.transport, self.store)
+            self.presence = PresenceInputRuntime(self.transport, self.store,
+                on_change=lambda: self.read_events.changed('aux'))
+            self.auxiliary = AuxInputRuntime(self.transport, self.store,
+                on_change=self._aux_changed)
+            self.unread = UnreadRuntime(mesh)
+
+    def _aux_changed(self, scope, chat):
+        selected = ('sidebar' if scope == 'users' else 'controls'
+                    if scope in ('identities', 'peer') else 'aux')
+        self.read_events.changed(selected, chat)
 
     def request_page(self, chat, *, index=None, proofs=()):
         with self._lock:
@@ -72,6 +88,20 @@ class LocalInputRuntime:
             except Exception:
                 return False
 
+    def _prepare_burst(self):
+        # Yield to collection after at most four existing bounded quanta.
+        # The time budget is cooperative: a single slow quantum completes
+        # under prepare_one's existing lock and shutdown contract.
+        deadline = time.monotonic() + 0.020
+        prepared = False
+        for _ in range(4):
+            if self._stop.is_set() or time.monotonic() >= deadline:
+                break
+            if not self.prepare_one():
+                break
+            prepared = True
+        return prepared
+
     def preparation_health(self, chat):
         with self._lock:
             return self._page_preparation.health(chat) if self._page_preparation is not None else None
@@ -89,6 +119,7 @@ class LocalInputRuntime:
     def reader(self, chat):
         return LocalPageSource(self.coordinator, self.store, chat)
 
+    @delivery_trace.observed('ingestion_queued', chat_arg=1)
     def request(self, chat, *, selected=False, activity=False):
         # Validate through the canonical path selector before queue admission.
         chat = self.reader(chat).chat
@@ -99,12 +130,18 @@ class LocalInputRuntime:
                                              selected=selected, activity=activity)
             if accepted and selected:
                 self._selected = chat
+                if self._page_preparation is not None:
+                    self._page_preparation.select(chat)
             return accepted
 
     def clear_selection(self):
         with self._lock:
             self._selected = None
             self.schedule.clear_selection()
+            if self._page_preparation is not None:
+                self._page_preparation.select(None)
+            if self.unread is not None:
+                self.unread.clear_selection()
 
     def hint(self):
         # Hints contain no authority, changed paths or provider payloads.
@@ -130,19 +167,21 @@ class LocalInputRuntime:
         """
         reader = self.reader(chat)
         with self.coordinator.finalization_cut(self.store, reader.definition) as (conn, source):
-            receipt = LocalSourceReceipt(reader.chat, str(self.coordinator.path),
-                                         self.coordinator.epoch, source)
-            row = conn.execute('SELECT build,schema FROM overlay_index_ready WHERE source=? '
-                               "AND typeof(build)='text' AND length(CAST(build AS BLOB))=32 "
-                               "AND typeof(schema)='integer'",
-                               (source.raw.source_id,)).fetchone()
-            if row is None:
-                raise overlay_index.OverlayIndexUnavailable('index_pending')
-            index = overlay_index.OverlayIndexPosition(source.raw, reader.chat, *row)
-            index = overlay_index._wanted(index, reader.store.path)
-            overlay_index._ready(conn, self.store.path, index)
+            with span('index_checks'):
+                receipt = LocalSourceReceipt(reader.chat, str(self.coordinator.path),
+                                             self.coordinator.epoch, source)
+                row = conn.execute('SELECT build,schema FROM overlay_index_ready WHERE source=? '
+                                   "AND typeof(build)='text' AND length(CAST(build AS BLOB))=32 "
+                                   "AND typeof(schema)='integer'",
+                                   (source.raw.source_id,)).fetchone()
+                if row is None:
+                    raise overlay_index.OverlayIndexUnavailable('index_pending')
+                index = overlay_index.OverlayIndexPosition(source.raw, reader.chat, *row)
+                index = overlay_index._wanted(index, reader.store.path)
+                overlay_index._ready(conn, self.store.path, index)
         return reader, receipt, index
 
+    @delivery_trace.observed('source_ingestion', chat_arg=1)
     def ingest(self, chat):
         """One complete bounded background attempt; serialize this owner only."""
         with self._worker_lock:
@@ -204,7 +243,14 @@ class LocalInputRuntime:
                     raise local_source.SourceChanged('ingestion_superseded')
                 with reader.finalization(receipt) as conn:
                     overlay_index._ready(conn, self.store.path, index)
-                return captured.source.raw != published.raw
+                changed = captured.source.raw != published.raw
+                if changed or not captured.source.ready:
+                    # Wake terminal preparation from an admitted source change,
+                    # rather than relying on repeated ready inventory polls.
+                    self.request_page(chat)
+                    if self.read_events is not None:
+                        self.read_events.changed('chat', chat)
+                return changed
             except Exception as exc:
                 budget = isinstance(exc, OverflowError) or (
                     isinstance(exc, RawCollectionUnavailable) and exc.args and
@@ -225,14 +271,17 @@ class LocalInputRuntime:
         job = self.schedule.take_due(now=time.monotonic())
         if job is None:
             return False
-        changed, success = False, False
+        delivery_trace.emit('ingestion_claimed', chat=job.chat_id)
+        changed, success, blocked = False, False, False
         try:
             changed = self.ingest(job.chat_id)
             success = True
+        except local_source.SourceChanged as exc:
+            blocked = exc.args == ('source_mutation_pending',)
         except Exception:
             pass  # health recorded; scheduler backs off without discarding intent
         finally:
-            self.schedule.finish(job, now=time.monotonic(), changed=changed, success=success)
+            self.schedule.finish(job, now=time.monotonic(), changed=changed, success=success, blocked=blocked)
         return True
 
     def start(self):
@@ -242,6 +291,8 @@ class LocalInputRuntime:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
+            if self.unread is not None:
+                self.unread.start()
             self._thread = threading.Thread(target=self._run, name='local-input-ingestion', daemon=True)
             self._thread.start()
 
@@ -253,11 +304,13 @@ class LocalInputRuntime:
             except Exception:
                 pass  # hints are optional; finite fallback polling remains
             while not self._stop.is_set():
+                if self.read_events is not None:
+                    self.read_events.tick()
                 try:
                     self.discover()
                 except Exception:
                     pass  # index preparation may still be pending
-                prepared = self.prepare_one()
+                prepared = self._prepare_burst()
                 ingested = self.run_due()
                 with self._worker_lock:
                     presence_work = self.presence.run_due() if self.presence is not None and not self._closed else False
@@ -298,6 +351,8 @@ class LocalInputRuntime:
         with self._lock:
             self._closed = True
             self._stop.set()
+            if self.read_events is not None:
+                self.read_events.close()
             if self._page_preparation is not None:
                 self._page_preparation.close()
             if self.presence is not None:
@@ -305,6 +360,11 @@ class LocalInputRuntime:
             if self.auxiliary is not None:
                 self.auxiliary.stop()
             thread = self._thread
+            unread = self.unread
+        # No GUI or runtime scheduling lock is held while joining count work.
+        # Its canonical finalizer may need the source owner during shutdown.
+        if unread is not None:
+            unread.stop()
         if thread is not None:
             thread.join(timeout=5)
             if thread.is_alive():

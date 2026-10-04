@@ -29,8 +29,9 @@ the new reader only derives membership state.
 
 ## Transport and rollout boundaries
 
-Direct folder transport has no cross-file snapshot protocol and is refused by
-the local reader. Cold mirrors fall back. Bootstrap provenance and provider
+Unsupported owners are refused by the local reader. Production roots select
+Supabase. Cold mirrors fall back within this internal membership reader; the GUI
+never falls back to retired full-history HTTP routes. Bootstrap provenance and provider
 cursors retain their documented meanings: neither proves remote completeness or
 freshness. A provider change not yet observed by this process is outside the
 common-local-point guarantee; local write-through state can precede its remote

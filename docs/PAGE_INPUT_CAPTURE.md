@@ -1,10 +1,10 @@
 # Bounded raw page input capture
 
-This inactive prerequisite captures already-ingested local inputs. It does not
-serve canonical messages, decide access, supply a browser cursor, count total
-history or establish remote completeness. No route or worker consumes it yet.
-The same local Store design is intended for both transports; bare-folder source
-publication and the remaining serving/readiness gates are still outstanding.
+This primitive captures already-ingested local inputs for the page owner. It does
+not itself serve canonical messages, decide access, supply a browser cursor,
+count total history or establish remote completeness.
+Production roots select Supabase. Current GUI serving uses the staged local
+input and page-operation owners described in LOCAL_PAGE_GUI_INTEGRATION.md.
 
 ## One input snapshot
 

@@ -64,16 +64,16 @@ def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app
     assert any(f['human'] and f['agent'] == 'bob' for f in result['feeds'])
 
 
-def test_nonempty_canonical_runtime_rows_match_legacy_reader(page_app):
+def test_nonempty_canonical_runtime_rows_match_retained_projection(page_app, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_agent('manager', harness={'agent_tools_enabled': True})
     owner.accounts.create_agent('specialist', harness={'agent_tools_enabled': True})
     owner.membership.add_members(chat, ['manager', 'specialist'])
     owner.outbox.flush_once()
-    manager = Mesh(app.root, 'manager', 'manager-box', encrypt=True,
+    manager = Mesh(clouds.bare(app.root), 'manager', 'manager-box', encrypt=True,
                    home=app.home, store_path=app.home / 'manager-runtime.sqlite')
-    specialist = Mesh(app.root, 'specialist', 'specialist-box', encrypt=True,
+    specialist = Mesh(clouds.bare(app.root), 'specialist', 'specialist-box', encrypt=True,
                       home=app.home, store_path=app.home / 'specialist-runtime.sqlite')
     try:
         manager.sync.sync_once([chat])
@@ -88,9 +88,9 @@ def test_nonempty_canonical_runtime_rows_match_legacy_reader(page_app):
                                  objective='Review', reason='Review',
                                  success_criteria=('Return a finding',))
         manager.outbox.flush_once()
+        _ready(app, chat)
         expected = contributor_rows(owner, chat)
         assert expected and offered.events[0].meta.call_id in [row['id'] for row in expected]
-        _ready(app, chat)
         result = _settled_aux(app, chat)
         assert result['status'] == 'ready', result
         assert result['metadata_status']['runtime'] == 'ready'

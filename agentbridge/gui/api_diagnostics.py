@@ -15,7 +15,8 @@ def set_diagnostics(app, req, mesh):
     enabled = req.data.get('enabled')
     if type(enabled) is not bool:
         return {'error': 'enabled must be a boolean'}
-    if not app.diagnostics.set_enabled(enabled):
+    if not app.diagnostics.set_enabled(enabled, slow_ms=req.data.get('slow_ms'),
+                                       sample_rate=req.data.get('sample_rate')):
         return {'error': 'diagnostics setting unavailable'}
     return app.diagnostics.configuration()
 

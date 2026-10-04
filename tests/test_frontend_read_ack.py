@@ -13,78 +13,109 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
-def test_paged_and_legacy_read_ack_failure_backoff_and_stale_owner(tmp_path):
+def test_page_read_ack_failure_backoff_and_stale_owner(tmp_path):
     source = (ROOT / "gui/static/js/chat.js").read_text(encoding="utf-8")
-    read = source[source.index("let legacyReadAck = null;"):
-                  source.index("// reading needs eyes:", source.index("let legacyReadAck = null;"))]
+    read = source[source.index('document.addEventListener("ab:manual-mark-unread",'):
+                  source.index("// reading needs eyes:", source.index('document.addEventListener("ab:manual-mark-unread",'))]
     script = r'''
 import assert from 'node:assert/strict';
-let now=1000, paged=true, refreshes=0, sidebar=0, calls=[];
+let now=1000, refreshes=0, sidebar=0, calls=[], timers=[];
+const activeTimers=new Map();
 const Date={now:()=>now};
-const document={addEventListener(){}};
-const window={addEventListener(){}};
+const document={addEventListener(){},hasFocus:()=>true};
 const tr={scrollHeight:1000,scrollTop:800,clientHeight:200};
 const $=()=>tr;
-const Mesh={chatId:'room',pendingRead:null,readTail:{},state:{chats:[
+const Mesh={chatId:'room',pendingRead:null,state:{chats:[
   {id:'room',last:{ns:9},unread:2,forced_unread:true}]}};
 const App={page:'chats'};
-const meshCaps=()=>({chat_page_v1:paged});
+
 const api=(path,body,options)=>new Promise((resolve,reject)=>{
   calls.push({path,body,options,resolve,reject});
 });
 const refreshPagedSidebar=()=>{refreshes++;return Promise.resolve()};
 const renderSidebar=()=>sidebar++;
-let legacyOwner={}, routeCurrent=true;
-const captureViewRead=()=>legacyOwner;
-const viewReadMayApply=owner=>routeCurrent && owner===legacyOwner;
-const factory=new Function('Mesh','App','meshCaps','$','api','Date',
-  'captureViewRead','viewReadMayApply','refreshPagedSidebar','renderSidebar','document',
-  'window','setTimeout','clearTimeout',
-  `let pageOwner={ready:true,chatId:'room',browsing:false,visibleReadNs:'9',current:()=>true};
+
+const cutoff='1790238834318311101',nextCutoff='1790238834318311102';
+const latestCutoff='1790238834318311103';
+const makeOwner=(ns,token,version)=>({ready:true,chatId:'room',browsing:false,
+  visibleReadNs:ns,visibleReadToken:token,visibleReadVersion:version,current:()=>true});
+const factory=new Function('Mesh','App','$','api','Date',
+  'refreshPagedSidebar','renderSidebar','document','owner','pageRetryDelay','setTimeout','clearTimeout','renderPagedChat',
+  `let pageOwner=owner;
    ${__READ__};return {markReadNow,getOwner:()=>pageOwner,setOwner:o=>pageOwner=o};`);
-const h=factory(Mesh,App,meshCaps,$,api,Date,captureViewRead,viewReadMayApply,
-  refreshPagedSidebar,renderSidebar,document,window,()=>1,()=>{});
+const h=factory(Mesh,App,$,api,Date,
+  refreshPagedSidebar,renderSidebar,document,makeOwner(cutoff,'a'.repeat(64),'v1'),
+  ()=>4000,(fn,ms)=>{timers.push({fn,ms});activeTimers.set(timers.length,{fn,ms});return timers.length;},
+  id=>activeTimers.delete(id),()=>{
+    const owner=h.getOwner();const attempt=calls.length;
+    owner.visibleReadToken='retry-token-'+attempt;owner.visibleReadVersion='retry-version-'+attempt;
+    owner.readAck.needsFreshPage=false;h.markReadNow('room');
+  });
+const fireRetry=()=>{const [id,timer]=activeTimers.entries().next().value;
+  activeTimers.delete(id);now+=timer.ms;timer.fn();};
 const settle=async()=>{await Promise.resolve();await Promise.resolve();await Promise.resolve()};
+const assertPagedRequest=(index,token,version)=>{
+  assert.equal(calls[index].path,'/api/mesh/chat_page_read');
+  assert.deepEqual(calls[index].body,{
+    chat_id:'room',page_version:version,read_ack_token:token});
+};
 h.markReadNow('room');h.markReadNow('room');
 assert.equal(calls.length,1,'at most one request while held');
-assert.equal(calls[0].body.up_to_ns,'9');
+assertPagedRequest(0,'a'.repeat(64),'v1');
 assert.equal(calls[0].options.timeoutMs,8000);
 assert.equal(Mesh.pendingRead,'room');
+assert.equal(Mesh.state.chats[0].unread,2);
+assert.equal(Mesh.state.chats[0].forced_unread,true);
+assert.equal(Object.hasOwn(Mesh,'readTail'),false);
 calls[0].reject(Error('network'));await settle();
 assert.equal(Mesh.pendingRead,'room');
 assert.equal(refreshes,0);
+assert.equal(timers.at(-1).ms,2000,'network failure schedules bounded fresh-page recovery');
+assert.equal(activeTimers.size,1,'one retry survives without another event');
 now=2999;h.markReadNow('room');assert.equal(calls.length,1,'bounded cooldown');
-now=3000;h.markReadNow('room');assert.equal(calls.length,2);
+assert.equal(activeTimers.size,1,'cooldown cannot multiply retry timers');
+now=3000;h.markReadNow('room');assert.equal(calls.length,1,'scheduled refresh owns the expired cooldown');
+fireRetry();assert.equal(calls.length,2);
+assert.equal(activeTimers.size,0,'fresh page consumes the previous retry');
 calls[1].resolve({status:'pending'});await settle();
-now=6999;h.markReadNow('room');assert.equal(calls.length,2,'second backoff doubles');
-now=7000;h.markReadNow('room');assert.equal(calls.length,3);
+assert.equal(Mesh.pendingRead,'room');assert.equal(refreshes,0);
+assert.equal(timers.at(-1).ms,4000,'pending token schedules a fresh page before retry');
+assert.equal(activeTimers.size,1);
+assert.equal(Mesh.state.chats[0].unread,2);
+now=8999;h.markReadNow('room');assert.equal(calls.length,2,'second backoff doubles');
+now=9000;h.markReadNow('room');assert.equal(calls.length,2,'pending retry also reacquires its page');
+fireRetry();assert.equal(calls.length,3);
+assertPagedRequest(1,'retry-token-1','retry-version-1');
+assertPagedRequest(2,'retry-token-2','retry-version-2');
 calls[2].resolve({ok:true});await settle();
 assert.equal(Mesh.pendingRead,null);assert.equal(refreshes,1);
+assert.equal(h.getOwner().readAck.lastSuccess,cutoff);
+assert.equal(activeTimers.size,0,'acknowledgement retires outstanding retries');
+assert.equal(Mesh.state.chats[0].unread,2,'paged badges require canonical sidebar data');
+assert.equal(Mesh.state.chats[0].forced_unread,true);
+assert.equal(Object.hasOwn(Mesh,'readTail'),false);assert.equal(sidebar,0);
 h.markReadNow('room');assert.equal(calls.length,3,'same cutoff not resent');
 
-// A new visible cutoff arriving during a held acknowledgement remains pending.
-h.getOwner().visibleReadNs='10'; h.markReadNow('room');
+// Adjacent decimal cuts beyond Number precision must not be conflated. A new
+// painted token/cutoff arriving during a held acknowledgement remains pending.
+Object.assign(h.getOwner(),makeOwner(nextCutoff,'b'.repeat(64),'v2'));
+h.markReadNow('room');
 assert.equal(calls.length,4);
-h.getOwner().visibleReadNs='11';calls[3].resolve({ok:true});await settle();
+assertPagedRequest(3,'b'.repeat(64),'v2');
+Object.assign(h.getOwner(),makeOwner(latestCutoff,'c'.repeat(64),'v3'));
+calls[3].resolve({ok:true});await settle();
+assert.equal(h.getOwner().readAck.lastSuccess,nextCutoff);
 assert.equal(Mesh.pendingRead,'room');
 h.markReadNow('room');assert.equal(calls.length,5);
+assertPagedRequest(4,'c'.repeat(64),'v3');
 const retired=h.getOwner();
-h.setOwner({ready:true,chatId:'room',browsing:false,visibleReadNs:'11',current:()=>true});
+const priorRefreshes=refreshes;
+h.setOwner(makeOwner(latestCutoff,'d'.repeat(64),'v4'));
 calls[4].resolve({ok:true});await settle();
 assert.equal(Mesh.pendingRead,'room','retired response cannot settle new owner');
 assert.equal(retired.readAck.inflight,false);
+assert.equal(refreshes,priorRefreshes,'retired response cannot refresh the new sidebar');
 
-// Legacy badge and optimistic readTail are not updated on failure.
-paged=false; now=10000;
-h.markReadNow('room'); assert.equal(calls.length,6);
-calls[5].reject(Error('network'));await settle();
-assert.equal(Mesh.state.chats[0].unread,2);
-assert.equal(Mesh.readTail.room,undefined);
-now=12000;h.markReadNow('room');assert.equal(calls.length,7);
-calls[6].resolve({ok:true});await settle();
-assert.equal(Mesh.state.chats[0].unread,0);
-assert.equal(Mesh.state.chats[0].forced_unread,false);
-assert.equal(Mesh.readTail.room,9);assert.equal(sidebar,1);
 '''.replace("__READ__", json.dumps(read))
     runner = tmp_path / "read_ack.mjs"
     runner.write_text(script, encoding="utf-8")
@@ -96,8 +127,8 @@ assert.equal(Mesh.readTail.room,9);assert.equal(sidebar,1);
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
 def test_manual_unread_rearms_same_cutoff_only_after_successful_sidebar_write(tmp_path):
     chat = (ROOT / "gui/static/js/chat.js").read_text(encoding="utf-8")
-    read = chat[chat.index("let legacyReadAck = null;"):
-                chat.index("// reading needs eyes:", chat.index("let legacyReadAck = null;"))]
+    read = chat[chat.index('document.addEventListener("ab:manual-mark-unread",'):
+                chat.index("// reading needs eyes:", chat.index('document.addEventListener("ab:manual-mark-unread",'))]
     sidebar = (ROOT / "gui/static/js/sidebar.js").read_text(encoding="utf-8")
     action = sidebar[sidebar.index("async function runChatAction("):
                      sidebar.index("async function refreshList(", sidebar.index("async function runChatAction("))]
@@ -106,22 +137,24 @@ import assert from 'node:assert/strict';
 let event, reads=[];
 const document={addEventListener:(name,fn)=>{if(name==='ab:manual-mark-unread')event=fn},
   dispatchEvent:e=>event(e)};
-const window={addEventListener(){}};
 class CustomEvent {constructor(type,options){this.type=type;this.detail=options.detail}}
 const Mesh={chatId:'room',pendingRead:null,state:{user:'me',chats:[
   {id:'room',last:{ns:9},unread:0,forced_unread:false}]}};
 const App={page:'chats'}, tr={scrollHeight:100,scrollTop:0,clientHeight:100};
-const owner={ready:true,chatId:'room',current:()=>true,browsing:false,visibleReadNs:'9'};
+const owner={ready:true,chatId:'room',current:()=>true,browsing:false,visibleReadNs:'9',
+  visibleReadToken:'a'.repeat(64),visibleReadVersion:'v1'};
 const $=()=>tr, meshCaps=()=>({chat_page_v1:true});
-const api=(path,body)=>{if(path==='/api/mesh/read'){
+const api=(path,body)=>{
+  assert.equal(path,'/api/mesh/chat_page_read');
+  assert.deepEqual(body,{chat_id:'room',page_version:'v1',read_ack_token:'a'.repeat(64)});
   let resolve;const promise=new Promise(done=>resolve=done);
   reads.push({resolve,body});return promise;
-}return Promise.resolve({ok:true})};
+};
 const build=new Function('document','Mesh','App','$','meshCaps','api',
-  'refreshPagedSidebar','renderSidebar','Date','captureViewRead','viewReadMayApply','owner','window',
+  'refreshPagedSidebar','renderSidebar','Date','captureViewRead','viewReadMayApply','owner',
   `let pageOwner=owner;${__READ__};return {markReadNow,getOwner:()=>pageOwner};`);
 const h=build(document,Mesh,App,$,meshCaps,api,()=>Promise.resolve(),()=>{},Date,
-  ()=>({}),()=>true,owner,window);
+  ()=>({}),()=>true,owner);
 const settle=async()=>{await Promise.resolve();await Promise.resolve();await Promise.resolve()};
 h.markReadNow('room');reads[0].resolve({ok:true});await settle();
 assert.equal(h.getOwner().readAck.lastSuccess,'9');
@@ -159,143 +192,6 @@ assert.equal(h.getOwner().readAck.lastSuccess,undefined);
 h.markReadNow('room');assert.equal(reads.length,4);
 '''.replace("__READ__", json.dumps(read)).replace("__ACTION__", json.dumps(action))
     runner = tmp_path / "manual_unread.mjs"
-    runner.write_text(script, encoding="utf-8")
-    result = subprocess.run([shutil.which("node"), str(runner)], text=True,
-                            encoding="utf-8", capture_output=True, timeout=15)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")
-def test_legacy_read_retries_without_news_and_cancels_for_owner_or_manual_unread(tmp_path):
-    source = (ROOT / "gui/static/js/chat.js").read_text(encoding="utf-8")
-    read = source[source.index("let legacyReadAck = null;"):
-                  source.index("async function renderChats(force)",
-                               source.index("let legacyReadAck = null;"))]
-    script = r'''
-import assert from 'node:assert/strict';
-const settle=async()=>{for(let i=0;i<6;i++)await Promise.resolve()};
-function setup() {
-  let now=1000, focused=true, paged=false, nextTimer=0, sidebar=0;
-  const timers=new Map(), listeners=new Map(), reads=[];
-  const on=(name,fn)=>listeners.set(name,fn);
-  const document={addEventListener:on,hasFocus:()=>focused};
-  const window={addEventListener:on};
-  const Mesh={chatId:'room',pendingRead:null,readTail:{},state:{user:'me',chats:[
-    {id:'room',last:{ns:9},unread:2,forced_unread:true}]}};
-  const App={page:'chats'};
-  let identity={routeSeq:1,selectedViewGeneration:1,sessionEpoch:1,lockEpoch:1};
-  const captureViewRead=()=>({...identity,chatId:Mesh.chatId,page:App.page});
-  const viewReadMayApply=owner=>owner.chatId===Mesh.chatId && owner.page===App.page
-    && Object.keys(identity).every(key=>identity[key]===owner[key]);
-  const api=(path,body,options)=>new Promise((resolve,reject)=>{
-    reads.push({path,body,options,resolve,reject});
-  });
-  const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,at:now+delay});return id};
-  const clearTimeout=id=>timers.delete(id);
-  const build=new Function('Mesh','App','meshCaps','api','Date','captureViewRead',
-    'viewReadMayApply','renderSidebar','document','window','setTimeout','clearTimeout',
-    `let pageOwner=null;${__READ__};return {markReadNow,getAck:()=>legacyReadAck};`);
-  const h=build(Mesh,App,()=>({chat_page_v1:paged}),api,{now:()=>now},captureViewRead,
-    viewReadMayApply,()=>sidebar++,document,window,setTimeout,clearTimeout);
-  return {...h,Mesh,App,reads,timers,identity,sidebar:()=>sidebar,
-    emit:(name,detail)=>listeners.get(name)?.({detail}),
-    focus:value=>focused=value, paged:value=>paged=value,
-    advance:async(ms)=>{now+=ms;
-      for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn()}
-      await settle();
-    }};
-}
-
-// No incoming message or focus transition is needed; both transport errors and
-// non-ok responses retain unread until success. Pressure doubles to the cap.
-{
-  const h=setup();h.markReadNow('room');
-  const delays=[2000,4000,8000,16000,32000,60000,60000];
-  for(let i=0;i<delays.length;i++){
-    if(i%2)h.reads[i].resolve({ok:false});else h.reads[i].reject(Error('offline'));
-    await settle();
-    assert.equal(h.timers.size,1,'one owned retry');
-    assert.equal(h.Mesh.pendingRead,'room');
-    assert.equal(h.Mesh.state.chats[0].unread,2);
-    assert.equal(h.Mesh.readTail.room,undefined);
-    await h.advance(delays[i]-1);assert.equal(h.reads.length,i+1);
-    await h.advance(1);assert.equal(h.reads.length,i+2,'timer retries without a poll');
-    assert.equal(h.timers.size,0,'no overlapping timer during request');
-    h.markReadNow('room');assert.equal(h.reads.length,i+2,'inflight deduplication');
-  }
-  h.reads.at(-1).resolve({ok:true});await settle();
-  assert.equal(h.getAck().failures,0);assert.equal(h.getAck().nextAt,0);
-  assert.equal(h.Mesh.pendingRead,null);assert.equal(h.Mesh.readTail.room,9);
-  assert.equal(h.Mesh.state.chats[0].unread,0);assert.equal(h.sidebar(),1);
-  assert.equal(h.timers.size,0);await h.advance(120000);assert.equal(h.reads.length,8);
-  h.markReadNow('room');assert.equal(h.reads.length,8,'success suppresses same cutoff');
-}
-
-// Losing focus leaves pending work for the existing focus listener. It does
-// not acknowledge unseen messages or install a recurring background timer.
-{
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  h.focus(false);await h.advance(2000);
-  assert.equal(h.reads.length,1);assert.equal(h.timers.size,0);
-  assert.equal(h.Mesh.pendingRead,'room');
-  h.focus(true);h.emit('focus');assert.equal(h.reads.length,2);
-  h.reads[1].resolve({ok:true});await settle();assert.equal(h.Mesh.pendingRead,null);
-}
-
-// Each part of selected-view ownership retires the retry. Returning to the
-// same room still has a newer route ticket; the old closure cannot reclaim it.
-for(const key of ['routeSeq','selectedViewGeneration','sessionEpoch','lockEpoch']){
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  h.identity[key]++;await h.advance(2000);
-  assert.equal(h.reads.length,1,key);assert.equal(h.timers.size,0,key);
-  h.markReadNow('room');assert.equal(h.reads.length,2,'new owner reads normally');
-  h.reads[1].resolve({ok:true});await settle();
-}
-for(const event of ['hashchange','ab:session-reset','ab:lock-epoch']){
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  h.emit(event);assert.equal(h.timers.size,0,event);assert.equal(h.getAck(),null,event);
-  await h.advance(60000);assert.equal(h.reads.length,1,event);
-  // An already inflight old-owner failure must not schedule after cleanup.
-  h.markReadNow('room');h.emit(event);h.reads[1].reject(Error('late'));await settle();
-  assert.equal(h.timers.size,0,event);
-  h.markReadNow('room');h.emit(event);h.reads[2].resolve({ok:true});await settle();
-  assert.equal(h.Mesh.state.chats[0].unread,2,'retired success cannot settle badge');
-  assert.equal(h.Mesh.readTail.room,undefined,event);
-}
-{
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  h.Mesh.chatId='other';h.identity.routeSeq++;h.emit('hashchange');
-  h.Mesh.chatId='room';h.identity.routeSeq++;h.emit('hashchange');
-  await h.advance(2000);assert.equal(h.reads.length,1,'away and back retires timer');
-}
-for(const change of [h=>h.App.page='settings',h=>h.Mesh.chatId='other',
-                     h=>h.paged(true),h=>h.Mesh.pendingRead=null]){
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  change(h);await h.advance(2000);assert.equal(h.reads.length,1);
-  assert.equal(h.timers.size,0);
-}
-
-// Manual unread cancels the old timer and invalidates any held response. Only
-// a later existing read gesture may rearm the same cutoff.
-{
-  const h=setup();h.markReadNow('room');h.reads[0].reject(Error('offline'));await settle();
-  h.emit('ab:manual-mark-unread',{chatId:'room'});
-  assert.equal(h.timers.size,0);assert.equal(h.getAck().manualUnreadArmed,true);
-  await h.advance(60000);assert.equal(h.reads.length,1,'manual unread is preserved');
-  h.markReadNow('room');assert.equal(h.reads.length,2);
-  h.emit('ab:manual-mark-unread',{chatId:'room'});
-  h.reads[1].reject(Error('late'));await settle();
-  assert.equal(h.timers.size,0,'retired version cannot schedule a retry');
-  assert.equal(h.getAck().manualUnreadArmed,true);assert.equal(h.sidebar(),0);
-  h.markReadNow('room');h.emit('ab:manual-mark-unread',{chatId:'room'});
-  h.reads[2].resolve({ok:true});await settle();
-  assert.equal(h.getAck().manualUnreadArmed,true,'retired success preserves unread intent');
-  assert.equal(h.Mesh.state.chats[0].unread,2);assert.equal(h.sidebar(),0);
-  h.markReadNow('room');h.reads[3].resolve({ok:true});await settle();
-  assert.equal(h.Mesh.pendingRead,null);assert.equal(h.getAck().manualUnreadArmed,false);
-}
-'''.replace("__READ__", json.dumps(read))
-    runner = tmp_path / "legacy_read_retry.mjs"
     runner.write_text(script, encoding="utf-8")
     result = subprocess.run([shutil.which("node"), str(runner)], text=True,
                             encoding="utf-8", capture_output=True, timeout=15)

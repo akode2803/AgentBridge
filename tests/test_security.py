@@ -1,10 +1,10 @@
 """R25 security regression tests — one per finding fixed this round.
 
-The shared-folder threat model (docs/THREAT_MODEL.md): an adversary can read
-AND write every byte at rest, so these craft hostile docs/logs directly on the
-transport (not through the client) and assert the read model / fold refuses
-them. Real E2EE meshes with per-identity keystores stand in for separate
-machines syncing one folder.
+An untrusted provider can expose or rewrite stored docs/logs, so these craft
+hostile records through the offline cloud transport and assert the read model
+and fold refuse them. Real E2EE meshes with per-identity keystores stand in
+for separate machines sharing one cloud root. These tests exercise application
+cryptographic gates; the fake provider does not simulate RLS.
 """
 
 from __future__ import annotations
@@ -23,22 +23,22 @@ from agentbridge.harness.settings import HarnessSettings
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.sealer import _aad
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
+
 
 from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(clouds, tmp_path):
     """aryan / fable / sudhir on their OWN homes (own keystores) — the e2ee
-    stand-in for three machines on one shared folder."""
-    root = tmp_path / "mesh2"
+    stand-in for three machines on one shared provider."""
+    root = clouds.root(tmp_path / "mesh2")
     homes: dict[str, object] = {}
 
     def mk(user, machine="m1"):
         home = tmp_path / f"home-{user}"
         homes[user] = home
-        return Mesh(FolderTransport(root), user, machine, encrypt=True, home=home)
+        return Mesh(clouds.bare(root), user, machine, encrypt=True, home=home)
 
     for u in ("aryan", "fable", "sudhir"):
         m = mk(u)
@@ -60,7 +60,7 @@ def ripple(sender, chat_id, *others):
 # ============================ FINDING A: redaction forgery ==================
 
 def test_forged_redaction_is_ignored(world):
-    """Any folder writer can DROP a redaction doc for another member's message.
+    """Any provider writer can DROP a redaction doc for another member's message.
     Without authentication the read model would tombstone it; R25 requires the
     tombstone be signed by the original sender, so a forged one is ignored and
     the message stays visible."""
@@ -183,9 +183,9 @@ def test_render_message_cannot_forge_transcript_lines():
 
 # ==================== FINDING: peer request replay =========================
 
-def _peer_world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def _peer_world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {
         "aryan": seed_account(tx, "aryan"),
         "fable": seed_account(tx, "fable"),
@@ -196,7 +196,7 @@ def _peer_world(tmp_path):
     def mk(user):
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, "mach1", home=home)
+        return Mesh(clouds.bare(root), user, "mach1", home=home)
 
     return {u: mk(u) for u in bundles}
 
@@ -206,18 +206,18 @@ def _settings(access="ask", auto=None):
         harness={"peer_access": access, "peer_auto": auto or []})))
 
 
-def test_peer_replayed_earlier_request_is_dropped(tmp_path):
+def test_peer_replayed_earlier_request_is_dropped(clouds, tmp_path):
     """The resolve cursor keeps only the LAST id per requester, so a captured
     EARLIER signed request (different id) would slip past it and be re-served.
     The ns floor rejects any request at or below one already handled."""
-    meshes = _peer_world(tmp_path)
+    meshes = _peer_world(clouds, tmp_path)
     try:
         claude, ops = meshes["claude"], meshes["ops"]
         target = PeerService(claude)
         requester = PeerService(ops)
         auto = _settings("ask", auto=["ops"])  # ops is auto-approved for READs
 
-        # capture request #1 off the folder before it's superseded
+        # capture request #1 off the provider before it's superseded
         rid1 = requester.request("claude", "ping")
         captured = ops.tx.get_doc("peer/claude/req/ops.json")
         assert captured["id"] == rid1
@@ -241,7 +241,7 @@ def test_peer_replayed_earlier_request_is_dropped(tmp_path):
 # ==================== R31: reaction / pin overlay forgery ===================
 
 def test_forged_reaction_file_is_ignored(world):
-    """A folder writer can drop reactions/<victim>.json attributed to anyone.
+    """A provider writer can drop reactions/<victim>.json attributed to anyone.
     R31 signs the per-user file over its full mapping; readers ignore files
     whose signature doesn't verify, so the fabrication never renders."""
     meshes, _ = world
@@ -502,7 +502,7 @@ def test_keystore_garbage_reads_as_absent(tmp_path):
 
 # ================= R44: the owner acts on their agent's messages =============
 
-def test_owner_acts_on_agents_message_and_undo(world):
+def test_owner_acts_on_agents_message_and_undo(clouds, world):
     """R44 (Q15/Q18 owner side): the responsible member edits, deletes and
     RESTORES their agent's messages — signed as themselves, honored by every
     member's fold. A non-owner stays refused, a forged edit/void changes
@@ -513,7 +513,7 @@ def test_owner_acts_on_agents_message_and_undo(world):
     meshes, root = world
     aryan, fable = meshes["aryan"], meshes["fable"]
     aryan.accounts.create_agent("helper")
-    helper = Mesh(FolderTransport(root), "helper", "m1", encrypt=True,
+    helper = Mesh(clouds.bare(root), "helper", "m1", encrypt=True,
                   home=aryan.home)   # agents live on their owner's machine
     try:
         chat = aryan.create_chat("Oversight", members=["fable", "helper"])

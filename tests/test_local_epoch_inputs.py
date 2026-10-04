@@ -16,7 +16,6 @@ from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport import raw_documents
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.local_mutations import root_identity
 
 
@@ -25,8 +24,8 @@ PATH = P.keys(CHAT, EPOCH)
 
 
 @pytest.fixture
-def world(tmp_path):
-    provider = FolderTransport(tmp_path / "provider")
+def world(tmp_path, clouds):
+    provider = clouds.cached(tmp_path / "provider")
     store = Store(tmp_path / "store.sqlite")
     local_source.initialize(store)
     source_selectors.initialize(store)
@@ -47,6 +46,7 @@ def world(tmp_path):
     try:
         yield service, provider, store, root, reader, publisher, bundle, key, valid
     finally:
+        provider.close()
         store.close()
 
 
@@ -56,6 +56,7 @@ def _publish(world, documents):
         provider.delete_doc(path)
     for path, value in documents.items():
         provider.put_doc(path, value)
+    provider.refresh()
     captured = publisher.capture()
     publisher.publish(
         captured, raw_documents.collect_documents(provider, reader.definition),
@@ -184,7 +185,7 @@ def test_new_cached_winner_and_identity_change_reject_old_observation(world):
     assert (CHAT, EPOCH) not in service._cache
 
 
-def test_local_observation_requires_exact_reader_transport_and_root(world, tmp_path):
+def test_local_observation_requires_exact_reader_transport_and_root(world, tmp_path, clouds):
     service, _provider, store, _root, reader, _publisher, *_rest, valid = world
     receipt, observed, _charges = _capture(world, {PATH: valid})
     with pytest.raises(ValueError, match="source reader"):
@@ -196,7 +197,7 @@ def test_local_observation_requires_exact_reader_transport_and_root(world, tmp_p
         )
 
     original = service.tx
-    service.tx = FolderTransport(tmp_path / "replacement")
+    service.tx = clouds.cached(tmp_path / "replacement")
     try:
         with pytest.raises(ValueError, match="transport changed|source transport mismatch"):
             epoch_inputs.publish_epoch(

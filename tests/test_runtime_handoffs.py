@@ -22,18 +22,17 @@ from agentbridge.harness.runner import AgentRunner
 
 
 @pytest.fixture()
-def handoff_meshes(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def handoff_meshes(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent("manager")
     owner.accounts.create_agent("specialist")
-    manager = Mesh(root, "manager", "box", encrypt=True, home=home,
+    manager = Mesh(clouds.bare(root), "manager", "box", encrypt=True, home=home,
                    store_path=tmp_path / "manager.sqlite")
-    specialist = Mesh(root, "specialist", "box", encrypt=True, home=home,
+    specialist = Mesh(clouds.bare(root), "specialist", "box", encrypt=True, home=home,
                       store_path=tmp_path / "specialist.sqlite")
     chat = owner.create_chat(
         "Runtime handoffs", members=["manager", "specialist"],
@@ -242,7 +241,8 @@ def test_missing_or_retargeted_child_pair_hides_handoff(handoff_meshes):
     raw = manager.tx.get_doc(task_path)
     manager.tx.delete_doc(task_path)
     assert handoffs.read(chat_id, "run-1", offer.meta.call_id or "") == []
-    manager.tx.create_doc(task_path, raw)
+    # Deletion retains the provider row as a tombstone; restoration replaces it.
+    manager.tx.put_doc(task_path, raw)
     assert handoffs.read(chat_id, "run-1", offer.meta.call_id or "") == [view]
 
 
@@ -636,7 +636,10 @@ def test_immutable_handoff_conflict_is_dead_not_retried(handoff_meshes,
     path = handoff_event_path(
         chat_id, "run-1", offer.meta.call_id or "", offer.meta.id,
     )
-    manager.tx.put_doc(path, {"conflict": True})
+    # A competing writer atomically occupies the exact queued event route.
+    assert manager.tx.get_doc(path) is None
+    conflict = {"conflict": True}
+    manager.tx.create_doc(path, conflict)
     manager.store._conn().execute(
         "UPDATE outbox SET next_ns=0, lease_ns=0 WHERE state='pending'",
     )
@@ -645,6 +648,7 @@ def test_immutable_handoff_conflict_is_dead_not_retried(handoff_meshes,
     assert counts.get("dead") == 1
     assert not counts.get("pending")
     assert manager.store.cached_doc("runtime/handoff-open") == {}
+    assert manager.tx.get_doc(path) == conflict
 
 
 def test_destination_cannot_decide_after_parent_terminal(handoff_meshes):
@@ -750,7 +754,8 @@ def test_retargeted_child_metadata_and_decision_expiry_fail_closed(
         meta=replace(view.task.meta, run_id="other-run", task_id="other-task",
                      expires_ns=(view.task.meta.expires_ns or 0) + 1),
     )
-    manager.tx.create_doc(original_path, handoffs._sealed(retargeted))
+    # Explicit tampering replaces the tombstoned row at its original route.
+    manager.tx.put_doc(original_path, handoffs._sealed(retargeted))
     assert handoffs.read(chat_id, "run-1", offer.meta.call_id or "") == []
 
     manager.tx.put_doc(original_path, handoffs._sealed(view.task))

@@ -112,13 +112,17 @@ def test_applock_endpoint_flow(rig):
 
 def test_autolock_activity_is_shared_across_app_windows():
     main = (JS_ROOT / "main.js").read_text(encoding="utf-8")
+    activity = main[main.index("let lastActivityReport ="):main.index("// a manual lock")]
 
-    assert 'api("/api/applock/activity", {' in main
-    assert 'instance_id: App.state?.instance_id || ""' in main
-    assert "now - lastActivityReport < 1000" in main
+    assert 'api("/api/applock/activity", {' in activity
+    assert 'instance_id: App.state?.instance_id || ""' in activity
+    assert "now - lastActivityReport < 1000" in activity
     for event in ("pointerdown", "pointermove", "keydown", "beforeinput",
                   "input", "paste", "compositionstart", "wheel", "touchstart"):
-        assert f'"{event}"' in main
-    assert 'window.addEventListener("focus"' not in main
+        assert f'"{event}"' in activity
+    # Focus reconciles refresh cadence; only real input may reset auto-lock.
+    assert '"focus"' not in activity
+    assert main.count("bumpIdle") == activity.count("bumpIdle")
+    assert 'window.addEventListener("focus", () => refreshPolicy.changed());' in main
     assert "sharedLastActive" not in main
     assert "idleLockPending" not in main

@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 
 from ..core.errors import AgentBridgeError
+from ..core import delivery_trace
+from .diagnostics import assign_request_sequence
 
 log = logging.getLogger("agentbridge.gui")
 
@@ -22,6 +24,8 @@ class Request:
     path: str = ""
     params: dict = field(default_factory=dict)  # query string (GET)
     data: dict = field(default_factory=dict)    # JSON body (POST)
+    diagnostic_sequence: int | None = None
+    diagnostic_ref: str | None = None
 
     def int_param(self, name: str, default: int, lo: int, hi: int) -> int:
         try:
@@ -113,21 +117,40 @@ def dispatch(handler, app, req, *args):
     """Run one endpoint with the v1 error contract: domain errors come back
     as ``{"error": ...}`` JSON (HTTP 200), never as an HTML error page."""
     started = time.perf_counter()
-    failure = None
+    diagnostics = None
     try:
-        result = handler(app, req, *args)
-    except AgentBridgeError as e:
-        failure = e
-        result = {"error": str(e)}
-    except json.JSONDecodeError:
-        result = {"error": "malformed JSON body"}
-    except Exception as e:  # noqa: BLE001 — a bug must never kill the socket
-        failure = e
-        log.exception("endpoint %s failed", req.path)
-        result = {"error": f"internal error: {e}"}
-    if not req.path.startswith('/api/diagnostics'):
         diagnostics = getattr(app, 'diagnostics', None)
         if diagnostics is not None and diagnostics.enabled:
+            assign_request_sequence(diagnostics, req)
+        else:
+            req.diagnostic_sequence = None
+    except Exception:
+        pass
+    diagnostic_generation = getattr(diagnostics, "generation", None)
+    failure = None
+    with delivery_trace.request_context(req.diagnostic_ref, req.diagnostic_sequence):
+        if not req.path.startswith('/api/diagnostics'):
+            data = req.params if req.method == 'GET' else req.data
+            chat = (data.get('chat_id') or data.get('chat') or data.get('id')) if type(data) is dict else ''
+            delivery_trace.emit('request_started', request_ref=req.diagnostic_ref, route=req.path, chat=chat)
+        try:
+            result = handler(app, req, *args)
+        except AgentBridgeError as e:
+            failure = e
+            result = {"error": str(e)}
+        except json.JSONDecodeError:
+            result = {"error": "malformed JSON body"}
+        except Exception as e:  # noqa: BLE001 — a bug must never kill the socket
+            failure = e
+            log.exception("endpoint %s failed", req.path)
+            result = {"error": f"internal error: {e}"}
+    if not req.path.startswith('/api/diagnostics'):
+        try:
+            enabled = (diagnostics is not None and diagnostics.enabled
+                       and getattr(diagnostics, "generation", None) == diagnostic_generation)
+        except Exception:
+            enabled = False
+        if enabled:
             try:
                 status = ('bytes' if isinstance(result, Response) else
                           result.get('status', 'error' if result.get('error') else
@@ -135,7 +158,8 @@ def dispatch(handler, app, req, *args):
                           if type(result) is dict else 'other')
                 event = {'event': 'server_request', 'route': req.path,
                          'duration_ms': (time.perf_counter() - started) * 1000,
-                         'status': status}
+                         'status': status, 'request_seq': req.diagnostic_sequence,
+                         'request_ref': req.diagnostic_ref, 'phase': 'request_finished'}
                 if type(result) is dict:
                     event['reason'] = (str(failure) if failure is not None else
                                        result.get('reason') or result.get('sidebar_status') or 'none')
@@ -154,7 +178,10 @@ def dispatch(handler, app, req, *args):
                     ref = diagnostics.chat_ref(chat)
                     if ref is not None:
                         event['chat_ref'] = ref
-                diagnostics.record(event)
+                diagnostics.flight_record(event)
+                if type(result) is dict and req.path == '/api/mesh/post' and result.get('id'):
+                    result = {**result, '_diagnostics': {'trace_ref': diagnostics.chat_ref(result['id']),
+                         'chat_ref': diagnostics.chat_ref(chat)}}
             except Exception:  # noqa: BLE001 — telemetry must not affect replies
                 pass
     return result

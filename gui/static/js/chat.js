@@ -6,15 +6,14 @@ import { $, esc, fmtSize, timeOnly, fmtTime, fmtTimeLower, fmtWhen, dayLabel,
 import { ICONS, BIRD, extIcon, agentIdentityBadge } from "./icons.js";
 import { isImg, fileUrl } from "./files.js";
 import { api, bindOpenFile } from "./api.js";
-import { diagnostic } from "./diagnostics.js";
+import { diagnostic, canonicalDeliveryDom, acknowledgedDelivery } from "./diagnostics.js";
 import { pendingSendRows, reconcileSends, removeSend } from "./pending-send.js";
 import { beginLoading, endLoading } from "./loading.js";
 import { md, stripMd, setTaggable } from "./markdown.js";
-import { App, Mesh, meshCaps, meshDraft, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureWarmStateRequest, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, meshStateSnapshot, observeLockState, restartIntent, beginInitialSelectedView, cancelInitialSelectedView, endInitialSelectedView, isInitialSelectedViewPending, markInitialSelectedViewReady } from "./state.js";
+import { App, Mesh, meshCaps, meshDraft, meshDn, meshInfoText, chatAdmins, chatDisplay, renderChrome, isDmLike, dmOther, meshAvatarInner, meshChatAvatarInner, meshIsAdmin, meshMuteActive, captureSessionEpoch, captureMeshStateRead, advanceSelectedView, captureViewRead, viewReadMayApply, sessionMayApply, applyMeshState, retireDeniedMeshChat, meshStateSnapshot, observeLockState, restartIntent } from "./state.js";
 import { BrowserSession } from "./session.js";
-import { warmContext, selectedChatContext, presentationFromState, sameWarmOperation } from "./warm-context.js";
 import { createLatestRead } from "./latest-read.js";
-import { createChatPageRead } from "./chat-page-read.js";
+import { createChatPageRead, pageRetryDelay } from "./chat-page-read.js";
 import { captureTranscriptAnchor, restoreTranscriptAnchor, pruneTranscriptResources } from "./chat-page-scroll.js";
 import { renderSidebar, renderSideLoading, syncAskDots } from "./sidebar.js";
 import { initComposer, renderMeshPending, renderReplyArea, startReply, startEdit, restoreSendDraft } from "./composer.js";
@@ -43,6 +42,7 @@ function abortPagedAux(owner) {
   if (owner) owner.auxAbort = null;
 }
 function resetPagedView() {
+  clearTimeout(pageOwner?.readAck?.retryTimer);
   abortPagedAux(pageOwner);
   pageOwner = null;
   clearTimeout(pageRetryTimer);
@@ -144,6 +144,8 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
     && owner.pageVersion === pageVersion && owner.current();
   if (current() && response?.status === "forbidden"
       && samePageBinding(response.session_binding, pageData.session_binding)) {
+    retireDeniedMeshChat(owner.chatId);
+    renderSidebar();
     resetPagedView();
     $("#content").innerHTML = "";
     location.hash = "#/chats";
@@ -162,8 +164,8 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
   const {data,presentation,aux} = pagedAuxDisplay(pageData, response);
   const tr = $("#transcript");
   const anchor = tr ? captureTranscriptAnchor(tr) : null;
-  const painted = await renderMeshChat(false, null, {data, presentation,
-    warmBase:true, paged:true, historyRead:true,
+  const painted = await paintMeshChat(false, null, {data, presentation,
+    paged:true, historyRead:true,
     aux, guard:current});
   if (painted && current()) {
     syncPagedAuxControls(pageData, presentation, status, response);
@@ -196,7 +198,7 @@ async function refreshPagedSidebar(owner) {
   } catch { /* Selected-room reads remain independent of sidebar readiness. */ }
 }
 
-async function renderPagedChat(force, kind = null) {
+async function renderPagedChat(force, kind = null, options = {}) {
   const binding = BrowserSession.snapshot().binding;
   if (!binding?.viewer) return;
   const ticket = captureSessionEpoch();
@@ -213,7 +215,14 @@ async function renderPagedChat(force, kind = null) {
         && meshStateSnapshot().lockEpoch === lockEpoch};
   }
   const owner = pageOwner;
-  if (owner.busy) return;
+  if (owner.busy) {
+    if (kind === null) {
+      owner.refreshDirty = true;
+      owner.refreshOptions = {...owner.refreshOptions, ...options,
+        realtime:!!(owner.refreshOptions?.realtime || options.realtime)};
+    }
+    return;
+  }
   if (!Mesh.state) renderSideLoading();
   owner.busy = true;
   const mode = kind || (owner.browsing && pageRead.refreshPlan() ? "refresh" : "first");
@@ -258,6 +267,8 @@ async function renderPagedChat(force, kind = null) {
         observeLockState(true); document.dispatchEvent(new CustomEvent("ab:locked")); return;
       }
       if (result.status === "forbidden") {
+        retireDeniedMeshChat(owner.chatId);
+        renderSidebar();
         host.innerHTML = ""; location.hash = "#/chats"; return;
       }
       const pending = ["pending", "reset_required"].includes(result.status);
@@ -267,15 +278,22 @@ async function renderPagedChat(force, kind = null) {
         host.dataset.pagePending = owner.identity;
         beginLoading(host, {label:"Loading chat…", placement:"center", current:owner.current});
       }
-      if (pending && ++owner.retries <= 5) {
+      owner.retries = Math.min(30, owner.retries + 1);
+      const retry = () => {
+        diagnostic("delivery", {phase:"retry_scheduled", mode, status:result.status,
+          retry_ms:pageRetryDelay(result, owner.retries, options.realtime)});
         clearTimeout(pageRetryTimer);
         pageRetryTimer = setTimeout(() => {
-          if (pageOwner === owner && owner.current()) renderPagedChat(false);
-        }, Math.min(2000, Math.max(350, result.retry_after_ms || 350)));
+          if (pageOwner === owner && owner.current()) renderPagedChat(false, null, options);
+        }, pageRetryDelay(result, owner.retries, options.realtime));
+      };
+      if (pending && owner.retries <= 5) {
+        retry();
       } else {
         endLoading(host);
         host.innerHTML = '<div class="empty"><p>Chat is not ready yet.</p><button id="page-retry">Retry</button></div>';
         $("#page-retry").onclick = () => { owner.retries = 0; renderPagedChat(true); };
+        if (options.realtime) retry(); // A failed final wake must remain recoverable.
       }
       return;
     }
@@ -296,7 +314,7 @@ async function renderPagedChat(force, kind = null) {
     const pane = $("#details-pane");
     if (!Mesh.detailsView) { pane.hidden = true; pane.innerHTML = ""; }
     owner.suppressOlderScroll = true;
-    const painted = await renderMeshChat(force, null, {data, presentation, warmBase:true, paged:true,
+    const painted = await paintMeshChat(force, null, {data, presentation, paged:true,
       historyRead: mode === "older" || owner.browsing,
       aux, guard:() => pageOwner === owner && owner.current()});
     diagnostic("page_paint", {mode, outcome:painted === false ? "skipped" : "completed",
@@ -304,6 +322,7 @@ async function renderPagedChat(force, kind = null) {
     if (!painted || pageOwner !== owner || !owner.current()) return;
     const tr = $("#transcript");
     if (!tr) return;
+    canonicalDeliveryDom(chatId, result.messages, tr);
     syncPagedAuxControls(data, presentation, data.metadata_status,
       {agents_paused:data.meta.agents_paused});
     if (!retainedAux && data.meta.kind === "dm") {
@@ -313,6 +332,9 @@ async function renderPagedChat(force, kind = null) {
       {msgExpand:Mesh.msgExpand, selectedIds:Mesh.select?.ids});
     tr._pageHasMore = result.hasMore;
     owner.visibleReadNs = data.read_cutoff_ns || "0";
+    owner.visibleReadToken = data.read_ack_token || null;
+    owner.visibleReadVersion = result.pageVersion;
+    if (owner.readAck) owner.readAck.needsFreshPage = false;
     if (tr._pageScrollOwner !== owner) {
       if (tr._pageScrollHandler) tr.removeEventListener("scroll", tr._pageScrollHandler);
       tr._pageScrollOwner = owner;
@@ -365,7 +387,7 @@ async function renderPagedChat(force, kind = null) {
       void refreshPagedAux(owner, owner.pageRevision, result.pageVersion, data);
     }
     // This is a bounded canonical sidebar request; it never gates first paint.
-    if (mode !== "older") void refreshPagedSidebar(owner);
+    if (mode !== "older" && options.sidebar !== false) void refreshPagedSidebar(owner);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (pageOwner === owner && owner.current()) recordChatOpen({v:1,mode:"paged",
         chat_fetch_ms:performance.now() - started, messages:result.messages.length});
@@ -373,16 +395,20 @@ async function renderPagedChat(force, kind = null) {
   } finally {
     owner.busy = false;
     finishLoading();
+    if (owner.refreshDirty && pageOwner === owner && owner.current()) {
+      owner.refreshDirty = false;
+      const nextOptions = {...options, ...owner.refreshOptions,
+        realtime:!!(options.realtime || owner.refreshOptions?.realtime)};
+      delete owner.refreshOptions;
+      setTimeout(() => {
+        if (pageOwner === owner && owner.current()) renderPagedChat(false, null, nextOptions);
+      }, 0);
+    }
   }
 }
 
 let chatRenderSeq = 0;
 let chatsFetchSeq = 0;
-let warmOperationSeq = 0;
-let warmOperationsExhausted = false;
-let activeWarmSurface = null;
-let skipWarmChatId = null;
-const INITIAL_SELECTED_TIMEOUT_MS = 30000;
 // A legitimate large sidebar can take longer than a selected room. Its timeout
 // bounds recovery, not freshness; abandoned responses still fail route guards.
 const SIDEBAR_TIMEOUT_MS = 60000;
@@ -391,29 +417,9 @@ document.addEventListener("ab:session-reset", () => {
   sidebarRead.cancel();
   chatRenderSeq += 1;
   chatsFetchSeq += 1;
-  activeWarmSurface = null;
 });
 document.addEventListener("ab:lock-epoch", () => {
   sidebarRead.cancel();
-  activeWarmSurface = null;
-  cancelInitialSelectedView();
-});
-document.addEventListener("ab:mesh-state-accepted", (event) => {
-  const active = activeWarmSurface;
-  const state = event.detail?.state;
-  const session = meshStateSnapshot();
-  if (!active || active.operationId !== warmOperationSeq
-      || active.sessionEpoch !== session.sessionEpoch
-      || active.viewer !== session.viewer || state?.user !== active.viewer
-      || App.page !== "chats" || Mesh.chatId !== active.chatId) return;
-  if (Array.isArray(state.chats)
-      && state.chats.some((chat) => chat?.id === active.chatId)) return;
-  activeWarmSurface = null;
-  if (warmOperationSeq >= Number.MAX_SAFE_INTEGER) warmOperationsExhausted = true;
-  else warmOperationSeq += 1;
-  $("#content").innerHTML = '<div class="chat-loading"></div>';
-  Mesh.renderedChat = null;
-  location.hash = "#/chats";
 });
 const chatOpenObservations = [];
 
@@ -429,67 +435,6 @@ window.agentBridgeChatOpenMetrics = chatOpenMetrics;
 
 function runAccessLabel(capability) {
   return capability.label || "Provider capability";
-}
-
-function currentRunAuthority(chatId, feeds) {
-  const runIds = [...new Set(feeds
-    .filter((feed) => !feed.human && /^r-[0-9]+-[0-9a-f]{8}$/.test(feed.run_id || ""))
-    .map((feed) => feed.run_id))].sort();
-  Mesh.authorityCache = Mesh.authorityCache || {};
-  Mesh.authorityPoll = Mesh.authorityPoll || {};
-  if (!runIds.length) {
-    delete Mesh.authorityCache[chatId];
-    delete Mesh.authorityPoll[chatId];
-    return [];
-  }
-  const key = runIds.join("|");
-  const now = Date.now();
-  const cached = Mesh.authorityCache[chatId];
-  const poll = Mesh.authorityPoll[chatId];
-  if (!poll || poll.key !== key || (!poll.pending && now - poll.at > 2000)) {
-    const request = { key, at: now, pending: true };
-    Mesh.authorityPoll[chatId] = request;
-    const batches = [];
-    for (let i = 0; i < runIds.length; i += 20) batches.push(runIds.slice(i, i + 20));
-    Promise.all(batches.map((ids) =>
-      api("/api/mesh/runtime_authority", { chat_id: chatId, run_ids: ids },
-        { timeoutMs: 4000 }).catch(() => null)))
-      .then((outputs) => {
-        if (Mesh.authorityPoll?.[chatId] !== request) return;
-        const valid = outputs.filter((out) => out && !out.error);
-        const verified = valid.flatMap((out) =>
-          Array.isArray(out.runs) ? out.runs : []).map((run) => ({
-            run_id: run.run_id,
-            manager: run.manager,
-            state: run.state,
-            updated_ns: run.updated_ns,
-            provider_version: run.provider_version,
-            capabilities: Array.isArray(run.capabilities)
-              ? run.capabilities.map((item) => ({
-                  label: item.label, state: item.state,
-                })) : [],
-          }));
-        // Authority is immutable for this exact active run-id set. A timeout,
-        // transient error, or mirror-lagged empty projection must not blank a
-        // previously verified card; a changed/ended run set invalidates by key.
-        if (valid.length === outputs.length && verified.length) {
-          const prior = cached && cached.key === key ? cached.runs : [];
-          const merged = new Map(prior.map((run) => [run.run_id, run]));
-          verified.forEach((run) => merged.set(run.run_id, run));
-          Mesh.authorityCache[chatId] = {
-            key, at: Date.now(), runs: [...merged.values()],
-          };
-        }
-        if (App.page === "chats" && Mesh.chatId === chatId) {
-          Mesh.chatKey = "";
-          renderMeshChat(false);
-        }
-      })
-      .finally(() => {
-        if (Mesh.authorityPoll?.[chatId] === request) request.pending = false;
-      });
-  }
-  return cached && cached.key === key ? cached.runs : [];
 }
 
 function runAccessDetails(run, open) {
@@ -525,111 +470,107 @@ function runAccessDetails(run, open) {
     </div>`;
 }
 
-// V32 (R51): advance the read cursor AND settle the badge NOW. The server
-// recomputes unread on the next state fetch — up to 20s away under SSE —
-// which was exactly the "unread counter while I'm using the chat" report.
-// Mirrors the server: mark_read also clears forced_unread (overlays.py).
-let legacyReadAck = null;
-function clearLegacyReadRetry(ack = legacyReadAck) {
-  if (!ack) return;
-  clearTimeout(ack.retryTimer);
-  ack.retryTimer = null;
-}
-function resetLegacyReadAck() {
-  clearLegacyReadRetry();
-  legacyReadAck = null;
-}
-document.addEventListener("ab:session-reset", resetLegacyReadAck);
-document.addEventListener("ab:lock-epoch", resetLegacyReadAck);
-window.addEventListener("hashchange", resetLegacyReadAck);
+// Read acknowledgments use the painted page token. Only a fresh canonical
+// sidebar read settles badges; a manual unread gesture rearms this page cut.
 document.addEventListener("ab:manual-mark-unread", (event) => {
   const chatId = event.detail?.chatId;
   if (!chatId || Mesh.chatId !== chatId) return;
   const invalidate = (ack) => {
     if (!ack) return;
-    clearLegacyReadRetry(ack);
     ack.version = (ack.version || 0) + 1;
     delete ack.lastSuccess;
-    ack.failures = 0; ack.nextAt = 0;
+    clearTimeout(ack.retryTimer); ack.retryTimer = null;
+    ack.failures = 0; ack.progressRetries = 0; ack.nextAt = 0;
+    ack.needsFreshPage = false;
     ack.manualUnreadArmed = true;
   };
   if (pageOwner?.chatId === chatId && pageOwner.current()) {
     invalidate(pageOwner.readAck ||= {inflight:false, failures:0, nextAt:0});
   }
-  if (legacyReadAck?.chatId === chatId && viewReadMayApply(legacyReadAck.owner)) {
-    invalidate(legacyReadAck);
-  }
 });
 function markReadNow(chatId) {
-  const paged = meshCaps().chat_page_v1;
-  const owner = paged ? pageOwner : captureViewRead();
-  if (paged) {
-    const tr = $("#transcript");
-    if (!owner?.ready || owner.chatId !== chatId || !owner.current()
-        || owner.browsing || !tr
-        || tr.scrollHeight - tr.scrollTop - tr.clientHeight > 120) {
-      Mesh.pendingRead = chatId;
-      return;
-    }
+  const owner = pageOwner;
+  const tr = $("#transcript");
+  if (!owner?.ready || owner.chatId !== chatId || !owner.current()
+      || owner.browsing || !tr
+      || tr.scrollHeight - tr.scrollTop - tr.clientHeight > 120) {
+    Mesh.pendingRead = chatId;
+    return;
   }
-  if (!owner) return;
-  const current = () => paged ? pageOwner === owner && owner.current()
-    : App.page === "chats" && Mesh.chatId === chatId && viewReadMayApply(owner);
+  if (!owner.visibleReadToken || !owner.visibleReadVersion) return;
+  const current = () => pageOwner === owner && owner.current();
   if (!current()) return;
-  const c = Mesh.state?.chats?.find((x) => x.id === chatId);
-  const cutoff = paged ? owner.visibleReadNs || "0" : c?.last?.ns || 0;
-  if (!paged && legacyReadAck && (legacyReadAck.chatId !== chatId
-      || !viewReadMayApply(legacyReadAck.owner))) resetLegacyReadAck();
-  const ack = paged ? (owner.readAck ||= {inflight:false, failures:0, nextAt:0})
-    : legacyReadAck && legacyReadAck.chatId === chatId
-      && viewReadMayApply(legacyReadAck.owner)
-      ? legacyReadAck : (legacyReadAck = {owner, chatId, inflight:false,
-                                         failures:0, nextAt:0});
+  const cutoff = owner.visibleReadNs || "0";
+  const ack = owner.readAck ||= {inflight:false, failures:0, nextAt:0};
   if (ack.lastSuccess === cutoff && !ack.manualUnreadArmed) return;
   Mesh.pendingRead = chatId;
   if (ack.inflight || Date.now() < ack.nextAt) return;
-  if (!paged) clearLegacyReadRetry(ack);
+  if (ack.needsFreshPage) {
+    // A timer owns the refresh until it fires. If focus/history canceled it,
+    // the next reading gesture must reacquire a page rather than replay a token.
+    if (ack.retryTimer == null && document.hasFocus()) {
+      renderPagedChat(false, null, {realtime:true, sidebar:false});
+    }
+    return;
+  }
+  clearTimeout(ack.retryTimer); ack.retryTimer = null;
   ack.inflight = true;
   const ackVersion = ack.version || 0;
-  const requestCurrent = () => current() && (paged || legacyReadAck === ack)
-    && (ack.version || 0) === ackVersion;
-  api("/api/mesh/read", { chat_id: chatId,
-    ...(paged ? {up_to_ns:cutoff} : {}) }, {timeoutMs:8000})
+  const requestCurrent = () => current() && (ack.version || 0) === ackVersion;
+  const retryFreshPage = (delay) => {
+    ack.needsFreshPage = true;
+    ack.nextAt = Date.now() + delay;
+    clearTimeout(ack.retryTimer);
+    const schedule = () => {
+      const timer = setTimeout(() => refresh(timer), delay);
+      ack.retryTimer = timer;
+    };
+    const refresh = (timer) => {
+      // A canceled callback may already be queued when a newer unread intent
+      // installs its own retry on this same ACK object.
+      if (ack.retryTimer !== timer || !requestCurrent()) return;
+      ack.retryTimer = null;
+      const visible = $("#transcript");
+      if (!document.hasFocus() || !owner.ready
+          || owner.browsing || !visible
+          || visible.scrollHeight - visible.scrollTop - visible.clientHeight > 120) return;
+      // Keep the retry's fence while rendering is busy. Independent realtime
+      // work still owns the shared dirty queue.
+      if (owner.busy || ack.inflight) {
+        schedule();
+        return;
+      }
+      // A fresh canonical paint supplies the token; never replay the failed
+      // or expired token, even when no further realtime event arrives.
+      renderPagedChat(false, null, {realtime:true, sidebar:false});
+    };
+    schedule();
+  };
+  api("/api/mesh/chat_page_read",
+    {chat_id:chatId, page_version:owner.visibleReadVersion, read_ack_token:owner.visibleReadToken},
+    {timeoutMs:8000})
     .then((response) => {
       if (!requestCurrent()) return;
+      if (["pending", "reset_required"].includes(response?.status)) {
+        ack.progressRetries = Math.min(30, (ack.progressRetries || 0) + 1);
+        const delay = pageRetryDelay(response, ack.progressRetries, true);
+        ack.failures = 0;
+        retryFreshPage(delay);
+        return;
+      }
       if (!response?.ok) throw Error("read acknowledgement pending");
+      if (response.status === "acknowledged") acknowledgedDelivery(chatId, response.read_ns);
+      clearTimeout(ack.retryTimer); ack.retryTimer = null;
+      ack.progressRetries = 0;
       ack.failures = 0; ack.nextAt = 0; ack.lastSuccess = cutoff;
       ack.manualUnreadArmed = false;
-      const latest = Mesh.state?.chats?.find((x) => x.id === chatId);
-      const sameCutoff = paged ? owner.visibleReadNs === cutoff
-        : (latest?.last?.ns || 0) === cutoff;
-      if (sameCutoff && Mesh.pendingRead === chatId) Mesh.pendingRead = null;
-      if (paged) { void refreshPagedSidebar(owner); return; }
-      // Legacy sidebar mutation follows acknowledgement; a failed read may
-      // never clear the badge or install an optimistic read-tail clamp.
-      if (!sameCutoff) return;
-      Mesh.readTail[chatId] = Math.max(Mesh.readTail[chatId] || 0, latest?.last?.ns || 0);
-      if (latest && (latest.unread || latest.forced_unread)) {
-        latest.unread = 0;
-        latest.forced_unread = false;
-        renderSidebar();
-      }
+      if (owner.visibleReadNs === cutoff && Mesh.pendingRead === chatId) Mesh.pendingRead = null;
+      void refreshPagedSidebar(owner);
     })
     .catch(() => {
       if (!requestCurrent()) return;
       ack.failures = Math.min(6, ack.failures + 1);
-      ack.nextAt = Date.now() + Math.min(60000, 2000 * 2 ** (ack.failures - 1));
-      if (!paged) {
-        // Legacy polls read only when messages change. Retry this view's
-        // pending receipt even when no new message or focus event arrives.
-        clearLegacyReadRetry(ack);
-        ack.retryTimer = setTimeout(() => {
-          ack.retryTimer = null;
-          if (!requestCurrent() || meshCaps().chat_page_v1
-              || Mesh.pendingRead !== chatId || !document.hasFocus()) return;
-          markReadNow(chatId);
-        }, Math.max(0, ack.nextAt - Date.now()));
-      }
+      retryFreshPage(Math.min(60000, 2000 * 2 ** (ack.failures - 1)));
     })
     .finally(() => { ack.inflight = false; });
   // The sidebar timestamp is a JS Number; only the next canonical sidebar
@@ -649,65 +590,15 @@ window.addEventListener("focus", () => {
 });
 
 async function renderChats(force) {
-  if (meshCaps().chat_page_v1 && Mesh.chatId) return renderPagedChat(force);
+  if (Mesh.chatId) return renderPagedChat(force, null,
+    {realtime:meshCaps().sse_refresh_v1 === true});
   if (pageOwner) resetPagedView();
-  // A normal safety poll must not supersede a validated initial transcript
-  // while its one broad-state hydration is still in flight. Forced mutation
-  // and route renders retain their existing ownership and may supersede it.
-  if (!force && isInitialSelectedViewPending()) return;
-  if (force) { advanceSelectedView(); cancelInitialSelectedView(); }
-  // Opening info for an already visible room does not need another all-room
-  // fold or transcript render. Its endpoint performs a fresh membership read.
-  if (force && Mesh.detailsView && Mesh.renderedChat === Mesh.chatId
-      && $("#transcript") && Mesh.state?.user && !meshStateSnapshot().locked) {
-    const pane = $("#details-pane");
-    const opening = pane.hidden;
-    pane.hidden = false;
-    if (opening) { pane.classList.remove("slide"); void pane.offsetWidth;
-      pane.classList.add("slide"); }
-    await V.renderChatDetails();
-    return;
-  }
-  if (warmOperationSeq >= Number.MAX_SAFE_INTEGER) warmOperationsExhausted = true;
-  else warmOperationSeq += 1;
-  const operationId = warmOperationSeq;
+  if (force) advanceSelectedView();
   const sessionTicket = captureSessionEpoch();
-  let warmStateRequest;
+  let stateRequest;
   const fetchSeq = ++chatsFetchSeq;
   const routeSeq = App.routeSeq;
-  const opening = !!Mesh.chatId && !$("#transcript");
-  const openTrace = opening ? {
-    v: 1,
-    request_ref: window.crypto?.randomUUID?.() ||
-      `open-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    started_ms: performance.now(),
-  } : null;
-  const skipWarm = skipWarmChatId === Mesh.chatId;
-  if (skipWarm) skipWarmChatId = null;
-  const warm = !skipWarm && !warmOperationsExhausted
-    && opening && !Mesh.detailsView && !restartIntent()
-    ? warmContext(meshStateSnapshot(), Mesh.state, Mesh.chatId) : null;
   const stateSnapshot = meshStateSnapshot();
-  const initialBase = !skipWarm && !warmOperationsExhausted
-    ? selectedChatContext(BrowserSession.snapshot(), App.state, {
-      state: Mesh.state, snapshot: stateSnapshot,
-      chatId: Mesh.chatId, opening,
-      details: Mesh.detailsView, restarting: !!restartIntent(),
-    }) : null;
-  const initial = initialBase ? Object.freeze({
-    ...initialBase,
-    sessionEpoch: stateSnapshot.sessionEpoch,
-    lockEpoch: stateSnapshot.lockEpoch,
-    stateGeneration: stateSnapshot.stateGeneration,
-    chatId: Mesh.chatId,
-  }) : null;
-  const accelerated = initial || warm;
-  if (accelerated) {
-    await renderWarmChat(force, openTrace, accelerated, {
-      fetchSeq, routeSeq, chatId: Mesh.chatId, operationId,
-    });
-    return;
-  }
   // leaving a chat for the no-chat home: paint the empty state NOW (from the
   // prior mesh state) so the open chat doesn't linger through the state fetch
   // below and then snap — the "settles after an await" stutter. The fetch still
@@ -733,29 +624,25 @@ async function renderChats(force) {
   try {
     fresh = await sidebarRead.request(
       () => {
-        warmStateRequest = captureWarmStateRequest(sessionTicket);
+        stateRequest = captureMeshStateRead(sessionTicket);
         return api("/api/mesh/state", undefined,
           {sideEffects: false, timeoutMs: SIDEBAR_TIMEOUT_MS});
       },
       () => fetchSeq === chatsFetchSeq && routeSeq === App.routeSeq
         && App.page === "chats" && sessionMayApply(sessionTicket)
-        // Admission runs before read() creates warmStateRequest.
+        // Admission runs before read() creates stateRequest.
         && stateSnapshot.lockEpoch === meshStateSnapshot().lockEpoch,
     );
   } catch { return; }
-  if (openTrace) {
-    openTrace.sidebar_fetch_ms = Math.max(
-      0, performance.now() - openTrace.started_ms);
-  }
   if (fetchSeq !== chatsFetchSeq || App.page !== "chats"
       || routeSeq !== App.routeSeq) return;
-  if (!fresh || !warmStateRequest || warmStateRequest.lockEpoch !== meshStateSnapshot().lockEpoch) return;
+  if (!fresh || !stateRequest || stateRequest.lockEpoch !== meshStateSnapshot().lockEpoch) return;
   if (fresh.locked && fresh.error) {
     observeLockState(true);
     document.dispatchEvent(new CustomEvent("ab:locked"));
     return;
   }
-  if (!applyMeshState(sessionTicket, fresh, warmStateRequest)) return;
+  if (!applyMeshState(sessionTicket, fresh, stateRequest)) return;
   // V111: locked is not signed-out — never cache the refusal as state or
   // paint "Start the mesh" over it (api.js already raised the lock screen)
   if (Mesh.state && Mesh.state.locked) {
@@ -766,7 +653,7 @@ async function renderChats(force) {
   // don't let this stale render paint the empty chat state over the new page
   if (App.page !== "chats") return;
   const ms = Mesh.state;
-  renderSidebar();   // V67: renderSidebar reconciles readTail (no badge flicker)
+  renderSidebar();
   startAskPoll();   // asks/timers surface on the whole chats page (R19.5)
 
   if (!ms.available) {
@@ -777,7 +664,7 @@ async function renderChats(force) {
           <h2>Start the mesh</h2>
           <p>Your mesh — the shared space where members, agents and chats
           live — isn't running yet. It may not be set up on this machine, or
-          its root (the synced folder or cloud project in Settings → About)
+          its cloud project (in Settings → About)
           isn't reachable right now. Starting it creates the member directory
           and chat space at the configured root; if it already exists,
           nothing is overwritten.</p>
@@ -809,41 +696,6 @@ async function renderChats(force) {
   }
   V.closeAuthPage();   // signed in (any path): drop the overlay if it's up
   V.closeConnectingPage();   // V125: restore healed — reveal the real app
-  if (Mesh.chatId) {
-    const pane = $("#details-pane");
-    // closing the pane: hide it NOW (before the async chat re-render) so the
-    // chat reclaims the freed width in the same frame as the route change.
-    // Deferring this until after `await renderMeshChat` left the emptied pane
-    // occupying its column, then snapped the chat wider ~50ms later (stutter
-    // on medium widths where the pane covers the chat).
-    if (!Mesh.detailsView && !pane.hidden) {
-      pane.hidden = true; pane.innerHTML = ""; Mesh.detailsKey = "";
-    }
-    await renderMeshChat(force, openTrace);
-    if (openTrace && App.page === "chats" && Mesh.chatId
-        && routeSeq === App.routeSeq) {
-      openTrace.render_completed_ms = Math.max(
-        0, performance.now() - openTrace.started_ms);
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        openTrace.first_painted_ms = Math.max(
-          0, performance.now() - openTrace.started_ms);
-        delete openTrace.started_ms;
-        recordChatOpen(openTrace);
-      }));
-    }
-    if (Mesh.detailsView) {
-      const opening = pane.hidden;
-      pane.hidden = false;
-      if (opening) {   // slide in only when the pane first opens
-        pane.classList.remove("slide");
-        void pane.offsetWidth;
-        pane.classList.add("slide");
-      }
-      await V.renderChatDetails();
-    }
-    else { pane.hidden = true; pane.innerHTML = ""; Mesh.detailsKey = ""; }
-    return;
-  }
   // no chat selected: the no-chat home. Already showing it (e.g. from the
   // optimistic paint above) → leave it, nothing here is dynamic.
   if (Mesh.listKey === "empty" && $("#content > .empty-state")) {
@@ -854,296 +706,89 @@ async function renderChats(force) {
 }
 V.renderChats = renderChats;
 
-function warmOperationCurrent(operation) {
-  const state = meshStateSnapshot();
-  return sameWarmOperation(operation, {
-    sessionEpoch: state.sessionEpoch,
-    lockEpoch: state.lockEpoch,
-    stateGeneration: state.stateGeneration,
-    routeSeq: App.routeSeq,
-    chatId: Mesh.chatId,
-    operationId: warmOperationSeq,
-    chatRenderSeq,
-  }) && operation.fetchSeq === chatsFetchSeq && App.page === "chats";
+// Independent bounded lanes: a slow inventory must not hold selected-chat
+// delivery. Each read still uses the existing route/session/canonical gates.
+let realtimeSidebarSerial = 0;
+let realtimeSidebarTimer = null;
+let realtimeSidebarFailures = 0;
+function resetRealtimeSidebar() {
+  realtimeSidebarSerial += 1;
+  clearTimeout(realtimeSidebarTimer);
+  realtimeSidebarTimer = null;
+  realtimeSidebarFailures = 0;
 }
-
-function warmIdentityCurrent(operation) {
-  const state = meshStateSnapshot();
-  return operation.sessionEpoch === state.sessionEpoch
-    && operation.lockEpoch === state.lockEpoch
-    && operation.routeSeq === App.routeSeq
-    && operation.chatId === Mesh.chatId
-    && operation.operationId === warmOperationSeq
-    && operation.chatRenderSeq === chatRenderSeq
-    && operation.fetchSeq === chatsFetchSeq && App.page === "chats";
-}
-
-function restartColdAfterStateInvalidation(operation, force) {
-  if (operation.coldRestarted || !warmIdentityCurrent(operation)) return false;
-  const state = meshStateSnapshot();
-  if (state.stateGeneration === operation.stateGeneration) return false;
-  operation.coldRestarted = true;
-  activeWarmSurface = null;
-  skipWarmChatId = operation.chatId;
-  queueMicrotask(() => {
-    if (warmIdentityCurrent(operation)) renderChats(force);
-    else if (skipWarmChatId === operation.chatId) skipWarmChatId = null;
-  });
-  return true;
-}
-
-function restartColdAfterInitialFailure(operation, force) {
-  if (!operation.initial) return false;
-  endInitialSelectedView(operation.initialViewOwner);
-  if (operation.coldRestarted || !warmIdentityCurrent(operation)
-      || restartIntent()) return false;
-  operation.coldRestarted = true;
-  activeWarmSurface = null;
-  skipWarmChatId = operation.chatId;
-  queueMicrotask(() => {
-    if (warmIdentityCurrent(operation)) renderChats(force);
-    else if (skipWarmChatId === operation.chatId) skipWarmChatId = null;
-  });
-  return true;
-}
-
-function applyCurrentWarmError(operation, data) {
-  if (!warmOperationCurrent(operation)) return false;
-  if (operation.initial) endInitialSelectedView(operation.initialViewOwner);
-  if (data?.locked) {
-    observeLockState(true);
-    document.dispatchEvent(new CustomEvent("ab:locked"));
-    return false;
-  }
-  if (data?.error === "No such chat") {
-    $("#content").innerHTML = '<div class="chat-loading"></div>';
-    Mesh.renderedChat = null;
-    location.hash = "#/chats";
-    return false;
-  }
-  if (data?.error === "Sign in first" || data?.error === "Session changed") {
-    return false;  // the authoritative poll owns auth recovery
-  }
-  toast("Couldn't load this chat", true);
-  return false;
-}
-
-export async function renderWarmChat(force, openTrace, warm, route) {
-  const operation = {
-    ...warm,
-    ...route,
-    chatRenderSeq,
-  };
-  if (operation.initial) {
-    operation.initialViewOwner = beginInitialSelectedView();
-  }
+document.addEventListener("ab:session-reset", resetRealtimeSidebar);
+document.addEventListener("ab:lock-epoch", resetRealtimeSidebar);
+async function refreshRealtimeSidebar() {
   const ticket = captureSessionEpoch();
-  let data;
+  const route = App.routeSeq;
+  const lock = meshStateSnapshot().lockEpoch;
+  const serial = ++realtimeSidebarSerial;
+  clearTimeout(realtimeSidebarTimer);
+  realtimeSidebarTimer = null;
+  const current = () => App.page === "chats" && App.routeSeq === route
+    && sessionMayApply(ticket) && !meshStateSnapshot().locked
+    && lock === meshStateSnapshot().lockEpoch;
+  let request;
+  const fresh = await sidebarRead.request(() => {
+    request = captureMeshStateRead(ticket);
+    return api("/api/mesh/state", undefined, {sideEffects:false, timeoutMs:15000});
+  }, current);
+  if (!current() || serial !== realtimeSidebarSerial) return;
+  if (fresh && applyMeshState(ticket, fresh, request)) {
+    renderSidebar();
+    if (fresh.chats_complete !== false) { realtimeSidebarFailures = 0; return; }
+  }
+  realtimeSidebarFailures = Math.min(5, realtimeSidebarFailures + 1);
+  realtimeSidebarTimer = setTimeout(() => {
+    realtimeSidebarTimer = null;
+    if (current() && serial === realtimeSidebarSerial) void refreshRealtimeSidebar();
+  }, Math.min(8000, 500 * 2 ** (realtimeSidebarFailures - 1)));
+}
+async function refreshRealtimeAux() {
+  const owner = pageOwner;
+  if (!owner?.ready || !owner.current() || owner.busy) return;
+  if (owner.realtimeAuxBusy) { owner.realtimeAuxDirty = true; return; }
+  owner.realtimeAuxBusy = true;
   try {
-    data = await api(`/api/mesh/chat?id=${encodeURIComponent(operation.chatId)}`,
-      undefined, { sideEffects: false,
-        timeoutMs: operation.initial ? INITIAL_SELECTED_TIMEOUT_MS : 0 });
-  } catch {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (!warmOperationCurrent(operation)) {
-    if (!restartColdAfterInitialFailure(operation, force)) {
-      restartColdAfterStateInvalidation(operation, force);
+    const snapshot = pageRead.snapshot();
+    if (snapshot.status === "page" && snapshot.pageData) {
+      await refreshPagedAux(owner, owner.pageRevision, owner.pageVersion,
+        {...snapshot.pageData, messages:snapshot.messages});
     }
-    return;
-  }
-  if (data?.error) {
-    if (!operation.initial || data.locked || data.error === "No such chat") {
-      return applyCurrentWarmError(operation, data);
+  } finally {
+    owner.realtimeAuxBusy = false;
+    if (owner.realtimeAuxDirty && pageOwner === owner && owner.current()) {
+      owner.realtimeAuxDirty = false;
+      setTimeout(() => refreshRealtimeAux(), 0);
     }
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (!sessionMayApply(ticket, data)
-      || data.me !== warm.presentation.user
-      || data.meta?.id !== operation.chatId
-      || !Array.isArray(data.meta?.members)
-      || !Array.isArray(data.messages)
-      || !data.meta.members.includes(data.me)) {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-
-  try {
-    if (operation.initial) {
-      V.closeAuthPage();
-      V.closeConnectingPage();
-    }
-
-    operation.chatRenderSeq = chatRenderSeq + 1;
-    // Own the surface before the async function yields. The prepared renderer
-    // commits synchronously, but its resolved promise still creates a microtask
-    // window in which an accepted room-removal event must be able to clear it.
-    activeWarmSurface = {
-      operationId: operation.operationId,
-      sessionEpoch: operation.sessionEpoch,
-      chatId: operation.chatId,
-      viewer: data.me,
-      initial: !!operation.initial,
-    };
-    const presentation = data.presentation?.user === data.me
-      ? presentationFromState(data.presentation) : null;
-    await renderMeshChat(force, openTrace, {
-      data, presentation: presentation || warm.presentation, warmBase: true,
-      guard: () => warmOperationCurrent(operation),
-    });
-  } catch (error) {
-    if (operation.initial) {
-      restartColdAfterInitialFailure(operation, force);
-      return;
-    }
-    throw error;
-  }
-  if (!warmOperationCurrent(operation)) {
-    if (activeWarmSurface?.operationId === operation.operationId) {
-      activeWarmSurface = null;
-    }
-    if (operation.initial) restartColdAfterInitialFailure(operation, force);
-    else restartColdAfterStateInvalidation(operation, force);
-    return;
-  }
-
-  if (operation.initial) {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (warmOperationCurrent(operation)) {
-        markInitialSelectedViewReady(operation.initialViewOwner);
-      } else restartColdAfterInitialFailure(operation, force);
-    }));
-  }
-
-  // Observe the fresh base paint, not the later state/profile hydration. Keep
-  // the captured record content-free and schedule-only so telemetry adds no
-  // request, render, or await to the warm critical path.
-  if (openTrace) {
-    const observation = {
-      ...openTrace,
-      mode: "warm",
-      sidebar_fetch_ms: 0,
-      render_completed_ms: Math.max(
-        0, performance.now() - openTrace.started_ms),
-    };
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!warmOperationCurrent(operation)) return;
-      observation.first_painted_ms = Math.max(
-        0, performance.now() - observation.started_ms);
-      delete observation.started_ms;
-      recordChatOpen(observation);
-    }));
-  }
-
-  // Let the fresh selected room paint before the expensive all-room fold.
-  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-  if (!warmOperationCurrent(operation)) {
-    if (operation.initial) restartColdAfterInitialFailure(operation, force);
-    else restartColdAfterStateInvalidation(operation, force);
-    return;
-  }
-  let warmStateRequest;
-  const statePromise = sidebarRead.request(
-    () => {
-      warmStateRequest = captureWarmStateRequest(ticket);
-      return api("/api/mesh/state", undefined, { sideEffects: false,
-        timeoutMs: SIDEBAR_TIMEOUT_MS });
-    },
-    () => warmOperationCurrent(operation),
-  );
-  const guardedAux = (path, fallback) => api(path, undefined, {
-    sideEffects: false,
-    timeoutMs: operation.initial ? 10000 : 0,
-  })
-    .then((value) => {
-      if (!warmOperationCurrent(operation)) return null;
-      if (value?.locked) {
-        applyCurrentWarmError(operation, value);
-        return null;
-      }
-      return !value || value.error ? fallback : value;
-    })
-    .catch(() => fallback);
-  const auxPromise = Promise.all([
-    guardedAux(`/api/mesh/livefeed?id=${encodeURIComponent(operation.chatId)}`,
-      { feeds: [] }),
-    guardedAux(`/api/mesh/runtime_tasks?id=${encodeURIComponent(operation.chatId)}`,
-      { tasks: [] }),
-  ]);
-  const fresh = await statePromise;
-  if (!warmOperationCurrent(operation)) {
-    if (operation.initial) restartColdAfterInitialFailure(operation, force);
-    else restartColdAfterStateInvalidation(operation, force);
-    return;
-  }
-  if (!fresh) {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (fresh.error) {
-    if (!operation.initial || fresh.locked || fresh.error === "No such chat") {
-      return applyCurrentWarmError(operation, fresh);
-    }
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (!sessionMayApply(ticket, fresh)) {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (!Array.isArray(fresh.chats)
-      || !fresh.chats.some((chat) => chat?.id === operation.chatId)) {
-    if (operation.initial) endInitialSelectedView(operation.initialViewOwner);
-    $("#content").innerHTML = '<div class="chat-loading"></div>';
-    Mesh.renderedChat = null;
-    location.hash = "#/chats";
-    return;
-  }
-  if (!applyMeshState(ticket, fresh, warmStateRequest)) {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  const advanced = meshStateSnapshot();
-  operation.stateGeneration = advanced.stateGeneration;
-  renderSidebar();
-  if (!warmOperationCurrent(operation)) {
-    restartColdAfterInitialFailure(operation, force);
-    return;
-  }
-  if (operation.initial) {
-    // The base and fully hydrated surfaces intentionally share one renderer.
-    // Once ordinary polls may supersede this operation, force their first pass
-    // through the full rebuild instead of letting the base signatures short-cut
-    // controls while auxiliary hydration is delayed.
-    Mesh.chatKey = "";
-    Mesh.structKey = "";
-    endInitialSelectedView(operation.initialViewOwner);
-    if (activeWarmSurface?.operationId === operation.operationId) {
-      // Retain the surface owner for synchronous room-removal handling, but
-      // broad state is accepted: ordinary safety polling may now supersede
-      // delayed/failed auxiliary hydration.
-      activeWarmSurface.initial = false;
-    }
-    startAskPoll();
-  }
-  const aux = await auxPromise;
-  if (!warmOperationCurrent(operation)) {
-    if (operation.initial) restartColdAfterInitialFailure(operation, force);
-    else restartColdAfterStateInvalidation(operation, force);
-    return;
-  }
-  if (aux.some((value) => !value)) return;
-  Mesh.structKey = "";  // hydration adds controls/composer to the base view
-  operation.chatRenderSeq = chatRenderSeq + 1;
-  await renderMeshChat(force, null, {
-    data, aux, guard: () => warmOperationCurrent(operation),
-  });
-  if (activeWarmSurface?.operationId === operation.operationId) {
-    activeWarmSurface = null;
   }
 }
+V.refreshRealtime = async frames => {
+  if (!Mesh.state?.user || meshStateSnapshot().locked) return;
+  if (App.page === "new" && frames.some(frame => frame.type === "mirror_update"
+      || frame.scope === "global" || frame.scope === "sidebar")) {
+    return V.refresh(false); // Existing directory query/focus and session guards.
+  }
+  if (App.page !== "chats") return; // Settings retains its guarded scoped owner.
+  let page = false, sidebar = false, auxiliary = false;
+  for (const frame of frames) {
+    const scope = frame.type === "read_model" ? frame.scope : "chat";
+    if (frame.type === "mirror_update" || scope === "global") {
+      page = !!Mesh.chatId; sidebar = true; auxiliary = true;
+    } else if (scope === "sidebar") sidebar = true;
+    else if (scope === "aux") auxiliary ||= !frame.chat_id || frame.chat_id === Mesh.chatId;
+    else if (scope === "chat") {
+      sidebar = true;
+      page ||= !!Mesh.chatId && frame.chat_id === Mesh.chatId;
+    }
+  }
+  const work = [];
+  if (page) work.push(renderPagedChat(false, null, {sidebar:false,realtime:true}));
+  else if (auxiliary) work.push(refreshRealtimeAux());
+  if (sidebar) work.push(refreshRealtimeSidebar());
+  await Promise.allSettled(work);
+};
 
 // the structural signature that drives renderMeshChat's FULL rebuild (name +
 // archived + members). Extracted so patchChatName can keep it in sync after a
@@ -1156,30 +801,9 @@ function chatStructKey(chatId, m) {
     + "|" + (m.avatar ? m.avatar.sha256 : "");   // group photo → repaint header
 }
 
-// Connection rows for the home card AND Settings → Connection (which calls
-// this via V — views never import views). Transport-aware since the Supabase
-// cutover: a cloud root reports the warm mirror's health, not the folder/
-// OneDrive checks (those read "✗ No — check OneDrive" on a healthy cloud
-// mesh). A v1 server has no s.connection — fold its top-level folder fields
-// into the same shape so the old rendering is unchanged there.
+// Cloud connection rows shared by the home card and Settings via V.
 function connectionRows(s) {
-  const c = s.connection ||
-    { scheme: "folder", root: s.shared_dir, shared_ok: s.shared_ok,
-      sync_client: s.onedrive_running };
-  if (c.scheme === "folder") {
-    const local = c.mode === "local";
-    const storage = local ? "Local folder" : `${esc(c.provider || "Synced folder")}`;
-    const ready = !c.shared_ok ? "✗ Folder unavailable"
-      : c.writable === false ? "✗ Read-only"
-        : c.state === "sync_paused" ? "⚠ Local data available; sync client paused"
-          : "✓ Ready";
-    const sync = !local && c.provider === "OneDrive"
-      ? `<dt>Sync client</dt><dd>${c.sync_client == null ? "Unknown"
-        : c.sync_client ? "✓ Running" : "✗ Not running"}</dd>` : "";
-    return `
-      <dt>Storage</dt><dd>${storage}</dd>
-      <dt>Folder</dt><dd>${ready}</dd>${sync}`;
-  }
+  const c = s.connection || {};
   // cloud: warm mirror = connected; warm but long past the safety-poll
   // cadence (45s idle, backoff caps at 60s) = the refresher is failing,
   // serving cached
@@ -1299,19 +923,25 @@ function agentPermissionEntry(meta, presentation) {
   return pending ? "pending" : "absent";
 }
 
-async function renderMeshChat(force, openTrace = null, prepared = null) {
-  if (!prepared && meshCaps().chat_page_v1) return renderPagedChat(force);
-  const sessionTicket = captureSessionEpoch();
-  const readStarted = performance.now();
-  const renderSeq = ++chatRenderSeq;
+// Public selected-chat refreshes always acquire a canonical bounded page.
+async function renderMeshChat(force) {
+  if (!Mesh.chatId) return;
+  return renderPagedChat(force);
+}
+
+// Acquired data only. No implicit transcript/livefeed/runtime_tasks acquisition.
+// Companion cards, asks, read acknowledgements and actions remain separately owned.
+async function paintMeshChat(force, openTrace, prepared) {
+  if (!prepared?.data) throw new TypeError("chat painting requires acquired data");
+  if (prepared.paged !== true) return false;
+  const sessionTicket = prepared.sessionTicket || captureSessionEpoch();
+  const renderSeq = prepared.renderSeq ?? ++chatRenderSeq;
   const chatId = Mesh.chatId;
-  const data = prepared?.data
-    || await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (prepared?.guard && !prepared.guard()) return;
-  if (openTrace) {
-    openTrace.chat_fetch_ms = Math.max(
-      0, performance.now() - openTrace.started_ms
-        - (openTrace.sidebar_fetch_ms || 0));
+  const data = prepared.data;
+  if (prepared.guard && !prepared.guard()) return;
+  if (openTrace && prepared.readStarted === undefined) {
+    openTrace.chat_fetch_ms = Math.max(0, performance.now() - openTrace.started_ms
+      - (openTrace.sidebar_fetch_ms || 0));
   }
   if (renderSeq !== chatRenderSeq) return;
   if (data.error) {
@@ -1327,19 +957,13 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     location.hash = "#/chats"; return;
   }
   if (!sessionMayApply(sessionTicket, data)) return;
-  const ms = prepared?.presentation || Mesh.state
-    || presentationFromState(data.presentation);
+  const ms = prepared.presentation || Mesh.state;
   if (!ms || ms.user !== data.me) return;
-  const [feedData, runtimeData] = prepared?.paged
-    ? [{feeds:prepared.aux?.feeds || []}, {tasks:prepared.aux?.tasks || []}]
-    : prepared?.warmBase ? [{ feeds: [] }, { tasks: [] }]
-    : prepared?.aux || await Promise.all([
-      api(`/api/mesh/livefeed?id=${encodeURIComponent(chatId)}`),
-      api(`/api/mesh/runtime_tasks?id=${encodeURIComponent(chatId)}`),
-    ]);
+  const [feedData, runtimeData] = [
+    {feeds:prepared.aux?.feeds || []}, {tasks:prepared.aux?.tasks || []}];
   if (prepared?.guard && !prepared.guard()) return;
   if (!sessionMayApply(sessionTicket)) return;
-  if (openTrace) {
+  if (openTrace && prepared.readStarted === undefined) {
     openTrace.aux_fetch_ms = Math.max(
       0, performance.now() - openTrace.started_ms
         - (openTrace.sidebar_fetch_ms || 0)
@@ -1349,19 +973,17 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   endLoading($("#content"));
   const feeds = feedData.feeds || [];
   const runtimeTasks = runtimeData.tasks || [];
-  const interactive = !prepared?.warmBase;
   const viewDn = (name) => meshDn(name, ms);
   const viewAvatar = (name) => meshAvatarInner(name, ms);
   const viewInfo = (msg, me) => meshInfoText(msg, me, ms);
   const displayKind = (name) => ms.users?.[name]?.display_kind
     || ms.users?.[name]?.kind;
-  const authorityRuns = prepared?.paged ? prepared.aux?.runs || []
-    : prepared?.warmBase ? [] : currentRunAuthority(chatId, feeds);
+  const authorityRuns = prepared.aux?.runs || [];
   // a fetch that started before a chat switch must not paint the old chat over
   // the new one — bail if the route moved on while we were awaiting (the rare
   // "flash of the previous chat" on a fast switch)
   if (App.page !== "chats" || Mesh.chatId !== chatId) return;
-  reconcileSends(chatId, data.messages, prepared ? -1 : readStarted);
+  reconcileSends(chatId, data.messages, prepared.readStarted ?? -1);
   const pendingRows = pendingSendRows(chatId);
   const meta = data.meta;
   const pinsSig = (meta.pins || []).map((p) => p.id + p.until).join(",");
@@ -1379,7 +1001,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // the flag in so the repaint rides the partial path
   const goneSig = Object.values(ms.users || {})
     .filter((u) => u.departed).map((u) => u.username).join(",");
-  const selectedProfileSig = prepared?.paged && prepared?.aux
+  const selectedProfileSig = prepared.aux
     ? (meta.members || []).map(name => {
         const user = ms.users?.[name];
         return [name,user?.display,user?.kind,user?.departed,user?.avatar?.sha256];
@@ -1398,9 +1020,6 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // pins deliberately do NOT (pin/unpin must ride the partial path so scroll
   // survives — the banner is synced imperatively).
   const structKey = chatStructKey(chatId, meta);
-  // the DM header's presence line updates on EVERY pass — it lives outside
-  // both signatures, so a pure last-seen change must not wait for a rebuild
-  if (!prepared?.warmBase) syncDmHeaderPresence();
   // NEITHER signature moved: skip the rebuild EVEN under force. Opening/closing
   // the chat-info pane routes here with force=true but nothing changed —
   // rebuilding would re-clamp read-mores at the pane's new width and flash the
@@ -1408,11 +1027,10 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (key === Mesh.chatKey && structKey === Mesh.structKey
       && App.page === "chats" && $("#transcript")) {
     if (prepared?.guard && !prepared.guard()) return;
-    syncReceiptTicks($("#transcript"), data.messages, isDmLike(meta), !data._paged || data.metadata_status?.receipts === "ready");
+    syncReceiptTicks($("#transcript"), data.messages, isDmLike(meta), data.metadata_status?.receipts === "ready");
     if (Mesh.jumpTo) jumpToMessage();
     return true;
   }
-  const hadNew = !prepared?.historyRead && key !== Mesh.chatKey;
   Mesh.chatKey = key;
 
   // mentions highlight only actual members — membership is symmetric:
@@ -1673,7 +1291,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     // only the fresh rows need binding + clamping below
     const freshEls = reconcileRows(tr,
       parts.length ? parts : [["empty", bubbles]]);
-    syncReceiptTicks(tr, data.messages, isDm, !data._paged || data.metadata_status?.receipts === "ready");
+    syncReceiptTicks(tr, data.messages, isDm, data.metadata_status?.receipts === "ready");
     bindTranscript(tr, chatId, data, menuCtx);
     animateRxChanges(tr, data.messages, oldRx);
     freshEls.forEach((el) => bindOpenFile(el, chatId, ".mesh-att"));
@@ -1694,10 +1312,6 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     if (Mesh.jumpTo) jumpToMessage();
     else if (nearBottom) tr.scrollTop = tr.scrollHeight;
     else tr.scrollTop = prevTop;
-    if (hadNew && !prepared?.paged) {
-      if (document.hasFocus()) markReadNow(chatId);
-      else Mesh.pendingRead = chatId;   // settle on the focus listener
-    }
     return true;
   }
   Mesh.structKey = structKey;
@@ -1739,15 +1353,12 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   // DM header online/last-seen sub-line (Q32) — only when the peer shares it,
   // so the name stays vertically centered otherwise (the .has-sub class drives
   // the push-up transition in css)
-  const dmSub = prepared?.warmBase ? ""
-    : dmPeer ? presenceLine(ms.users?.[dmPeer]?.presence) : "";
+  const dmSub = ""; // A finalized companion read paints presence separately.
   // DM/self header shows the peer's photo; a group shows the group photo
   const headAva = meshChatAvatarInner(meta, ms);
-  // Selected pages carry the verified viewer mute scalar; the legacy path
-  // continues reading its sidebar overview. Missing page state stays neutral.
-  const muteReady = !data._paged || data.metadata_status?.mute === "ready";
-  const isMuted = meshMuteActive(data._paged ? {mute:meta.mute}
-    : (ms.chats || []).find((k) => k.id === chatId) || {});
+  // Selected pages carry the verified viewer mute scalar. Missing state stays neutral.
+  const muteReady = data.metadata_status?.mute === "ready";
+  const isMuted = meshMuteActive({mute:meta.mute});
   const permissionEntry = agentPermissionEntry(meta, ms);
   if (prepared?.guard && !prepared.guard()) return;
   $("#content").innerHTML = `
@@ -1768,11 +1379,11 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         ${isMember && !isDm ? `<button data-act="add">${ICONS.addUser} Add member</button>` : ""}
         <button data-act="search">${ICONS.search} Search</button>
         <button data-act="select">${ICONS.select} Select messages</button>
-        ${prepared?.warmBase && !data._paged ? "" : muteReady
+        ${muteReady
           ? `<button data-act="mute">${isMuted ? ICONS.bellOff : ICONS.bell} ${isMuted ? "Unmute" : "Mute notifications"}</button>`
           : '<button data-act="mute" disabled>Mute status loading…</button>'}
         ${isMember ? `<button data-act="archive">${ICONS.archive} ${meta.archived ? "Unarchive" : "Archive"} ${isDm ? "chat" : "group"}</button>` : ""}
-        ${!data._paged || data.metadata_status?.pause === "ready"
+        ${data.metadata_status?.pause === "ready"
           ? `<button data-act="pause">${ICONS.pause} ${meta.agents_paused ? "Resume agents in this chat" : "Stand down agents in this chat"}</button>`
           : '<button data-act="pause" disabled>Agent pause status loading…</button>'}
         <button data-act="close">${ICONS.close} Close chat</button>
@@ -1794,8 +1405,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
     </div>` : `
     <div id="composer">
       <div id="composer-pill">
-        ${prepared?.warmBase && !data._paged ? ""
-          : permissionEntry === "ready"
+        ${permissionEntry === "ready"
             ? `<button id="agents-perm-btn" title="Agent permissions">${ICONS.hand}</button>`
             : permissionEntry === "pending"
               ? `<button id="agents-perm-btn" title="Agent permissions loading" disabled>${ICONS.hand}</button>`
@@ -1865,19 +1475,19 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         // re-check live (the captured isMuted goes stale after a toggle);
         // flip the button in place — the header isn't rebuilt on a poll
         const cNow = (Mesh.state?.chats || []).find((k) => k.id === chatId);
-        if (meshMuteActive(data._paged ? {mute:meta.mute} : cNow || {})) {
+        if (meshMuteActive({mute:meta.mute})) {
           const r = await api("/api/mesh/mute", { chat_id: chatId, muted: false });
           if (r.error) { toast(r.error, true); return; }
-          if (data._paged) meta.mute = false;
+          meta.mute = false;
           if (cNow) cNow.mute = false;   // show it now, don't wait for the poll
           toast("Notifications back on", { check: true });
           b.innerHTML = `${ICONS.bell} Mute notifications`;
           V.refresh(false);
         } else {
           muteDialog(chatId, () => {
-            if (data._paged) meta.mute = true;
+            meta.mute = true;
             b.innerHTML = `${ICONS.bellOff} Unmute`;
-            if (data._paged) V.refresh(false);
+            V.refresh(false);
           });
         }
       }
@@ -1892,14 +1502,14 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
         location.hash = "#/chats";   // archived chats leave the active list
       } else if (act === "pause") {
         // V62: chat-scoped — the harness holds THIS chat's triggers/timers
-        if (data._paged && (b.disabled || typeof b._paused !== "boolean")) return;
-        const down = data._paged ? !b._paused : !meta.agents_paused;
+        if (b.disabled || typeof b._paused !== "boolean") return;
+        const down = !b._paused;
         toast(down ? "Standing down agents in this chat…"
                    : "Resuming agents in this chat…", { spinner: true });
         const r = await api("/api/mesh/chat_pause",
                             { chat_id: chatId, paused: down });
         if (r.error) { toast(r.error, { error: true, swap: true }); return; }
-        if (data._paged) b._paused = !!r.paused;
+        b._paused = !!r.paused;
         Mesh.structKey = ""; renderMeshChat(true);
         toast(r.paused ? "Agents standing down in this chat"
                        : "Agents resumed in this chat",
@@ -1926,16 +1536,13 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
 
   const tr = $("#transcript");
   if (isMember) {
-    // Guarded stateGeneration + data.me equality make the draft key's legacy
-    // Mesh.state.user read identity-equivalent during this synchronous init.
+    // The ready bound-session viewer owns the composer draft.
     initComposer(chatId, members, ms);
     renderReplyArea(chatId, ms);
   }
-  if (interactive) {
-    renderMeshPending(chatId);
-    Mesh.askKey = "";        // fresh chat surface: let the next tick repaint
-    startAskPoll();
-  }
+  renderMeshPending(chatId);
+  Mesh.askKey = "";        // fresh chat surface: let the next tick repaint
+  startAskPoll();
   // Canonical messages and metadata are already fresh; interaction need not
   // wait for directory/runtime hydration. Endpoints still authorize actions.
   bindOpenFile(tr, chatId, ".mesh-att");
@@ -1945,7 +1552,7 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (parts.length && tr.children.length === parts.length) {
     tr._rows = new Map(parts.map(([k, h], i) => [k, { html: h, el: tr.children[i] }]));
   }
-  syncReceiptTicks(tr, data.messages, isDm, !data._paged || data.metadata_status?.receipts === "ready");
+  syncReceiptTicks(tr, data.messages, isDm, data.metadata_status?.receipts === "ready");
   clampLong(tr, Mesh.msgExpand = Mesh.msgExpand || {});
   if (Mesh.jumpTo) jumpToMessage();
   else if (keep && !keep.nearBottom) tr.scrollTop = keep.top;
@@ -1953,10 +1560,6 @@ async function renderMeshChat(force, openTrace = null, prepared = null) {
   if (keep?.caret) {
     const box = $("#mesh-body");
     if (box) { box.focus(); box.setSelectionRange(keep.caret[0], keep.caret[1]); }
-  }
-  if (interactive && hadNew) {
-    if (document.hasFocus()) markReadNow(chatId);
-    else Mesh.pendingRead = chatId;     // settle on the focus listener
   }
   // opening a chat animates the transcript in — an in-place structural
   // update (rename etc.) must not re-play the entrance (R52)
@@ -2020,8 +1623,8 @@ function startAskPoll() {
     if (document.hidden || !document.hasFocus() || askPollRequest) return;
     const ticket = captureSessionEpoch();
     const lockEpoch = meshStateSnapshot().lockEpoch;
-    const bound = meshCaps().chat_page_v1;
     const binding = BrowserSession.snapshot().binding;
+    if (!binding?.viewer) return;
     const request = {abort:new AbortController()};
     askPollRequest = request;
     try {
@@ -2030,40 +1633,38 @@ function startAskPoll() {
       if (askPollRequest !== request || request.abort.signal.aborted
           || App.page !== "chats" || meshStateSnapshot().lockEpoch !== lockEpoch
           || !sessionMayApply(ticket, r)
-          || (bound && !samePageBinding(binding, r?.session_binding))) return;
+          || !samePageBinding(binding, r?.session_binding)) return;
       if (r?.locked || r?.forbidden || r?.error === "Session changed") {
         resetAskPollState(); return;
       }
       if (r?.error || !Array.isArray(r?.asks) || !Array.isArray(r?.timers)
           || r.asks.length > 1024 || r.timers.length > 512) return;
-      const key = bound ? JSON.stringify([binding.instance_id,
-        binding.session_generation,binding.viewer]) : "legacy";
+      const key = JSON.stringify([binding.instance_id,
+        binding.session_generation,binding.viewer]);
       const prior = askPollSnapshot?.key === key ? askPollSnapshot
         : {key,rooms:[],peer:[],timers:[]};
       const rooms = r.asks.filter(item => item?.kind !== "peer");
       const peerRows = r.asks.filter(item => item?.kind === "peer");
-      if (bound && (r.ok !== true || typeof r.rooms_complete !== "boolean"
+      if (r.ok !== true || typeof r.rooms_complete !== "boolean"
           || typeof r.peer_complete !== "boolean"
           || typeof r.timers_complete !== "boolean"
           || !Array.isArray(r.resolved_room_ids)
           || r.resolved_room_ids.length > 128
           || r.resolved_room_ids.some(id => typeof id !== "string" || !id)
-          || new Set(r.resolved_room_ids).size !== r.resolved_room_ids.length)) return;
-      const resolved = new Set(bound ? r.resolved_room_ids : []);
-      let roomRows = bound
-        ? (r.rooms_complete ? [] : prior.rooms.filter(item => !resolved.has(item.chat_id)))
-          .concat(rooms.filter(item => resolved.has(item.chat_id))).slice(-1024)
-        : mergeAskLane(prior.rooms,rooms,true,1024);
+          || new Set(r.resolved_room_ids).size !== r.resolved_room_ids.length) return;
+      const resolved = new Set(r.resolved_room_ids);
+      const roomRows = (r.rooms_complete ? [] : prior.rooms.filter(item => !resolved.has(item.chat_id)))
+        .concat(rooms.filter(item => resolved.has(item.chat_id))).slice(-1024);
       askPollSnapshot = {
         key,
         rooms:roomRows,
-        peer:mergeAskLane(prior.peer,peerRows,bound ? r.peer_complete : true,128),
-        timers:mergeAskLane(prior.timers,r.timers,bound ? r.timers_complete : true,512),
+        peer:mergeAskLane(prior.peer,peerRows,r.peer_complete,128),
+        timers:mergeAskLane(prior.timers,r.timers,r.timers_complete,512),
       };
       // Global incomplete room scans cannot prove that a previously visible
       // active room is still available. Probe that *known* selected ID only;
       // never expose provider-discovered forbidden room identities globally.
-      if (bound && !r.rooms_complete && Mesh.chatId && !resolved.has(Mesh.chatId)
+      if (!r.rooms_complete && Mesh.chatId && !resolved.has(Mesh.chatId)
           && prior.rooms.some(item => item.chat_id === Mesh.chatId)) {
         const scopedChat = Mesh.chatId;
         try {
@@ -2959,7 +2560,7 @@ function jumpToMessage() {
   if (!id) return;
   const el = document.querySelector(`#transcript .msg[data-mid="${CSS.escape(id)}"]`);
   if (!el) {
-    if (meshCaps().chat_page_v1) toast("That message is outside the loaded history. Load earlier messages to find it.");
+    toast("That message is outside the loaded history. Load earlier messages to find it.");
     return;
   }
   el.scrollIntoView({ block: "center" });

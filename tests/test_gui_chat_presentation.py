@@ -1,148 +1,133 @@
-"""Privacy and bounds for display-only selected-chat presentation."""
-
+"""Privacy and bounds for current selected-chat auxiliary profiles."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import time
+from types import SimpleNamespace
 
-from agentbridge.gui.api_chats import _chat_presentation
-from agentbridge.mesh.service import Mesh
+import pytest
 
-
-@dataclass
-class _Account:
-    avatar: dict | None = None
-
-
-class _Directory:
-    def __init__(self, accounts):
-        self.accounts = accounts
-        self.reads = []
-
-    def get(self, name):
-        self.reads.append(name)
-        return self.accounts.get(name)
+from agentbridge.core.models import Account, Privacy, UserKind
+from agentbridge.mesh.profile_presentation import project_profile
+from conftest import seed_account
 
 
-class _Mesh:
-    user = "viewer"
+@pytest.fixture
+def manual_presentation_owners(monkeypatch):
+    """These boundary tests own publication through rig.prepare, serially."""
+    from agentbridge.mesh.service import Mesh
+    from agentbridge.mesh.sync import SyncEngine
 
-    def __init__(self, accounts, profiles):
-        self.directory = _Directory(accounts)
-        self.profiles = profiles
-
-    def visible_profile(self, name):
-        return dict(self.profiles.get(name, {}))
-
-
-def test_selected_presentation_is_relevant_privacy_filtered_and_detached():
-    accounts = {
-        "viewer": _Account(),
-        "member": _Account({"sha256": "a" * 64, "updated": "now", "raw": "secret"}),
-        "sender": _Account({"sha256": "b" * 64}),
-        "unrelated": _Account({"sha256": "c" * 64}),
-    }
-    profiles = {
-        "viewer": {"display": "Viewer", "kind": "human", "owner": "hidden"},
-        "member": {"display": "Member", "kind": "agent", "photo_visible": True,
-                   "machine": "hidden", "active": True},
-        "sender": {"display": "Sender", "kind": "human", "photo_visible": False,
-                   "sign_pub": "hidden"},
-        "unrelated": {"display": "Nope", "kind": "agent", "photo_visible": True},
-    }
-    mesh = _Mesh(accounts, profiles)
-    result = _chat_presentation(
-        mesh, ["viewer", "member"], [{"from": "sender"}, {"from": "member"}],
-    )
-
-    assert result == {
-        "user": "viewer",
-        "users": {
-            "viewer": {"display": "Viewer", "display_kind": "human"},
-            "member": {"display": "Member", "display_kind": "agent",
-                       "avatar": {"sha256": "a" * 64, "updated": "now"}},
-            "sender": {"display": "Sender", "display_kind": "human"},
-        },
-    }
-    assert "unrelated" not in mesh.directory.reads
-    profiles["member"]["display"] = "changed later"
-    accounts["member"].avatar["sha256"] = "changed later"
-    assert result["users"]["member"]["display"] == "Member"
-    assert result["users"]["member"]["avatar"]["sha256"] == "a" * 64
-    wire = repr(result)
-    for forbidden in ("owner", "machine", "active", "sign_pub", "raw", "photo_visible"):
-        assert forbidden not in wire
+    monkeypatch.setattr(Mesh, 'start', lambda self, **kwargs: None)
+    monkeypatch.setattr(SyncEngine, 'run', lambda self, **kwargs: None)
 
 
-def test_selected_presentation_enforces_count_and_utf8_budget():
-    names = [f"u{i:03d}" for i in range(300)]
-    accounts = {name: _Account() for name in ["viewer", *names]}
-    profiles = {
-        name: {"display": "\U0001f642" * 256, "kind": "human"}
-        for name in accounts
-    }
-    mesh = _Mesh(accounts, profiles)
-    result = _chat_presentation(mesh, names, [])
-
-    assert len(result["users"]) <= 256
-    assert list(result["users"])[0] == "viewer"
-    # The production owner charges canonical per-entry UTF-8 JSON before
-    # retaining each record and stops before crossing its 64 KiB budget.
-    import json
-
-    charged = sum(
-        len(json.dumps({name: value}, ensure_ascii=False).encode("utf-8"))
-        for name, value in result["users"].items()
-    )
-    assert charged <= 64 * 1024
-    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 64 * 1024
-    assert len(result["users"]) < len(accounts)
+def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
+    rig.signup()
+    rig.peer_account('member')
+    rig.peer_account('unrelated')
+    with rig.peer_mesh('member') as member:
+        member.set_about('private profile')
+        member.set_privacy({'about': 'nobody', 'photo': 'nobody'})
+        member.outbox.flush_once()
+    chat = rig.post('/api/mesh/create_chat', name='Profiles', members=['member'])['chat']['id']
+    result = rig.aux(chat)
+    assert set(result['users']) == {'aryan', 'member'}
+    assert 'about' not in result['users']['member']
+    assert 'private profile' not in json.dumps(result)
+    assert 'sign_pub' not in json.dumps(result['users'])
+    before = result['users']['member']['display']
+    with rig.peer_mesh('member') as member:
+        member.set_display('Changed later')
+        member.outbox.flush_once()
+    assert result['users']['member']['display'] == before
+    assert rig.aux(chat)['users']['member']['display'] == 'Changed later'
 
 
-def test_selected_presentation_retains_exactly_256_short_profiles():
-    names = [f"u{i:03d}" for i in range(300)]
-    accounts = {name: _Account() for name in ["viewer", *names]}
-    profiles = {name: {"display": name, "kind": "human"} for name in accounts}
-    result = _chat_presentation(_Mesh(accounts, profiles), names, [])
-    assert len(result["users"]) == 256
-    assert list(result["users"])[0] == "viewer"
-    assert "u254" in result["users"]
-    assert "u255" not in result["users"]
+@pytest.mark.usefixtures('manual_presentation_owners')
+def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
+    rig.signup()
+    names = [f'u{i:03d}' for i in range(70)]
+    for name in names:
+        seed_account(rig.app.mesh.tx, name, display='Short name')
+    chat = rig.post('/api/mesh/create_chat', name='Bounded profiles', members=names)['chat']['id']
+    # This checks presentation cardinality, not a runner's SQLite throughput.
+    # Keep the authority clock stable in this test; expiry/rollback stay covered
+    # separately through the same real HTTP preparation and finalization path.
+    from agentbridge.mesh import membership_coordinator
+    now = time.time_ns()
+    monkeypatch.setattr(membership_coordinator, 'time', SimpleNamespace(time_ns=lambda: now))
+    result = rig.aux(chat)
+    assert result.get('status') == 'ready', result
+    assert len(result['users']) == 64
+    assert 'aryan' in result['users']
+    assert result['metadata_status']['profiles'] == 'pending'
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 4 * 1024 * 1024
 
 
-def test_missing_profiles_still_bound_authority_lookups_to_256_names():
-    names = [f"missing{i:03d}" for i in range(300)]
-    mesh = _Mesh({"viewer": _Account()}, {"viewer": {"display": "Viewer"}})
-    result = _chat_presentation(mesh, names, [])
-    assert result["users"] == {"viewer": {"display": "Viewer"}}
-    assert len(mesh.directory.reads) == 256
-    assert mesh.directory.reads[0] == "viewer"
-    assert mesh.directory.reads[-1] == "missing254"
+@pytest.mark.parametrize('fault', ['expired', 'rollback'])
+@pytest.mark.usefixtures('manual_presentation_owners')
+def test_selected_presentation_withholds_payload_on_clock_fault(rig, monkeypatch, fault):
+    from agentbridge.gui.api_page_aux import AuxiliaryPageOperation
+    from agentbridge.mesh import membership_coordinator
+
+    rig.signup()
+    chat = rig.post('/api/mesh/create_chat', name='Clock fence', members=[])['chat']['id']
+    rig.prepare(chat)
+    now = [time.time_ns()]
+    monkeypatch.setattr(membership_coordinator, 'time', SimpleNamespace(time_ns=lambda: now[0]))
+    decorate = AuxiliaryPageOperation._decorate
+
+    def expire_after_real_calculation(self, round_, *args, **kwargs):
+        payload = decorate(self, round_, *args, **kwargs)
+        now[0] = round_.deadline if fault == 'expired' else round_.now - 1
+        return payload
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AuxiliaryPageOperation, '_decorate', expire_after_real_calculation)
+        result = rig.get('/api/mesh/chat_aux', id=chat)
+    assert result['status'] == 'unavailable', result
+    assert result['reason'] == ('clock_expired' if fault == 'expired' else 'clock_rollback')
+    assert not {'users', 'feeds', 'tasks', 'runs'} & result.keys()
+    # A new canonical computation can succeed after the fault is removed.
+    now[0] = time.time_ns()
+    assert rig.aux(chat)['status'] == 'ready'
+
+
+def test_unknown_profile_relationship_defers_private_fields():
+    account = Account(name='member', about='secret', privacy=Privacy(about='members', photo='agents'))
+    result = project_profile(account, 'viewer', viewer_kind=UserKind.HUMAN)
+    assert 'about' not in result.profile
+    assert result.profile['photo_visible'] is None
+    assert {'about', 'photo'} <= set(result.pending_fields)
+    proved = project_profile(account, 'viewer', viewer_kind=UserKind.HUMAN,
+                             same_selected_room=True, viewer_owns_agent=True)
+    assert proved.profile['about'] == 'secret'
+    assert proved.profile['photo_visible'] is True
+
+
+def test_profile_utf8_budget_rejects_oversized_display():
+    account = Account(name='member', display='🙂' * 256)
+    with pytest.raises(ValueError, match='invalid display'):
+        project_profile(account, 'viewer', viewer_kind=UserKind.HUMAN, same_selected_room=True)
 
 
 def test_outsider_chat_denial_never_returns_presentation(rig):
     rig.signup()
-    rig.peer_account("fable")
-    outsider = Mesh(
-        rig.root, "fable", "peerbox", home=rig.home,
-        store_path=rig.home / "fable-presentation.sqlite",
-    )
-    try:
-        private = outsider.create_chat("Private", [])
-    finally:
-        outsider.close()
-    denied = rig.get("/api/mesh/chat", id=private.id)
-    assert "error" in denied
-    assert "presentation" not in denied
+    rig.peer_account('fable')
+    with rig.peer_mesh('fable') as peer:
+        private = peer.create_chat('Private', [])
+    denied = rig.aux(private.id)
+    assert denied['status'] == 'forbidden'
+    assert 'users' not in denied
+    assert 'private' not in json.dumps(denied).lower()
 
 
-def test_hidden_or_missing_profile_fields_fall_back_without_authority_data():
-    mesh = _Mesh(
-        {"viewer": _Account(), "missing": _Account(), "bad": _Account({"sha256": 7})},
-        {"viewer": {}, "missing": {"display": "", "kind": "machine"},
-         "bad": {"display": "B", "kind": "agent", "photo_visible": True}},
-    )
-    result = _chat_presentation(mesh, ["missing", "bad", "absent"], [])
-    assert result["users"]["viewer"] == {"display": "viewer"}
-    assert result["users"]["missing"] == {"display": "missing"}
-    assert result["users"]["bad"] == {"display": "B", "display_kind": "agent"}
-    assert "absent" not in result["users"]
+def test_hidden_or_missing_profile_fields_fall_back_without_private_data():
+    account = Account(name='member', display='', about='private',
+                      privacy=Privacy(about='nobody', photo='nobody', status='nobody'))
+    result = project_profile(account, 'viewer', viewer_kind=UserKind.HUMAN, same_selected_room=True)
+    assert result.profile['display'] == ''
+    assert result.profile['photo_visible'] is False
+    assert 'about' not in result.profile and 'status' not in result.profile
+    assert result.pending_fields == ()

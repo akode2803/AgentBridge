@@ -20,11 +20,10 @@ from agentbridge.mesh.service import Mesh
 
 
 @pytest.fixture()
-def delegation_meshes(tmp_path):
-    root = tmp_path / "mesh"
-    root.mkdir()
+def delegation_meshes(tmp_path, clouds):
+    root = clouds.root(tmp_path / "mesh")
     home = tmp_path / "home"
-    owner = Mesh(root, "owner", "box", encrypt=True, home=home,
+    owner = Mesh(clouds.bare(root), "owner", "box", encrypt=True, home=home,
                  store_path=tmp_path / "owner.sqlite")
     owner.accounts.create_human("owner", "correct-horse")
     owner.accounts.create_agent(
@@ -34,9 +33,9 @@ def delegation_meshes(tmp_path):
         "specialist", harness={"agent_tools_enabled": True,
                                "routing": {"agents": {"enabled": True}}},
     )
-    manager = Mesh(root, "manager", "box", encrypt=True, home=home,
+    manager = Mesh(clouds.bare(root), "manager", "box", encrypt=True, home=home,
                    store_path=tmp_path / "manager.sqlite")
-    specialist = Mesh(root, "specialist", "box", encrypt=True, home=home,
+    specialist = Mesh(clouds.bare(root), "specialist", "box", encrypt=True, home=home,
                       store_path=tmp_path / "specialist.sqlite")
     chat = owner.create_chat(
         "Delegation proof", members=["manager", "specialist"],

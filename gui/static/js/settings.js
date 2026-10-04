@@ -310,15 +310,9 @@ function wireAppLock() {
 // V116: the About page's connection <dl> — built the same way at mount and
 // by the live poller, which swaps ONLY these rows (so the traffic meter and
 // mirror health tick while you watch, without a full repaint wiping the
-// Updates card's transient notes). The folder "open" link is inline-bound
-// for that reason: a listener bound at mount wouldn't survive the swap.
+// Updates card's transient notes).
 function connKvRows(s) {
-  const cloud = s.connection && s.connection.scheme !== "folder";
-  const root = s.connection ? s.connection.root : s.shared_dir;
-  return `${cloud
-      ? `<dt>Cloud root</dt><dd class="mono">${esc(root || "")}</dd>`
-      : `<dt>Shared folder</dt><dd class="mono">${esc(root || "")}
-          <a href="#" onclick="openTarget('shared');return false">open</a></dd>`}
+  return `<dt>Cloud root</dt><dd class="mono">${esc(s.connection?.root || "")}</dd>
     ${V.connectionRows(s)}
     <dt>Version</dt><dd>${V.versionLine(s)}</dd>`;
 }
@@ -436,9 +430,8 @@ async function renderSettings() {
       <div class="card">
         <h2>Session</h2>
         <div class="row"><button id="st-logout">Sign out</button></div>
-        <p class="hint" style="margin-bottom:0">Your account lives in the shared
-        folder — it works from any machine that syncs it, and your photo, name and
-        settings follow you.</p>
+        <p class="hint" style="margin-bottom:0">Sign in to your cloud mesh from
+        another machine to access your account, photo, name and settings.</p>
       </div>
       <div class="card">
         <h2>Delete account</h2>

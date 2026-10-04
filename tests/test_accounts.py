@@ -7,19 +7,18 @@ from agentbridge.core.models import MsgKind, Role, UserKind
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.keyring import KeyStore
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
     bundles = {}
 
     def mk(user, machine="mach1"):
         home = tmp_path / f"home-{user}-{machine}"
         if user in bundles:
             KeyStore(home).save(user, bundles[user])
-        return Mesh(FolderTransport(root), user, machine, home=home)
+        return Mesh(clouds.bare(root), user, machine, home=home)
 
     boot = mk("aryan")
     boot.accounts.create_human("aryan", "aryan-pass")

@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,32 @@ __all__ = [
     "load_app_config",
     "save_app_config",
     "configured_machine",
+    "validate_root_spec",
 ]
+
+
+def validate_root_spec(spec: Any) -> str:
+    """Validate a configured cloud root before activating local resources.
+
+    Keep errors independent of the supplied value: an invalid value may contain
+    credentials. The 1 KiB label budget leaves room for provider metadata within
+    the 4 KiB source and cache identity contracts. Unicode labels remain valid;
+    URL syntax and path syntax do not.
+    """
+    error = "A valid supabase:// root is required"
+    if type(spec) is not str or not spec.startswith("supabase://"):
+        raise ConfigError(error)
+    label = spec[len("supabase://"):]
+    if (not label or label in (".", "..")
+            or any(char in "/\\?#@:" or char.isspace()
+                   or unicodedata.category(char).startswith("C") for char in label)):
+        raise ConfigError(error)
+    try:
+        if len(label.encode("utf-8")) > 1024:
+            raise ConfigError(error)
+    except UnicodeEncodeError:
+        raise ConfigError(error) from None
+    return spec
 
 DEFAULT_HOME = Path(os.environ.get("AGENTBRIDGE_HOME", "")) if os.environ.get(
     "AGENTBRIDGE_HOME"

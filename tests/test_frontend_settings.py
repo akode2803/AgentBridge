@@ -42,3 +42,30 @@ def test_remounted_agent_model_controls_still_autosave():
     assert 'slot.classList.contains("ag-model")' in remount
     assert "refreshEfforts(slot.dataset.agent)" in remount
     assert "agConfigSave(slot.dataset.agent)" in remount
+
+
+def test_cloud_connection_and_account_surfaces_have_no_folder_transport_controls():
+    chat = (ROOT / "chat.js").read_text(encoding="utf-8")
+    settings = (ROOT / "settings.js").read_text(encoding="utf-8")
+    state = (ROOT / "state.js").read_text(encoding="utf-8")
+    connection = chat[chat.index("function connectionRows(s)"):
+                      chat.index("V.connectionRows = connectionRows")]
+    about = settings[settings.index("function connKvRows(s)"):
+                     settings.index("async function renderSettings()")]
+
+    assert '<dt>Cloud mesh</dt>' in connection
+    assert 'm.age_s > 120' in connection
+    assert 'm.retry_in_s' in connection
+    assert 'm.hints_suspect' in connection
+    assert 'm.transfer' in connection
+    assert 'm.auth.startsWith("member:")' in connection
+    assert '<dt>Cloud root</dt>' in about
+    assert 's.connection?.root' in about
+    assert 'shared_dir' not in connection + about
+    assert 'scheme === "folder"' not in connection
+    assert "openTarget('shared')" not in settings
+    assert "machine that syncs it" not in settings
+    assert "folder_unavailable" not in state
+    assert "folder_read_only" not in state
+    assert 'title="Save to a folder"' in chat
+    assert "Open config folder" in settings

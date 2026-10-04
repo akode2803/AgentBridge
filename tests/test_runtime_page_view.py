@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from fake_cloud import refresh_transport
+
 from agentbridge.gui.api_runtime import contributor_rows
 from agentbridge.harness.runtime.authority import AuthorityError
 from agentbridge.harness.runtime.handoffs import HandoffLedger
@@ -57,17 +59,16 @@ class Round:
 
 
 @pytest.fixture
-def world(tmp_path):
-    root, home = tmp_path / 'mesh', tmp_path / 'home'
-    root.mkdir()
-    owner = Mesh(root, 'owner', 'box', encrypt=True, home=home,
+def world(tmp_path, clouds):
+    root, home = clouds.root(tmp_path / 'mesh'), tmp_path / 'home'
+    owner = Mesh(clouds.cached(root), 'owner', 'box', encrypt=True, home=home,
                  store_path=tmp_path / 'owner.sqlite')
     owner.accounts.create_human('owner', 'owner-pass')
     owner.accounts.create_agent('manager', harness={'agent_tools_enabled':True})
     owner.accounts.create_agent('specialist', harness={'agent_tools_enabled':True})
-    manager = Mesh(root, 'manager', 'box', encrypt=True, home=home,
+    manager = Mesh(clouds.bare(root), 'manager', 'box', encrypt=True, home=home,
                    store_path=tmp_path / 'manager.sqlite')
-    specialist = Mesh(root, 'specialist', 'box', encrypt=True, home=home,
+    specialist = Mesh(clouds.bare(root), 'specialist', 'box', encrypt=True, home=home,
                       store_path=tmp_path / 'specialist.sqlite')
     chat = owner.create_chat('Runtime captured', members=['manager','specialist']).id
     owner.outbox.flush_once()
@@ -84,6 +85,7 @@ def world(tmp_path):
                                  objective='Review', reason='Review',
                                  success_criteria=('Return a finding',))
         manager.outbox.flush_once()
+        refresh_transport(owner.tx)
         documents = owner.tx.cached_docs_bounded(f'chats/{chat}/runtime/', 10000)
         accounts = {name:owner.directory.get(name)
                     for name in ('owner','manager','specialist')}

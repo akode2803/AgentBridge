@@ -19,7 +19,8 @@ import re
 import sys
 from pathlib import Path
 
-from .core.config import load_app_config
+from .core.config import load_app_config, validate_root_spec
+from .core.errors import ConfigError
 from .core.models import ChatKind, Message, MsgKind
 from .mesh.events import is_legacy_chat_id
 from .mesh.service import Mesh
@@ -92,9 +93,11 @@ def main(argv: list[str] | None = None) -> int:
     if not root:
         ap.error("no --root given and none remembered in config.json")
 
-    mesh = Mesh(Path(root), args.user, args.machine, encrypt=True,
-                home=home) if home else Mesh(Path(root), args.user, args.machine,
-                                             encrypt=True)
+    try:
+        root = validate_root_spec(root)
+    except ConfigError as exc:
+        ap.error(str(exc))
+    mesh = Mesh(root, args.user, args.machine, encrypt=True, home=home)
     try:
         mesh.sync.sync_once()
         chats = args.chat or [s.id for s in mesh.chats_for()]

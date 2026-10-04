@@ -1,4 +1,4 @@
-"""Opt-in GUI paging is bounded, opaque and session fenced."""
+"""GUI paging is bounded, opaque and session fenced on offline cloud backing."""
 from __future__ import annotations
 
 import json
@@ -19,18 +19,24 @@ from agentbridge.mesh import page_operation
 from agentbridge.store import local_source
 from agentbridge.store.page_inputs import MessageKey
 
+from conftest import refresh_cloud
+
 
 @pytest.fixture
-def page_app(tmp_path, monkeypatch):
+def page_app(tmp_path, monkeypatch, clouds):
     # Drive explicit background steps; the production worker remains covered
     # separately. No polling or race with an outbox/ingestion thread here.
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kw: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kw: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='guibox',
+    clouds.factory_auto_refresh = False
+    root = clouds.root(tmp_path / 'root')
+    app = GuiApp(root, home=tmp_path / 'home', machine='guibox',
                  encrypt=True, local_inputs=True)
     try:
         assert app.signup('viewer', '', 'secret')['ok']
+        refresh_cloud(app)
         chat = api_chats.create_chat(app, Request(data={'name': 'Room', 'members': []}))['chat']['id']
+        refresh_cloud(app)
         yield app, chat
     finally:
         app.close()
@@ -45,6 +51,9 @@ def _ready(app, chat):
     for _ in range(8):
         if app.mesh.outbox.flush_once() == 0:
             break
+    # Observe foreign peer changes before admitting a new local source cut.
+    # The page endpoint itself never performs this provider refresh.
+    refresh_cloud(app)
     runtime.prepare_one()
     runtime.ingest(chat)
     return runtime

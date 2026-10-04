@@ -20,7 +20,6 @@ from agentbridge.store import lifecycle_heads, membership_read_inputs
 from agentbridge.store.db import Store
 from agentbridge.store.membership_read_inputs import capture_cut, matches_cut
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.mirror_observation import MirrorPositionValidation
 
 
@@ -45,15 +44,10 @@ def _event(message_id: str, ns: int = 1) -> dict:
 
 
 @pytest.fixture
-def admission_mesh(tmp_path):
+def admission_mesh(tmp_path, clouds):
     root = tmp_path / "mesh"
-    root.mkdir()
-    inner = FolderTransport(root)
+    inner = clouds.bare(root)
     cache = CachingTransport(inner, auto_refresh=False)
-    # FolderTransport owns a Path root; R184's CachingTransport capture requires
-    # explicit string identities, as cloud transports normally provide.
-    cache._mirror_root_identity = str(root)
-    cache._mirror_cache_identity = "admission-fixture-cache"
     mesh = Mesh(cache, "aryan", "machine", home=tmp_path / "home")
     try:
         inner.put_doc(P.meta(CHAT), ChatSnapshot(

@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from agentbridge.gui import api_chats
+from agentbridge.gui import api_chats, api_pages
 from agentbridge.gui.context import GuiApp, SessionReadToken
 from agentbridge.gui.routing import Request, authed, authed_read
 from agentbridge.mesh.service import Mesh
@@ -35,21 +35,30 @@ def test_completed_real_read_is_discarded_across_logout_login_aba(
     if next_user == "fable":
         rig.peer_account("fable")
     entered, release = threading.Event(), threading.Event()
-    original_log = api_chats.ProjectionObservation.log
+    if route == "chat":
+        rig.page(chat_id)
+    else:
+        rig.sidebar()
+    original = api_pages.chat_page.__wrapped__ if route == "chat" else api_chats._state_captured
 
-    def block_after_payload(self, home, outcome):
-        if self.scope == ("chat" if route == "chat" else "sidebar") and outcome == "ok":
-            entered.set()
-            assert release.wait(10)
-        return original_log(self, home, outcome)
+    def block_after_payload(*args, **kwargs):
+        value = original(*args, **kwargs)
+        entered.set()
+        assert release.wait(10)
+        return value
 
-    monkeypatch.setattr(api_chats.ProjectionObservation, "log", block_after_payload)
+    if route == "chat":
+        # Wrap only payload construction, leaving the public read fence intact.
+        from agentbridge.gui.routing import authed_read_token
+        monkeypatch.setattr(api_pages, "chat_page", authed_read_token(block_after_payload))
+    else:
+        monkeypatch.setattr(api_chats, "_state_captured", block_after_payload)
     result: dict[str, object] = {}
     errors: list[BaseException] = []
 
     def read() -> None:
         try:
-            handler = api_chats.chat if route == "chat" else api_chats.state
+            handler = api_pages.chat_page if route == "chat" else api_chats.state
             req = Request(params={"id": chat_id}) if route == "chat" else Request()
             result["out"] = handler(rig.app, req)
         except BaseException as error:
@@ -145,11 +154,11 @@ def test_valid_reads_do_not_hold_session_lock_during_handler_work(rig):
     assert results == [{"ok": True}, {"ok": True}]
 
 
-def test_token_tampering_and_cross_app_fail_closed(rig, tmp_path):
+def test_token_tampering_and_cross_app_fail_closed(rig, tmp_path, clouds):
     rig.signup()
     token = rig.app.capture_session_read()
     assert token is not None
-    other = GuiApp(tmp_path / "other-root", home=tmp_path / "other-home", machine="other")
+    other = GuiApp(clouds.root(tmp_path / "other-root"), home=tmp_path / "other-home", machine="other")
     try:
         assert not other.validate_session_read(token)
         object.__setattr__(token, "generation", token.generation + 1)

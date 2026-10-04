@@ -21,10 +21,11 @@ MAX_JOBS = 132  # 128 room companions plus four root scopes.
 
 
 class AuxInputRuntime:
-    def __init__(self, transport, store, *, clock=time.monotonic):
+    def __init__(self, transport, store, *, clock=time.monotonic, on_change=None):
         if type(transport) is not LocalMutationTransport or not callable(clock):
             raise ValueError('aux ingestion requires mutation-owned transport and clock')
         self.transport, self.store, self.clock = transport, store, clock
+        self.on_change = on_change
         self.coordinator = transport._coordinator
         staged_source.initialize(store)
         source_selectors.initialize(store)
@@ -113,6 +114,8 @@ class AuxInputRuntime:
                                                   observed_ns=time.time_ns(), comparison=equality)
             if captured.source.raw.source_id != admitted.raw.source_id:
                 staged_source.retire_generation(self.store, captured.source.raw.source_id)
+            if self.on_change is not None and (not equality or not captured.source.ready):
+                self.on_change(reader.scope, reader.chat_id)
             return admitted
         except Exception as exc:
             budget = isinstance(exc, OverflowError) or (

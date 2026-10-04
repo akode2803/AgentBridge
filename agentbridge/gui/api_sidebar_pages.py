@@ -13,6 +13,7 @@ import time
 from ..core.models import ChatSnapshot, MsgKind
 from ..mesh.page_operation import PageOperation
 from ..mesh.readmodel import unread_info
+from ..mesh.unread_counts import UnreadSession
 from ..store import aux_inputs, local_source, overlay_index
 from ..transport.authority_observation import _part
 from .serialize import chat_json, snippet_json
@@ -75,24 +76,58 @@ def _summary(snapshot, selection, viewer, state):
     return entry, True
 
 
+def _stage(app, chat, phase, status, reason='none', **fields):
+    """Diagnostic failures must never affect canonical sidebar outcomes."""
+    try:
+        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
+            diagnostics.stage('/api/mesh/state', chat, phase, status, reason, **fields)
+    except Exception:  # noqa: BLE001 — telemetry is best effort
+        pass
+
+
+def _timed_stage(app, chat, phase, call, *args):
+    started = time.perf_counter()
+    try:
+        value = call(*args)
+    except Exception as exc:
+        _stage(app, chat, phase, 'error', 'other',
+               duration_ms=(time.perf_counter() - started) * 1000,
+               error_type=type(exc).__name__)
+        raise
+    _stage(app, chat, phase, 'ready' if phase == 'inputs' else value.status,
+           'none' if phase == 'inputs' else (value.reason or 'none'),
+           duration_ms=(time.perf_counter() - started) * 1000)
+    return value
+
+
 def _room(app, mesh, token, chat):
     runtime = mesh.local_inputs
     try:
         chat = _part(chat)
         runtime.request(chat)
         runtime.request_page(chat)
-        reader, receipt, index = runtime.inputs(chat)
+        session = UnreadSession(token.app_identity, token.generation, mesh.user)
+        unread = runtime.unread
+        if unread is not None:
+            unread.request(chat, session)
+        candidate = None if unread is None else unread.candidate(chat, session)
+        reader, receipt, index = _timed_stage(app, chat, 'inputs', runtime.inputs, chat)
         operation = PageOperation(mesh, chat, source_reader=reader,
                                   limit=PAGE_LIMIT, scan_budget=SCAN_BUDGET,
-                                  summary_only=True)
+                                  summary_only=True, unread_candidate=candidate)
         for _ in range(4):
-            value = operation.prepare(receipt, receipt, index)
+            value = _timed_stage(app, chat, 'prepare', operation.prepare, receipt, receipt, index)
             if value.status not in ('prepared', 'restart'):
-                if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-                    diagnostics.stage('/api/mesh/state', chat, 'sidebar',
-                                      value.status, value.reason or 'none')
+                _stage(app, chat, 'sidebar', value.status, value.reason or 'none')
+            if candidate is not None and value.status not in ('prepared', 'forbidden'):
+                # A count is only comparison evidence. Its stale or over-budget
+                # closure must not suppress a fresh ordinary sidebar summary.
+                unread.invalidate(chat, session)
+                candidate = operation.unread_candidate = None
+                reader, receipt, index = _timed_stage(app, chat, 'inputs', runtime.inputs, chat)
+                continue
             if value.status == 'restart':
-                reader, receipt, index = runtime.inputs(chat)
+                reader, receipt, index = _timed_stage(app, chat, 'inputs', runtime.inputs, chat)
                 continue
             if value.status == 'work':
                 if value.reason == 'overlay_proofs':
@@ -104,13 +139,16 @@ def _room(app, mesh, token, chat):
                 return None, True
             if value.status != 'prepared':
                 return None, False
-            final = app.finalize_page_read(token, value.prepared)
+            final = _timed_stage(app, chat, 'finalize', app.finalize_page_read, token, value.prepared)
             if final.status not in ('page', 'restart'):
-                if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-                    diagnostics.stage('/api/mesh/state', chat, 'sidebar',
-                                      final.status, final.reason or 'none')
+                _stage(app, chat, 'sidebar', final.status, final.reason or 'none')
+            if candidate is not None and final.status not in ('page', 'locked'):
+                unread.invalidate(chat, session)
+                candidate = operation.unread_candidate = None
+                reader, receipt, index = _timed_stage(app, chat, 'inputs', runtime.inputs, chat)
+                continue
             if final.status == 'restart':
-                reader, receipt, index = runtime.inputs(chat)
+                reader, receipt, index = _timed_stage(app, chat, 'inputs', runtime.inputs, chat)
                 continue
             if final.status != 'page' or final.result is None:
                 return None, False
@@ -121,7 +159,10 @@ def _room(app, mesh, token, chat):
             if snapshot.deleted:
                 return None, True
             state = json.loads(presentation.viewer_state_json)
-            return _summary(snapshot, selected, mesh.user, state)
+            row, resolved = _summary(snapshot, selected, mesh.user, state)
+            if row is not None and final.result.unread is not None:
+                row.update(final.result.unread)
+            return row, resolved
     except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable,
             OSError, sqlite3.Error, ValueError, TypeError):
         return None, False
@@ -152,11 +193,9 @@ def capture_sidebar(app, mesh, token):
             return out
         started = time.perf_counter()
         row, resolved = _room(app, mesh, token, chat)
-        if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-            diagnostics.stage('/api/mesh/state', chat, 'sidebar',
-                              'ready' if resolved else 'pending',
-                              duration_ms=(time.perf_counter() - started) * 1000,
-                              rows=int(row is not None))
+        _stage(app, chat, 'sidebar', 'ready' if resolved else 'pending',
+               duration_ms=(time.perf_counter() - started) * 1000,
+               rows=int(row is not None))
         if row is not None:
             out['chats'].append(row)
         if not resolved:

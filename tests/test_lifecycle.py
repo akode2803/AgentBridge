@@ -17,13 +17,12 @@ from agentbridge.mesh.lifecycle import (
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store.db import Store
-from agentbridge.transport.folder import FolderTransport
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh"
-    aryan = Mesh(FolderTransport(root), "aryan", "workstation",
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh")
+    aryan = Mesh(clouds.bare(root), "aryan", "workstation",
                  home=tmp_path / "home-aryan")
     aryan.accounts.create_human("aryan", "aryan-pass")
     aryan.accounts.create_human("fable", "fable-pass")
@@ -94,11 +93,11 @@ def test_signed_state_survives_transport_rollback_via_local_head(world):
         )
 
 
-def test_host_and_transfer_require_agent_private_key(world, tmp_path):
+def test_host_and_transfer_require_agent_private_key(clouds, world, tmp_path):
     mesh, root, fable_bundle = world
     home = tmp_path / "home-fable"
     KeyStore(home).save("fable", fable_bundle)
-    fable = Mesh(FolderTransport(root), "fable", "workstation", home=home)
+    fable = Mesh(clouds.bare(root), "fable", "workstation", home=home)
     try:
         with pytest.raises(LifecycleError, match="identity key for @claude"):
             publish_change(

@@ -15,24 +15,28 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.mesh.sync import SyncEngine
 from types import SimpleNamespace
 
+from conftest import refresh_cloud
+
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='viewer-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='viewer-box',
                  encrypt=True, local_inputs=True)
     remote = manager = None
     try:
         assert app.signup('viewer', '', 'secret')['ok']
         # Host the owned agent on another machine so process truth correctly
         # leaves its pending ask visible in this GUI.
-        remote = Mesh(app.root, 'viewer', 'remote-box', encrypt=True,
+        remote = Mesh(clouds.bare(app.root), 'viewer', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'remote-owner.sqlite')
         remote.accounts.create_agent('manager', harness={'agent_tools_enabled': True})
+        refresh_cloud(app)
         chat = app.mesh.create_chat('Asks', members=['manager']).id
         app.mesh.outbox.flush_once()
-        manager = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+        manager = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                        home=app.home, store_path=tmp_path / 'manager.sqlite')
         manager.sync.sync_once([chat])
         ask = PermissionLane(manager, 'manager').publish_ask(
@@ -48,6 +52,7 @@ def world(tmp_path, monkeypatch):
 
 
 def _ingest(app, chat, *, room=True, companions=True):
+    refresh_cloud(app)
     runtime = app.mesh.local_inputs
     runtime.prepare_one()
     if room:
@@ -119,7 +124,7 @@ def test_room_aux_mutation_after_prepare_invalidates_before_handoff(world):
     assert pending['rooms_complete'] is False
 
 
-def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
+def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world, clouds):
     app, chat, first_ask = world
     app.mesh.tx.put_doc('status/manager_harness.json', {'timers': [
         {'id': 'wake-1', 'chat_id': chat,
@@ -127,7 +132,7 @@ def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
     ]})
     second_chat = app.mesh.create_chat('Another ask room', members=['manager']).id
     app.mesh.outbox.flush_once()
-    manager = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+    manager = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                    home=app.home, store_path=app.home / 'manager-second.sqlite')
     try:
         manager.sync.sync_once([second_chat])
@@ -154,26 +159,27 @@ def test_owned_agent_timer_is_present_with_complete_crossroom_asks(world):
         manager.close()
 
 
-def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch):
+def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='viewer-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='viewer-box',
                  encrypt=True, local_inputs=True)
     meshes = []
     try:
         assert app.signup('viewer', '', 'secret')['ok']
         app.mesh.accounts.create_human('fable', 'fable-pass')
-        remote = Mesh(app.root, 'viewer', 'remote-box', encrypt=True,
+        remote = Mesh(clouds.bare(app.root), 'viewer', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'remote-owner.sqlite')
         meshes.append(remote)
         remote.accounts.create_agent('manager')
-        fable = Mesh(app.root, 'fable', 'fable-box', encrypt=True,
+        fable = Mesh(clouds.bare(app.root), 'fable', 'fable-box', encrypt=True,
                      home=app.home, store_path=tmp_path / 'fable.sqlite')
         meshes.append(fable)
         fable.accounts.create_agent('ops')
-        target = Mesh(app.root, 'manager', 'remote-box', encrypt=True,
+        target = Mesh(clouds.bare(app.root), 'manager', 'remote-box', encrypt=True,
                       home=app.home, store_path=tmp_path / 'manager.sqlite')
-        requester = Mesh(app.root, 'ops', 'remote-box', encrypt=True,
+        requester = Mesh(clouds.bare(app.root), 'ops', 'remote-box', encrypt=True,
                          home=app.home, store_path=tmp_path / 'ops.sqlite')
         meshes.extend((target, requester))
         PeerService(requester).request('manager', 'status')
@@ -184,6 +190,7 @@ def test_chatless_peer_and_timer_work_without_any_room(tmp_path, monkeypatch):
             {'id': 'chatless-wake', 'chat_id': '', 'at_ns': time.time_ns() + 60_000_000_000,
              'note': 'Check status'},
         ]})
+        refresh_cloud(app)
         for scope in ('identities', 'status', 'peer'):
             app.mesh.local_inputs.auxiliary.ingest(scope)
 
@@ -260,17 +267,19 @@ def test_unresolved_room_timer_is_pending_not_disclosed(world):
     assert result['timers'] == []
 
 
-def test_identity_source_over_2048_is_structured_incomplete_not_internal_error(tmp_path, monkeypatch):
+def test_identity_source_over_2048_is_structured_incomplete_not_internal_error(tmp_path, monkeypatch, clouds):
     monkeypatch.setattr(Mesh, 'start', lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, 'run', lambda self, **_kwargs: None)
-    app = GuiApp(tmp_path / 'root', home=tmp_path / 'home', machine='capacity-box',
+    clouds.factory_auto_refresh = False
+    app = GuiApp(clouds.root(tmp_path / 'root'), home=tmp_path / 'home', machine='capacity-box',
                  encrypt=False, local_inputs=True)
     try:
         assert app.signup('viewer', '', 'secret')['ok']
-        provider = app.mesh.tx._transport
-        for index in range(2048):
-            name = f'other-{index:04d}'
-            provider.put_doc(f'users/{name}.json', {'name': name, 'kind': 'human'})
+        clouds.seed_documents(app.root, {
+            f'users/other-{index:04d}.json': {'name': f'other-{index:04d}', 'kind': 'human'}
+            for index in range(2048)
+        })
+        refresh_cloud(app)
         app.mesh.local_inputs.auxiliary.ingest('identities')
         result = _asks(app)
         assert result['ok'] and result['asks'] == [] and result['timers'] == []
@@ -279,3 +288,198 @@ def test_identity_source_over_2048_is_structured_incomplete_not_internal_error(t
         assert not result['timers_complete']
     finally:
         app.close()
+
+
+
+def test_ready_owner_ask_polls_do_not_enqueue_page_preparation(world, monkeypatch):
+    app, chat, ask = world
+    _ingest(app, chat)
+    initial = _asks(app, chat)
+    assert initial['asks_complete'], initial
+    runtime = app.mesh.local_inputs
+    requests = []
+    original = runtime.request_page
+
+    def observed(room, **kwargs):
+        requests.append((room, kwargs))
+        return original(room, **kwargs)
+
+    monkeypatch.setattr(runtime, 'request_page', observed)
+    for _ in range(3):
+        result = _asks(app, chat)
+        assert result['asks_complete'], result
+        assert [row['id'] for row in result['asks']] == [ask.id]
+    assert requests == []
+
+
+def test_pending_owner_ask_inputs_enqueue_preparation(world, monkeypatch):
+    app, chat, _ask = world
+    _ingest(app, chat, room=False)
+    runtime = app.mesh.local_inputs
+    requests = []
+    original = runtime.request_page
+
+    def observed(room, **kwargs):
+        requests.append((room, kwargs))
+        return original(room, **kwargs)
+
+    monkeypatch.setattr(runtime, 'request_page', observed)
+    result = _asks(app, chat)
+    assert not result['rooms_complete'] and not result['asks_complete']
+    assert requests == [(chat, {})]
+
+
+@pytest.mark.parametrize('reason', ['terminal_classification_pending', 'overlay_proofs'])
+def test_owner_ask_work_preserves_preparation_request(world, monkeypatch, reason):
+    from agentbridge.gui import api_bounded_asks
+
+    app, chat, _ask = world
+    _ingest(app, chat)
+    runtime = app.mesh.local_inputs
+    requests = []
+    proof_work = (('proof-path', 'proof-key'),) if reason == 'overlay_proofs' else ()
+    monkeypatch.setattr(api_bounded_asks.OwnerAskPageOperation, 'prepare',
+        lambda *_args: SimpleNamespace(status='work', reason=reason, work=proof_work))
+    monkeypatch.setattr(runtime, 'request_page',
+        lambda room, **kwargs: requests.append((room, kwargs)) or True)
+    result = _asks(app, chat)
+    assert not result['rooms_complete'] and not result['asks_complete']
+    assert len(requests) == 1 and requests[0][0] == chat
+    if reason == 'overlay_proofs':
+        assert requests[0][1]['proofs'] is proof_work
+        assert requests[0][1]['index'].chat_id == chat
+    else:
+        assert requests[0][1] == {}
+
+
+
+def test_owner_ask_preparation_follows_source_change_not_unchanged_ingestion(world, monkeypatch):
+    app, chat, _ask = world
+    _ingest(app, chat)
+    assert _asks(app, chat)['asks_complete']
+    runtime = app.mesh.local_inputs
+    requests = []
+    original = runtime.request_page
+
+    def observed(room, **kwargs):
+        requests.append((room, kwargs))
+        return original(room, **kwargs)
+
+    monkeypatch.setattr(runtime, 'request_page', observed)
+    assert runtime.ingest(chat) is False
+    assert requests == []
+    app.mesh.membership.leave(chat)
+    app.mesh.sync.sync_once([chat])
+    runtime.ingest(chat)
+    assert requests == [(chat, {})]
+    assert runtime.prepare_one()
+    result = _asks(app)
+    assert result['rooms_complete'] and result['asks_complete']
+    assert result['asks'] == [] and result['resolved_room_ids'] == []
+
+def test_ready_owner_ask_auxiliary_recovers_without_terminal_wake(world, monkeypatch):
+    app, chat, ask = world
+    _ingest(app, chat)
+    assert _asks(app, chat)['asks_complete']
+    runtime = app.mesh.local_inputs
+    app.mesh.tx.put_doc(f'chats/{chat}/runtime/owner-control/manager/asks/late.json',
+                        {'header': {'id': 'late'}})
+    page_requests, auxiliary_requests = [], []
+    original = runtime.auxiliary.request
+
+    def observed(scope, room='', **kwargs):
+        auxiliary_requests.append((scope, room))
+        return original(scope, room, **kwargs)
+
+    monkeypatch.setattr(runtime, 'request_page',
+        lambda room, **kwargs: page_requests.append((room, kwargs)) or True)
+    monkeypatch.setattr(runtime.auxiliary, 'request', observed)
+    pending = _asks(app, chat)
+    assert not pending['asks_complete'], pending
+    assert ('runtime', chat) in auxiliary_requests
+    assert page_requests == []
+    runtime.auxiliary.ingest('runtime', chat)
+    recovered = _asks(app, chat)
+    assert recovered['asks_complete'], recovered
+    assert [row['id'] for row in recovered['asks']] == [ask.id]
+    assert page_requests == []
+
+
+@pytest.mark.parametrize('phase', ['prepare', 'finalize'])
+def test_owner_ask_restart_exhaustion_queues_preparation(world, monkeypatch, phase):
+    from agentbridge.gui import api_bounded_asks
+
+    app, chat, _ask = world
+    _ingest(app, chat)
+    assert _asks(app, chat)['asks_complete']
+    runtime = app.mesh.local_inputs
+    attempts, requests = [], []
+
+    def restart(*_args):
+        attempts.append(phase)
+        return SimpleNamespace(status='restart')
+
+    if phase == 'prepare':
+        monkeypatch.setattr(api_bounded_asks.OwnerAskPageOperation, 'prepare', restart)
+    else:
+        monkeypatch.setattr(app, 'finalize_page_read', restart)
+    monkeypatch.setattr(runtime, 'request_page',
+        lambda room, **kwargs: requests.append((room, kwargs)) or True)
+    result = _asks(app, chat)
+    assert not result['asks_complete'] and not result['rooms_complete'], result
+    assert attempts == [phase] * 4
+    assert requests == [(chat, {})]
+
+
+def test_changed_source_admission_shutdown_preserves_winner(world, monkeypatch):
+    import threading
+
+    app, chat, _ask = world
+    _ingest(app, chat)
+    assert _asks(app, chat)['asks_complete']
+    runtime = app.mesh.local_inputs
+    app.mesh.membership.leave(chat)
+    app.mesh.sync.sync_once([chat])
+    entered, release = threading.Event(), threading.Event()
+    errors, scheduled = [], []
+    original = runtime.request_page
+
+    def paused(room, **kwargs):
+        entered.set()
+        if not release.wait(2):
+            raise RuntimeError('test release deadline')
+        result = original(room, **kwargs)
+        scheduled.append(result)
+        return result
+
+    def capture(action):
+        try:
+            action()
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(runtime, 'request_page', paused)
+    ingest = threading.Thread(target=capture, args=(lambda: runtime.ingest(chat),))
+    stop = threading.Thread(target=capture, args=(runtime.stop,))
+    try:
+        ingest.start()
+        assert entered.wait(2), errors
+        stop.start()
+        deadline = time.monotonic() + 1
+        while not runtime._closed and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert runtime._closed
+        release.set()
+        ingest.join(2)
+        stop.join(2)
+        assert not ingest.is_alive() and not stop.is_alive()
+        assert errors == []
+        assert scheduled == [False]
+        winner = runtime.reader(chat).capture().source
+        assert winner.ready and winner.writes_pending == 0
+    finally:
+        release.set()
+        if ingest.ident is not None:
+            ingest.join(3)
+        if stop.ident is not None:
+            stop.join(3)

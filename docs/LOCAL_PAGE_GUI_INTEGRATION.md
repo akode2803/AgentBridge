@@ -1,10 +1,11 @@
 # Local transcript paging and companions
 
 `GET /api/mesh/chat_page` serves request-owned canonical windows from admitted
-local inputs. The production `serve()` path now constructs `GuiApp` with
-`local_inputs=True`; the library constructor still defaults to `False` for
-compatibility. Browser chat rendering is wired to this route when its capability
-is present. This source implementation is not evidence of a released build or
+local inputs. `GuiApp` defaults to and requires `local_inputs=True`; explicitly
+disabling it is rejected. Browser session adoption requires both
+`session_binding_v1=true` and `chat_page_v1=true`, and selected chats always use
+this route. Missing capabilities and pending inputs cannot select a full-history
+HTTP fallback. This source implementation is not evidence of a released build or
 of the user's currently running app; full-suite/CI and release checks remain
 separate.
 

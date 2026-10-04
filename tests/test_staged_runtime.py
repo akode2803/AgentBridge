@@ -8,8 +8,6 @@ import pytest
 from agentbridge.mesh import local_input_runtime
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source, staged_publication, staged_source
-from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 from agentbridge.transport.raw_documents import RawCollectionUnavailable
 
 
@@ -22,19 +20,19 @@ def _mesh(tmp_path, transport, label):
                 store_path=tmp_path / (label + '.sqlite'), local_inputs=True)
 
 
-def _seed(folder):
-    folder.put_doc(META, {'id': CHAT, 'members': ['alice']})
-    folder.put_doc('users/alice.json', {'name': 'alice'})
+def _seed(provider):
+    provider.put_doc(META, {'id': CHAT, 'members': ['alice']})
+    provider.put_doc('users/alice.json', {'name': 'alice'})
 
 
-def test_over_twenty_thousand_overlay_edits_admit_and_stable_repoll(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    edits = folder.root / 'chats' / CHAT / 'overlays' / 'edits'
-    edits.mkdir(parents=True)
-    for n in range(20_031):
-        (edits / f'{n:05}.json').write_bytes(b'{}')
-    mesh = _mesh(tmp_path, folder, 'large')
+def test_over_twenty_thousand_overlay_edits_admit_and_stable_repoll(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    clouds.seed_documents(provider.root, {
+        f'chats/{CHAT}/overlays/edits/{n:05}.json': {} for n in range(20_031)
+    })
+    provider.refresh()
+    mesh = _mesh(tmp_path, provider, 'large')
     try:
         assert mesh.local_inputs.ingest(CHAT) is True
         reader, receipt, index = mesh.local_inputs.inputs(CHAT)
@@ -50,17 +48,17 @@ def test_over_twenty_thousand_overlay_edits_admit_and_stable_repoll(tmp_path):
         mesh.close()
 
 
-def test_more_than_sixteen_megabytes_folder_and_cached_parity(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
+def test_more_than_sixteen_megabytes_independent_cloud_cache_parity(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
     # Encoded source exceeds the legacy 16 MiB whole-collection ceiling while
     # each record remains far below the independent per-document ceiling.
     payload = 'x' * (70 * 1024)
     for n in range(256):
-        folder.put_doc(f'users/bulk-{n:03}.json', {'body': payload})
-    cached_transport = CachingTransport(FolderTransport(folder.root), auto_refresh=False)
+        provider.put_doc(f'users/bulk-{n:03}.json', {'body': payload})
+    cached_transport = clouds.cached(provider.root)
     cached_transport.refresh()
-    direct, cached = (_mesh(tmp_path, folder, 'direct'),
+    direct, cached = (_mesh(tmp_path, provider, 'direct'),
                       _mesh(tmp_path, cached_transport, 'cached'))
     try:
         assert direct.local_inputs.ingest(CHAT)
@@ -83,10 +81,10 @@ def test_more_than_sixteen_megabytes_folder_and_cached_parity(tmp_path):
         direct.close()
 
 
-def test_collector_failure_keeps_old_readable_until_handled_failure(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    mesh = _mesh(tmp_path, folder, 'failure')
+def test_collector_failure_keeps_old_readable_until_handled_failure(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    mesh = _mesh(tmp_path, provider, 'failure')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
@@ -118,10 +116,10 @@ def test_collector_failure_keeps_old_readable_until_handled_failure(tmp_path, mo
         mesh.close()
 
 
-def test_local_mutation_between_batches_rejects_staged_admission(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    mesh = _mesh(tmp_path, folder, 'movement')
+def test_local_mutation_between_batches_rejects_staged_admission(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    mesh = _mesh(tmp_path, provider, 'movement')
     try:
         runtime = mesh.local_inputs
         original = local_input_runtime.collect_document_batches
@@ -137,17 +135,17 @@ def test_local_mutation_between_batches_rejects_staged_admission(tmp_path, monke
                             batch_documents=1, **limits)
 
         monkeypatch.setattr(local_input_runtime, 'collect_document_batches', mutate_after_first)
-        with pytest.raises(local_source.SourceChanged):
+        with pytest.raises(RawCollectionUnavailable, match="mirror_changed"):
             runtime.ingest(CHAT)
         assert mutated and not runtime.health(CHAT)['ready']
     finally:
         mesh.close()
 
 
-def test_local_mutation_at_admission_rejects_staged_result(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    mesh = _mesh(tmp_path, folder, 'admission')
+def test_local_mutation_at_admission_rejects_staged_result(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    mesh = _mesh(tmp_path, provider, 'admission')
     try:
         runtime = mesh.local_inputs
         original = staged_publication.identical
@@ -168,10 +166,10 @@ def test_local_mutation_at_admission_rejects_staged_result(tmp_path, monkeypatch
         mesh.close()
 
 
-def test_pointer_swap_rejects_old_receipt_and_preserves_unchanged_identity(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    mesh = _mesh(tmp_path, folder, 'swap')
+def test_pointer_swap_rejects_old_receipt_and_preserves_unchanged_identity(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    mesh = _mesh(tmp_path, provider, 'swap')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
@@ -194,11 +192,11 @@ def test_pointer_swap_rejects_old_receipt_and_preserves_unchanged_identity(tmp_p
         mesh.close()
 
 
-def test_successful_replacement_records_deletion_as_absence(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    folder.put_doc('users/bob.json', {'name': 'bob'})
-    mesh = _mesh(tmp_path, folder, 'deletion')
+def test_successful_replacement_records_deletion_as_absence(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    provider.put_doc('users/bob.json', {'name': 'bob'})
+    mesh = _mesh(tmp_path, provider, 'deletion')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
@@ -213,11 +211,11 @@ def test_successful_replacement_records_deletion_as_absence(tmp_path):
         mesh.close()
 
 
-def test_partial_failed_replacement_cannot_expose_missing_subset(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    folder.put_doc('users/bob.json', {'name': 'bob'})
-    mesh = _mesh(tmp_path, folder, 'partial')
+def test_partial_failed_replacement_cannot_expose_missing_subset(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    provider.put_doc('users/bob.json', {'name': 'bob'})
+    mesh = _mesh(tmp_path, provider, 'partial')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
@@ -243,7 +241,7 @@ def test_partial_failed_replacement_cannot_expose_missing_subset(tmp_path, monke
             runtime.inputs(CHAT)
     finally:
         mesh.close()
-    reopened = _mesh(tmp_path, FolderTransport(folder.root), 'partial')
+    reopened = _mesh(tmp_path, clouds.cached(provider.root), 'partial')
     try:
         assert not reopened.local_inputs.health(CHAT)['ready']
         with pytest.raises(local_source.SourceChanged):
@@ -256,10 +254,10 @@ def test_partial_failed_replacement_cannot_expose_missing_subset(tmp_path, monke
         reopened.close()
 
 
-def test_interrupted_stage_preserves_old_admission_across_reopen(tmp_path, monkeypatch):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    mesh = _mesh(tmp_path, folder, 'crash')
+def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_path, monkeypatch):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    mesh = _mesh(tmp_path, provider, 'crash')
     original_collect = local_input_runtime.collect_document_batches
     original_abort, original_cleanup = staged_source.abort, staged_source.cleanup
     try:
@@ -292,7 +290,7 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(tmp_path, monke
     monkeypatch.setattr(local_input_runtime, 'collect_document_batches', original_collect)
     monkeypatch.setattr(staged_source, 'abort', original_abort)
     monkeypatch.setattr(staged_source, 'cleanup', original_cleanup)
-    reopened = _mesh(tmp_path, FolderTransport(folder.root), 'crash')
+    reopened = _mesh(tmp_path, clouds.cached(provider.root), 'crash')
     try:
         assert reopened.local_inputs.health(CHAT)['ready']
         assert local_source.capture(reopened.store, reopened.local_inputs.reader(CHAT).definition.source).raw == old
@@ -305,13 +303,14 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(tmp_path, monke
         reopened.close()
 
 
-def test_background_cleanup_reclaims_old_generation_without_touching_admitted(tmp_path):
-    folder = FolderTransport(tmp_path / 'provider')
-    _seed(folder)
-    users = folder.root / 'users'
-    for n in range(300):
-        (users / f'extra-{n:03}.json').write_bytes(b'{}')
-    mesh = _mesh(tmp_path, folder, 'cleanup')
+def test_background_cleanup_reclaims_old_generation_without_touching_admitted(clouds, tmp_path):
+    provider = clouds.cached(tmp_path / 'provider')
+    _seed(provider)
+    clouds.seed_documents(provider.root, {
+        f'users/extra-{n:03}.json': {} for n in range(300)
+    })
+    provider.refresh()
+    mesh = _mesh(tmp_path, provider, 'cleanup')
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)

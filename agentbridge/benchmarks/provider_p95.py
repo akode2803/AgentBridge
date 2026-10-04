@@ -131,7 +131,19 @@ def create_room(base: str, agent: str, label: str) -> dict:
 
 def matching_feeds(feeds: list[dict], message_id: str) -> list[dict]:
     return [item for item in feeds
-            if message_id in str(item.get("transition_id", ""))]
+            if str(item.get("transition_id", "")).rpartition("|")[2].partition("@")[0]
+            == message_id]
+
+
+def _sample_binding(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    generation = value.get("session_generation")
+    return (isinstance(value.get("instance_id"), str) and bool(value["instance_id"])
+            and isinstance(value.get("viewer"), str) and bool(value["viewer"])
+            and isinstance(generation, str) and generation.isascii()
+            and generation.isdecimal() and len(generation) <= 19
+            and str(int(generation)) == generation and int(generation) <= 2**63 - 1)
 
 
 def run_sample(base: str, agent: str, index: int, timeout_s: float,
@@ -160,28 +172,51 @@ def run_sample(base: str, agent: str, index: int, timeout_s: float,
         access_seen = False
         deadline = time.monotonic() + timeout_s
         reply = None
+        sample_binding = None
         while time.monotonic() < deadline:
             now = time.perf_counter()
-            feed = request_json(
-                base, "/api/mesh/livefeed?id=" + urllib.parse.quote(chat_id)
-            ).get("feeds", [])
-            matching_feed = matching_feeds(feed, message_id)
+            auxiliary = request_json(
+                base, "/api/mesh/chat_aux?id=" + urllib.parse.quote(chat_id))
+            chat = request_json(
+                base, "/api/mesh/chat_page?id=" + urllib.parse.quote(chat_id) + "&limit=50")
+            if not isinstance(auxiliary, dict) or not isinstance(chat, dict):
+                return None, f"sample {index} malformed canonical projection"
+            if any(result.get("status") in ("forbidden", "unavailable")
+                   for result in (auxiliary, chat)):
+                return None, f"sample {index} canonical projection unavailable"
+            metadata = auxiliary.get("metadata_status", {})
+            if (auxiliary.get("status") != "ready" or chat.get("status") != "page"
+                    or auxiliary.get("chat_id") != chat_id or chat.get("chat_id") != chat_id
+                    or not isinstance(metadata, dict)
+                    or metadata.get("live") != "ready" or metadata.get("runtime") != "ready"
+                    or not _sample_binding(auxiliary.get("session_binding"))
+                    or auxiliary["session_binding"] != chat.get("session_binding")
+                    or not auxiliary.get("page_version")
+                    or auxiliary["page_version"] != chat.get("page_version")
+                    or not isinstance(auxiliary.get("feeds"), list)
+                    or not isinstance(auxiliary.get("runs"), list)
+                    or not isinstance(chat.get("messages"), list)
+                    or len(auxiliary["feeds"]) > 64 or len(auxiliary["runs"]) > 50
+                    or len(chat["messages"]) > 50
+                    or any(not isinstance(item, dict) for rows in (
+                        auxiliary["feeds"], auxiliary["runs"], chat["messages"]) for item in rows)):
+                time.sleep(0.2)
+                continue
+            if sample_binding is not None and sample_binding != auxiliary["session_binding"]:
+                return None, f"sample {index} session changed"
+            sample_binding = auxiliary["session_binding"]
+            matching_feed = matching_feeds(auxiliary["feeds"], message_id)
             if matching_feed and first_feed_ms is None:
                 first_feed_ms = round((now - started) * 1000, 1)
-            run_ids = [item["run_id"] for item in matching_feed
-                       if str(item.get("run_id", "")).startswith("r-")]
-            if run_ids:
-                authority = request_json(base, "/api/mesh/runtime_authority", {
-                    "chat_id": chat_id, "run_ids": run_ids[:20],
-                })
-                access_seen = access_seen or bool(authority.get("runs"))
-            chat = request_json(
-                base, "/api/mesh/chat?id=" + urllib.parse.quote(chat_id))
+            run_ids = {item["run_id"] for item in matching_feed
+                       if str(item.get("run_id", "")).startswith("r-")}
+            access_seen = access_seen or any(item.get("run_id") in run_ids
+                                            for item in auxiliary["runs"])
             replies = [message for message in chat.get("messages", [])
                        if message.get("from") == agent]
             reply = next((message for message in reversed(replies)
                           if str(message.get("body", "")).strip() == expected), None)
-            if reply is not None:
+            if reply is not None and first_feed_ms is not None and access_seen:
                 break
             time.sleep(0.2)
         if reply is None:

@@ -5,26 +5,24 @@ import time
 import pytest
 
 from agentbridge.core.errors import PermissionDenied, ValidationError
-from agentbridge.mesh import presence as presence_mod
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
 
 
 from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundles = {n: seed_account(tx, n) for n in ("aryan", "fable", "sudhir")}
     bundles["claude"] = seed_account(tx, "claude", "agent", owner="aryan")
 
     def mk(user, machine="mach1"):
         home = tmp_path / f"home-{user}-{machine}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, machine, home=home)
+        return Mesh(clouds.bare(root), user, machine, home=home)
 
     meshes = {u: mk(u) for u in ("aryan", "fable", "sudhir", "claude")}
     yield meshes, mk
@@ -64,13 +62,15 @@ def test_multi_device_merge_any_fresh_online_wins(world):
 
 def test_stale_device_stops_counting(world, monkeypatch):
     meshes, _ = world
+    viewer = meshes["aryan"]
+    assert viewer.presence.stale_s == viewer.tx.profile.presence_stale_s
     meshes["fable"].presence.heartbeat(online=True)
     # jump the clock past the staleness window: the online flag alone
     # doesn't count if the device stopped beating (crash without offline)
     real_ns = time.time_ns
     monkeypatch.setattr(time, "time_ns",
-                        lambda: real_ns() + int((presence_mod.STALE_S + 5) * 1e9))
-    assert meshes["aryan"].presence.presence_of("fable")["online"] is False
+                        lambda: real_ns() + int((viewer.presence.stale_s + 5) * 1e9))
+    assert viewer.presence.presence_of("fable")["online"] is False
 
 
 def test_metered_profile_paces_presence_and_flips_poke():

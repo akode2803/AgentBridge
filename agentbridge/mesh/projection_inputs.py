@@ -1,7 +1,7 @@
 """Diagnostic collection of content-free projection input candidates.
 
 Coverage is deliberately incomplete and cannot authorize cache admission.
-Document snapshots are bounded/local on mirror and folder transports, but the
+Document snapshots are bounded/local on cloud mirrors, but the
 existing membership resolver may read through, update pins, and retain lifecycle
 heads while reconciling newer state events. No cached data is served here.
 """
@@ -190,7 +190,7 @@ class ProjectionInputCollector:
     def _mirror_state(self) -> tuple[bool, bool]:
         status = getattr(self.mesh.tx, "mirror_status", None)
         if not callable(status):
-            return True, False  # a local folder transport is authoritative here
+            return False, True  # unsupported observations cannot establish readiness
         current = status()
         warm = bool(isinstance(current, dict) and current.get("warm"))
         state = str(current.get("state") or "loading") if isinstance(current, dict) \

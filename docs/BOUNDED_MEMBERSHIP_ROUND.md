@@ -39,6 +39,6 @@ outside the mirror critical section.
 Remaining activation work: a bounded outer progress/readthrough owner, exact
 page/overlay/proof positions tied to this membership cut, current viewer and
 history-on-join checks, final GUI session binding, and browser continuation/
-scroll/retention behavior. Direct folder transport and any source without an
-R212 provider-observed mirror receipt remain unsupported by this inactive API;
-both transports still require the eventual common serving integration.
+scroll/retention behavior. Any source without an R212 provider-observed mirror
+receipt remains unsupported by this primitive. The current Supabase GUI
+integration is described in LOCAL_PAGE_GUI_INTEGRATION.md.

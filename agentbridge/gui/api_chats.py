@@ -1,9 +1,7 @@
-"""Core chat endpoints: the sidebar state, the transcript, posting, reading.
+"""GUI bootstrap, bounded sidebar state, posting and explicit read actions.
 
-Shapes follow v1 where sane (``/api/mesh/state`` and ``/api/mesh/chat`` are
-the two payloads the whole frontend hangs off) with the v2 fields added
-alongside: ``admins`` (multi-admin, D12), ``handle``, ``status``, receipts
-with the Delivered tier, per-user ``archived``.
+Selected transcripts are served by api_pages; signed-in sidebar rows are
+served solely by canonical page summaries.
 """
 
 from __future__ import annotations
@@ -11,59 +9,21 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
-from itertools import chain
-from pathlib import Path
 
 from ..core.errors import ValidationError
-from ..harness.runtime.controls import read_pause
 from ..mesh.pins import key_fingerprint
 from .context import GuiApp, SessionReadToken, session_read_binding
-from .projection_perf import ProjectionObservation
-from .routing import authed, authed_read_token
-from .serialize import chat_json, message_json, user_json
+from .routing import authed
+from .serialize import chat_json
 
 __all__ = ["GET", "POST"]
 
 
 def _connection(app: GuiApp) -> dict:
-    """Transport-aware status for the Connection panel (no-chat home +
-    Settings → Connection). A folder root keeps the v1 checks — does the
-    folder exist, is the sync client alive; a cloud root reports the warm
-    mirror's health instead (there is no folder or OneDrive to check, and
-    the folder checks read "✗ No — check OneDrive" on a healthy cloud mesh:
-    wrong and alarming)."""
+    """Cloud connection health from the GUI's shared Supabase mirror."""
     tx = app.transport
-    scheme = getattr(tx, "scheme", "folder")
-    out = {"scheme": scheme, "root": str(app.root)}
-    if scheme == "folder":
-        from .desktop import sync_client_running
-
-        root = app.root if isinstance(app.root, Path) else Path(app.root)
-        parts = [part.lower() for part in root.parts]
-        provider = next((name for name, marks in (
-            ("OneDrive", ("onedrive", "sharepoint")),
-            ("Google Drive", ("google drive", "googledrive")),
-            ("Dropbox", ("dropbox",)),
-            ("iCloud Drive", ("icloud drive", "mobile documents")),
-        ) if any(mark in part for part in parts for mark in marks)), None)
-        shared_ok = root.is_dir()
-        writable = shared_ok and os.access(root, os.W_OK)
-        out.update(
-            mode="synced" if provider else "local",
-            provider=provider,
-            shared_ok=shared_ok,
-            writable=writable,
-        )
-        out["sync_client"] = sync_client_running() if provider == "OneDrive" else None
-        out["state"] = (
-            "folder_unavailable" if not shared_ok
-            else "folder_read_only" if not writable
-            else "sync_paused" if provider == "OneDrive" and out["sync_client"] is False
-            else "online"
-        )
-        return out
-    out["host"] = str(getattr(tx, "host", "") or "")
+    out = {"scheme": tx.scheme, "root": str(app.root),
+           "host": str(getattr(tx, "host", "") or "")}
     status = getattr(tx, "mirror_status", None)
     if callable(status):
         out["mirror"] = status()
@@ -100,8 +60,9 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "instance_id": token.app_identity,
         "server_pid": os.getpid(),
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "sse_refresh_v1": bool(token.mesh is not None and token.mesh.tx.scheme == 'supabase'),
                  "session_binding_v1": True,
-                 "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
+                 "chat_page_v1": True},
         "paused": False,  # compatibility field; mesh-global pause is retired
         "user": binding["viewer"],
         "session_binding": binding,
@@ -113,65 +74,6 @@ def _bridge_state_captured(app: GuiApp, token: SessionReadToken) -> dict:
         "app_lock": lock.status() if lock is not None
         else {"enabled": False, "locked": False, "autolock_min": 0},
     }
-
-
-def _live_by_chat(app: GuiApp, mesh) -> dict[str, list[dict]]:
-    """V66: who is typing / which agent run is mid-flight, per chat — one
-    pass over the mirror's status docs (free; no cloud call rides this).
-    Membership is applied by the CALLER: only chats already in the viewer's
-    own list get annotated, so nothing leaks about rooms they aren't in.
-    Thresholds mirror the in-chat feed: typing heartbeats go stale at 12s,
-    a run silent for 10+ minutes is a ghost. V109: a "running" doc from a
-    locally-hosted agent whose runner PROCESS is dead is a ghost NOW, not
-    in ten minutes — process truth beats the stale doc."""
-    from .api_agents import runner_state
-    from .api_messages import _age_s
-    from .livefeed import expand_runs, suppress_superseded_preparing
-
-    live: dict[str, list[dict]] = {}
-    try:
-        paths = mesh.tx.list_docs("status")
-    except Exception:  # noqa: BLE001 — liveliness is decoration, never a 500
-        return live
-    for path in paths:
-        leaf = path.rsplit("/", 1)[-1]
-        is_typing = leaf.startswith("typing_")
-        doc = mesh.tx.get_doc(path)
-        if not isinstance(doc, dict):
-            continue
-        if is_typing:
-            cid = doc.get("chat_id") or ""
-            age = _age_s(doc.get("updated", ""))
-            who = doc.get("user") or ""
-            if (not cid or not who or who == mesh.user or age is None
-                    or age > 12):
-                continue
-            live.setdefault(cid, []).append({"user": who, "typing": True})
-            continue
-        for run in expand_runs(path, doc):
-            if run.get("state") != "running":
-                continue
-            cid = run.get("chat_id") or ""
-            if not cid:
-                continue
-            age = _age_s(run.get("updated", ""))
-            if age is not None and age > 600:
-                continue
-            who = run.get("agent") or ""
-            if runner_state(app, mesh, who) is False:
-                continue
-            live.setdefault(cid, []).append(
-                {"user": who, "run_id": run.get("run_id") or "",
-                 "transition_id": run.get("transition_id") or "",
-                 "preparing": bool(run.get("preparing")),
-                 "activity": " ".join(
-                     str(run.get("activity") or "").split())[:80]})
-    for entries in live.values():
-        entries[:] = suppress_superseded_preparing(entries)
-        entries.sort(key=lambda item: (not item.get("typing"),
-                                       item.get("user", ""),
-                                       item.get("run_id", "")))
-    return live
 
 
 def state(app: GuiApp, req) -> dict:
@@ -207,8 +109,9 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
         "server_pid": os.getpid(),
         "encrypted": app.encrypt,
         "caps": {"sse": True, "receipts": "delivered", "admins": True,
+                 "sse_refresh_v1": bool(mesh is not None and mesh.tx.scheme == 'supabase'),
                  "session_binding_v1": True,
-                 "chat_page_v1": bool(getattr(app, 'local_inputs_enabled', False))},
+                 "chat_page_v1": True},
         "max_upload_bytes": None,
         "connection": _connection(app),
         "session_binding": session_read_binding(token),
@@ -226,217 +129,23 @@ def _state_captured(app: GuiApp, req, token: SessionReadToken) -> dict:
             if (acc := app.directory0.get(n)) is not None
         }
         return out
-    if getattr(app, 'local_inputs_enabled', False) and mesh.local_inputs is not None:
-        from .api_sidebar_pages import MAX_RESPONSE_BYTES, capture_sidebar
+    from .api_sidebar_pages import MAX_RESPONSE_BYTES, capture_sidebar
 
-        out.update(capture_sidebar(app, mesh, token))
-        out['key_alerts'] = [
-            {'name': a.get('name', ''), 'seen_sign_pub': a.get('seen_sign_pub', ''),
-             'first_seen': a.get('first_seen', ''),
-             'pinned_fp': mesh.key_pins.fingerprint(a.get('name', '')),
-             'seen_fp': key_fingerprint(a.get('name', ''),
-                                         a.get('seen_sign_pub', ''),
-                                         a.get('seen_agree_pub', ''))}
-            for a in mesh.key_alerts()
-        ]
-        if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
-            out.update(users={}, chats=[], key_alerts=[], chats_complete=False,
-                       users_complete=False, user_status='response_byte_budget',
-                       sidebar_status='response_byte_budget')
-        return out
-    observation = ProjectionObservation("sidebar")
-    users: dict = {}
-    # Keep this loop in its current ownership boundary; P0 only times it.
-    directory_t0 = time.perf_counter()
-    for name in mesh.directory.names():
-        acc = mesh.directory.get(name)
-        if acc is None:
-            continue
-        profile = mesh.visible_profile(name)
-        presence = {
-            k: v for k, v in mesh.visible_presence(name).items() if v is not None
-        }
-        entry = user_json(acc, profile, presence or None, me=mesh.user)
-        if app.encrypt:
-            # R31: the trusted-key fingerprint + out-of-band verified state,
-            # for the DM info Encryption card (compare over another channel)
-            entry["key_fp"] = mesh.key_pins.fingerprint(
-                name, acc.keys.sign_pub, acc.keys.agree_pub)
-            entry["key_verified"] = mesh.key_pins.verified(name)
-        users[name] = entry
-    observation.stage(
-        "directory_projection", time.perf_counter() - directory_t0)
-    observation.count("serialization_count", len(users))
-    out["users"] = users
-    chats = []
-    live = observation.measure("status_annotation", lambda: _live_by_chat(app, mesh))
-    snapshots = observation.measure("visible_chat_enumeration", mesh.chats_for)
-    observation.count("room_count", len(snapshots))
-    overview_t0 = time.perf_counter()
-    for snap in snapshots:
-        overview = mesh.chat_overview(snap.id, observer=observation)
-        entry = chat_json(snap, overview=overview)
-        if live.get(snap.id):  # V66: sidebar liveliness — set only when active
-            entry["live"] = live[snap.id]
-        chats.append(entry)
-    observation.stage(
-        "overview_folds", time.perf_counter() - overview_t0)
-    observation.count("serialization_count", len(chats))
-    out["chats"] = chats
-    # R27: pin-mismatch alerts (an account's published keys changed) — the
-    # sidebar shows a banner until the signed-in human acknowledges
-    out["key_alerts"] = [
-        {"name": a.get("name", ""), "seen_sign_pub": a.get("seen_sign_pub", ""),
-         "first_seen": a.get("first_seen", ""),
-         # both fingerprints, so the human can compare out-of-band (R31):
-         # pinned = what this machine trusts, seen = what the doc now claims
-         "pinned_fp": mesh.key_pins.fingerprint(a.get("name", "")),
-         "seen_fp": key_fingerprint(
-             a.get("name", ""), a.get("seen_sign_pub", ""),
-             a.get("seen_agree_pub", ""))}
+    out.update(capture_sidebar(app, mesh, token))
+    out['key_alerts'] = [
+        {'name': a.get('name', ''), 'seen_sign_pub': a.get('seen_sign_pub', ''),
+         'first_seen': a.get('first_seen', ''),
+         'pinned_fp': mesh.key_pins.fingerprint(a.get('name', '')),
+         'seen_fp': key_fingerprint(a.get('name', ''),
+                                     a.get('seen_sign_pub', ''),
+                                     a.get('seen_agree_pub', ''))}
         for a in mesh.key_alerts()
     ]
-    observation.log(app.home, "ok")
+    if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
+        out.update(users={}, chats=[], key_alerts=[], chats_complete=False,
+                   users_complete=False, user_status='response_byte_budget',
+                   sidebar_status='response_byte_budget')
     return out
-
-
-@authed_read_token
-def chat(app: GuiApp, req, mesh, token: SessionReadToken) -> dict:
-    """The transcript: messages (choke-point filtered), receipts on my own
-    messages, active pins, my starred ids + read cursor."""
-    chat_id = req.params.get("id", "")
-    tail = req.int_param("tail", 200, 1, 1000)
-    observation = ProjectionObservation("chat")
-    try:
-        projection = observation.measure(
-            "transcript_fold",
-            lambda: mesh.conversation_projection(chat_id, observer=observation),
-        )  # raises NotAMember for outsiders
-        snap = projection.snapshot
-        msgs = projection.messages
-        me = mesh.user
-        receipts = observation.measure(
-            "receipts_fold",
-            lambda: mesh.receipts_for(
-                chat_id, observer=observation, messages=msgs),
-        )
-        payload = []
-
-        def assemble_payload() -> None:
-            for message in msgs[-tail:]:
-                item = message_json(message, me)
-                receipt = receipts.get(message.id)
-                if receipt:
-                    item["receipt"] = receipt
-                payload.append(item)
-
-        observation.measure("payload_assembly", assemble_payload)
-        observation.count("serialization_count", len(payload))
-        mine = projection.viewer_state
-        meta = chat_json(snap, full=True)
-        meta["created"] = _created_iso(msgs)
-        meta["created_by"] = _created_by(msgs)
-        meta["archived"] = mine["archived"]
-        meta["pins"] = observation.measure(
-            "pins", lambda: _pins_list(mesh.pins(chat_id), msgs))
-        meta["agents_paused"] = observation.measure(
-            "pause_state",
-            lambda: read_pause(
-                mesh.directory, mesh.tx, chat_id=chat_id, snapshot=snap,
-                source="cached",
-            ),
-        )
-        if meta["kind"] == "dm":
-            other = next((member for member in snap.members if member != me), None)
-            acc = mesh.directory.get(me)
-            meta["blocked"] = bool(other and acc and other in acc.blocked)
-        result = {
-            "meta": meta,
-            "messages": payload,
-            "me": me,
-            "starred": mine["starred"],
-            "read_ns": mine["read_ns"],
-            "total": len(msgs),
-            "session_binding": session_read_binding(token),
-            "presentation": observation.measure(
-                "selected_presentation",
-                lambda: _chat_presentation(mesh, snap.members, payload),
-            ),
-        }
-    except Exception:
-        observation.log(app.home, "denied_or_error")
-        raise
-    observation.log(app.home, "ok")
-    return result
-
-
-def _chat_presentation(mesh, members, messages) -> dict:
-    """Bounded decorations for the already-authorized selected transcript.
-
-    Profiles retain their ordinary privacy filtering. No owner, key, presence,
-    permission or account-state field can become a client authority input.
-    Missing/oversized decorations simply render as usernames.
-    """
-    users = {}
-    budget = 64 * 1024 - len(json.dumps(
-        {"user": mesh.user, "users": {}}, ensure_ascii=False,
-    ).encode("utf-8"))
-    seen = set()
-    for name in chain((mesh.user,), members, (m["from"] for m in messages)):
-        if name in seen:
-            continue
-        if len(seen) >= 256:
-            break
-        seen.add(name)
-        acc = mesh.directory.get(name)
-        if acc is None:
-            continue
-        profile = mesh.visible_profile(name)
-        item = {"display": str(profile.get("display") or name)[:256]}
-        if profile.get("kind") in {"human", "agent"}:
-            item["display_kind"] = profile["kind"]
-        if profile.get("photo_visible") and isinstance(acc.avatar, dict):
-            avatar = {key: value for key, limit in (("sha256", 128), ("updated", 64))
-                      if isinstance(value := acc.avatar.get(key), str)
-                      and len(value) <= limit}
-            if avatar:
-                item["avatar"] = avatar
-        size = len(json.dumps({name: item}, ensure_ascii=False).encode("utf-8"))
-        if size > budget:
-            break
-        budget -= size
-        users[name] = item
-    return {"user": mesh.user, "users": users}
-
-
-def _pins_list(pins: dict, msgs) -> list[dict]:
-    """The frontend banner wants an ARRAY of {id, until, body}, latest message
-    first. Resolve bodies from the already-filtered read model (a redacted
-    message reads as its tombstone, never its old body)."""
-    by_id = {m.id: m for m in msgs}
-    out = []
-    for msg_id, doc in pins.items():
-        m = by_id.get(msg_id)
-        if m is None or m.deleted:
-            continue  # pinned message gone/redacted: drop it from the banner
-        out.append({"id": msg_id, "until": doc.get("until_ns", 0),
-                    "body": m.body, "ns": m.ns})
-    out.sort(key=lambda p: p["ns"], reverse=True)
-    return out
-
-
-def _created_iso(msgs) -> str:
-    for m in msgs:  # the genesis info event is first in ns order
-        if m.event and m.event.get("type") == "created":
-            return m.ts
-    return ""
-
-
-def _created_by(msgs) -> str:
-    for m in msgs:
-        if m.event and m.event.get("type") == "created":
-            return m.from_
-    return ""
 
 
 @authed
@@ -568,7 +277,6 @@ def activity(app: GuiApp, req, mesh) -> dict:
 GET = {
     "/api/state": bridge_state,
     "/api/mesh/state": state,
-    "/api/mesh/chat": chat,
 }
 POST = {
     "/api/mesh/post": post,

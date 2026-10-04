@@ -3,7 +3,7 @@
 One symmetric runner serves EVERY agent; per-agent differences live in the
 owner-set harness config on the agent's account (``agent.harness``), never in
 code. The harness is a Mesh-facade client like the GUI and the CLI: it never
-reads the synced folder directly, so visibility = membership holds by
+reads raw transport records directly, so visibility = membership holds by
 construction.
 
 Core pieces:

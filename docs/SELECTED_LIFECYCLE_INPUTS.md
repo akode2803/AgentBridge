@@ -1,8 +1,8 @@
 # Selected lifecycle inputs for canonical paging
 
-These inactive primitives replace namespace-wide input capture. They do not
-resolve membership, verify signatures, or authorize a page. The chat endpoint
-still uses its existing canonical path.
+These selected-input primitives avoid namespace-wide foreground capture. They
+do not themselves resolve membership, verify signatures or authorize a page.
+The mandatory GUI page operation supplies canonical and final session checks.
 
 `store.lifecycle_inputs.prepare(conn)` explicitly prepares two covering size
 indexes outside foreground requests. One partial index covers retained lifecycle
@@ -40,10 +40,10 @@ the receipt nor an empty range proves current permission or remote completeness.
 
 The current mirror prefix capture can inspect the global mirror up to its path
 budget. This operation remains confined to background publication. Cold,
-bootstrap-only, bare-folder and oversized inputs fail explicitly; foreground
+bootstrap-only, unsupported-owner and oversized inputs fail explicitly; foreground
 reads do not invoke publication, provider I/O, or a full-history fallback.
-Normal app folder transport must pass through the same provider-observed caching
-transport boundary before this primitive is eligible.
+Production inputs pass through the provider-observed Supabase caching transport
+boundary before this primitive is eligible.
 
 Before activation, the owning coordinator still needs fresh pin/account and
 lifecycle evaluation, retained-head publication with its authority fence, current

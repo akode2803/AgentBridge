@@ -1,6 +1,6 @@
 """Peer harness access (R22): the signed request/response channel, the
 off/ask policy, the owner-verdict state machine, auto-grants, timeouts, and
-forged-request rejection — all over a real folder mesh with real keys."""
+forged-request rejection — all over a real Supabase mesh with real keys."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ from conftest import install_key, seed_account
 
 
 @pytest.fixture
-def world(tmp_path):
-    root = tmp_path / "mesh2"
-    from agentbridge.transport.folder import FolderTransport
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    root = clouds.root(tmp_path / "mesh2")
+
+    tx = clouds.bare(root)
     bundles = {
         "aryan": seed_account(tx, "aryan"),
         "fable": seed_account(tx, "fable"),
@@ -40,7 +40,7 @@ def world(tmp_path):
     def mk(user):
         home = tmp_path / f"home-{user}"
         install_key(home, user, bundles[user])
-        return Mesh(FolderTransport(root), user, "mach1", home=home)
+        return Mesh(clouds.bare(root), user, "mach1", home=home)
 
     meshes = {u: mk(u) for u in bundles}
     yield meshes
@@ -182,7 +182,7 @@ def test_timeout_fails_closed(world, monkeypatch):
 
 
 def test_forged_request_is_rejected(world):
-    """A folder writer forging @ops's request (no @ops key) is dropped."""
+    """A provider writer forging @ops's request (no @ops key) is dropped."""
     claude = world["claude"]
     forged = {"id": "peer-x", "to": "claude", "from": "ops", "kind": "request",
               "command": "status", "payload": {}, "ns": 1, "sig": "AAAA"}
@@ -390,19 +390,19 @@ def test_repair_denied_by_owner_does_not_run(world):
     assert PeerService(ops).read_response("claude", rid)["payload"]["ok"] is False
 
 
-def test_peer_hold_stands_the_runner_down(tmp_path):
+def test_peer_hold_stands_the_runner_down(clouds, tmp_path):
     """A peer 'pause' sets a harness-LOCAL hold that standing_down honors and
     that survives across runner instances (persisted)."""
     from agentbridge.harness import AgentRunner
-    from agentbridge.transport.folder import FolderTransport
 
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     bundle = seed_account(tx, "claude", "agent", owner="aryan")
     home = tmp_path / "home"
     install_key(home, "claude", bundle)
 
-    runner = AgentRunner(root, "claude", home=home, machine="mach1", poll_s=0.2)
+    runner = AgentRunner(clouds.bare(root), "claude", home=home, machine="mach1", poll_s=0.2)
     try:
         assert runner.standing_down() is False
         runner.peer.repair_ops["pause"]()    # what an approved pause invokes
@@ -410,7 +410,7 @@ def test_peer_hold_stands_the_runner_down(tmp_path):
     finally:
         runner.close()
     # a fresh runner on the same home still sees the hold (persisted)
-    other = AgentRunner(root, "claude", home=home, machine="mach1", poll_s=0.2)
+    other = AgentRunner(clouds.bare(root), "claude", home=home, machine="mach1", poll_s=0.2)
     try:
         assert other.standing_down() is True
         other.peer.repair_ops["resume"]()

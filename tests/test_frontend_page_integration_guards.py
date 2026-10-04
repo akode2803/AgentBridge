@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_paged_read_eyes_latest_scroll_and_pending_receipt_guards(tmp_path):
     source = (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8')
-    mark = source[source.index('let legacyReadAck = null;'):
+    mark = source[source.index('document.addEventListener("ab:manual-mark-unread",'):
                   source.index('// reading needs eyes:', source.index('function markReadNow(chatId)'))]
     ticks = source[source.index('function syncReceiptTicks('):
                    source.index('function receiptTicks(', source.index('function syncReceiptTicks('))]
@@ -25,8 +25,8 @@ import assert from 'node:assert/strict';
 let paged = true, requests = [], sidebarPaints = 0;
 let tr = {scrollHeight:1000, clientHeight:200, scrollTop:250};
 let pageOwner = {ready:true, chatId:'room', browsing:false, current:()=>true,
-                 visibleReadNs:'100'};
-let Mesh = {chatId:'room',pendingRead:null, readTail:{}, state:{chats:[
+                 visibleReadNs:'100',visibleReadToken:'a'.repeat(64),visibleReadVersion:'v1'};
+let Mesh = {chatId:'room',pendingRead:null,  state:{chats:[
   {id:'room', last:{ns:150}, unread:5, forced_unread:true},
 ]}};
 const meshCaps = () => ({chat_page_v1:paged});
@@ -34,7 +34,6 @@ const $ = selector => selector === '#transcript' ? tr : null;
 const api = (path, body) => {requests.push({path, body}); return Promise.resolve({ok:true});};
 const renderSidebar = () => {sidebarPaints += 1;};
 const document={addEventListener(){}};
-const window={addEventListener(){}};
 const App={page:'chats'};
 const captureViewRead=()=>({});
 const viewReadMayApply=()=>true;
@@ -49,15 +48,27 @@ assert.equal(Mesh.pendingRead,'room');
 assert.deepEqual(requests,[]); // not at tail, even within first page
 assert.equal(sidebarPaints,0);
 tr.scrollTop=800;
+for (const field of ['visibleReadToken','visibleReadVersion']) {
+  const saved=pageOwner[field];
+  pageOwner[field]=null;
+  markReadNow('room');
+  assert.deepEqual(requests,[],'a cutoff alone cannot authorize a paged read');
+  assert.equal(Mesh.pendingRead,'room');
+  pageOwner[field]=saved;
+}
 markReadNow('room');
 assert.equal(Mesh.pendingRead,'room','receipt remains pending until acknowledgement');
 assert.equal(requests.length,1);
-assert.deepEqual(requests[0].body,{chat_id:'room',up_to_ns:'100'});
+assert.deepEqual(requests[0],{path:'/api/mesh/chat_page_read',body:{
+  chat_id:'room',page_version:'v1',read_ack_token:'a'.repeat(64)}});
+assert.equal(Mesh.state.chats[0].unread,5);
+assert.equal(Mesh.state.chats[0].forced_unread,true);
 await Promise.resolve();await Promise.resolve();
 assert.equal(Mesh.pendingRead,null);
 assert.equal(boundedSidebarReads,1);
-assert.equal(Mesh.readTail.room,undefined);
+assert.equal(Object.hasOwn(Mesh,'readTail'),false);
 assert.equal(Mesh.state.chats[0].unread,5); // a newer sidebar tail was not seen
+assert.equal(Mesh.state.chats[0].forced_unread,true);
 Mesh.state.chats[0].last.ns=90;
 markReadNow('room');
 assert.equal(Mesh.state.chats[0].unread,5); // JS Number cannot prove exact cutoff
@@ -68,13 +79,6 @@ assert.equal(requests.length,1); // historical window never advances read
 pageOwner.browsing=false;
 markReadNow('different');
 assert.equal(requests.length,1);
-paged=false;
-markReadNow('room');
-await Promise.resolve();await Promise.resolve();
-assert.equal(Mesh.readTail.room,90);
-assert.equal(Mesh.state.chats[0].unread,0);
-assert.equal(sidebarPaints,1);
-
 const slot = {innerHTML:'<span>Sent</span>', _receiptHtml:'<span>Sent</span>'};
 const row = {querySelector:()=>slot};
 const transcript = {_rows:new Map([['m:own',{el:row}]])};

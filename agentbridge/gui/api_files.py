@@ -542,22 +542,13 @@ def save(app, req, mesh, token) -> dict:
 def open_target(app, req) -> dict:
     """The Settings → Connection 'open' buttons (v1 parity — the route was
     missing in v2, leaving them dead). Targets are FIXED names, never a
-    client-supplied path: 'home' = the local config dir, 'shared' = a folder
-    mesh root. A cloud root has no folder to open."""
+    client-supplied path: 'home' = the local config dir."""
     lock = getattr(app, "lock", None)   # V111: opens Explorer — locked = no
     if lock is not None and lock.locked:
         return {"error": "App is locked", "locked": True}
     target = (req.data.get("target") or "").strip()
     if target == "home":
         desktop.open_path(app.home)
-        return {"ok": True}
-    if target == "shared":
-        from pathlib import Path
-
-        if not isinstance(app.root, Path):
-            return {"error": "The mesh lives in a cloud service — there is "
-                             "no folder to open"}
-        desktop.open_path(app.root)
         return {"ok": True}
     return {"error": f"unknown open target {target!r}"}
 

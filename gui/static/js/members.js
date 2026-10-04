@@ -33,17 +33,86 @@ function pickerSections(users, me, exclude, context) {
            any: listed.length > 0 };
 }
 
+function memberResponseCurrent(ticket, data) {
+  if (!modalReadMayApply(ticket)) return false;
+  // Error-only replies may omit the binding; they never supply data.
+  if (data?.session_binding !== undefined && !modalReadMayApply(ticket, data)) return false;
+  if (data && typeof data === "object" && !Array.isArray(data)
+      && !data.error && data.status !== "locked"
+      && !modalReadMayApply(ticket, data)) return false;
+  if ((data?.locked && data?.error) || data?.status === "locked") {
+    document.dispatchEvent(new CustomEvent("ab:locked"));
+    return false;
+  }
+  return true;
+}
+
+function memberReadStatus(data) {
+  return data?.status === "pending" || data?.status === "restart" ? "pending"
+    : data?.status === "forbidden" ? "forbidden" : "unavailable";
+}
+
+async function readMemberMetadata(chatId, ticket) {
+  let ms, data;
+  try {
+    ms = await api("/api/mesh/state", undefined, {timeoutMs:15000, sideEffects:false});
+  } catch {
+    return modalReadMayApply(ticket) ? {status:"unavailable"} : null;
+  }
+  if (!memberResponseCurrent(ticket, ms)) return null;
+  if (!ms || typeof ms !== "object" || Array.isArray(ms) || ms.error
+      || typeof ms.user !== "string" || !ms.users || typeof ms.users !== "object"
+      || Array.isArray(ms.users)) return {status:"unavailable"};
+  if (!modalReadMayApply(ticket, ms)) return null;
+  try {
+    data = await api(`/api/mesh/chat_summary?id=${encodeURIComponent(chatId)}`, undefined,
+      {timeoutMs:15000, sideEffects:false});
+  } catch {
+    return modalReadMayApply(ticket) ? {status:"unavailable"} : null;
+  }
+  if (!memberResponseCurrent(ticket, data)) return null;
+  if (!data || typeof data !== "object" || Array.isArray(data) || data.error) {
+    return {status:"unavailable"};
+  }
+  if (!modalReadMayApply(ticket, data)) return null;
+  if (data.status !== "ready") return {status:memberReadStatus(data)};
+  const meta = data.meta;
+  if (!meta || meta.id !== chatId || data.chat_id !== chatId
+      || !Array.isArray(meta.members) || meta.members.some(name => typeof name !== "string" || !name)
+      || new Set(meta.members).size !== meta.members.length) return {status:"unavailable"};
+  return {status:"ready", ms, meta};
+}
+
+function showMemberReadProblem(chatId, ticket, status, retry) {
+  if (!modalReadMayApply(ticket)) return;
+  const message = status === "pending" ? "Chat members aren't ready yet."
+    : status === "forbidden" ? "This chat is no longer available."
+    : "Couldn't load chat members.";
+  const box = openModal(`
+    <div class="pane-head" style="margin:0 0 10px">
+      <button class="icon-btn" id="mr-close">${ICONS.close}</button>
+      <span class="pane-title">Chat members</span>
+    </div>
+    <div class="empty" style="padding:22px 0">${esc(message)}</div>
+    <button id="mr-retry">Try again</button>`);
+  box.querySelector("#mr-close").addEventListener("click", closeModal);
+  const retryOwner = captureModalRead();
+  box.querySelector("#mr-retry").addEventListener("click", () => {
+    if (modalReadMayApply(retryOwner) && box.isConnected) retry(chatId);
+  });
+}
+
 async function showAddMembers(chatId) {
   const ticket = beginModalRead();
-  const ms = await api("/api/mesh/state");
-  if (!modalReadMayApply(ticket, ms) || ms.error) return;
-  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (data.error) {
-    if (modalReadMayApply(ticket)) toast("Couldn't load chat members", true);
+  const result = await readMemberMetadata(chatId, ticket);
+  if (!result || !modalReadMayApply(ticket)) return;
+  if (result.status !== "ready") {
+    showMemberReadProblem(chatId, ticket, result.status,
+      () => showAddMembers(chatId));
     return;
   }
-  if (!modalReadMayApply(ticket, data)) return;
-  const picker = pickerSections(ms.users, ms.user, data.meta.members || [], ms);
+  const { ms, meta } = result;
+  const picker = pickerSections(ms.users, ms.user, meta.members, ms);
   const box = openModal(`
     <div class="pane-head" style="margin:0 0 10px">
       <button class="icon-btn" id="am-close">${ICONS.close}</button>
@@ -81,15 +150,14 @@ V.showAddMembers = showAddMembers;
 // Search members: same surface, view-only
 async function showSearchMembers(chatId) {
   const ticket = beginModalRead();
-  const ms = await api("/api/mesh/state");
-  if (!modalReadMayApply(ticket, ms) || ms.error) return;
-  const data = await api(`/api/mesh/chat?id=${encodeURIComponent(chatId)}`);
-  if (data.error) {
-    if (modalReadMayApply(ticket)) toast("Couldn't load chat members", true);
+  const result = await readMemberMetadata(chatId, ticket);
+  if (!result || !modalReadMayApply(ticket)) return;
+  if (result.status !== "ready") {
+    showMemberReadProblem(chatId, ticket, result.status,
+      () => showSearchMembers(chatId));
     return;
   }
-  if (!modalReadMayApply(ticket, data)) return;
-  const meta = data.meta;
+  const { ms, meta } = result;
   const row = (u) => {
     const rec = ms.users[u] || {};
     return `

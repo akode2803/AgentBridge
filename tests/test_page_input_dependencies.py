@@ -14,7 +14,6 @@ from agentbridge.store import document_observation, overlay_index
 from agentbridge.store.db import Store
 from agentbridge.store.page_inputs import PageInputsChanged
 from agentbridge.transport.cache import CachingTransport
-from agentbridge.transport.folder import FolderTransport
 
 
 CHAT = "room"
@@ -300,15 +299,10 @@ def test_missing_selection_index_fails_closed_and_store_reopen_rebuilds_it(tmp_p
 
 
 def test_live_mirror_wrapper_rejects_message_mutation_after_initial_capture(
-        tmp_path, monkeypatch):
-    provider = FolderTransport(tmp_path / "provider")
+        tmp_path, monkeypatch, clouds):
+    provider = clouds.bare(tmp_path / "provider")
     provider.put_doc(REACTION, {"v": {"newest": "✅"}, "ns": 1, "sig": "invalid"})
     mirror = CachingTransport(provider, auto_refresh=False)
-    # Folder transports do not normally publish cloud cache identities. Give
-    # this disposable mirror the same explicit stable identities as the
-    # existing real-folder capture fixtures.
-    mirror._mirror_root_identity = str(provider.root)
-    mirror._mirror_cache_identity = "page-input-fixture-cache"
     mirror.refresh()
     store = Store(tmp_path / "store.sqlite")
     store.prepare_page_input_index()

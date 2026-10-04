@@ -19,8 +19,8 @@ from test_gui_chat_pages import _ready, page_app as _shared_page_app
 
 
 @pytest.fixture(name='page_app')
-def _page_fixture(tmp_path, monkeypatch):
-    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch)
+def _page_fixture(tmp_path, monkeypatch, clouds):
+    yield from _shared_page_app.__wrapped__(tmp_path, monkeypatch, clouds)
 
 
 def _posted(app, chat, raw=b'attachment-data', name='test.txt'):
@@ -203,14 +203,14 @@ def test_unrelated_arrival_during_fetch_uses_fresh_final_authority(page_app, mon
     assert fired and isinstance(result, Response), result
 
 
-def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypatch):
+def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypatch, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
     owner.membership.add_members(chat, ['peer'])
     owner.membership.grant_admin(chat, 'peer')
     message, rec = _posted(app, chat)
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-file.sqlite')
     try:
         peer.sync.sync_once([chat])
@@ -235,14 +235,14 @@ def test_removed_member_cannot_fetch_or_probe_missing_message(page_app, monkeypa
         peer.close()
 
 
-def test_member_removed_while_transport_fetch_waits(page_app, monkeypatch):
+def test_member_removed_while_transport_fetch_waits(page_app, monkeypatch, clouds):
     app, chat = page_app
     owner = app.mesh
     owner.accounts.create_human('peer', 'peer-password')
     owner.membership.add_members(chat, ['peer'])
     owner.membership.grant_admin(chat, 'peer')
     message, rec = _posted(app, chat)
-    peer = Mesh(app.root, 'peer', 'peerbox', encrypt=True, home=app.home,
+    peer = Mesh(clouds.bare(app.root), 'peer', 'peerbox', encrypt=True, home=app.home,
                 store_path=app.home / 'peer-file.sqlite')
     try:
         peer.sync.sync_once([chat])

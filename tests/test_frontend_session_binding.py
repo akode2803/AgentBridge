@@ -34,13 +34,13 @@ def _run_node(tmp_path: Path, program: str) -> None:
 
 
 @requires_node
-def test_binding_parser_is_exact_decimal_and_refuses_legacy_after_adoption(tmp_path):
+def test_binding_parser_is_exact_decimal_and_refuses_unbound_bootstrap(tmp_path):
     _run_node(tmp_path, """
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
         const bound = (instance_id, session_generation, viewer = 'aryan') =>
-          ({v: 2, instance_id, user: viewer, caps: {session_binding_v1: true},
+          ({v: 2, instance_id, user: viewer, caps: {session_binding_v1: true, chat_page_v1: true},
             session_binding: {instance_id, session_generation, viewer}});
         const accept = (payload) => b.acceptBootstrap(b.beginBootstrap(), payload);
 
@@ -55,30 +55,67 @@ def test_binding_parser_is_exact_decimal_and_refuses_legacy_after_adoption(tmp_p
           const out = probe.acceptBootstrap(probe.beginBootstrap(), bound('bad', bad));
           assert.equal(out.accepted, false, String(bad));
         }
-        assert.equal(accept({configured: true, gui_version: 'legacy', bridge_version: 'legacy'}).accepted, true);
-        assert.equal(accept({v: 3, caps: {session_binding_v1: true}}).accepted, false);
+        assert.equal(accept({configured: true, gui_version: 'legacy', bridge_version: 'legacy'}).accepted, false);
+        assert.equal(b.snapshot().ready, false);
+        assert.equal(b.snapshot().mode, 'undecided');
+        assert.equal(b.mayApply(b.capture()), false);
+        assert.equal(accept({v: 3, caps: {session_binding_v1: true, chat_page_v1: true}}).accepted, false);
         assert.equal(accept(bound('one', '7')).accepted, true);
-        // Binding mode is sticky: an old bridge payload must not downgrade it.
+        // An unbound payload cannot replace an adopted binding.
         assert.equal(accept({configured: true, gui_version: 'legacy', bridge_version: 'legacy'}).accepted, false);
         assert.equal(accept({v: 2, caps: {}}).accepted, false);
     """)
 
 
 @requires_node
-def test_legacy_bootstrap_refuses_malformed_capability_containers(tmp_path):
-    """Untrusted legacy payload caps must be object-shaped before capability probing."""
+def test_bootstrap_requires_exact_binding_and_paging_capabilities(tmp_path):
+    """Both current protocols are mandatory before any binding can be adopted."""
     _run_node(tmp_path, """
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
-        const oldV2 = (caps) => ({v: 2, configured: false, gui_version: '0.24.272',
-          instance_id: 'old', user: null, ...(caps === undefined ? {} : {caps})});
+        const payload = (caps) => ({v: 2, instance_id: 'p', user: 'aryan',
+          session_binding: {instance_id: 'p', session_generation: '0', viewer: 'aryan'},
+          ...(caps === undefined ? {} : {caps})});
         const accept = (payload) => {
           const boundary = createSessionBoundary();
-          return boundary.acceptBootstrap(boundary.beginBootstrap(), payload).accepted;
+          const result = boundary.acceptBootstrap(boundary.beginBootstrap(), payload);
+          if (!result.accepted) {
+            assert.equal(boundary.snapshot().ready, false);
+            assert.equal(boundary.snapshot().binding, null);
+            assert.equal(boundary.mayApply(boundary.capture(), payload), false);
+          }
+          return result;
         };
-        assert.equal(accept(oldV2(undefined)), true, 'recognized capability-absent old v2');
-        for (const caps of [null, [], 1, true, 'session_binding_v1', {session_binding_v1: false}]) {
-          assert.equal(accept(oldV2(caps)), false, JSON.stringify(caps));
+        const caps = {session_binding_v1: true, chat_page_v1: true};
+        assert.equal(accept(payload(caps)).accepted, true);
+        for (const value of [undefined, null, [], 1, true, 'session_binding_v1', {}]) {
+          assert.equal(accept(payload(value)).accepted, false, String(value));
+        }
+        for (const field of ['session_binding_v1', 'chat_page_v1']) {
+          for (const value of [undefined, null, false, 0, 1, 'true', [], {}]) {
+            const missing = {...caps, [field]: value};
+            const out = accept(payload(missing));
+            assert.equal(out.accepted, false, field + ': ' + String(value));
+            assert.equal(out.reason, field === 'session_binding_v1'
+              ? 'binding_capability_missing' : 'paging_capability_missing');
+          }
+          const absent = {...caps}; delete absent[field];
+          assert.equal(accept(payload(absent)).accepted, false, field + ': absent');
+        }
+        // Arrays with protocol properties are still invalid containers.
+        assert.equal(accept(payload(Object.assign([], caps))).accepted, false);
+        assert.equal(accept(Object.assign([], payload(caps))).accepted, false);
+        for (const value of [undefined, null, [], 1, true, 'bootstrap']) {
+          assert.equal(accept(value).accepted, false, String(value));
+        }
+        const b = createSessionBoundary();
+        assert.equal(b.acceptBootstrap(b.beginBootstrap(), payload(caps)).accepted, true);
+        const binding = b.snapshot().binding;
+        const epoch = b.capture().epoch;
+        for (const missing of [{session_binding_v1: true}, {chat_page_v1: true}]) {
+          assert.equal(b.acceptBootstrap(b.beginBootstrap(), payload(missing)).accepted, false);
+          assert.deepEqual(b.snapshot().binding, binding);
+          assert.equal(b.capture().epoch, epoch, 'rejection cannot manufacture a session transition');
         }
     """)
 
@@ -97,7 +134,7 @@ def test_same_instance_aba_floor_and_bootstrap_sequence_cannot_roll_back(tmp_pat
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
-        const payload = (generation, viewer = 'aryan') => ({v: 2, instance_id: 'same-process', user: viewer, caps: {session_binding_v1: true},
+        const payload = (generation, viewer = 'aryan') => ({v: 2, instance_id: 'same-process', user: viewer, caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id: 'same-process', session_generation: generation, viewer}});
         const accept = (p) => b.acceptBootstrap(b.beginBootstrap(), p);
         assert.equal(accept(payload('7')).accepted, true);
@@ -125,7 +162,7 @@ def test_changed_instance_requires_second_fresh_bootstrap_and_retires_old(tmp_pa
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary({maxRetiredInstances: 2});
-        const p = (instance_id, generation, viewer = 'aryan') => ({v: 2, instance_id, user: viewer, caps: {session_binding_v1: true},
+        const p = (instance_id, generation, viewer = 'aryan') => ({v: 2, instance_id, user: viewer, caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id, session_generation: generation, viewer}});
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), p('old', '19')).accepted, true);
         const oldTicket = b.capture();
@@ -149,7 +186,7 @@ def test_retired_instance_capacity_exhausts_and_refuses_all_late_application(tmp
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary({maxRetiredInstances: 1});
         const p = (instance_id) => ({v: 2, instance_id, user: 'aryan',
-          caps: {session_binding_v1: true},
+          caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id, session_generation: '0', viewer: 'aryan'}});
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), p('a')).accepted, true);
         const a = b.capture();
@@ -173,7 +210,7 @@ def test_actual_epoch_guard_model_drops_stale_cache_dom_and_post_followup(tmp_pa
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
-        const response = (viewer, generation) => ({v: 2, instance_id: 'p', caps: {session_binding_v1: true},
+        const response = (viewer, generation) => ({v: 2, instance_id: 'p', caps: {session_binding_v1: true, chat_page_v1: true},
           user: viewer, session_binding: {instance_id: 'p', session_generation: generation, viewer}});
         const app = {state: null};
         const mesh = {state: null, chatId: null, authorityCache: {private: true}};
@@ -231,7 +268,7 @@ def test_real_bootstrap_orchestration_discards_stale_and_clears_on_exhaustion(tm
           clears += 1; App.state = null; Mesh.state = null; Mesh.chatId = null; Mesh.authorityCache = {{}};
         }};
         const p = (instance_id, generation, viewer = 'aryan') => ({{v: 2, instance_id, user: viewer,
-          caps: {{session_binding_v1: true}},
+          caps: {{session_binding_v1: true, chat_page_v1: true}},
           session_binding: {{instance_id, session_generation: generation, viewer}}}});
         let replies = [];
         const context = {{configureDiagnostics:()=>{{}}, BrowserSession: boundary, App, Mesh, clearSessionCaches,
@@ -276,7 +313,7 @@ def test_real_bootstrap_starts_fresh_request_after_auth_epoch_invalidation(tmp_p
         let calls = 0, resolveOld;
         const old = new Promise((resolve) => {{ resolveOld = resolve; }});
         const p = (generation) => ({{v: 2, instance_id: 'same', user: 'aryan',
-          caps: {{session_binding_v1: true}},
+          caps: {{session_binding_v1: true, chat_page_v1: true}},
           session_binding: {{instance_id: 'same', session_generation: generation, viewer: 'aryan'}}}});
         const replies = [p('1'), old, p('3')];
         const context = {{configureDiagnostics:()=>{{}}, BrowserSession: boundary, App, V: {{}}, clearSessionCaches: () => {{ App.state = null; }},
@@ -302,7 +339,7 @@ def test_pending_transition_is_not_read_ready_until_fresh_bootstrap_commits(tmp_
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
         const p = (instance_id, generation) => ({v: 2, instance_id, user: 'aryan',
-          caps: {session_binding_v1: true},
+          caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id, session_generation: generation, viewer: 'aryan'}});
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), p('a', '1')).accepted, true);
         assert.equal(b.mayApply(b.capture()), true);
@@ -325,7 +362,7 @@ def test_invalidation_preserves_identity_floor_and_requires_fresh_readiness(tmp_
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const p = (instance_id, generation, viewer = 'aryan') => ({v: 2, instance_id, user: viewer,
-          caps: {session_binding_v1: true},
+          caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id, session_generation: generation, viewer}});
         const b = createSessionBoundary();
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), p('same', '7')).accepted, true);
@@ -349,30 +386,34 @@ def test_invalidation_preserves_identity_floor_and_requires_fresh_readiness(tmp_
 
 
 @requires_node
-def test_legacy_upgrade_advances_epoch_and_old_backend_versions_stay_compatible(tmp_path):
+def test_old_backend_versions_never_adopt_and_current_bootstrap_needs_no_upgrade(tmp_path):
     _run_node(tmp_path, """
         import assert from 'node:assert/strict';
         import { createSessionBoundary } from './session.mjs';
         const legacy = (version) => ({v: 2, configured: false, gui_version: version, instance_id: 'legacy', user: null});
-        const bound = {v: 2, instance_id: 'p', user: 'aryan', caps: {session_binding_v1: true},
+        const bound = {v: 2, instance_id: 'p', user: 'aryan', caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id: 'p', session_generation: '4', viewer: 'aryan'}};
         for (const version of ['0.24.259', '0.24.270', '0.24.272']) {
           const probe = createSessionBoundary();
-          assert.equal(probe.acceptBootstrap(probe.beginBootstrap(), legacy(version)).accepted, true, version);
+          assert.equal(probe.acceptBootstrap(probe.beginBootstrap(), legacy(version)).accepted, false, version);
+          assert.equal(probe.snapshot().ready, false);
+          assert.equal(probe.mayApply(probe.capture(), legacy(version)), false);
         }
         const b = createSessionBoundary();
-        assert.equal(b.acceptBootstrap(b.beginBootstrap(), legacy('0.24.259')).accepted, true);
+        assert.equal(b.acceptBootstrap(b.beginBootstrap(), legacy('0.24.259')).accepted, false);
         const old = b.capture();
         b.invalidate();
         assert.equal(b.mayApply(b.capture()), false);
-        assert.equal(b.acceptBootstrap(b.beginBootstrap(), legacy('0.24.259')).accepted, true);
-        const beforeUpgrade = b.capture();
-        const upgraded = b.acceptBootstrap(b.beginBootstrap(), bound);
-        assert.equal(upgraded.accepted, true);
-        assert.equal(upgraded.transition, true);
-        assert.equal(b.mayApply(beforeUpgrade), false);
+        assert.equal(b.acceptBootstrap(b.beginBootstrap(), legacy('0.24.259')).accepted, false);
+        const beforeAdoption = b.capture();
+        const adopted = b.acceptBootstrap(b.beginBootstrap(), bound);
+        assert.equal(adopted.accepted, true);
+        assert.equal(adopted.transition, false);
+        assert.equal(adopted.mode, 'bound');
+        assert.equal(b.capture().epoch, beforeAdoption.epoch);
         assert.equal(b.mayApply(old), false);
         assert.equal(b.mayApply(b.capture(), bound), true);
+        assert.equal(b.mayApply(b.capture(), legacy('0.24.272')), false);
     """)
 
 
@@ -418,7 +459,7 @@ def test_polled_exact_auth_receipt_can_finish_once_but_mismatched_receipt_cannot
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
         const response = (viewer, generation) => ({v: 2, instance_id: 'p', user: viewer,
-          caps: {session_binding_v1: true},
+          caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id: 'p', session_generation: generation, viewer}});
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), response('aryan', '1')).accepted, true);
         const prePost = b.capture();
@@ -447,7 +488,7 @@ def test_accepted_post_drops_its_actual_cache_and_dom_followup_after_transition(
         import { createSessionBoundary } from './session.mjs';
         const b = createSessionBoundary();
         const p = (viewer, generation) => ({v: 2, instance_id: 'p', user: viewer,
-          caps: {session_binding_v1: true},
+          caps: {session_binding_v1: true, chat_page_v1: true},
           session_binding: {instance_id: 'p', session_generation: generation, viewer}});
         assert.equal(b.acceptBootstrap(b.beginBootstrap(), p('aryan', '1')).accepted, true);
         const cache = {state: {user: 'aryan'}, agent: 'old'};

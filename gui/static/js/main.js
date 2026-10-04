@@ -5,14 +5,14 @@ import { $, initTheme, initAccent, toast } from "./util.js";
 import { api } from "./api.js";
 import { configureDiagnostics, diagnostic } from "./diagnostics.js";
 import { beginLoading, endLoading } from "./loading.js";
-import { App, Mesh, Settings, RESTART_KEY, restartIntent, clearRestartIntent,
+import { App, Mesh, Settings, meshCaps, RESTART_KEY, restartIntent, clearRestartIntent,
          resetSubviews, renderChrome, clearSessionCaches, captureSessionEpoch,
-         applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState, isInitialSelectedViewReady,
-         isInitialSelectedViewPending, cancelInitialSelectedView } from "./state.js";
+         applyMeshState, captureMeshStateRead, captureViewRead, viewReadMayApply, observeLockState } from "./state.js";
 import { BrowserSession } from "./session.js";
 import { renderSidebar, clearSidebar, syncSidebarSelection, renderSideLoading } from "./sidebar.js";
 import { V, EXPECTED } from "./views.js";
 import { syncRealtime, realtimeActive } from "./realtime.js";
+import { createRefreshPolicy } from "./refresh-policy.js";
 import "./auth.js";
 import { isPagedChatViewReady } from "./chat.js";
 import "./details.js";
@@ -254,7 +254,6 @@ async function refreshOnce(rerender) {
   // window used to sit on the dropped boot cover forever, reading as a
   // sign-out. Kick a full chats render; its own fetch fills Mesh.state.
   else if (!Mesh.state && PAGES[App.page]) {
-    if (isInitialSelectedViewPending()) return;
     try { await PAGES[App.page](); } catch { /* the next poll heals */ }
   }
   // signed out (R53): watch for a session appearing OUTSIDE the auth page —
@@ -291,6 +290,15 @@ async function refreshOnce(rerender) {
 // the settings page runs its own leash (settings.js startSettingsPoll) —
 // its data lives outside /api/state, and repaints need interaction guards
 V.refresh = refresh;
+const refreshPolicy = createRefreshPolicy({
+  refresh: () => refresh(false),
+  healthy: () => realtimeActive() && meshCaps().sse_refresh_v1 === true,
+  connected: realtimeActive,
+  background: () => document.hidden || !document.hasFocus(),
+});
+document.addEventListener("ab:realtime-state", () => refreshPolicy.changed());
+document.addEventListener("visibilitychange", () => refreshPolicy.changed());
+window.addEventListener("focus", () => refreshPolicy.changed());
 
 // a missing registration is a wiring bug — fail loudly at boot, not with
 // an undefined-call deep inside a render
@@ -312,7 +320,6 @@ const PAGES = {
 function route() {
   ["#content", "#side-chats", "#details-pane"].forEach((id) => endLoading($(id)));
   sessionRoutePending = false;
-  cancelInitialSelectedView();
   App.routeSeq = (App.routeSeq || 0) + 1;
   const hash = location.hash.replace("#/", "");
   const [page0, sub, sub2] = hash.split("/");
@@ -518,7 +525,7 @@ function routeInitialLocation() {
       // cover onto a bare shell mid-boot read as "the app signed out".
       // V111: the lock page IS a real first view — fade onto it.
       // V125: so is the connecting page (blind restore in progress).
-      if (!Mesh.state && !signedInHome && !isInitialSelectedViewReady() && !isPagedChatViewReady()
+      if (!Mesh.state && !signedInHome && !isPagedChatViewReady()
           && !document.getElementById("lock")
           && !document.getElementById("connecting")
           && App.page === "chats" && Date.now() - t0 < 45000) {
@@ -553,17 +560,7 @@ function routeInitialLocation() {
       lockNow();
     }
   });
-  // Local /api/state poll — fixed cadence (the user knob retired in V110:
-  // this only hits our own localhost server's in-memory mirror; every cadence
-  // that costs anything is profile-driven in the transport layer since R76).
-  // When the SSE stream is live (v2) the stream carries the news, so the poll
-  // drops to a slow safety-net tick that heals any dropped frame.
-  (function poll() {
-    const background = document.hidden || !document.hasFocus();
-    const ms = background ? 20000 : (realtimeActive() ? 20000 : 2500);
-    setTimeout(async () => {
-      try { await refresh(false); } catch { /* next tick retries */ }
-      poll();
-    }, ms);
-  })();
+  // Older/unsupported servers and broken SSE retain bounded recovery. A
+  // healthy event-first stream has no periodic broad /api/state refresh.
+  refreshPolicy.start();
 })();

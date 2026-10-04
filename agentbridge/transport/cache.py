@@ -12,7 +12,7 @@ How the mirror works instead:
 - ``warm()`` bulk-loads EVERY doc under the root in one paged query
   (``snapshot_docs``) plus the chat-id list.
 - ``get_doc`` / ``list_docs`` / ``list_chat_ids`` are then served from memory
-  — ZERO network on the hot read paths, folder-grade latency.
+  — no network on these hot document read paths.
 - A background daemon keeps the mirror fresh. R76 (docs/SCALING.md): on a
   transport with a doc delta feed it pulls ONLY "rows changed since cursor"
   — woken by realtime pokes, with a slow SAFETY poll while idle and a rare
@@ -32,10 +32,10 @@ How the mirror works instead:
   not lag (the SyncEngine already mirrors messages into the local SQLite
   store), and blobs are large + fetched on demand.
 
-Staleness is bounded by poke latency (sub-second writer-coalesced) or, with
-realtime down, one safety-poll interval — within the mesh's existing
-eventual-consistency tolerance (meta.json is a rebuildable last-writer-wins
-snapshot; a OneDrive folder's sync lag is far larger).
+Realtime hints reduce ordinary observation delay; safety polling reconciles
+missed hints. Provider failures can retain an older snapshot, so neither a poke
+nor a polling interval proves a hard remote-staleness bound. Canonical readers
+recheck authority from their captured inputs.
 Everything not overridden delegates to the inner transport.
 """
 
@@ -73,7 +73,7 @@ from .mirror_observation import (
 
 __all__ = ["CachingTransport"]
 
-# base cadence for an UNMETERED wrapped transport (tests; folder stays bare).
+# base cadence for an UNMETERED wrapped transport (internal tests).
 # Metered drivers get their cadence from their TransportProfile instead.
 CLOUD_REFRESH_S = 4.0
 # how long a local write shadows a refresh (a pull in flight while we wrote
@@ -907,7 +907,12 @@ class CachingTransport(Transport):
                     # established room, authoritative RLS disappearance is a
                     # revocation and must beat a concurrent local append.
                     self._chat_writes[chat_id] = time.monotonic()
-        self._persist_snapshot()
+        # Logs are never in the bootstrap snapshot. An established-room append
+        # changes no cached fields, so avoid copying/writing the entire mirror.
+        # Failed best-effort cache writes retry on cache-changing operations or
+        # full refresh; append success still depends on the provider above.
+        if is_new:
+            self._persist_snapshot()
 
     def read_log(
         self, chat_id: str, log_name: str, offset: int = 0

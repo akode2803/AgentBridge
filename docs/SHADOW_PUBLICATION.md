@@ -40,5 +40,5 @@ chat-list syntax and provenance. Byte ceilings do not bound exact heap or CPU.
 Tokens/receipts are concurrency evidence, not authorization or proof of origin.
 Frozen data classes are revalidated at write boundaries, not treated as unforgeable
 capabilities. Provider completeness, membership/trust/session closure, pending
-echoes, folder identity support, recurring-work budgets and cache admission remain
+echoes, recurring-work budgets and cache admission remain
 separate requirements. See SHADOW_SLOT.md for the durable storage contract.

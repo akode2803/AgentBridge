@@ -1,5 +1,5 @@
 """Supabase transport (R23, D2) — the cloud realtime driver behind the same
-Transport contract as the synced folder.
+Transport contract used by the mesh, GUI, CLI and harness.
 
 Mapping (schema in ``docs/supabase_schema.sql``, pasted once by the owner):
 - docs  -> ``ab_docs``  (root, path, jsonb) — put_doc is one atomic upsert;
@@ -121,7 +121,7 @@ def _is_unique_violation(err: Exception) -> bool:
 
 
 def _check(path: str) -> str:
-    """POSIX-relative path discipline, same as the folder driver."""
+    """Validate POSIX-relative logical record paths."""
     p = (path or "").replace("\\", "/").strip("/")
     if not p or ".." in p.split("/"):
         raise ValidationError(f"bad transport path: {path!r}")

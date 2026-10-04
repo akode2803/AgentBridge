@@ -15,16 +15,16 @@ from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationErro
 from agentbridge.core.models import ChatKind, ChatSnapshot, Member, Role
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
-from agentbridge.transport.folder import FolderTransport
+
 
 CHAT = "room1"
 
 
 @pytest.fixture
-def world(tmp_path):
-    """Shared folder root + meshes for ann, bob (members) and eve (not)."""
-    root = tmp_path / "mesh2"
-    tx = FolderTransport(root)
+def world(clouds, tmp_path):
+    """Shared cloud root + meshes for ann, bob (members) and eve (not)."""
+    root = clouds.root(tmp_path / "mesh2")
+    tx = clouds.bare(root)
     snap = ChatSnapshot(
         id=CHAT, kind=ChatKind.GROUP, name="Room",
         members={
@@ -35,7 +35,7 @@ def world(tmp_path):
     tx.put_doc(P.meta(CHAT), snap.to_dict())
 
     def mk(user):
-        return Mesh(FolderTransport(root), user, "mach1", home=tmp_path / f"home-{user}")
+        return Mesh(clouds.bare(root), user, "mach1", home=tmp_path / f"home-{user}")
 
     meshes = {u: mk(u) for u in ("ann", "bob", "eve")}
     yield meshes

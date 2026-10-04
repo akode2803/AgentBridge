@@ -93,7 +93,6 @@ def test_sealed_attachment_roundtrip(rig, monkeypatch):
     # may otherwise correctly retire its source between admission and capture.
     monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
-    rig.app.local_inputs_enabled = True
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="Files",
@@ -105,7 +104,7 @@ def test_sealed_attachment_roundtrip(rig, monkeypatch):
                     attachments=[up["token"]])
     assert sent["ok"]
 
-    got = rig.get("/api/mesh/chat", id=cid)
+    got = rig.page(cid)
     files = got["messages"][-1]["files"]
     assert len(files) == 1
     rec = files[0]
@@ -182,19 +181,18 @@ def test_forward_reseals_attachments(rig, monkeypatch):
     # may otherwise correctly retire its source between admission and capture.
     monkeypatch.setattr(Mesh, "start", lambda self, **_kwargs: None)
     monkeypatch.setattr(SyncEngine, "run", lambda self, **_kwargs: None)
-    rig.app.local_inputs_enabled = True
     rig.signup()
     c1 = rig.post("/api/mesh/create_chat", name="Src", members=[])["chat"]["id"]
     c2 = rig.post("/api/mesh/create_chat", name="Dst", members=[])["chat"]["id"]
     up = rig.post_raw("/api/mesh/upload", PNG, name="pic.png")
     rig.post("/api/mesh/post", chat_id=c1, body="original",
              attachments=[up["token"]])
-    src_msg = rig.get("/api/mesh/chat", id=c1)["messages"][-1]
+    src_msg = rig.page(c1)["messages"][-1]
 
     fw = rig.post("/api/mesh/forward", chat_id=c1, msg_id=src_msg["id"],
                   targets=[c2])
     assert fw["ok"] and fw["forwarded"] == 1
-    dst_msg = rig.get("/api/mesh/chat", id=c2)["messages"][-1]
+    dst_msg = rig.page(c2)["messages"][-1]
     assert dst_msg["body"] == "original"
     assert dst_msg["fwd"]["from"] == "aryan"
     new_id = dst_msg["files"][0]["id"]
@@ -211,7 +209,7 @@ def test_forward_rejects_every_target_before_reading_source_files(
     up = rig.post_raw("/api/mesh/upload", PNG, name="private.png")
     rig.post("/api/mesh/post", chat_id=src, body="private",
              attachments=[up["token"]])
-    msg = rig.get("/api/mesh/chat", id=src)["messages"][-1]
+    msg = rig.page(src)["messages"][-1]
     with rig.peer_mesh("fable") as peer:
         target = peer.create_chat("Not Aryan's", members=[]).id
 
@@ -236,14 +234,14 @@ def test_avatars_profile_and_group(rig):
     assert out["ok"] and out["avatar"]["sha256"]
     ctype, body = rig.get_bytes("/api/mesh/avatar", user="aryan")
     assert body == PNG
-    assert rig.get("/api/mesh/state")["users"]["aryan"]["avatar"]["sha256"]
+    assert rig.aux(cid)["users"]["aryan"]["avatar"]["sha256"]
     rig.post("/api/mesh/clear_avatar")
-    assert "avatar" not in rig.get("/api/mesh/state")["users"]["aryan"]
+    assert "avatar" not in rig.aux(cid)["users"]["aryan"]
 
     # group photo: marker folds into meta, members can fetch
     out = rig.post_raw("/api/mesh/set_group_avatar", PNG, chat=cid)
     assert out["ok"] and out["avatar"]
-    st_chat = next(c for c in rig.get("/api/mesh/state")["chats"]
+    st_chat = next(c for c in rig.sidebar()["chats"]
                    if c["id"] == cid)
     assert st_chat["avatar"] == hashlib.sha256(PNG).hexdigest()
     _, body = rig.get_bytes("/api/mesh/avatar", chat=cid)
@@ -253,6 +251,7 @@ def test_avatars_profile_and_group(rig):
     with rig.peer_mesh("fable") as fable:
         fable.accounts.set_avatar(PNG)
         fable.set_privacy({"photo": "nobody"})
+    rig.prepare(cid)
     got = rig.get("/api/mesh/avatar", user="fable")
     assert "error" in got
 
@@ -265,24 +264,24 @@ def test_message_ops_star_pin_edit_delete(rig):
     m2 = rig.post("/api/mesh/post", chat_id=cid, body="two")["id"]
 
     rig.post("/api/mesh/star", chat_id=cid, msg_id=m1)
-    stars = rig.get("/api/mesh/starred", id=cid)["starred"]
+    stars = rig.collection(cid, "starred")["items"]
     assert [s["id"] for s in stars] == [m1]
     rig.post("/api/mesh/star", chat_id=cid, msg_id=m1, starred=False)
-    assert rig.get("/api/mesh/starred", id=cid)["starred"] == []
+    assert rig.collection(cid, "starred")["items"] == []
 
     rig.post("/api/mesh/pin", chat_id=cid, msg_id=m2)
-    pins = rig.get("/api/mesh/chat", id=cid)["meta"]["pins"]
+    pins = rig.page(cid)["meta"]["pins"]
     assert [p["id"] for p in pins] == [m2]   # list of {id, until, body} for the banner
     rig.post("/api/mesh/unpin", chat_id=cid, msg_id=m2)
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["pins"] == []
+    assert rig.page(cid)["meta"]["pins"] == []
 
     rig.post("/api/mesh/edit_message", chat_id=cid, msg_id=m1, body="one v2")
-    got = rig.get("/api/mesh/chat", id=cid)
+    got = rig.page(cid)
     edited = next(m for m in got["messages"] if m["id"] == m1)
     assert edited["body"] == "one v2" and edited["edited"]
 
     def message_ids():
-        return [m["id"] for m in rig.get("/api/mesh/chat", id=cid)["messages"]
+        return [m["id"] for m in rig.page(cid)["messages"]
                 if m["kind"] == "message"]
 
     # delete for me (reversible)
@@ -294,11 +293,11 @@ def test_message_ops_star_pin_edit_delete(rig):
     # delete for everyone -> tombstone
     rig.post("/api/mesh/delete_messages", chat_id=cid, ids=[m2],
              scope="everyone")
-    last = rig.get("/api/mesh/chat", id=cid)["messages"][-1]
+    last = rig.page(cid)["messages"][-1]
     assert last["deleted"] is True and last["body"] == ""
 
     rig.post("/api/mesh/clear_chat", chat_id=cid)
-    assert [m for m in rig.get("/api/mesh/chat", id=cid)["messages"]
+    assert [m for m in rig.page(cid)["messages"]
             if m["kind"] == "message"] == []
 
 
@@ -314,7 +313,7 @@ def test_redact_is_sender_only(rig):
 
     def arrived():
         return any(m["id"] == env.id
-                   for m in rig.get("/api/mesh/chat", id=cid)["messages"])
+                   for m in rig.page(cid)["messages"])
     wait_for(arrived)
     out = rig.post("/api/mesh/delete_messages", chat_id=cid, ids=[env.id],
                    scope="everyone")
@@ -329,21 +328,20 @@ def test_chat_flags_and_reactions(rig):
     rig.post("/api/mesh/archive", chat_id=cid, archived=True)
     rig.post("/api/mesh/pin_chat", chat_id=cid, pinned=True)
     rig.post("/api/mesh/mark_unread", chat_id=cid, unread=True)
-    chat = next(c for c in rig.get("/api/mesh/state")["chats"]
+    chat = next(c for c in rig.sidebar()["chats"]
                 if c["id"] == cid)
     assert chat["archived"] and chat["pinned"] and chat["forced_unread"]
 
     rig.post("/api/mesh/hide_chat", chat_id=cid)
-    assert next(c for c in rig.get("/api/mesh/state")["chats"]
-                if c["id"] == cid)["hidden"]
+    assert all(c["id"] != cid for c in rig.sidebar()["chats"])
     rig.post("/api/mesh/hide_chat", chat_id=cid, undo=True)
 
     rig.post("/api/mesh/mute", chat_id=cid, hours=1)
-    assert next(c for c in rig.get("/api/mesh/state")["chats"]
+    assert next(c for c in rig.sidebar()["chats"]
                 if c["id"] == cid)["mute"] > 0
 
     rig.post("/api/mesh/react", chat_id=cid, msg_id=m1, emoji="👍")
-    got = next(m for m in rig.get("/api/mesh/chat", id=cid)["messages"]
+    got = next(m for m in rig.page(cid)["messages"]
                if m["id"] == m1)
     assert got["reactions"] == {"👍": ["aryan"]}
 
@@ -368,16 +366,16 @@ def test_group_settings_admins_and_delete(rig):
     assert "error" not in out, out
     assert out["admins"] == ["aryan"]
 
-    info = rig.get("/api/mesh/chat_info", id=cid)
+    info = rig.summary(cid)
     assert info["meta"]["name"] == "Team 2"
     assert info["meta"]["description"] == "hello"
 
     # admin deletes the group for everyone -> terminal
     assert rig.post("/api/mesh/delete_chat", chat_id=cid)["ok"]
-    state = rig.get("/api/mesh/state")
+    state = rig.sidebar()
     assert "chats" in state, state
     assert all(c["id"] != cid for c in state["chats"])
-    assert "error" in rig.get("/api/mesh/chat", id=cid)
+    assert rig.page(cid)["status"] == "forbidden"
 
 
 def test_delete_chat_needs_admin(rig):
@@ -400,10 +398,11 @@ def test_state_hides_terminal_event_when_meta_is_stale(rig):
     terminal = mesh.build_event(
         cid, {"type": "chat_deleted", "by": "aryan"},
     )
-    mesh.store.upsert_messages(cid, [terminal.to_dict()])
+    mesh.tx.append_log(cid, "aryan", terminal.to_dict())
+    mesh.sync.sync_once([cid])
 
-    assert all(c["id"] != cid for c in rig.get("/api/mesh/state")["chats"])
-    assert "error" in rig.get("/api/mesh/chat", id=cid)
+    assert all(c["id"] != cid for c in rig.sidebar()["chats"])
+    assert rig.page(cid)["status"] == "forbidden"
 
 
 # ------------------------------------------------------------------ profile
@@ -504,15 +503,15 @@ def test_agents_create_patch_standdown_delete(rig):
 
     down = rig.post("/api/mesh/stand_down", down=True)
     assert down["changed"] == ["helper"]
-    assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False
+    assert rig.sidebar()["users"]["helper"]["active"] is False
     rig.post("/api/mesh/stand_down", down=False)
 
     st = rig.post("/api/mesh/pause", paused=True)
     assert "retired" in st["error"]
-    assert rig.get("/api/mesh/state")["paused"] is False
+    assert rig.sidebar()["paused"] is False
 
     rig.post("/api/mesh/delete_agent", username="helper")
-    assert rig.get("/api/mesh/state")["users"]["helper"]["active"] is False
+    assert rig.sidebar()["users"]["helper"]["active"] is False
 
 
 def test_create_agent_normalizes_partial_harness_and_preserves_choice(rig):
@@ -589,7 +588,6 @@ def test_asks_surface_and_answer_roundtrip(rig):
     from agentbridge.harness.runtime.permissions import PermissionLane
     from agentbridge.harness.peer import PeerService
     from agentbridge.mesh.service import Mesh
-    from agentbridge.transport.folder import FolderTransport
     from types import SimpleNamespace
 
     rig.signup()
@@ -597,10 +595,10 @@ def test_asks_surface_and_answer_roundtrip(rig):
     rig.post("/api/mesh/create_agent", username="ops", display="Ops")
     cid = rig.post("/api/mesh/create_chat", name="Approval room",
                    members=["helper"])["chat"]["id"]
-    tx = FolderTransport(rig.root)
-    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+    tx = rig.app.mesh.tx
+    helper = Mesh(rig.clouds.bare(rig.root), "helper", "guibox", encrypt=True, home=rig.home,
                   store_path=rig.home / "helper-ask.sqlite")
-    ops = Mesh(rig.root, "ops", "guibox", encrypt=True, home=rig.home,
+    ops = Mesh(rig.clouds.bare(rig.root), "ops", "guibox", encrypt=True, home=rig.home,
                store_path=rig.home / "ops-peer.sqlite")
     helper.sync.sync_once([cid])
     ask = PermissionLane(helper, "helper").publish_ask(
@@ -608,20 +606,26 @@ def test_asks_surface_and_answer_roundtrip(rig):
         detail="C:/elsewhere/x.txt", input_digest="a" * 64,
         timeout_s=120, run_id="run-1", call_id="call-1")
     _beat(rig, "helper")
-    out = rig.get("/api/mesh/asks", chat=cid)
+    out = rig.asks(cid)
     assert [a["id"] for a in out["asks"]] == [ask.id]
     assert out["asks"][0]["agent"] == "helper"
-    assert rig.get("/api/mesh/asks", chat="other")["asks"] == []
+    # A nonexistent room has no admitted membership/source proof. Observe the
+    # pending contract directly instead of demanding a complete ready helper.
+    unknown = rig.get("/api/mesh/asks", chat="other")
+    assert unknown["asks"] == [] and unknown["resolved_room_ids"] == []
+    assert not unknown["asks_complete"] and not unknown["rooms_complete"]
 
     # scheduled wake-ups surface through the same endpoint (R19.5)
     tx.put_doc("status/helper_harness.json", {
         "agent": "helper", "paused": False, "queue": [],
         "timers": [{"id": "t1", "chat_id": cid, "at_ns": 1,
                     "note": "check back"}]})
-    out = rig.get("/api/mesh/asks")
+    out = rig.asks()
     assert out["timers"] == [{"agent": "helper", "id": "t1", "chat_id": cid,
                               "at_ns": 1, "note": "check back"}]
-    assert rig.get("/api/mesh/asks", chat="other")["timers"] == []
+    unknown = rig.get("/api/mesh/asks", chat="other")
+    assert unknown["timers"] == []
+    assert not unknown["asks_complete"] and not unknown["rooms_complete"]
 
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=ask.id,
                    verdict="always", tool="ForgedTool", chat=cid)
@@ -638,7 +642,7 @@ def test_asks_surface_and_answer_roundtrip(rig):
     requester = PeerService(ops)
     peer1 = requester.request("helper", "status")
     assert target.serve_once(peer_settings) == 1
-    surfaced = [a for a in rig.get("/api/mesh/asks")["asks"]
+    surfaced = [a for a in rig.asks()["asks"]
                 if a.get("kind") == "peer"]
     assert surfaced and surfaced[0]["peer"] == "ops"
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=peer1,
@@ -653,7 +657,7 @@ def test_asks_surface_and_answer_roundtrip(rig):
     # A repair request is also reconstructed server-side and remains one-shot.
     peer2 = requester.request("helper", "pause")
     assert target.serve_once(peer_settings) == 1
-    rep = [a for a in rig.get("/api/mesh/asks")["asks"]
+    rep = [a for a in rig.asks()["asks"]
            if a.get("id") == peer2][0]
     assert rep["repair"] is True and "pause" in rep["detail"]
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=peer2,
@@ -668,7 +672,7 @@ def test_asks_surface_and_answer_roundtrip(rig):
     assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
     rig.post("/api/mesh/signup", username="mallory", password="mallory-pw1",
              display="Mallory")
-    assert rig.get("/api/mesh/asks")["asks"] == []
+    assert rig.asks()["asks"] == []
     out = rig.post("/api/mesh/answer_ask", agent="helper", ask_id=ask.id,
                    verdict="allow")
     assert "error" in out
@@ -689,7 +693,7 @@ def test_timer_cancel_owner_gated_and_merging(rig):
     })
     assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-1")["ok"]
     assert rig.post("/api/mesh/timer_cancel", agent="helper", id="t-2")["ok"]
-    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+    helper = Mesh(rig.clouds.bare(rig.root), "helper", "guibox", encrypt=True, home=rig.home,
                   store_path=rig.home / "helper-controls.sqlite")
     try:
         from agentbridge.harness.runtime.controls import owner_commands
@@ -716,28 +720,25 @@ def test_dm_blocked_flag_viewer_side_only(rig):
     rig.signup()
     rig.peer_account("sudhir")
     cid = rig.post("/api/mesh/create_dm", username="sudhir")["chat"]["id"]
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["blocked"] is False
+    assert rig.page(cid)["meta"]["blocked"] is False
     assert rig.post("/api/mesh/block", username="sudhir")["ok"]
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["blocked"] is True
+    assert rig.page(cid)["meta"]["blocked"] is True
     assert rig.post("/api/mesh/unblock", username="sudhir")["ok"]
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["blocked"] is False
+    assert rig.page(cid)["meta"]["blocked"] is False
     # the reverse direction must NOT leak: sudhir blocks aryan — aryan's
     # flag stays False, but the send fails with the neutral reason
     with rig.peer_mesh("sudhir") as pm:
         pm.block("aryan")
         pm.outbox.flush_once()
-    assert rig.get("/api/mesh/chat", id=cid)["meta"]["blocked"] is False
+    assert rig.page(cid)["meta"]["blocked"] is False
     out = rig.post("/api/mesh/post", chat_id=cid, body="hello?")
     assert "is not available" in out.get("error", "")
     assert "block" not in out.get("error", "").lower()   # reason never leaks
 
 
 # ----------------------------------------------------------- typing + feeds
-def test_livefeed_no_id_is_membership_filtered(rig):
-    """V128: the no-id lane (all my chats) applies the same membership
-    filter as the per-chat path — a run doc or typing heartbeat in a room
-    the caller isn't a member of must never surface (visibility =
-    membership, the one invariant)."""
+def test_selected_aux_feeds_are_membership_filtered(rig):
+    """Selected auxiliaries exclude other rooms' status and deny outsiders."""
     rig.signup()
     rig.peer_account("fable")
     rig.peer_account("cara")
@@ -755,37 +756,36 @@ def test_livefeed_no_id_is_membership_filtered(rig):
         "updated": now, "activity": "secret"})
     tx.put_doc("status/typing_cara.json", {
         "user": "cara", "chat_id": theirs, "updated": now})
-    feeds = rig.get("/api/mesh/livefeed")["feeds"]
+    result = rig.aux(mine)
+    assert result.get("status") == "ready", result
+    feeds = result["feeds"]
     who = {f["agent"] for f in feeds}
     assert "helper" in who           # my chat's run shows
     assert "hermit" not in who       # a not-my-room run never leaks
     assert "cara" not in who         # nor their typing heartbeat
     assert not any("secret" in str(f.get("activity", "")) for f in feeds)
-    # the per-chat path still answers for my own room
-    feeds = rig.get("/api/mesh/livefeed", id=mine)["feeds"]
-    assert {f["agent"] for f in feeds} == {"helper"}
+    denied = rig.aux(theirs)
+    assert denied["status"] == "forbidden" and "feeds" not in denied
 
 
-def test_typing_and_livefeed(rig):
+def test_typing_and_selected_aux_feed(rig):
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="T",
                    members=["fable"])["chat"]["id"]
     # my own typing is never news to me
     rig.post("/api/mesh/typing", chat_id=cid)
-    assert rig.get("/api/mesh/livefeed", id=cid)["feeds"] == []
+    assert rig.aux(cid)["feeds"] == []
     # fable's heartbeat shows up
     rig.app.mesh.tx.put_doc("status/typing_fable.json", {
         "user": "fable", "chat_id": cid, "updated": utcnow_iso(),
     })
-    feeds = rig.get("/api/mesh/livefeed", id=cid)["feeds"]
+    feeds = rig.aux(cid)["feeds"]
     assert feeds and feeds[0]["typing"] and feeds[0]["agent"] == "fable"
 
 
-def test_state_carries_sidebar_liveliness(rig):
-    """V66: the sidebar state annotates a chat with `live` — who's typing
-    (fresh heartbeats only, never my own) and which agent run is mid-flight
-    (running + not a ghost). Quiet chats carry no field at all."""
+def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig):
+    """Live decorations arrive through the selected auxiliary read."""
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="Live",
@@ -797,7 +797,7 @@ def test_state_carries_sidebar_liveliness(rig):
         return next(c for c in state["chats"] if c["id"] == chat_id)
 
     # quiet mesh: no live field anywhere
-    st = rig.get("/api/mesh/state")
+    st = rig.sidebar()
     assert "live" not in chat_of(st, cid) and "live" not in chat_of(st, other)
 
     # my OWN typing is never news to me; fable's fresh heartbeat is
@@ -821,23 +821,23 @@ def test_state_carries_sidebar_liveliness(rig):
         "state": "running", "agent": "zombie", "chat_id": other,
         "updated": "2020-01-01T00:00:00Z", "activity": "stuck",
     })
-    st = rig.get("/api/mesh/state")
-    live = chat_of(st, cid)["live"]
-    assert {"user": "fable", "typing": True} in live
-    assert any(f.get("user") == "helper"
+    live = rig.aux(cid)["feeds"]
+    assert any(f.get("agent") == "fable" and f.get("typing") for f in live)
+    assert any(f.get("agent") == "helper"
                and f.get("activity") == "Searching for the export"
                for f in live)
-    assert {f.get("run_id") for f in live if f.get("user") == "helper"} \
+    assert {f.get("run_id") for f in live if f.get("agent") == "helper"} \
         == {"run-a", "run-b"}
-    assert not any(f.get("user") == "aryan" for f in live)
-    assert "live" not in chat_of(st, other)   # the ghost never surfaces
+    assert not any(f.get("agent") == "aryan" for f in live)
+    assert rig.aux(other)["feeds"] == []   # the ghost never surfaces
 
     # a stale typing heartbeat drops off
     rig.app.mesh.tx.put_doc("status/typing_fable.json", {
         "user": "fable", "chat_id": cid, "updated": "2020-01-01T00:00:00Z",
     })
-    st = rig.get("/api/mesh/state")
-    assert not any(f.get("typing") for f in chat_of(st, cid).get("live", []))
+    st = rig.sidebar()
+    assert "live" not in chat_of(st, cid)
+    assert not any(f.get("typing") for f in rig.aux(cid)["feeds"])
 
 
 def _beat(rig, agent, *, age_s=0.0, pid=None):
@@ -870,7 +870,7 @@ def test_asks_are_gated_by_process_truth(rig, monkeypatch, request):
     rig.post("/api/mesh/create_agent", username="helper")   # machine=guibox
     cid = rig.post("/api/mesh/create_chat", name="Local asks",
                    members=["helper"])["chat"]["id"]
-    helper = Mesh(rig.root, "helper", "guibox", encrypt=True, home=rig.home,
+    helper = Mesh(rig.clouds.bare(rig.root), "helper", "guibox", encrypt=True, home=rig.home,
                   store_path=rig.home / "helper-liveness.sqlite")
     request.addfinalizer(helper.close)
     helper.sync.sync_once([cid])
@@ -879,16 +879,16 @@ def test_asks_are_gated_by_process_truth(rig, monkeypatch, request):
         input_digest="c" * 64, timeout_s=120, run_id="r", call_id="c")
 
     # dead runner (no heartbeat at all): the prompt is a ghost
-    assert rig.get("/api/mesh/asks")["asks"] == []
+    assert rig.asks()["asks"] == []
     # fresh heartbeat + live pid: the prompt is real
     _beat(rig, "helper")
-    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == [ask.id]
+    assert [a["id"] for a in rig.asks()["asks"]] == [ask.id]
     # stale heartbeat: dead again — a reused pid can't fake life
     _beat(rig, "helper", age_s=3600)
-    assert rig.get("/api/mesh/asks")["asks"] == []
+    assert rig.asks()["asks"] == []
     # dead pid with a fresh stamp: still dead
     _beat(rig, "helper", pid=999999999)
-    assert rig.get("/api/mesh/asks")["asks"] == []
+    assert rig.asks()["asks"] == []
 
     # a REMOTE agent (hosted elsewhere): process truth is unknowable here,
     # so the ask's own timeout decides
@@ -901,27 +901,24 @@ def test_asks_are_gated_by_process_truth(rig, monkeypatch, request):
     )
     remote_cid = rig.post("/api/mesh/create_chat", name="Remote asks",
                           members=["farbot"])["chat"]["id"]
-    farbot = Mesh(rig.root, "farbot", "elsewhere", encrypt=True, home=rig.home,
+    farbot = Mesh(rig.clouds.bare(rig.root), "farbot", "elsewhere", encrypt=True, home=rig.home,
                   store_path=rig.home / "farbot-liveness.sqlite")
     request.addfinalizer(farbot.close)
     farbot.sync.sync_once([remote_cid])
     remote = PermissionLane(farbot, "farbot").publish_ask(
         chat_id=remote_cid, kind="permission", tool="Read", detail="remote",
         input_digest="d" * 64, timeout_s=120, run_id="r2", call_id="c2")
-    assert [a["id"] for a in rig.get("/api/mesh/asks")["asks"]] == [remote.id]
+    assert [a["id"] for a in rig.asks()["asks"]] == [remote.id]
     # Advance only the permission module's clock for expiry validation; a
     # sub-second timeout races Windows filesystem and HTTP I/O.
     with monkeypatch.context() as expires:
         expires.setattr(permissions, "time", SimpleNamespace(
             time_ns=lambda: remote.record["expires_ns"] + 1))
-        assert rig.get("/api/mesh/asks")["asks"] == []
+        assert rig.asks()["asks"] == []
 
 
 def test_run_lines_need_a_live_runner(rig):
-    """V109: a 'running' feed doc from a locally-hosted agent whose runner
-    process is dead is a ghost NOW — the sidebar live line and the in-chat
-    livefeed both drop it (was: up to 10 minutes of 'running' after a
-    crash)."""
+    """A selected feed drops a locally hosted run whose process is dead."""
     rig.signup()
     rig.post("/api/mesh/create_agent", username="helper")
     cid = rig.post("/api/mesh/create_chat", name="RunTruth",
@@ -934,13 +931,13 @@ def test_run_lines_need_a_live_runner(rig):
         return next(c for c in state["chats"] if c["id"] == cid)
 
     # dead runner: no live line, no feed
-    assert "live" not in chat_of(rig.get("/api/mesh/state"))
-    assert rig.get("/api/mesh/livefeed", id=cid)["feeds"] == []
+    assert "live" not in chat_of(rig.sidebar())
+    assert rig.aux(cid)["feeds"] == []
     # live runner: both surface
     _beat(rig, "helper")
-    live = chat_of(rig.get("/api/mesh/state")).get("live", [])
-    assert any(f.get("user") == "helper" for f in live)
-    feeds = rig.get("/api/mesh/livefeed", id=cid)["feeds"]
+    live = rig.aux(cid)["feeds"]
+    assert any(f.get("agent") == "helper" for f in live)
+    feeds = rig.aux(cid)["feeds"]
     assert feeds and feeds[0]["agent"] == "helper"
 
 
@@ -973,10 +970,12 @@ def test_agent_harness_visibility_and_adoption(rig):
     # (`settings` — model, standing approvals, aux flags) is the OWNER's
     # private view: absent for non-owners, while the responsible member
     # stays public (accountability, not config)
-    users = rig.get("/api/mesh/state")["users"]
+    users = rig.sidebar()["users"]
     assert users["fbot"]["owners"] == ["fable"]
     assert "settings" not in users["fbot"]
-    assert "settings" in users["helper"]  # my own agent: still served
+    assert "settings" not in users["helper"]  # public sidebar has no owner config
+    mine = rig.get("/api/mesh/me")["my_agents"]
+    assert any(agent["name"] == "helper" and "harness" in agent for agent in mine)
 
     # adoption re-homes a migrated-shaped agent to THIS machine
     rig.app.mesh.tx.put_doc("users/legacybot.json", {

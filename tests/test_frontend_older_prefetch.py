@@ -79,7 +79,7 @@ assert.equal(host,content);
     result = subprocess.run([shutil.which("node"), str(runner)], text=True,
                             encoding="utf-8", capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "    finishLoading();\n  }\n}" in source, "all older exits must settle the cue"
+    assert "} finally {\n    owner.busy = false;\n    finishLoading();" in source, "all older exits must settle the cue before trailing work"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="requires Node.js")

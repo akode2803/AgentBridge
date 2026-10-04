@@ -10,7 +10,6 @@ import json
 from ..store import document_observation as docs, source_selectors as scopes
 from .authority_observation import AuthorityObservationUnavailable, _JSONBudget, _position_locked
 from .cache import CachingTransport
-from .folder import FolderTransport
 
 
 class RawCollectionUnavailable(RuntimeError):
@@ -76,30 +75,7 @@ def collect_documents(transport, definition, *, max_documents=20_000,
         for path, value in refs:
             include(path, value)
         return result
-    if type(transport) is not FolderTransport:
-        raise RawCollectionUnavailable('unsupported_transport')
-
-    from .folder_raw import collect, FolderReadUnavailable
-
-    def include_bytes(logical, payload):
-        try:
-            value = json.loads(payload.decode('utf-8-sig'), parse_constant=_invalid_constant)
-        except (ValueError, UnicodeError, RecursionError) as exc:
-            raise RawCollectionUnavailable('malformed_document') from exc
-        include(logical, value)
-
-    try:
-        collect(transport.root, exact, prefixes, max_bytes=max_bytes,
-                max_paths=max_examined_paths, include=include_bytes)
-    except FolderReadUnavailable as exc:
-        raise RawCollectionUnavailable(str(exc)) from exc
-    except OSError as exc:
-        raise RawCollectionUnavailable('io') from exc
-    return result
-
-
-def _invalid_constant(_value):
-    raise ValueError('non-finite JSON')
+    raise RawCollectionUnavailable('unsupported_transport')
 
 
 def collect_document_batches(transport, definition, *, consume,
@@ -208,6 +184,8 @@ def collect_document_batches(transport, definition, *, consume,
                             refs.append((path, value))
                 except AuthorityObservationUnavailable as exc:
                     raise RawCollectionUnavailable('mirror_changed') from exc
+                except RawCollectionUnavailable:
+                    raise
                 except RuntimeError as exc:
                     raise RawCollectionUnavailable('mirror_changed') from exc
             for path, value in refs:
@@ -218,24 +196,4 @@ def collect_document_batches(transport, definition, *, consume,
         flush()
         check_position()
         return
-    if type(transport) is not FolderTransport:
-        raise RawCollectionUnavailable('unsupported_transport')
-
-    from .folder_raw import collect, FolderReadUnavailable
-
-    def include_bytes(logical, payload):
-        try:
-            value = json.loads(payload.decode('utf-8-sig'), parse_constant=_invalid_constant)
-        except (ValueError, UnicodeError, RecursionError) as exc:
-            raise RawCollectionUnavailable('malformed_document') from exc
-        include(logical, value)
-
-    try:
-        collect(transport.root, exact, prefixes, max_bytes=max_total_bytes,
-                max_paths=max_examined_paths, include=include_bytes,
-                max_document_bytes=max_document_bytes, deduplicate=False)
-    except FolderReadUnavailable as exc:
-        raise RawCollectionUnavailable(str(exc)) from exc
-    except OSError as exc:
-        raise RawCollectionUnavailable('io') from exc
-    flush()
+    raise RawCollectionUnavailable('unsupported_transport')

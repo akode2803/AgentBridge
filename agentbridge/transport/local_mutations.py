@@ -81,6 +81,15 @@ class LocalMutationTransport(Transport):
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.put_doc(path, data))
 
+    def put_reserved_doc(self, path, data, reservation):
+        """Finish an exact document write reserved in a canonical local cut."""
+        from ..store.mutation_reservation import FinalizationMutation
+        if (type(reservation) is not FinalizationMutation
+                or reservation.coordinator is not self._coordinator
+                or reservation.changes != (Selector('doc_exact', path),)):
+            raise ValueError('foreign document reservation')
+        return reservation.execute(lambda: self._transport.put_doc(path, data))
+
     def create_doc(self, path, data):
         # Delegate directly; base create_doc may call its own put_doc, but it
         # must not create a second outer intent.
@@ -200,22 +209,18 @@ def root_identity(transport):
     escape. Unknown drivers need an explicit identity contract before activation.
     """
     import json
-    import os
     from urllib.parse import urlsplit, urlunsplit
     from .cache import CachingTransport
-    from .folder import FolderTransport, _unextend
     from .supabase import SupabaseTransport
 
     if type(transport) is CachingTransport:
-        if type(transport.inner) not in (FolderTransport, SupabaseTransport):
+        if type(transport.inner) is not SupabaseTransport:
             raise ValueError('unsupported nested transport owner')
         from .mirror_observation import transport_identities
         if (transport._mirror_root_identity, transport._mirror_cache_identity) != transport_identities(transport.inner):
             raise ValueError('cache identity changed')
         return root_identity(transport.inner)
-    if type(transport) is FolderTransport:
-        fields = ['local-root-v1', 'folder', os.path.normcase(_unextend(str(transport.root.resolve())))]
-    elif type(transport) is SupabaseTransport:
+    if type(transport) is SupabaseTransport:
         url, root = transport._env.get('SUPABASE_URL'), transport.root
         if type(url) is not str or not url or len(url) > 4096 or type(root) is not str or not root:
             raise ValueError('invalid provider identity')

@@ -24,6 +24,7 @@ CHAT_UPDATE = "chat_update"    # info event: membership/name/permissions moved
 ADDED_TO_CHAT = "added_to_chat"  # this identity was added to a chat
 REACTION = "reaction"          # someone reacted (V50 breadcrumb, not state)
 MIRROR_UPDATE = "mirror_update"  # content-free cloud-doc convergence wake
+READ_MODEL = "read_model"      # content-free local readiness/deadline wake
 
 
 @dataclass
@@ -38,11 +39,15 @@ class Subscription:
     def __init__(self, bus: "EventBus", maxsize: int = 1000) -> None:
         self._bus = bus
         self._q: queue.Queue[Event] = queue.Queue(maxsize=maxsize)
+        self._gap_lock = threading.Lock()
+        self._gap = False
 
     def _offer(self, event: Event) -> None:
         try:
             self._q.put_nowait(event)
-        except queue.Full:  # drop-oldest: the poll loop heals any gap
+        except queue.Full:  # A bounded explicit resync bit heals dropped frames.
+            with self._gap_lock:
+                self._gap = True
             try:
                 self._q.get_nowait()
             except queue.Empty:
@@ -51,6 +56,11 @@ class Subscription:
                 self._q.put_nowait(event)
             except queue.Full:
                 pass
+
+    def take_gap(self) -> bool:
+        with self._gap_lock:
+            gap, self._gap = self._gap, False
+            return gap
 
     def get(self, timeout: float | None = None) -> Event | None:
         try:
