@@ -147,6 +147,7 @@ def dispatch(handler, app, req, *args):
     if not req.path.startswith('/api/diagnostics'):
         try:
             enabled = (diagnostics is not None and diagnostics.enabled
+                       and delivery_trace.recorder() is diagnostics
                        and getattr(diagnostics, "generation", None) == diagnostic_generation)
         except Exception:
             enabled = False
@@ -160,6 +161,13 @@ def dispatch(handler, app, req, *args):
                          'duration_ms': (time.perf_counter() - started) * 1000,
                          'status': status, 'request_seq': req.diagnostic_sequence,
                          'request_ref': req.diagnostic_ref, 'phase': 'request_finished'}
+                message_ref = None
+                if (req.method == 'POST' and req.path == '/api/mesh/post'
+                        and type(result) is dict and result.get('ok') is True
+                        and not result.get('error') and type(result.get('id')) is str):
+                    message_ref = diagnostics.chat_ref(result['id'])
+                    if message_ref is not None:
+                        event['trace_ref'] = message_ref
                 if type(result) is dict:
                     event['reason'] = (str(failure) if failure is not None else
                                        result.get('reason') or result.get('sidebar_status') or 'none')
@@ -178,10 +186,14 @@ def dispatch(handler, app, req, *args):
                     ref = diagnostics.chat_ref(chat)
                     if ref is not None:
                         event['chat_ref'] = ref
-                diagnostics.flight_record(event)
-                if type(result) is dict and req.path == '/api/mesh/post' and result.get('id'):
-                    result = {**result, '_diagnostics': {'trace_ref': diagnostics.chat_ref(result['id']),
-                         'chat_ref': diagnostics.chat_ref(chat)}}
+                # Ref calculation can race opt-out. Recheck and serialize both
+                # admission and response enrichment with generation/owner changes.
+                with delivery_trace.recorder_fence(diagnostics, diagnostic_generation) as active:
+                    if active:
+                        diagnostics.flight_record(event)
+                        if message_ref is not None:
+                            result = {**result, '_diagnostics': {'trace_ref': message_ref,
+                                 'chat_ref': diagnostics.chat_ref(chat)}}
             except Exception:  # noqa: BLE001 — telemetry must not affect replies
                 pass
     return result

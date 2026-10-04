@@ -24,6 +24,10 @@ _REQUEST_LOCK = threading.Lock()
 _request_sequence = 0
 MAX_LINE_BYTES = 2048
 MAX_CLIENT_EVENTS = 50
+MAX_RATE_ROWS = 64
+CRITICAL_RESERVE = 16
+# Four internal admission booleans, including their fixed JSON field names.
+CONTEXT_BOOKKEEPING_BYTES = 96
 _TAB = re.compile(r'[0-9a-f]{16}\Z')
 
 EVENTS = frozenset({
@@ -97,7 +101,8 @@ _NUMBERS = frozenset({'duration_ms', 'monotonic_ms', 'scroll_top',
                       'scroll_height', 'client_height', 'holder_age_ms', 'queue_wait_ms', 'retry_ms', 'dom_delay_ms', 'ack_delay_ms'})
 _INTEGERS = frozenset({'rows', 'messages', 'items', 'chats',
                        'loading_count', 'seq', 'raw_examined', 'holder_count', 'context_dropped',
-                       'rate_dropped', 'sampled_out', 'client_dropped'})
+                       'rate_dropped', 'sampled_out', 'client_dropped', 'context_evicted',
+                       'rate_rejected', 'queue_overflow', 'admission_dropped'})
 _BOOLEANS = frozenset({'has_transcript', 'busy', 'has_more',
                        'chats_complete', 'unread_complete'})
 _CLIENT_FIELDS = frozenset({'event', 'route', 'status', 'reason', 'mode',
@@ -126,9 +131,11 @@ class Diagnostics:
         self.generation = 0
         self._context = deque(maxlen=512)
         self._context_bytes = 0
-        self._flight_counts = {'context_dropped': 0, 'rate_dropped': 0, 'sampled_out': 0}
+        self._flight_counts = dict.fromkeys(('context_dropped', 'rate_dropped', 'sampled_out',
+            'context_evicted', 'rate_rejected', 'queue_overflow', 'admission_dropped'), 0)
         self._rate_at = 0.0
         self._rate_rows = 0
+        self._rate_ordinary = 0
         self._dropped_events = self._write_failures = 0
         try:
             with self.settings.open('rb') as stream:
@@ -186,7 +193,7 @@ class Diagnostics:
             self._writes.put_nowait((self.generation, dict(row)))
             return True
         except queue.Full:
-            self.note_drop('rate')
+            self._count('queue_overflow')
             return False
 
     def flush(self, timeout=1.0):
@@ -198,7 +205,8 @@ class Diagnostics:
 
     def close(self):
         self.flush()
-        self._closed = True
+        with self._lock:
+            self._closed = True
 
     @staticmethod
     def _slow(value):
@@ -213,8 +221,10 @@ class Diagnostics:
         return float(value)
 
     def note_drop(self, category, count=1):
+        self._count(category + '_dropped', count)
+
+    def _count(self, key, count=1):
         with self._lock:
-            key = category + '_dropped'
             if key in self._flight_counts:
                 self._flight_counts[key] = min(1_000_000, self._flight_counts[key] + count)
 
@@ -272,6 +282,7 @@ class Diagnostics:
                         pass
             if self.enabled != value:
                 self.generation += 1
+                self._rate_at = self._rate_rows = self._rate_ordinary = 0
             self.enabled = value
             self.slow_ms, self.sample_rate = slow, sample
             if not value:
@@ -334,6 +345,51 @@ class Diagnostics:
         out['origin'] = 'browser' if client else 'server'
         return out
 
+    def _retention(self, event):
+        # Inventory exclusion is an expected membership outcome, not an error.
+        # A real exception or slow observation still promotes its context.
+        exclusion = (event.get('event') == 'page_stage'
+                     and event.get('route') == '/api/mesh/state'
+                     and event.get('status') == 'forbidden'
+                     and event.get('reason') == 'viewer_not_member')
+        error = (event.get('error_type') not in (None, 'unknown', 'OtherError')
+                 or event.get('status') in ('error', 'locked', 'unavailable')
+                 or event.get('status') == 'forbidden' and not exclusion
+                 or event.get('outcome') in ('failed', 'aborted')
+                 or event.get('event') == 'client_error')
+        slow = (event.get('duration_ms', 0) >= self.slow_ms
+                or event.get('queue_wait_ms', 0) >= self.slow_ms)
+        breadcrumb = event.get('phase') in (
+            'origin_minted', 'local_commit', 'outbox_attempt', 'transport_append',
+            'append_ack_observed', 'outbox_retry', 'outbox_dead', 'canonical_dom',
+            'native_ack', 'send_reconciled', 'abandoned', 'shutdown') or (
+            event.get('phase') in ('request_started', 'request_finished',
+                                  'browser_request_started', 'browser_response')
+            and event.get('route') == '/api/mesh/post') or (
+            event.get('event') == 'route' and event.get('outcome') in ('enabled', 'changed'))
+        return error or slow, breadcrumb
+
+    def _admit(self, row):
+        row['_wanted'] = True
+        trigger, breadcrumb = self._retention(row)
+        critical = trigger or breadcrumb
+        if (self._rate_rows >= MAX_RATE_ROWS or not critical
+                and self._rate_ordinary >= MAX_RATE_ROWS - CRITICAL_RESERVE):
+            self._count('rate_rejected')
+            if not row.get('_rate_denied'):
+                row['_rate_denied'] = True
+                self.note_drop('rate')
+            admitted = False
+        else:
+            # Failed enqueue attempts consume admission capacity too.
+            self._rate_rows += 1
+            self._rate_ordinary += int(not critical)
+            admitted = self._enqueue({**row, **self._flight_counts})
+        row['_retained'] = admitted
+        if not admitted and not row.get('_admission_failed'):
+            row['_admission_failed'] = True
+            self._count('admission_dropped')
+
     def flight_record(self, data, *, client=False):
         """Bounded metadata context and retention admission; disk I/O is queued."""
         try:
@@ -348,55 +404,44 @@ class Diagnostics:
                     event['clock_ref'] = self.clock_ref
                     event.setdefault('monotonic_ms', round(time.perf_counter()*1000, 3))
                 now = time.monotonic()
-                encoded_bytes = len(json.dumps(event, separators=(',', ':'))) + 20
+                encoded_bytes = len(json.dumps(event, separators=(',', ':'))) + CONTEXT_BOOKKEEPING_BYTES
                 if encoded_bytes > MAX_LINE_BYTES:
                     self.note_drop('context')
                     return False
                 while self._context and (len(self._context) >= 512
                         or self._context_bytes + encoded_bytes > 256*1024
                         or now-self._context[0][0] > 30):
-                    _, removed, _ = self._context.popleft()
+                    _, removed, removed_row = self._context.popleft()
                     self._context_bytes -= removed
-                    self.note_drop('context')
+                    self._count('context_evicted')
+                    if removed_row.get('_wanted') and not removed_row.get('_retained'):
+                        self.note_drop('context')
                 self._context.append((now, encoded_bytes, event))
                 self._context_bytes += encoded_bytes
-                phase = event.get('phase')
-                error = (event.get('error_type') not in (None, 'unknown', 'OtherError')
-                         or event.get('status') in ('error', 'forbidden', 'locked', 'unavailable')
-                         or event.get('outcome') in ('failed', 'aborted')
-                         or event.get('event') == 'client_error')
-                slow = (event.get('duration_ms', 0) >= self.slow_ms
-                        or event.get('queue_wait_ms', 0) >= self.slow_ms)
-                breadcrumb = phase in ('origin_minted', 'local_commit', 'outbox_attempt',
-                    'append_ack_observed', 'outbox_retry', 'outbox_dead', 'canonical_dom',
-                    'native_ack', 'send_reconciled', 'abandoned', 'shutdown') or (
-                    phase == 'request_started' and event.get('route') == '/api/mesh/post') or (
-                    event.get('event') == 'route' and event.get('outcome') in ('enabled', 'changed'))
+                trigger, breadcrumb = self._retention(event)
                 ref = event.get('request_ref') or event.get('trace_ref')
                 if ref is None and event.get('request_seq') is not None:
                     ref = self.chat_ref(str(event['request_seq']))
                 sampled = self.sample_rate == 1 or bool(ref and int(ref, 16)/(2**64) < self.sample_rate)
-                if not (error or slow or breadcrumb or sampled):
+                if not (trigger or breadcrumb or sampled):
                     self._flight_counts['sampled_out'] = min(1_000_000, self._flight_counts['sampled_out']+1)
                     return True
                 rows = [event]
-                if error or slow:
+                if trigger:
                     keys = ('trace_ref', 'request_ref', 'chat_ref', 'request_seq')
-                    rows = [row for _, _, row in self._context
-                            if row is event or any(event.get(k) and event.get(k) == row.get(k) for k in keys)][-48:]
+                    context = [row for _, _, row in self._context if row is not event
+                               and any(event.get(k) and event.get(k) == row.get(k) for k in keys)]
                     # Even an uncorrelated error retains a small global pre-event window.
-                    if len(rows) == 1:
-                        rows = [row for _, _, row in list(self._context)[-16:]]
+                    if not context:
+                        context = [row for _, _, row in list(self._context)[-16:] if row is not event]
+                    # The cause gets capacity first; then retain newest context.
+                    rows += list(reversed(context[-47:]))
                 if now-self._rate_at >= 1:
-                    self._rate_at, self._rate_rows = now, 0
+                    self._rate_at, self._rate_rows, self._rate_ordinary = now, 0, 0
                 for row in rows:
                     if row.get('_retained'):
                         continue
-                    if self._rate_rows >= 64:
-                        self.note_drop('rate')
-                        continue
-                    self._rate_rows += 1
-                    row['_retained'] = self._enqueue({**row, **self._flight_counts})
+                    self._admit(row)
                 return True
         except Exception:
             self._write_failures = min(1_000_000, self._write_failures + 1)

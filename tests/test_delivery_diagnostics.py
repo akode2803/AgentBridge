@@ -38,7 +38,8 @@ def test_slow_context_privacy_and_bounds(tmp_path):
         )
     config = sink.configuration()
     assert config["context_rows"] <= 512 and config["context_bytes"] <= 256 * 1024
-    assert config["context_dropped"] > 0 and config["sampled_out"] > 0
+    assert config["context_evicted"] > 0 and config["sampled_out"] > 0
+    assert config["context_dropped"] == 0
     assert not sink.path.exists()
     sink.flight_record(
         {
