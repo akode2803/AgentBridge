@@ -12,13 +12,72 @@ from agentbridge.store.db import Store
 from agentbridge.store.outbox import OutboxWorker
 
 
+def _writer_controls(sink):
+    config = sink.configuration()
+    return {name: config[name] for name in (
+        'writer_queue', 'write_failures', 'context_rows', 'context_evicted',
+        'context_dropped', 'rate_dropped', 'rate_rejected', 'queue_overflow',
+        'admission_dropped')}
+
+
 def rows(sink):
-    sink.flush()
+    drained = sink.flush()
+    controls = _writer_controls(sink)
+    if not drained:
+        # Never inspect a partial file as a complete retention result, and
+        # never dump configuration's path or the queued private observations.
+        raise AssertionError(f'diagnostics writer did not drain within its existing bound: {controls!r}')
+    if controls['write_failures']:
+        raise AssertionError(f'diagnostics writer failed: {controls!r}')
     return [
         json.loads(line)
         for path in sorted(sink.directory.glob("events*.jsonl"))
         for line in path.read_text().splitlines()
     ]
+
+
+def test_rows_reject_partial_trigger_first_write_with_bounded_safe_diagnostics(tmp_path, monkeypatch):
+    sink = Diagnostics(tmp_path / 'PRIVATE_PATH')
+    assert sink.set_enabled(True, slow_ms=100, sample_rate=0)
+    blocked = threading.Event()
+    release = threading.Event()
+    original = sink.record
+    calls = []
+
+    def hold_context(data, **kwargs):
+        calls.append(data.get('phase'))
+        if len(calls) == 2:
+            blocked.set()
+            if not release.wait(5):
+                raise RuntimeError('bounded test writer gate expired')
+        return original(data, **kwargs)
+
+    monkeypatch.setattr(sink, 'record', hold_context)
+    try:
+        common = {'event': 'delivery', 'chat_ref': 'c' * 16, 'body': 'PRIVATE_BODY'}
+        assert sink.flight_record({**common, 'phase': 'preparation_queued'})
+        assert sink.flight_record({**common, 'phase': 'preparation_claimed', 'duration_ms': 1})
+        assert sink.flight_record({**common, 'phase': 'preparation_claimed', 'queue_wait_ms': 100})
+        assert blocked.wait(1), 'writer did not reach second admission'
+        partial = [json.loads(line) for line in sink.path.read_text().splitlines()]
+        assert any(row.get('queue_wait_ms') == 100 for row in partial)
+        assert not any(row.get('phase') == 'preparation_queued' for row in partial)
+        with pytest.raises(AssertionError, match='writer did not drain') as raised:
+            rows(sink)
+        message = str(raised.value)
+        assert "'writer_queue': 1" in message
+        assert "'write_failures': 0" in message
+        assert 'PRIVATE' not in message
+    finally:
+        release.set()
+        sink.close()
+        if sink._worker is not None:
+            sink._worker.join(1)
+            assert not sink._worker.is_alive(), 'test writer was not reaped'
+    retained = rows(sink)
+    assert any(row.get('queue_wait_ms') == 100 for row in retained)
+    assert any(row.get('phase') == 'preparation_queued' for row in retained)
+    assert all('PRIVATE' not in json.dumps(row) for row in retained)
 
 
 def test_slow_context_privacy_and_bounds(tmp_path):
@@ -431,7 +490,8 @@ def test_slow_queue_wait_retains_private_context_without_sampling(tmp_path, clie
                                    "queue_wait_ms": 100}, client=client)
         retained = rows(sink)
         assert any(row.get("queue_wait_ms") == 100 for row in retained)
-        assert any(row.get("phase") == "preparation_queued" for row in retained)
+        if not any(row.get("phase") == "preparation_queued" for row in retained):
+            raise AssertionError(f'queued context absent after successful writer drain: {_writer_controls(sink)!r}')
         assert len(retained) <= 48
         assert all("PRIVATE" not in json.dumps(row) for row in retained)
     finally:
