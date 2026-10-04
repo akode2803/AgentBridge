@@ -516,6 +516,8 @@ def test_result_ready_restart_settles_when_return_is_no_longer_allowed(
     assert specialist.store.cached_doc(path)["state"] == "interrupted"
 
 
+# Bound the full encrypted harness while allowing slow filesystem preparation.
+@pytest.mark.timeout(120)
 def test_shutdown_cancels_an_executing_child(delegation_meshes):
     _owner, manager, specialist, chat_id = delegation_meshes
     _source_handoffs, destination_handoffs, _source, _destination, work = (
@@ -532,34 +534,54 @@ def test_shutdown_cancels_an_executing_child(delegation_meshes):
     journal["claim_lease_ns"] = 0
     specialist.store.cache_doc(path, journal)
     work = destination.claim_ready(exclude=set())[0]
+    shutdown_ready = threading.Event()
+    shutdown_requested = threading.Event()
+    cancellation_observed = threading.Event()
 
     class BlockingResponder(_ChildResponder):
         entered = threading.Event()
 
         def respond_child(self, prepared, *, cancelled=None):
+            assert not cancelled(), "child was cancelled before provider entry"
             self.entered.set()
-            while not cancelled():
-                time.sleep(0.01)
+            shutdown_ready.set()
+            assert shutdown_requested.wait(10), "runner shutdown was not requested"
+            assert cancelled(), "executing child did not observe runner shutdown"
+            cancellation_observed.set()
             raise DelegationError("cancelled")
 
     responder = BlockingResponder()
-    thread = threading.Thread(
-        target=destination.execute, args=(work, responder),
-    )
+
+    def request_shutdown():
+        shutdown_ready.wait()
+        if responder.entered.is_set():
+            stopping.set()
+            shutdown_requested.set()
+
+    thread = threading.Thread(target=request_shutdown)
     thread.start()
     try:
-        assert responder.entered.wait(10), "child provider was never entered"
-        stopping.set()
-        thread.join(timeout=10)
+        # Canonical preparation performs filesystem reads and encrypted
+        # activation. Only the executing provider's shutdown is timed here.
+        destination.execute(work, responder)
     finally:
+        # Wake the shutdown worker even if preparation returns before entry.
+        shutdown_ready.set()
         stopping.set()
         thread.join(timeout=10)
 
     assert not thread.is_alive()
+    journal = specialist.store.cached_doc(path)
+    assert responder.entered.is_set(), f"child provider was never entered: {journal}"
+    assert cancellation_observed.is_set(), f"child cancellation was not observed: {journal}"
+    assert journal["state"] == "interrupted"
+    assert journal["error"] == "DelegationError"
     view = destination_handoffs.read(
         chat_id, work.run_id, work.handoff_id,
     )[0]
-    assert view.events[-1].state is HandoffState.INTERRUPTED
+    assert [event.state for event in view.events[-2:]] == [
+        HandoffState.ACTIVE, HandoffState.INTERRUPTED,
+    ]
 
 
 def test_source_shutdown_releases_blocking_delegation(delegation_meshes):
