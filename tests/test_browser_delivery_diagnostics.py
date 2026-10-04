@@ -1,7 +1,7 @@
-"""Real Chromium collector/module integration, not authenticated app/peer acceptance.
+"""Real Chromium API/collector integration, not authenticated app/peer acceptance.
 
 No app accounts or credentials are created. The message/read HTTP responses are
-synthetic; diagnostics.js, browser DOM/fetch, and the disposable Diagnostics sink
+synthetic; api.js/diagnostics.js, browser DOM/fetch, and the disposable Diagnostics sink
 are real. Set AGENTBRIDGE_CHROMIUM_EXECUTABLE to select a local Chromium binary.
 """
 
@@ -41,7 +41,9 @@ def _rows(sink):
 @pytest.fixture
 def browser_collector(tmp_path):
     sink = Diagnostics(tmp_path)
-    module = (Path(__file__).resolve().parents[1] / "gui/static/js/diagnostics.js").read_bytes()
+    scripts = Path(__file__).resolve().parents[1] / "gui/static/js"
+    module = (scripts / "diagnostics.js").read_bytes()
+    api_module = (scripts / "api.js").read_bytes()
     uploads = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -59,10 +61,17 @@ def browser_collector(tmp_path):
         def do_GET(self):
             if self.path == "/":
                 self.reply(b'<div id="transcript"></div><script type="module">'
-                           b'import * as d from "/diagnostics.js";window.d=d;</script>',
+                           b'import * as d from "/diagnostics.js";window.d=d;'
+                           b'import {api} from "/api.js";window.api=api;</script>',
                            "text/html")
             elif self.path == "/diagnostics.js":
                 self.reply(module, "text/javascript")
+            elif self.path == "/api.js":
+                self.reply(api_module, "text/javascript")
+            elif self.path == "/util.js":
+                self.reply(b'export function toast() {}', "text/javascript")
+            elif self.path == "/files.js":
+                self.reply(b'export function bindFilePreview() {}', "text/javascript")
             elif self.path == "/synthetic/incoming":
                 self.reply({"type": "message", "id": RECEIVED_ID,
                             "ns": int(RECEIVED_NS), "chat_id": PRIVATE_CHAT,
@@ -84,7 +93,7 @@ def browser_collector(tmp_path):
             elif self.path == "/api/mesh/post":
                 sink.flight_record({"event": "server_request", "phase": "request_finished",
                                     "route": self.path, "status": "ok",
-                                    "request_ref": self.headers.get("X-Diagnostic-Ref")})
+                                    "request_ref": self.headers.get("X-AgentBridge-Diagnostic")})
                 self.reply({"id": SENT_ID, "ns": int(SENT_NS), "body": "PRIVATE_BODY",
                             "_diagnostics": {"trace_ref": SENT_TRACE, "chat_ref": "c" * 16}})
             elif self.path == "/api/mesh/chat_page_read":
@@ -170,18 +179,20 @@ def test_real_chromium_delivery_dom_upload_privacy_and_optout(browser_collector)
     with page.expect_response("**/api/diagnostics/events"):
         page.evaluate("""async () => {
             d.configureDiagnostics(true);
-            const ref = d.beginDiagnosticRequest('/api/mesh/post', {chat_id:chat});
-            const response = await fetch('/api/mesh/post', {method:'POST',
-                headers:{'Content-Type':'application/json', 'X-Diagnostic-Ref':ref},
-                body:JSON.stringify({chat_id:chat, body:'PRIVATE_BODY'})});
-            window.sent = await response.json();
-            d.endDiagnosticRequest(ref, '/api/mesh/post', {}, sent);
+            window.sent = await api('/api/mesh/post', {chat_id:chat, body:'PRIVATE_BODY'});
             addRow('PRIVATE_WRONG_ID'); window.sentRow = addRow(sent.id, true);
             d.canonicalDeliveryDom(chat, [sent], transcript); await ack('9007199254740993123');
             d.diagnostic('client_request', {route:'/api/state?cursor=PRIVATE_CURSOR',
                 body:'PRIVATE_BODY', sql:'PRIVATE_SQL', path:'PRIVATE_PATH'});
         }""")
     rows = _rows(sink)
+    server_finish = next(row for row in rows if row['origin'] == 'server'
+                         and row.get('phase') == 'request_finished')
+    request_ref = server_finish['request_ref']
+    assert request_ref and len(request_ref) == 16
+    for phase in ('browser_request_started', 'browser_response'):
+        assert any(row['origin'] == 'browser' and row.get('phase') == phase
+                   and row.get('request_ref') == request_ref for row in rows)
     assert not any(row.get("phase") in ("canonical_dom", "native_ack") for row in rows)
     assert any(row["event"] == "transcript_state" and row["rows"] == 3 for row in rows)
 
