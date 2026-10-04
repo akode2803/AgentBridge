@@ -29,6 +29,8 @@ jobs:
           node-version: "22"
       - name: Frontend module check
         run: uv run python devtools/check_frontend.py
+      - name: Canonical GUI finalization handoff boundaries
+        run: uv run pytest -q tests/test_gui_canonical_chat_composer.py
       - name: Windows fixture portability and auxiliary clock boundaries
         if: runner.os == 'Windows'
         run: uv run pytest -q tests/test_frontend_page_progress_retry.py tests/test_gui_chat_presentation.py

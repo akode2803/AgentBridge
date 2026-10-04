@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from agentbridge.gui import api_pages
 from agentbridge.gui.routing import Request
+from agentbridge.store import local_source
 
 
 def _join(thread):
@@ -40,16 +43,29 @@ def test_chat_page_preserves_canonical_wire_parity_without_full_projection(rig, 
     assert 'total' not in repeated and 'presentation' not in repeated
 
 
-def test_chat_stale_success_is_fenced_after_real_page_finalization(rig, monkeypatch):
+@pytest.mark.parametrize('preparation_pending', [False, True], ids=['ready', 'pending-first'])
+def test_chat_stale_success_is_fenced_after_real_page_finalization(
+        rig, monkeypatch, preparation_pending):
     rig.signup()
     chat = rig.post('/api/mesh/create_chat', name='Fence', members=[])['chat']['id']
     rig.post('/api/mesh/post', chat_id=chat, body='old private plaintext')
     rig.page(chat)
     entered, release = threading.Event(), threading.Event()
+    completed = []
+    pending = []
+    capture = api_pages.capture_inputs
+    def pending_once(*args, **kwargs):
+        if preparation_pending and not pending:
+            pending.append(True)
+            raise local_source.SourceChanged('first preparation cut changed')
+        return capture(*args, **kwargs)
+    monkeypatch.setattr(api_pages, 'capture_inputs', pending_once)
     original = rig.app.finalize_page_read
     def completed_page(*args, **kwargs):
         value = original(*args, **kwargs)
-        assert value.status == 'page'
+        if value.status != 'page':
+            return value
+        completed.append(value)
         entered.set()
         assert release.wait(10)
         return value
@@ -57,20 +73,25 @@ def test_chat_stale_success_is_fenced_after_real_page_finalization(rig, monkeypa
     out, errors = {}, []
     def read():
         try:
-            out['value'] = api_pages.chat_page(rig.app, Request(params={'id': chat}))
+            # Background publication can invalidate an earlier ready cut. Reach
+            # a real finalization within the existing finite readiness budget
+            # before holding the stale-success barrier; denials stay terminal.
+            out['value'] = rig.page(chat)
         except BaseException as error:
             errors.append(error)
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
     try:
-        assert entered.wait(10)
+        assert entered.wait(10), {'out': out, 'errors': errors}
+        assert len(completed) == 1 and completed[0].status == 'page'
+        assert len(pending) == int(preparation_pending)
         assert rig.app.logout('hexagon') == {'ok': True}
         release.set()
         _join(reader)
     finally:
         release.set()
         _join(reader)
-    assert not errors
+    assert not errors, errors
     assert out['value'] == {'error': 'Sign in first'}
     assert 'old private plaintext' not in repr(out)
 
