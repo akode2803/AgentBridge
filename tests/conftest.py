@@ -290,11 +290,11 @@ class GuiRig:
                 break
         return runtime
 
-    def _read_ready(self, path, *, prepare_chat="", ready, **params):
+    def _read_ready(self, path, *, prepare_chat="", ready, read=None, **params):
         last = None
         for _ in range(self._read_attempts):
             self.prepare(prepare_chat)
-            last = self.get(path, **params)
+            last = (self.get if read is None else read)(path, **params)
             # A final canonical fence can lose its captured input cut while
             # background owners publish. Reprepare within the same finite
             # attempt budget; genuine unavailability and denials remain terminal.
