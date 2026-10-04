@@ -45,6 +45,9 @@ def browser_collector(tmp_path):
     module = (scripts / "diagnostics.js").read_bytes()
     api_module = (scripts / "api.js").read_bytes()
     uploads = []
+    delayed_request = threading.Event()
+    release_response = threading.Event()
+    delayed_headers = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -72,6 +75,13 @@ def browser_collector(tmp_path):
                 self.reply(b'export function toast() {}', "text/javascript")
             elif self.path == "/files.js":
                 self.reply(b'export function bindFilePreview() {}', "text/javascript")
+            elif self.path.startswith('/api/state?'):
+                delayed_headers.append(self.headers.get('X-AgentBridge-Diagnostic'))
+                delayed_request.set()
+                if not release_response.wait(timeout=10):
+                    self.send_error(504)
+                    return
+                self.reply({'status': 'ok', 'messages': ['PRIVATE_MESSAGE']})
             elif self.path == "/synthetic/incoming":
                 self.reply({"type": "message", "id": RECEIVED_ID,
                             "ns": int(RECEIVED_NS), "chat_id": PRIVATE_CHAT,
@@ -128,7 +138,7 @@ def browser_collector(tmp_path):
             page = context.new_page()
             page.set_default_timeout(5000)
             page.goto(base)
-            page.wait_for_function("!!window.d")
+            page.wait_for_function("!!window.d && !!window.api")
             page.evaluate("""() => {
                 window.chat = 'PRIVATE_CHAT';
                 window.transcript = document.querySelector('#transcript');
@@ -145,11 +155,15 @@ def browser_collector(tmp_path):
                     d.acknowledgedDelivery(chat, (await response.json()).read_ns);
                 };
             }""")
-            yield SimpleNamespace(page=page, sink=sink, uploads=uploads)
+            yield SimpleNamespace(page=page, sink=sink, uploads=uploads,
+                                  delayed_request=delayed_request,
+                                  release_response=release_response,
+                                  delayed_headers=delayed_headers)
             context.close()
             browser.close()
             browser = None
     finally:
+        release_response.set()
         if browser is not None and browser.is_connected():
             browser.close()
         server.shutdown()
@@ -160,6 +174,53 @@ def browser_collector(tmp_path):
             sink._worker.join(timeout=1)
             assert not sink._worker.is_alive(), "diagnostics worker was not reaped"
         assert not thread.is_alive(), "loopback HTTP server was not reaped"
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize('mode', ['off_on', 'session_reset', 'disabled_start', 'owned'])
+def test_real_chromium_completion_ownership_across_diagnostic_generations(browser_collector, mode):
+    rig = browser_collector
+    page = rig.page
+    page.expose_function('requestArrived', rig.delayed_request.is_set)
+    page.evaluate("""mode => {
+        d.configureDiagnostics(mode !== 'disabled_start');
+        window.completed = false;
+        window.pending = api('/api/state?secret=PRIVATE_QUERY').then(out => {
+            window.result = out; window.completed = true;
+        });
+    }""", mode)
+    # Keep Playwright's event loop pumping its route callback while the actual
+    # server waits; a blocking Python Event.wait would prevent request dispatch.
+    page.wait_for_function('async () => await window.requestArrived()', timeout=3000)
+    request_ref = rig.delayed_headers[0]
+    if mode == 'disabled_start':
+        assert request_ref is None
+    else:
+        assert request_ref and len(request_ref) == 16
+    page.evaluate("""mode => {
+        if (mode === 'off_on') { d.configureDiagnostics(false); d.configureDiagnostics(true); }
+        if (mode === 'session_reset') document.dispatchEvent(new Event('ab:session-reset'));
+        if (mode === 'disabled_start') d.configureDiagnostics(true);
+    }""", mode)
+    rig.release_response.set()
+    page.wait_for_function('window.completed')
+    assert page.evaluate('window.result') == {'status': 'ok', 'messages': ['PRIVATE_MESSAGE']}
+    # Fence on the postcompletion marker's own upload, rather than an older
+    # batch whose response could race the collector's one-second timer.
+    with page.expect_response(lambda response:
+                              response.url.endswith('/api/diagnostics/events')
+                              and any(event.get('event') == 'client_error'
+                                      for event in response.request.post_data_json['events'])):
+        page.evaluate("d.diagnostic('client_error', {error_type:'Error'})")
+    events = [event for upload in rig.uploads for event in upload['events']]
+    completions = [event for event in events if event.get('phase') == 'browser_response']
+    legacy = [event for event in events if event.get('event') == 'client_request']
+    if mode == 'owned':
+        assert len(completions) == len(legacy) == 1
+        assert completions[0]['request_ref'] == legacy[0]['request_ref'] == request_ref
+    else:
+        assert completions == legacy == [], 'abandoned request regained diagnostic ownership'
+    assert 'PRIVATE' not in json.dumps(rig.uploads)
 
 
 @pytest.mark.timeout(30)
