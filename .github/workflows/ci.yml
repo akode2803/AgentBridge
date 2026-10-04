@@ -33,6 +33,8 @@ jobs:
         run: uv run pytest -q tests/test_gui_canonical_chat_composer.py
       - name: GUI session ownership boundaries
         run: uv run pytest -q tests/test_gui_session_reads.py tests/test_gui_fixture_timeouts.py
+      - name: Selected auxiliary readiness boundaries
+        run: uv run pytest -q tests/test_gui_fixture_readiness.py tests/test_gui_endpoints.py::test_selected_aux_owns_liveliness_and_sidebar_remains_bounded
       - name: Windows fixture portability and auxiliary clock boundaries
         if: runner.os == 'Windows'
         run: uv run pytest -q tests/test_frontend_page_progress_retry.py tests/test_gui_chat_presentation.py

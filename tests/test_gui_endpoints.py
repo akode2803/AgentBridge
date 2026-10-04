@@ -234,9 +234,9 @@ def test_avatars_profile_and_group(rig):
     assert out["ok"] and out["avatar"]["sha256"]
     ctype, body = rig.get_bytes("/api/mesh/avatar", user="aryan")
     assert body == PNG
-    assert rig.aux(cid)["users"]["aryan"]["avatar"]["sha256"]
+    assert rig.aux_ready(cid)["users"]["aryan"]["avatar"]["sha256"]
     rig.post("/api/mesh/clear_avatar")
-    assert "avatar" not in rig.aux(cid)["users"]["aryan"]
+    assert "avatar" not in rig.aux_ready(cid)["users"]["aryan"]
 
     # group photo: marker folds into meta, members can fetch
     out = rig.post_raw("/api/mesh/set_group_avatar", PNG, chat=cid)
@@ -756,7 +756,7 @@ def test_selected_aux_feeds_are_membership_filtered(rig):
         "updated": now, "activity": "secret"})
     tx.put_doc("status/typing_cara.json", {
         "user": "cara", "chat_id": theirs, "updated": now})
-    result = rig.aux(mine)
+    result = rig.aux_ready(mine)
     assert result.get("status") == "ready", result
     feeds = result["feeds"]
     who = {f["agent"] for f in feeds}
@@ -775,12 +775,12 @@ def test_typing_and_selected_aux_feed(rig):
                    members=["fable"])["chat"]["id"]
     # my own typing is never news to me
     rig.post("/api/mesh/typing", chat_id=cid)
-    assert rig.aux(cid)["feeds"] == []
+    assert rig.aux_ready(cid)["feeds"] == []
     # fable's heartbeat shows up
     rig.app.mesh.tx.put_doc("status/typing_fable.json", {
         "user": "fable", "chat_id": cid, "updated": utcnow_iso(),
     })
-    feeds = rig.aux(cid)["feeds"]
+    feeds = rig.aux_ready(cid)["feeds"]
     assert feeds and feeds[0]["typing"] and feeds[0]["agent"] == "fable"
 
 
@@ -821,7 +821,7 @@ def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig):
         "state": "running", "agent": "zombie", "chat_id": other,
         "updated": "2020-01-01T00:00:00Z", "activity": "stuck",
     })
-    live = rig.aux(cid)["feeds"]
+    live = rig.aux_ready(cid)["feeds"]
     assert any(f.get("agent") == "fable" and f.get("typing") for f in live)
     assert any(f.get("agent") == "helper"
                and f.get("activity") == "Searching for the export"
@@ -829,7 +829,7 @@ def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig):
     assert {f.get("run_id") for f in live if f.get("agent") == "helper"} \
         == {"run-a", "run-b"}
     assert not any(f.get("agent") == "aryan" for f in live)
-    assert rig.aux(other)["feeds"] == []   # the ghost never surfaces
+    assert rig.aux_ready(other)["feeds"] == []   # the ghost never surfaces
 
     # a stale typing heartbeat drops off
     rig.app.mesh.tx.put_doc("status/typing_fable.json", {
@@ -837,7 +837,7 @@ def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig):
     })
     st = rig.sidebar()
     assert "live" not in chat_of(st, cid)
-    assert not any(f.get("typing") for f in rig.aux(cid)["feeds"])
+    assert not any(f.get("typing") for f in rig.aux_ready(cid)["feeds"])
 
 
 def _beat(rig, agent, *, age_s=0.0, pid=None):
@@ -932,12 +932,12 @@ def test_run_lines_need_a_live_runner(rig):
 
     # dead runner: no live line, no feed
     assert "live" not in chat_of(rig.sidebar())
-    assert rig.aux(cid)["feeds"] == []
+    assert rig.aux_ready(cid)["feeds"] == []
     # live runner: both surface
     _beat(rig, "helper")
-    live = rig.aux(cid)["feeds"]
+    live = rig.aux_ready(cid)["feeds"]
     assert any(f.get("agent") == "helper" for f in live)
-    feeds = rig.aux(cid)["feeds"]
+    feeds = rig.aux_ready(cid)["feeds"]
     assert feeds and feeds[0]["agent"] == "helper"
 
 
