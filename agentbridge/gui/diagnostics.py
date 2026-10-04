@@ -282,7 +282,6 @@ class Diagnostics:
                         pass
             if self.enabled != value:
                 self.generation += 1
-                self._rate_at = self._rate_rows = self._rate_ordinary = 0
             self.enabled = value
             self.slow_ms, self.sample_rate = slow, sample
             if not value:

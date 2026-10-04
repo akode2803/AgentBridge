@@ -114,7 +114,7 @@ def test_queue_overflow_is_separate_and_deduplicates_denied_events(recorder):
     assert sink.configuration()['admission_dropped'] == 3
 
 
-def test_next_window_and_new_generation_restore_capacity_without_old_queue(recorder):
+def test_next_window_restores_capacity_without_old_generation_queue(recorder):
     sink, clock = recorder
     for _ in range(64):
         emit(sink, 'native_ack')
@@ -125,7 +125,17 @@ def test_next_window_and_new_generation_restore_capacity_without_old_queue(recor
     emit(sink, 'local_commit')
     retained = drain(sink)
     assert [row['phase'] for row in retained] == ['local_commit']
-    assert sink._rate_rows == 1 and sink.configuration()['context_rows'] == 1
+    assert sink._rate_rows == 2 and sink.configuration()['context_rows'] == 1
+
+
+def test_optout_cannot_renew_capacity_within_the_same_rate_window(recorder):
+    sink, _ = recorder
+    for _ in range(64):
+        emit(sink, 'native_ack')
+    assert sink.set_enabled(False) and sink.set_enabled(True, sample_rate=0)
+    emit(sink, 'local_commit')
+    assert sink._writes.empty() and sink._rate_rows == 64
+    assert sink.configuration()['rate_dropped'] == 1
 
 
 def test_context_byte_reservation_covers_internal_admission_flags(recorder):

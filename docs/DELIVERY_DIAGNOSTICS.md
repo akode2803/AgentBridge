@@ -56,8 +56,9 @@ Admission counters are process-lifetime totals, capped at 1,000,000:
 
 Admission denials can later recover; they do not prove permanent disk loss.
 These categories overlap and must not be summed as a count of lost messages.
-Opt-out discards intentionally queued/context observations; a new enabled
-generation receives fresh admission capacity while cumulative counters remain.
+Opt-out discards intentionally queued/context observations. Admission capacity
+and cumulative counters span generations; toggling cannot renew the same
+one-second window's quota.
 
 Opt-out clears context and queued writes, stops admission, and fences late server/browser completions by generation/ownership. Already persisted records remain until rotation. A write already admitted to the worker may finish during opt-out; no new disabled observations are admitted. A small weak-reference daemon performs file I/O using a separate writer lock. Delivery and database transaction hooks do not write log files or wait on that disk lock. Explicit bounded flush is reserved for tests/shutdown. No unbounded shutdown wait or provider call is added.
 
@@ -70,7 +71,7 @@ cancel the actual request or prove a failed message delivery.
 
 ## Recorder correction validation
 
-The separate recorder admission/correlation correction passed 155 related local
+The separate recorder admission/correlation correction passed 156 related local
 tests, including saturation, unique/repeated rejection accounting, writer queue
 overflow, byte bounds, sidebar exclusions, actual HTTP send correlation,
 generation/replacement barrier races, privacy, frontend and real Chromium
