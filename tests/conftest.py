@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +26,38 @@ from agentbridge.store import local_source
 from agentbridge.transport.raw_documents import RawCollectionUnavailable
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
+
+
+def _http_timeout_frames():
+    """Bounded code locations only: never request data, locals or source text."""
+    rows = []
+    frames = sys._current_frames()
+    for number, frame in enumerate(list(frames.values())[:32]):
+        locations = []
+        for _ in range(12):
+            if frame is None:
+                break
+            locations.append(
+                f'{Path(frame.f_code.co_filename).name}:{frame.f_lineno}:{frame.f_code.co_name}')
+            frame = frame.f_back
+        rows.append(f'thread[{number}] ' + ' <- '.join(locations))
+    return ('GUI fixture HTTP timeout (10s); code frames only\n' + '\n'.join(rows))[:16000]
+
+
+@contextmanager
+def _fixture_response(request):
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            yield response
+    except TimeoutError as error:
+        try:
+            error.add_note(_http_timeout_frames())
+        except Exception:
+            try:
+                error.add_note('GUI fixture HTTP timeout (10s); code frame capture unavailable')
+            except Exception:
+                pass  # Evidence collection cannot replace the actual timeout.
+        raise
 
 
 @pytest.fixture
@@ -83,12 +118,12 @@ class GuiRig:
 
     def get(self, path, **params):
         qs = f"?{urllib.parse.urlencode(params)}" if params else ""
-        with urllib.request.urlopen(self.base + path + qs, timeout=10) as r:
+        with _fixture_response(self.base + path + qs) as r:
             return json.loads(r.read())
 
     def get_bytes(self, path, **params):
         qs = f"?{urllib.parse.urlencode(params)}" if params else ""
-        with urllib.request.urlopen(self.base + path + qs, timeout=10) as r:
+        with _fixture_response(self.base + path + qs) as r:
             return r.headers.get("Content-Type", ""), r.read()
 
     def post(self, path, **body):
@@ -98,7 +133,7 @@ class GuiRig:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _fixture_response(req) as r:
             return json.loads(r.read())
 
     def post_raw(self, path, raw: bytes, **params):
@@ -108,7 +143,7 @@ class GuiRig:
             headers={"Content-Type": "application/octet-stream"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _fixture_response(req) as r:
             return json.loads(r.read())
 
     # ------------------------------------------------------------- helpers
