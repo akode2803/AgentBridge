@@ -1,8 +1,9 @@
 """Finite fixture readiness retries preserve genuine failure responses."""
 
 import pytest
+from types import SimpleNamespace
 
-from conftest import GuiRig
+from conftest import GuiRig, _capture_finalization_failures
 
 
 def _reader(responses):
@@ -124,3 +125,38 @@ def test_reason_control_shape_does_not_admit_private_text(reason):
     message = str(raised.value)
     assert "'reason': '<absent-or-invalid>'" in message
     assert 'private' not in message
+
+
+def test_finalization_probe_is_scoped_bounded_and_preserves_terminal_result(monkeypatch):
+    from agentbridge.mesh import page_operation
+    from agentbridge.store.local_source import SourceChanged
+
+    calls = []
+    original = page_operation._failure
+
+    def finalize(exc):
+        calls.append(exc)
+        return page_operation._failure(exc)
+
+    app = SimpleNamespace(finalize_page_read=finalize)
+    snapshot = _capture_finalization_failures(app, monkeypatch)
+    exc = SourceChanged('presence_inputs_changed')
+    outside = page_operation._failure(exc)
+    assert snapshot() == []
+    result = app.finalize_page_read(exc)
+    assert result == outside == original(exc)
+    assert result.status == 'unavailable' and result.reason == 'inputs_unavailable'
+    assert calls == [exc]
+    assert snapshot() == [{'kind': 'SourceChanged', 'reason': 'presence_inputs_changed'}]
+    for _ in range(12):
+        app.finalize_page_read(SourceChanged('PRIVATE_PATH', {'PRIVATE_ID': 'PRIVATE_BODY'}))
+    assert len(snapshot()) == 8
+    assert all(row == {'kind': 'SourceChanged', 'reason': '<absent-or-invalid>'}
+               for row in snapshot())
+    assert 'PRIVATE' not in repr(snapshot())
+    rig, attempts = _reader([{'status': 'unavailable', 'reason': 'inputs_unavailable'}])
+    rig._finalization_failures = snapshot
+    with pytest.raises(AssertionError) as raised:
+        rig.aux_ready('room')
+    assert attempts == ['room']
+    assert 'SourceChanged' in str(raised.value) and 'PRIVATE' not in str(raised.value)
