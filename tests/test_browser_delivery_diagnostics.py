@@ -48,6 +48,7 @@ def browser_collector(tmp_path):
     delayed_request = threading.Event()
     release_response = threading.Event()
     delayed_headers = []
+    delayed_response = {'malformed': False}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -82,7 +83,8 @@ def browser_collector(tmp_path):
                     self.send_error(504)
                     return
                 try:
-                    self.reply({'status': 'ok', 'messages': ['PRIVATE_MESSAGE']})
+                    self.reply(b'PRIVATE_INVALID_JSON' if delayed_response['malformed']
+                               else {'status': 'ok', 'messages': ['PRIVATE_MESSAGE']})
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # This endpoint deliberately exercises browser cancellation.
             elif self.path == "/synthetic/incoming":
@@ -161,7 +163,8 @@ def browser_collector(tmp_path):
             yield SimpleNamespace(page=page, sink=sink, uploads=uploads,
                                   delayed_request=delayed_request,
                                   release_response=release_response,
-                                  delayed_headers=delayed_headers)
+                                  delayed_headers=delayed_headers,
+                                  delayed_response=delayed_response)
             context.close()
             browser.close()
             browser = None
@@ -181,10 +184,11 @@ def browser_collector(tmp_path):
 
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize('mode', ['off_on', 'session_reset', 'disabled_start', 'owned'])
-@pytest.mark.parametrize('cancel', [False, True])
-def test_real_chromium_completion_ownership_across_diagnostic_generations(browser_collector, mode, cancel):
+@pytest.mark.parametrize('completion', ['success', 'cancel', 'malformed'])
+def test_real_chromium_completion_ownership_across_diagnostic_generations(browser_collector, mode, completion):
     rig = browser_collector
     page = rig.page
+    rig.delayed_response['malformed'] = completion == 'malformed'
     page.expose_function('requestArrived', rig.delayed_request.is_set)
     page.evaluate("""mode => {
         d.configureDiagnostics(mode !== 'disabled_start');
@@ -216,13 +220,15 @@ def test_real_chromium_completion_ownership_across_diagnostic_generations(browse
         if (mode === 'session_reset') document.dispatchEvent(new Event('ab:session-reset'));
         if (mode === 'disabled_start') d.configureDiagnostics(true);
     }""", mode)
-    if cancel:
+    if completion == 'cancel':
         page.evaluate('window.controller.abort()')
         page.wait_for_function('window.completed')
         assert page.evaluate('window.errorName') == 'AbortError'
     rig.release_response.set()
     page.wait_for_function('window.completed')
-    if not cancel:
+    if completion == 'malformed':
+        assert page.evaluate('window.errorName') == 'SyntaxError'
+    if completion == 'success':
         assert page.evaluate('window.result') == {'status': 'ok', 'messages': ['PRIVATE_MESSAGE']}
     # Fence on the postcompletion marker's own upload, rather than an older
     # batch whose response could race the collector's one-second timer.
@@ -238,9 +244,11 @@ def test_real_chromium_completion_ownership_across_diagnostic_generations(browse
     if mode == 'owned':
         assert len(completions) == len(legacy) == 1
         assert completions[0]['request_ref'] == legacy[0]['request_ref'] == request_ref
-        assert completions[0]['phase'] == ('browser_request_failed' if cancel else 'browser_response')
-        if cancel:
-            assert legacy[0]['status'] == 'error' and legacy[0]['error_type'] == 'AbortError'
+        assert completions[0]['phase'] == ('browser_response' if completion == 'success'
+                                          else 'browser_request_failed')
+        if completion != 'success':
+            assert legacy[0]['status'] == 'error'
+            assert legacy[0]['error_type'] == ('AbortError' if completion == 'cancel' else 'Error')
     else:
         assert completions == legacy == [], 'abandoned request regained diagnostic ownership'
     assert 'PRIVATE' not in json.dumps(rig.uploads)
