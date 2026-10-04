@@ -60,6 +60,45 @@ def _fixture_response(request):
         raise
 
 
+def _read_status_summary(out):
+    """Failure controls only; never response payloads, identities or errors."""
+    controls = {
+        'status': {'pending', 'page', 'ready', 'unavailable', 'forbidden', 'locked',
+                   'reset', 'reset_required', 'session_changed'},
+        'reason': {'page_inputs_changed', 'clock_expired', 'clock_rollback',
+                   'local_paging_disabled', 'local_inputs_pending', 'viewer_not_member',
+                   'session_changed', 'unread_session_changed', 'app_locked',
+                   'auxiliary_progress', 'auxiliary_changed', 'auxiliary_pending',
+                   'operation_superseded', 'identity_changed', 'source_mutation_pending',
+                   'schema_preparation_failed', 'budget_exhausted', 'step_budget_exhausted',
+                   'overlay_proofs', 'source_refresh', 'receipt_presence_changed',
+                   # Fixed terminal codes emitted by page_operation and
+                   # membership_coordinator; never admit arbitrary reason text.
+                   'inputs_unavailable', 'invalid_inputs', 'storage_unavailable',
+                   'resource_unavailable', 'pins_unavailable', 'invalid_clock',
+                   'missing_meta', 'invalid_meta_boundary', 'invalid_proposal',
+                   'pending_terminal', 'account_budget_exhausted', 'subject_budget_exhausted',
+                   'lifecycle_incomplete', 'local_source_owner_changed', 'read_ack_trust_changed',
+                   'pin_inputs_changed', 'page_presentation_changed', 'authority_inputs_changed',
+                   'membership_inputs_changed', 'lifecycle_inputs_changed', 'terminal_inputs_changed',
+                   'lookup_policy_changed', 'page_mirror_changed', 'proposal_head_mismatch',
+                   'retained_head_changed', 'continuation_changed', 'operation_byte_budget',
+                   'operation_crypto_budget', 'operation_epoch_budget', 'operation_parent_budget',
+                   'operation_proof_budget', 'operation_round_budget', 'operation_step_budget',
+                   'pin_parent_budget'},
+    }
+    summary = {}
+    for name in ('status', 'reason'):
+        value = out.get(name)
+        summary[name] = (value if isinstance(value, str) and value in controls[name]
+                         else '<absent-or-invalid>')
+    summary['error_present'] = 'error' in out
+    summary['forbidden'] = bool(out.get('forbidden'))
+    summary['payload_fields_present'] = [
+        name for name in ('users', 'feeds', 'tasks', 'runs') if name in out]
+    return summary
+
+
 @pytest.fixture
 def clouds(monkeypatch):
     """Opt-in, isolated fake cloud; only registered Supabase URIs are injected."""
@@ -229,8 +268,8 @@ class GuiRig:
                 return last
         raise AssertionError(
             f'{path} remained unresolved after {self._read_attempts} explicit '
-            f'preparation attempts: {last!r}; ingestion errors: '
-            f'{self._prepare_errors!r}')
+            f'preparation attempts: {_read_status_summary(last)!r}; '
+            f'ingestion error types: {[row[1] for row in self._prepare_errors[-8:]]!r}')
 
     def page(self, chat, **params):
         return self._read_ready('/api/mesh/chat_page', prepare_chat=chat, id=chat,
@@ -241,6 +280,7 @@ class GuiRig:
                                 ready=lambda out: out.get('status') == 'ready', **params)
 
     def aux(self, chat, **params):
+        """Read readiness or its terminal response for explicit status tests."""
         def ready(out):
             status = out.get('metadata_status', {})
             # Profiles/presence can remain pending at their presentation bound
@@ -249,6 +289,17 @@ class GuiRig:
                     and all(status.get(lane) == 'ready' for lane in ('live', 'runtime', 'pause')))
         return self._read_ready('/api/mesh/chat_aux', prepare_chat=chat, id=chat,
                                 ready=ready, **params)
+
+    def aux_ready(self, chat, **params):
+        """Require a usable positive read without changing retries or denials."""
+        out = self.aux(chat, **params)
+        metadata = out.get('metadata_status', {})
+        if not (out.get('status') == 'ready' and 'error' not in out
+                and not out.get('forbidden') and isinstance(metadata, dict)
+                and all(metadata.get(lane) == 'ready' for lane in ('live', 'runtime', 'pause'))):
+            # Explicit raise avoids pytest rewriting an assert and dumping out.
+            raise AssertionError(f'auxiliary payload required: {_read_status_summary(out)!r}')
+        return out
 
     def collection(self, chat, kind, **params):
         return self._read_ready('/api/mesh/chat_collection', prepare_chat=chat, id=chat,
