@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from agentbridge.core.models import Account, Privacy, UserKind
+from agentbridge.gui import api_chats
+from agentbridge.gui.routing import Request
 from agentbridge.mesh.profile_presentation import project_profile
 from conftest import seed_account
 
@@ -45,12 +47,17 @@ def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
 
 
 @pytest.mark.usefixtures('manual_presentation_owners')
+@pytest.mark.timeout(45)
 def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
     rig.signup()
     names = [f'u{i:03d}' for i in range(70)]
     for name in names:
         seed_account(rig.app.mesh.tx, name, display='Short name')
-    chat = rig.post('/api/mesh/create_chat', name='Bounded profiles', members=names)['chat']['id']
+    # Bulk setup uses the real authenticated route under the whole-test bound;
+    # the HTTP socket deadline belongs to the selected-profile read below.
+    chat = api_chats.create_chat(rig.app, Request(data={
+        'name': 'Bounded profiles', 'members': names,
+    }))['chat']['id']
     # This checks presentation cardinality, not a runner's SQLite throughput.
     # Keep the authority clock stable in this test; expiry/rollback stay covered
     # separately through the same real HTTP preparation and finalization path.
