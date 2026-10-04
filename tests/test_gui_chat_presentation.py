@@ -31,7 +31,7 @@ def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
         member.set_privacy({'about': 'nobody', 'photo': 'nobody'})
         member.outbox.flush_once()
     chat = rig.post('/api/mesh/create_chat', name='Profiles', members=['member'])['chat']['id']
-    result = rig.aux(chat)
+    result = rig.aux_ready(chat)
     assert set(result['users']) == {'aryan', 'member'}
     assert 'about' not in result['users']['member']
     assert 'private profile' not in json.dumps(result)
@@ -41,7 +41,7 @@ def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
         member.set_display('Changed later')
         member.outbox.flush_once()
     assert result['users']['member']['display'] == before
-    assert rig.aux(chat)['users']['member']['display'] == 'Changed later'
+    assert rig.aux_ready(chat)['users']['member']['display'] == 'Changed later'
 
 
 @pytest.mark.usefixtures('manual_presentation_owners')
@@ -57,7 +57,7 @@ def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
     from agentbridge.mesh import membership_coordinator
     now = time.time_ns()
     monkeypatch.setattr(membership_coordinator, 'time', SimpleNamespace(time_ns=lambda: now))
-    result = rig.aux(chat)
+    result = rig.aux_ready(chat)
     assert result.get('status') == 'ready', result
     assert len(result['users']) == 64
     assert 'aryan' in result['users']
@@ -91,7 +91,7 @@ def test_selected_presentation_withholds_payload_on_clock_fault(rig, monkeypatch
     assert not {'users', 'feeds', 'tasks', 'runs'} & result.keys()
     # A new canonical computation can succeed after the fault is removed.
     now[0] = time.time_ns()
-    assert rig.aux(chat)['status'] == 'ready'
+    assert rig.aux_ready(chat)['status'] == 'ready'
 
 
 def test_unknown_profile_relationship_defers_private_fields():

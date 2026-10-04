@@ -48,3 +48,45 @@ def test_terminal_responses_are_returned_without_readiness_retry(terminal):
     assert rig._read_ready('/api/mesh/chat_aux', prepare_chat='room',
                            ready=lambda out: False) is terminal
     assert attempts == ['room']
+
+
+def test_positive_aux_read_waits_for_pending_and_returns_real_payload():
+    ready = {'status': 'ready', 'feeds': [],
+             'metadata_status': dict.fromkeys(('live', 'runtime', 'pause'), 'ready')}
+    rig, attempts = _reader([{'status': 'pending', 'reason': 'local_inputs_pending'}, ready])
+    assert rig.aux_ready('room') is ready
+    assert attempts == ['room', 'room']
+
+
+@pytest.mark.parametrize('terminal', [
+    {'status': 'unavailable', 'reason': 'clock_expired'},
+    {'status': 'forbidden', 'reason': 'viewer_not_member'},
+    {'status': 'locked'},
+    {'status': 'session_changed'},
+    {'status': 'reset_required'},
+    {'status': 'ready', 'error': 'private-marker', 'feeds': ['private-marker']},
+    {'status': 'ready', 'forbidden': True, 'users': {'private-marker': {}}},
+    {'status': 'PrivateMarker', 'reason': 'PrivateMarker', 'error': 'private-marker'},
+])
+def test_positive_aux_read_rejects_terminal_response_without_retry_or_payload_dump(terminal):
+    rig, attempts = _reader([terminal])
+    with pytest.raises(AssertionError, match='auxiliary payload required') as raised:
+        rig.aux_ready('room')
+    assert attempts == ['room']
+    assert 'private-marker' not in str(raised.value)
+    assert 'PrivateMarker' not in str(raised.value)
+    if terminal.get('reason') in {'clock_expired', 'viewer_not_member'}:
+        assert terminal['reason'] in str(raised.value)
+
+
+def test_exhausted_input_cut_reports_controls_without_payload_or_ingestion_details():
+    changed = {'status': 'unavailable', 'reason': 'page_inputs_changed',
+               'session_binding': {'viewer': 'private-marker'}, 'feeds': ['private-marker']}
+    rig, attempts = _reader([changed] * GuiRig._read_attempts)
+    rig._prepare_errors = [('private-marker', 'SourceChanged', ('private-marker',))]
+    with pytest.raises(AssertionError) as raised:
+        rig.aux_ready('room')
+    assert len(attempts) == 16
+    assert 'page_inputs_changed' in str(raised.value)
+    assert 'SourceChanged' in str(raised.value)
+    assert 'private-marker' not in str(raised.value)

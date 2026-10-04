@@ -60,6 +60,31 @@ def _fixture_response(request):
         raise
 
 
+def _read_status_summary(out):
+    """Failure controls only; never response payloads, identities or errors."""
+    controls = {
+        'status': {'pending', 'page', 'ready', 'unavailable', 'forbidden', 'locked',
+                   'reset', 'reset_required', 'session_changed'},
+        'reason': {'page_inputs_changed', 'clock_expired', 'clock_rollback',
+                   'local_paging_disabled', 'local_inputs_pending', 'viewer_not_member',
+                   'session_changed', 'unread_session_changed', 'app_locked',
+                   'auxiliary_progress', 'auxiliary_changed', 'auxiliary_pending',
+                   'operation_superseded', 'identity_changed', 'source_mutation_pending',
+                   'schema_preparation_failed', 'budget_exhausted', 'step_budget_exhausted',
+                   'overlay_proofs', 'source_refresh', 'receipt_presence_changed'},
+    }
+    summary = {}
+    for name in ('status', 'reason'):
+        value = out.get(name)
+        summary[name] = (value if isinstance(value, str) and value in controls[name]
+                         else '<absent-or-invalid>')
+    summary['error_present'] = 'error' in out
+    summary['forbidden'] = bool(out.get('forbidden'))
+    summary['payload_fields_present'] = [
+        name for name in ('users', 'feeds', 'tasks', 'runs') if name in out]
+    return summary
+
+
 @pytest.fixture
 def clouds(monkeypatch):
     """Opt-in, isolated fake cloud; only registered Supabase URIs are injected."""
@@ -229,8 +254,8 @@ class GuiRig:
                 return last
         raise AssertionError(
             f'{path} remained unresolved after {self._read_attempts} explicit '
-            f'preparation attempts: {last!r}; ingestion errors: '
-            f'{self._prepare_errors!r}')
+            f'preparation attempts: {_read_status_summary(last)!r}; '
+            f'ingestion error types: {[row[1] for row in self._prepare_errors[-8:]]!r}')
 
     def page(self, chat, **params):
         return self._read_ready('/api/mesh/chat_page', prepare_chat=chat, id=chat,
@@ -241,6 +266,7 @@ class GuiRig:
                                 ready=lambda out: out.get('status') == 'ready', **params)
 
     def aux(self, chat, **params):
+        """Read readiness or its terminal response for explicit status tests."""
         def ready(out):
             status = out.get('metadata_status', {})
             # Profiles/presence can remain pending at their presentation bound
@@ -249,6 +275,17 @@ class GuiRig:
                     and all(status.get(lane) == 'ready' for lane in ('live', 'runtime', 'pause')))
         return self._read_ready('/api/mesh/chat_aux', prepare_chat=chat, id=chat,
                                 ready=ready, **params)
+
+    def aux_ready(self, chat, **params):
+        """Require a usable positive read without changing retries or denials."""
+        out = self.aux(chat, **params)
+        metadata = out.get('metadata_status', {})
+        if not (out.get('status') == 'ready' and 'error' not in out
+                and not out.get('forbidden') and isinstance(metadata, dict)
+                and all(metadata.get(lane) == 'ready' for lane in ('live', 'runtime', 'pause'))):
+            # Explicit raise avoids pytest rewriting an assert and dumping out.
+            raise AssertionError(f'auxiliary payload required: {_read_status_summary(out)!r}')
+        return out
 
     def collection(self, chat, kind, **params):
         return self._read_ready('/api/mesh/chat_collection', prepare_chat=chat, id=chat,
