@@ -21,7 +21,7 @@ def test_chat_and_sidebar_diagnostics_are_content_free_and_detect_bounded_work(r
     rig.signup()
     cid = rig.post("/api/mesh/create_chat", name="Observed", members=[])["chat"]["id"]
     rig.post("/api/mesh/post", chat_id=cid, body="projection-private-body")
-    # Complete fixture preparation before measuring the bounded HTTP reads.
+    # Prepare an initial cut; later reads may still request background work.
     assert rig.sidebar()["chats_complete"]
     assert rig.page(cid)["status"] == "page"
     # Model sparse observations for retained-stage coverage. Separate diagnostic
@@ -35,8 +35,10 @@ def test_chat_and_sidebar_diagnostics_are_content_free_and_detect_bounded_work(r
     with monkeypatch.context() as scoped:
         scoped.setattr(diagnostics, "time", sparse_clock)
         assert rig.app.diagnostics.set_enabled(True, sample_rate=1)
-        sidebar = rig.get("/api/mesh/state")
-        chat = rig.get("/api/mesh/chat_page", id=cid)
+        # Intervening reads may request background work and invalidate the
+        # prepared cut. Wait for real canonical readiness within fixture bounds.
+        sidebar = rig.sidebar()
+        chat = rig.page(cid)
     assert chat["status"] == "page"
     assert chat["session_binding"] == sidebar["session_binding"]
     assert chat["messages"][-1]["body"] == "projection-private-body"

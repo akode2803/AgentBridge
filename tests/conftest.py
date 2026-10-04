@@ -178,6 +178,13 @@ class GuiRig:
         for _ in range(self._read_attempts):
             self.prepare(prepare_chat)
             last = self.get(path, **params)
+            # A final canonical fence can lose its captured input cut while
+            # background owners publish. Reprepare within the same finite
+            # attempt budget; genuine unavailability and denials remain terminal.
+            if (last.get('status') == 'unavailable'
+                    and last.get('reason') == 'page_inputs_changed'
+                    and 'error' not in last and not last.get('forbidden')):
+                continue
             if ('error' in last or last.get('forbidden')
                     or last.get('status') in {
                         'forbidden', 'unavailable', 'reset', 'reset_required',
