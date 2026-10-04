@@ -71,7 +71,21 @@ def _read_status_summary(out):
                    'auxiliary_progress', 'auxiliary_changed', 'auxiliary_pending',
                    'operation_superseded', 'identity_changed', 'source_mutation_pending',
                    'schema_preparation_failed', 'budget_exhausted', 'step_budget_exhausted',
-                   'overlay_proofs', 'source_refresh', 'receipt_presence_changed'},
+                   'overlay_proofs', 'source_refresh', 'receipt_presence_changed',
+                   # Fixed terminal codes emitted by page_operation and
+                   # membership_coordinator; never admit arbitrary reason text.
+                   'inputs_unavailable', 'invalid_inputs', 'storage_unavailable',
+                   'resource_unavailable', 'pins_unavailable', 'invalid_clock',
+                   'missing_meta', 'invalid_meta_boundary', 'invalid_proposal',
+                   'pending_terminal', 'account_budget_exhausted', 'subject_budget_exhausted',
+                   'lifecycle_incomplete', 'local_source_owner_changed', 'read_ack_trust_changed',
+                   'pin_inputs_changed', 'page_presentation_changed', 'authority_inputs_changed',
+                   'membership_inputs_changed', 'lifecycle_inputs_changed', 'terminal_inputs_changed',
+                   'lookup_policy_changed', 'page_mirror_changed', 'proposal_head_mismatch',
+                   'retained_head_changed', 'continuation_changed', 'operation_byte_budget',
+                   'operation_crypto_budget', 'operation_epoch_budget', 'operation_parent_budget',
+                   'operation_proof_budget', 'operation_round_budget', 'operation_step_budget',
+                   'pin_parent_budget'},
     }
     summary = {}
     for name in ('status', 'reason'):

@@ -90,3 +90,37 @@ def test_exhausted_input_cut_reports_controls_without_payload_or_ingestion_detai
     assert 'page_inputs_changed' in str(raised.value)
     assert 'SourceChanged' in str(raised.value)
     assert 'private-marker' not in str(raised.value)
+
+
+@pytest.mark.parametrize('reason', [
+    'inputs_unavailable', 'invalid_inputs', 'storage_unavailable',
+    'resource_unavailable', 'pins_unavailable', 'local_source_owner_changed',
+    'operation_round_budget', 'read_ack_trust_changed',
+])
+def test_terminal_failure_codes_survive_diagnostics_without_retry_or_private_details(reason):
+    terminal = {'status': 'unavailable', 'reason': reason,
+                'error': 'private-marker', 'users': {'private-marker': {}},
+                'session_binding': {'viewer': 'private-marker'}}
+    rig, attempts = _reader([terminal])
+    with pytest.raises(AssertionError) as raised:
+        rig.aux_ready('room')
+    assert attempts == ['room']
+    message = str(raised.value)
+    assert f"'reason': '{reason}'" in message
+    assert "'error_present': True" in message
+    assert 'private-marker' not in message
+    assert 'session_binding' not in message
+
+
+@pytest.mark.parametrize('reason', [
+    'private_marker', 'inputs_unavailable_private_marker',
+    'inputs_unavailable\nprivate-marker', {'inputs_unavailable': 'private-marker'},
+])
+def test_reason_control_shape_does_not_admit_private_text(reason):
+    rig, attempts = _reader([{'status': 'unavailable', 'reason': reason}])
+    with pytest.raises(AssertionError) as raised:
+        rig.aux_ready('room')
+    assert attempts == ['room']
+    message = str(raised.value)
+    assert "'reason': '<absent-or-invalid>'" in message
+    assert 'private' not in message
