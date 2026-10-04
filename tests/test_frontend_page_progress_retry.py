@@ -12,13 +12,16 @@ pytestmark = pytest.mark.skipif(shutil.which('node') is None, reason='requires N
 
 
 def _run(tmp_path, script):
-    (tmp_path / 'package.json').write_text('{"type":"module"}')
+    (tmp_path / 'package.json').write_text('{"type":"module"}', encoding='utf-8')
     for name in ('chat-pages.js', 'chat-page-read.js'):
-        (tmp_path / name).write_text((ROOT / 'gui/static/js' / name).read_text())
-    (tmp_path / 'chat-source.txt').write_text((ROOT / 'gui/static/js/chat.js').read_text())
+        (tmp_path / name).write_text(
+            (ROOT / 'gui/static/js' / name).read_text(encoding='utf-8'), encoding='utf-8')
+    (tmp_path / 'chat-source.txt').write_text(
+        (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8'), encoding='utf-8')
     check = tmp_path / 'check.mjs'
-    check.write_text(script)
-    result = subprocess.run(['node', str(check)], capture_output=True, text=True)
+    check.write_text(script, encoding='utf-8')
+    result = subprocess.run(['node', str(check)], capture_output=True, text=True,
+                            encoding='utf-8')
     assert result.returncode == 0, result.stdout + result.stderr
 
 

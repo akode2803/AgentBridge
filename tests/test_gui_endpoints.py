@@ -756,7 +756,9 @@ def test_selected_aux_feeds_are_membership_filtered(rig):
         "updated": now, "activity": "secret"})
     tx.put_doc("status/typing_cara.json", {
         "user": "cara", "chat_id": theirs, "updated": now})
-    feeds = rig.aux(mine)["feeds"]
+    result = rig.aux(mine)
+    assert result.get("status") == "ready", result
+    feeds = result["feeds"]
     who = {f["agent"] for f in feeds}
     assert "helper" in who           # my chat's run shows
     assert "hermit" not in who       # a not-my-room run never leaks

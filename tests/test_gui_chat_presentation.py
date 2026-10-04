@@ -39,6 +39,7 @@ def test_selected_presentation_enforces_current_member_bound(rig):
         seed_account(rig.app.mesh.tx, name, display='Short name')
     chat = rig.post('/api/mesh/create_chat', name='Bounded profiles', members=names)['chat']['id']
     result = rig.aux(chat)
+    assert result.get('status') == 'ready', result
     assert len(result['users']) == 64
     assert 'aryan' in result['users']
     assert result['metadata_status']['profiles'] == 'pending'

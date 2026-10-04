@@ -64,9 +64,8 @@ def test_clock_and_counter_faults_preserve_business_result(monkeypatch, failure)
 
 @pytest.mark.parametrize('target', ['root', 'store'])
 @pytest.mark.parametrize('fail_at', [None, 'BEGIN IMMEDIATE', 'COMMIT', 'BODY'])
-def test_acquisition_commit_rollback_close_order_and_failure(monkeypatch, target, fail_at):
+def test_acquisition_commit_rollback_close_order_and_failure(monkeypatch, tmp_path, target, fail_at):
     from agentbridge.store import mutation_coordinator as root_module
-    from pathlib import Path
     calls = []
     error = RuntimeError('business error')
     class Connection:
@@ -84,7 +83,7 @@ def test_acquisition_commit_rollback_close_order_and_failure(monkeypatch, target
             calls.append('CLOSE')
     monkeypatch.setattr(root_module.sqlite3, 'connect', lambda *a, **k: Connection())
     owner = MutationCoordinator.__new__(MutationCoordinator)
-    owner.path = Path('/unused-disposable.sqlite')
+    owner.path = tmp_path / 'unused-disposable.sqlite'
     context = owner._transaction() if target == 'root' else local_source._writer(owner)
     capture, token = phases.begin()
     try:
