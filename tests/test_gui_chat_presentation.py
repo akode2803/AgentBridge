@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,18 +34,52 @@ def test_selected_presentation_is_relevant_privacy_filtered_and_detached(rig):
     assert rig.aux(chat)['users']['member']['display'] == 'Changed later'
 
 
-def test_selected_presentation_enforces_current_member_bound(rig):
+def test_selected_presentation_enforces_current_member_bound(rig, monkeypatch):
     rig.signup()
     names = [f'u{i:03d}' for i in range(70)]
     for name in names:
         seed_account(rig.app.mesh.tx, name, display='Short name')
     chat = rig.post('/api/mesh/create_chat', name='Bounded profiles', members=names)['chat']['id']
+    # This checks presentation cardinality, not a runner's SQLite throughput.
+    # Keep the authority clock stable in this test; expiry/rollback stay covered
+    # separately through the same real HTTP preparation and finalization path.
+    from agentbridge.mesh import membership_coordinator
+    now = time.time_ns()
+    monkeypatch.setattr(membership_coordinator, 'time', SimpleNamespace(time_ns=lambda: now))
     result = rig.aux(chat)
     assert result.get('status') == 'ready', result
     assert len(result['users']) == 64
     assert 'aryan' in result['users']
     assert result['metadata_status']['profiles'] == 'pending'
     assert len(json.dumps(result, ensure_ascii=False).encode()) <= 4 * 1024 * 1024
+
+
+@pytest.mark.parametrize('fault', ['expired', 'rollback'])
+def test_selected_presentation_withholds_payload_on_clock_fault(rig, monkeypatch, fault):
+    from agentbridge.gui.api_page_aux import AuxiliaryPageOperation
+    from agentbridge.mesh import membership_coordinator
+
+    rig.signup()
+    chat = rig.post('/api/mesh/create_chat', name='Clock fence', members=[])['chat']['id']
+    rig.prepare(chat)
+    now = [time.time_ns()]
+    monkeypatch.setattr(membership_coordinator, 'time', SimpleNamespace(time_ns=lambda: now[0]))
+    decorate = AuxiliaryPageOperation._decorate
+
+    def expire_after_real_calculation(self, round_, *args, **kwargs):
+        payload = decorate(self, round_, *args, **kwargs)
+        now[0] = round_.deadline if fault == 'expired' else round_.now - 1
+        return payload
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AuxiliaryPageOperation, '_decorate', expire_after_real_calculation)
+        result = rig.get('/api/mesh/chat_aux', id=chat)
+    assert result['status'] == 'unavailable', result
+    assert result['reason'] == ('clock_expired' if fault == 'expired' else 'clock_rollback')
+    assert not {'users', 'feeds', 'tasks', 'runs'} & result.keys()
+    # A new canonical computation can succeed after the fault is removed.
+    now[0] = time.time_ns()
+    assert rig.aux(chat)['status'] == 'ready'
 
 
 def test_unknown_profile_relationship_defers_private_fields():

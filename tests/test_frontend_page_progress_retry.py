@@ -11,13 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 
 
-def _run(tmp_path, script):
+def _run(tmp_path, script, *, source_newline=None):
     (tmp_path / 'package.json').write_text('{"type":"module"}', encoding='utf-8')
     for name in ('chat-pages.js', 'chat-page-read.js'):
         (tmp_path / name).write_text(
             (ROOT / 'gui/static/js' / name).read_text(encoding='utf-8'), encoding='utf-8')
     (tmp_path / 'chat-source.txt').write_text(
-        (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8'), encoding='utf-8')
+        (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8'),
+        encoding='utf-8', newline=source_newline)
     check = tmp_path / 'check.mjs'
     check.write_text(script, encoding='utf-8')
     result = subprocess.run(['node', str(check)], capture_output=True, text=True,
@@ -46,12 +47,14 @@ assert.equal(pageRetryDelay({status:'unavailable',retry_after_ms:30000},30,false
 ''')
 
 
-def test_native_ack_refreshes_and_paints_new_token_before_retry_with_ownership_fences(tmp_path):
+@pytest.mark.parametrize('source_newline', ['\n', '\r\n'], ids=['lf', 'crlf'])
+def test_native_ack_refreshes_and_paints_new_token_before_retry_with_ownership_fences(
+        tmp_path, source_newline):
     _run(tmp_path, r'''
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {pageRetryDelay} from './chat-page-read.js';
-const src=fs.readFileSync(new URL('./chat-source.txt',import.meta.url),'utf8');
+const src=fs.readFileSync(new URL('./chat-source.txt',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const ackSource=src.slice(src.indexOf('document.addEventListener("ab:manual-mark-unread",'),src.indexOf('// reading needs eyes:'));
 const resetSource=src.slice(src.indexOf('function resetPagedView()'),src.indexOf('document.addEventListener("ab:session-reset"'));
 const tick=async()=>{for(let n=0;n<8;n++)await Promise.resolve();};
@@ -301,4 +304,4 @@ for(const first of [new Error('offline'),{status:'pending',retry_after_ms:350}])
  assert.equal([...h.timers.values()][0].ms,2000);
  assert.equal(h.Mesh.pendingRead,'room');
 }
-''')
+''', source_newline=source_newline)
