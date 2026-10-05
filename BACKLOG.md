@@ -18,9 +18,9 @@ Source/CI completion is separate from merge, runtime activation and live accepta
 
 - [~] **Remove selected-ask delay behind broad inventory.** The browser awaited
   the global response before starting selected-room asks. Independent bounded
-  scoped polling is implemented on current main; 78 controlled race, Chromium and
-  integration tests passed; independent review passed. PR44 CI, merge and
-  actual-instance timing remain open.
+  scoped polling is integrated in PR44; 78 controlled race, Chromium and
+  integration tests plus the complete local suite passed. Independent review
+  passed; actual-instance timing remains open.
   See [SELECTED_ASK_LATENCY.md](docs/SELECTED_ASK_LATENCY.md).
 - [D] **Repeated schema-check optimization (PR43).** Skipped by Aryan; PR43 is
   closed unmerged. Its source optimization is excluded from this branch.
@@ -29,13 +29,12 @@ Source/CI completion is separate from merge, runtime activation and live accepta
   PR40/41 retain their own work on top of the repaired main.
 - [x] **Integrate browser diagnostic fidelity.** PR39 passed Linux3141 and
   Windows3128 tests and merged as `dd5a36e054e695db1d058ad9fee0703a5d8aae1b`.
-- [ ] **Complete delivery recovery acceptance.** PR40's16 lost-ACK/reopen cases
-  passed locally; its original Windows CI encountered the separate presence race.
-  The repaired combined head is under fresh CI. Abrupt-process termination recovery
-  remains separate from the orderly-reopen checkpoint.
-- [ ] **Integrate the diagnostics runbook.** PR41's command checks and independent
-  review passed; original CI encountered presence/fixture ingestion conflicts.
-  The repaired combined head is under fresh CI before merge.
+- [x] **Complete delivery recovery acceptance.** PR40's16 lost-ACK/reopen cases
+  passed locally; its repaired head passed Linux and Windows CI and merged.
+  Abrupt-process termination recovery remains separate from the orderly-reopen
+  checkpoint.
+- [x] **Integrate the diagnostics runbook.** PR41's command checks, independent
+  review and repaired Linux/Windows CI passed before merge.
 - [ ] **Capture actual two-client delivery and refresh timing.** Measure commit,
   Realtime hint, ingestion/queue, SSE, canonical page finalization, DOM and ACK
   separately. Requires an authorized reachable provider and independently owned

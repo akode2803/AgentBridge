@@ -47,7 +47,7 @@ gate (0.57s).
 
 The branch is based on main after PR42 merged as
 `ae87c8be4809c65840747342adbaf49b4442dc1e`. PR43 was skipped and closed
-unmerged; its schema-check optimization is excluded. PR44 CI, merge and runtime
-activation remain open. Pending work is listed in
+unmerged; its schema-check optimization is excluded. The source change is integrated
+in PR44; runtime activation remains open. Pending work is listed in
 [BACKLOG.md](../BACKLOG.md). Actual two-client transport/queue/SSE/DOM/ACK timing,
 live authorization and native-device acceptance remain open.
