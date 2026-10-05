@@ -272,9 +272,9 @@ function renderChatListSidebar() {
   const recency = (c) => (c.last && c.last.ns) || 0;
   listed.sort((a, b) => (!!b.pinned - !!a.pinned) || (recency(b) - recency(a)));
   const box = $("#side-chats");
-  // The foreground chat owns its own delayed cue. A usable retained list is
-  // already useful while its next canonical refresh runs in the background.
-  const waiting = ms.chats_complete === false && listed.length === 0;
+  // The row is delayed, so a quick reconciliation stays visually quiet. When
+  // it does appear it sits with the cached chats until the canonical pass ends.
+  const waiting = ms.chats_complete === false;
   const session = captureSessionEpoch();
   const progress = () => syncSidebarProgress(box, {
     pending: waiting && !Mesh.chatId,

@@ -25,7 +25,7 @@ from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
     document_observation, lifecycle_heads, membership_input_position,
-    shadow_chat_inputs, shadow_slot,
+    shadow_chat_inputs, shadow_slot, sidebar_cache,
 )
 from .shadow_chat_inputs import ShadowChatInputs
 from .document_observation import (
@@ -164,6 +164,7 @@ class Store:
         document_observation.initialize(self._conn())
         overlay_index.initialize(self._conn())
         shadow_slot.initialize(self._conn())
+        sidebar_cache.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -180,6 +181,18 @@ class Store:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    # ------------------------------------------------ sidebar presentation
+    def cached_sidebar(self, viewer: str, *, allowed_ids=None) -> list[dict]:
+        return sidebar_cache.capture(self.path, viewer, allowed_ids=allowed_ids)
+
+    def publish_sidebar(self, viewer: str, chat_id: str, row: dict | None,
+                        *, updated_ns: int) -> bool:
+        return sidebar_cache.publish(
+            self._conn(), viewer, chat_id, row, updated_ns=updated_ns)
+
+    def prune_sidebar(self, viewer: str, allowed_ids: frozenset[str]) -> int:
+        return sidebar_cache.prune(self._conn(), viewer, allowed_ids)
 
     def claim_once(self, scope: str, key: str, ns: int) -> bool:
         """Atomically and durably claim one replay-sensitive record."""

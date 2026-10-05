@@ -153,8 +153,8 @@ def test_scoped_router_avoids_off_room_transcript_and_keeps_new_directory(tmp_pa
 import assert from 'node:assert/strict';
 const App={page:'chats'},Mesh={state:{user:'me'},chatId:'selected'};
 const meshStateSnapshot=()=>({locked:false}),meshCaps=()=>({chat_page_v1:true});
-let pages=0,sidebars=0,aux=0,broad=0;
-const V={refresh:async()=>{broad++}};
+let pages=0,sidebars=0,aux=0,broad=0,cached=0;
+const V={refresh:async()=>{broad++},refreshSidebarCache:async()=>{cached++}};
 const renderPagedChat=async(_force,_kind,options)=>{
  assert.equal(options.sidebar,false);assert.equal(options.realtime,true);pages++;
 };
@@ -173,6 +173,7 @@ App.page='new';await V.refreshRealtime([{type:'read_model',scope:'sidebar'}]);
 assert.equal(broad,1);
 App.page='settings';await V.refreshRealtime([{type:'mirror_update'}]);
 assert.equal(broad,1);
+assert.equal(cached,1);
 ''')
 
 

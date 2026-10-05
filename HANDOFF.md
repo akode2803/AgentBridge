@@ -28,5 +28,17 @@ The 2026-10-06 transport-limit audit is in
 foreground fast polling while Realtime is healthy, shortens user-visible
 Broadcast hints within the existing four-per-second cap, and bounds active
 failure recovery at one second. The next task is startup ownership and cached
-sidebar paint: render a session-bound admitted list immediately, reconcile rows
-independently, and keep settings independent of all-room projection.
+sidebar paint.
+
+The cached-sidebar startup implementation is on
+`codex/cached-sidebar-startup` at app version `0.24.298`. `/api/mesh/state`
+now serves bounded last-finalized presentations from the local SQLite Store;
+two session-fenced browser jobs reconcile rooms independently through the
+existing canonical page operation and progressively replace those rows.
+Realtime chat hints prioritize one room and content-free global hints request a
+bounded all-room pass. Settings uses the same quick state without waiting for
+all-room projection. Cached rows never authorize an action, and a session
+change clears all in-memory work positioning. Focused GUI/sidebar/frontend
+coverage passes; the next release step is the full offline suite, then rebase
+onto the transport-audit merge and open the stacked PR. After that, stabilize
+selected transcripts so no accepted update can blank the existing page.

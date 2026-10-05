@@ -672,6 +672,7 @@ async function renderChats(force) {
     return;
   }
   if (!applyMeshState(sessionTicket, fresh, stateRequest)) return;
+  if (fresh.chats_complete === false) void reconcileSidebar();
   // V111: locked is not signed-out — never cache the refusal as state or
   // paint "Start the mesh" over it (api.js already raised the lock screen)
   if (Mesh.state && Mesh.state.locked) {
@@ -735,6 +736,91 @@ async function renderChats(force) {
 }
 V.renderChats = renderChats;
 
+let sidebarReconcileOwner = null;
+let sidebarReconcileTimer = null;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function resetSidebarReconcile() {
+  if (sidebarReconcileOwner) sidebarReconcileOwner.cancelled = true;
+  sidebarReconcileOwner = null;
+  clearTimeout(sidebarReconcileTimer);
+  sidebarReconcileTimer = null;
+}
+document.addEventListener("ab:session-reset", resetSidebarReconcile);
+document.addEventListener("ab:lock-epoch", resetSidebarReconcile);
+
+async function acceptCachedSidebar(owner) {
+  if (owner.cancelled || !sessionMayApply(owner.ticket)
+      || meshStateSnapshot().locked) return false;
+  const request = captureMeshStateRead(owner.ticket);
+  const fresh = await api("/api/mesh/state", undefined,
+    {sideEffects:false, timeoutMs:15000});
+  if (owner.cancelled || !sessionMayApply(owner.ticket) || fresh?.error
+      || !applyMeshState(owner.ticket, fresh, request)) return false;
+  renderSidebar();
+  return fresh.chats_complete === true;
+}
+
+async function reconcileSidebar(preferred = "", refreshAll = false) {
+  if (!Mesh.state?.user || meshStateSnapshot().locked) return;
+  clearTimeout(sidebarReconcileTimer);
+  sidebarReconcileTimer = null;
+  if (sidebarReconcileOwner && !sidebarReconcileOwner.cancelled) {
+    if (preferred) {
+      sidebarReconcileOwner.preferred = preferred;
+      sidebarReconcileOwner.followup = preferred;
+      sidebarReconcileOwner.hasMore = true;
+    }
+    if (refreshAll) {
+      sidebarReconcileOwner.refreshAll = true;
+      sidebarReconcileOwner.followupAll = true;
+      sidebarReconcileOwner.hasMore = true;
+    }
+    return sidebarReconcileOwner.promise;
+  }
+  const owner = {ticket:captureSessionEpoch(), preferred, cancelled:false,
+    refreshAll, followup:"", followupAll:false, changed:false, hasMore:true,
+    attempts:0, promise:null};
+  sidebarReconcileOwner = owner;
+  const current = () => !owner.cancelled && sidebarReconcileOwner === owner
+    && sessionMayApply(owner.ticket) && !meshStateSnapshot().locked;
+  const worker = async () => {
+    while (current() && owner.hasMore && owner.attempts < 256) {
+      owner.attempts += 1;
+      const chatId = owner.preferred;
+      const all = owner.refreshAll;
+      owner.preferred = "";
+      owner.refreshAll = false;
+      let result;
+      try {
+        result = await api("/api/mesh/sidebar_refresh",
+          {...(chatId ? {chat_id:chatId} : {}), ...(all ? {refresh_all:true} : {})},
+          {sideEffects:false, timeoutMs:15000});
+      } catch { return; }
+      if (!current() || result?.error) return;
+      owner.changed ||= result.changed === true;
+      owner.hasMore = result.has_more === true;
+      if (result.changed === true) await acceptCachedSidebar(owner);
+      if (result.status === "pending" || result.status === "busy") {
+        await sleep(Math.max(100, Number(result.retry_after_ms) || 350));
+      }
+    }
+  };
+  owner.promise = Promise.allSettled([worker(), worker()]).then(async () => {
+    if (current()) await acceptCachedSidebar(owner);
+  }).finally(() => {
+    const followup = owner.followup;
+    const followupAll = owner.followupAll;
+    if (sidebarReconcileOwner === owner) sidebarReconcileOwner = null;
+    if ((followup || followupAll) && !owner.cancelled) {
+      queueMicrotask(() => reconcileSidebar(followup, followupAll));
+    } else if (owner.hasMore && !owner.cancelled && sessionMayApply(owner.ticket)) {
+      sidebarReconcileTimer = setTimeout(() => reconcileSidebar(), 2000);
+    }
+  });
+  return owner.promise;
+}
+V.refreshSidebarCache = reconcileSidebar;
+
 // Independent bounded lanes: a slow inventory must not hold selected-chat
 // delivery. Each read still uses the existing route/session/canonical gates.
 let realtimeSidebarSerial = 0;
@@ -748,7 +834,8 @@ function resetRealtimeSidebar() {
 }
 document.addEventListener("ab:session-reset", resetRealtimeSidebar);
 document.addEventListener("ab:lock-epoch", resetRealtimeSidebar);
-async function refreshRealtimeSidebar() {
+async function refreshRealtimeSidebar(preferred = "", refreshAll = false) {
+  if (typeof V !== "undefined") void V.refreshSidebarCache?.(preferred, refreshAll);
   const ticket = captureSessionEpoch();
   const route = App.routeSeq;
   const lock = meshStateSnapshot().lockEpoch;
@@ -767,6 +854,7 @@ async function refreshRealtimeSidebar() {
   if (fresh && applyMeshState(ticket, fresh, request)) {
     renderSidebar();
     if (fresh.chats_complete !== false) { realtimeSidebarFailures = 0; return; }
+    if (typeof V !== "undefined") void V.refreshSidebarCache?.();
   }
   realtimeSidebarFailures = Math.min(5, realtimeSidebarFailures + 1);
   realtimeSidebarTimer = setTimeout(() => {
@@ -799,23 +887,32 @@ V.refreshRealtime = async frames => {
       || frame.scope === "global" || frame.scope === "sidebar")) {
     return V.refresh(false); // Existing directory query/focus and session guards.
   }
-  if (App.page !== "chats") return; // Settings retains its guarded scoped owner.
-  let page = false, sidebar = false, auxiliary = false;
+  let page = false, sidebar = false, auxiliary = false, preferred = "", refreshAll = false;
   for (const frame of frames) {
     const scope = frame.type === "read_model" ? frame.scope : "chat";
     if (frame.type === "mirror_update" || scope === "global") {
-      page = !!Mesh.chatId; sidebar = true; auxiliary = true;
-    } else if (scope === "sidebar") sidebar = true;
+      page = !!Mesh.chatId; sidebar = true; auxiliary = true; refreshAll = true;
+    } else if (scope === "sidebar") {
+      sidebar = true;
+      if (!frame.chat_id) refreshAll = true;
+      else preferred = frame.chat_id;
+    }
     else if (scope === "aux") auxiliary ||= !frame.chat_id || frame.chat_id === Mesh.chatId;
     else if (scope === "chat") {
       sidebar = true;
+      if (frame.chat_id) preferred = frame.chat_id;
       page ||= !!Mesh.chatId && frame.chat_id === Mesh.chatId;
     }
   }
+  if (App.page === "settings") {
+    if (sidebar) await V.refreshSidebarCache?.(preferred, refreshAll);
+    return;
+  }
+  if (App.page !== "chats") return;
   const work = [];
   if (page) work.push(renderPagedChat(false, null, {sidebar:false,realtime:true}));
   else if (auxiliary) work.push(refreshRealtimeAux());
-  if (sidebar) work.push(refreshRealtimeSidebar());
+  if (sidebar) work.push(refreshRealtimeSidebar(preferred, refreshAll));
   await Promise.allSettled(work);
 };
 

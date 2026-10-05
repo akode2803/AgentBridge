@@ -82,7 +82,7 @@ const policy=new Function('Mesh','App','$','updateTitleBadge','captureSessionEpo
   (Mesh,App,$,updateTitleBadge,captureSessionEpoch,sessionMayApply,syncSidebarProgress);
 const base={available:true,user:'me',chats_complete:false,chats:[{id:'a'}]};
 Mesh.state=base; policy().progress();
-assert.equal(calls.at(-1).pending,false,'usable list quiet during background paging');
+assert.equal(calls.at(-1).pending,true,'incomplete cached list shows delayed updating row');
 Mesh.state={...base,chats:[]}; policy().progress();
 assert.equal(calls.at(-1).pending,true,'empty incomplete list receives one cue');
 Mesh.chatId='selected'; policy().progress();

@@ -283,8 +283,8 @@ def test_selected_canonical_denial_retires_only_known_row_and_old_reads(tmp_path
     program = setup + r'''
 const ticket=BrowserSession.capture();
 const binding={viewer:'aryan',instance_id:'i',session_generation:'1'};
-const response=(chats,complete=false)=>({user:'aryan',session_binding:binding,
-  chats,chats_complete:complete});
+const response=(chats,complete=false,removed=[])=>({user:'aryan',session_binding:binding,
+  chats,chats_complete:complete,chats_removed:removed});
 const denied={id:'a',last:{body:'private preview'}}, other={id:'b'};
 const initial=api.captureMeshStateRead(ticket);
 assert.equal(api.applyMeshState(ticket,response([denied,other]),initial),true);
@@ -297,10 +297,13 @@ assert.deepEqual(Mesh.state.chats,[other]);
 const incomplete=api.captureMeshStateRead(ticket);
 assert.equal(api.applyMeshState(ticket,response([]),incomplete),true);
 assert.deepEqual(Mesh.state.chats,[other]);
+const removed=api.captureMeshStateRead(ticket);
+assert.equal(api.applyMeshState(ticket,response([],false,['b']),removed),true);
+assert.deepEqual(Mesh.state.chats,[]);
 // A newly captured canonical positive restores legitimate membership.
 const restored=api.captureMeshStateRead(ticket);
 assert.equal(api.applyMeshState(ticket,response([denied]),restored),true);
-assert.deepEqual(Mesh.state.chats,[other,denied]);
+assert.deepEqual(Mesh.state.chats,[denied]);
 App.page='settings';assert.equal(api.retireDeniedMeshChat('a'),false);
 App.page='chats';Mesh.state.user='other';
 assert.equal(api.retireDeniedMeshChat('a'),false);
