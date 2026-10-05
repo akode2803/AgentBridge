@@ -1589,9 +1589,12 @@ V.renderPendingSends = (chatId, scroll = false) => {
 // pending ask gets a sidebar dot, so nothing waits invisibly.
 let askPollRequest = null;
 let askPollSnapshot = null;
+let askSelectedRequest = null;
+let askSelectedSnapshot = null;
 function resetAskPollState() {
   askPollRequest?.abort.abort();
-  askPollRequest = askPollSnapshot = null;
+  askSelectedRequest?.abort.abort();
+  askPollRequest = askPollSnapshot = askSelectedRequest = askSelectedSnapshot = null;
   Mesh.askSeen = new Set();
   Mesh.askDone = new Map();
   Mesh.timerDone = new Map();
@@ -1611,118 +1614,171 @@ function mergeAskLane(previous, incoming, complete, maxRows) {
   return merged.size <= maxRows ? [...merged.values()] : previous;
 }
 
+function askBindingKey(binding) {
+  return JSON.stringify([binding.instance_id,binding.session_generation,binding.viewer]);
+}
+
+function validAskPollResponse(r) {
+  return r?.ok === true && !r.error && Array.isArray(r.asks) && Array.isArray(r.timers)
+    && r.asks.length <= 1024 && r.timers.length <= 512
+    && typeof r.rooms_complete === "boolean" && typeof r.peer_complete === "boolean"
+    && typeof r.timers_complete === "boolean" && Array.isArray(r.resolved_room_ids)
+    && r.resolved_room_ids.length <= 128
+    && r.resolved_room_ids.every(id => typeof id === "string" && id)
+    && new Set(r.resolved_room_ids).size === r.resolved_room_ids.length;
+}
+
+function paintAskPollSnapshot(binding) {
+  const key = askBindingKey(binding);
+  const lockEpoch = meshStateSnapshot().lockEpoch;
+  const global = askPollSnapshot?.key === key && askPollSnapshot.lockEpoch === lockEpoch ? askPollSnapshot
+    : {rooms:[],peer:[],timers:[]};
+  const cid = Mesh.chatId;
+  const selected = askSelectedSnapshot?.key === key
+    && askSelectedSnapshot.chat === cid && askSelectedSnapshot.route === App.routeSeq
+    && askSelectedSnapshot.lockEpoch === lockEpoch
+    ? askSelectedSnapshot : null;
+  // A scoped completed/denied result owns this room's display. A late broad
+  // response cannot restore its old rows, timers or a previously cleared ask.
+  const rooms = selected ? global.rooms.filter(a => a.chat_id !== cid)
+    .slice(0, 1024 - selected.rooms.length).concat(selected.rooms)
+    : global.rooms;
+  const timers = selected ? global.timers.filter(t => t.chat_id !== cid)
+    .slice(0, 512 - selected.timers.length).concat(selected.timers)
+    : global.timers;
+  Mesh.askDone = Mesh.askDone || new Map();
+  Mesh.timerDone = Mesh.timerDone || new Map();
+  const now = Date.now();
+  for (const [id, ts] of Mesh.askDone)
+    if (now - ts > 900000) Mesh.askDone.delete(id);
+  for (const [id, ts] of Mesh.timerDone)
+    if (now - ts > 900000) Mesh.timerDone.delete(id);
+  const asks = [...rooms,...global.peer].filter(a => !Mesh.askDone.has(a.id));
+  Mesh.askSeen = Mesh.askSeen || new Set();
+  if (Mesh.askSeen.size > 500) Mesh.askSeen.clear();
+  for (const a of asks) {
+    if (!Mesh.askSeen.has(a.id)) { Mesh.askSeen.add(a.id); notifyAsk(a); }
+  }
+  syncAskDots(asks);
+  const peer = asks.filter(a => a.kind === "peer");
+  if (cid) renderAskBar(cid, [...asks.filter(a => a.chat_id === cid),...peer],
+    timers.filter(t => t.chat_id === cid && !Mesh.timerDone.has(t.id)));
+}
+
+async function refreshSelectedAskPoll() {
+  const chat = Mesh.chatId;
+  const route = App.routeSeq;
+  if (askSelectedRequest && (askSelectedRequest.chat !== chat || askSelectedRequest.route !== route)) {
+    askSelectedRequest.abort.abort();
+    askSelectedRequest = null;
+  }
+  if (App.page !== "chats" || !chat || document.hidden || !document.hasFocus()
+      || askSelectedRequest) return;
+  const ticket = captureSessionEpoch();
+  const lockEpoch = meshStateSnapshot().lockEpoch;
+  const binding = BrowserSession.snapshot().binding;
+  if (!binding?.viewer) return;
+  const request = {abort:new AbortController(),chat,route};
+  askSelectedRequest = request;
+  try {
+    const r = await api(`/api/mesh/asks?chat=${encodeURIComponent(chat)}`, undefined,
+      {sideEffects:false,timeoutMs:15000,signal:request.abort.signal});
+    if (askSelectedRequest !== request || request.abort.signal.aborted
+        || App.page !== "chats" || Mesh.chatId !== chat || App.routeSeq !== route
+        || meshStateSnapshot().lockEpoch !== lockEpoch || !sessionMayApply(ticket, r)
+        || !samePageBinding(binding, r?.session_binding)) return;
+    if (r?.locked || r?.error === "Session changed") { resetAskPollState(); return; }
+    if (!validAskPollResponse(r)) return;
+    const key = askBindingKey(binding);
+    const ownsPrior = askSelectedSnapshot?.key === key && askSelectedSnapshot.chat === chat
+      && askSelectedSnapshot.route === route && askSelectedSnapshot.lockEpoch === lockEpoch;
+    const globalPrior = askPollSnapshot?.key === key && askPollSnapshot.lockEpoch === lockEpoch;
+    const previous = ownsPrior ? askSelectedSnapshot
+      : {rooms:globalPrior ? askPollSnapshot.rooms.filter(a => a.chat_id === chat) : [],
+         timers:globalPrior ? askPollSnapshot.timers.filter(t => t.chat_id === chat) : []};
+    if (r.forbidden === true) {
+      // Retire this room from broad display across routes. Filter only this
+      // room from broad reads captured before the denial, so unrelated lanes
+      // continue refreshing even while a denied selected route remains open.
+      if (askPollRequest) {
+        askPollRequest.deniedRooms.add(chat);
+        if (askPollRequest.deniedRooms.size > 128) {
+          askPollRequest.abort.abort();
+          askPollRequest = null;
+        }
+      }
+      if (globalPrior) {
+        askPollSnapshot.rooms = askPollSnapshot.rooms.filter(a => a.chat_id !== chat);
+        askPollSnapshot.timers = askPollSnapshot.timers.filter(t => t.chat_id !== chat);
+      }
+      askSelectedSnapshot = {key,chat,route,lockEpoch,rooms:[],timers:[],denied:true};
+    } else {
+      if (r.resolved_room_ids.some(id => id !== chat)
+          || (r.rooms_complete && !r.resolved_room_ids.includes(chat))) return;
+      const resolved = r.resolved_room_ids.includes(chat);
+      if (!resolved && (previous.denied || !ownsPrior)) return;
+      askSelectedSnapshot = {key,chat,route,lockEpoch,
+        rooms:mergeAskLane(previous.rooms,resolved ? r.asks.filter(a => a?.kind !== "peer" && a?.chat_id === chat) : [],
+                           r.rooms_complete,1024),
+        timers:mergeAskLane(previous.timers,r.timers.filter(t => t?.chat_id === chat),
+                            r.timers_complete,512)};
+    }
+    paintAskPollSnapshot(binding);
+  } catch { /* Preserve verified same-owner rows until the next bounded read. */ }
+  finally { if (askSelectedRequest === request) askSelectedRequest = null; }
+}
+
 function startAskPoll() {
-  if (Mesh.askPollId) return;                // one global poller
+  if (Mesh.askPollId) {
+    const binding = BrowserSession.snapshot().binding;
+    if (App.page === "chats" && binding?.viewer) paintAskPollSnapshot(binding);
+    // Route entry may happen while a slow global read is still in flight.
+    if (askSelectedRequest?.chat !== Mesh.chatId || askSelectedRequest?.route !== App.routeSeq) {
+      if (askSelectedSnapshot?.chat !== Mesh.chatId || askSelectedSnapshot?.route !== App.routeSeq)
+        void refreshSelectedAskPoll();
+    }
+    return;
+  }
   const tick = async () => {
     if (App.page !== "chats") {
-      clearInterval(Mesh.askPollId);         // left the page: stand down
+      clearInterval(Mesh.askPollId);
       Mesh.askPollId = null;
       resetAskPollState();
       return;
     }
+    void refreshSelectedAskPoll();
     if (document.hidden || !document.hasFocus() || askPollRequest) return;
     const ticket = captureSessionEpoch();
     const lockEpoch = meshStateSnapshot().lockEpoch;
     const binding = BrowserSession.snapshot().binding;
     if (!binding?.viewer) return;
-    const request = {abort:new AbortController()};
+    const request = {abort:new AbortController(),deniedRooms:new Set()};
     askPollRequest = request;
     try {
       const r = await api("/api/mesh/asks", undefined,
         {sideEffects:false,timeoutMs:15000,signal:request.abort.signal});
       if (askPollRequest !== request || request.abort.signal.aborted
           || App.page !== "chats" || meshStateSnapshot().lockEpoch !== lockEpoch
-          || !sessionMayApply(ticket, r)
-          || !samePageBinding(binding, r?.session_binding)) return;
+          || !sessionMayApply(ticket, r) || !samePageBinding(binding, r?.session_binding)) return;
       if (r?.locked || r?.forbidden || r?.error === "Session changed") {
         resetAskPollState(); return;
       }
-      if (r?.error || !Array.isArray(r?.asks) || !Array.isArray(r?.timers)
-          || r.asks.length > 1024 || r.timers.length > 512) return;
-      const key = JSON.stringify([binding.instance_id,
-        binding.session_generation,binding.viewer]);
-      const prior = askPollSnapshot?.key === key ? askPollSnapshot
+      if (!validAskPollResponse(r)) return;
+      const key = askBindingKey(binding);
+      const prior = askPollSnapshot?.key === key && askPollSnapshot.lockEpoch === lockEpoch ? askPollSnapshot
         : {key,rooms:[],peer:[],timers:[]};
-      const rooms = r.asks.filter(item => item?.kind !== "peer");
+      const denied = chat => request.deniedRooms.has(chat);
+      const rooms = r.asks.filter(item => item?.kind !== "peer" && !denied(item?.chat_id));
       const peerRows = r.asks.filter(item => item?.kind === "peer");
-      if (r.ok !== true || typeof r.rooms_complete !== "boolean"
-          || typeof r.peer_complete !== "boolean"
-          || typeof r.timers_complete !== "boolean"
-          || !Array.isArray(r.resolved_room_ids)
-          || r.resolved_room_ids.length > 128
-          || r.resolved_room_ids.some(id => typeof id !== "string" || !id)
-          || new Set(r.resolved_room_ids).size !== r.resolved_room_ids.length) return;
       const resolved = new Set(r.resolved_room_ids);
-      const roomRows = (r.rooms_complete ? [] : prior.rooms.filter(item => !resolved.has(item.chat_id)))
-        .concat(rooms.filter(item => resolved.has(item.chat_id))).slice(-1024);
-      askPollSnapshot = {
-        key,
-        rooms:roomRows,
+      askPollSnapshot = {key,lockEpoch,
+        rooms:(r.rooms_complete ? [] : prior.rooms.filter(item => !resolved.has(item.chat_id)))
+          .concat(rooms.filter(item => resolved.has(item.chat_id))).slice(-1024),
         peer:mergeAskLane(prior.peer,peerRows,r.peer_complete,128),
-        timers:mergeAskLane(prior.timers,r.timers,r.timers_complete,512),
-      };
-      // Global incomplete room scans cannot prove that a previously visible
-      // active room is still available. Probe that *known* selected ID only;
-      // never expose provider-discovered forbidden room identities globally.
-      if (!r.rooms_complete && Mesh.chatId && !resolved.has(Mesh.chatId)
-          && prior.rooms.some(item => item.chat_id === Mesh.chatId)) {
-        const scopedChat = Mesh.chatId;
-        try {
-          const scoped = await api(`/api/mesh/asks?chat=${encodeURIComponent(scopedChat)}`,
-            undefined, {sideEffects:false,timeoutMs:15000,signal:request.abort.signal});
-          if (askPollRequest !== request || request.abort.signal.aborted
-              || App.page !== "chats" || Mesh.chatId !== scopedChat
-              || meshStateSnapshot().lockEpoch !== lockEpoch
-              || !sessionMayApply(ticket, scoped)
-              || !samePageBinding(binding, scoped?.session_binding)) return;
-          if (scoped?.forbidden) {
-            askPollSnapshot.rooms = askPollSnapshot.rooms.filter(
-              item => item.chat_id !== scopedChat);
-            askPollSnapshot.timers = askPollSnapshot.timers.filter(
-              item => item.chat_id !== scopedChat);
-          } else if (scoped?.rooms_complete === true
-              && scoped.resolved_room_ids?.includes(scopedChat)
-              && Array.isArray(scoped.asks)) {
-            askPollSnapshot.rooms = askPollSnapshot.rooms.filter(
-              item => item.chat_id !== scopedChat).concat(scoped.asks.filter(
-                item => item?.chat_id === scopedChat && item?.kind !== "peer")).slice(-1024);
-          }
-        } catch { /* previous verified same-session rows remain visible */ }
-      }
-      const timers = askPollSnapshot.timers;
-      // V85: local memory of answered/dismissed asks — the card dies the
-      // moment you act and never resurrects while the harness's doc is
-      // still converging (the old grey-out un-greyed on the next tick and
-      // read as "the decision didn't record"; that WAS the 2–3 tries)
-      Mesh.askDone = Mesh.askDone || new Map();
-      // V88: same instant-kill memory for DISMISSED wake-ups — the cancel
-      // doc takes a harness tick to consume, and the chip must not
-      // resurrect meanwhile
-      Mesh.timerDone = Mesh.timerDone || new Map();
-      const now = Date.now();
-      for (const [id, ts] of Mesh.askDone)
-        if (now - ts > 900000) Mesh.askDone.delete(id);
-      for (const [id, ts] of Mesh.timerDone)
-        if (now - ts > 900000) Mesh.timerDone.delete(id);
-      const asks = [...askPollSnapshot.rooms,...askPollSnapshot.peer]
-        .filter((a) => !Mesh.askDone.has(a.id));
-      // V85: a NEW ask pings once — a run is blocked on the owner, and a
-      // prompt behind an unfocused window used to time out unseen
-      Mesh.askSeen = Mesh.askSeen || new Set();
-      if (Mesh.askSeen.size > 500) Mesh.askSeen.clear();
-      for (const a of asks) {
-        if (!Mesh.askSeen.has(a.id)) { Mesh.askSeen.add(a.id); notifyAsk(a); }
-      }
-      syncAskDots(asks);
-      const cid = Mesh.chatId;
-      // peer-session requests are chatless — show them in whatever chat is
-      // open so the owner never misses one; chat asks filter to this chat
-      const peer = asks.filter((a) => a.kind === "peer");
-      if (cid) renderAskBar(cid,
-        [...asks.filter((a) => a.chat_id === cid), ...peer],
-        timers.filter((t) => t.chat_id === cid
-                             && !Mesh.timerDone.has(t.id)));
-    } catch { /* next tick retries without clearing same-session partial lanes */ }
+        timers:mergeAskLane(prior.timers.filter(t => !denied(t.chat_id)),
+                            r.timers.filter(t => !denied(t?.chat_id)),r.timers_complete,512)};
+      paintAskPollSnapshot(binding);
+    } catch { /* Next tick retries without clearing same-session partial lanes. */ }
     finally { if (askPollRequest === request) askPollRequest = null; }
   };
   Mesh.askPollId = setInterval(tick, 2000);
