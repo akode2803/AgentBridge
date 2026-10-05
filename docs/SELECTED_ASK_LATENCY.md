@@ -45,8 +45,9 @@ multi-room denial under one held global request and the129-room retirement
 overflow fence. A final timer-preservation addition passed the14-case Node
 gate (0.57s).
 
-The branch is based on PR42 (`8856363d5f662d2416c173df469c7fd7b6cc55aa`).
-PR43 was skipped and closed unmerged; its schema-check optimization is excluded.
-Merge and runtime activation remain user-directed. Pending work is listed in
+The branch is based on main after PR42 merged as
+`ae87c8be4809c65840747342adbaf49b4442dc1e`. PR43 was skipped and closed
+unmerged; its schema-check optimization is excluded. PR44 CI, merge and runtime
+activation remain open. Pending work is listed in
 [BACKLOG.md](../BACKLOG.md). Actual two-client transport/queue/SSE/DOM/ACK timing,
 live authorization and native-device acceptance remain open.
