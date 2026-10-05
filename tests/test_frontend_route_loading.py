@@ -19,7 +19,7 @@ def test_route_and_paged_feedback_keep_fresh_reads(tmp_path):
     route = main[main.index("function route() {"):main.index('\nwindow.addEventListener("hashchange", route);')]
     home_start = chat.index('  if (!Mesh.chatId && App.page === "chats" && !$("#content > .empty-state")')
     home = chat[home_start:chat.index("  // very first boot", home_start)]
-    loading_start = chat.index("  const visibleRefresh =")
+    loading_start = chat.index("  const visiblePage =")
     loading = chat[loading_start:chat.index("  try {", loading_start)]
     program = r'''
 import assert from 'node:assert/strict';
@@ -67,7 +67,7 @@ const choose=new Function('before','Mesh','chatId','mode','kind','$','owner','be
   `${loadingSource}; return finishLoading;`);
 function chooseCue({before={},rendered='room',mode='first',kind=null,pending=false}={}) {
   cues=0;choose(before,{renderedChat:rendered},'room',mode,kind,()=>({dataset:{pagePending:pending?'owner':null}}),
-    {identity:'owner',current:()=>true},()=>{cues++;return ()=>{};});return cues;
+    {identity:'owner',ready:true,current:()=>true},()=>{cues++;return ()=>{};});return cues;
 }
 assert.equal(chooseCue(),0);assert.equal(chooseCue({mode:'refresh'}),0);
 assert.equal(chooseCue({before:null}),1);assert.equal(chooseCue({rendered:'other'}),1);
