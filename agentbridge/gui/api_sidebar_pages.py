@@ -117,7 +117,8 @@ def _room(app, mesh, token, chat):
                                   summary_only=True, unread_candidate=candidate)
         for _ in range(4):
             value = _timed_stage(app, chat, 'prepare', operation.prepare, receipt, receipt, index)
-            if value.status not in ('prepared', 'restart'):
+            if value.status not in ('prepared', 'restart') and not (
+                    value.status == 'forbidden' and value.reason == 'viewer_not_member'):
                 _stage(app, chat, 'sidebar', value.status, value.reason or 'none')
             if candidate is not None and value.status not in ('prepared', 'forbidden'):
                 # A count is only comparison evidence. Its stale or over-budget
@@ -140,7 +141,8 @@ def _room(app, mesh, token, chat):
             if value.status != 'prepared':
                 return None, False
             final = _timed_stage(app, chat, 'finalize', app.finalize_page_read, token, value.prepared)
-            if final.status not in ('page', 'restart'):
+            if final.status not in ('page', 'restart') and not (
+                    final.status == 'forbidden' and final.reason == 'viewer_not_member'):
                 _stage(app, chat, 'sidebar', final.status, final.reason or 'none')
             if candidate is not None and final.status not in ('page', 'locked'):
                 unread.invalidate(chat, session)
