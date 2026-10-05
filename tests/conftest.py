@@ -24,6 +24,7 @@ from agentbridge.mesh.keyring import KeyStore
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source
+from agentbridge.store.db import LogIngestionConflict
 from agentbridge.transport.raw_documents import RawCollectionUnavailable
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
@@ -258,7 +259,7 @@ class GuiRig:
             try:
                 return work()
             except (local_source.SourceChanged, RawCollectionUnavailable,
-                    OSError, sqlite3.Error, OverflowError) as exc:
+                    LogIngestionConflict, OSError, sqlite3.Error, OverflowError) as exc:
                 # Runtime ingestion records its own health. A failed attempt
                 # remains pending or unavailable at the ordinary HTTP boundary.
                 self._prepare_errors.append((label, type(exc).__name__, exc.args))

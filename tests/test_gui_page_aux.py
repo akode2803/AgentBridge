@@ -146,6 +146,43 @@ def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     assert result.result is None
 
 
+@pytest.mark.parametrize('changed', [False, True])
+def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(page_app, changed):
+    app, chat = page_app
+    mesh = app.mesh
+    mesh.post(chat, 'one')
+    _ready(app, chat)
+    presence = mesh.local_inputs.presence
+    assert presence.ingest().ready
+    reader, receipt, index = mesh.local_inputs.inputs(chat)
+    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    prepared = operation.prepare(receipt, receipt, index)
+    if prepared.status == 'work' and prepared.reason == 'overlay_proofs':
+        for path, pub in prepared.work:
+            mesh.store.verify_overlay_signature(index, path, pub)
+        prepared = operation.prepare(receipt, receipt, index)
+    assert prepared.status == 'prepared'
+    assert prepared.prepared._fence.display_presence is not None
+    old_presence = presence.reader.capture()
+    if changed:
+        old_display = prepared.prepared._fence.display_presence.inputs
+        seen = next(row[1] for row in old_display.subjects if row[0] == mesh.user)
+        mesh.tx.put_doc('presence/viewer-race.json', {
+            'user': mesh.user, 'last_seen_ns': seen + 1,
+            'last_seen': utcnow_iso(), 'online': False})
+    assert presence.ingest().ready
+    assert presence.reader.capture() != old_presence
+    if changed:
+        new_display = presence.reader.capture_display_members(presence.reader.capture(), (mesh.user,))
+        assert new_display.subjects != old_display.subjects
+    assert reader.capture() == receipt
+    result = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
+    assert (result.status, result.reason) == ('unavailable', 'page_inputs_changed')
+    assert result.result is None
+    fresh = _settled_aux(app, chat)
+    assert fresh['status'] == 'ready' and fresh['metadata_status']['presence'] == 'ready'
+
+
 def test_cold_aux_sources_explicitly_pending_and_not_false_unpaused(page_app):
     app, chat = page_app
     app.mesh.post(chat, 'one')
