@@ -35,7 +35,7 @@ const App = {page:'chats',routeSeq:3};
 const Mesh = {chatId:'room',state:{user:'alice',chats:[
   {id:'room',last:{ns:60},unread:2,forced_unread:true},
 ]},select:{ids:new Set()},msgExpand:{},pendingRead:null};
-let anchorCaptures=0,anchorRestores=0,prunes=0,paints=0,sidebar=0;
+let anchorCaptures=0,anchorRestores=0,prunes=0,paints=0,sidebar=0,retired=0;
 const calls=[], modes=[];
 let paintAllowed=true;
 let pageVersion='v1';
@@ -65,6 +65,7 @@ const document = {
   hasFocus:()=>true,dispatchEvent(){},
   createElement:()=>({id:'',className:'',innerHTML:'',onclick:null}),
 };
+const location = {hash:''};
 const pageRead = {
   reset(){},invalidate(){},refreshPlan:()=>savedPlan ?
     {windowAnchor:'frozen-prior',requestedMessages:1}:null,
@@ -95,10 +96,13 @@ const deps={App,Mesh,diagnostic:()=>{},canonicalDeliveryDom:()=>{},BrowserSessio
       aux:response ? response.aux : null};
   },
   syncPagedAuxControls:()=>{},syncDmHeaderPresence:()=>{},
-  paintMeshChat:async()=>{paints++;return paintAllowed;},
+  paintMeshChat:async()=>{paints++;if(paintAllowed){
+    Mesh.renderedChat=Mesh.chatId;content.innerHTML='visible transcript';
+  }return paintAllowed;},
   api:(path,body)=>{calls.push([path,body]);return Promise.resolve({ok:true});},
   renderSidebar:()=>{sidebar++;},renderSideLoading:()=>{},meshCaps:()=>({chat_page_v1:true}),
-  observeLockState:()=>{},CustomEvent:class{},location:{hash:''},
+  retireDeniedMeshChat:()=>{retired++;},
+  observeLockState:()=>{},CustomEvent:class{},location,
   V:{renderChatDetails:async()=>{}},
   refreshPagedSidebar:async()=>{},
   requestAnimationFrame:fn=>fn(),recordChatOpen:()=>{},
@@ -155,14 +159,18 @@ await new Promise(resolve=>setImmediate(resolve));
 assert.equal(modes.at(-1),'older');
 assert.equal(calls.length,1);
 
-// A first-ever older fetch may be pending. Its visible data is cleared for
-// freshness, but the saved opaque positioning plan makes retry a refresh,
-// then the original older intent resumes rather than silently showing tail.
+// An older fetch may be pending. Its canonical page state and cursors are
+// discarded, while the already admitted same-session DOM remains visible.
+// The saved opaque positioning plan makes retry a refresh, then the original
+// older intent resumes rather than silently showing tail.
 await renderPagedChat(false,'first');
 pendingOlder=true;
 await renderPagedChat(false,'older');
 assert.equal(getOwner().browsing,true);
 assert.equal(getOwner().wantOlder,true);
+assert.equal(getOwner().ready,true);
+assert.equal(Mesh.renderedChat,'room');
+assert.equal(content.innerHTML,'visible transcript');
 await flushTimer();
 assert.deepEqual(modes.slice(-3),['first','older','refresh']);
 assert.equal(getOwner().wantOlder,true);
@@ -220,10 +228,23 @@ const good=await originalRead('first');
 releaseRead(good);await inFlight;
 pageRead.read=async()=>({status:'pending',reason:'local_inputs_pending'});
 getOwner().retries=8;
-elements['#page-retry']={};
 await flushTimer();
+assert.equal(getOwner().ready,true);
+assert.equal(Mesh.renderedChat,'room');
+assert.equal(content.innerHTML,'visible transcript');
 assert.ok(timers.some(timer=>!timer.cancelled&&!timer.ran&&timer.delay===2000),
  'pending page progress keeps its bounded two-second recovery cadence after UI retries');
+
+// A fresh terminal access result immediately retires the retained display and
+// cancels its recovery timer. Retention never substitutes for authorization.
+pageRead.read=async()=>({status:'forbidden',reason:'viewer_not_member'});
+await renderPagedChat(false);
+assert.equal(getOwner().ready,false);
+assert.equal(Mesh.renderedChat,null);
+assert.equal(content.innerHTML,'');
+assert.equal(retired,1);
+assert.equal(location.hash,'#/chats');
+assert.equal(timers.filter(timer=>!timer.cancelled&&!timer.ran).length,0);
 '''.replace('__POLICY__', json.dumps(policy)).replace('__RENDER__', json.dumps(render)).replace('__MARK__', json.dumps(mark)).replace('__OLDER__', json.dumps(older))
     path = tmp_path / 'paged-render.mjs'
     path.write_text(runner, encoding='utf-8')
