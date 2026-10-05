@@ -249,6 +249,44 @@ def test_multiple_pending_intents_require_each_exact_completion(tmp_path):
         store.close()
 
 
+def test_begin_waits_through_bounded_root_writer_before_external_work(tmp_path):
+    root = MutationCoordinator(tmp_path / "home", "mesh-root")
+    locked = threading.Event()
+    release = threading.Event()
+    result = []
+    errors = []
+
+    def hold_root():
+        with sqlite3.connect(root.path, timeout=2) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            locked.set()
+            assert release.wait(5)
+
+    def begin_mutation():
+        try:
+            result.append(root.begin((S("doc_exact", "users/alice.json"),)))
+        except BaseException as exc:
+            errors.append(exc)
+
+    holder = threading.Thread(target=hold_root)
+    mutator = threading.Thread(target=begin_mutation)
+    holder.start()
+    assert locked.wait(2)
+    mutator.start()
+    try:
+        # This crosses the former one-second connection timeout.  The local
+        # intent must keep waiting; no provider operation exists at this layer.
+        mutator.join(1.2)
+        assert mutator.is_alive()
+    finally:
+        release.set()
+        holder.join(5)
+        mutator.join(5)
+    assert not errors
+    assert len(result) == 1
+    root.complete(result[0])
+
+
 def test_missing_pending_scope_is_not_invisible_to_publication(tmp_path):
     root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
     store = _store(tmp_path / 'store.sqlite')
