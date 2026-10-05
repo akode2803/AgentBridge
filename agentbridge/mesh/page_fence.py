@@ -295,6 +295,8 @@ def matches_store(conn, mesh, prepared, *, source_reader=None):
             return False
         reader = LocalPresenceSource(source_reader.coordinator, mesh.store)
         evidence = fence.display_presence
+        if not reader.matches_in_transaction(conn, evidence.receipt):
+            return False
         if reader.capture_display_in_transaction(conn, evidence.receipt,
                 tuple(row[0] for row in evidence.inputs.subjects)) != evidence.inputs:
             return False
