@@ -60,99 +60,16 @@ assert.deepEqual(Mesh.state.chats,[]); // Never carry display across sessions.
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
-def test_ask_poll_serializes_and_holds_incomplete_verified_lanes(tmp_path):
+@pytest.mark.parametrize('scenario', [
+    'independent', 'global_first', 'denial', 'partial', 'route', 'reset',
+    'invalid', 'done', 'standdown', 'global_partial', 'bounds', 'failure', 'repeated_denial',
+])
+def test_ask_poll_independent_owned_lanes(tmp_path, scenario):
     source = (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8')
     body = source[source.index('let askPollRequest = null;'):
                   source.index('function renderAskBar(', source.index('let askPollRequest = null;'))]
-    script = r'''
-import assert from 'node:assert/strict';
-const binding={instance_id:'app',session_generation:'1',viewer:'alice'};
-const Mesh={chatId:'room',askPollId:null,askKey:'',askCounts:{}};
-const App={page:'chats'};
-const events={},requests=[],dots=[],bars=[],notified=[];
-let tick;
-const document={hidden:false,hasFocus:()=>true,
-  addEventListener:(name,fn)=>{events[name]=fn;}};
-const api=(_path,_body,options)=>new Promise(resolve=>requests.push({resolve,options}));
-const deps={Mesh,App,document,api,$:()=>({innerHTML:''}),
-  captureSessionEpoch:()=>({epoch:1}),meshStateSnapshot:()=>({lockEpoch:0}),
-  meshCaps:()=>({chat_page_v1:true}),BrowserSession:{snapshot:()=>({binding})},
-  sessionMayApply:()=>true,samePageBinding:(a,b)=>JSON.stringify(a)===JSON.stringify(b),
-  syncAskDots:asks=>dots.push(asks.map(a=>a.id)),
-  renderAskBar:(chat,asks,timers)=>bars.push({chat,asks:asks.map(a=>a.id),
-                                           timers:timers.map(t=>t.id)}),
-  notifyAsk:a=>notified.push(a.id),
-  setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{},
-};
-const build=new Function(...Object.keys(deps),
-  `${__BODY__};return {startAskPoll,resetAskPollState};`);
-const {startAskPoll,resetAskPollState}=build(...Object.values(deps));
-const response=(extra={})=>({ok:true,asks:[
-  {id:'r1',chat_id:'room',kind:'tool'},
-  {id:'p1',chat_id:'',kind:'peer'}],
-  timers:[{id:'t1',chat_id:'room'}],
-  asks_complete:true,rooms_complete:true,peer_complete:true,
-  timers_complete:true,resolved_room_ids:['room'],forbidden:false,
-  session_binding:binding,...extra});
-startAskPoll();
-assert.equal(requests.length,1);
-tick();assert.equal(requests.length,1); // One in-flight request, no overlap.
-requests.shift().resolve(response());
-await new Promise(resolve=>setImmediate(resolve));
-assert.deepEqual(bars.at(-1),{chat:'room',asks:['r1','p1'],timers:['t1']});
-assert.deepEqual(notified,['r1','p1']);
-
-// Missing protocol binding or completion evidence never replaces verified cards.
-for(const invalid of [
-  {session_binding:undefined}, {rooms_complete:undefined}, {peer_complete:undefined},
-  {timers_complete:undefined}, {resolved_room_ids:undefined}, {rooms_complete:'true'},
-]) {
-  const before={bars:bars.length,dots:dots.length,notifications:notified.length};
-  tick();requests.shift().resolve(response({...invalid,asks:[{id:'unverified',chat_id:'room'}]}));
-  await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual({bars:bars.length,dots:dots.length,notifications:notified.length},before);
-}
-
-tick();
-requests.shift().resolve(response({asks:[
-  {id:'r2',chat_id:'room',kind:'tool'},
-  {id:'p2',chat_id:'',kind:'peer'}],
-  timers:[{id:'t2',chat_id:'room'}],
-  asks_complete:false,rooms_complete:false,peer_complete:true,
-  timers_complete:false}));
-await new Promise(resolve=>setImmediate(resolve));
-assert.deepEqual(bars.at(-1),{chat:'room',asks:['r2','p2'],timers:['t1','t2']});
-assert.deepEqual(dots.at(-1),['r2','p2']);
-
-// Another global room pending leaves r2 retained, but an exact scoped
-// forbidden result for the already-known selected room removes it now.
-tick();
-requests.shift().resolve(response({asks:[{id:'p2',chat_id:'',kind:'peer'}],
-  timers:[],rooms_complete:false,asks_complete:false,resolved_room_ids:[],
-  timers_complete:false}));
-await new Promise(resolve=>setImmediate(resolve));
-assert.equal(requests.length,1); // One scoped known-room check, not another global scan.
-tick();assert.equal(requests.length,1); // Both phases share the in-flight owner.
-requests.shift().resolve(response({forbidden:true,asks:[],timers:[],
-  resolved_room_ids:[]}));
-await new Promise(resolve=>setImmediate(resolve));
-assert.deepEqual(dots.at(-1),['p2']);
-assert.deepEqual(bars.at(-1).timers,[]);
-
-tick();
-requests.shift().resolve(response({forbidden:true,asks:[],timers:[],
-  resolved_room_ids:[]}));
-await new Promise(resolve=>setImmediate(resolve));
-assert.deepEqual(dots.at(-1),[]);
-assert.equal(Mesh.askKey,'');
-
-tick();const stale=requests.shift();
-events['ab:session-reset']();
-assert.equal(stale.options.signal.aborted,true);
-stale.resolve(response());
-await new Promise(resolve=>setImmediate(resolve));
-assert.deepEqual(dots.at(-1),[]);
-'''.replace('__BODY__', json.dumps(body))
+    script = (ROOT / 'tests/fixtures/ask_poll_scenarios.mjs').read_text(encoding='utf-8')
+    script = script.replace('__BODY__', json.dumps(body)).replace('__SCENARIO__', json.dumps(scenario))
     path = tmp_path / 'asks.mjs'
     path.write_text(script, encoding='utf-8')
     run = subprocess.run([shutil.which('node'), str(path)], cwd=tmp_path,

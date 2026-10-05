@@ -11,6 +11,45 @@
 
 ## Active, partial, and deferred requirements
 
+### Current cloud responsiveness tasks (Aryan, 2026-10-05)
+
+These entries track the current cloud work; historical items below are preserved.
+Source/CI completion is separate from merge, runtime activation and live acceptance.
+
+- [~] **Remove selected-ask delay behind broad inventory.** The browser awaited
+  the global response before starting selected-room asks. Independent bounded
+  scoped polling is implemented on the PR42 base; 78 controlled race, Chromium and
+  integration tests passed; independent review passed. Merge and actual-instance timing remain open.
+  See [SELECTED_ASK_LATENCY.md](docs/SELECTED_ASK_LATENCY.md).
+- [D] **Repeated schema-check optimization (PR43).** Skipped by Aryan; PR43 is
+  closed unmerged. Its source optimization is excluded from this branch.
+- [ ] **Integrate the verified presence-race repair.** PR42 passed Linux3134 and
+  Windows3121 tests; explicit user merge instruction is pending. After integration,
+  verify main and incorporate the repair into PR40/41 without discarding their work.
+- [ ] **Integrate browser diagnostic fidelity.** PR39 passed Linux3141 and
+  Windows3128 tests; user-directed merge remains pending. Reconcile the prior
+  readiness-summary review thread after its correction reaches the target branch.
+- [ ] **Complete delivery recovery acceptance.** PR40's16 lost-ACK/reopen cases
+  passed locally; its full Windows CI encountered the separate presence race.
+  Integrate that repair and verify the combined tree. Abrupt-process termination
+  recovery remains separate from the orderly-reopen checkpoint.
+- [ ] **Integrate the diagnostics runbook.** PR41's command checks and independent
+  review passed; full CI encountered presence/fixture ingestion conflicts. Verify
+  it with the repair before user-directed merge.
+- [ ] **Capture actual two-client delivery and refresh timing.** Measure commit,
+  Realtime hint, ingestion/queue, SSE, canonical page finalization, DOM and ACK
+  separately. Requires an authorized reachable provider and independently owned
+  clients; live-provider proxy403 has not been bypassed.
+- [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
+  storage policy, revocation and foreign-root/chat denials remain runtime gates.
+  Notifications and cached results must not become authority.
+- [ ] **Verify native integration, rich media and recorder overhead.** Headless
+  Linux Chromium coverage does not establish interactive/native macOS access or
+  actual-device scrolling, route changes, layout and diagnostic overhead.
+- [ ] **Coordinate runtime cutover.** Preserve source/configuration/stores/outboxes
+  and establish writer ownership before activation; no migration-complete claim
+  follows from source publication or passing CI.
+
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
 - [x] **V202 — pure key-pin evaluation** (R177,2026-09-15): source969044d/
