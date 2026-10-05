@@ -369,9 +369,8 @@ class CachingTransport(Transport):
             return "hint"
         if self._health_state != "online":
             return "cache"
-        if (time.monotonic() < self._interactive_until
-                or time.monotonic() < self._suspect_until
-                or self.realtime_status() == "disconnected"):
+        if (time.monotonic() < self._suspect_until
+                or self.realtime_status() != "ready"):
             return "fallback"
         return "poll"
 

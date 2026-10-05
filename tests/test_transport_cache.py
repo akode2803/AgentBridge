@@ -950,9 +950,11 @@ def test_foreground_lease_is_fast_bounded_and_releases(delta_mirror, monkeypatch
 
 def test_foreground_lease_does_not_accelerate_healthy_realtime(delta_mirror):
     _inner, tx = delta_mirror
+    tx.refresh()
     tx.inner.realtime_status = lambda: "ready"
     tx.set_interactive(True)
     assert tx.suggest_poll_s(4.0) == 45.0
+    assert tx.latency_lane(False) == "poll"
     tx._suspect_until = time.monotonic() + 60
     assert tx.suggest_poll_s(4.0) == 1.0
 
@@ -974,8 +976,13 @@ def test_activity_renewal_does_not_wake_healthy_provider_poll(delta_mirror, monk
 
 def test_background_realtime_disconnect_uses_fallback_cadence(delta_mirror):
     inner, tx = delta_mirror
+    tx.refresh()
     inner.rt_status = "disconnected"
     assert tx.suggest_poll_s(4.0) == tx.profile.fallback_poll_s == 10.0
+    assert tx.latency_lane(False) == "fallback"
+    inner.rt_status = "connecting"
+    assert tx.suggest_poll_s(4.0) == tx.profile.fallback_poll_s
+    assert tx.latency_lane(False) == "fallback"
 
 
 def test_foreign_delta_emits_one_content_free_local_wake(delta_mirror):
