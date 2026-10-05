@@ -84,7 +84,10 @@ _MAX_BACKOFF_S = 60.0
 # how long the hint watchdog distrusts pokes after a silent change (R76)
 _SUSPECT_S = 600.0
 _INTERACTIVE_LEASE_S = 15.0
-_INTERACTIVE_POLL_S = 3.0
+# Foreground recovery cadence, used only while Realtime is unavailable or the
+# hint watchdog has observed misses. A healthy socket stays on idle_poll_s: UI
+# focus is not itself a reason to spend provider queries.
+_INTERACTIVE_POLL_S = 1.0
 # Testable local clock seam for the write/refresh race guard. It deliberately
 # remains process-local: timestamps here are only mirror ownership hints.
 _monotonic = time.monotonic
@@ -343,9 +346,15 @@ class CachingTransport(Transport):
         the caller's cadence."""
         if not self.profile.metered:
             return default
-        if time.monotonic() < self._interactive_until:
+        interactive = time.monotonic() < self._interactive_until
+        suspect = time.monotonic() < self._suspect_until
+        realtime = self.realtime_status()
+        if realtime != "ready":
+            return (min(_INTERACTIVE_POLL_S, self.profile.fallback_poll_s)
+                    if interactive else self.profile.fallback_poll_s)
+        if interactive and suspect:
             return min(_INTERACTIVE_POLL_S, self.profile.fallback_poll_s)
-        if time.monotonic() < self._suspect_until:
+        if suspect:
             return self.profile.fallback_poll_s
         return self.profile.idle_poll_s
 
@@ -360,19 +369,20 @@ class CachingTransport(Transport):
             return "hint"
         if self._health_state != "online":
             return "cache"
-        if (time.monotonic() < self._interactive_until
-                or time.monotonic() < self._suspect_until
-                or self.realtime_status() == "disconnected"):
+        if (time.monotonic() < self._suspect_until
+                or self.realtime_status() != "ready"):
             return "fallback"
         return "poll"
 
     def set_interactive(self, active: bool, *, lease_s: float = _INTERACTIVE_LEASE_S) -> None:
         """Hold a short foreground lease; expiry makes crashes self-healing."""
+        now = time.monotonic()
+        was_interactive = now < self._interactive_until
         self._interactive_until = (
-            time.monotonic() + max(1.0, float(lease_s)) if active else 0.0
+            now + max(1.0, float(lease_s)) if active else 0.0
         )
         wake = getattr(self.inner, "wake_local", None)
-        if callable(wake):
+        if callable(wake) and bool(active) != was_interactive:
             wake()
 
     def subscribe_changes(self, callback):

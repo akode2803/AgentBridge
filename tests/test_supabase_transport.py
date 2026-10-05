@@ -311,7 +311,7 @@ def test_short_lived_realtime_flaps_increase_backoff(monkeypatch):
 
     now = [100.0]
     monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(mod.random, "random", lambda: 0.5)
+    monkeypatch.setattr(mod.random, "random", lambda: 1.0)
 
     class FakeRealtime:
         def __init__(self, *_args):
@@ -326,18 +326,15 @@ def test_short_lived_realtime_flaps_increase_backoff(monkeypatch):
     tx = SupabaseTransport(
         "team", env={"SUPABASE_URL": "https://x.test",
                      "SUPABASE_SECRET_KEY": "sb_secret_x"}, client=FakeClient())
-    first = tx._ensure_rt()
-    first.live = False
-    now[0] += 1
-    assert tx._ensure_rt() is None
-    first_delay = tx._rt_retry_at - now[0]
-    tx._rt_retry_at = 0
-    second = tx._ensure_rt()
-    second.live = False
-    now[0] += 1
-    assert tx._ensure_rt() is None
-    second_delay = tx._rt_retry_at - now[0]
-    assert first_delay == 1.0 and second_delay == 2.0
+    delays = []
+    for _ in range(6):
+        current = tx._ensure_rt()
+        current.live = False
+        now[0] += 1
+        assert tx._ensure_rt() is None
+        delays.append(tx._rt_retry_at - now[0])
+        tx._rt_retry_at = 0
+    assert delays == pytest.approx([1.15, 2.3, 4.6, 9.2, 15.0, 15.0])
 
 
 def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
@@ -373,6 +370,7 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
 
     client = Client()
     metrics = []
+    wakes = []
 
     async def create_client(*_args): return client
 
@@ -383,7 +381,7 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
         types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
     rt = _RealtimeThread(
         {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
-        "team", lambda: None, metrics.append)
+        "team", lambda: wakes.append("disconnect"), metrics.append)
     deadline = time.monotonic() + 2.0
     while rt.status() != "ready" and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -395,6 +393,7 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
     while rt.alive() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert rt.status() == "disconnected"
+    assert wakes == ["disconnect"]
     assert client.ch.unsubscribed and client.realtime.closed
     assert metrics.count("rt_socket_closes") == 1
     rt.close()
@@ -583,7 +582,7 @@ def test_hint_classes(tx):
     tx.put_doc("chats/c1/meta.json", {"name": "Room"})
     tx.append_log("c1", "a@box.jsonl", {"id": "m1"})
     assert tx._hints.calls == [
-        None, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 10.0, 1.0, 0.5,
+        None, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 0.5, 0.25, 0.1,
     ]
     tx.hint_now()
     assert tx._hints.calls[-1] == 0.0

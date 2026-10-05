@@ -7,6 +7,15 @@ Local SQLite, snapshots, outboxes and attachment downloads remain supported.
 General relational portability is secondary. A lean local relay/node is a later capability, not a
 reason to duplicate the entire remote database now.
 
+The 2026-10-06 [transport-limit audit](TRANSPORT_LIMIT_AUDIT.md) found that
+startup latency is dominated by sequential all-room canonical sidebar work,
+not the transport's four-worker synchronization ceiling. The immediate next
+checkpoint is startup ownership and cached-sidebar paint: serve a session-bound
+admitted local SQLite presentation immediately, reconcile changed rooms in
+bounded independent work, and keep settings routing independent of chat-list
+completion. Healthy Supabase Realtime now owns normal wakeups; accelerated
+polling is restricted to disconnected or suspect recovery.
+
 ## Measured incident, not a latency guarantee
 
 The real instance reproduced history loss during fast scrolling when receipt

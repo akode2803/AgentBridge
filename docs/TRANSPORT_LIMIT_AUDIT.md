@@ -1,0 +1,71 @@
+# Supabase transport limit audit
+
+Audited 2026-10-06 against the production Supabase path and the running
+`mesh2` instance. These limits have different jobs. Cost controls may adapt to
+Realtime health; authority, response-size, queue and memory bounds must remain
+hard failures or explicit incomplete results.
+
+## Findings and decisions
+
+| Limit or path | Previous behavior | Decision |
+|---|---|---|
+| Supabase Broadcast coalescing | Messages waited up to 500 ms, ordinary user-visible documents 1 s and receipts 10 s. Broadcasts had a four-per-second hard cap. | Messages now request a poke after 100 ms, ordinary user-visible documents after 250 ms and receipts after 500 ms. Keep the 250 ms global floor, so sustained bursts still emit at most four pokes per second. |
+| Healthy foreground safety polling | Merely focusing the GUI renewed a lease that forced document and log delta queries every 3 s, even while Realtime was ready. | Remove focus-driven fast polling from the healthy path. Healthy Realtime uses the 45 s safety cadence. |
+| Foreground recovery polling | A disconnected or suspect Realtime path could take up to 3 s between foreground recovery reads. | Use a 1 s cadence only while the app is active and Realtime is disconnected or the hint watchdog is suspect. Background failure recovery remains 10 s. |
+| Realtime reconnect backoff | Exponential retry could reach 60 s. | Cap at 15 s. One root owns one socket per GUI process, so this does not create a startup channel fan-out. |
+| Full document reconciliation | A complete snapshot heals delta-feed errors every 6 h. | Keep. Realtime Broadcast is a content-free, lossy wakeup and cannot prove completeness or authority. |
+| Browser broad refresh | No broad timer while the local SSE stream is healthy; 20 s when connected but unhealthy/background; 2.5 s when foreground and disconnected. | Keep as bounded recovery. Scoped transcript/sidebar/auxiliary lanes own the normal event path. |
+| Selected-room source admission | One room is admitted at a time; active selected work retries from 350 ms and backs off to the 4 s background cadence. | Keep serialization. It owns coherent SQLite publication and avoids competing writers. Realtime wakes it early; its timer is recovery, not a remote history poll. |
+| Initial log synchronization | Four workers scan newly visible chats; ordinary ticks use one global change-feed query and read only named logs. | Keep four. Increasing it does not accelerate sidebar projection and risks more simultaneous provider reads followed by SQLite contention. Revisit after startup projection is detached and measured. |
+| Sidebar room/response bounds | At most 128 rooms and 4 MiB; every room is currently finalized sequentially before the response completes. | Keep the safety bounds. Replace the request shape in the next task: serve an admitted local sidebar snapshot immediately, then reconcile bounded rows independently. |
+| Chat history | A 50-visible-message canonical page scans at most 200 raw rows. The usual six 50-row pages retain 300 messages; an independent 600-message hard cap also applies. Older pages load only on upward demand from local SQLite. | Keep. This is already bounded and does not fetch complete remote history. It protects CPU, decryption work and DOM memory. |
+| Raw-input capture | 100,000 admitted messages and 10,000 logs are hard capture ceilings. | Keep. These are integrity/resource ceilings, not transport throttles. Large-history paging must stay below them rather than weakening them. |
+| Provider timeouts and inline retries | PostgREST/function calls time out after 6 s, storage after 20 s; two short inline retries cover transient failures. | Keep. They bound failed work and do not control normal throughput. |
+
+## Evidence
+
+The running app reported one active Realtime socket, a ready delta mirror and
+roughly 591 KiB received over 477 provider queries in about 29 minutes. That is
+approximately 1.2 MiB and 980 queries per hour while the focused 3 s polling
+rule was active. The transport changes remove those fast scans while healthy;
+they spend the faster 1 s cadence only during a visible recovery window.
+
+The lightweight `/api/state` request completed in 13 ms. Two consecutive
+`/api/mesh/state` requests took 7.05 s and 7.72 s and returned about 15 KiB.
+This confirms the startup delay is canonical all-room projection work rather
+than response size or the four-worker log-sync ceiling. Provider transfer
+counters are process-wide and background work continued during measurement,
+so they are workload observations rather than endpoint attribution.
+
+Supabase currently counts a Broadcast once for the sender and once for every
+subscriber. Its hosted quotas are 2 million Realtime messages per month on Free
+and 5 million on Pro, and its instantaneous Free limits are 100 messages/s and
+100 channel joins/s. The existing four-poke/s root-wide cap remains far below
+that throughput ceiling, while coalescing still prevents one poke per write in
+a dense burst. References:
+
+- <https://supabase.com/docs/guides/platform/manage-your-usage/realtime-messages>
+- <https://supabase.com/docs/guides/realtime/limits>
+- <https://supabase.com/docs/guides/realtime/settings>
+
+## Architectural conclusions
+
+Realtime should remain a fast invalidation lane followed by bounded canonical
+reads. It must not become continuing membership authority. Polling remains only
+for lost-wakeup recovery, completeness reconciliation, time-sensitive silent
+auxiliary data and explicit older-page demand.
+
+The next implementation task is startup ownership and cached-sidebar paint:
+materialize a session-bound admitted sidebar presentation in local SQLite,
+paint it without waiting for a fresh all-room fold, reconcile changed rooms
+independently, and let settings route from the lightweight bootstrap. Do not
+put decrypted sidebar state in browser persistent storage. The existing
+"Updating chats" row should describe that background reconciliation and
+disappear only when the sidebar owner reaches its corresponding completed
+generation.
+
+Reactions should not become reply messages. A reaction has overlay semantics:
+one actor can replace/remove it, it should not advance unread or history paging,
+and deleting the target changes how it is presented. Reactions can share the
+same signed event storage and scoped invalidation machinery as messages while
+remaining a separate projected type.
