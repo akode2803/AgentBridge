@@ -13,6 +13,12 @@ No runtime credentials, user stores or private logs are included. The later
 recorder correction passed full Linux/Windows CI and merged in PR38. The separate
 browser/fixture fidelity checkpoint passed both platforms and merged in PR39. The
 [diagnostics runbook](docs/DIAGNOSTICS_RUNBOOK.md) covers bounded capture and
-offline summaries. Deployed Supabase authorization/Realtime, independent peers,
-native-platform integration and real-use performance remain open. Coordinate writer ownership
-and preserve each machine's source/configuration/stores before runtime cutover.
+offline summaries. The 2026-10-06 macOS acceptance exercised deployed member
+RLS, Realtime reconnect and an isolated second store, and fixed transcript
+blanking during pending selected-chat ingestion in PR46/PR47. It also measured a
+remaining roughly 4--6 second incoming admission tail and showed that diagnostic
+sampling at 1.0 materially distorts the workload. Exact evidence and limits are
+in [docs/CLOUD_MIGRATION_CHECKPOINT.md](docs/CLOUD_MIGRATION_CHECKPOINT.md).
+Independently authenticated devices, revocation/chat denial, offline replay,
+rich media and latency remain open. Coordinate writer ownership and preserve
+each machine's source/configuration/stores before runtime cutover.
