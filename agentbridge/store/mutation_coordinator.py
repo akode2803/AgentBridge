@@ -24,6 +24,7 @@ from . import local_source as owner, source_selectors as scopes
 MAX_STORES = 64
 MAX_PENDING = 64
 MAX_QUARANTINED = 256
+ROOT_LOCK_TIMEOUT_S = 5.0
 _NORMAL_TOKEN = re.compile(r'[0-9a-f]{64}\Z')
 _SENTINEL_TOKEN = re.compile(r'q[0-9a-f]{63}\Z')
 _SCHEMA = {
@@ -82,11 +83,14 @@ class MutationCoordinator:
         self.path.chmod(0o600)
 
     @contextmanager
-    def _transaction(self, *, create=False):
+    def _transaction(self, *, create=False, timeout_s=1.0):
         with delivery_trace.transaction('root', self.path) as trace:
             mode = 'rwc' if create else 'rw'
             with span('root_open'):
-                conn = sqlite3.connect(f'{self.path.as_uri()}?mode={mode}', uri=True, timeout=1)
+                conn = sqlite3.connect(
+                    f'{self.path.as_uri()}?mode={mode}', uri=True,
+                    timeout=timeout_s,
+                )
             try:
                 if create:
                     conn.execute('PRAGMA journal_mode=WAL')
@@ -265,7 +269,11 @@ class MutationCoordinator:
         if a later Store or the root commit fails; never compensate them to ready.
         """
         changes = scopes.selectors(changes, limit=8)
-        with self._transaction() as conn:
+        # Finalization and publication hold this root writer while committing
+        # their bounded Store cut.  Slower filesystems can legitimately exceed
+        # one second (notably Windows CI).  A new mutation may wait through
+        # that local cut because its provider operation has not started yet.
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
             self._schema(conn)
             token = self._insert_intent(conn, changes)
             self._retire(conn, changes)
