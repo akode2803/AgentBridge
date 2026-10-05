@@ -3,7 +3,7 @@
 import pytest
 from types import SimpleNamespace
 
-from conftest import GuiRig, _capture_finalization_failures
+from conftest import GuiRig, _capture_finalization_failures, _read_status_summary
 
 
 def _reader(responses):
@@ -125,6 +125,62 @@ def test_reason_control_shape_does_not_admit_private_text(reason):
     message = str(raised.value)
     assert "'reason': '<absent-or-invalid>'" in message
     assert 'private' not in message
+
+
+@pytest.mark.parametrize('sidebar_status', ['rooms_pending', 'inventory_pending'])
+def test_sidebar_exhaustion_keeps_progress_controls_without_private_payload(sidebar_status):
+    pending = {'user': 'private-marker', 'users': {'private-marker': {}},
+               'chats': ['private-marker'], 'sidebar_status': sidebar_status,
+               'user_status': 'users_pending', 'users_complete': False,
+               'chats_complete': False}
+    rig, attempts = _reader([pending] * GuiRig._read_attempts)
+    with pytest.raises(AssertionError) as raised:
+        rig.sidebar()
+    assert len(attempts) == 16
+    message = str(raised.value)
+    assert f"'sidebar_status': '{sidebar_status}'" in message
+    assert "'user_status': 'users_pending'" in message
+    assert "'users_complete': False" in message
+    assert "'chats_complete': False" in message
+    assert 'private-marker' not in message
+
+
+def test_asks_exhaustion_keeps_each_completion_lane_without_private_payload():
+    pending = {'asks_complete': False, 'rooms_complete': True,
+               'peer_complete': False, 'timers_complete': True,
+               'asks': ['private-marker'], 'timers': ['private-marker'],
+               'resolved_room_ids': ['private-marker']}
+    rig, attempts = _reader([pending] * GuiRig._read_attempts)
+    with pytest.raises(AssertionError) as raised:
+        rig.asks()
+    assert len(attempts) == 16
+    message = str(raised.value)
+    for field in ('asks_complete', 'rooms_complete', 'peer_complete', 'timers_complete'):
+        assert f"'{field}': {pending[field]}" in message
+    assert 'private-marker' not in message
+    assert 'resolved_room_ids' not in message
+
+
+@pytest.mark.parametrize('reason', ['terminal_classification_pending', 'account_readthrough'])
+def test_aux_work_exhaustion_keeps_fixed_work_reason(reason):
+    pending = {'status': 'pending', 'reason': reason, 'feeds': ['private-marker']}
+    rig, attempts = _reader([pending] * GuiRig._read_attempts)
+    with pytest.raises(AssertionError) as raised:
+        rig.aux_ready('room')
+    assert len(attempts) == 16
+    assert f"'reason': '{reason}'" in str(raised.value)
+    assert 'private-marker' not in str(raised.value)
+
+
+@pytest.mark.parametrize('value', ['private-marker', {'private-marker': True},
+                                  ['private-marker'], 1, 0, None])
+def test_new_progress_controls_reject_non_enum_text_and_non_boolean_values(value):
+    fields = ('sidebar_status', 'user_status', 'users_complete', 'chats_complete',
+              'asks_complete', 'rooms_complete', 'peer_complete', 'timers_complete')
+    summary = _read_status_summary(dict.fromkeys(fields, value))
+    for field in fields:
+        assert summary[field] == '<absent-or-invalid>'
+    assert 'private-marker' not in repr(summary)
 
 
 def test_finalization_probe_is_scoped_bounded_and_preserves_terminal_result(monkeypatch):
