@@ -17,6 +17,15 @@ page requests were often below 400 ms while all-room state and asks took seconds
 These are individual observations, not representative percentiles or a remote
 send-to-render measurement.
 
+The 2026-10-06 actual-instance run added one concrete delivery trace. Warm
+incoming messages preserved their admitted transcript after PR46, but some took
+roughly 4--6 seconds to appear. The selected page first observed
+`source_not_ready`; ingestion then hit a short `SourceChanged` retry before a
+later canonical page could be admitted. This is a measured tail on one machine,
+not a population percentile. Full diagnostic sampling materially worsened the
+same workload, so latency experiments must use normal sampling or separately
+account for recorder pressure.
+
 ## Next useful work
 
 1. Finish edit-aware read acknowledgement. A finalized visible page must expose

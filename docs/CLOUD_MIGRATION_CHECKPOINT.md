@@ -55,14 +55,54 @@ browser/fixture fidelity milestone also passed both platforms and merged in PR39
 See [DELIVERY_DIAGNOSTICS.md](DELIVERY_DIAGNOSTICS.md) for exact-head evidence
 and [DIAGNOSTICS_RUNBOOK.md](DIAGNOSTICS_RUNBOOK.md) for the capture procedure.
 
+## 2026-10-06 actual-instance checkpoint
+
+The macOS app at merged runtime commit `ea63113` used the deployed `mesh2`
+project in `member:aryan` mode. A read-only transport constructed without the
+service key against a nonexistent foreign root authenticated in that member mode
+and returned zero documents, chat ids and log changes. This is deployed
+foreign-root read evidence for those three APIs; it does not establish foreign
+chat, storage, mutation or revocation behavior.
+
+An isolated temporary SQLite/home process exercised the same project as app user
+`codex`, but reused Aryan's Supabase member credential. It is useful two-store
+delivery evidence, not an independently authenticated user or device. A live
+Realtime channel reached `ready`; injecting a channel-error transition caused
+one disconnect, one replacement open and a return to `ready` with one active
+socket and peak one. This tests the provider connection and watchdog path, not a
+physical network outage or offline replay.
+
+Warm peer messages reproduced the selected transcript disappearing while
+`/api/mesh/chat_page` returned `local_inputs_pending`. PR46 keeps the already
+admitted same-session DOM while discarding page state/cursors and retrying fresh
+canonical reads; locked and forbidden results still retire the view. Repeated
+live messages after activation kept every prior row visible and showed neither
+the centered loading state nor "Chat is not ready yet." PR47 corrected the
+source-slice loader test missed by the focused gate. Its exact failed Linux run
+had 3,173 passing tests, 18 skips and one harness `ReferenceError`; the corrected
+focused set passed 24 tests.
+
+This run did **not** meet the product latency target. With normal diagnostic
+sampling, some warm incoming messages took roughly 4--6 seconds to appear. The
+trace showed `source_not_ready`, a short `SourceChanged` ingestion retry and
+later canonical admission. A manual reverse sync observed Aryan's message after
+8.25 seconds. Sampling every diagnostic event (`sample_rate=1`, `slow_ms=50`)
+created heavy recorder/database pressure and pushed one admission beyond ten
+seconds; restoring the documented 0.01/1000-ms defaults returned the app to its
+normal behavior. Complete sampling is therefore an intrusive stress mode, not a
+transparent latency measurement.
+
+The synthetic room could not be deleted by its agent creator: the agent-side
+delete returned `PermissionDenied`, while Aryan was a non-admin. It remains as
+explicit cleanup/ownership evidence rather than being removed through a
+privileged bypass.
+
 ## Remaining acceptance
 
-Live Supabase access was blocked by an observed proxy CONNECT 403. No denial was
-bypassed and no credentials or accounts were created. Acceptance requires an
-authorized reachable environment, actual member mode without service-key
-fallback, deployed schema/RPC/storage policies, revocation and foreign-root/chat
-denial checks, independent-peer disconnect/reconnect and offline-outbox replay.
-See [SECURITY_RLS.md](SECURITY_RLS.md) for the current deployment contract.
+Acceptance still requires independently authenticated peers/devices, foreign
+chat and storage denial, revocation, offline-outbox replay, real network loss,
+and the selected-chat latency work identified above. See
+[SECURITY_RLS.md](SECURITY_RLS.md) for the current deployment contract.
 
 Native macOS/Windows integration, independently owned peers, rich-media layout
 and real-use diagnostic latency/overhead remain separate gates. Preserve local
