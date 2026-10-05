@@ -8,6 +8,12 @@ Correlated local phases cover browser HTTP start/JSON settlement, server dispatc
 
 References are process-secret keyed BLAKE2s message/chat/database tags and random request/tab/transaction tags. Correlation fields are hints only. Fixed schemas discard body, raw IDs, paths, SQL, credentials, arbitrary exception strings and stack traces before buffering. Existing legacy latency JSONL is preserved; its earlier configuration/retention remains distinct from this opt-in integrated recorder.
 
+A successful send's server POST completion records the same opaque message tag
+returned in `_diagnostics`, alongside its request reference and process sequence.
+This joins the request to mint, commit and outbox observations without storing
+the message ID or body. Failed sends and stale recorder generations produce no
+new message bridge.
+
 ## Bounds and opt-out
 
 Default slow threshold: 1000 ms; successful request sample rate: 0.01. Authenticated POST /api/diagnostics accepts enabled plus optional slow_ms (50–60000) and sample_rate (0–1). Existing enable checkbox is retained; threshold controls are API settings. Error/slow traces and minimal send/outbox/DOM/ack breadcrumbs are retained subject to bounds, not guaranteed losslessly during bursts.
@@ -17,7 +23,42 @@ overlapping queue and body durations are never summed. Browser collector routes
 use the same asynchronous context, sampling and rate admission as delivery rows.
 An upload receipt acknowledges admission, not persistence.
 
-Pre-event context: at most 512 sanitized rows, 256 KiB reserved encoded budget, 30 seconds. A trigger selects up to 48 correlated prior rows, or 16 global rows when no association is available. Previously admitted rows are not duplicated. At most 64 retained rows per second. Async writer queue: at most 256 bounded rows. Root/Store scope deferral: at most 128 rows in a shared outer nested transaction buffer, plus local drop counts. Observed holder registry: at most 128 descriptors. Browser: 200 queued rows, 50 per upload, 32 delivery/attempt/recent-completion entries and 128 request entries. DOM lookup inspects at most the last 512 nodes; larger windows can have omitted rows. Transient data can be evicted; counters distinguish context eviction, sampled omission, retention/writer overflow, upload loss and file write faults.
+Pre-event context: at most 512 sanitized rows, 256 KiB reserved encoded budget,
+30 seconds. An error/slow trigger is admitted first, followed by newest useful
+context: at most 48 total rows, or 16 total for an uncorrelated trigger.
+Previously admitted rows are not duplicated. Total admission remains at most
+64 rows per one-second window, with at most 48 ordinary rows; 16 slots are
+reserved for error/slow events and delivery/route breadcrumbs. Promoting fast
+context does not give it critical priority. Critical events can use unused
+ordinary capacity. Failed enqueue attempts also consume admission capacity.
+Async writer queue: at most 256 bounded rows. Root/Store scope deferral: at most
+128 rows in a shared outer nested transaction buffer, plus local drop counts.
+Observed holder registry: at most 128 descriptors. Browser: 200 queued rows,
+50 per upload, 32 delivery/attempt/recent-completion entries and 128 request
+entries. DOM lookup inspects at most the last 512 nodes; larger windows can have
+omitted rows. Queue saturation, rotation and crashes can still lose evidence.
+
+Expected sidebar inventory membership exclusions retain one prepare/finalize
+context observation, without duplicate sidebar error promotion. Selected-chat
+denials, actual exceptions and slow inventory observations still promote.
+
+Admission counters are process-lifetime totals, capped at 1,000,000:
+
+| Counter | Meaning |
+| --- | --- |
+| `context_evicted` | Normal time/row/byte ring rotation, including already retained rows |
+| `context_dropped` | Requested but unretained context evicted, invalid/oversized observations, or transaction deferral overflow |
+| `rate_dropped` | Distinct observations denied by rate admission at least once |
+| `rate_rejected` | Every rate rejection attempt, including repeated promotions |
+| `queue_overflow` | Every failed enqueue attempt on the bounded writer queue |
+| `admission_dropped` | Distinct observations denied by either rate or queue admission, counted once across both |
+| `sampled_out` | Initial observations kept only as context, eligible for later promotion |
+
+Admission denials can later recover; they do not prove permanent disk loss.
+These categories overlap and must not be summed as a count of lost messages.
+Opt-out discards intentionally queued/context observations. Admission capacity
+and cumulative counters span generations; toggling cannot renew the same
+one-second window's quota.
 
 Opt-out clears context and queued writes, stops admission, and fences late server/browser completions by generation/ownership. Already persisted records remain until rotation. A write already admitted to the worker may finish during opt-out; no new disabled observations are admitted. A small weak-reference daemon performs file I/O using a separate writer lock. Delivery and database transaction hooks do not write log files or wait on that disk lock. Explicit bounded flush is reserved for tests/shutdown. No unbounded shutdown wait or provider call is added.
 
@@ -27,6 +68,17 @@ lock and session retirement use the same exactly-once bookkeeping. Timer callbac
 and refresh settlements are fenced to their observation/session owners. A delayed
 or suspended browser may run its timer late. An `abandoned` observation does not
 cancel the actual request or prove a failed message delivery.
+
+## Recorder correction validation
+
+The separate recorder admission/correlation correction passed 156 related local
+tests, including saturation, unique/repeated rejection accounting, writer queue
+overflow, byte bounds, sidebar exclusions, actual HTTP send correlation,
+generation/replacement barrier races, privacy, frontend and real Chromium
+collector coverage. Independent review approved the final changes. The recorder
+correction has not been published or tested in full cross-platform CI; PR37's
+successful CI tests a different, unchanged-production tree. No runtime activation,
+Mac or live-provider acceptance is inferred from these local tests.
 
 ## Cloud coverage audit
 

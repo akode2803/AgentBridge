@@ -15,6 +15,7 @@ _ownership = ContextVar('delivery_ownership', default=None)
 _buffer = ContextVar('delivery_db_buffer', default=None)
 _holders = {}
 _lock = threading.Lock()
+_recorder_lock = threading.RLock()
 MAX_HOLDERS = 128
 MAX_DEFERRED = 128
 
@@ -37,7 +38,20 @@ PHASES = frozenset({
 
 def install(recorder):
     global _recorder
-    _recorder = weakref.ref(recorder)
+    with _recorder_lock:
+        _recorder = weakref.ref(recorder)
+
+
+@contextmanager
+def recorder_fence(sink, generation):
+    """Serialize completion admission with owner replacement and opt-out.
+
+    Callers may enqueue bounded sanitized metadata here, never do disk/provider
+    work. Install takes only the owner lock; setting changes take the sink lock.
+    """
+    with _recorder_lock:
+        with sink._lock:
+            yield recorder() is sink and sink.generation == generation
 
 
 def recorder():

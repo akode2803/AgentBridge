@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -97,6 +98,48 @@ def _read_status_summary(out):
     summary['payload_fields_present'] = [
         name for name in ('users', 'feeds', 'tasks', 'runs') if name in out]
     return summary
+
+
+def _capture_finalization_failures(app, monkeypatch):
+    """Observe swallowed input failures only within this rig's finalizer."""
+    from agentbridge.mesh import page_operation
+
+    names = {kind: kind.__name__ for kind in page_operation._ERRORS}
+    reasons = {'presence_inputs_changed', 'presence_observation_unavailable',
+               'aux_inputs_changed', 'aux_receipt_binding_changed',
+               'local_inputs_changed', 'source_not_ready', 'source_mutation_pending',
+               'source_changed_during_finalization', 'terminal_classification_pending',
+               'receipt_presence_changed'}
+    captured = deque(maxlen=8)
+    lock = threading.Lock()
+    scope = threading.local()
+    classify = page_operation._failure
+    finalize = app.finalize_page_read
+
+    def observe(exc):
+        result = classify(exc)
+        if getattr(scope, 'active', False):
+            reason = (exc.args[0] if len(exc.args) == 1 and type(exc.args[0]) is str
+                      and exc.args[0] in reasons else '<absent-or-invalid>')
+            with lock:
+                captured.append({'kind': names.get(type(exc), '<unknown>'), 'reason': reason})
+        return result
+
+    def scoped(*args, **kwargs):
+        previous = getattr(scope, 'active', False)
+        scope.active = True
+        try:
+            return finalize(*args, **kwargs)
+        finally:
+            scope.active = previous
+
+    def snapshot():
+        with lock:
+            return list(captured)
+
+    monkeypatch.setattr(page_operation, '_failure', observe)
+    monkeypatch.setattr(app, 'finalize_page_read', scoped)
+    return snapshot
 
 
 @pytest.fixture
@@ -247,11 +290,11 @@ class GuiRig:
                 break
         return runtime
 
-    def _read_ready(self, path, *, prepare_chat="", ready, **params):
+    def _read_ready(self, path, *, prepare_chat="", ready, read=None, **params):
         last = None
         for _ in range(self._read_attempts):
             self.prepare(prepare_chat)
-            last = self.get(path, **params)
+            last = (self.get if read is None else read)(path, **params)
             # A final canonical fence can lose its captured input cut while
             # background owners publish. Reprepare within the same finite
             # attempt budget; genuine unavailability and denials remain terminal.
@@ -298,7 +341,9 @@ class GuiRig:
                 and not out.get('forbidden') and isinstance(metadata, dict)
                 and all(metadata.get(lane) == 'ready' for lane in ('live', 'runtime', 'pause'))):
             # Explicit raise avoids pytest rewriting an assert and dumping out.
-            raise AssertionError(f'auxiliary payload required: {_read_status_summary(out)!r}')
+            failures = getattr(self, '_finalization_failures', lambda: [])()
+            raise AssertionError(f'auxiliary payload required: {_read_status_summary(out)!r}; '
+                                 f'recent finalization input controls: {failures!r}')
         return out
 
     def collection(self, chat, kind, **params):
@@ -342,7 +387,7 @@ class GuiRig:
 
 
 @pytest.fixture()
-def rig(tmp_path, clouds):
+def rig(tmp_path, clouds, monkeypatch):
     # These endpoint tests explicitly observe provider changes via helpers.
     # Keep the mirror cut stable during admitted raw collection; independent
     # cache-refresh behavior is covered by the cloud/cache worker fixtures.
@@ -359,6 +404,7 @@ def rig(tmp_path, clouds):
     thread.start()
     host, port = server.server_address[:2]
     r = GuiRig(app, f"http://{host}:{port}", root, home, clouds)
+    r._finalization_failures = _capture_finalization_failures(app, monkeypatch)
     try:
         yield r
     finally:

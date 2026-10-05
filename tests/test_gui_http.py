@@ -8,7 +8,10 @@ from __future__ import annotations
 import http.client
 import json
 import queue
+import sys
 import threading
+import time
+from types import SimpleNamespace
 import urllib.request
 
 import pytest
@@ -16,7 +19,7 @@ import pytest
 from agentbridge.gui.context import GuiApp
 from agentbridge.mesh.service import Mesh
 
-from conftest import wait_for
+from conftest import refresh_cloud, wait_for
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -242,6 +245,45 @@ def test_state_sidebar_shape(rig):
     assert st["chats_complete"] and st["users_complete"]
 
 
+def _next_nonheartbeat_frame(frames, timeout=15):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise queue.Empty
+        event = frames.get(timeout=remaining)
+        if event.get('type') != 'heartbeat':
+            return event
+
+
+def test_sse_heartbeat_does_not_replace_message_or_renew_wait_budget(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(sys.modules[__name__], 'time',
+                        SimpleNamespace(monotonic=lambda: clock[0]))
+    waits = []
+
+    class Frames:
+        def get(self, *, timeout):
+            waits.append(timeout)
+            clock[0] += 5
+            return {'type': 'heartbeat'} if len(waits) == 1 else {'type': 'message'}
+
+    assert _next_nonheartbeat_frame(Frames()) == {'type': 'message'}
+    assert waits == [15, 10]
+    clock[0] = 100
+    waits.clear()
+
+    class HeartbeatsOnly:
+        def get(self, *, timeout):
+            waits.append(timeout)
+            clock[0] += 5
+            return {'type': 'heartbeat'}
+
+    with pytest.raises(queue.Empty):
+        _next_nonheartbeat_frame(HeartbeatsOnly())
+    assert waits == [15, 10, 5]
+
+
 def test_sse_stream_delivers_peer_message(rig):
     rig.signup()
     rig.peer_account("fable")
@@ -271,8 +313,11 @@ def test_sse_stream_delivers_peer_message(rig):
         fable.sync.sync_once()
         fable.post(cid, "ping from fable")
         fable.outbox.flush_once()
+    # The shared rig deliberately disables provider auto-refresh. Observe the
+    # peer's real published write; ordinary mesh polling still emits the SSE.
+    refresh_cloud(rig.app)
 
-    ev = frames.get(timeout=15)
+    ev = _next_nonheartbeat_frame(frames)
     assert ev["type"] == "message"
     assert ev["chat_id"] == cid and ev["from"] == "fable"
     conn.close()
