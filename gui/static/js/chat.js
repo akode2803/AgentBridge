@@ -237,11 +237,12 @@ async function renderPagedChat(force, kind = null, options = {}) {
   }
   if (kind === "first") { owner.wantOlder = false; owner.recoveryAnchor = null; }
   const started = performance.now();
-  // Same-room route changes and safety refreshes keep the visible transcript
-  // while making a fresh canonical read. Pending/reset responses below clear
-  // that surface and install their own cue; explicit history actions keep one.
-  const visibleRefresh = before && Mesh.renderedChat === chatId
-    && mode !== "older" && kind !== "first";
+  // The DOM is presentation only, but an already admitted same-session page
+  // remains useful while its replacement is pending. The page owner still
+  // discards its canonical window and opaque cursors; a terminal access result
+  // below retires this surface immediately.
+  const visiblePage = !!before && Mesh.renderedChat === chatId && owner.ready;
+  const visibleRefresh = visiblePage && mode !== "older" && kind !== "first";
   const loadingHost = mode === "older" ? $("#page-history-controls") || $("#content")
     : $("#content");
   const finishLoading = visibleRefresh || $("#content").dataset.pagePending === owner.identity ? () => {}
@@ -259,19 +260,47 @@ async function renderPagedChat(force, kind = null, options = {}) {
       owner.auxSnapshot = null;
       owner.recoveryAnchor = anchor;
       if (mode === "older" && ++owner.olderRetries > 5) owner.wantOlder = false;
-      owner.ready = false;
-      Mesh.chatKey = Mesh.structKey = "";
-      Mesh.renderedChat = null;
       const host = $("#content");
       if (result.status === "locked") {
+        clearTimeout(pageRetryTimer);
+        pageRetryTimer = null;
+        owner.ready = false;
+        Mesh.chatKey = Mesh.structKey = "";
+        Mesh.renderedChat = null;
         observeLockState(true); document.dispatchEvent(new CustomEvent("ab:locked")); return;
       }
       if (result.status === "forbidden") {
+        clearTimeout(pageRetryTimer);
+        pageRetryTimer = null;
+        owner.ready = false;
+        Mesh.chatKey = Mesh.structKey = "";
+        Mesh.renderedChat = null;
         retireDeniedMeshChat(owner.chatId);
         renderSidebar();
         host.innerHTML = ""; location.hash = "#/chats"; return;
       }
       const pending = ["pending", "reset_required"].includes(result.status);
+      const recoverable = pending || result.status === "unavailable";
+      if (visiblePage && recoverable) {
+        // The retained DOM is not authority and supplies no continuation. All
+        // actions and the replacement page still go through fresh server-side
+        // authorization. Keep retrying at the bounded recovery cadence so a
+        // final Realtime wake cannot be lost behind transient ingestion work.
+        owner.retries = Math.min(30, owner.retries + 1);
+        const delay = pageRetryDelay(result, owner.retries, options.realtime);
+        diagnostic("delivery", {phase:"retry_scheduled", mode,
+          status:result.status, retry_ms:delay});
+        clearTimeout(pageRetryTimer);
+        pageRetryTimer = setTimeout(() => {
+          if (pageOwner === owner && owner.current()) {
+            renderPagedChat(false, null, options);
+          }
+        }, delay);
+        return;
+      }
+      owner.ready = false;
+      Mesh.chatKey = Mesh.structKey = "";
+      Mesh.renderedChat = null;
       if (host.dataset.pagePending !== owner.identity) {
         endLoading(host);
         host.innerHTML = '<div class="chat-loading"></div>';
