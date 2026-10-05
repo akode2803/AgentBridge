@@ -76,9 +76,22 @@ tests, including saturation, unique/repeated rejection accounting, writer queue
 overflow, byte bounds, sidebar exclusions, actual HTTP send correlation,
 generation/replacement barrier races, privacy, frontend and real Chromium
 collector coverage. Independent review approved the final changes. The recorder
-correction has not been published or tested in full cross-platform CI; PR37's
-successful CI tests a different, unchanged-production tree. No runtime activation,
-Mac or live-provider acceptance is inferred from these local tests.
+correction was published in [PR38](https://github.com/akode2803/AgentBridge/pull/38)
+and merged as `d278b8480c5014a28ffbe9abc42d2cdc935c499d`. Its final head
+`63f2b28708bd039a5aaa4adf104f299b6b68db0d` passed full Linux CI
+(3130 passed, 17 skipped) and Windows CI (3117 passed, 30 skipped) in
+[run 37217360697](https://github.com/akode2803/AgentBridge/actions/runs/37217360697).
+Those results include the later session/readiness/SSE test corrections. Passing
+CI does not establish the causes of earlier intermittent failures. No runtime
+activation, Mac or live-provider acceptance is inferred.
+
+[PR39](https://github.com/akode2803/AgentBridge/pull/39) contains the separate
+browser and fixture fidelity milestone: real production API/header correlation,
+twelve Chromium completion-ownership cases across success/cancellation/malformed
+JSON, and allowlisted sidebar/asks/work progress summaries. Its 139 related local
+tests and independent review passed. It remains a draft awaiting full CI and
+merge; these tests use synthetic application responses and do not establish
+authenticated peer or native-device acceptance.
 
 ## Cloud coverage audit
 
@@ -126,3 +139,5 @@ timing or retention under a burst.
 Deployed Supabase authorization/Realtime, independent peers, native platforms,
 rich media and real-use latency/overhead remain acceptance gaps. See
 [CLOUD_MIGRATION_CHECKPOINT.md](CLOUD_MIGRATION_CHECKPOINT.md).
+For capture, bounded offline summaries and evidence interpretation, see
+[DIAGNOSTICS_RUNBOOK.md](DIAGNOSTICS_RUNBOOK.md).

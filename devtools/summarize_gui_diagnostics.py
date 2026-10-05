@@ -16,7 +16,8 @@ Exact nearest-rank percentiles retain at most max_records duration samples.
 Durations are observations, not additive stages: browser page_paint includes
 page_read, which can include multiple client_request calls; server_request can
 include page_stage work. Server ingestion timestamps cannot align browser clocks,
-and there is no shared request identifier. Never subtract or sum these series.
+and this summary does not pair the recorder's opaque request references. Never
+subtract or sum these series.
 Missing page_stage durations are expected for untimed prepare/finalize events.
 """
 
