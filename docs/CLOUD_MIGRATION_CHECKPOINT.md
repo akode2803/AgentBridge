@@ -51,8 +51,8 @@ and inapplicable plain/encrypted or CLI fixture variants. Warnings are existing
 MCP deprecations and a threaded-fork warning. These are the original migration
 baseline results, not the current branch's test count. Subsequent recorder
 corrections passed full Linux and Windows CI and merged in PR38; the separate
-PR39 browser/fixture fidelity milestone remains a draft awaiting full CI and
-merge. See [DELIVERY_DIAGNOSTICS.md](DELIVERY_DIAGNOSTICS.md) for exact-head evidence
+browser/fixture fidelity milestone also passed both platforms and merged in PR39.
+See [DELIVERY_DIAGNOSTICS.md](DELIVERY_DIAGNOSTICS.md) for exact-head evidence
 and [DIAGNOSTICS_RUNBOOK.md](DIAGNOSTICS_RUNBOOK.md) for the capture procedure.
 
 ## Remaining acceptance

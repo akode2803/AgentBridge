@@ -76,7 +76,7 @@ attempt never committed.
 
 Fixture readiness failures have bounded safe control summaries and scoped
 finalization probes; HTTP timeout notes retain bounded code locations without
-locals or request data. PR39 adds lane-specific sidebar/asks controls and real
+locals or request data. PR39 added lane-specific sidebar/asks controls and real
 browser completion ownership coverage. These capture evidence without widening
 the retry/deadline contract. Diagnose a concrete recurring failure from that
 evidence before changing retry policy or claiming an underlying cause fixed.

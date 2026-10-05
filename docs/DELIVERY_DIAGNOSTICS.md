@@ -89,9 +89,11 @@ activation, Mac or live-provider acceptance is inferred.
 browser and fixture fidelity milestone: real production API/header correlation,
 twelve Chromium completion-ownership cases across success/cancellation/malformed
 JSON, and allowlisted sidebar/asks/work progress summaries. Its 139 related local
-tests and independent review passed. It remains a draft awaiting full CI and
-merge; these tests use synthetic application responses and do not establish
-authenticated peer or native-device acceptance.
+tests and independent review passed. Its final head
+`6bc080dd33bad6279addc33e5a304e62cf365082` passed Linux and Windows CI and
+merged as `dd5a36e054e695db1d058ad9fee0703a5d8aae1b`. These tests use synthetic
+application responses and do not establish authenticated peer or native-device
+acceptance.
 
 ## Cloud coverage audit
 
