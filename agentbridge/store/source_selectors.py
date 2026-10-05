@@ -89,10 +89,11 @@ def _definition(value):
     return rebuilt
 
 
-def _schema(conn):
+def _schema(conn, *, owner_checked=False):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?) LIMIT 1", ('local_source_definitions', 'local_source_selectors')).fetchone():
         raise owner.SourceChanged('unexpected_selector_trigger')
-    owner._schema(conn)
+    if not owner_checked:
+        owner._schema(conn)
     for name, sql in _SCHEMA.items():
         if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
             raise owner.SourceChanged('selector_schema_changed')
@@ -111,7 +112,10 @@ def initialize(store):
 
 def _registered_definition(conn, value):
     """Validate existing raw dependency coverage, without registering it."""
-    _schema(conn)
+    # Both callers just captured the source on this same transaction, including
+    # owner schema/epoch validation. Registry checks remain fresh; this is not
+    # a schema cache and cannot survive a capture or transaction boundary.
+    _schema(conn, owner_checked=True)
     size = conn.execute('SELECT typeof(definition),length(CAST(definition AS BLOB)) FROM local_source_definitions WHERE source=?', (value.source,)).fetchone()
     if size is not None and (size[0] != 'text' or size[1] > 65536):
         raise owner.SourceChanged('registered_definition_budget')
