@@ -349,7 +349,10 @@ class CachingTransport(Transport):
         interactive = time.monotonic() < self._interactive_until
         suspect = time.monotonic() < self._suspect_until
         realtime = self.realtime_status()
-        if interactive and (suspect or realtime != "ready"):
+        if realtime != "ready":
+            return (min(_INTERACTIVE_POLL_S, self.profile.fallback_poll_s)
+                    if interactive else self.profile.fallback_poll_s)
+        if interactive and suspect:
             return min(_INTERACTIVE_POLL_S, self.profile.fallback_poll_s)
         if suspect:
             return self.profile.fallback_poll_s
@@ -374,11 +377,13 @@ class CachingTransport(Transport):
 
     def set_interactive(self, active: bool, *, lease_s: float = _INTERACTIVE_LEASE_S) -> None:
         """Hold a short foreground lease; expiry makes crashes self-healing."""
+        now = time.monotonic()
+        was_interactive = now < self._interactive_until
         self._interactive_until = (
-            time.monotonic() + max(1.0, float(lease_s)) if active else 0.0
+            now + max(1.0, float(lease_s)) if active else 0.0
         )
         wake = getattr(self.inner, "wake_local", None)
-        if callable(wake):
+        if callable(wake) and bool(active) != was_interactive:
             wake()
 
     def subscribe_changes(self, callback):

@@ -690,11 +690,15 @@ class DeltaTransport(BulkTransport):
 
     def __init__(self):
         super().__init__()
+        self.rt_status = "ready"
         self.reads["get_docs_delta"] = 0
         self.seq = 0
         self.journal: dict[str, tuple[int, bool]] = {}  # path -> (seq, dead)
         self.on_delta = None       # fires MID-pull (the local-write race)
         self.delta_broken = False  # simulates the legacy schema
+
+    def realtime_status(self):
+        return self.rt_status
 
     def put_doc(self, path, data):
         super().put_doc(path, data)
@@ -929,18 +933,19 @@ def test_suggest_poll_adapts_to_hint_health(delta_mirror):
 def test_foreground_lease_is_fast_bounded_and_releases(delta_mirror, monkeypatch):
     _inner, tx = delta_mirror
     tx.refresh()
+    tx.inner.rt_status = "disconnected"
     now = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     tx.set_interactive(True, lease_s=15.0)
     assert tx.suggest_poll_s(4.0) == 1.0
     assert tx.latency_lane(False) == "fallback"
     now[0] = 116.0
-    assert tx.suggest_poll_s(4.0) == 45.0
+    assert tx.suggest_poll_s(4.0) == 10.0
     assert tx.latency_lane(True) == "hint"
-    assert tx.latency_lane(False) == "poll"
+    assert tx.latency_lane(False) == "fallback"
     tx.set_interactive(True)
     tx.set_interactive(False)
-    assert tx.suggest_poll_s(4.0) == 45.0
+    assert tx.suggest_poll_s(4.0) == 10.0
 
 
 def test_foreground_lease_does_not_accelerate_healthy_realtime(delta_mirror):
@@ -950,6 +955,27 @@ def test_foreground_lease_does_not_accelerate_healthy_realtime(delta_mirror):
     assert tx.suggest_poll_s(4.0) == 45.0
     tx._suspect_until = time.monotonic() + 60
     assert tx.suggest_poll_s(4.0) == 1.0
+
+
+def test_activity_renewal_does_not_wake_healthy_provider_poll(delta_mirror, monkeypatch):
+    inner, tx = delta_mirror
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    wakes = []
+    inner.wake_local = lambda: wakes.append(now[0])
+    tx.set_interactive(True, lease_s=15.0)
+    now[0] = 110.0
+    tx.set_interactive(True, lease_s=15.0)
+    assert wakes == [100.0]
+    tx.set_interactive(False)
+    tx.set_interactive(False)
+    assert wakes == [100.0, 110.0]
+
+
+def test_background_realtime_disconnect_uses_fallback_cadence(delta_mirror):
+    inner, tx = delta_mirror
+    inner.rt_status = "disconnected"
+    assert tx.suggest_poll_s(4.0) == tx.profile.fallback_poll_s == 10.0
 
 
 def test_foreign_delta_emits_one_content_free_local_wake(delta_mirror):
