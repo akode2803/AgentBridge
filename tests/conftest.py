@@ -73,6 +73,7 @@ def _read_status_summary(out):
                    'operation_superseded', 'identity_changed', 'source_mutation_pending',
                    'schema_preparation_failed', 'budget_exhausted', 'step_budget_exhausted',
                    'overlay_proofs', 'source_refresh', 'receipt_presence_changed',
+                   'terminal_classification_pending', 'account_readthrough',
                    # Fixed terminal codes emitted by page_operation and
                    # membership_coordinator; never admit arbitrary reason text.
                    'inputs_unavailable', 'invalid_inputs', 'storage_unavailable',
@@ -87,12 +88,20 @@ def _read_status_summary(out):
                    'operation_crypto_budget', 'operation_epoch_budget', 'operation_parent_budget',
                    'operation_proof_budget', 'operation_round_budget', 'operation_step_budget',
                    'pin_parent_budget'},
+        'sidebar_status': {'ready', 'inventory_pending', 'rooms_pending',
+                           'room_limit', 'response_byte_budget', 'session_changed'},
+        'user_status': {'ready', 'users_pending', 'user_limit', 'user_byte_budget',
+                        'response_byte_budget'},
     }
     summary = {}
-    for name in ('status', 'reason'):
+    for name in controls:
         value = out.get(name)
         summary[name] = (value if isinstance(value, str) and value in controls[name]
                          else '<absent-or-invalid>')
+    for name in ('users_complete', 'chats_complete', 'asks_complete',
+                 'rooms_complete', 'peer_complete', 'timers_complete'):
+        value = out.get(name)
+        summary[name] = value if type(value) is bool else '<absent-or-invalid>'
     summary['error_present'] = 'error' in out
     summary['forbidden'] = bool(out.get('forbidden'))
     summary['payload_fields_present'] = [
