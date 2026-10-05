@@ -53,6 +53,7 @@ _RETRY_WAIT = 0.4
 _POSTGREST_TIMEOUT_S = 6
 _STORAGE_TIMEOUT_S = 20
 _FUNCTION_TIMEOUT_S = 6
+_RT_MAX_BACKOFF_S = 15.0
 
 # R76 (docs/SCALING.md §3) — writer-side hint coalescing. A hint is a
 # content-free wake-up; per-class intervals bound how long a write may wait
@@ -62,9 +63,9 @@ _HINT_CLASSES: list[tuple[str, float | None]] = [
     ("status/asks/", 1.0),    # legacy test/old-client lane only
     ("status/", 5.0),         # run-feed spinners: progress, not content
 ]
-_HINT_STATE_S = 10.0          # chats/*/state/* (read receipts) may settle lazily
-_HINT_DEFAULT_S = 1.0         # meta/roster/overlays/settings: user-visible, rare
-_HINT_LOG_S = 0.5             # message appends: latency IS the product
+_HINT_STATE_S = 0.5           # read receipts are visible delivery feedback
+_HINT_DEFAULT_S = 0.25        # rare user-visible meta/roster/overlay changes
+_HINT_LOG_S = 0.1             # first idle message pokes promptly; floor caps bursts
 # tells "the schema is missing the R76 columns" apart from a network fault —
 # only these flip the driver into legacy full-snapshot mode
 _MISSING_COL_MARKS = ("42703", "PGRST204", "does not exist", "Could not find")
@@ -850,9 +851,11 @@ class SupabaseTransport(Transport):
                                 and now - self._rt_ready_since >= 30.0):
                             self._rt_failures = 0
                         self._rt_failures += 1
-                        delay = min(2 ** min(self._rt_failures - 1, 6), 60.0)
-                        self._rt_retry_at = now + delay * (
-                            0.85 + random.random() * 0.3)
+                        delay = min(2 ** min(self._rt_failures - 1, 6),
+                                    _RT_MAX_BACKOFF_S)
+                        self._rt_retry_at = now + min(
+                            _RT_MAX_BACKOFF_S,
+                            delay * (0.85 + random.random() * 0.3))
                         self._rt_ready_since = 0.0
                     self._rt_metric("rt_disconnects")
             with self._rt_state_lock:
@@ -868,7 +871,8 @@ class SupabaseTransport(Transport):
                 with self._rt_state_lock:
                     self._rt_failures += 1
                     self._rt_retry_at = time.monotonic() + min(
-                        2 ** min(self._rt_failures - 1, 6), 60.0)
+                        2 ** min(self._rt_failures - 1, 6),
+                        _RT_MAX_BACKOFF_S)
             return self._rt
 
     def close(self) -> None:
@@ -994,10 +998,28 @@ class _RealtimeThread:
         except BaseException:  # cancellation/failure falls back to polling
             pass
         finally:
-            with self._state_lock:
-                if not self._closing:
-                    self._state = "disconnected"
+            if not self._closing:
+                self._mark_disconnected()
             self._loop.close()
+
+    def _mark_disconnected(self) -> None:
+        """Publish one local wake when a ready/connecting socket drops.
+
+        Watchers may already be sleeping on the healthy 45-second cadence.
+        Waking them makes the next wait choose the foreground recovery cadence;
+        it carries no provider data or authority verdict.
+        """
+        changed = False
+        with self._state_lock:
+            if not self._closing and self._state != "disconnected":
+                self._state = "disconnected"
+                self._ready.clear()
+                changed = True
+        if changed:
+            try:
+                self._on_hint()
+            except Exception:  # noqa: BLE001 - disconnect still stands
+                pass
 
     def _subscription_status(self, status, _error=None) -> None:
         value = getattr(status, "value", status)
@@ -1009,9 +1031,8 @@ class _RealtimeThread:
                 if not self._counted_ready:
                     self._counted_ready = True
                     self._on_metric("rt_ready")
-            elif value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
-                self._state = "disconnected"
-                self._ready.clear()
+        if value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
+            self._mark_disconnected()
 
     async def _main(self) -> None:
         from realtime import RealtimeChannelOptions
@@ -1045,9 +1066,7 @@ class _RealtimeThread:
                 errored = getattr(self._channel, "is_errored", False)
                 errored = errored() if callable(errored) else bool(errored)
                 if self._ready.is_set() and (not joined or errored):
-                    with self._state_lock:
-                        self._state = "disconnected"
-                        self._ready.clear()
+                    self._mark_disconnected()
                     return
         finally:
             channel, self._channel = self._channel, None

@@ -932,7 +932,7 @@ def test_foreground_lease_is_fast_bounded_and_releases(delta_mirror, monkeypatch
     now = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     tx.set_interactive(True, lease_s=15.0)
-    assert tx.suggest_poll_s(4.0) == 3.0
+    assert tx.suggest_poll_s(4.0) == 1.0
     assert tx.latency_lane(False) == "fallback"
     now[0] = 116.0
     assert tx.suggest_poll_s(4.0) == 45.0
@@ -941,6 +941,15 @@ def test_foreground_lease_is_fast_bounded_and_releases(delta_mirror, monkeypatch
     tx.set_interactive(True)
     tx.set_interactive(False)
     assert tx.suggest_poll_s(4.0) == 45.0
+
+
+def test_foreground_lease_does_not_accelerate_healthy_realtime(delta_mirror):
+    _inner, tx = delta_mirror
+    tx.inner.realtime_status = lambda: "ready"
+    tx.set_interactive(True)
+    assert tx.suggest_poll_s(4.0) == 45.0
+    tx._suspect_until = time.monotonic() + 60
+    assert tx.suggest_poll_s(4.0) == 1.0
 
 
 def test_foreign_delta_emits_one_content_free_local_wake(delta_mirror):

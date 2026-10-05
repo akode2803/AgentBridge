@@ -22,3 +22,11 @@ in [docs/CLOUD_MIGRATION_CHECKPOINT.md](docs/CLOUD_MIGRATION_CHECKPOINT.md).
 Independently authenticated devices, revocation/chat denial, offline replay,
 rich media and latency remain open. Coordinate writer ownership and preserve
 each machine's source/configuration/stores before runtime cutover.
+
+The 2026-10-06 transport-limit audit is in
+[docs/TRANSPORT_LIMIT_AUDIT.md](docs/TRANSPORT_LIMIT_AUDIT.md). It removes
+foreground fast polling while Realtime is healthy, shortens user-visible
+Broadcast hints within the existing four-per-second cap, and bounds active
+failure recovery at one second. The next task is startup ownership and cached
+sidebar paint: render a session-bound admitted list immediately, reconcile rows
+independently, and keep settings independent of all-room projection.
