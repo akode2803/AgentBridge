@@ -21,7 +21,7 @@ def test_deletion_feedback_lifetime_and_session_races(tmp_path):
 import assert from 'node:assert/strict';
 const source = __SOURCE__;
 function setup() {
-  let generation=1, seq=0, refreshes=0, exits=0, live=null;
+  let generation=1, seq=0, refreshes=0, sidebarRefreshes=0, exits=0, live=null;
   const timers=new Map(), requests=[], toasts=[];
   let respond=()=>Promise.resolve({ok:true});
   const api=(path,body)=>{requests.push({path,body});return respond(path,body);};
@@ -32,14 +32,16 @@ function setup() {
   const setTimeout=(fn,delay)=>{timers.set(++seq,{fn,delay});return seq;};
   const clearTimeout=id=>timers.delete(id);
   const Mesh={chatId:'room'};
+  const V={refreshSidebarCache:chat=>{assert.equal(chat,'room');sidebarRefreshes++}};
   const factory=new Function('api','toast','setTimeout','clearTimeout','captureSessionEpoch','sessionMayApply',
-    'Mesh','exitSelect','refreshChat','ICONS',`${source};return {deleteForMe,deleteForEveryone,hideSilently};`);
+    'Mesh','V','exitSelect','refreshChat','ICONS',`${source};return {deleteForMe,deleteForEveryone,hideSilently};`);
   const actions=factory(api,toast,setTimeout,clearTimeout,()=>generation,t=>t===generation,Mesh,
-    ()=>exits++,()=>refreshes++,{trash:'trash'});
+    V,()=>exits++,()=>refreshes++,{trash:'trash'});
   return {...actions,requests,toasts,timers,toast,
     response(fn){respond=fn;},retire(){generation++;},
     tick(){const entries=[...timers];timers.clear();entries.forEach(([,t])=>{assert.equal(t.delay,500);t.fn();});},
-    get live(){return live;},get refreshes(){return refreshes;},get exits(){return exits;}};
+    get live(){return live;},get refreshes(){return refreshes;},
+    get sidebarRefreshes(){return sidebarRefreshes;},get exits(){return exits;}};
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
 // A fast private delete preserves its canonical Undo; no timer can flash later.
@@ -48,6 +50,7 @@ assert.equal(fast.toasts.length,1);assert.equal(fast.timers.size,0);
 assert.equal(fast.live.opts.action,'Undo');await fast.live.opts.onAction();
 assert.deepEqual(fast.requests.map(r=>r.path),['/api/mesh/delete_messages','/api/mesh/undelete_messages']);
 assert.equal(fast.refreshes,2);
+assert.equal(fast.sidebarRefreshes,2);
 // Slow delete replaces progress with the correct result for all variants.
 for (const [method,scope,undo] of [['deleteForMe','me',true],['deleteForEveryone','everyone',false],['hideSilently','me',false]]) {
   const s=setup(), pending=deferred();s.response(()=>pending.promise);
@@ -56,6 +59,7 @@ for (const [method,scope,undo] of [['deleteForMe','me',true],['deleteForEveryone
   pending.resolve({ok:true});await done;
   assert.equal(s.live.message,`2 messages deleted for ${scope==='everyone'?'everyone':'me'}`);
   assert.equal(s.live.opts.action==='Undo',undo);assert.equal(s.timers.size,0);
+  assert.equal(s.sidebarRefreshes,1);
 }
 // Both synchronous failure and async rejection end progress and its reveal timer.
 for (const failure of ['throw','reject','api-error']) {
@@ -64,6 +68,7 @@ for (const failure of ['throw','reject','api-error']) {
   const done=s.deleteForEveryone('room',['one']);
   if(failure!=='throw'){s.tick();if(failure==='reject')pending.reject(new Error('offline'));else pending.resolve({error:'Denied'});}
   await done;assert.equal(s.timers.size,0);assert.equal(s.refreshes,0);
+  assert.equal(s.sidebarRefreshes,0);
   assert.equal(s.live.opts,true);assert.equal(s.live.message,failure==='api-error'?'Denied':'Could not delete messages. Please try again.');
 }
 // A request settling after session retirement cannot show completion or Undo.
@@ -71,6 +76,7 @@ for (const method of ['deleteForMe','deleteForEveryone','hideSilently']) {
   const s=setup(), pending=deferred();s.response(()=>pending.promise);
   const done=s[method]('room',['one']);s.retire();s.tick();pending.resolve({ok:true});await done;
   assert.equal(s.toasts.length,0);assert.equal(s.refreshes,0);assert.equal(s.timers.size,0);
+  assert.equal(s.sidebarRefreshes,0);
 }
 // Session retirement queued between helper settlement and caller continuation.
 for (const method of ['deleteForMe','deleteForEveryone','hideSilently']) {

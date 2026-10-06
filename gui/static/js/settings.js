@@ -341,6 +341,7 @@ async function renderSettings() {
     ms = fresh;
   }
   if (!ms.available || !ms.user) { location.hash = "#/chats"; return; }
+  if (ms.chats_complete === false) void V.refreshSidebarCache?.();
   if (hadState) {
     const backgroundTicket = captureSessionEpoch();
     const backgroundRequest = captureMeshStateRead(backgroundTicket);

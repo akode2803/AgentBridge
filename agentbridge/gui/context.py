@@ -124,6 +124,8 @@ class GuiApp:
         self.page_read_tokens = PageReadTokens()
         from .collection_cursors import CollectionCursorRegistry
         self.collection_cursors = CollectionCursorRegistry()
+        from .sidebar_refresh import SidebarRefreshQueue
+        self.sidebar_refresh = SidebarRefreshQueue()
         self.mesh: Mesh | None = None
         self._session_generation = 0
         self._session_reads_exhausted = False
@@ -256,6 +258,7 @@ class GuiApp:
         self.page_cursors.clear()
         self.page_read_tokens.clear()
         self.collection_cursors.clear()
+        self.sidebar_refresh.clear()
         if self.mesh is not None and self.mesh.local_inputs is not None:
             self.mesh.local_inputs.clear_selection()
             if self.mesh.local_inputs.unread is not None:

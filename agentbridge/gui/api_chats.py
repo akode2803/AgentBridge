@@ -14,6 +14,7 @@ from ..core.errors import ValidationError
 from ..mesh.pins import key_fingerprint
 from .context import GuiApp, SessionReadToken, session_read_binding
 from .routing import authed
+from .api_sidebar_pages import refresh_sidebar
 from .serialize import chat_json
 
 __all__ = ["GET", "POST"]
@@ -279,6 +280,7 @@ GET = {
     "/api/mesh/state": state,
 }
 POST = {
+    "/api/mesh/sidebar_refresh": refresh_sidebar,
     "/api/mesh/post": post,
     "/api/mesh/read": read,
     "/api/mesh/create_chat": create_chat,

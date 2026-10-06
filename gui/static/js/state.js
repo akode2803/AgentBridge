@@ -252,7 +252,10 @@ export function applyMeshState(ticket, response, request) {
       && Array.isArray(prior.chats) && Array.isArray(response.chats)) {
     // Incomplete inventory omits unresolved rooms. Keep last displayed rows
     // for this exact session only; every row action still reauthorizes.
-    const held = new Map(prior.chats.filter(row => row && typeof row.id === "string")
+    const removed = new Set(Array.isArray(response.chats_removed)
+      ? response.chats_removed.filter(id => typeof id === "string") : []);
+    const held = new Map(prior.chats.filter(row => row && typeof row.id === "string"
+        && !removed.has(row.id))
       .map(row => [row.id,row]));
     for (const row of response.chats) {
       if (row && typeof row.id === "string") held.set(row.id,row);

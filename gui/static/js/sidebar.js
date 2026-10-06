@@ -272,9 +272,9 @@ function renderChatListSidebar() {
   const recency = (c) => (c.last && c.last.ns) || 0;
   listed.sort((a, b) => (!!b.pinned - !!a.pinned) || (recency(b) - recency(a)));
   const box = $("#side-chats");
-  // The foreground chat owns its own delayed cue. A usable retained list is
-  // already useful while its next canonical refresh runs in the background.
-  const waiting = ms.chats_complete === false && listed.length === 0;
+  // The row is delayed, so a quick reconciliation stays visually quiet. When
+  // it does appear it sits with the cached chats until the canonical pass ends.
+  const waiting = ms.chats_complete === false;
   const session = captureSessionEpoch();
   const progress = () => syncSidebarProgress(box, {
     pending: waiting && !Mesh.chatId,
@@ -572,7 +572,7 @@ async function runChatAction(act, c) {
       if (!sessionMayApply(sessionTicket)) return;
       if (r.error) { toast(r.error, true); return; }
       toast("Notifications back on", { check: true });
-      if (!await refreshList(sessionTicket)) return;
+      if (!await refreshList(sessionTicket, chatId)) return;
     } else {
       V.muteDialog(chatId);   // 8 hours / 1 week / Always (chat.js)
     }
@@ -586,7 +586,7 @@ async function runChatAction(act, c) {
     if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
     toast(r.archived ? "Chat archived — find it under Archived" : "Chat restored");
-    if (!await refreshList(sessionTicket)) return;
+    if (!await refreshList(sessionTicket, chatId)) return;
   } else if (act === "unread") {
     const isUnread = (c.unread > 0) || !!c.forced_unread;
     const r = isUnread
@@ -597,25 +597,27 @@ async function runChatAction(act, c) {
     if (!isUnread && r.ok === true) {
       document.dispatchEvent(new CustomEvent("ab:manual-mark-unread", {detail:{chatId}}));
     }
-    if (!await refreshList(sessionTicket)) return;
+    if (!await refreshList(sessionTicket, chatId)) return;
   } else if (act === "pin") {
     const willPin = !c.pinned;
     const r = await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: willPin });
     if (!sessionMayApply(sessionTicket)) return;
     if (r.error) { toast(r.error, true); return; }
-    if (!await refreshList(sessionTicket)) return;
+    if (!await refreshList(sessionTicket, chatId)) return;
     toast(willPin ? "Chat pinned" : "Chat unpinned", {
       check: true, action: "Undo", onAction: async () => {
         const undoTicket = captureSessionEpoch();
         await api("/api/mesh/pin_chat", { chat_id: chatId, pinned: !willPin });
         if (!sessionMayApply(undoTicket)) return;
-        await refreshList(undoTicket);
+        await refreshList(undoTicket, chatId);
       },
     });
   }
 }
 
-async function refreshList(ticket = captureSessionEpoch()) {
+async function refreshList(ticket = captureSessionEpoch(), chatId = "") {
+  if (!sessionMayApply(ticket)) return false;
+  if (chatId) await V.refreshSidebarCache?.(chatId);
   if (!sessionMayApply(ticket)) return false;
   const request = captureMeshStateRead(ticket);
   const fresh = await api("/api/mesh/state");

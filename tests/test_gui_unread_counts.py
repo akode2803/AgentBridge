@@ -78,9 +78,19 @@ def _oracle(app, chat):
 
 
 def _sidebar(app, chat):
-    """Use the real state route, including normal final session checks."""
-    result = api_chats.state(app, Request())
-    return next((row for row in result.get('chats', ()) if row['id'] == chat), None)
+    """Use the real bounded refresh/state routes and their final session checks."""
+    api_chats.state(app, Request())  # Capture inventory and queue reconciliation.
+    request = Request(data={'chat_id': chat})
+    for _ in range(100):
+        refreshed = api_chats.refresh_sidebar(app, request)
+        result = api_chats.state(app, Request())
+        row = next((item for item in result.get('chats', ())
+                    if item['id'] == chat), None)
+        if row is not None or (refreshed['status'] == 'ready'
+                               and not refreshed['has_more']):
+            return row
+        app.mesh.local_inputs.prepare_one()
+    pytest.fail('sidebar refresh did not converge')
 
 
 def _assert_exact(row, oracle):

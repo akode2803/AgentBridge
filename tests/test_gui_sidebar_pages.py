@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -55,11 +56,15 @@ def _plain_record(mesh, chat, ident, ns, sender, body):
 
 
 def _state(app, *, rounds=12):
-    value = None
+    value = api_chats.state(app, Request())
+    token = app.capture_session_read()
+    for chat in app.mesh.tx.list_chat_ids():
+        app.sidebar_refresh.request_chat(token, chat)
     for _ in range(rounds):
         value = api_chats.state(app, Request())
         if value.get('chats_complete'):
             return value
+        api_chats.refresh_sidebar(app, Request(method='POST', data={}))
         app.mesh.local_inputs.prepare_one()
     return value
 
@@ -93,6 +98,83 @@ def test_optin_never_calls_fullfold_and_preserves_verified_viewer_flags(world, m
     assert state['metadata_status']['profiles'] == 'pending'
     assert state['users_complete'] and state['user_status'] == 'ready'
     assert 'presence' not in state['users']['viewer']
+
+
+def test_cached_sidebar_paints_before_canonical_reconciliation(world, monkeypatch):
+    from agentbridge.gui import api_sidebar_pages
+
+    app, chat, _encrypted = world
+    app.mesh.post(chat, 'cached startup preview')
+    _ready(app, chat)
+    assert any(row['id'] == chat for row in _state(app)['chats'])
+    app.sidebar_refresh.clear()  # a fresh process starts with no queue progress
+
+    def no_foreground_fold(*_args, **_kwargs):
+        pytest.fail('cached state performed foreground canonical work')
+
+    monkeypatch.setattr(api_sidebar_pages, '_room', no_foreground_fold)
+    cached = api_chats.state(app, Request())
+    assert cached['chats_complete'] is False
+    assert cached['sidebar_status'] == 'rooms_pending'
+    assert next(row for row in cached['chats'] if row['id'] == chat)[
+        'last']['body'] == 'cached startup preview'
+
+
+def test_corrupt_sidebar_cache_queues_canonical_repair(world):
+    app, chat, _encrypted = world
+    app.mesh.post(chat, 'repair me')
+    _ready(app, chat)
+    assert _state(app)['chats_complete']
+    with app.mesh.store._conn() as conn:
+        conn.execute(
+            "UPDATE sidebar_presentations SET payload='[]' WHERE chat_id=?",
+            (chat,),
+        )
+    app.sidebar_refresh.clear()
+    pending = api_chats.state(app, Request())
+    assert not pending['chats_complete']
+    assert pending['sidebar_status'] == 'cache_pending'
+    assert pending['sidebar_pending'] > 0
+    repaired = _state(app)
+    assert repaired['chats_complete']
+    assert next(row for row in repaired['chats'] if row['id'] == chat)[
+        'last']['body'] == 'repair me'
+
+
+def test_sidebar_publication_failure_requeues_canonical_result(world, monkeypatch):
+    app, chat, _encrypted = world
+    app.mesh.post(chat, 'retry publication')
+    _ready(app, chat)
+    api_chats.state(app, Request())
+    token = app.capture_session_read()
+    app.sidebar_refresh.request_chat(token, chat)
+
+    def fail_publish(*_args, **_kwargs):
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(app.mesh.store, 'publish_sidebar', fail_publish)
+    with pytest.raises(sqlite3.OperationalError, match='locked'):
+        api_chats.refresh_sidebar(
+            app, Request(method='POST', data={'chat_id': chat}))
+    status = app.sidebar_refresh.status(token)
+    assert status['running'] == 0 and status['pending'] >= 1
+
+
+def test_sidebar_projection_failure_releases_and_requeues_claim(world, monkeypatch):
+    from agentbridge.gui import api_sidebar_pages
+
+    app, chat, _encrypted = world
+    _ready(app, chat)
+    api_chats.state(app, Request())
+    token = app.capture_session_read()
+    app.sidebar_refresh.request_chat(token, chat)
+    monkeypatch.setattr(api_sidebar_pages, '_room',
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError('boom')))
+    with pytest.raises(RuntimeError, match='boom'):
+        api_chats.refresh_sidebar(
+            app, Request(method='POST', data={'chat_id': chat}))
+    status = app.sidebar_refresh.status(token)
+    assert status['running'] == 0 and status['pending'] >= 1
 
 
 def test_forged_viewer_state_cannot_set_sidebar_flags(world):
@@ -264,14 +346,15 @@ def test_sidebar_phase_diagnostics_use_existing_private_schema(world):
     raw = app.diagnostics.path.read_text()
     events = [event for line in raw.splitlines() if
               (event := json.loads(line))['event'] == 'page_stage'
-              and event['route'] == '/api/mesh/state']
+              and event['route'] == '/api/mesh/sidebar_refresh']
     assert len(events) == 3
     phases = {e['phase']: e for e in events}
     assert set(phases) == {'inputs', 'prepare', 'finalize'}
     assert [phases[p]['status'] for p in ('inputs', 'prepare', 'finalize')] == [
         'ready', 'prepared', 'page']
     for event in events:
-        assert event['event'] == 'page_stage' and event['route'] == '/api/mesh/state'
+        assert (event['event'] == 'page_stage'
+                and event['route'] == '/api/mesh/sidebar_refresh')
         assert event['duration_ms'] >= 0 and len(event['chat_ref']) == 16
     assert chat not in raw and 'private message' not in raw
     assert app.diagnostics.set_enabled(False)

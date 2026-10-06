@@ -85,6 +85,14 @@ Folder transport is no longer a supported production deployment.
   covers *content*; the permission layer and Supabase RLS cover *metadata
   policy*. This is a deliberate v1 scope line: encrypting the social graph is a
   much larger project.
+- **The local sidebar presentation cache is inside the member-device boundary.**
+  To paint the chat list before canonical reconciliation finishes, its bounded
+  SQLite rows retain the last finalized preview (up to 120 characters) in
+  plaintext under the AgentBridge home directory. It is never published to the
+  transport and never authorizes a read or action. This has the same local
+  OS-user trust boundary as plaintext drafts; full-disk or per-record local
+  encryption remains future hardening for machines whose storage is not
+  already protected.
 - **No per-message forward secrecy / post-compromise security.** We rotate on
   membership change, not per message (no double ratchet — D4). Compromising a
   member's identity key exposes every epoch key currently wrapped for them,

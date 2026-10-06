@@ -35,7 +35,7 @@ EVENTS = frozenset({
     'realtime', 'client_error', 'route', 'server_request', 'page_stage', 'delivery',
 })
 ROUTES = frozenset({
-    '/api/state', '/api/mesh/state', '/api/mesh/chat',
+    '/api/state', '/api/mesh/state', '/api/mesh/sidebar_refresh', '/api/mesh/chat',
     '/api/mesh/chat_page', '/api/mesh/chat_aux',
     '/api/mesh/chat_summary', '/api/mesh/chat_collection',
     '/api/mesh/read', '/api/mesh/chat_page_read', '/api/mesh/mark_unread', '/api/mesh/asks',
@@ -348,7 +348,8 @@ class Diagnostics:
         # Inventory exclusion is an expected membership outcome, not an error.
         # A real exception or slow observation still promotes its context.
         exclusion = (event.get('event') == 'page_stage'
-                     and event.get('route') == '/api/mesh/state'
+                     and event.get('route') in (
+                         '/api/mesh/state', '/api/mesh/sidebar_refresh')
                      and event.get('status') == 'forbidden'
                      and event.get('reason') == 'viewer_not_member')
         error = (event.get('error_type') not in (None, 'unknown', 'OtherError')

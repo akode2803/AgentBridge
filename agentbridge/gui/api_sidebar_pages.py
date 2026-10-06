@@ -14,10 +14,12 @@ from ..core.models import ChatSnapshot, MsgKind
 from ..mesh.page_operation import PageOperation
 from ..mesh.readmodel import unread_info
 from ..mesh.unread_counts import UnreadSession
-from ..store import aux_inputs, local_source, overlay_index
+from ..store import aux_inputs, local_source, overlay_index, sidebar_cache
 from ..transport.authority_observation import _part
 from .serialize import chat_json, snippet_json
 from . import sidebar_users
+from .context import session_read_binding
+from .routing import authed_read_token
 
 
 MAX_ROOMS = 128
@@ -80,7 +82,7 @@ def _stage(app, chat, phase, status, reason='none', **fields):
     """Diagnostic failures must never affect canonical sidebar outcomes."""
     try:
         if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-            diagnostics.stage('/api/mesh/state', chat, phase, status, reason, **fields)
+            diagnostics.stage('/api/mesh/sidebar_refresh', chat, phase, status, reason, **fields)
     except Exception:  # noqa: BLE001 — telemetry is best effort
         pass
 
@@ -172,7 +174,7 @@ def _room(app, mesh, token, chat):
 
 
 def capture_sidebar(app, mesh, token):
-    """Independent complete/incomplete room inventory with a hard row budget."""
+    """Return admitted cached rows and queue bounded canonical reconciliation."""
     users, users_complete, user_status = _users(mesh)
     out = {'users': users, 'chats': [], 'chats_complete': False,
            'users_complete': users_complete, 'user_status': user_status,
@@ -181,6 +183,11 @@ def capture_sidebar(app, mesh, token):
     try:
         ids = mesh.tx.list_chat_ids()
     except (OSError, ValueError, TypeError):
+        try:
+            out['chats'] = mesh.store.cached_sidebar(mesh.user)
+        except (sidebar_cache.SidebarCacheUnavailable, OSError, sqlite3.Error,
+                OverflowError, ValueError):
+            pass
         out['sidebar_status'] = 'inventory_pending'
         return out
     if (type(ids) is not list or len(ids) > MAX_ROOMS
@@ -188,23 +195,75 @@ def capture_sidebar(app, mesh, token):
             or len(set(ids)) != len(ids)):
         out['sidebar_status'] = 'room_limit' if type(ids) is list and len(ids) > MAX_ROOMS else 'inventory_pending'
         return out
-    complete = True
-    for chat in ids:
-        if not app.validate_session_read(token):
-            out['sidebar_status'] = 'session_changed'
-            return out
-        started = time.perf_counter()
-        row, resolved = _room(app, mesh, token, chat)
-        _stage(app, chat, 'sidebar', 'ready' if resolved else 'pending',
-               duration_ms=(time.perf_counter() - started) * 1000,
-               rows=int(row is not None))
-        if row is not None:
-            out['chats'].append(row)
-        if not resolved:
-            complete = False
-    out['chats_complete'] = complete
-    out['sidebar_status'] = 'ready' if complete else 'rooms_pending'
+    allowed = frozenset(ids)
+    cache_ready = True
+    try:
+        mesh.store.prune_sidebar(mesh.user, allowed)
+        out['chats'] = mesh.store.cached_sidebar(mesh.user, allowed_ids=allowed)
+    except (sidebar_cache.SidebarCacheUnavailable, OSError, sqlite3.Error,
+            OverflowError, ValueError):
+        cache_ready = False
+        out['chats'] = []
+    app.sidebar_refresh.request_inventory(token, ids)
+    if not cache_ready:
+        app.sidebar_refresh.request_all(token)
+    progress = app.sidebar_refresh.status(token)
+    out['chats_complete'] = progress['complete'] and cache_ready
+    out['sidebar_pending'] = progress['pending'] + progress['running']
+    out['chats_removed'] = list(progress['removed'])
+    out['sidebar_status'] = ('cache_pending' if not cache_ready else
+                             'ready' if progress['complete'] else 'rooms_pending')
     if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
         out.update(users={}, chats=[], chats_complete=False, users_complete=False,
-                   user_status='response_byte_budget', sidebar_status='response_byte_budget')
+                   chats_removed=[], user_status='response_byte_budget',
+                   sidebar_status='response_byte_budget')
     return out
+
+
+@authed_read_token
+def refresh_sidebar(app, req, mesh, token):
+    """Resolve at most one room and publish only its finalized presentation."""
+    if req.data.get('refresh_all') is True:
+        app.sidebar_refresh.request_all(token)
+    preferred = req.data.get('chat_id') or ''
+    if type(preferred) is not str:
+        preferred = ''
+    if preferred:
+        try:
+            preferred = _part(preferred)
+            if not app.sidebar_refresh.request_chat(token, preferred):
+                preferred = ''
+        except ValueError:
+            preferred = ''
+    chat = app.sidebar_refresh.claim(token, preferred=preferred)
+    if chat is None:
+        progress = app.sidebar_refresh.status(token)
+        return {'ok': True, 'status': 'ready' if progress['complete'] else 'busy',
+                'changed': False, 'has_more': not progress['complete'],
+                'chats_complete': progress['complete'],
+                'retry_after_ms': 100,
+                'session_binding': session_read_binding(token)}
+    started = time.perf_counter()
+    row, resolved, changed, published = None, False, False, False
+    try:
+        row, resolved = _room(app, mesh, token, chat)
+        if resolved and app.validate_session_read(token):
+            changed = mesh.store.publish_sidebar(
+                mesh.user, chat, row, updated_ns=time.time_ns())
+            changed = (app.sidebar_refresh.record_presentation(
+                token, chat, visible=row is not None) or changed)
+            published = True
+    finally:
+        # A canonical result is not complete until its display row (including
+        # an intentional removal) is durable.  Publication failures must leave
+        # the claim pending for a later bounded retry.
+        app.sidebar_refresh.finish(token, chat, resolved=published)
+    _stage(app, chat, 'sidebar', 'ready' if resolved else 'pending',
+           duration_ms=(time.perf_counter() - started) * 1000,
+           rows=int(row is not None))
+    progress = app.sidebar_refresh.status(token)
+    return {'ok': True, 'status': 'ready' if resolved else 'pending',
+            'changed': changed, 'has_more': not progress['complete'],
+            'chats_complete': progress['complete'],
+            'retry_after_ms': 350 if not resolved else 0,
+            'session_binding': session_read_binding(token)}

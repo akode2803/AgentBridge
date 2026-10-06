@@ -666,6 +666,7 @@ async function renderChatDetails() {
   if (dgArch) dgArch.addEventListener("click", async () => {
     const r = await api("/api/mesh/archive", { chat_id: chatId, archived: !meta.archived });
     if (r.error) { toast(r.error, true); return; }
+    await V.refreshSidebarCache?.(chatId);
     location.hash = "#/chats";
   });
   const dgExit = $("#dg-exit");

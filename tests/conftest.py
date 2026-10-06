@@ -90,7 +90,8 @@ def _read_status_summary(out):
                    'operation_proof_budget', 'operation_round_budget', 'operation_step_budget',
                    'pin_parent_budget'},
         'sidebar_status': {'ready', 'inventory_pending', 'rooms_pending',
-                           'room_limit', 'response_byte_budget', 'session_changed'},
+                           'room_limit', 'cache_pending', 'response_byte_budget',
+                           'session_changed'},
         'user_status': {'ready', 'users_pending', 'user_limit', 'user_byte_budget',
                         'response_byte_budget'},
     }
@@ -366,7 +367,19 @@ class GuiRig:
                     or out.get('users_complete') and out.get('chats_complete')
                     or out.get('sidebar_status') in {'room_limit', 'response_byte_budget'}
                     or out.get('user_status') in {'user_limit', 'user_byte_budget'})
-        return self._read_ready('/api/mesh/state', ready=ready)
+        # Lightweight readiness-policy unit tests construct a reader without
+        # an HTTP server; retain their original pure-read behavior.
+        if not hasattr(self, 'base'):
+            return self._read_ready('/api/mesh/state', ready=ready)
+        initial = self.get('/api/mesh/state')
+        if initial.get('user') is not None:
+            self.post('/api/mesh/sidebar_refresh', refresh_all=True)
+        def read(path, **params):
+            out = self.get(path, **params)
+            if not ready(out):
+                self.post('/api/mesh/sidebar_refresh')
+            return out
+        return self._read_ready('/api/mesh/state', ready=ready, read=read)
 
     def asks(self, chat=""):
         return self._read_ready('/api/mesh/asks', prepare_chat=chat,
