@@ -1076,7 +1076,11 @@ function agentPermissionEntry(meta, presentation) {
 // Public selected-chat refreshes always acquire a canonical bounded page.
 async function renderMeshChat(force, kind = null) {
   if (!Mesh.chatId) return;
-  return renderPagedChat(force, kind);
+  // This public seam previously accepted display metadata. Only the explicit
+  // live-tail action is an acquisition command; arbitrary caller objects must
+  // not flow into the page owner's mode selection.
+  return kind === "first" ? renderPagedChat(force, "first")
+    : renderPagedChat(force);
 }
 
 // Acquired data only. No implicit transcript/livefeed/runtime_tasks acquisition.

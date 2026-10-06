@@ -77,6 +77,8 @@ for (const caps of [undefined, null, {}, {chat_page_v1:false}, {chat_page_v1:tru
   await render(true, {started_ms:1}, {data:{messages:[]},paged:false});
   assert.deepEqual(calls.pop(), [true], "display metadata cannot select a retired acquisition route");
 }
+await render(false, "first");
+assert.deepEqual(calls.pop(), [false, "first"], "explicit live-tail acquisition is preserved");
 Mesh.chatId = null; await render(true); assert.deepEqual(calls, []);
 '''
 
