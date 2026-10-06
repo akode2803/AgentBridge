@@ -348,7 +348,8 @@ class Diagnostics:
         # Inventory exclusion is an expected membership outcome, not an error.
         # A real exception or slow observation still promotes its context.
         exclusion = (event.get('event') == 'page_stage'
-                     and event.get('route') == '/api/mesh/state'
+                     and event.get('route') in (
+                         '/api/mesh/state', '/api/mesh/sidebar_refresh')
                      and event.get('status') == 'forbidden'
                      and event.get('reason') == 'viewer_not_member')
         error = (event.get('error_type') not in (None, 'unknown', 'OtherError')
