@@ -41,10 +41,11 @@ rows, and locked/forbidden results still retire immediately. The real self-chat
 held 50 through 216 messages during rapid upward paging without blanking.
 Focused Python, Node and Chromium coverage passes.
 
-The same live run found the next task. A locally sent self-message committed,
-published to Supabase and reached SQLite, but broad diagnostics plus concurrent
-sidebar preparation produced sustained `SourceChanged` churn, so the selected
-page did not admit the message and the browser kept its optimistic clock. Make
-selected-chat admission progress independently of background sidebar refresh,
-then verify acknowledged-send reconciliation under intrusive logging. Do not
+The same live run found and fixed a related paging edge: sending while viewing a
+frozen historical window left the durable message represented by its optimistic
+clock until the user selected “Jump to latest.” The composer now explicitly
+returns to the live tail after a send response, where the canonical row
+reconciles the optimistic bubble. The next task is to measure and reduce the
+remaining commit-to-render admission tail under normal diagnostics, while
+keeping selected-chat progress independent of background sidebar work. Do not
 weaken the current authority, source-generation or finalization fences.

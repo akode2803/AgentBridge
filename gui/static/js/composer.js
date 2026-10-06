@@ -328,7 +328,9 @@ export function initComposer(chatId, members, context = Mesh.state) {
     }
     if (currentSendChat(send)) {
       V.renderPendingSends?.(chatId);
-      V.renderMeshChat(false).then(() => {
+      // Sending from a frozen historical window returns to the live tail so
+      // the durable canonical row can reconcile this optimistic bubble.
+      V.renderMeshChat(false, "first").then(() => {
         // Refresh sidebar preview/order through its existing coalesced reader,
         // only after the selected transcript has settled. Never block first paint.
         const snapshot = meshStateSnapshot();

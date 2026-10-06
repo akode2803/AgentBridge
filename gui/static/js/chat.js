@@ -1074,9 +1074,9 @@ function agentPermissionEntry(meta, presentation) {
 }
 
 // Public selected-chat refreshes always acquire a canonical bounded page.
-async function renderMeshChat(force) {
+async function renderMeshChat(force, kind = null) {
   if (!Mesh.chatId) return;
-  return renderPagedChat(force);
+  return renderPagedChat(force, kind);
 }
 
 // Acquired data only. No implicit transcript/livefeed/runtime_tasks acquisition.

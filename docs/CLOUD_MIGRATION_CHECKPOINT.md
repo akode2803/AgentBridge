@@ -100,14 +100,14 @@ admission and retries from a fresh canonical cut. A page that examined raw rows
 may still legitimately become empty through clear, hide, history-on-join or
 other canonical visibility rules; access denial still retires immediately.
 
-The run also recorded a separate progress failure under full diagnostic
-sampling. A self-message reached local commit, Supabase append acknowledgement,
-`local_send_status=sent` and the local messages table, while repeated concurrent
-sidebar preparation invalidated selected-page cuts. The optimistic clock
-therefore remained visible. This is durable-send evidence and a selected-read
-admission/reconciliation blocker, not evidence of a transport failure. The next
-checkpoint must isolate foreground selected-chat progress from background
-sidebar churn and re-run this case with broad logging enabled.
+The run also sent a self-message while the browser retained a frozen historical
+window after loading all older pages. The message reached local commit,
+Supabase append acknowledgement, `local_send_status=sent` and the local messages
+table; selecting “Jump to latest” immediately replaced the optimistic clock
+with that canonical row. The composer now performs that live-tail transition
+after a send response. This observation does not establish source starvation;
+the remaining commit-to-render admission tail still needs a separate measured
+run under normal diagnostic sampling.
 
 The synthetic room could not be deleted by its agent creator: the agent-side
 delete returned `PermissionDenied`, while Aryan was a non-admin. It remains as

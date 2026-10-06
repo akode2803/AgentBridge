@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.skipif(shutil.which('node') is None, reason='requires Node.js')
 def test_explicit_latest_scroll_anchor_and_exact_read_after_paint(tmp_path):
     source = (ROOT / 'gui/static/js/chat.js').read_text(encoding='utf-8')
+    composer = (ROOT / 'gui/static/js/composer.js').read_text(encoding='utf-8')
+    assert 'V.renderMeshChat(false, "first")' in composer
+    assert 'return renderPagedChat(force, kind);' in source
     policy_source = (ROOT / 'gui/static/js/chat-page-read.js').read_text(encoding='utf-8')
     policy = policy_source[policy_source.index('function retryAfter('):
                           policy_source.index('function noData(')]
