@@ -54,6 +54,7 @@ STATUSES = frozenset({
 })
 REASONS = frozenset({
     'none', 'unknown', 'other', 'local_inputs_pending', 'local_paging_disabled',
+    'empty_raw_transition',
     'overlay_proofs', 'terminal_classification_pending', 'continuation_changed',
     'continuation_expired', 'window_store_changed', 'page_inputs_changed',
     'page_mirror_changed', 'page_progress', 'source_refresh',

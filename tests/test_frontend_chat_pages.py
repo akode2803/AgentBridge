@@ -30,7 +30,7 @@ const page = (ids, version = 'v1', continuation = 'raw-older', extra = {}) => ({
   messages: ids.map(id => ({id, body: id})), continuation,
   window_anchor: `anchor-${continuation ?? 'tail'}`,
   has_more: continuation !== null, history_exhausted: continuation === null,
-  scan_budget_exhausted: false, ...extra,
+  scan_budget_exhausted: false, raw_examined:ids.length, ...extra,
 });
 const ids = result => result.messages.map(m => m.id);
 

@@ -1575,8 +1575,9 @@ async function paintMeshChat(force, openTrace, prepared) {
   // the whole header opens chat info — except the ⋮ corner and its menu
   const menu = $("#chat-menu");
   $("#chat-top").addEventListener("click", (e) => {
-    if (e.target.closest("#chat-more") || e.target.closest("#chat-menu")
-        || e.target.closest("#chat-back")) return;
+    const target = e.target;
+    if (target?.closest?.("#chat-more") || target?.closest?.("#chat-menu")
+        || target?.closest?.("#chat-back")) return;
     location.hash = `#/chats/${chatId}/details`;
   });
   $("#chat-back").addEventListener("click", () => { location.hash = "#/chats"; });
@@ -1603,7 +1604,8 @@ async function paintMeshChat(force, openTrace, prepared) {
   syncPinBanner(chatId, pins);
   document.addEventListener("click", function away(e) {
     if (!menu) { document.removeEventListener("click", away); return; }
-    if (!e.target.closest("#chat-more") && !e.target.closest("#chat-menu")) {
+    const target = e.target;
+    if (!target?.closest?.("#chat-more") && !target?.closest?.("#chat-menu")) {
       if (!menu.isConnected) { document.removeEventListener("click", away); return; }
       menu.hidden = true;
     }

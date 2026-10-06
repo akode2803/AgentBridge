@@ -92,6 +92,23 @@ seconds; restoring the documented 0.01/1000-ms defaults returned the app to its
 normal behavior. Complete sampling is therefore an intrusive stress mode, not a
 transparent latency measurement.
 
+A later self-chat pressure run at version `0.24.299` exercised rapid upward
+paging from 50 through 216 retained messages without an empty transcript or a
+loading overlay. The browser now treats a completed zero-message, zero-raw-row
+replacement of an admitted nonempty append-only page as incomplete local
+admission and retries from a fresh canonical cut. A page that examined raw rows
+may still legitimately become empty through clear, hide, history-on-join or
+other canonical visibility rules; access denial still retires immediately.
+
+The run also recorded a separate progress failure under full diagnostic
+sampling. A self-message reached local commit, Supabase append acknowledgement,
+`local_send_status=sent` and the local messages table, while repeated concurrent
+sidebar preparation invalidated selected-page cuts. The optimistic clock
+therefore remained visible. This is durable-send evidence and a selected-read
+admission/reconciliation blocker, not evidence of a transport failure. The next
+checkpoint must isolate foreground selected-chat progress from background
+sidebar churn and re-run this case with broad logging enabled.
+
 The synthetic room could not be deleted by its agent creator: the agent-side
 delete returned `PermissionDenied`, while Aryan was a non-admin. It remains as
 explicit cleanup/ownership evidence rather than being removed through a

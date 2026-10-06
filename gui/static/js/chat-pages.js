@@ -171,6 +171,9 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
           || typeof response.history_exhausted !== "boolean"
           || response.history_exhausted === response.has_more
           || typeof response.scan_budget_exhausted !== "boolean"
+          || !Number.isSafeInteger(response.raw_examined)
+          || response.raw_examined < response.messages.length
+          || response.raw_examined > 2000
           || (response.scan_budget_exhausted && !response.has_more)
           || (response.continuation !== null
               && (typeof response.continuation !== "string"
@@ -196,6 +199,16 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
         }
         const rows = encodeRows(response.messages, heldIds(refresh.pages));
         if (rows === null) return clear("invalidated", "page_budget");
+        // Message logs are append-only. Visibility changes such as clear,
+        // hide, membership tenure and redaction still examine raw rows before
+        // producing an empty canonical page. Therefore a completed zero-raw
+        // replacement cannot retire a previously nonempty visible window: it
+        // is an incomplete local admission and must be retried from a fresh
+        // canonical cut.
+        if (refresh.target > 0 && refresh.count === 0 && rows.length === 0
+            && response.raw_examined === 0 && !response.has_more) {
+          return clear("pending", "empty_raw_transition", true);
+        }
         const size = rows.reduce((bytes, row) => bytes + row.bytes, 2);
         if (refresh.requests === 1) refresh.firstAnchor = pageAnchor;
         if (rows.length) refresh.pages.unshift({rows, bytes: size, anchor: pageAnchor});
@@ -235,6 +248,10 @@ export function createChatPages({maxPages = 6, maxMessages = 600,
       const priorIds = heldIds();
       const rows = encodeRows(response.messages, ticket.kind === "older" ? priorIds : []);
       if (rows === null) return clear("invalidated", "page_budget");
+      if (ticket.kind === "first" && priorIds.length && rows.length === 0
+          && response.raw_examined === 0 && !response.has_more) {
+        return clear("pending", "empty_raw_transition", true);
+      }
       const size = rows.reduce((bytes, row) => bytes + row.bytes, 2);
       if (size > maxBytes) return clear("invalidated", "page_budget");
       const removed = ticket.kind === "first" ? priorIds.slice() : [];

@@ -150,7 +150,10 @@ Object.defineProperty(content, "innerHTML", {set(html) {
   this.appendChild(new El("div", {id: "reply-area"})); this.appendChild(new El("textarea", {id: "mesh-body"}));
   register(this);
 }});
-const document = {hasFocus: () => false, addEventListener() {}, removeEventListener() {},
+const documentListeners = {};
+const document = {hasFocus: () => false,
+  addEventListener(type, fn) { (documentListeners[type] ||= []).push(fn); },
+  removeEventListener(type, fn) { documentListeners[type] = (documentListeners[type] || []).filter(v => v !== fn); },
   querySelectorAll: sel => descendants(content).filter(x => matches(x, sel)),
   createElement(tag) { if (tag === "template") { const t = new El(tag); t.content = {};
       Object.defineProperty(t, "innerHTML", {set(v) { t.content.firstElementChild = rowFrom(v); }}); return t; }
@@ -214,6 +217,8 @@ assert.equal(readStarts.at(-1), -1);
 const more = $("#chat-more"), menu = $("#chat-menu"), tr = $("#transcript"), file = tr.querySelector(".mesh-att");
 assert(more && menu && file, "base paint must expose options and canonical file action");
 await more.click(); assert.equal(menu.hidden, false, "base options must open immediately");
+for (const fn of documentListeners.click || []) await fn({target: {}});
+assert.equal(menu.hidden, true, "non-Element click targets close options without throwing");
 assert.equal(file.listeners.click.length, 1); assert.equal(tr.listeners.click.length, 1);
 await file.click();
 assert.deepEqual(calls.at(-1), ["/api/mesh/open_file", {chat_id: "room", id: "blob-1", message_id: "m1"}]);
