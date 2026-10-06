@@ -70,6 +70,16 @@ failure-record transaction can commit.
 Cleanup runs between scheduled scans and rechecks foreground-selected work between
 chunks. The runtime does not rebuild or fold complete history on a page request.
 
+Cached collection currently enumerates the complete mirror dictionary to find a
+chat's declared selectors, then writes a complete candidate and compares it with
+the admitted generation. This is bounded but can scale with unrelated mirror
+documents as well as selected overlays. Opt-in diagnostics record one compact
+`source_reconciliation` observation with examined/selected counts and stage
+durations. The staged-write duration overlaps collection because each selected
+batch is written by the collector callback. The evidence is intended to choose
+between a chat-scoped mirror index, precise changed-path evidence and scheduling
+changes without weakening the complete repair path.
+
 ## Current GUI integration
 
 The mandatory GUI page endpoint uses this staged owner with bounded canonical page

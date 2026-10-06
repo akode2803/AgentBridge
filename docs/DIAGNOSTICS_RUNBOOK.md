@@ -57,6 +57,13 @@ p50/p95/p99 use nearest rank over the retained samples, not a complete traffic
 population. The summary groups phases and fixed outcomes without correlating
 individual requests, messages or clocks.
 
+Schema version 2 also includes a bounded `source_reconciliation` section. It
+reports independent distributions for mirror enumeration, staged writes,
+comparison, admission and finalization, plus examined/selected document counts.
+`stage_write_ms` is contained within `collect_ms`; do not add those metrics.
+Fast background attempts use an opaque random attempt tag for normal sampling;
+it is not a request, message or authority reference.
+
 ## Follow the evidence boundary
 
 | Symptom | Evidence to inspect | What it can establish |

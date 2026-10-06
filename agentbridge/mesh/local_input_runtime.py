@@ -260,7 +260,23 @@ class LocalInputRuntime:
             publisher = SourcePublisher(self.coordinator, self.store, reader.definition)
             expected = None
             stage = None
+            profile_started = delivery_trace.queue_clock()
+            profile = {} if profile_started is not None else None
+            profile_ref = delivery_trace.sampling_reference() if profile is not None else None
+            profile_status, profile_error = 'ok', None
+
+            def timed(name, started, *, add=False):
+                if profile is None:
+                    return
+                try:
+                    value = delivery_trace.elapsed_ms(started)
+                    if value is not None:
+                        profile[name] = profile.get(name, 0) + value if add else value
+                except Exception:
+                    pass  # Profiling cannot replace the ingestion result.
+
             try:
+                started = delivery_trace.queue_clock()
                 captured = publisher.capture()
                 # Build an invisible candidate while the latest admitted raw
                 # snapshot remains readable. The final transaction CAS checks
@@ -268,7 +284,10 @@ class LocalInputRuntime:
                 # durably before attempting any external mutation.
                 with self.coordinator.publication_gate(self.store, reader.definition):
                     expected = local_source.claim_collection(self.store, captured.source)
+                timed('capture_claim_ms', started)
+                started = delivery_trace.queue_clock()
                 stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
+                timed('stage_open_ms', started)
                 exact = {s.value for s in reader.definition.selectors if s.kind == 'doc_exact'}
                 prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
 
@@ -281,12 +300,33 @@ class LocalInputRuntime:
                             raise ValueError('source document depth')
                         if path not in exact and not any(path == p or path.startswith(p + '/') for p in prefixes):
                             raise ValueError('document outside declared source scope')
-                    staged_source.append(self.store, stage, batch)
+                    write_started = delivery_trace.queue_clock()
+                    try:
+                        staged_source.append(self.store, stage, batch)
+                    finally:
+                        timed('stage_write_ms', write_started, add=True)
 
-                collect_document_batches(self.transport._transport, reader.definition, consume=append)
+                collection = {} if profile is not None else None
+                started = delivery_trace.queue_clock()
+                try:
+                    collect_document_batches(
+                        self.transport._transport, reader.definition,
+                        consume=append, stats=collection,
+                    )
+                finally:
+                    timed('collect_ms', started)
+                    if profile is not None and collection is not None:
+                        try:
+                            profile.update(collection)
+                        except Exception:
+                            pass
+                started = delivery_trace.queue_clock()
                 staged_source.finish(self.store, stage)
+                timed('seal_ms', started)
                 reuse = None
+                started = delivery_trace.queue_clock()
                 comparison = staged_publication.identical(self.store, expected, stage)
+                timed('compare_ms', started)
                 if comparison:
                     # Retain unchanged raw/index identity after full comparison.
                     conn = document_observation._open_reader(self.store.path)
@@ -300,18 +340,26 @@ class LocalInputRuntime:
                             overlay_index._ready(conn, self.store.path, reuse)
                     finally:
                         conn.close()
-                with self.coordinator.publication_gate(self.store, reader.definition):
-                    published, index = staged_publication.admit(self.store, expected, stage,
-                        observed_ns=time.time_ns(), reuse=reuse, comparison=comparison)
+                started = delivery_trace.queue_clock()
+                try:
+                    with self.coordinator.publication_gate(self.store, reader.definition):
+                        published, index = staged_publication.admit(self.store, expected, stage,
+                            observed_ns=time.time_ns(), reuse=reuse, comparison=comparison)
+                finally:
+                    timed('admit_ms', started)
                 # Keep failure handling bound to the pre-admission claim.
                 # Post-commit cleanup cannot retire the newly admitted winner.
                 if captured.source.raw.source_id != published.raw.source_id:
                     staged_source.retire_generation(self.store, captured.source.raw.source_id)
-                receipt = reader.capture()
-                if receipt.source != published:
-                    raise local_source.SourceChanged('ingestion_superseded')
-                with reader.finalization(receipt) as conn:
-                    overlay_index._ready(conn, self.store.path, index)
+                started = delivery_trace.queue_clock()
+                try:
+                    receipt = reader.capture()
+                    if receipt.source != published:
+                        raise local_source.SourceChanged('ingestion_superseded')
+                    with reader.finalization(receipt) as conn:
+                        overlay_index._ready(conn, self.store.path, index)
+                finally:
+                    timed('source_finalize_ms', started)
                 changed = captured.source.raw != published.raw
                 if changed or not captured.source.ready:
                     # Wake terminal preparation from an admitted source change,
@@ -321,6 +369,7 @@ class LocalInputRuntime:
                         self.read_events.changed('chat', chat)
                 return changed
             except Exception as exc:
+                profile_status, profile_error = 'error', type(exc).__name__
                 budget = isinstance(exc, OverflowError) or (
                     isinstance(exc, RawCollectionUnavailable) and exc.args and
                     exc.args[0] in ('document_budget', 'byte_budget', 'path_budget', 'document_byte_budget'))
@@ -339,11 +388,28 @@ class LocalInputRuntime:
                         'collection_superseded') from exc
                 raise
             finally:
-                if stage is not None:
-                    # abort never retires a mapped generation. Partial/unused
-                    # candidates become reclaimable in bounded cleanup steps.
-                    staged_source.abort(self.store, stage)
-                    staged_source.cleanup(self.store, max_rows=128)
+                try:
+                    if stage is not None:
+                        cleanup_started = delivery_trace.queue_clock()
+                        try:
+                            # abort never retires a mapped generation. Partial/unused
+                            # candidates become reclaimable in bounded cleanup steps.
+                            staged_source.abort(self.store, stage)
+                            staged_source.cleanup(self.store, max_rows=128)
+                        finally:
+                            timed('cleanup_ms', cleanup_started)
+                except BaseException as exc:
+                    profile_status, profile_error = 'error', type(exc).__name__
+                    raise
+                finally:
+                    if profile is not None:
+                        delivery_trace.emit(
+                            'source_reconciliation', chat=chat,
+                            status=profile_status, error_type=profile_error,
+                            sample_ref=profile_ref,
+                            duration_ms=delivery_trace.elapsed_ms(profile_started),
+                            **profile,
+                        )
 
     def run_due(self):
         job = self.schedule.take_due(now=time.monotonic())

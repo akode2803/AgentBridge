@@ -29,7 +29,8 @@ PHASES = frozenset({
     'outbox_retry', 'outbox_dead',
     'sync_observed', 'sse_frame', 'transport_read', 'transport_append', 'ingestion',
     'outbox_batch', 'store_send_commit', 'page_prepare', 'page_finalize',
-    'source_ingestion', 'ingestion_queued', 'ingestion_claimed',
+    'source_ingestion', 'source_reconciliation', 'ingestion_queued',
+    'ingestion_claimed',
     'preparation', 'preparation_queued', 'preparation_claimed',
     'db_acquire', 'db_body', 'db_commit', 'db_rollback', 'db_close',
     'browser_request_started', 'browser_response', 'browser_request_failed',
@@ -111,6 +112,14 @@ def reference(value):
     try:
         sink = recorder()
         return sink.chat_ref(value) if sink is not None else None
+    except Exception:
+        return None
+
+
+def sampling_reference():
+    """Return an opaque per-attempt sampling key when diagnostics are active."""
+    try:
+        return secrets.token_hex(8) if recorder() is not None else None
     except Exception:
         return None
 

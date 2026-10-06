@@ -6,6 +6,18 @@ Integrated with the existing authenticated, opt-in GUI diagnostics setting. Exis
 
 Correlated local phases cover browser HTTP start/JSON settlement, server dispatch, envelope mint/cache commit, outbox attempt/provider handler return/retry/dead outcome, definite local append completion, exact confirmed-local-snapshot admission, log transport reads/ingestion, source ingestion request/claim/preparation, canonical page prepare/finalize, observed root/local-source Store acquisition/body/commit/rollback, SSE emission/reception/refresh queue/settlement, exact canonical DOM and covering native acknowledgment. Browser sender durations start at native POST dispatch. Incoming durations start at local SSE message reception. Neither measures an independent peer end-to-end. Optimistic pending rows and animation-frame opportunities are excluded from canonical DOM acceptance. Acknowledgments use exact ns from canonical IDs or safe/string integer representations; JavaScript's rounded large Numbers cannot establish coverage.
 
+Each sampled source attempt emits one compact `source_reconciliation` row. It
+splits capture/claim, stage creation, complete mirror enumeration, staged writes,
+seal, generation comparison, atomic admission, finalization and cleanup. It also
+records bounded counts for mirror documents examined, documents selected,
+selected bytes and staged batches. Staged-write time is contained within the
+collection duration and must not be added to it. These counters describe local
+work only; they do not prove remote completeness, freshness or authority. A
+random per-attempt sampling tag makes fast background attempts eligible for the
+configured sample without linking them to a message or request. Counter bounds
+match the collector ceilings: two million examined paths, one million selected
+documents/batches and 512 MiB of selected bytes.
+
 References are process-secret keyed BLAKE2s message/chat/database tags and random request/tab/transaction tags. Correlation fields are hints only. Fixed schemas discard body, raw IDs, paths, SQL, credentials, arbitrary exception strings and stack traces before buffering. Existing legacy latency JSONL is preserved; its earlier configuration/retention remains distinct from this opt-in integrated recorder.
 
 A successful send's server POST completion records the same opaque message tag

@@ -93,6 +93,35 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
     assert _one(summary.summarize([path]), "browser")["event"] == "page_stage"
 
 
+def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
+    complete = _event(
+        "delivery", phase="source_reconciliation", status="ok",
+        duration_ms=30, capture_claim_ms=2, stage_open_ms=3,
+        collect_ms=20, stage_write_ms=12, seal_ms=1, compare_ms=4,
+        admit_ms=2, source_finalize_ms=1, cleanup_ms=1,
+        documents_examined=20_000, documents_selected=5,
+        document_bytes=1000, document_batches=2,
+    )
+    partial = _event(
+        "delivery", phase="source_reconciliation", status="error",
+        duration_ms=10, collect_ms=True, documents_examined="private",
+    )
+    result = summary.summarize([_write(tmp_path, [complete, partial])])
+    profile = result["source_reconciliation"]
+
+    assert result["schema_version"] == 2
+    assert profile["events"] == 2
+    assert profile["metrics"]["duration_ms"]["p50"] == 10
+    assert profile["metrics"]["duration_ms"]["p95"] == 30
+    assert profile["metrics"]["collect_ms"]["samples"] == 1
+    assert profile["metrics"]["collect_ms"]["invalid"] == 1
+    assert profile["metrics"]["documents_examined"]["invalid"] == 1
+    assert profile["metrics"]["documents_selected"]["missing"] == 1
+    assert profile["metrics"]["stage_write_ms"]["p50"] == 12
+    assert "private" not in json.dumps(result)
+    assert "overlap" in result["notes"][0]
+
+
 def test_accepts_actual_recorder_schema_without_starting_app(tmp_path):
     recorder = Diagnostics(tmp_path)
     try:

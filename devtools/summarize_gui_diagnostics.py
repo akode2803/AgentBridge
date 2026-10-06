@@ -51,6 +51,15 @@ _COUNTERS = {
     "status": STATUSES, "reason": REASONS, "outcome": OUTCOMES,
     "error_type": ERROR_TYPES,
 }
+_RECONCILIATION_NUMBERS = (
+    "duration_ms", "capture_claim_ms", "stage_open_ms", "collect_ms",
+    "stage_write_ms", "seal_ms", "compare_ms", "admit_ms",
+    "source_finalize_ms", "cleanup_ms",
+)
+_RECONCILIATION_INTEGERS = (
+    "documents_examined", "documents_selected", "document_bytes",
+    "document_batches",
+)
 _NOTES = [
     "Duration series overlap; do not add or subtract them.",
     "Browser page_paint includes page_read, not just rendering time.",
@@ -115,7 +124,45 @@ class _Group:
         }
 
 
-def _observe(raw: bytes, groups: dict, counts: dict) -> None:
+@dataclass
+class _ReconciliationProfile:
+    events: int = 0
+    values: dict[str, list[float]] = field(default_factory=lambda: {
+        name: [] for name in _RECONCILIATION_NUMBERS + _RECONCILIATION_INTEGERS
+    })
+    missing: Counter = field(default_factory=Counter)
+    invalid: Counter = field(default_factory=Counter)
+
+    def observe(self, record: dict) -> None:
+        self.events += 1
+        for name in self.values:
+            if name not in record:
+                self.missing[name] += 1
+                continue
+            value = record[name]
+            valid_type = (type(value) in (int, float)
+                          if name in _RECONCILIATION_NUMBERS
+                          else type(value) is int)
+            if (not valid_type or not 0 <= value <= 1e9
+                    or not math.isfinite(value)):
+                self.invalid[name] += 1
+                continue
+            self.values[name].append(float(value))
+
+    def summary(self) -> dict:
+        return {
+            "events": self.events,
+            "metrics": {
+                name: {**_distribution(values),
+                       "missing": self.missing[name],
+                       "invalid": self.invalid[name]}
+                for name, values in self.values.items()
+            },
+        }
+
+
+def _observe(raw: bytes, groups: dict, profiles: _ReconciliationProfile,
+             counts: dict) -> None:
     try:
         record = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError, RecursionError):
@@ -134,6 +181,9 @@ def _observe(raw: bytes, groups: dict, counts: dict) -> None:
     if key not in groups:
         groups[key] = _Group()
     groups[key].observe(record)
+    if (origin == "server" and record["event"] == "delivery"
+            and record.get("phase") == "source_reconciliation"):
+        profiles.observe(record)
     counts["accepted_records"] += 1
 
 
@@ -161,6 +211,7 @@ def summarize(paths: Sequence[str | Path], *, max_bytes: int = MAX_INPUT_BYTES,
     errors = []
     stopped_by = None
     groups = {}
+    profiles = _ReconciliationProfile()
     for index, path in enumerate(paths):
         if counts["bytes_read"] == max_bytes or counts["lines_read"] == max_records:
             stopped_by = "max_bytes" if counts["bytes_read"] == max_bytes else "max_records"
@@ -212,7 +263,7 @@ def summarize(paths: Sequence[str | Path], *, max_bytes: int = MAX_INPUT_BYTES,
                     if not terminated:
                         counts["unterminated_lines"] += 1
                     if line_bytes <= MAX_LINE_BYTES:
-                        _observe(line, groups, counts)
+                        _observe(line, groups, profiles, counts)
                 if not remaining:
                     counts["files_completed"] += 1
         except (OSError, ValueError, TypeError):
@@ -227,7 +278,7 @@ def summarize(paths: Sequence[str | Path], *, max_bytes: int = MAX_INPUT_BYTES,
     for (category, *dimensions), group in sorted(groups.items()):
         series[category].append(group.summary(*dimensions))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "input": {"files_requested": len(paths), **counts, "errors": errors,
                   "stopped_by": stopped_by,
                   "complete": stopped_by is None and not errors,
@@ -235,6 +286,7 @@ def summarize(paths: Sequence[str | Path], *, max_bytes: int = MAX_INPUT_BYTES,
         "percentile_method": "nearest_rank",
         "notes": list(_NOTES),
         "series": series,
+        "source_reconciliation": profiles.summary(),
     }
 
 
