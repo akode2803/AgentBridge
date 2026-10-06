@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from agentbridge.mesh import local_input_runtime
-from agentbridge.store import overlay_index
+from agentbridge.store import overlay_index, staged_source
 from agentbridge.mesh.sealer import PlainSealer
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source
@@ -354,6 +354,23 @@ def test_stale_failure_cannot_retire_newer_publication(rig):
     assert recorded is False
     assert local_source.capture(mesh.store, reader.definition.source) == winner
     assert runtime.health(CHAT)["ready"]
+
+
+def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
+        rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    runtime.ingest(CHAT)
+    original = staged_source.begin
+
+    def mutate_then_begin(*args, **kwargs):
+        local_source.invalidate(mesh.store, runtime.reader(CHAT).definition.source)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(staged_source, 'begin', mutate_then_begin)
+    with pytest.raises(local_source.SourceChanged, match='collection_superseded'):
+        runtime.ingest(CHAT)
+    assert runtime.health(CHAT)['ready'] is False
 
 
 def test_request_run_due_failure_finishes_scheduler_lease(rig, monkeypatch):

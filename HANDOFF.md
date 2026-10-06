@@ -41,13 +41,11 @@ rows, and locked/forbidden results still retire immediately. The real self-chat
 held 50 through 216 messages during rapid upward paging without blanking.
 Focused Python, Node and Chromium coverage passes.
 
-PR51's first full CI run failed on both platforms at the same deterministic
-public-route boundary test: the new live-tail parameter also forwarded arbitrary
-legacy display metadata into canonical page mode selection. Head `e6940ba`
-accepts only the explicit `"first"` command and keeps other caller metadata out
-of acquisition. The exact route/paging checks and all 36 frontend modules pass
-locally; the automatically triggered replacement CI run is intentionally not
-being polled.
+PR51 merged as `d8697d2` after Linux and Windows CI passed. Its first full CI
+run had failed on both platforms at the same deterministic public-route boundary
+test: the new live-tail parameter also forwarded arbitrary legacy display
+metadata into canonical page mode selection. Head `e6940ba` accepts only the
+explicit `"first"` command and keeps other caller metadata out of acquisition.
 
 The same live run found and fixed a related paging edge: sending while viewing a
 frozen historical window left the durable message represented by its optimistic
@@ -60,7 +58,7 @@ weaken the current authority, source-generation or finalization fences.
 
 The first local-send latency correction is implemented on
 `codex/selected-send-admission` at app version `0.24.300`, stacked on the
-selected-transcript branch. After definite provider success, an ordinary message
+selected-transcript work now merged to main. After definite provider success, an ordinary message
 can re-admit the exact pre-write local snapshot only when the root/source CAS
 shows that the append's two retirements were the sole transitions and the Store
 row matches the appended envelope byte-for-byte. Provider failure, ambiguous
@@ -70,10 +68,16 @@ canonical requests still recompute authority. The path preserves the real
 last-successful-ingestion time, schedules full reconciliation, and records a
 sanitized append-completion/admission breadcrumb pair. The relevant checkpoint
 passed 354 Python tests with two expected skips, Ruff, diff checks and all 36
-frontend module checks. It remains undeployed, unrestarted and not live-measured.
+frontend module checks. PR52's first Linux run exposed a source-owner race after
+the new background reconciliation wake: a local mutation between collection
+claim and stage creation leaked internal `StageChanged`. The ingestion boundary
+now reports that exact lost CAS as retryable `SourceChanged`; a deterministic
+regression plus the 104-test focused GUI/local-input gate and Ruff pass locally.
+It remains undeployed, unrestarted and not live-measured.
 
-Next: review the complete stacked diff, land the transcript-stability dependency,
-then measure POST commit -> provider return -> local snapshot admission ->
-canonical DOM under normal diagnostics. If the remaining delay is in page
-preparation/render rather than admission, optimize that measured boundary rather
-than widening the exact local append exception.
+Next: land PR52 after replacement CI, then measure POST commit -> provider return
+-> local snapshot admission -> canonical DOM under normal diagnostics. Add stage
+boundary timings for full reconciliation before choosing between chat-scoped
+mirror indexing, precise changed-path evidence and direct selected-chat scheduling.
+If the remaining delay is in page preparation/render rather than admission,
+optimize that measured boundary rather than widening the exact local append exception.

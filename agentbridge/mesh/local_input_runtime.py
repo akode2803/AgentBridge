@@ -328,6 +328,15 @@ class LocalInputRuntime:
                     with self.coordinator.publication_gate(self.store, reader.definition):
                         local_source.record_failure(self.store, reader.definition.source,
                             reason='budget' if budget else 'unavailable', expected=expected)
+                if (isinstance(exc, staged_source.StageChanged)
+                        and exc.args == ('stage_owner_changed',)):
+                    # A local mutation may cross the narrow gap between the
+                    # source claim and creation of its invisible stage. That is
+                    # a routine lost source CAS, not a staging-format failure.
+                    # Keep the mutation's newer position and let the bounded
+                    # scheduler or foreground test driver collect it again.
+                    raise local_source.SourceChanged(
+                        'collection_superseded') from exc
                 raise
             finally:
                 if stage is not None:
