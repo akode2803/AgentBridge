@@ -109,6 +109,18 @@ after a send response. This observation does not establish source starvation;
 the remaining commit-to-render admission tail still needs a separate measured
 run under normal diagnostic sampling.
 
+The follow-up at app version `0.24.300` adds a bounded local send admission path.
+After a definite provider append, it may restore the exact previously ready
+source only when the coordinator revision shows no intervening transition and
+the optimistic SQLite row matches the appended envelope byte-for-byte. Failed or
+ambiguous provider writes, crashes and source races remain unavailable until full
+ingestion; info/authority events are excluded. The path preserves the actual
+last-successful-ingestion timestamp, queues complete reconciliation, and emits
+sanitized `local_append_completed` and `local_snapshot_admitted` breadcrumbs so
+a future live run can measure provider return through canonical DOM. Local
+deterministic coverage passes; live latency and independently owned peer
+acceptance remain outstanding.
+
 The synthetic room could not be deleted by its agent creator: the agent-side
 delete returned `PermissionDenied`, while Aryan was a non-admin. It remains as
 explicit cleanup/ownership evidence rather than being removed through a

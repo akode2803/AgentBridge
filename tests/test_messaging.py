@@ -103,6 +103,28 @@ def test_attachment_spool_is_cancelled_when_local_commit_fails(world, monkeypatc
     assert ann.messages_for(CHAT) == []
 
 
+def test_attachment_cleanup_failure_does_not_block_local_append_settlement(
+        world, monkeypatch):
+    ann = world['ann']
+    settled = []
+    ann.messaging.set_local_append_admitter(
+        lambda *_args: None,
+        lambda *_args: False,
+        lambda chat, record: settled.append((chat, record['id'])),
+    )
+
+    def failed_cleanup(_payload):
+        raise OSError('spool cleanup unavailable')
+
+    monkeypatch.setattr(ann.attachments, 'cleanup_payload', failed_cleanup)
+    hook = ann.messaging.outbox_success_hooks()['append_log']
+    with pytest.raises(OSError, match='spool cleanup unavailable'):
+        hook(f'{CHAT}|ann@mach1', {
+            'id': 'message-id', 'kind': 'message', 'from': 'ann', 'ns': 1,
+        })
+    assert settled == [(CHAT, 'message-id')]
+
+
 def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
         world, monkeypatch):
     ann, bob = world["ann"], world["bob"]

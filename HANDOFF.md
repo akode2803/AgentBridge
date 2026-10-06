@@ -41,6 +41,14 @@ rows, and locked/forbidden results still retire immediately. The real self-chat
 held 50 through 216 messages during rapid upward paging without blanking.
 Focused Python, Node and Chromium coverage passes.
 
+PR51's first full CI run failed on both platforms at the same deterministic
+public-route boundary test: the new live-tail parameter also forwarded arbitrary
+legacy display metadata into canonical page mode selection. Head `e6940ba`
+accepts only the explicit `"first"` command and keeps other caller metadata out
+of acquisition. The exact route/paging checks and all 36 frontend modules pass
+locally; the automatically triggered replacement CI run is intentionally not
+being polled.
+
 The same live run found and fixed a related paging edge: sending while viewing a
 frozen historical window left the durable message represented by its optimistic
 clock until the user selected “Jump to latest.” The composer now explicitly
@@ -49,3 +57,23 @@ reconciles the optimistic bubble. The next task is to measure and reduce the
 remaining commit-to-render admission tail under normal diagnostics, while
 keeping selected-chat progress independent of background sidebar work. Do not
 weaken the current authority, source-generation or finalization fences.
+
+The first local-send latency correction is implemented on
+`codex/selected-send-admission` at app version `0.24.300`, stacked on the
+selected-transcript branch. After definite provider success, an ordinary message
+can re-admit the exact pre-write local snapshot only when the root/source CAS
+shows that the append's two retirements were the sole transitions and the Store
+row matches the appended envelope byte-for-byte. Provider failure, ambiguous
+outcome, crash, pending writes or any concurrent transition leaves the source
+unavailable for complete ingestion. Info and authority events are excluded;
+canonical requests still recompute authority. The path preserves the real
+last-successful-ingestion time, schedules full reconciliation, and records a
+sanitized append-completion/admission breadcrumb pair. The relevant checkpoint
+passed 354 Python tests with two expected skips, Ruff, diff checks and all 36
+frontend module checks. It remains undeployed, unrestarted and not live-measured.
+
+Next: review the complete stacked diff, land the transcript-stability dependency,
+then measure POST commit -> provider return -> local snapshot admission ->
+canonical DOM under normal diagnostics. If the remaining delay is in page
+preparation/render rather than admission, optimize that measured boundary rather
+than widening the exact local append exception.

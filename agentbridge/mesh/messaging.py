@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from .. import crypto
+from ..core import delivery_trace
 from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from ..core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Message, MsgKind
 from ..core.latency import clock_id, sink_for_store
@@ -87,6 +88,9 @@ class MessagingService:
         self._flush_outbox = flush_outbox
         self._apply_terminal = lambda _chat_id: None
         self._reclaim_terminal = lambda _chat_id: None
+        self._prepare_local_append = lambda _chat_id, _record: None
+        self._admit_local_append = lambda _admission, _record: False
+        self._settle_local_append = lambda _chat_id, _record: False
         self.privacy = privacy
         self._sign_event = event_signer
         self.directory = directory
@@ -190,6 +194,14 @@ class MessagingService:
 
     def set_terminal_reclaimer(self, callback) -> None:
         self._reclaim_terminal = callback
+
+    def set_local_append_admitter(self, prepare, admit, settle) -> None:
+        """Wire the optional local-input fast path owned by the Mesh runtime."""
+        if not all(callable(item) for item in (prepare, admit, settle)):
+            raise TypeError('local append admission callbacks must be callable')
+        self._prepare_local_append = prepare
+        self._admit_local_append = admit
+        self._settle_local_append = settle
 
     def flush_outbox(self) -> int:
         return int(self._flush_outbox() or 0)
@@ -736,6 +748,7 @@ class MessagingService:
             if not isinstance(envelope, dict) or not envelope.get("id"):
                 raise ValidationError("malformed envelope payload")
             kind = envelope.get("kind", "message")
+            local_admission = None
             if kind == "message":
                 try:
                     self.require_send(chat_id, drain_before_terminal=True)
@@ -752,6 +765,10 @@ class MessagingService:
                             or not self._local_terminal_follows(target, envelope)):
                         raise ValidationError(
                             "chat is no longer sendable") from exc
+                try:
+                    local_admission = self._prepare_local_append(chat_id, envelope)
+                except Exception:  # noqa: BLE001 — optional speed path only
+                    local_admission = None
             elif kind == "info":
                 event = envelope.get("event") or {}
                 etype = event.get("type") if isinstance(event, dict) else ""
@@ -779,6 +796,16 @@ class MessagingService:
                 for manifest in self.attachments.manifests(payload):
                     self.attachments.upload(chat_id, manifest)
             self.tx.append_log(chat_id, log_name, envelope)
+            if kind == 'message':
+                delivery_trace.emit(
+                    'local_append_completed', chat=chat_id,
+                    message=envelope.get('id', ''), outcome='completed',
+                )
+            if local_admission is not None:
+                try:
+                    self._admit_local_append(local_admission, envelope)
+                except Exception:  # noqa: BLE001 — complete ingestion heals it
+                    pass
             if kind == "info" and etype in {EV_DELETED, EV_MEMBER_LEFT}:
                 if etype == EV_DELETED:
                     # Member RLS still sees the pre-terminal ACL here. Exact
@@ -807,10 +834,22 @@ class MessagingService:
         return False
 
     def outbox_success_hooks(self) -> dict:
-        if self.attachments is None:
-            return {}
-        return {OUTBOX_APPEND: lambda _target, payload:
-                self.attachments.cleanup_payload(payload)}
+        def append_succeeded(target, payload):
+            try:
+                if self.attachments is not None:
+                    self.attachments.cleanup_payload(payload)
+            finally:
+                envelope = (self.attachments.envelope(payload)
+                            if self.attachments is not None else payload)
+                chat_id, separator, _log_name = target.partition('|')
+                if (separator and isinstance(envelope, dict)
+                        and envelope.get('kind', 'message') == 'message'):
+                    try:
+                        self._settle_local_append(chat_id, envelope)
+                    except Exception:  # noqa: BLE001 — successful send stays sent
+                        pass
+
+        return {OUTBOX_APPEND: append_succeeded}
 
     def outbox_dead_hooks(self) -> dict:
         # The inspectable dead row retains its sealed retry source. Its bounded

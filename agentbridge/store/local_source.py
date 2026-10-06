@@ -6,15 +6,15 @@ and the current raw position. Any interrupted transition remains unavailable.
 """
 from __future__ import annotations
 
-from ..core.input_phase_timings import span
-from ..core import delivery_trace
-
+import json
 import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core import delivery_trace
+from ..core.input_phase_timings import span
 from . import document_observation as docs
 
 MAX = docs.MAX_SQLITE_INTEGER
@@ -297,6 +297,66 @@ def admit(store, expected, published, *, observed_ns, allow_unchanged=False):
         _advance(conn, expected.source_id, current.revision)
         conn.execute('UPDATE local_sources SET ready_incarnation=?,ready_generation=?,ready_cursor=?,last_success_ns=?,failures=0,error=\'\' WHERE source=?', (published.incarnation, published.generation, published.cursor, observed_ns, expected.source_id))
     return SourcePosition(published, current.epoch, current.revision + 1, True, 0, current.logical_source)
+
+
+def admit_confirmed_local_message(store, expected, chat_id, record):
+    """Re-admit one definitely appended local message without a remote rescan.
+
+    The caller must hold the mutation coordinator's publication gate after the
+    append intent completed. ``expected`` is the ready source captured before
+    that intent. Begin and completion each retire it once; any other source
+    transition makes the exact revision/raw CAS fail. The optimistic Store row
+    must still equal the sealed envelope byte-for-byte. This admits local raw
+    input only; readers continue to recompute authority and visibility.
+    """
+    expected = _expected(store, expected)
+    if not expected.ready or expected.writes_pending:
+        raise SourceChanged('local_append_source_not_ready')
+    if (type(chat_id) is not str or not chat_id or len(chat_id.encode()) > 4096
+            or type(record) is not dict or record.get('kind') != 'message'):
+        raise ValueError('invalid confirmed local message')
+    ident, ns, sender = record.get('id'), record.get('ns'), record.get('from')
+    if (type(ident) is not str or not ident or len(ident.encode()) > 4096
+            or type(ns) is not int or not 0 <= ns <= MAX
+            or type(sender) is not str or len(sender.encode()) > 4096):
+        raise ValueError('invalid confirmed local message')
+    payload = json.dumps(record, ensure_ascii=False)
+    payload_bytes = len(payload.encode())
+    if payload_bytes > 4 * 1024 * 1024:
+        raise OverflowError('confirmed local message budget')
+    if expected.revision > MAX - 3:
+        raise OverflowError('local source revision exhausted')
+    with _writer(store) as conn:
+        current = capture_in_transaction(conn, store, expected.source_id)
+        if (current.epoch != expected.epoch or current.raw != expected.raw
+                or current.revision != expected.revision + 2
+                or current.ready or current.writes_pending):
+            raise SourceChanged('local_append_source_changed')
+        shape = conn.execute(
+            'SELECT typeof(ns),typeof(sender),length(CAST(sender AS BLOB)),'
+            'typeof(kind),length(CAST(kind AS BLOB)),typeof(payload),'
+            'length(CAST(payload AS BLOB)) FROM messages WHERE chat_id=? AND id=?',
+            (chat_id, ident),
+        ).fetchone()
+        if shape != ('integer', 'text', len(sender.encode()), 'text', 7,
+                     'text', payload_bytes):
+            raise SourceChanged('local_append_message_changed')
+        exact = conn.execute(
+            'SELECT 1 FROM messages WHERE chat_id=? AND id=? AND ns=? '
+            'AND sender=? AND kind=? AND payload=?',
+            (chat_id, ident, ns, sender, 'message', payload),
+        ).fetchone()
+        if exact != (1,):
+            raise SourceChanged('local_append_message_changed')
+        _advance(conn, expected.source_id, current.revision)
+        conn.execute(
+            'UPDATE local_sources SET ready_incarnation=?,ready_generation=?,'
+            'ready_cursor=? WHERE source=?',
+            (current.raw.incarnation, current.raw.generation, current.raw.cursor,
+             expected.source_id),
+        )
+    return SourcePosition(current.raw, current.epoch, current.revision + 1,
+                          True, 0, current.logical_source)
 
 
 def record_failure(store, source, *, reason, expected=None):

@@ -204,6 +204,28 @@ def test_config_invalid_sampling_error_rate_and_disk_failure(tmp_path, monkeypat
     ) == {"ok": True}
 
 
+def test_local_snapshot_admission_is_retained_as_delivery_breadcrumb(tmp_path):
+    sink = Diagnostics(tmp_path)
+    assert sink.set_enabled(True, sample_rate=0)
+    trace.emit(
+        'local_append_completed', message='private-message',
+        chat='private-chat', outcome='completed',
+    )
+    trace.emit(
+        'local_snapshot_admitted', message='private-message',
+        chat='private-chat', outcome='completed',
+    )
+    result = rows(sink)
+    assert any(row.get('phase') == 'local_append_completed' for row in result)
+    admitted = next(
+        row for row in result if row.get('phase') == 'local_snapshot_admitted'
+    )
+    assert admitted['outcome'] == 'completed'
+    assert len(admitted['trace_ref']) == len(admitted['chat_ref']) == 16
+    assert 'private-message' not in sink.path.read_text()
+    assert 'private-chat' not in sink.path.read_text()
+
+
 def test_forged_correlation_clock_and_crash_breadcrumb(tmp_path):
     sink = Diagnostics(tmp_path)
     sink.set_enabled(True, sample_rate=0)

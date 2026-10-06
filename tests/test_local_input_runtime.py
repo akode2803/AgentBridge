@@ -219,6 +219,103 @@ def test_owned_write_invalidates_before_provider_call_and_failed_write_stays_pen
         assert conn.execute("SELECT count(*) FROM mutation_intents").fetchone() == (1,)
 
 
+def test_confirmed_local_message_reuses_ready_snapshot_before_full_reconciliation(
+        rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    provider.put_doc(META, {
+        'id': CHAT, 'kind': 'group',
+        'members': {'alice': {'role': 'admin'}},
+    })
+    assert runtime.ingest(CHAT)
+    before = runtime.inputs(CHAT)[1].source
+    before_health = runtime.health(CHAT)
+    env = mesh.post(CHAT, 'local append fast path')
+
+    # The optimistic row alone does not bypass invalidate-before-write. The
+    # definite provider return may restore only the exact ready source captured
+    # before that mutation; a complete collector remains queued afterward.
+    monkeypatch.setattr(runtime, 'ingest',
+                        lambda _chat: pytest.fail('success path performed full ingestion'))
+    assert mesh.outbox.flush_once() == 1
+    after = runtime.inputs(CHAT)[1].source
+    assert after.ready and after.raw == before.raw
+    assert after.revision == before.revision + 3
+    assert runtime.health(CHAT)['last_success_ns'] == before_health['last_success_ns']
+    assert runtime.schedule._states[CHAT].due > 0
+    assert provider.read_log(CHAT, 'alice@machine')[0][-1]['id'] == env.id
+    stored = mesh.store._conn().execute(
+        'SELECT state FROM local_send_status WHERE chat_id=? AND message_id=?',
+        (CHAT, env.id),
+    ).fetchone()
+    assert stored == ('sent',)
+
+
+def test_confirmed_local_message_does_not_admit_across_source_transition(rig):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    provider.put_doc(META, {
+        'id': CHAT, 'kind': 'group',
+        'members': {'alice': {'role': 'admin'}},
+    })
+    assert runtime.ingest(CHAT)
+    source_id = runtime.inputs(CHAT)[1].source.source_id
+    prepare = runtime.prepare_local_append
+    admit = runtime.admit_local_append
+
+    def transition_then_admit(admission, record):
+        local_source.invalidate(mesh.store, source_id)
+        return admit(admission, record)
+
+    mesh.messaging.set_local_append_admitter(
+        prepare, transition_then_admit, runtime.local_append_settled,
+    )
+    mesh.post(CHAT, 'local append loses its exact source CAS')
+    assert mesh.outbox.flush_once() == 1
+    assert not runtime.health(CHAT)['ready']
+    assert runtime.schedule._states[CHAT].due > 0
+
+
+def test_failed_provider_append_never_admits_local_snapshot(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    provider.put_doc(META, {
+        'id': CHAT, 'kind': 'group',
+        'members': {'alice': {'role': 'admin'}},
+    })
+    assert runtime.ingest(CHAT)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError('provider append unavailable')
+
+    monkeypatch.setattr(provider, 'append_log', unavailable)
+    mesh.post(CHAT, 'provider failure keeps source unavailable')
+    assert mesh.outbox.flush_once() == 0
+    assert not runtime.health(CHAT)['ready']
+    with runtime.coordinator._transaction() as conn:
+        assert conn.execute(
+            'SELECT count(*) FROM mutation_intents'
+        ).fetchone() == (1,)
+
+
+def test_local_append_settlement_always_queues_full_reconciliation(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    queued = []
+
+    def failed_page(_chat):
+        raise RuntimeError('page preparation unavailable')
+
+    monkeypatch.setattr(runtime, 'request_page', failed_page)
+    monkeypatch.setattr(
+        runtime, 'request',
+        lambda chat, **kwargs: queued.append((chat, kwargs)) or True,
+    )
+    with pytest.raises(RuntimeError, match='page preparation unavailable'):
+        runtime.local_append_settled(CHAT, {'kind': 'message'})
+    assert queued == [(CHAT, {'activity': True})]
+
+
 def test_unsafe_collection_retires_readiness_and_persists_bounded_health(rig):
     mesh, provider = rig
     runtime = mesh.local_inputs
