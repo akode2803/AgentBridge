@@ -1074,9 +1074,13 @@ function agentPermissionEntry(meta, presentation) {
 }
 
 // Public selected-chat refreshes always acquire a canonical bounded page.
-async function renderMeshChat(force) {
+async function renderMeshChat(force, kind = null) {
   if (!Mesh.chatId) return;
-  return renderPagedChat(force);
+  // This public seam previously accepted display metadata. Only the explicit
+  // live-tail action is an acquisition command; arbitrary caller objects must
+  // not flow into the page owner's mode selection.
+  return kind === "first" ? renderPagedChat(force, "first")
+    : renderPagedChat(force);
 }
 
 // Acquired data only. No implicit transcript/livefeed/runtime_tasks acquisition.
@@ -1575,8 +1579,9 @@ async function paintMeshChat(force, openTrace, prepared) {
   // the whole header opens chat info — except the ⋮ corner and its menu
   const menu = $("#chat-menu");
   $("#chat-top").addEventListener("click", (e) => {
-    if (e.target.closest("#chat-more") || e.target.closest("#chat-menu")
-        || e.target.closest("#chat-back")) return;
+    const target = e.target;
+    if (target?.closest?.("#chat-more") || target?.closest?.("#chat-menu")
+        || target?.closest?.("#chat-back")) return;
     location.hash = `#/chats/${chatId}/details`;
   });
   $("#chat-back").addEventListener("click", () => { location.hash = "#/chats"; });
@@ -1603,7 +1608,8 @@ async function paintMeshChat(force, openTrace, prepared) {
   syncPinBanner(chatId, pins);
   document.addEventListener("click", function away(e) {
     if (!menu) { document.removeEventListener("click", away); return; }
-    if (!e.target.closest("#chat-more") && !e.target.closest("#chat-menu")) {
+    const target = e.target;
+    if (!target?.closest?.("#chat-more") && !target?.closest?.("#chat-menu")) {
       if (!menu.isConnected) { document.removeEventListener("click", away); return; }
       menu.hidden = true;
     }

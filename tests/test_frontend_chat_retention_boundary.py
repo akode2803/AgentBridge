@@ -30,7 +30,7 @@ const page = (rows, cursor, version='v1', extras={}) => ({
   read_ns:0,read_cutoff_ns:cutoff,read_ack_token:'a'.repeat(64),
   window_anchor:`anchor-${cursor}`,frozen_window_anchor:`frozen-${rows.at(-1)}`,
   continuation:cursor,has_more:cursor!==null,history_exhausted:cursor===null,
-  scan_budget_exhausted:false,...extras,
+  scan_budget_exhausted:false,raw_examined:rows.length,...extras,
 });
 const queue=[], calls=[];
 const reader=createChatPageRead({pageSize:200,fetchPage:request=>{

@@ -35,9 +35,11 @@ def _page(ids, cursor, version='v1', **extras):
         'meta': {'id': 'room'}, 'me': 'alice', 'starred': [],
         'metadata_status': {'receipts': 'ready'}, 'read_ns': 0,
         'read_cutoff_ns': CUTOFF, 'read_ack_token': 'a' * 64,
-        'window_anchor': f'anchor-{cursor}', 'frozen_window_anchor': f'frozen-{ids[-1]}',
+        'window_anchor': f'anchor-{cursor}',
+        'frozen_window_anchor': f'frozen-{ids[-1] if ids else "empty"}',
         'continuation': cursor, 'has_more': cursor is not None,
-        'history_exhausted': cursor is None, 'scan_budget_exhausted': False, **extras,
+        'history_exhausted': cursor is None, 'scan_budget_exhausted': False,
+        'raw_examined': len(ids), **extras,
     }
 
 
@@ -306,12 +308,31 @@ def test_real_chromium_600_boundary_anchor_resources_refresh_and_painted_ack(ret
         'chat_id': 'room', 'page_version': 'v3', 'read_ack_token': 'e' * 64}]
     assert rig.acknowledgments[-1] == state['ackBodies'][0]
     assert state['unread'] == 7 and state['forced'] is True
+
+    # An impossible completed zero-raw replacement keeps the admitted DOM.
+    # A later canonical page replaces it; a true visibility cut with examined
+    # raw rows is still allowed to empty it.
+    rig.responses.append(_page([], None, 'v4', raw_examined=0))
+    page.evaluate('fixture.render("first")')
+    retained = page.evaluate('fixture.snapshot()')
+    assert retained['ids'] == ['latest']
+    assert retained['snapshotIds'] == []
+    state = _render(rig, 'first', _page(['latest', 'new'], None, 'v5'))
+    assert state['ids'] == ['latest', 'new']
+    state = _render(rig, 'first', _page([], None, 'v6', raw_examined=2))
+    assert state['ids'] == []
+
+    # Refill once before checking that an unpainted response cannot publish
+    # its read token or replace the retained transcript.
+    state = _render(rig, 'first', _page(['latest'], None, 'v7',
+                    read_ack_token='e' * 64,
+                    read_cutoff_ns='9007199254740994111'))
     page.evaluate('fixture.rejectPaint()')
-    rig.responses.append(_page(['unpainted'], None, 'v4', read_ack_token='f' * 64))
+    rig.responses.append(_page(['unpainted'], None, 'v8', read_ack_token='f' * 64))
     page.evaluate('fixture.render("first")')
     state = page.evaluate('fixture.snapshot()')
     assert state['ids'] == ['latest']
-    assert state['token'] == 'e' * 64 and state['version'] == 'v3'
+    assert state['token'] == 'e' * 64 and state['version'] == 'v7'
     page.evaluate('fixture.retire();fixture.markAtBottom()')
     assert page.evaluate('fixture.snapshot().ackBodies') == state['ackBodies']
     assert rig.responses == [] and errors == []

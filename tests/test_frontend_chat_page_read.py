@@ -27,7 +27,8 @@ const page = (ids, version = 'v1', cursor = 'next', starred = [], extras = {}) =
   status:'page', chat_id:'room', session_binding:binding(), page_version:version,
   window_anchor:`anchor-${cursor ?? 'tail'}`, continuation:cursor,
   has_more:cursor !== null, history_exhausted:cursor === null,
-  scan_budget_exhausted:false, messages:ids.map(id => ({id, body:id, receipt:{status:'read'}})),
+  scan_budget_exhausted:false, raw_examined:ids.length,
+  messages:ids.map(id => ({id, body:id, receipt:{status:'read'}})),
   starred, starred_scope:'page', meta:{id:'room',pins:[{id:'p1'}]}, me:'alice',
   read_ns:17, read_cutoff_ns:'1790000000000000001', metadata_status:{pins:'ready',receipts:'ready'}, ...extras,
 });
@@ -146,6 +147,29 @@ assert.equal(result.status,'unavailable');
 assert.equal(result.reason,'page_metadata_invalid');
 assert.deepEqual(result.evictedIds,['fresh']);
 assert.deepEqual(ids(reader.snapshot()),[]);
+
+const stableQueue = [];
+const stable = createChatPageRead({fetchPage: () => stableQueue.shift(),
+  maxPages:2,maxMessages:4,maxBytes:2000});
+stable.reset(binding(), 'room', 1);
+stableQueue.push(page(['visible'],'v1',null));
+await stable.read('first');
+stableQueue.push(page([],'v2',null,[],{raw_examined:0}));
+result = await stable.read('first');
+assert.equal(result.status,'pending');
+assert.equal(result.reason,'empty_raw_transition');
+assert.deepEqual(result.evictedIds,['visible']);
+assert.notEqual(stable.refreshPlan(),null);
+stableQueue.push(page(['visible','new'],'v3',null));
+result = await stable.read('first');
+assert.deepEqual(ids(result),['visible','new']);
+
+// A real visibility cut still examines raw rows, so it may canonically empty
+// the transcript without being mistaken for incomplete local admission.
+stableQueue.push(page([],'v4',null,[],{raw_examined:2}));
+result = await stable.read('first');
+assert.equal(result.status,'page');
+assert.deepEqual(ids(result),[]);
 
 const filteredQueue = [];
 const filtered = createChatPageRead({fetchPage: () => filteredQueue.shift(),

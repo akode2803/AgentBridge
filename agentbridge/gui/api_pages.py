@@ -135,6 +135,11 @@ def chat_page(app, req, mesh, token):
             'read_cutoff_ns': str(read_cutoff(selected)),
             'has_more': selected.has_more, 'history_exhausted': selected.history_exhausted,
             'scan_budget_exhausted': selected.scan_budget_exhausted,
+            # Lets the browser distinguish a legitimate all-filtered window
+            # (clear/hide/history-on-join still examines raw rows) from an
+            # impossible empty replacement of an already visible append-only
+            # transcript. This is bounded selection evidence, not authority.
+            'raw_examined': selected.raw_examined,
             'continuation': app.page_cursors.issue(token, chat, selected),
             'window_anchor': app.page_cursors.issue_anchor(token, chat, selected, before),
             'frozen_window_anchor': (app.page_cursors.issue_anchor(

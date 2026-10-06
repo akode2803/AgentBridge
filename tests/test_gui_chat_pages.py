@@ -77,6 +77,7 @@ def test_first_page_and_opaque_continuation_with_deferred_metadata(page_app):
     first = _settled_page(app, chat, limit='2')
     assert first['status'] == 'page', first
     assert len(first['messages']) == 2
+    assert first['raw_examined'] == 2
     assert first['has_more'] and len(first['continuation']) == 64
     assert first['chat_id'] == chat and len(first['page_version']) == 64
     assert first['metadata_status']['pins'] == 'ready'

@@ -30,15 +30,22 @@ Broadcast hints within the existing four-per-second cap, and bounds active
 failure recovery at one second. The next task is startup ownership and cached
 sidebar paint.
 
-The cached-sidebar startup implementation is on
-`codex/cached-sidebar-startup` at app version `0.24.298`. `/api/mesh/state`
-now serves bounded last-finalized presentations from the local SQLite Store;
-two session-fenced browser jobs reconcile rooms independently through the
-existing canonical page operation and progressively replace those rows.
-Realtime chat hints prioritize one room and content-free global hints request a
-bounded all-room pass. Settings uses the same quick state without waiting for
-all-room projection. Cached rows never authorize an action, and a session
-change clears all in-memory work positioning. Focused GUI/sidebar/frontend
-coverage passes; the next release step is the full offline suite, then rebase
-onto the transport-audit merge and open the stacked PR. After that, stabilize
-selected transcripts so no accepted update can blank the existing page.
+Cached-sidebar startup shipped in PR50 at app version `0.24.298` and passed
+Linux/Windows CI. The selected-transcript stability follow-up is on
+`codex/stable-selected-transcript` at `0.24.299`. Canonical pages now expose the
+bounded raw-row count already computed by selection. A terminal zero-row,
+zero-raw replacement cannot retire an admitted nonempty append-only transcript;
+the browser discards its page state and retries from a fresh cut while retaining
+the DOM as presentation. Legitimate visibility changes still scan their raw
+rows, and locked/forbidden results still retire immediately. The real self-chat
+held 50 through 216 messages during rapid upward paging without blanking.
+Focused Python, Node and Chromium coverage passes.
+
+The same live run found and fixed a related paging edge: sending while viewing a
+frozen historical window left the durable message represented by its optimistic
+clock until the user selected “Jump to latest.” The composer now explicitly
+returns to the live tail after a send response, where the canonical row
+reconciles the optimistic bubble. The next task is to measure and reduce the
+remaining commit-to-render admission tail under normal diagnostics, while
+keeping selected-chat progress independent of background sidebar work. Do not
+weaken the current authority, source-generation or finalization fences.
