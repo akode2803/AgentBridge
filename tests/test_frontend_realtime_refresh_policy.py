@@ -224,7 +224,7 @@ const clearTimeout=id=>timers.delete(id);
 const listeners=new Map();
 const document={addEventListener:(name,fn)=>listeners.set(name,fn)};
 const Mesh={state:{user:'viewer'}};
-const applied=[];let refreshCalls=[],stateComplete=true,gates=[];
+const applied=[];let refreshCalls=[],stateComplete=true,rejectState=false,gates=[];
 const captureSessionEpoch=()=>({epoch});
 const sessionMayApply=ticket=>ticket.epoch===epoch;
 const meshStateSnapshot=()=>({locked,lockEpoch});
@@ -232,7 +232,10 @@ const captureMeshStateRead=()=>({});
 const applyMeshState=(_ticket,fresh)=>{applied.push(fresh);return true};
 const renderSidebar=()=>{};
 const api=async(route,body)=>{
- if(route==='/api/mesh/state')return {chats_complete:stateComplete};
+ if(route==='/api/mesh/state'){
+  if(rejectState)throw Error('offline');
+  return {chats_complete:stateComplete};
+ }
  refreshCalls.push(body);
  if(refreshCalls.length<=2)return new Promise(resolve=>gates.push(resolve));
  return {status:'ready',has_more:false,changed:false};
@@ -249,11 +252,13 @@ const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
 const first=reconcileSidebar('a',true);await flush();
 assert.equal(refreshCalls.length,2);
 const joined=reconcileSidebar('b',true);assert.ok(joined instanceof Promise);
-assert.equal(refreshCalls.length,2,'active hint is owned by one follow-up');
+assert.equal(refreshCalls.length,2,'active hint is owned by the active reconciliation');
 for(const resolve of gates)resolve({status:'ready',has_more:true,changed:false});
 await first;await flush();await flush();
 assert.equal(refreshCalls.filter(body=>body?.refresh_all===true).length,2,
- 'one initial global pass and one follow-up pass');
+ 'one initial global pass and one active nudge');
+assert.ok(refreshCalls.some(body=>body?.chat_id==='b'),
+ 'a room hint jumps ahead during the active reconciliation');
 
 resetSidebarReconcile();refreshCalls=[];gates=[];stateComplete=false;timers.clear();
 const retry=reconcileSidebar();await flush();
@@ -261,6 +266,13 @@ for(const resolve of gates)resolve({status:'ready',has_more:false,changed:false}
 await retry;await flush();
 assert.ok([...timers.values()].some(timer=>timer.ms===2000),
  'an incomplete final cache read schedules another bounded pass');
+
+resetSidebarReconcile();refreshCalls=[];gates=[];stateComplete=true;rejectState=true;timers.clear();
+const rejected=reconcileSidebar();await flush();
+for(const resolve of gates)resolve({status:'ready',has_more:false,changed:false});
+await rejected;await flush();
+assert.ok([...timers.values()].some(timer=>timer.ms===2000),
+ 'a failed final cache read settles and schedules another bounded pass');
 '''.replace('__SOURCE__', json.dumps(section)))
 
 

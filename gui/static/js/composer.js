@@ -289,6 +289,7 @@ export function initComposer(chatId, members, context = Mesh.state) {
         const r = await api("/api/mesh/edit_message",
           { chat_id: chatId, msg_id: editing.id, body: newBody });
         if (r.error) { toast(r.error, true); return; }
+        void V.refreshSidebarCache?.(chatId);
       }
       cancelEdit(chatId, context);   // restores the interrupted draft + send icon
       playSendBlip();   // V89: saving an edit is a send — same chirp
@@ -309,6 +310,11 @@ export function initComposer(chatId, members, context = Mesh.state) {
         chat_id: chatId, body: send.body, client_ref: send.ref,
         attachments: send.attachments.map(a => a.token), reply_to: send.reply,
       }, {timeoutMs: 60000});
+      const snapshot = meshStateSnapshot();
+      if (!r.error && r.id && sessionMayApply(send.session)
+          && snapshot.lockEpoch === send.lockEpoch && !snapshot.locked) {
+        void V.refreshSidebarCache?.(chatId);
+      }
       if (!sendMayApply(send)) return; // canonical read may already have settled it
       if (r.error || !r.id) {
         failSend(send, r.error || "No message acknowledgement received");

@@ -78,6 +78,23 @@ def test_sidebar_cache_survives_store_reopen(tmp_path):
         reopened.close()
 
 
+def test_sidebar_cache_prunes_stale_row_before_enforcing_budget(tmp_path):
+    store = Store(tmp_path / "cache.sqlite")
+    allowed = frozenset(f"room-{n:03d}" for n in range(sidebar_cache.MAX_ROWS))
+    try:
+        with store._conn() as conn:
+            conn.executemany(
+                "INSERT INTO sidebar_presentations(viewer,chat_id,payload,updated_ns) "
+                "VALUES(?,?,?,?)",
+                (("alice", chat, f'{{"id":"{chat}"}}', n)
+                 for n, chat in enumerate((*allowed, "stale-room"))),
+            )
+        assert store.prune_sidebar("alice", allowed) == 1
+        assert {row["id"] for row in store.cached_sidebar("alice")} == allowed
+    finally:
+        store.close()
+
+
 def test_sidebar_refresh_queue_is_session_bound_and_caps_parallel_claims():
     queue = SidebarRefreshQueue()
     token = SessionReadToken("app", 1, object())
@@ -114,6 +131,25 @@ def test_sidebar_refresh_queue_is_session_bound_and_caps_parallel_claims():
     replacement = SessionReadToken("app", 2, object())
     assert queue.claim(replacement) is None
     assert queue.status(replacement)["complete"] is False
+
+
+def test_sidebar_refresh_priority_does_not_claim_an_unrelated_room():
+    queue = SidebarRefreshQueue()
+    token = SessionReadToken("app", 1, object())
+    queue.request_inventory(token, ["a", "b"])
+    assert queue.claim(token, preferred="missing") is None
+    assert queue.status(token)["pending"] == 2
+    assert queue.claim(token, preferred="b") == "b"
+
+
+def test_sidebar_removal_evidence_is_bounded():
+    queue = SidebarRefreshQueue()
+    token = SessionReadToken("app", 1, object())
+    queue.request_inventory(token, ["initial"])
+    for n in range(200):
+        queue.request_inventory(token, [f"room-{n}"])
+    removed = queue.status(token)["removed"]
+    assert len(removed) == 128
 
 
 def test_removed_inflight_claims_still_count_toward_parallel_cap():

@@ -129,15 +129,21 @@ def prune(conn: sqlite3.Connection, viewer: str, allowed_ids: frozenset[str]) ->
             or any(_identity(chat, "chat") != chat for chat in allowed_ids)):
         raise ValueError("invalid sidebar inventory")
     with conn:
-        existing = [row[0] for row in conn.execute(
+        if allowed_ids:
+            placeholders = ",".join("?" for _ in allowed_ids)
+            removed = conn.execute(
+                "DELETE FROM sidebar_presentations WHERE viewer=? "
+                f"AND chat_id NOT IN ({placeholders})",
+                (viewer, *allowed_ids),
+            ).rowcount
+        else:
+            removed = conn.execute(
+                "DELETE FROM sidebar_presentations WHERE viewer=?", (viewer,)
+            ).rowcount
+        remaining = conn.execute(
             "SELECT chat_id FROM sidebar_presentations WHERE viewer=? LIMIT ?",
             (viewer, MAX_ROWS + 1),
-        )]
-        if len(existing) > MAX_ROWS:
+        ).fetchall()
+        if len(remaining) > MAX_ROWS:
             raise SidebarCacheUnavailable("sidebar cache row budget")
-        stale = [chat for chat in existing if chat not in allowed_ids]
-        conn.executemany(
-            "DELETE FROM sidebar_presentations WHERE viewer=? AND chat_id=?",
-            ((viewer, chat) for chat in stale),
-        )
-    return len(stale)
+    return removed

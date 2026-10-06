@@ -160,6 +160,23 @@ def test_sidebar_publication_failure_requeues_canonical_result(world, monkeypatc
     assert status['running'] == 0 and status['pending'] >= 1
 
 
+def test_sidebar_projection_failure_releases_and_requeues_claim(world, monkeypatch):
+    from agentbridge.gui import api_sidebar_pages
+
+    app, chat, _encrypted = world
+    _ready(app, chat)
+    api_chats.state(app, Request())
+    token = app.capture_session_read()
+    app.sidebar_refresh.request_chat(token, chat)
+    monkeypatch.setattr(api_sidebar_pages, '_room',
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError('boom')))
+    with pytest.raises(RuntimeError, match='boom'):
+        api_chats.refresh_sidebar(
+            app, Request(method='POST', data={'chat_id': chat}))
+    status = app.sidebar_refresh.status(token)
+    assert status['running'] == 0 and status['pending'] >= 1
+
+
 def test_forged_viewer_state_cannot_set_sidebar_flags(world):
     app, chat, encrypted = world
     if not encrypted:

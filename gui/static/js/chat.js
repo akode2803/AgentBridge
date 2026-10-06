@@ -752,8 +752,13 @@ async function acceptCachedSidebar(owner) {
   if (owner.cancelled || !sessionMayApply(owner.ticket)
       || meshStateSnapshot().locked) return false;
   const request = captureMeshStateRead(owner.ticket);
-  const fresh = await api("/api/mesh/state", undefined,
-    {sideEffects:false, timeoutMs:15000});
+  let fresh;
+  try {
+    fresh = await api("/api/mesh/state", undefined,
+      {sideEffects:false, timeoutMs:15000});
+  } catch {
+    return false;
+  }
   if (owner.cancelled || !sessionMayApply(owner.ticket) || fresh?.error
       || !applyMeshState(owner.ticket, fresh, request)) return false;
   renderSidebar();
@@ -765,18 +770,32 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
   clearTimeout(sidebarReconcileTimer);
   sidebarReconcileTimer = null;
   if (sidebarReconcileOwner && !sidebarReconcileOwner.cancelled) {
+    let nudged = false;
     if (preferred) {
-      sidebarReconcileOwner.followupChats.add(preferred);
-      if (sidebarReconcileOwner.followupChats.size > 1) {
-        sidebarReconcileOwner.followupAll = true;
+      if (!sidebarReconcileOwner.preferred
+          || sidebarReconcileOwner.preferred === preferred) {
+        sidebarReconcileOwner.preferred = preferred;
+        nudged = true;
+      } else {
+        sidebarReconcileOwner.followupChats.add(preferred);
+        if (sidebarReconcileOwner.followupChats.size > 1) {
+          sidebarReconcileOwner.followupAll = true;
+        }
       }
     }
-    if (refreshAll) sidebarReconcileOwner.followupAll = true;
+    if (refreshAll) {
+      sidebarReconcileOwner.refreshAll = true;
+      nudged = true;
+    }
+    if (nudged) {
+      sidebarReconcileOwner.hasMore = true;
+      sidebarReconcileOwner.hintSeq += 1;
+    }
     return sidebarReconcileOwner.promise;
   }
   const owner = {ticket:captureSessionEpoch(), preferred, cancelled:false,
     refreshAll, followupChats:new Set(), followupAll:false, changed:false, hasMore:true,
-    attempts:0, promise:null};
+    attempts:0, hintSeq:0, promise:null};
   sidebarReconcileOwner = owner;
   const current = () => !owner.cancelled && sidebarReconcileOwner === owner
     && sessionMayApply(owner.ticket) && !meshStateSnapshot().locked;
@@ -785,6 +804,7 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
       owner.attempts += 1;
       const chatId = owner.preferred;
       const all = owner.refreshAll;
+      const hintSeq = owner.hintSeq;
       owner.preferred = "";
       owner.refreshAll = false;
       let result;
@@ -795,7 +815,8 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
       } catch { return; }
       if (!current() || result?.error) return;
       owner.changed ||= result.changed === true;
-      owner.hasMore = result.has_more === true;
+      owner.hasMore = owner.hintSeq !== hintSeq || result.has_more === true;
+      if (chatId && result.status === "busy") owner.preferred = chatId;
       if (result.changed === true) await acceptCachedSidebar(owner);
       if (result.status === "pending" || result.status === "busy") {
         await sleep(Math.max(100, Number(result.retry_after_ms) || 350));
@@ -2456,6 +2477,7 @@ function openMsgMenu(rect, msg, chatId, ctx) {
       const r = await api("/api/mesh/restore_message",
                           { chat_id: chatId, msg_id: msg.id });
       if (r.error) { toast(r.error, true); return; }
+      void V.refreshSidebarCache?.(chatId);
       toast("Message restored for everyone", { check: true });
       refreshChat();
     } else if (act === "reply") {
@@ -3040,6 +3062,7 @@ async function deleteForEveryone(chatId, ids) {
   const ticket = await requestMessageDeletion(chatId, ids, "everyone");
   if (!ticket || !sessionMayApply(ticket)) return;
   if (Mesh.chatId === chatId) exitSelect();
+  void V.refreshSidebarCache?.(chatId);
   refreshChat();
   toast(`${ids.length} message${ids.length === 1 ? "" : "s"} deleted for everyone`, { check: true });
 }
@@ -3050,6 +3073,7 @@ async function deleteForMe(chatId, ids) {
   exitSelect();
   const ticket = await requestMessageDeletion(chatId, ids, "me");
   if (!ticket || !sessionMayApply(ticket)) return;
+  void V.refreshSidebarCache?.(chatId);
   refreshChat();
   toast(`${n} message${n === 1 ? "" : "s"} deleted for me`, {
     icon: ICONS.trash, action: "Undo",
@@ -3059,6 +3083,7 @@ async function deleteForMe(chatId, ids) {
         const r = await api("/api/mesh/undelete_messages", { chat_id: chatId, ids });
         if (!sessionMayApply(ticket)) return;
         if (r.error) { toast(r.error, true); return; }
+        void V.refreshSidebarCache?.(chatId);
         refreshChat();
       } catch {
         if (sessionMayApply(ticket)) toast("Could not undo deletion. Please try again.", true);
@@ -3071,6 +3096,7 @@ async function deleteForMe(chatId, ids) {
 async function hideSilently(chatId, ids) {
   const ticket = await requestMessageDeletion(chatId, ids, "me");
   if (!ticket || !sessionMayApply(ticket)) return;
+  void V.refreshSidebarCache?.(chatId);
   refreshChat();
   toast(`${ids.length} message${ids.length === 1 ? "" : "s"} deleted for me`, { check: true });
 }

@@ -215,7 +215,8 @@ def capture_sidebar(app, mesh, token):
                              'ready' if progress['complete'] else 'rooms_pending')
     if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
         out.update(users={}, chats=[], chats_complete=False, users_complete=False,
-                   user_status='response_byte_budget', sidebar_status='response_byte_budget')
+                   chats_removed=[], user_status='response_byte_budget',
+                   sidebar_status='response_byte_budget')
     return out
 
 
@@ -230,7 +231,8 @@ def refresh_sidebar(app, req, mesh, token):
     if preferred:
         try:
             preferred = _part(preferred)
-            app.sidebar_refresh.request_chat(token, preferred)
+            if not app.sidebar_refresh.request_chat(token, preferred):
+                preferred = ''
         except ValueError:
             preferred = ''
     chat = app.sidebar_refresh.claim(token, preferred=preferred)
@@ -242,10 +244,9 @@ def refresh_sidebar(app, req, mesh, token):
                 'retry_after_ms': 100,
                 'session_binding': session_read_binding(token)}
     started = time.perf_counter()
-    row, resolved = _room(app, mesh, token, chat)
-    changed = False
-    published = False
+    row, resolved, changed, published = None, False, False, False
     try:
+        row, resolved = _room(app, mesh, token, chat)
         if resolved and app.validate_session_read(token):
             changed = mesh.store.publish_sidebar(
                 mesh.user, chat, row, updated_ns=time.time_ns())
