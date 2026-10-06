@@ -69,6 +69,16 @@ def test_rotation_thread_safety_and_bounded_settings_read(tmp_path, monkeypatch)
     assert Diagnostics(tmp_path).enabled is False
 
 
+def test_sidebar_refresh_has_its_own_diagnostic_route(tmp_path):
+    recorder = Diagnostics(tmp_path)
+    assert recorder.set_enabled(True, sample_rate=1)
+    recorder.stage('/api/mesh/sidebar_refresh', 'private-chat',
+                   'sidebar', 'ready', rows=1)
+    row = _rows(recorder)[0]
+    assert row['route'] == '/api/mesh/sidebar_refresh'
+    assert row['phase'] == 'sidebar' and row['status'] == 'ready'
+
+
 def test_missing_fchmod_and_log_failure_never_break_dispatch(tmp_path, monkeypatch):
     recorder = Diagnostics(tmp_path)
     assert recorder.set_enabled(True, sample_rate=1)

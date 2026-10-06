@@ -114,3 +114,21 @@ def test_sidebar_refresh_queue_is_session_bound_and_caps_parallel_claims():
     replacement = SessionReadToken("app", 2, object())
     assert queue.claim(replacement) is None
     assert queue.status(replacement)["complete"] is False
+
+
+def test_removed_inflight_claims_still_count_toward_parallel_cap():
+    queue = SidebarRefreshQueue()
+    token = SessionReadToken("app", 1, object())
+    queue.request_inventory(token, ["a", "b", "c"])
+    first = queue.claim(token)
+    second = queue.claim(token)
+    assert {first, second} == {"a", "b"}
+
+    queue.request_inventory(token, ["c"])
+    assert queue.claim(token) is None
+    assert queue.status(token)["running"] == 2
+
+    queue.finish(token, first, resolved=True)
+    assert queue.claim(token) == "c"
+    queue.finish(token, second, resolved=False)
+    assert queue.status(token)["running"] == 1

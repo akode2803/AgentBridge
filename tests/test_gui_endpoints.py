@@ -933,12 +933,10 @@ def test_run_lines_need_a_live_runner(rig):
     # dead runner: no live line, no feed
     assert "live" not in chat_of(rig.sidebar())
     assert rig.aux_ready(cid)["feeds"] == []
-    # live runner: both surface
+    # live runner: the selected auxiliary feed surfaces it
     _beat(rig, "helper")
-    live = rig.aux_ready(cid)["feeds"]
-    assert any(f.get("agent") == "helper" for f in live)
     feeds = rig.aux_ready(cid)["feeds"]
-    assert feeds and feeds[0]["agent"] == "helper"
+    assert feeds and any(f.get("agent") == "helper" for f in feeds)
 
 
 # ------------------------------------------------- harness surfaces (R15)

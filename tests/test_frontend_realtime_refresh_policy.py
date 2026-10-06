@@ -153,27 +153,34 @@ def test_scoped_router_avoids_off_room_transcript_and_keeps_new_directory(tmp_pa
 import assert from 'node:assert/strict';
 const App={page:'chats'},Mesh={state:{user:'me'},chatId:'selected'};
 const meshStateSnapshot=()=>({locked:false}),meshCaps=()=>({chat_page_v1:true});
-let pages=0,sidebars=0,aux=0,broad=0,cached=0;
-const V={refresh:async()=>{broad++},refreshSidebarCache:async()=>{cached++}};
+let pages=0,sidebars=[],aux=0,broad=0,cached=[];
+const V={refresh:async()=>{broad++},refreshSidebarCache:async(...args)=>{cached.push(args)}};
 const renderPagedChat=async(_force,_kind,options)=>{
  assert.equal(options.sidebar,false);assert.equal(options.realtime,true);pages++;
 };
-const refreshRealtimeSidebar=async()=>{sidebars++};
+const refreshRealtimeSidebar=async(...args)=>{sidebars.push(args)};
 const refreshRealtimeAux=async()=>{aux++};
 ''' + router + r'''
 await V.refreshRealtime([{type:'message',chat_id:'other'}]);
-assert.deepEqual([pages,sidebars,aux,broad],[0,1,0,0]);
+assert.deepEqual([pages,sidebars.length,aux,broad],[0,1,0,0]);
+assert.deepEqual(sidebars.at(-1),['other',false]);
 await V.refreshRealtime([{type:'message',chat_id:'selected'}]);
-assert.deepEqual([pages,sidebars,aux,broad],[1,2,0,0]);
+assert.deepEqual([pages,sidebars.length,aux,broad],[1,2,0,0]);
 await V.refreshRealtime([{type:'read_model',scope:'aux',chat_id:''}]);
-assert.deepEqual([pages,sidebars,aux,broad],[1,2,1,0]);
+assert.deepEqual([pages,sidebars.length,aux,broad],[1,2,1,0]);
 await V.refreshRealtime([{type:'read_model',scope:'sidebar',chat_id:'other'}]);
-assert.deepEqual([pages,sidebars,aux,broad],[1,3,1,0]);
-App.page='new';await V.refreshRealtime([{type:'read_model',scope:'sidebar'}]);
+assert.deepEqual([pages,sidebars.length,aux,broad],[1,3,1,0]);
+await V.refreshRealtime([{type:'message',chat_id:'other'},
+ {type:'message',chat_id:'third'}]);
+assert.deepEqual(sidebars.at(-1),['',true]);
+App.page='new';await V.refreshRealtime([{type:'message',chat_id:'other'}]);
+assert.deepEqual(cached.at(-1),['other',false]);assert.equal(broad,0);
+await V.refreshRealtime([{type:'read_model',scope:'sidebar'}]);
 assert.equal(broad,1);
+assert.deepEqual(cached.at(-1),['',true]);
 App.page='settings';await V.refreshRealtime([{type:'mirror_update'}]);
 assert.equal(broad,1);
-assert.equal(cached,1);
+assert.deepEqual(cached.at(-1),['',true]);
 ''')
 
 
@@ -201,6 +208,59 @@ fail=true;await refresh();const callback=[...timers.values()][0].fn;
 epoch++;document.dispatchEvent(new CustomEvent('ab:session-reset'));
 assert.equal(timers.size,0);const before=attempts;callback();await flush();
 assert.equal(attempts,before);
+'''.replace('__SOURCE__', json.dumps(section)))
+
+
+def test_sidebar_reconcile_retries_requeued_final_read_without_replaying_global_hint(tmp_path):
+    source = (ROOT / 'chat.js').read_text(encoding='utf-8')
+    section = source[source.index('let sidebarReconcileOwner = '):
+                     source.index('// Independent bounded lanes:')]
+    _run(tmp_path, r'''
+import assert from 'node:assert/strict';
+let epoch=1,locked=false,lockEpoch=0,nextTimer=0;
+const timers=new Map();
+const setTimeout=(fn,ms)=>{timers.set(++nextTimer,{fn,ms});return nextTimer};
+const clearTimeout=id=>timers.delete(id);
+const listeners=new Map();
+const document={addEventListener:(name,fn)=>listeners.set(name,fn)};
+const Mesh={state:{user:'viewer'}};
+const applied=[];let refreshCalls=[],stateComplete=true,gates=[];
+const captureSessionEpoch=()=>({epoch});
+const sessionMayApply=ticket=>ticket.epoch===epoch;
+const meshStateSnapshot=()=>({locked,lockEpoch});
+const captureMeshStateRead=()=>({});
+const applyMeshState=(_ticket,fresh)=>{applied.push(fresh);return true};
+const renderSidebar=()=>{};
+const api=async(route,body)=>{
+ if(route==='/api/mesh/state')return {chats_complete:stateComplete};
+ refreshCalls.push(body);
+ if(refreshCalls.length<=2)return new Promise(resolve=>gates.push(resolve));
+ return {status:'ready',has_more:false,changed:false};
+};
+const V={};
+const build=new Function('document','Mesh','captureSessionEpoch','sessionMayApply',
+ 'meshStateSnapshot','captureMeshStateRead','applyMeshState','renderSidebar','api',
+ 'setTimeout','clearTimeout','V',__SOURCE__+
+ ';return {reconcileSidebar,resetSidebarReconcile};');
+const {reconcileSidebar,resetSidebarReconcile}=build(document,Mesh,captureSessionEpoch,
+ sessionMayApply,meshStateSnapshot,captureMeshStateRead,applyMeshState,renderSidebar,
+ api,setTimeout,clearTimeout,V);
+const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
+const first=reconcileSidebar('a',true);await flush();
+assert.equal(refreshCalls.length,2);
+const joined=reconcileSidebar('b',true);assert.ok(joined instanceof Promise);
+assert.equal(refreshCalls.length,2,'active hint is owned by one follow-up');
+for(const resolve of gates)resolve({status:'ready',has_more:true,changed:false});
+await first;await flush();await flush();
+assert.equal(refreshCalls.filter(body=>body?.refresh_all===true).length,2,
+ 'one initial global pass and one follow-up pass');
+
+resetSidebarReconcile();refreshCalls=[];gates=[];stateComplete=false;timers.clear();
+const retry=reconcileSidebar();await flush();
+for(const resolve of gates)resolve({status:'ready',has_more:false,changed:false});
+await retry;await flush();
+assert.ok([...timers.values()].some(timer=>timer.ms===2000),
+ 'an incomplete final cache read schedules another bounded pass');
 '''.replace('__SOURCE__', json.dumps(section)))
 
 

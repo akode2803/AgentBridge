@@ -82,7 +82,7 @@ def _stage(app, chat, phase, status, reason='none', **fields):
     """Diagnostic failures must never affect canonical sidebar outcomes."""
     try:
         if (diagnostics := getattr(app, 'diagnostics', None)) is not None:
-            diagnostics.stage('/api/mesh/state', chat, phase, status, reason, **fields)
+            diagnostics.stage('/api/mesh/sidebar_refresh', chat, phase, status, reason, **fields)
     except Exception:  # noqa: BLE001 — telemetry is best effort
         pass
 
@@ -244,14 +244,19 @@ def refresh_sidebar(app, req, mesh, token):
     started = time.perf_counter()
     row, resolved = _room(app, mesh, token, chat)
     changed = False
+    published = False
     try:
         if resolved and app.validate_session_read(token):
             changed = mesh.store.publish_sidebar(
                 mesh.user, chat, row, updated_ns=time.time_ns())
             changed = (app.sidebar_refresh.record_presentation(
                 token, chat, visible=row is not None) or changed)
+            published = True
     finally:
-        app.sidebar_refresh.finish(token, chat, resolved=resolved)
+        # A canonical result is not complete until its display row (including
+        # an intentional removal) is durable.  Publication failures must leave
+        # the claim pending for a later bounded retry.
+        app.sidebar_refresh.finish(token, chat, resolved=published)
     _stage(app, chat, 'sidebar', 'ready' if resolved else 'pending',
            duration_ms=(time.perf_counter() - started) * 1000,
            rows=int(row is not None))

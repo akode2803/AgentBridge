@@ -63,7 +63,6 @@ class SidebarRefreshQueue:
             self._inventory = inventory
             self._pending = OrderedDict(
                 (chat, None) for chat in self._pending if chat in allowed)
-            self._running.intersection_update(allowed)
             for chat in inventory:
                 if chat not in self._running:
                     self._pending.setdefault(chat, None)

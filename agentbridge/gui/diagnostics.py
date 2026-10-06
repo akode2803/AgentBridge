@@ -35,7 +35,7 @@ EVENTS = frozenset({
     'realtime', 'client_error', 'route', 'server_request', 'page_stage', 'delivery',
 })
 ROUTES = frozenset({
-    '/api/state', '/api/mesh/state', '/api/mesh/chat',
+    '/api/state', '/api/mesh/state', '/api/mesh/sidebar_refresh', '/api/mesh/chat',
     '/api/mesh/chat_page', '/api/mesh/chat_aux',
     '/api/mesh/chat_summary', '/api/mesh/chat_collection',
     '/api/mesh/read', '/api/mesh/chat_page_read', '/api/mesh/mark_unread', '/api/mesh/asks',

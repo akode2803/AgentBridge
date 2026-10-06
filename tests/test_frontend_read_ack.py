@@ -167,7 +167,8 @@ const actionFactory=new Function('Mesh','api','document','CustomEvent',
   'captureSessionEpoch','sessionMayApply','toast','refreshList','chatDisplay','V',
   __ACTION__+';return runChatAction;');
 const run=actionFactory(Mesh,sidebarApi,document,CustomEvent,()=>({}),()=>true,
-  ()=>{},async()=>{marked++;Mesh.state.chats[0].forced_unread=true;return true},
+  ()=>{},async(_ticket,chatId)=>{assert.equal(chatId,'room');marked++;
+    Mesh.state.chats[0].forced_unread=true;return true},
   ()=>'',{});
 failManual=true;await run('unread',Mesh.state.chats[0]);
 assert.equal(events,0,'failed manual write cannot invalidate ack');
