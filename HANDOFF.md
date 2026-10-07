@@ -161,6 +161,7 @@ reconciliation fell from 64.25 ms to 11.12 ms (25-attempt p95 11.70 ms). A known
 change took 66.44 ms with one scan versus 116.98 ms for the conservative unknown
 two-scan path. Ruff, diff checks, the 286-test transport/source gate, the 423-test
 publication integration gate and the complete suite pass locally: 3232 passed,
-18 skipped. The branch checkpoint is committed but has no PR and is not deployed,
-restarted or live-measured. Next: merge PR54 after Windows completes, rebase onto
-the merge, then open one reviewable PR for the journal change.
+18 skipped. The branch is pushed as stacked PR55 against PR54 and is not deployed,
+restarted or live-measured. Next: merge PR54 after Windows completes, retarget
+PR55 to main, finish its review/CI, then measure the live selected-chat path under
+normal diagnostic sampling before choosing another architectural shortcut.
