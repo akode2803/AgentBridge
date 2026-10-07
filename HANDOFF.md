@@ -89,3 +89,20 @@ boundary timings for full reconciliation before choosing between chat-scoped
 mirror indexing, precise changed-path evidence and direct selected-chat scheduling.
 If the remaining delay is in page preparation/render rather than admission,
 optimize that measured boundary rather than widening the exact local append exception.
+
+The stage-boundary diagnostics are implemented on
+`codex/source-admission-profiling` at app version `0.24.301`, stacked on PR52. A sampled full-source attempt
+now emits one compact row with capture/claim, stage creation, collection,
+staged-write, seal, comparison, admission, finalization and cleanup durations,
+plus examined/selected document, byte and batch counts. Staged-write time is a
+subset of collection time. Disabled diagnostics add no per-path counter; enabled
+capture adds only bounded counters and one row per attempt. The focused raw
+collector/local-input/diagnostics gate passes 67 tests and Ruff. Next validation
+should run the wider source/page suite, then use normal diagnostic sampling on the
+real selected chat after PR52 lands; do not use full sampling as a transparent
+latency measurement.
+
+The offline diagnostics summarizer now exposes those allowlisted stage/count
+fields as independent nearest-rank distributions in schema version 2. It keeps
+missing and invalid counts per metric, never returns raw identifiers or unknown
+fields, and explicitly preserves the non-additive collection/write relationship.

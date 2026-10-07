@@ -226,6 +226,50 @@ def test_local_snapshot_admission_is_retained_as_delivery_breadcrumb(tmp_path):
     assert 'private-chat' not in sink.path.read_text()
 
 
+def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path):
+    sink = Diagnostics(tmp_path)
+    assert sink.set_enabled(True, sample_rate=1)
+    trace.emit(
+        'source_reconciliation', chat='private-chat', duration_ms=12.5,
+        collect_ms=7.5, stage_write_ms=2.0, compare_ms=1.0,
+        documents_examined=20_000, documents_selected=3,
+        document_bytes=144, document_batches=1,
+        private_path='/do/not/record',
+    )
+    event = next(
+        row for row in rows(sink)
+        if row.get('phase') == 'source_reconciliation'
+    )
+    assert event['duration_ms'] == 12.5
+    assert event['collect_ms'] == 7.5
+    assert event['stage_write_ms'] == 2.0
+    assert event['documents_examined'] == 20_000
+    assert event['documents_selected'] == 3
+    assert event['document_bytes'] == 144
+    assert event['document_batches'] == 1
+    assert 'private_path' not in event
+    assert 'private-chat' not in sink.path.read_text()
+
+
+def test_source_reconciliation_sampling_key_and_full_collector_bounds(tmp_path):
+    sink = Diagnostics(tmp_path)
+    assert sink.set_enabled(True, sample_rate=0.01)
+    assert sink.flight_record({
+        'event': 'delivery', 'phase': 'source_reconciliation', 'status': 'ok',
+        'sample_ref': '0' * 16, 'documents_examined': 2_000_000,
+        'documents_selected': 1_000_000,
+        'document_bytes': 512 * 1024 * 1024,
+        'document_batches': 1_000_000,
+    })
+    event = next(row for row in rows(sink)
+                 if row.get('phase') == 'source_reconciliation')
+    assert event['sample_ref'] == '0' * 16
+    assert event['documents_examined'] == 2_000_000
+    assert event['documents_selected'] == 1_000_000
+    assert event['document_bytes'] == 512 * 1024 * 1024
+    assert event['document_batches'] == 1_000_000
+
+
 def test_forged_correlation_clock_and_crash_breadcrumb(tmp_path):
     sink = Diagnostics(tmp_path)
     sink.set_enabled(True, sample_rate=0)

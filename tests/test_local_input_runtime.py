@@ -373,6 +373,89 @@ def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
     assert runtime.health(CHAT)['ready'] is False
 
 
+def test_ingestion_emits_one_compact_reconciliation_profile(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    provider.put_doc('outside/value.json', {'ignored': True})
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+
+    assert runtime.ingest(CHAT)
+
+    profiles = [fields for phase, fields in events
+                if phase == 'source_reconciliation']
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile['status'] == 'ok' and profile['duration_ms'] == 2.0
+    assert profile['documents_examined'] == len(provider._docs)
+    assert profile['documents_selected'] >= 1
+    assert profile['document_batches'] >= 1
+    assert profile['collect_ms'] == 2.0
+    assert profile['stage_write_ms'] >= 2.0
+    assert profile['compare_ms'] == profile['admit_ms'] == 2.0
+
+
+def test_reconciliation_profile_survives_cleanup_failure(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    events = []
+    original_abort = staged_source.abort
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'a' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+
+    def abort_then_fail(*args, **kwargs):
+        original_abort(*args, **kwargs)
+        raise OSError('private cleanup failure')
+
+    monkeypatch.setattr(staged_source, 'abort', abort_then_fail)
+    with pytest.raises(OSError, match='private cleanup failure'):
+        runtime.ingest(CHAT)
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['status'] == 'error'
+    assert profile['error_type'] == 'OSError'
+    assert profile['sample_ref'] == 'a' * 16
+    assert profile['cleanup_ms'] == 2.0
+
+
+def test_reconciliation_profile_omits_cleanup_before_stage_exists(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'b' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+    monkeypatch.setattr(
+        local_input_runtime.local_source, 'claim_collection',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            local_source.SourceChanged('source_changed_before_collection')),
+    )
+
+    with pytest.raises(local_source.SourceChanged):
+        runtime.ingest(CHAT)
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['status'] == 'error'
+    assert profile['sample_ref'] == 'b' * 16
+    assert 'cleanup_ms' not in profile
+
+
 def test_request_run_due_failure_finishes_scheduler_lease(rig, monkeypatch):
     mesh, _provider = rig
     runtime = mesh.local_inputs

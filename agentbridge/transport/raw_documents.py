@@ -83,7 +83,7 @@ def collect_document_batches(transport, definition, *, consume,
                              max_document_bytes=4 * 1024 * 1024,
                              max_total_bytes=512 * 1024 * 1024,
                              max_documents=1_000_000,
-                             max_examined_paths=2_000_000):
+                             max_examined_paths=2_000_000, stats=None):
     """Deliver bounded dictionaries of raw documents; return only after full enumeration.
 
     A callback may have received batches when an exception occurs. Its caller must
@@ -96,6 +96,8 @@ def collect_document_batches(transport, definition, *, consume,
         raise ValueError('collection belongs to another transport root')
     if not callable(consume):
         raise ValueError('consume must be callable')
+    if stats is not None and type(stats) is not dict:
+        raise ValueError('stats must be a dict')
     for value, ceiling in ((batch_documents, 1024), (batch_bytes, 16 * 1024 * 1024),
                            (max_document_bytes, 16 * 1024 * 1024),
                            (max_total_bytes, 1024 * 1024 * 1024),
@@ -109,13 +111,26 @@ def collect_document_batches(transport, definition, *, consume,
     # Prefix walks include exact selections beneath them, so no global seen set.
     exact = {p for p in exact if not any(p == q or p.startswith(q + '/') for q in prefixes)}
     batch, size, total, count = {}, 0, 0, 0
+    examined = batches = 0
+
+    def report():
+        if stats is not None:
+            try:
+                stats.update(documents_examined=examined,
+                             documents_selected=count,
+                             document_bytes=total,
+                             document_batches=batches)
+            except Exception:
+                pass  # Optional work evidence cannot replace collection results.
     def verify():
         pass
 
     def flush():
-        nonlocal batch, size
+        nonlocal batch, size, batches
         if batch:
             consume(batch)
+            if stats is not None:
+                batches += 1
             verify()
             batch, size = {}, 0
 
@@ -165,35 +180,40 @@ def collect_document_batches(transport, definition, *, consume,
 
         verify = check_position
 
-        while True:
-            refs = []
-            with transport._lock:
-                try:
-                    if _position_locked(transport) != position:
-                        raise RawCollectionUnavailable('mirror_changed')
-                    finished = False
-                    for _ in range(batch_documents):
-                        try:
-                            path, value = next(iterator)
-                        except StopIteration:
-                            finished = True
-                            break
-                        if path in exact or any(path == p or path.startswith(p + '/') for p in prefixes):
-                            if path in transport._authority_unsafe:
-                                raise RawCollectionUnavailable('unsafe_cached_value')
-                            refs.append((path, value))
-                except AuthorityObservationUnavailable as exc:
-                    raise RawCollectionUnavailable('mirror_changed') from exc
-                except RawCollectionUnavailable:
-                    raise
-                except RuntimeError as exc:
-                    raise RawCollectionUnavailable('mirror_changed') from exc
-            for path, value in refs:
-                include(path, value)
+        try:
+            while True:
+                refs = []
+                with transport._lock:
+                    try:
+                        if _position_locked(transport) != position:
+                            raise RawCollectionUnavailable('mirror_changed')
+                        finished = False
+                        for _ in range(batch_documents):
+                            try:
+                                path, value = next(iterator)
+                            except StopIteration:
+                                finished = True
+                                break
+                            if stats is not None:
+                                examined += 1
+                            if path in exact or any(path == p or path.startswith(p + '/') for p in prefixes):
+                                if path in transport._authority_unsafe:
+                                    raise RawCollectionUnavailable('unsafe_cached_value')
+                                refs.append((path, value))
+                    except AuthorityObservationUnavailable as exc:
+                        raise RawCollectionUnavailable('mirror_changed') from exc
+                    except RawCollectionUnavailable:
+                        raise
+                    except RuntimeError as exc:
+                        raise RawCollectionUnavailable('mirror_changed') from exc
+                for path, value in refs:
+                    include(path, value)
+                check_position()
+                if finished:
+                    break
+            flush()
             check_position()
-            if finished:
-                break
-        flush()
-        check_position()
+        finally:
+            report()
         return
     raise RawCollectionUnavailable('unsupported_transport')

@@ -34,6 +34,25 @@ def test_cache_stream_exceeds_legacy_limit_without_retaining_all_refs(clouds, tm
     assert len(set(observed)) == len(observed)
 
 
+def test_batch_stats_distinguish_examined_mirror_from_selected_scope(clouds, tmp_path):
+    cache = _cache(clouds, tmp_path)
+    cache.put_doc('outside/value.json', {'ignored': True})
+    definition = _definition(
+        cache, source_selectors.Selector('doc_exact', 'items/00000.json'),
+    )
+    stats = {}
+    batches = []
+
+    collect_document_batches(cache, definition, consume=batches.append,
+                             batch_documents=37, stats=stats)
+
+    assert batches == [{'items/00000.json': {'n': 0}}]
+    assert stats['documents_examined'] == 20_112
+    assert stats['documents_selected'] == 1
+    assert stats['document_batches'] == 1
+    assert stats['document_bytes'] > 0
+
+
 def test_cache_movement_after_callback_fails_without_completion(clouds, tmp_path):
     cache = _cache(clouds, tmp_path)
     definition = _definition(cache, source_selectors.Selector('doc_prefix', 'items'))

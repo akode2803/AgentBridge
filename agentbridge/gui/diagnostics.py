@@ -92,18 +92,26 @@ _SERVER_BOUNDED_INTEGERS = {'request_seq': (1, 2**53 - 1),
                             'phase_dropped': (0, 1_000_000),
                             'phase_faults': (0, 1_000_000),
                             'sqlite_extended_code': (0, 65535),
-                            'sqlite_primary_code': (0, 255)}
+                            'sqlite_primary_code': (0, 255),
+                            'documents_examined': (0, 2_000_000),
+                            'documents_selected': (0, 1_000_000),
+                            'document_bytes': (0, 512 * 1024 * 1024),
+                            'document_batches': (0, 1_000_000)}
 
 _ENUMS = {'flow': frozenset({'sent', 'received'}), 'db_kind': frozenset({'root', 'store'}),
           'holder_coverage': frozenset({'acquisition_start_only'}),'sqlite_category': SQLITE_CATEGORIES, 'event': EVENTS, 'route': ROUTES, 'status': STATUSES,
           'reason': REASONS, 'mode': MODES, 'outcome': OUTCOMES,
           'error_type': ERROR_TYPES, 'phase': PHASES}
 _NUMBERS = frozenset({'duration_ms', 'monotonic_ms', 'scroll_top',
-                      'scroll_height', 'client_height', 'holder_age_ms', 'queue_wait_ms', 'retry_ms', 'dom_delay_ms', 'ack_delay_ms'})
+                      'scroll_height', 'client_height', 'holder_age_ms', 'queue_wait_ms',
+                      'retry_ms', 'dom_delay_ms', 'ack_delay_ms', 'capture_claim_ms',
+                      'stage_open_ms', 'collect_ms', 'stage_write_ms', 'seal_ms',
+                      'compare_ms', 'admit_ms', 'source_finalize_ms', 'cleanup_ms'})
 _INTEGERS = frozenset({'rows', 'messages', 'items', 'chats',
                        'loading_count', 'seq', 'raw_examined', 'holder_count', 'context_dropped',
                        'rate_dropped', 'sampled_out', 'client_dropped', 'context_evicted',
-                       'rate_rejected', 'queue_overflow', 'admission_dropped'})
+                       'rate_rejected', 'queue_overflow', 'admission_dropped',
+                       })
 _BOOLEANS = frozenset({'has_transcript', 'busy', 'has_more',
                        'chats_complete', 'unread_complete'})
 _CLIENT_FIELDS = frozenset({'event', 'route', 'status', 'reason', 'mode',
@@ -336,7 +344,8 @@ class Diagnostics:
                 out[key] = value
             elif key in ('tab_ref', 'request_ref', 'trace_ref', 'chat_ref') and type(value) is str and _TAB.fullmatch(value):
                 out[key] = value
-            elif key in ('chat_ref', 'clock_ref', 'database_ref', 'holder_ref') and not client and type(value) is str and _TAB.fullmatch(value):
+            elif key in ('chat_ref', 'clock_ref', 'database_ref', 'holder_ref',
+                          'sample_ref') and not client and type(value) is str and _TAB.fullmatch(value):
                 out[key] = value
         if 'event' not in out:
             return None
@@ -421,7 +430,8 @@ class Diagnostics:
                 self._context.append((now, encoded_bytes, event))
                 self._context_bytes += encoded_bytes
                 trigger, breadcrumb = self._retention(event)
-                ref = event.get('request_ref') or event.get('trace_ref')
+                ref = (event.get('sample_ref') or event.get('request_ref')
+                       or event.get('trace_ref'))
                 if ref is None and event.get('request_seq') is not None:
                     ref = self.chat_ref(str(event['request_seq']))
                 sampled = self.sample_rate == 1 or bool(ref and int(ref, 16)/(2**64) < self.sample_rate)
@@ -430,7 +440,8 @@ class Diagnostics:
                     return True
                 rows = [event]
                 if trigger:
-                    keys = ('trace_ref', 'request_ref', 'chat_ref', 'request_seq')
+                    keys = ('sample_ref', 'trace_ref', 'request_ref', 'chat_ref',
+                            'request_seq')
                     context = [row for _, _, row in self._context if row is not event
                                and any(event.get(k) and event.get(k) == row.get(k) for k in keys)]
                     # Even an uncorrelated error retains a small global pre-event window.
