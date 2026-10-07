@@ -5,7 +5,9 @@ from dataclasses import replace
 
 import pytest
 
-from agentbridge.store import local_source, source_selectors, staged_publication, staged_source
+from agentbridge.store import (
+    local_source, overlay_index, source_selectors, staged_publication, staged_source,
+)
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
@@ -110,6 +112,37 @@ def test_complete_admitted_comparison_reuses_raw_and_index_without_stage(store):
     assert stable.ready and stable.raw == ready.raw
     assert stable.revision > claimed.revision
     assert index == old_index
+
+
+def test_unchanged_observation_updates_health_without_generation_movement(store):
+    ready, old_index, _ = _admit_first(store)
+    before_health = local_source.health(store, LOGICAL)
+    stable, index = staged_publication.observe_unchanged(
+        store, ready, CHAT, observed_ns=123,
+    )
+    assert stable == ready and stable.raw == ready.raw
+    assert index == old_index
+    health = local_source.health(store, LOGICAL)
+    assert health['last_success_ns'] == 123
+    assert health['last_success_ns'] != before_health['last_success_ns']
+
+    local_source.invalidate(store, LOGICAL)
+    with pytest.raises(local_source.SourceChanged):
+        staged_publication.observe_unchanged(
+            store, ready, CHAT, observed_ns=124,
+        )
+
+
+def test_unchanged_observation_rejects_missing_index(store):
+    ready, _index, _ = _admit_first(store)
+    conn = store._conn()
+    conn.execute('DELETE FROM overlay_index_ready WHERE source=?',
+                 (ready.raw.source_id,))
+    conn.commit()
+    with pytest.raises(overlay_index.OverlayIndexUnavailable, match='index_pending'):
+        staged_publication.observe_unchanged(
+            store, ready, CHAT, observed_ns=123,
+        )
 
 
 @pytest.mark.parametrize('documents', [

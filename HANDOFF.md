@@ -131,7 +131,7 @@ initial build, the expected cost of safe compare-then-rebuild fallback until
 verified changed-path evidence exists. The rebased branch is pushed as PR54; its
 replacement review/CI are pending. It is not deployed, restarted or live-measured.
 
-PR54's final-head review then found two gaps despite green cross-platform CI:
+PR54's earlier-head review then found two gaps despite green cross-platform CI:
 the unchanged return did not make an interrupted older candidate reclaimable,
 and changed/failed admitted comparisons omitted their first traversal from the
 work counters. The unchanged admission transaction now abandons superseded
@@ -139,5 +139,28 @@ building and unadmitted sealed candidates under the exact source-owner CAS.
 Diagnostics aggregate both comparison and fallback collection work, with bounds
 covering at most two complete traversals; an interrupted comparison retains its
 partial counters. The 163-test staging/local-input/diagnostics gate, Ruff and
-diff checks pass locally. A corrected head still needs replacement review and CI
-before PR54 can merge.
+diff checks pass locally. Corrected head `287c92e` has a clean replacement review
+and passing Ubuntu CI. Its replacement Windows job was still running at the last
+2026-10-07 checkpoint, so PR54 remains open and undeployed.
+
+The next reconciliation optimization is complete locally on
+`codex/mirror-change-evidence` at app version `0.24.303`, stacked on PR54. A
+bounded process-local journal records exact changed document paths for each
+mirror revision, or one bounded unknown marker when complete evidence cannot be
+retained. A volatile 128-source LRU binds the final mirror position to the exact
+ready SQLite source produced by a complete collection. Proven irrelevant mirror
+movement now performs only a source/index health CAS; a known relevant change
+uses one complete staged collection; restart, eviction, oversized changes and
+any uncertainty retain PR54's complete comparison fallback. The journal stores
+no payload, provider cursor, timestamp, authority verdict or remote-freshness
+claim, and canonical reads continue recomputing membership, trust, keys and
+visibility from admitted SQLite inputs.
+
+In a disposable 50,004-document mirror with four selected inputs, median no-op
+reconciliation fell from 64.25 ms to 11.12 ms (25-attempt p95 11.70 ms). A known
+change took 66.44 ms with one scan versus 116.98 ms for the conservative unknown
+two-scan path. Ruff, diff checks, the 286-test transport/source gate, the 423-test
+publication integration gate and the complete suite pass locally: 3232 passed,
+18 skipped. The branch checkpoint is committed but has no PR and is not deployed,
+restarted or live-measured. Next: merge PR54 after Windows completes, rebase onto
+the merge, then open one reviewable PR for the journal change.

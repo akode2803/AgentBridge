@@ -88,6 +88,8 @@ def test_collector_failure_keeps_old_readable_until_handled_failure(clouds, tmp_
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
+        with runtime._lock:
+            runtime._mirror_tokens.clear()
         reader, old_receipt, old_index = runtime.inputs(CHAT)
         old = old_receipt.source.raw
         original = local_input_runtime.collect_document_batches
@@ -219,6 +221,8 @@ def test_partial_failed_replacement_cannot_expose_missing_subset(clouds, tmp_pat
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(CHAT)
+        with runtime._lock:
+            runtime._mirror_tokens.clear()
         reader, prior, _index = runtime.inputs(CHAT)
         original = local_input_runtime.collect_document_batches
         delivered = []
@@ -264,16 +268,10 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_pat
         assert mesh.local_inputs.ingest(CHAT)
         old_reader, old_receipt, old_index = mesh.local_inputs.inputs(CHAT)
         old = old_receipt.source.raw
-        delivered, collections = [], []
+        delivered = []
         provider.put_doc(META, {'id': CHAT, 'members': ['alice'], 'revision': 2})
 
         def interrupt(transport, definition, *, consume, **limits):
-            collections.append(True)
-            if len(collections) == 1:
-                # Let the admitted comparison observe the changed document and
-                # fall through to a real candidate build.
-                return original_collect(transport, definition, consume=consume,
-                                        batch_documents=1, **limits)
             def sink(batch):
                 consume(batch)
                 delivered.append(True)
@@ -291,7 +289,7 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_pat
         monkeypatch.setattr(staged_source, 'cleanup', lambda *_args, **_kwargs: None)
         with pytest.raises(KeyboardInterrupt):
             mesh.local_inputs.ingest(CHAT)
-        assert len(collections) == 2 and delivered
+        assert delivered
         interrupted_source = mesh.store._conn().execute(
             "SELECT source FROM staged_sources WHERE phase='building'",
         ).fetchone()[0]

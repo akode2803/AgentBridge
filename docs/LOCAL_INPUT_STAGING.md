@@ -100,6 +100,26 @@ Successful unchanged admission also marks any interrupted older candidate
 reclaimable, so the fast return cannot strand active-stage capacity. Precise verified changed-path evidence can remove that
 changed-case duplicate work later; an untrusted Realtime hint cannot.
 
+The subsequent process-local change journal removes those two remaining common
+costs without changing the durable contract. A token is retained only after a
+complete fenced collection and is bound to that exact ready source and mirror
+position. If every retained mirror revision is known and irrelevant to the
+source selectors, reconciliation performs only a source/index health CAS. A
+known relevant path goes directly to one complete staged build. Restart,
+eviction, oversized change sets and any uncertain state use the complete
+comparison above. Tokens use an LRU bound of 128 sources and are never persisted.
+The journal records concurrency evidence only; authority is recomputed from the
+admitted SQLite snapshot on every canonical request.
+
+In a disposable 50,004-document fake-provider mirror with four selected inputs,
+median no-op reconciliation fell from about 64.25 ms for the complete admitted
+comparison to 11.12 ms for the journal plus source/index health CAS. The measured
+95th-percentile journal no-op was 11.70 ms over 25 attempts. A known relevant
+change took 66.44 ms with one staged collection, while the restart/unknown path
+took 116.98 ms with compare then rebuild. These synthetic local timings validate
+the work reduction and fallback shape; they are not live-provider or device
+acceptance results.
+
 ## Current GUI integration
 
 The mandatory GUI page endpoint uses this staged owner with bounded canonical page

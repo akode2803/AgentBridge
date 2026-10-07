@@ -107,7 +107,7 @@ _ENUMS = {'flow': frozenset({'sent', 'received'}), 'db_kind': frozenset({'root',
 _NUMBERS = frozenset({'duration_ms', 'monotonic_ms', 'scroll_top',
                       'scroll_height', 'client_height', 'holder_age_ms', 'queue_wait_ms',
                       'retry_ms', 'dom_delay_ms', 'ack_delay_ms', 'capture_claim_ms',
-                      'stage_open_ms', 'collect_ms', 'stage_write_ms', 'seal_ms',
+                      'change_check_ms', 'stage_open_ms', 'collect_ms', 'stage_write_ms', 'seal_ms',
                       'compare_ms', 'admit_ms', 'source_finalize_ms', 'cleanup_ms'})
 _INTEGERS = frozenset({'rows', 'messages', 'items', 'chats',
                        'loading_count', 'seq', 'raw_examined', 'holder_count', 'context_dropped',

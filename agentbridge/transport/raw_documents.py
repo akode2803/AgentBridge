@@ -215,5 +215,5 @@ def collect_document_batches(transport, definition, *, consume,
             check_position()
         finally:
             report()
-        return
+        return position
     raise RawCollectionUnavailable('unsupported_transport')

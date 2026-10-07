@@ -40,6 +40,8 @@ from typing import Any
 
 from .mirror_observation import (
     MirrorCaptureUnavailable,
+    MirrorChangeEvidence,
+    MirrorChangeRequest,
     MirrorExpectedPosition,
     MirrorObservation,
     MirrorPositionValidation,
@@ -47,6 +49,7 @@ from .mirror_observation import (
     MirrorSelectionRequest,
     validate_capture_budget,
     validated_position_fields,
+    validated_change_request,
 )
 
 __all__ = ["Transport", "TransportProfile", "Watcher"]
@@ -210,6 +213,13 @@ class Transport(ABC):
         from .mirror_observation import validated_selection_request
         validated_selection_request(request)
         return MirrorCaptureUnavailable("unsupported")
+
+    def mirror_changes_since(
+        self, request: MirrorChangeRequest,
+    ) -> MirrorChangeEvidence:
+        """Decline process-local change evidence without touching transport."""
+        validated_change_request(request)
+        return MirrorChangeEvidence("unknown", reason="unsupported")
 
     def get_docs(self, prefix: str = "") -> dict[str, Any]:
         """OPTIONAL fast path: every doc under ``prefix`` at once. This

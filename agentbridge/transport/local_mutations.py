@@ -69,6 +69,9 @@ class LocalMutationTransport(Transport):
     def capture_mirror_selection(self, request):
         return self._transport.capture_mirror_selection(request)
 
+    def mirror_changes_since(self, request):
+        return self._transport.mirror_changes_since(request)
+
     def _mutate(self, changes, operation):
         intent = self._coordinator.begin(changes)
         # Exceptions intentionally retain the durable intent. A later retry's

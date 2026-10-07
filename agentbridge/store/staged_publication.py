@@ -139,6 +139,44 @@ def admit_identical(store, expected, comparison, *, observed_ns):
     return result, index
 
 
+def observe_unchanged(store, expected, chat_id, *, observed_ns):
+    """Refresh source health after process-local no-change concurrency evidence.
+
+    The caller must prove an unbroken mirror-revision chain from the complete
+    cut that produced ``expected``. This transaction proves only that the same
+    ready Store owner/index still exists; it retains every generation identity
+    and does not persist the mirror evidence.
+    """
+    expected = owner._expected(store, expected)
+    if not expected.ready or expected.writes_pending or not expected.raw.initialized:
+        raise owner.SourceChanged('unchanged_source_not_ready')
+    if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
+        raise ValueError('invalid observation time')
+    with owner._writer(store) as conn:
+        current = owner.capture_in_transaction(conn, store, expected.source_id)
+        if current != expected or current.writes_pending:
+            raise owner.SourceChanged('source_changed_during_ingestion')
+        row = conn.execute(
+            'SELECT build,schema FROM overlay_index_ready WHERE source=?',
+            (expected.raw.source_id,),
+        ).fetchone()
+        if row is None:
+            raise overlay_index.OverlayIndexUnavailable('index_pending')
+        index = overlay_index.OverlayIndexPosition(expected.raw, chat_id, *row)
+        index = overlay_index._wanted(index, store.path)
+        overlay_index._ready(conn, store.path, index)
+        conn.execute(
+            "UPDATE local_sources SET last_success_ns=?,failures=0,error='' "
+            "WHERE source=?",
+            (observed_ns, expected.source_id),
+        )
+        result = owner.capture_in_transaction(conn, store, expected.source_id)
+        overlay_index._ready(conn, store.path, index)
+        if result != expected or not result.ready:
+            raise owner.SourceChanged('unchanged_observation_failed')
+    return result, index
+
+
 def identical(store, expected, candidate):
     """Compare complete raw generations off the root gate with bounded buffers.
 

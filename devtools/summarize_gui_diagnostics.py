@@ -52,7 +52,7 @@ _COUNTERS = {
     "error_type": ERROR_TYPES,
 }
 _RECONCILIATION_NUMBERS = (
-    "duration_ms", "capture_claim_ms", "stage_open_ms", "collect_ms",
+    "duration_ms", "capture_claim_ms", "change_check_ms", "stage_open_ms", "collect_ms",
     "stage_write_ms", "seal_ms", "compare_ms", "admit_ms",
     "source_finalize_ms", "cleanup_ms",
 )

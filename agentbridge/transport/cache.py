@@ -46,7 +46,9 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,8 @@ from .authority_observation import detach_ingress_documents, detach_ingress_valu
 from .mirror_observation import (
     MAX_MIRROR_INTEGER,
     MirrorCaptureUnavailable,
+    MirrorChangeEvidence,
+    MirrorChangeRequest,
     MirrorExpectedPosition,
     MirrorObservation,
     MirrorPositionValidation,
@@ -69,6 +73,7 @@ from .mirror_observation import (
     transport_identities,
     validated_position_fields,
     validated_selection_request,
+    validated_change_request,
 )
 
 __all__ = ["CachingTransport"]
@@ -94,10 +99,68 @@ _monotonic = time.monotonic
 # read-through miss sentinel: tells "doc absent/unreachable" apart from a
 # stored None (inner.get_doc reports both as its default)
 _MISS = object()
+_CHANGE_JOURNAL_ENTRIES = 256
+_CHANGE_JOURNAL_PATHS = 4096
+_CHANGE_JOURNAL_ENTRY_BYTES = 256 * 1024
+_CHANGE_JOURNAL_TOTAL_BYTES = 1024 * 1024
 
 
 def _selection_keys_valid(documents: dict) -> bool:
     return all(type(path) is str and _valid_path(path) for path in documents)
+
+
+@dataclass(frozen=True)
+class _MirrorChangeEntry:
+    revision: int
+    paths: tuple[str, ...] | None
+    charged_bytes: int
+
+
+class _MirrorMutationEvidence:
+    """Bound one mutation's actual document changes under the mirror lock."""
+
+    def __init__(self, revision: int):
+        self.revision = revision
+        self.paths: set[str] = set()
+        self.bytes = 16
+        self.unknown = False
+        self.recorded = False
+
+    def add(self, path: str) -> None:
+        self.recorded = True
+        if self.unknown:
+            return
+        if type(path) is not str or not _valid_path(path):
+            self.unknown = True
+            self.paths.clear()
+            self.bytes = 16
+            return
+        if path in self.paths:
+            return
+        try:
+            charged = 8 + len(path.encode("utf-8"))
+        except UnicodeEncodeError:
+            self.unknown = True
+            self.paths.clear()
+            self.bytes = 16
+            return
+        if (len(self.paths) >= _CHANGE_JOURNAL_PATHS
+                or self.bytes + charged > _CHANGE_JOURNAL_ENTRY_BYTES):
+            self.unknown = True
+            self.paths.clear()
+            self.bytes = 16
+            return
+        self.paths.add(path)
+        self.bytes += charged
+
+    def complete(self) -> None:
+        self.recorded = True
+
+    def make_unknown(self) -> None:
+        self.recorded = True
+        self.unknown = True
+        self.paths.clear()
+        self.bytes = 16
 
 
 class CachingTransport(Transport):
@@ -158,6 +221,8 @@ class CachingTransport(Transport):
         self._last_error_message: str | None = None
         self._last_attempt = 0.0
         self._change_listeners: list = []
+        self._mirror_change_journal: deque[_MirrorChangeEntry] = deque()
+        self._mirror_change_bytes = 0
         # Selective exact lookup is safe only while every stored key is an
         # exact validated string; otherwise dict lookup could invoke a hostile
         # key's equality hook under the mirror mutex.
@@ -167,16 +232,32 @@ class CachingTransport(Transport):
     @contextmanager
     def _captured_mutation_locked(self):
         """Advance before mutation and poison capture after interruption."""
+        evidence = None
         if self._mirror_invalid_reason is None:
             if self._mirror_revision == MAX_MIRROR_INTEGER:
                 self._mirror_invalid_reason = "revision_exhausted"
             else:
                 self._mirror_revision += 1
+                evidence = _MirrorMutationEvidence(self._mirror_revision)
         try:
-            yield
+            yield evidence
         except BaseException:
             self._mirror_invalid_reason = "mutation_interrupted"
             raise
+        else:
+            if evidence is not None:
+                if not evidence.recorded:
+                    evidence.make_unknown()
+                paths = None if evidence.unknown else tuple(sorted(evidence.paths))
+                entry = _MirrorChangeEntry(
+                    evidence.revision, paths, evidence.bytes,
+                )
+                self._mirror_change_journal.append(entry)
+                self._mirror_change_bytes += entry.charged_bytes
+                while (len(self._mirror_change_journal) > _CHANGE_JOURNAL_ENTRIES
+                       or self._mirror_change_bytes > _CHANGE_JOURNAL_TOTAL_BYTES):
+                    retired = self._mirror_change_journal.popleft()
+                    self._mirror_change_bytes -= retired.charged_bytes
 
     # delegate unknown attributes (root, cache_key, …) to the inner transport
     def __getattr__(self, name: str) -> Any:
@@ -457,10 +538,12 @@ class CachingTransport(Transport):
             self._record_failure(exc)
             raise
         with self._lock:
-            with self._captured_mutation_locked():
+            with self._captured_mutation_locked() as mutation:
                 was_warm = self._warm
                 previous_docs = self._docs
                 previous_ids = set(self._chat_ids)
+                previous_unsafe = set(self._authority_unsafe)
+                previous_provenance = self._mirror_provenance
                 # local writes newer than the snapshot query win until the next
                 # cycle (present = keep ours; absent = we deleted it, keep it gone)
                 for path, wrote in self._doc_writes.items():
@@ -490,13 +573,23 @@ class CachingTransport(Transport):
                 self._last_refresh = time.time()
                 self._last_full = time.monotonic()
                 silent = self.profile.silent_prefixes
-                foreign = was_warm and (
-                    previous_ids != ids or any(
-                        previous_docs.get(path, _MISS) != docs.get(path, _MISS)
-                        and not (silent and path.startswith(silent))
-                        for path in set(previous_docs) | set(docs)
-                    )
-                )
+                foreign = was_warm and previous_ids != ids
+                if mutation is not None:
+                    if (not was_warm or previous_provenance != "provider_observed"
+                            or not self._mirror_selection_keys_valid):
+                        mutation.make_unknown()
+                        foreign = foreign or was_warm
+                    else:
+                        for path in set(previous_docs) | set(docs):
+                            changed = (
+                                previous_docs.get(path, _MISS) != docs.get(path, _MISS)
+                                or (path in previous_unsafe) != (path in authority_unsafe)
+                            )
+                            if changed:
+                                mutation.add(path)
+                                if not (silent and path.startswith(silent)):
+                                    foreign = True
+                        mutation.complete()
                 self._prune_guards_locked()
         self._record_success()
         self._persist_snapshot()
@@ -546,7 +639,8 @@ class CachingTransport(Transport):
             raise
         silent = self.profile.silent_prefixes
         with self._lock:
-            with self._captured_mutation_locked():
+            with self._captured_mutation_locked() as mutation:
+                previous_provenance = self._mirror_provenance
                 recent_ids = {
                     chat_id for chat_id, wrote in self._chat_writes.items()
                     if wrote >= t0
@@ -560,7 +654,10 @@ class CachingTransport(Transport):
                     wrote = self._doc_writes.get(path)
                     if wrote is not None and wrote >= t0:
                         continue           # our newer local write wins this cycle
-                    if (self._docs.get(path, _MISS) != val
+                    value_changed = self._docs.get(path, _MISS) != val
+                    safety_changed = ((path in self._authority_unsafe)
+                                      != (path in authority_unsafe))
+                    if (value_changed
                             and not (silent and path.startswith(silent))):
                         foreign = True
                     self._docs[path] = val
@@ -568,15 +665,20 @@ class CachingTransport(Transport):
                         self._authority_unsafe.add(path)
                     else:
                         self._authority_unsafe.discard(path)
+                    if mutation is not None and (value_changed or safety_changed):
+                        mutation.add(path)
                 for path in deleted:
                     wrote = self._doc_writes.get(path)
                     if wrote is not None and wrote >= t0:
                         continue
+                    existed = path in self._docs or path in self._authority_unsafe
                     if (path in self._docs
                             and not (silent and path.startswith(silent))):
                         foreign = True
                     self._docs.pop(path, None)
                     self._authority_unsafe.discard(path)
+                    if mutation is not None and existed:
+                        mutation.add(path)
                     if path.startswith("chats/") and path.endswith("/meta.json"):
                         # a tombstoned meta = the chat is gone; stop listing it
                         cid = path.split("/")[1]
@@ -585,6 +687,10 @@ class CachingTransport(Transport):
                     revoked_prefixes = tuple(
                         f"chats/{chat_id}/" for chat_id in revoked_ids
                     )
+                    if mutation is not None:
+                        for path in self._docs:
+                            if path.startswith(revoked_prefixes):
+                                mutation.add(path)
                     self._docs = {
                         path: value for path, value in self._docs.items()
                         if not path.startswith(revoked_prefixes)
@@ -596,6 +702,12 @@ class CachingTransport(Transport):
                 self._cursor = max(self._cursor, cursor)
                 self._mirror_provenance = "provider_observed"
                 self._last_refresh = time.time()
+                if mutation is not None:
+                    if (previous_provenance != "provider_observed"
+                            or not self._mirror_selection_keys_valid):
+                        mutation.make_unknown()
+                    else:
+                        mutation.complete()
                 self._prune_guards_locked()
         self._record_success()
         if changed or deleted or revoked_ids:
@@ -715,7 +827,7 @@ class CachingTransport(Transport):
                 owned, authority_safe = detach_ingress_value(path, owned) if owned is not _MISS else (owned, True)
                 with self._lock:
                     if owned is not _MISS:
-                        with self._captured_mutation_locked():
+                        with self._captured_mutation_locked() as mutation:
                             self._docs[path] = owned
                             if authority_safe:
                                 self._authority_unsafe.discard(path)
@@ -726,6 +838,8 @@ class CachingTransport(Transport):
                                 and type(path) is str
                                 and _valid_path(path)
                             )
+                            if mutation is not None:
+                                mutation.add(path)
                         return copy.deepcopy(owned)
                     self._neg.add(path)
             return default
@@ -782,7 +896,10 @@ class CachingTransport(Transport):
             pass
         owned, authority_safe = detach_ingress_value(path, owned)
         with self._lock:
-            with self._captured_mutation_locked():
+            with self._captured_mutation_locked() as mutation:
+                value_changed = self._docs.get(path, _MISS) != owned
+                safety_changed = ((path in self._authority_unsafe)
+                                  != (not authority_safe))
                 self._docs[path] = owned
                 if authority_safe:
                     self._authority_unsafe.discard(path)
@@ -794,15 +911,26 @@ class CachingTransport(Transport):
                 self._doc_writes[path] = _monotonic()
                 self._neg.discard(path)
                 self._neg.discard(f"list:{path.rsplit('/', 1)[0]}")
+                if mutation is not None:
+                    if value_changed or safety_changed:
+                        mutation.add(path)
+                    else:
+                        mutation.complete()
         self._persist_snapshot()
 
     def delete_doc(self, path: str) -> None:
         self.inner.delete_doc(path)
         with self._lock:
-            with self._captured_mutation_locked():
+            with self._captured_mutation_locked() as mutation:
+                existed = path in self._docs or path in self._authority_unsafe
                 self._docs.pop(path, None)
                 self._authority_unsafe.discard(path)
                 self._doc_writes[path] = time.monotonic()
+                if mutation is not None:
+                    if existed:
+                        mutation.add(path)
+                    else:
+                        mutation.complete()
         self._persist_snapshot()
 
     def list_docs(self, prefix: str) -> list[str]:
@@ -911,12 +1039,14 @@ class CachingTransport(Transport):
             # a first append can create a new chat — visible to us at once
             is_new = chat_id not in self._chat_ids
             if is_new:
-                with self._captured_mutation_locked():
+                with self._captured_mutation_locked() as mutation:
                     self._chat_ids = sorted({*self._chat_ids, chat_id})
                     # Only new-chat publication needs this race guard. For an
                     # established room, authoritative RLS disappearance is a
                     # revocation and must beat a concurrent local append.
                     self._chat_writes[chat_id] = time.monotonic()
+                    if mutation is not None:
+                        mutation.complete()
         # Logs are never in the bootstrap snapshot. An established-room append
         # changes no cached fields, so avoid copying/writing the entire mirror.
         # Failed best-effort cache writes retry on cache-changing operations or
@@ -933,14 +1063,18 @@ class CachingTransport(Transport):
         self.inner.delete_chat(chat_id)
         now = time.monotonic()
         with self._lock:
-            with self._captured_mutation_locked():
+            with self._captured_mutation_locked() as mutation:
                 prefix = f"chats/{chat_id}/"
                 for p in [p for p in self._docs if p.startswith(prefix)]:
                     self._docs.pop(p, None)
                     self._authority_unsafe.discard(p)
                     self._doc_writes[p] = now
+                    if mutation is not None:
+                        mutation.add(p)
                 self._chat_ids = [c for c in self._chat_ids if c != chat_id]
                 self._chat_writes.pop(chat_id, None)
+                if mutation is not None:
+                    mutation.complete()
         self._persist_snapshot()
 
     def capture_mirror(
@@ -1010,6 +1144,57 @@ class CachingTransport(Transport):
                 provenance=self._mirror_provenance,
                 documents=(self._docs if self._mirror_selection_keys_valid else None),
             )
+
+    def mirror_changes_since(
+        self, request: MirrorChangeRequest,
+    ) -> MirrorChangeEvidence:
+        """Classify selector movement within this bounded mirror instance."""
+        bounded = validated_change_request(request)
+        with self._lock:
+            reason = self._mirror_invalid_reason
+            if reason is not None:
+                return MirrorChangeEvidence("unknown", reason=reason)
+            if not self._warm:
+                return MirrorChangeEvidence("unknown", reason="cold")
+            if (self._mirror_root_identity is None
+                    or self._mirror_cache_identity is None):
+                return MirrorChangeEvidence("unknown", reason="invalid_identity")
+            if (self._mirror_provenance != "provider_observed"
+                    or not self._mirror_selection_keys_valid):
+                return MirrorChangeEvidence("unknown", reason="invalid_payload")
+            current = MirrorExpectedPosition(
+                self._mirror_root_identity, self._mirror_cache_identity,
+                self._mirror_instance_nonce, self._mirror_revision,
+            )
+            expected = bounded.expected
+            if ((expected.root_identity, expected.cache_identity,
+                 expected.instance_nonce)
+                    != (current.root_identity, current.cache_identity,
+                        current.instance_nonce)):
+                return MirrorChangeEvidence("unknown", reason="identity_changed")
+            if expected.revision > current.revision:
+                return MirrorChangeEvidence("unknown", reason="future_revision")
+            if expected.revision == current.revision:
+                return MirrorChangeEvidence("unchanged", current)
+            wanted_revision = expected.revision + 1
+            entries = [entry for entry in self._mirror_change_journal
+                       if entry.revision >= wanted_revision]
+            if (not entries or entries[0].revision != wanted_revision
+                    or entries[-1].revision != current.revision
+                    or any(right.revision != left.revision + 1
+                           for left, right in zip(entries, entries[1:]))):
+                return MirrorChangeEvidence("unknown", reason="journal_gap")
+            exact = set(bounded.exact_paths)
+            prefixes = bounded.complete_prefixes
+            for entry in entries:
+                if entry.paths is None:
+                    return MirrorChangeEvidence("unknown", reason="unknown_change")
+                for path in entry.paths:
+                    if path in exact or any(
+                            path == prefix or path.startswith(prefix + "/")
+                            for prefix in prefixes):
+                        return MirrorChangeEvidence("changed", current)
+            return MirrorChangeEvidence("unchanged", current)
 
     # ----------------------------------------------------------------- blobs
     def put_blob(self, path: str, data: bytes) -> None:
