@@ -75,6 +75,14 @@ now reports that exact lost CAS as retryable `SourceChanged`; a deterministic
 regression plus the 104-test focused GUI/local-input gate and Ruff pass locally.
 It remains undeployed, unrestarted and not live-measured.
 
+PR52's replacement Ubuntu job passed. Windows completed 3189 tests with 31
+expected skips and failed one unrelated display-presence regression after its
+30-second clock expired before the intended changed-input check. The production
+ordering is conservative and unchanged. That test now holds the membership clock
+only around the targeted finalization and restores real time before its fresh
+read; the changed/unchanged presence cases and the independent expiry case pass
+five consecutive focused runs. A replacement cross-platform run is pending.
+
 Next: land PR52 after replacement CI, then measure POST commit -> provider return
 -> local snapshot admission -> canonical DOM under normal diagnostics. Add stage
 boundary timings for full reconciliation before choosing between chat-scoped
