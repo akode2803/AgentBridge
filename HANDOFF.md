@@ -235,8 +235,26 @@ reached 1,067 passes and 12 expected skips without a failure when it was stopped
 after review found the 128-state eviction flaw; cross-platform CI remains the
 complete final gate for this branch.
 
-Next: publish this scheduler correction for cross-platform CI. After CI, deploy
-it once and compare normal-sampling attempt rate, exact CAS-loss categories, page latency
+PR57's first CI run failed one deterministic test on both platforms because the
+diagnostics-only fake runtime did not accept the new `activity` keyword. Windows
+also repeated the previously documented signup/presence transaction timeout, so
+GUI adoption now starts the Mesh without its presence thread, publishes the
+initial machine announcement, and only then starts presence; an ordering
+regression covers that contract without widening the fixture timeout.
+Automated review identified two valid edge cases: a scoped off-room activity hint
+could perform one unchanged attempt before mirror convergence and then inherit a
+long idle delay, and the stage-owner race captured its diagnostic category before
+converting to `collection_superseded`. The local correction gives only the named
+source a four-second/350 ms convergence window, clears it when selection closes,
+updates the test fake, and records the converted exception/category before the
+profile is emitted. The corrected focused scheduler/local-input/sidebar/recorder/
+diagnostics gate passes 194 tests with four expected skips; Ruff and diff checks
+pass. The exact failing GUI endpoint and its startup/readiness/fixture regression
+set pass 63 tests. The separate roadmap/bookkeeping commit remains on
+`codex/post-latency-roadmap` and is not part of PR57.
+
+PR57 remains the release target. After replacement CI passes, merge and deploy
+it once, then compare normal-sampling attempt rate, exact CAS-loss categories, page latency
 and the sidebar/network cue against the v0.24.304 window. If mutation-pending is
 dominant, make mutation completion wake only affected sources; if admission or
 finalization supersession dominates, fix that owner transition instead. Do not

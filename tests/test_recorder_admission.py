@@ -155,7 +155,7 @@ def test_context_byte_reservation_covers_internal_admission_flags(recorder):
 def test_inventory_exclusion_has_one_context_observation_and_does_not_promote(recorder, monkeypatch):
     sink, _ = recorder
     sink.sample_rate = 0
-    runtime = SimpleNamespace(unread=None, request=lambda *_: None,
+    runtime = SimpleNamespace(unread=None, request=lambda *_, **__: None,
                               request_page=lambda *_: None, inputs=lambda *_: (None, None, None))
     result = SimpleNamespace(status='forbidden', reason='viewer_not_member')
     monkeypatch.setattr(api_sidebar_pages, 'PageOperation', lambda *_a, **_k:

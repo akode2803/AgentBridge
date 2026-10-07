@@ -553,8 +553,10 @@ class LocalInputRuntime:
                     # a routine lost source CAS, not a staging-format failure.
                     # Keep the mutation's newer position and let the bounded
                     # scheduler or foreground test driver collect it again.
-                    raise local_source.SourceChanged(
-                        'collection_superseded') from exc
+                    converted = local_source.SourceChanged('collection_superseded')
+                    profile_error = type(converted).__name__
+                    profile_reason = _reconciliation_failure_reason(converted)
+                    raise converted from exc
                 raise
             finally:
                 try:

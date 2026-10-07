@@ -6,9 +6,11 @@ import threading
 
 import pytest
 
+from agentbridge.applink import AppLink
 from agentbridge.gui import api_chats, api_pages
 from agentbridge.gui.context import GuiApp, SessionReadToken
 from agentbridge.gui.routing import Request, authed, authed_read
+from agentbridge.mesh.presence import PresenceService
 from agentbridge.mesh.service import Mesh
 
 
@@ -246,7 +248,7 @@ def test_failed_adopt_is_transient_then_cleanup_and_re_adopt_recovers(rig, monke
     assert rig.app.logout("hexagon") == {"ok": True}
     original_start = Mesh.start
 
-    def broken_start(self):
+    def broken_start(self, **_kwargs):
         raise RuntimeError("start interrupted")
 
     monkeypatch.setattr(Mesh, "start", broken_start)
@@ -258,6 +260,34 @@ def test_failed_adopt_is_transient_then_cleanup_and_re_adopt_recovers(rig, monke
     assert rig.app.login("aryan", "hexagon")["ok"] is True
     token = rig.app.capture_session_read()
     assert token is not None and rig.app.validate_session_read(token)
+
+
+def test_adopt_announces_machine_before_starting_presence(rig, monkeypatch):
+    events = []
+    original_start = Mesh.start
+
+    def start(self, *, heartbeat=True):
+        events.append(("mesh_start", heartbeat))
+        return original_start(self, heartbeat=heartbeat)
+
+    monkeypatch.setattr(Mesh, "start", start)
+    announce = AppLink.announce
+    presence_start = PresenceService.start
+
+    def record_announce(self, capabilities=None):
+        events.append(("announce", tuple(capabilities or ())))
+        return announce(self, capabilities)
+
+    def record_presence(self, interval=None):
+        events.append(("presence_start", interval))
+        return presence_start(self, interval)
+
+    monkeypatch.setattr(AppLink, "announce", record_announce)
+    monkeypatch.setattr(PresenceService, "start", record_presence)
+    rig.signup()
+    assert events[:3] == [
+        ("mesh_start", False), ("announce", ("gui",)), ("presence_start", None),
+    ]
 
 
 def test_writes_keep_entry_only_auth_and_lock_denials(rig):

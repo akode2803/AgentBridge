@@ -24,6 +24,7 @@ class _State:
     failures: int = 0
     rerun_at: float | None = None
     blocked_until: float = 0.0
+    hot_until: float = 0.0
 
 
 class SourceSchedule:
@@ -98,9 +99,11 @@ class SourceSchedule:
             if selected:
                 self._selected, self._lease_until = chat, now + 15.0
             hot = activity or changed_route
-            if hot and chat == self._selected:
-                self._hot_until = now + 4.0
+            if hot:
+                state.hot_until = now + 4.0
                 state.idle = 0
+                if chat == self._selected:
+                    self._hot_until = state.hot_until
             # Pure lease renewal should not force a fresh scan. A hint uses
             # activity=True, regardless of whether this is the selected chat.
             if hot:
@@ -112,6 +115,9 @@ class SourceSchedule:
 
     def clear_selection(self):
         with self._lock:
+            state = self._states.get(self._selected)
+            if state is not None:
+                state.hot_until = 0.0
             self._selected = None
             self._lease_until = self._hot_until = 0.0
 
@@ -144,13 +150,14 @@ class SourceSchedule:
                 raise ValueError('stale ingestion completion')
             state = self._states[job.chat_id]
             selected = job.chat_id == self._selected and now < self._lease_until
+            hot = now < state.hot_until
             if not blocked:
                 state.failures = 0 if success else min(8, state.failures + 1)
             # ``idle`` counts successful observations that found no source
             # change. Failed or blocked work has its own bounded retry policy;
             # treating it as proof that a source is quiet would compound two
             # unrelated backoffs and delay recovery after a transient error.
-            if changed or (success and selected and now < self._hot_until):
+            if changed or (success and hot):
                 state.idle = 0
             elif success:
                 state.idle = min(8, state.idle + 1)
@@ -174,6 +181,12 @@ class SourceSchedule:
                 delay = min(60.0, self.background * 2 ** (state.failures - 1))
             elif selected:
                 delay = 0.35 if now < self._hot_until else min(self.background, 0.35 * 2 ** state.idle)
+            elif hot:
+                # A scoped off-room hint can precede the corresponding mirror
+                # refresh. Keep only that named source warm long enough for the
+                # persisted mirror wake to catch up; unrelated rooms retain
+                # their adaptive background cadence.
+                delay = 0.35
             else:
                 # Background discovery used to reread every known chat every
                 # four seconds forever.  A large cached account therefore kept

@@ -392,6 +392,15 @@ def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
     runtime.ingest(CHAT)
     provider.put_doc(META, _documents(2)[META])
     original = staged_source.begin
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'f' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
 
     def mutate_then_begin(*args, **kwargs):
         local_source.invalidate(mesh.store, runtime.reader(CHAT).definition.source)
@@ -401,6 +410,10 @@ def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
     with pytest.raises(local_source.SourceChanged, match='collection_superseded'):
         runtime.ingest(CHAT)
     assert runtime.health(CHAT)['ready'] is False
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['error_type'] == 'SourceChanged'
+    assert profile['reason'] == 'collection_superseded'
 
 
 def test_unchanged_ingest_reuses_admitted_source_without_creating_stage(

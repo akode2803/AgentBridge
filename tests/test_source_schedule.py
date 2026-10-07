@@ -62,6 +62,27 @@ def test_activity_burst_while_running_coalesces_to_one_rerun():
     assert schedule.wait_s(now=0.25, maximum=10) == pytest.approx(0.35)
 
 
+def test_scoped_background_activity_stays_warm_for_mirror_convergence():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request("room", now=0)
+    first = _take(schedule, 0.05, "room")
+    schedule.finish(first, now=0.05)
+    assert schedule.wait_s(now=0.05, maximum=10) == pytest.approx(4)
+
+    schedule.request("room", now=1, activity=True)
+    hinted = _take(schedule, 1.05, "room")
+    schedule.finish(hinted, now=1.05)
+    assert schedule.wait_s(now=1.05, maximum=10) == pytest.approx(0.35)
+
+    retry = _take(schedule, 1.4, "room")
+    schedule.finish(retry, now=1.4)
+    assert schedule.wait_s(now=1.4, maximum=10) == pytest.approx(0.35)
+
+    cooled = _take(schedule, 5.01, "room")
+    schedule.finish(cooled, now=5.01)
+    assert schedule.wait_s(now=5.01, maximum=10) == pytest.approx(4)
+
+
 def test_only_one_job_runs_and_selected_yields_after_two_to_background():
     schedule = SourceSchedule()
     schedule.request("background-a", now=0)
