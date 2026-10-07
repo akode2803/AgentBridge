@@ -340,6 +340,28 @@ def publish(
     )
 
 
+def _serialize_live_documents(documents, *, max_documents, max_bytes):
+    """Return exact stored JSON bytes for one bounded live-document batch."""
+    document_budget = _validate_budget(max_documents, "max_documents")
+    byte_budget = _validate_budget(max_bytes, "max_bytes")
+    if (type(documents) is not dict or not documents
+            or len(documents) > document_budget):
+        raise ValueError("invalid live document batch")
+    normalized = {}
+    used = 0
+    for raw_path, value in documents.items():
+        name = _validate_document_path(raw_path)
+        _validate_json_keys(value)
+        payload = json.dumps(
+            value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
+        used += len(name.encode("utf-8")) + len(payload.encode("utf-8"))
+        if used > byte_budget:
+            raise OverflowError("live document batch exceeds byte budget")
+        normalized[name] = payload
+    return normalized, used
+
+
 
 def _same_complete_documents(conn, source, normalized):
     """Compare exact raw bytes without materializing unbounded old payloads.

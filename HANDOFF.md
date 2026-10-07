@@ -106,3 +106,38 @@ The offline diagnostics summarizer now exposes those allowlisted stage/count
 fields as independent nearest-rank distributions in schema version 2. It keeps
 missing and invalid counts per metric, never returns raw identifiers or unknown
 fields, and explicitly preserves the non-additive collection/write relationship.
+
+PR53's first automated review found four diagnostics-only gaps: uncorrelated fast
+background attempts were never sampled at the default rate, collector counts were
+clamped below their supported ceilings, cleanup failure could suppress the row,
+and pre-stage failures recorded a no-op cleanup duration. Head `2c8b6f0` fixes all
+four with dedicated regressions; 328 focused tests and Ruff pass locally. The
+replacement cross-platform run is pending and the second automated review is
+clean.
+
+The next optimization is implemented locally on
+`codex/unchanged-source-fast-path` at app version `0.24.302`, stacked on PR53.
+After the existing source claim, it compares the complete mirror selection
+byte-for-byte with the admitted raw generation in bounded batches. Exact equality
+advances only the owner/readiness metadata and preserves the raw generation and
+overlay index; any changed, added or missing row, invalid index, mirror movement
+or source race uses or requires the complete staged path. Canonical authority is
+still recomputed and no mirror/cache verdict is persisted. In a disposable
+20,033-document fake-provider case, median unchanged reconciliation fell from
+about 403 ms to 173 ms. The 335-test source/staging gate, 102-test GUI/page gate,
+the full 3218-test suite with 18 expected skips, Ruff and diff checks pass locally.
+A deliberately changed last document measured about 560 ms versus 380 ms for an
+initial build, the expected cost of safe compare-then-rebuild fallback until
+verified changed-path evidence exists. The rebased branch is pushed as PR54; its
+replacement review/CI are pending. It is not deployed, restarted or live-measured.
+
+PR54's final-head review then found two gaps despite green cross-platform CI:
+the unchanged return did not make an interrupted older candidate reclaimable,
+and changed/failed admitted comparisons omitted their first traversal from the
+work counters. The unchanged admission transaction now abandons superseded
+building and unadmitted sealed candidates under the exact source-owner CAS.
+Diagnostics aggregate both comparison and fallback collection work, with bounds
+covering at most two complete traversals; an interrupted comparison retains its
+partial counters. The 163-test staging/local-input/diagnostics gate, Ruff and
+diff checks pass locally. A corrected head still needs replacement review and CI
+before PR54 can merge.

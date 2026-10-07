@@ -155,3 +155,19 @@ def test_sealed_candidate_cannot_cross_owner_revision(store):
     with pytest.raises(stage.StageChanged, match='owner_revision'):
         stage.verify_sealed(conn, store, candidate, expected=later)
     conn.rollback()
+
+
+def test_superseded_sealed_candidate_can_be_abandoned_without_new_stage(store):
+    local_source.initialize(store)
+    first = local_source.retire_for_publication(
+        store, local_source.capture(store, 'logical'),
+    )
+    candidate = stage.begin(store, 'logical', CHAT, expected=first)
+    stage.finish(store, candidate)
+    later = local_source.retire_for_publication(store, first)
+    with local_source._writer(store) as conn:
+        stage.abandon_superseded(conn, store, 'logical', later)
+    assert store._conn().execute(
+        'SELECT phase FROM staged_sources WHERE source=?',
+        (candidate.source_id,),
+    ).fetchone() == ('abandoned',)

@@ -93,10 +93,12 @@ _SERVER_BOUNDED_INTEGERS = {'request_seq': (1, 2**53 - 1),
                             'phase_faults': (0, 1_000_000),
                             'sqlite_extended_code': (0, 65535),
                             'sqlite_primary_code': (0, 255),
-                            'documents_examined': (0, 2_000_000),
-                            'documents_selected': (0, 1_000_000),
-                            'document_bytes': (0, 512 * 1024 * 1024),
-                            'document_batches': (0, 1_000_000)}
+                            # One attempt can perform an admitted comparison
+                            # followed by one complete staged fallback scan.
+                            'documents_examined': (0, 4_000_000),
+                            'documents_selected': (0, 2_000_000),
+                            'document_bytes': (0, 1024 * 1024 * 1024),
+                            'document_batches': (0, 2_000_000)}
 
 _ENUMS = {'flow': frozenset({'sent', 'received'}), 'db_kind': frozenset({'root', 'store'}),
           'holder_coverage': frozenset({'acquisition_start_only'}),'sqlite_category': SQLITE_CATEGORIES, 'event': EVENTS, 'route': ROUTES, 'status': STATUSES,

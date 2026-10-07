@@ -251,23 +251,23 @@ def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path
     assert 'private-chat' not in sink.path.read_text()
 
 
-def test_source_reconciliation_sampling_key_and_full_collector_bounds(tmp_path):
+def test_source_reconciliation_sampling_key_and_two_collection_bounds(tmp_path):
     sink = Diagnostics(tmp_path)
     assert sink.set_enabled(True, sample_rate=0.01)
     assert sink.flight_record({
         'event': 'delivery', 'phase': 'source_reconciliation', 'status': 'ok',
-        'sample_ref': '0' * 16, 'documents_examined': 2_000_000,
-        'documents_selected': 1_000_000,
-        'document_bytes': 512 * 1024 * 1024,
-        'document_batches': 1_000_000,
+        'sample_ref': '0' * 16, 'documents_examined': 4_000_000,
+        'documents_selected': 2_000_000,
+        'document_bytes': 1024 * 1024 * 1024,
+        'document_batches': 2_000_000,
     })
     event = next(row for row in rows(sink)
                  if row.get('phase') == 'source_reconciliation')
     assert event['sample_ref'] == '0' * 16
-    assert event['documents_examined'] == 2_000_000
-    assert event['documents_selected'] == 1_000_000
-    assert event['document_bytes'] == 512 * 1024 * 1024
-    assert event['document_batches'] == 1_000_000
+    assert event['documents_examined'] == 4_000_000
+    assert event['documents_selected'] == 2_000_000
+    assert event['document_bytes'] == 1024 * 1024 * 1024
+    assert event['document_batches'] == 2_000_000
 
 
 def test_forged_correlation_clock_and_crash_breadcrumb(tmp_path):

@@ -60,7 +60,11 @@ individual requests, messages or clocks.
 Schema version 2 also includes a bounded `source_reconciliation` section. It
 reports independent distributions for mirror enumeration, staged writes,
 comparison, admission and finalization, plus examined/selected document counts.
+The document counters include both the admitted comparison and staged fallback
+when changed input requires two complete traversals.
 `stage_write_ms` is contained within `collect_ms`; do not add those metrics.
+On an unchanged-source fast path, `collect_ms` is contained within `compare_ms`
+and candidate-stage timings are absent; do not add that pair either.
 Fast background attempts use an opaque random attempt tag for normal sampling;
 it is not a request, message or authority reference.
 

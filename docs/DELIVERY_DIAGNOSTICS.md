@@ -10,13 +10,17 @@ Each sampled source attempt emits one compact `source_reconciliation` row. It
 splits capture/claim, stage creation, complete mirror enumeration, staged writes,
 seal, generation comparison, atomic admission, finalization and cleanup. It also
 records bounded counts for mirror documents examined, documents selected,
-selected bytes and staged batches. Staged-write time is contained within the
-collection duration and must not be added to it. These counters describe local
-work only; they do not prove remote completeness, freshness or authority. A
+selected bytes and collection batches. A changed admitted comparison followed
+by a staged fallback reports the sum of both traversals. Staged-write time is contained within the
+collection duration and must not be added to it. For an unchanged-source fast
+path, collection is contained within comparison; missing stage/write/seal/cleanup
+metrics mean no candidate was built. These overlapping values must not be summed.
+The counters describe local work only; they do not prove remote completeness,
+freshness or authority. A
 random per-attempt sampling tag makes fast background attempts eligible for the
 configured sample without linking them to a message or request. Counter bounds
-match the collector ceilings: two million examined paths, one million selected
-documents/batches and 512 MiB of selected bytes.
+allow at most two complete collector traversals: four million examined paths,
+two million selected documents/batches and 1 GiB of selected bytes.
 
 References are process-secret keyed BLAKE2s message/chat/database tags and random request/tab/transaction tags. Correlation fields are hints only. Fixed schemas discard body, raw IDs, paths, SQL, credentials, arbitrary exception strings and stack traces before buffering. Existing legacy latency JSONL is preserved; its earlier configuration/retention remains distinct from this opt-in integrated recorder.
 

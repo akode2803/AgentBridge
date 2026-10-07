@@ -358,9 +358,10 @@ def test_stale_failure_cannot_retire_newer_publication(rig):
 
 def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
         rig, monkeypatch):
-    mesh, _provider = rig
+    mesh, provider = rig
     runtime = mesh.local_inputs
     runtime.ingest(CHAT)
+    provider.put_doc(META, _documents(2)[META])
     original = staged_source.begin
 
     def mutate_then_begin(*args, **kwargs):
@@ -370,6 +371,49 @@ def test_mutation_between_collection_claim_and_stage_begin_is_retryable(
     monkeypatch.setattr(staged_source, 'begin', mutate_then_begin)
     with pytest.raises(local_source.SourceChanged, match='collection_superseded'):
         runtime.ingest(CHAT)
+    assert runtime.health(CHAT)['ready'] is False
+
+
+def test_unchanged_ingest_reuses_admitted_source_without_creating_stage(
+        rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    _reader, before, before_index = runtime.inputs(CHAT)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('unchanged source created a stage')
+
+    monkeypatch.setattr(staged_source, 'begin', forbidden)
+    assert runtime.ingest(CHAT) is False
+    _reader, after, after_index = runtime.inputs(CHAT)
+    assert after.source.raw == before.source.raw
+    assert after.source.revision > before.source.revision
+    assert after_index == before_index
+
+
+def test_mirror_movement_during_unchanged_comparison_cannot_admit(
+        rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    original = local_input_runtime.document_observation._serialize_live_documents
+    crossed = False
+
+    def move_mirror(documents, **limits):
+        nonlocal crossed
+        if not crossed:
+            crossed = True
+            provider.put_doc(META, _documents(2)[META])
+        return original(documents, **limits)
+
+    monkeypatch.setattr(
+        local_input_runtime.document_observation,
+        '_serialize_live_documents', move_mirror,
+    )
+    with pytest.raises(RawCollectionUnavailable, match='mirror_changed'):
+        runtime.ingest(CHAT)
+    assert crossed
     assert runtime.health(CHAT)['ready'] is False
 
 
@@ -398,6 +442,91 @@ def test_ingestion_emits_one_compact_reconciliation_profile(rig, monkeypatch):
     assert profile['collect_ms'] == 2.0
     assert profile['stage_write_ms'] >= 2.0
     assert profile['compare_ms'] == profile['admit_ms'] == 2.0
+
+
+def test_unchanged_profile_has_comparison_without_candidate_stage(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'c' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+
+    assert runtime.ingest(CHAT) is False
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['collect_ms'] == profile['compare_ms'] == 2.0
+    assert profile['documents_selected'] == len(_documents())
+    assert not {'stage_open_ms', 'stage_write_ms', 'seal_ms', 'cleanup_ms'} & profile.keys()
+
+
+def test_changed_profile_counts_comparison_and_fallback_collections(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    provider.put_doc(STATE, {"ns": 2, "hidden": [], "starred": []})
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'd' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+
+    assert runtime.ingest(CHAT) is True
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['documents_examined'] == 2 * len(provider._docs)
+    assert profile['documents_selected'] == 2 * len(_documents())
+    # The comparison's mismatching batch raises before its callback completes;
+    # the staged fallback contributes the one completed batch.
+    assert profile['document_batches'] == 1
+    assert profile['collect_ms'] == 4.0
+    assert profile['compare_ms'] == 4.0
+
+
+def test_failed_comparison_keeps_partial_collection_counters(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    events = []
+    original = local_input_runtime.collect_document_batches
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'e' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+
+    def interrupted(transport, definition, *, consume, **limits):
+        def fail_after_batch(batch):
+            consume(batch)
+            raise RawCollectionUnavailable('interrupted_profile')
+        return original(
+            transport, definition, consume=fail_after_batch,
+            batch_documents=1, **limits,
+        )
+
+    monkeypatch.setattr(local_input_runtime, 'collect_document_batches', interrupted)
+    with pytest.raises(RawCollectionUnavailable, match='interrupted_profile'):
+        runtime.ingest(CHAT)
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['status'] == 'error'
+    assert profile['compare_ms'] == profile['collect_ms'] == 2.0
+    assert profile['documents_examined'] == 1
+    assert profile['documents_selected'] == 1
+    assert profile['document_batches'] == 0
 
 
 def test_reconciliation_profile_survives_cleanup_failure(rig, monkeypatch):

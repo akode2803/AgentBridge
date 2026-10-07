@@ -264,9 +264,16 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_pat
         assert mesh.local_inputs.ingest(CHAT)
         old_reader, old_receipt, old_index = mesh.local_inputs.inputs(CHAT)
         old = old_receipt.source.raw
-        delivered = []
+        delivered, collections = [], []
+        provider.put_doc(META, {'id': CHAT, 'members': ['alice'], 'revision': 2})
 
         def interrupt(transport, definition, *, consume, **limits):
+            collections.append(True)
+            if len(collections) == 1:
+                # Let the admitted comparison observe the changed document and
+                # fall through to a real candidate build.
+                return original_collect(transport, definition, consume=consume,
+                                        batch_documents=1, **limits)
             def sink(batch):
                 consume(batch)
                 delivered.append(True)
@@ -284,7 +291,13 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_pat
         monkeypatch.setattr(staged_source, 'cleanup', lambda *_args, **_kwargs: None)
         with pytest.raises(KeyboardInterrupt):
             mesh.local_inputs.ingest(CHAT)
-        assert delivered
+        assert len(collections) == 2 and delivered
+        interrupted_source = mesh.store._conn().execute(
+            "SELECT source FROM staged_sources WHERE phase='building'",
+        ).fetchone()[0]
+        # The next process sees the original admitted inputs again, so its
+        # unchanged fast path must retire the interrupted candidate.
+        provider.put_doc(META, {'id': CHAT, 'members': ['alice']})
     finally:
         mesh.close()
     monkeypatch.setattr(local_input_runtime, 'collect_document_batches', original_collect)
@@ -299,6 +312,16 @@ def test_interrupted_stage_preserves_old_admission_across_reopen(clouds, tmp_pat
         assert reader.capture_authority(retained).documents.document(META)['id'] == CHAT
         assert reopened.local_inputs.ingest(CHAT) is False
         assert reopened.local_inputs.inputs(CHAT)[1].source.ready
+        assert reopened.store._conn().execute(
+            'SELECT phase FROM staged_sources WHERE source=?',
+            (interrupted_source,),
+        ).fetchone() == ('abandoned',)
+        while staged_source.cleanup(reopened.store, max_rows=128):
+            pass
+        assert reopened.store._conn().execute(
+            'SELECT 1 FROM staged_sources WHERE source=?',
+            (interrupted_source,),
+        ).fetchone() is None
     finally:
         reopened.close()
 
