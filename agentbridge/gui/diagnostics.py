@@ -362,7 +362,8 @@ class Diagnostics:
                 or event.get('queue_wait_ms', 0) >= self.slow_ms)
         breadcrumb = event.get('phase') in (
             'origin_minted', 'local_commit', 'outbox_attempt', 'transport_append',
-            'append_ack_observed', 'outbox_retry', 'outbox_dead', 'canonical_dom',
+            'append_ack_observed', 'local_append_completed',
+            'local_snapshot_admitted', 'outbox_retry', 'outbox_dead', 'canonical_dom',
             'native_ack', 'send_reconciled', 'abandoned', 'shutdown') or (
             event.get('phase') in ('request_started', 'request_finished',
                                   'browser_request_started', 'browser_response')

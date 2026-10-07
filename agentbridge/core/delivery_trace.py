@@ -24,7 +24,9 @@ class _Deferred(list):
     dropped = 0
 PHASES = frozenset({
     'request_started', 'request_finished', 'origin_minted', 'local_commit',
-    'outbox_attempt', 'append_ack_observed', 'outbox_retry', 'outbox_dead',
+    'outbox_attempt', 'append_ack_observed', 'local_append_completed',
+    'local_snapshot_admitted',
+    'outbox_retry', 'outbox_dead',
     'sync_observed', 'sse_frame', 'transport_read', 'transport_append', 'ingestion',
     'outbox_batch', 'store_send_commit', 'page_prepare', 'page_finalize',
     'source_ingestion', 'ingestion_queued', 'ingestion_claimed',

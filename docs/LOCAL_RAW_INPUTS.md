@@ -16,9 +16,10 @@ The local input cut does not prove remote completeness or a global remote cut.
 Before a local authority-affecting external write, durably retire every affected
 local source and record the write intent. If invalidation fails, do not issue the
 external write. Keep the intent on failure or ambiguous outcome. Definite success
-can complete the intent, but cannot itself make the source ready: a new complete
-raw publication and admission are still required. A failed republish or crash
-must not restore the previous ready generation.
+can complete the intent, but ordinarily cannot itself make the source ready: a
+new complete raw publication and admission are still required. One narrow local
+message exception is described below. A failed republish or crash must not
+restore the previous ready generation.
 
 The `store.local_source` owner installs a separate raw admission namespace,
 uses FULL-synchronous write transactions, and binds readiness to both owner
@@ -46,6 +47,20 @@ this owner and is not a paging admission path.
 Local writer success/clear/remove/key changes must invalidate immediately,
 including app and harness writers. Another device's changes are observed through
 ingestion. Watcher notifications are hints, never evidence of completeness.
+
+An ordinary local message append may re-admit the pre-write snapshot immediately
+after definite provider success when all of these facts match exactly: the source
+was ready before the write, the coordinator revision advanced only through that
+write's begin/completion retirements, there are no pending writes, the raw
+document position is unchanged, and the optimistic SQLite message row matches
+the sealed appended envelope byte-for-byte. The final bounded compare and pointer
+update run under the root publication gate. Any concurrent source transition,
+malformed row, storage error, crash or ambiguous provider outcome misses the CAS
+and leaves ordinary complete ingestion responsible for recovery. Info events and
+authority-affecting writes never use this path. Canonical readers still recompute
+membership, trust, keys and visibility. The fast admission does not advance the
+last-successful-ingestion timestamp, and a full background collection remains
+queued to incorporate concurrent remote inputs.
 
 ## Adaptive freshness integration plan
 

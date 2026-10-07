@@ -147,7 +147,10 @@ def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
 
 
 @pytest.mark.parametrize('changed', [False, True])
-def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(page_app, changed):
+def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(
+        page_app, changed, monkeypatch):
+    from agentbridge.mesh import membership_coordinator
+
     app, chat = page_app
     mesh = app.mesh
     mesh.post(chat, 'one')
@@ -176,7 +179,12 @@ def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(pag
         new_display = presence.reader.capture_display_members(presence.reader.capture(), (mesh.user,))
         assert new_display.subjects != old_display.subjects
     assert reader.capture() == receipt
-    result = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
+    # This regression owns the changed presence cut. Its independent clock-expiry
+    # behavior has dedicated coverage below and must not win on a slow CI host.
+    with monkeypatch.context() as clock:
+        clock.setattr(membership_coordinator.time, 'time_ns',
+                      lambda: prepared.prepared._round.now)
+        result = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
     assert (result.status, result.reason) == ('unavailable', 'page_inputs_changed')
     assert result.result is None
     fresh = _settled_aux(app, chat)

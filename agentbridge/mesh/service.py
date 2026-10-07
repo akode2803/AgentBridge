@@ -131,6 +131,12 @@ class Mesh:
         self.messaging.set_terminal_reclaimer(
             lambda chat_id: Janitor(self).reclaim_deleted_chat_attachments(chat_id)
         )
+        if self.local_inputs is not None:
+            self.messaging.set_local_append_admitter(
+                self.local_inputs.prepare_local_append,
+                self.local_inputs.admit_local_append,
+                self.local_inputs.local_append_settled,
+            )
         self.accounts = AccountsService(
             self.tx, self.directory, self.messaging, self.membership,
             user, machine, keystore=self.keystore,

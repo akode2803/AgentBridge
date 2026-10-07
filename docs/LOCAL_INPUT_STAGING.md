@@ -3,8 +3,10 @@
 The local ingestion runtime collects documents from the exact built-in
 `CachingTransport` over exact `SupabaseTransport` into SQLite in bounded batches. This is an eventual-delivery snapshot of admitted
 raw inputs, not a remote atomic snapshot or a permission cache. Message-log
-admission remains separate. Canonical page requests still recompute membership,
-history-on-join, trust, keys, lifecycle, overlays and visibility.
+admission remains separate except for the exact confirmed-local-message CAS
+documented in [Phase 1 local raw inputs](LOCAL_RAW_INPUTS.md). Canonical page
+requests still recompute membership, history-on-join, trust, keys, lifecycle,
+overlays and visibility.
 
 A logical source identifies immutable dependency selectors and local mutation
 intents. Each physical candidate uses a new, never-reused `stage:` source ID.

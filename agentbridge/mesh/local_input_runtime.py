@@ -11,6 +11,7 @@ from ..core import delivery_trace
 
 import threading
 import time
+from dataclasses import dataclass
 
 from ..store import local_source, overlay_index, source_selectors, staged_source, staged_publication, document_observation
 from ..store.source_publication import SourcePublisher
@@ -18,6 +19,12 @@ from ..transport.local_mutations import LocalMutationTransport
 from ..transport.raw_documents import collect_document_batches, RawCollectionUnavailable
 from .local_page_source import LocalPageSource, LocalSourceReceipt
 from .source_schedule import SourceSchedule
+
+
+@dataclass(frozen=True)
+class _LocalAppendAdmission:
+    chat: str
+    source: local_source.SourcePosition
 
 
 class LocalInputRuntime:
@@ -157,6 +164,68 @@ class LocalInputRuntime:
         reader = self.reader(chat)
         return local_source.health(self.store, reader.definition.source)
 
+    def prepare_local_append(self, chat, record):
+        """Capture a ready pre-append source for an optional exact fast path."""
+        if type(record) is not dict or record.get('kind') != 'message':
+            return None
+        reader = self.reader(chat)
+        with self._lock:
+            if self._closed:
+                return None
+        try:
+            with self.coordinator.publication_gate(self.store, reader.definition):
+                source = local_source.capture(self.store, reader.definition.source)
+                if not source.ready or source.writes_pending:
+                    return None
+                return _LocalAppendAdmission(reader.chat, source)
+        except (local_source.SourceChanged, OSError):
+            return None
+
+    def admit_local_append(self, admission, record):
+        """Restore readiness only for the exact definitely appended local row."""
+        if type(admission) is not _LocalAppendAdmission:
+            return False
+        reader = self.reader(admission.chat)
+        if admission.source.source_id != reader.definition.source:
+            raise ValueError('foreign local append admission')
+        with self._lock:
+            if self._closed:
+                return False
+        try:
+            with self.coordinator.publication_gate(self.store, reader.definition):
+                local_source.admit_confirmed_local_message(
+                    self.store, admission.source, admission.chat, record,
+                )
+            delivery_trace.emit(
+                'local_snapshot_admitted', chat=admission.chat,
+                message=record.get('id', ''), outcome='completed',
+            )
+            return True
+        except (local_source.SourceChanged, OSError, OverflowError, ValueError):
+            # The ordinary complete-source ingestion path remains authoritative
+            # after any missed CAS, malformed row or unavailable storage.
+            return False
+
+    def local_append_settled(self, chat, record):
+        """After outbox deletion, prepare terminal facts and reconcile fully."""
+        if type(record) is not dict or record.get('kind') != 'message':
+            return False
+        try:
+            chat = self.reader(chat).chat
+        except ValueError:
+            return False
+        with self._lock:
+            if self._closed:
+                return False
+        try:
+            self.request_page(chat)
+        finally:
+            # The exact fast admission is only a latest-successful local
+            # snapshot. Keep the complete transport-neutral collector scheduled
+            # even if terminal-page preparation itself is temporarily broken.
+            self.request(chat, activity=True)
+        return True
+
     def inputs(self, chat):
         """Capture ready source and index at one bounded coordinator/SQLite cut.
 
@@ -259,6 +328,15 @@ class LocalInputRuntime:
                     with self.coordinator.publication_gate(self.store, reader.definition):
                         local_source.record_failure(self.store, reader.definition.source,
                             reason='budget' if budget else 'unavailable', expected=expected)
+                if (isinstance(exc, staged_source.StageChanged)
+                        and exc.args == ('stage_owner_changed',)):
+                    # A local mutation may cross the narrow gap between the
+                    # source claim and creation of its invisible stage. That is
+                    # a routine lost source CAS, not a staging-format failure.
+                    # Keep the mutation's newer position and let the bounded
+                    # scheduler or foreground test driver collect it again.
+                    raise local_source.SourceChanged(
+                        'collection_superseded') from exc
                 raise
             finally:
                 if stage is not None:
