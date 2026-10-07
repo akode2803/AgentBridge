@@ -11,11 +11,13 @@ from ..core import delivery_trace
 
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from ..store import local_source, overlay_index, source_selectors, staged_source, staged_publication, document_observation
 from ..store.source_publication import SourcePublisher
 from ..transport.local_mutations import LocalMutationTransport
+from ..transport.mirror_observation import MirrorChangeRequest, MirrorExpectedPosition
 from ..transport.raw_documents import collect_document_batches, RawCollectionUnavailable
 from .local_page_source import LocalPageSource, LocalSourceReceipt
 from .source_schedule import SourceSchedule
@@ -25,6 +27,15 @@ from .source_schedule import SourceSchedule
 class _LocalAppendAdmission:
     chat: str
     source: local_source.SourcePosition
+
+
+@dataclass(frozen=True)
+class _SourceMirrorToken:
+    source: local_source.SourcePosition
+    mirror: MirrorExpectedPosition
+
+
+_MAX_MIRROR_TOKENS = 128
 
 
 class LocalInputRuntime:
@@ -44,6 +55,7 @@ class LocalInputRuntime:
         self._stop = threading.Event()
         self._thread = None
         self._closed = False
+        self._mirror_tokens = OrderedDict()
         self._page_preparation = None
         self._discovery = None
         self._discovery_due = 0.0
@@ -51,6 +63,17 @@ class LocalInputRuntime:
         self.auxiliary = None
         self.unread = None
         self.read_events = None
+
+    def _retain_mirror_token(self, source, mirror):
+        """Keep bounded process-local evidence for recently reconciled sources."""
+        if type(source) is not local_source.SourcePosition \
+                or type(mirror) is not MirrorExpectedPosition:
+            return
+        with self._lock:
+            self._mirror_tokens[source.source_id] = _SourceMirrorToken(source, mirror)
+            self._mirror_tokens.move_to_end(source.source_id)
+            while len(self._mirror_tokens) > _MAX_MIRROR_TOKENS:
+                self._mirror_tokens.popitem(last=False)
 
     def bind_page_owner(self, mesh):
         from .page_preparation import PagePreparation
@@ -193,9 +216,13 @@ class LocalInputRuntime:
                 return False
         try:
             with self.coordinator.publication_gate(self.store, reader.definition):
-                local_source.admit_confirmed_local_message(
+                result = local_source.admit_confirmed_local_message(
                     self.store, admission.source, admission.chat, record,
                 )
+            with self._lock:
+                token = self._mirror_tokens.get(result.source_id)
+                if token is not None and token.source == admission.source:
+                    self._retain_mirror_token(result, token.mirror)
             delivery_trace.emit(
                 'local_snapshot_admitted', chat=admission.chat,
                 message=record.get('id', ''), outcome='completed',
@@ -290,9 +317,60 @@ class LocalInputRuntime:
                 except Exception:
                     pass  # Profiling cannot replace the ingestion result.
 
+            def retain_token(source, mirror):
+                self._retain_mirror_token(source, mirror)
+
+            def finalize(published, index):
+                final_started = delivery_trace.queue_clock()
+                try:
+                    receipt = reader.capture()
+                    if receipt.source != published:
+                        raise local_source.SourceChanged('ingestion_superseded')
+                    with reader.finalization(receipt) as conn:
+                        overlay_index._ready(conn, self.store.path, index)
+                finally:
+                    timed('source_finalize_ms', final_started)
+
             try:
                 started = delivery_trace.queue_clock()
                 captured = publisher.capture()
+                exact = {s.value for s in reader.definition.selectors
+                         if s.kind == 'doc_exact'}
+                prefixes = {s.value for s in reader.definition.selectors
+                            if s.kind == 'doc_prefix'}
+                prefixes = {p for p in prefixes if not any(
+                    p.startswith(q + '/') for q in prefixes if q != p
+                )}
+                known_changed = False
+                with self._lock:
+                    token = self._mirror_tokens.get(captured.source.source_id)
+                    if token is not None:
+                        self._mirror_tokens.move_to_end(captured.source.source_id)
+                if (token is not None and token.source == captured.source
+                        and captured.source.ready
+                        and not captured.source.writes_pending):
+                    change_started = delivery_trace.queue_clock()
+                    try:
+                        evidence = self.transport._transport.mirror_changes_since(
+                            MirrorChangeRequest(
+                                token.mirror, tuple(sorted(exact)),
+                                tuple(sorted(prefixes)),
+                            ),
+                        )
+                    finally:
+                        timed('change_check_ms', change_started)
+                    if evidence.status == 'unchanged':
+                        with self.coordinator.publication_gate(
+                                self.store, reader.definition):
+                            published, index = staged_publication.observe_unchanged(
+                                self.store, captured.source, reader.chat,
+                                observed_ns=time.time_ns(),
+                            )
+                        timed('capture_claim_ms', started)
+                        finalize(published, index)
+                        retain_token(published, evidence.position)
+                        return False
+                    known_changed = evidence.status == 'changed'
                 # Build an invisible candidate while the latest admitted raw
                 # snapshot remains readable. The final transaction CAS checks
                 # this exact owner position; local writes still retire it
@@ -300,30 +378,22 @@ class LocalInputRuntime:
                 with self.coordinator.publication_gate(self.store, reader.definition):
                     expected = local_source.claim_collection(self.store, captured.source)
                 timed('capture_claim_ms', started)
+                collected_position = None
 
                 def collect(consume, stats):
+                    nonlocal collected_position
                     def checked(batch):
                         if self._stop.is_set() or self._closed:
                             raise RuntimeError('local input ingestion stopped')
                         consume(batch)
 
-                    collect_document_batches(
+                    collected_position = collect_document_batches(
                         self.transport._transport, reader.definition,
                         consume=checked, stats=stats,
                     )
 
-                def finalize(published, index):
-                    final_started = delivery_trace.queue_clock()
-                    try:
-                        receipt = reader.capture()
-                        if receipt.source != published:
-                            raise local_source.SourceChanged('ingestion_superseded')
-                        with reader.finalization(receipt) as conn:
-                            overlay_index._ready(conn, self.store.path, index)
-                    finally:
-                        timed('source_finalize_ms', final_started)
-
-                if expected.ready and expected.raw.initialized:
+                if (not known_changed and expected.ready
+                        and expected.raw.initialized):
                     comparison_collection = {} if profile is not None else None
 
                     def compare_collection(consume):
@@ -353,14 +423,12 @@ class LocalInputRuntime:
                         finally:
                             timed('admit_ms', started)
                         finalize(published, index)
+                        retain_token(published, collected_position)
                         return False
 
                 started = delivery_trace.queue_clock()
                 stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
                 timed('stage_open_ms', started)
-                exact = {s.value for s in reader.definition.selectors if s.kind == 'doc_exact'}
-                prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
-
                 def append(batch):
                     for path in batch:
                         document_observation._validate_document_path(path)
@@ -413,6 +481,7 @@ class LocalInputRuntime:
                 if captured.source.raw.source_id != published.raw.source_id:
                     staged_source.retire_generation(self.store, captured.source.raw.source_id)
                 finalize(published, index)
+                retain_token(published, collected_position)
                 changed = captured.source.raw != published.raw
                 if changed or not captured.source.ready:
                     # Wake terminal preparation from an admitted source change,

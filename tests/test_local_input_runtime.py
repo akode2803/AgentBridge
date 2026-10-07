@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from dataclasses import replace
 
 import pytest
 
 from agentbridge.mesh import local_input_runtime
-from agentbridge.store import overlay_index, staged_source
+from agentbridge.store import overlay_index, staged_publication, staged_source
 from agentbridge.mesh.sealer import PlainSealer
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import local_source
@@ -323,6 +324,8 @@ def test_unsafe_collection_retires_readiness_and_persists_bounded_health(rig):
     before = runtime.health(CHAT)
     with provider._lock:
         provider._authority_unsafe.add(META)
+    with runtime._lock:
+        runtime._mirror_tokens.clear()
 
     with pytest.raises(RawCollectionUnavailable, match="unsafe_cached_value"):
         runtime.ingest(CHAT)
@@ -388,7 +391,7 @@ def test_unchanged_ingest_reuses_admitted_source_without_creating_stage(
     assert runtime.ingest(CHAT) is False
     _reader, after, after_index = runtime.inputs(CHAT)
     assert after.source.raw == before.source.raw
-    assert after.source.revision > before.source.revision
+    assert after.source.revision == before.source.revision
     assert after_index == before_index
 
 
@@ -397,6 +400,8 @@ def test_mirror_movement_during_unchanged_comparison_cannot_admit(
     mesh, provider = rig
     runtime = mesh.local_inputs
     assert runtime.ingest(CHAT)
+    with runtime._lock:
+        runtime._mirror_tokens.clear()
     original = local_input_runtime.document_observation._serialize_live_documents
     crossed = False
 
@@ -448,6 +453,8 @@ def test_unchanged_profile_has_comparison_without_candidate_stage(rig, monkeypat
     mesh, _provider = rig
     runtime = mesh.local_inputs
     assert runtime.ingest(CHAT)
+    with runtime._lock:
+        runtime._mirror_tokens.clear()  # model restart / unavailable journal
     events = []
     monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
     monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
@@ -466,10 +473,109 @@ def test_unchanged_profile_has_comparison_without_candidate_stage(rig, monkeypat
     assert not {'stage_open_ms', 'stage_write_ms', 'seal_ms', 'cleanup_ms'} & profile.keys()
 
 
+def test_journal_unchanged_updates_health_without_scan_or_generation(rig, monkeypatch):
+    mesh, _provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    before = local_source.capture(mesh.store, runtime.reader(CHAT).definition.source)
+    events = []
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'elapsed_ms', lambda _start: 2.0)
+    monkeypatch.setattr(local_input_runtime.delivery_trace, 'sampling_reference',
+                        lambda: 'f' * 16)
+    monkeypatch.setattr(
+        local_input_runtime.delivery_trace, 'emit',
+        lambda phase, **fields: events.append((phase, fields)),
+    )
+    monkeypatch.setattr(
+        local_input_runtime, 'collect_document_batches',
+        lambda *_args, **_kwargs: pytest.fail('unchanged journal path scanned mirror'),
+    )
+
+    assert runtime.ingest(CHAT) is False
+    after = local_source.capture(mesh.store, runtime.reader(CHAT).definition.source)
+    assert after == before and after.raw == before.raw
+    profile = next(fields for phase, fields in events
+                   if phase == 'source_reconciliation')
+    assert profile['change_check_ms'] == 2.0
+    assert 'collect_ms' not in profile and 'stage_open_ms' not in profile
+
+
+def test_journal_known_change_skips_admitted_precomparison(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    provider.put_doc(STATE, {"ns": 2, "hidden": [], "starred": []})
+    monkeypatch.setattr(
+        staged_publication, 'identical_admitted',
+        lambda *_args, **_kwargs: pytest.fail('known change repeated comparison'),
+    )
+    assert runtime.ingest(CHAT) is True
+    assert runtime.inputs(CHAT)[1].source.ready
+
+
+def test_journal_unrelated_change_avoids_global_mirror_scan(rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    before = runtime.inputs(CHAT)[1].source
+    provider.put_doc('outside/value.json', {'ignored': True})
+    monkeypatch.setattr(
+        local_input_runtime, 'collect_document_batches',
+        lambda *_args, **_kwargs: pytest.fail('unrelated change scanned mirror'),
+    )
+    assert runtime.ingest(CHAT) is False
+    assert runtime.inputs(CHAT)[1].source == before
+
+
+def test_mirror_change_after_journal_query_is_ingested_on_next_attempt(
+        rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    original = staged_publication.observe_unchanged
+    crossed = []
+
+    def change_before_health_cas(*args, **kwargs):
+        provider.put_doc(STATE, {"ns": 2, "hidden": [], "starred": []})
+        crossed.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        staged_publication, 'observe_unchanged', change_before_health_cas,
+    )
+    assert runtime.ingest(CHAT) is False
+    assert crossed == [True]
+
+    monkeypatch.setattr(staged_publication, 'observe_unchanged', original)
+    assert runtime.ingest(CHAT) is True
+    reader, receipt, _index = runtime.inputs(CHAT)
+    assert reader.capture_viewer_state(receipt, 'alice').decoded() == {
+        "ns": 2, "hidden": [], "starred": [],
+    }
+
+
+def test_mirror_tokens_are_lru_bounded(rig):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    token = next(iter(runtime._mirror_tokens.values()))
+    first = None
+    for number in range(local_input_runtime._MAX_MIRROR_TOKENS + 1):
+        source = replace(token.source, logical_source=f"source-{number}")
+        runtime._retain_mirror_token(source, token.mirror)
+        first = first or source.source_id
+    assert len(runtime._mirror_tokens) == local_input_runtime._MAX_MIRROR_TOKENS
+    assert first not in runtime._mirror_tokens
+    assert f"source-{local_input_runtime._MAX_MIRROR_TOKENS}" in runtime._mirror_tokens
+
+
 def test_changed_profile_counts_comparison_and_fallback_collections(rig, monkeypatch):
     mesh, provider = rig
     runtime = mesh.local_inputs
     assert runtime.ingest(CHAT)
+    with runtime._lock:
+        runtime._mirror_tokens.clear()  # exercise PR54 compare-then-fallback
     provider.put_doc(STATE, {"ns": 2, "hidden": [], "starred": []})
     events = []
     monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)
@@ -497,6 +603,8 @@ def test_failed_comparison_keeps_partial_collection_counters(rig, monkeypatch):
     mesh, _provider = rig
     runtime = mesh.local_inputs
     assert runtime.ingest(CHAT)
+    with runtime._lock:
+        runtime._mirror_tokens.clear()
     events = []
     original = local_input_runtime.collect_document_batches
     monkeypatch.setattr(local_input_runtime.delivery_trace, 'queue_clock', lambda: 1.0)

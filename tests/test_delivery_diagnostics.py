@@ -231,7 +231,7 @@ def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path
     assert sink.set_enabled(True, sample_rate=1)
     trace.emit(
         'source_reconciliation', chat='private-chat', duration_ms=12.5,
-        collect_ms=7.5, stage_write_ms=2.0, compare_ms=1.0,
+        change_check_ms=0.25, collect_ms=7.5, stage_write_ms=2.0, compare_ms=1.0,
         documents_examined=20_000, documents_selected=3,
         document_bytes=144, document_batches=1,
         private_path='/do/not/record',
@@ -241,6 +241,7 @@ def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path
         if row.get('phase') == 'source_reconciliation'
     )
     assert event['duration_ms'] == 12.5
+    assert event['change_check_ms'] == 0.25
     assert event['collect_ms'] == 7.5
     assert event['stage_write_ms'] == 2.0
     assert event['documents_examined'] == 20_000

@@ -7,7 +7,7 @@ Integrated with the existing authenticated, opt-in GUI diagnostics setting. Exis
 Correlated local phases cover browser HTTP start/JSON settlement, server dispatch, envelope mint/cache commit, outbox attempt/provider handler return/retry/dead outcome, definite local append completion, exact confirmed-local-snapshot admission, log transport reads/ingestion, source ingestion request/claim/preparation, canonical page prepare/finalize, observed root/local-source Store acquisition/body/commit/rollback, SSE emission/reception/refresh queue/settlement, exact canonical DOM and covering native acknowledgment. Browser sender durations start at native POST dispatch. Incoming durations start at local SSE message reception. Neither measures an independent peer end-to-end. Optimistic pending rows and animation-frame opportunities are excluded from canonical DOM acceptance. Acknowledgments use exact ns from canonical IDs or safe/string integer representations; JavaScript's rounded large Numbers cannot establish coverage.
 
 Each sampled source attempt emits one compact `source_reconciliation` row. It
-splits capture/claim, stage creation, complete mirror enumeration, staged writes,
+splits capture/claim, process-local change checking, stage creation, complete mirror enumeration, staged writes,
 seal, generation comparison, atomic admission, finalization and cleanup. It also
 records bounded counts for mirror documents examined, documents selected,
 selected bytes and collection batches. A changed admitted comparison followed
@@ -15,6 +15,10 @@ by a staged fallback reports the sum of both traversals. Staged-write time is co
 collection duration and must not be added to it. For an unchanged-source fast
 path, collection is contained within comparison; missing stage/write/seal/cleanup
 metrics mean no candidate was built. These overlapping values must not be summed.
+`change_check_ms` is the bounded in-memory journal lookup. When that proves the
+selected inputs unchanged, collection and comparison metrics are absent. A
+missing change-check value means the process had no matching volatile token; it
+does not mean the source was unchanged.
 The counters describe local work only; they do not prove remote completeness,
 freshness or authority. A
 random per-attempt sampling tag makes fast background attempts eligible for the

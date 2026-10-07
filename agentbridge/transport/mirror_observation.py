@@ -26,6 +26,12 @@ _REASONS = {
     "changed",
 }
 _POSITION_STATUSES = {"matched", "changed", "unavailable"}
+_CHANGE_STATUSES = {"unchanged", "changed", "unknown"}
+_CHANGE_REASONS = {
+    "unsupported", "cold", "invalid_identity", "invalid_payload",
+    "revision_exhausted", "mutation_interrupted", "identity_changed",
+    "future_revision", "journal_gap", "unknown_change",
+}
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,29 @@ class MirrorSelectionRequest:
 
 
 @dataclass(frozen=True)
+class MirrorChangeRequest:
+    expected: MirrorExpectedPosition
+    exact_paths: tuple[str, ...]
+    complete_prefixes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MirrorChangeEvidence:
+    status: str
+    position: MirrorExpectedPosition | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _CHANGE_STATUSES:
+            raise ValueError("unknown mirror change status")
+        if self.status == "unknown":
+            if self.position is not None or self.reason not in _CHANGE_REASONS:
+                raise ValueError("unknown change evidence requires a known reason")
+        elif type(self.position) is not MirrorExpectedPosition or self.reason is not None:
+            raise ValueError("known change evidence requires a position")
+
+
+@dataclass(frozen=True)
 class MirrorSelectedPrefix:
     prefix: str
     records: tuple[MirrorDocumentRecord, ...]
@@ -168,6 +197,34 @@ def validated_selection_request(value: MirrorSelectionRequest) -> MirrorSelectio
     return MirrorSelectionRequest(
         expected, copied_paths, copied_prefixes, records, byte_limit, examined,
     )
+
+
+def validated_change_request(value: MirrorChangeRequest) -> MirrorChangeRequest:
+    """Detach and validate a bounded document-selector change query."""
+    if type(value) is not MirrorChangeRequest:
+        raise ValueError("expected MirrorChangeRequest")
+    expected = MirrorExpectedPosition(*validated_position_fields(value.expected))
+    if type(value.exact_paths) is not tuple or type(value.complete_prefixes) is not tuple:
+        raise ValueError("mirror change selectors must be exact tuples")
+    paths = tuple(value.exact_paths)
+    prefixes = tuple(value.complete_prefixes)
+    if len(paths) > 128 or len(prefixes) > 8:
+        raise ValueError("too many mirror change selectors")
+    if any(not _valid_path(item) for item in paths) \
+            or any(not _valid_path(item) for item in prefixes):
+        raise ValueError("invalid mirror change selector")
+    if len(set(paths)) != len(paths) or len(set(prefixes)) != len(prefixes):
+        raise ValueError("duplicate mirror change selector")
+    ordered = sorted(prefixes)
+    if any(right == left or right.startswith(left + "/")
+           for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("overlapping mirror change prefixes")
+    if any(path == prefix or path.startswith(prefix + "/")
+           for path in paths for prefix in prefixes):
+        raise ValueError("exact mirror change selector overlaps prefix")
+    if sum(len(item.encode("utf-8")) for item in paths + prefixes) > 64 * 1024:
+        raise ValueError("mirror change selectors exceed byte limit")
+    return MirrorChangeRequest(expected, paths, prefixes)
 
 
 def capture_mirror_selection_locked(*, request: MirrorSelectionRequest, warm: bool,
@@ -453,6 +510,8 @@ def _valid_json(value: Any, active: set[int]) -> bool:
 __all__ = [
     "MAX_MIRROR_INTEGER",
     "MirrorCaptureUnavailable",
+    "MirrorChangeEvidence",
+    "MirrorChangeRequest",
     "MirrorDocumentRecord",
     "MirrorExpectedPosition",
     "MirrorObservation",
@@ -466,5 +525,6 @@ __all__ = [
     "validate_identity",
     "transport_identities",
     "validated_position_fields",
+    "validated_change_request",
     "validated_selection_request",
 ]

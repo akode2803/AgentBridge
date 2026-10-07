@@ -96,7 +96,7 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
 def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
     complete = _event(
         "delivery", phase="source_reconciliation", status="ok",
-        duration_ms=30, capture_claim_ms=2, stage_open_ms=3,
+        duration_ms=30, capture_claim_ms=2, change_check_ms=0.5, stage_open_ms=3,
         collect_ms=20, stage_write_ms=12, seal_ms=1, compare_ms=4,
         admit_ms=2, source_finalize_ms=1, cleanup_ms=1,
         documents_examined=20_000, documents_selected=5,
@@ -111,6 +111,8 @@ def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
 
     assert result["schema_version"] == 2
     assert profile["events"] == 2
+    assert profile["metrics"]["change_check_ms"]["samples"] == 1
+    assert profile["metrics"]["change_check_ms"]["p50"] == 0.5
     assert profile["metrics"]["duration_ms"]["p50"] == 10
     assert profile["metrics"]["duration_ms"]["p95"] == 30
     assert profile["metrics"]["collect_ms"]["samples"] == 1

@@ -12,6 +12,7 @@ from agentbridge.transport.base import Transport, TransportProfile, Watcher
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.mirror_observation import (
     MAX_MIRROR_INTEGER,
+    MirrorChangeRequest,
     MirrorExpectedPosition,
     MirrorObservation,
 )
@@ -254,6 +255,116 @@ def test_bootstrap_then_empty_provider_observation_changes_provenance(
     second = cached.capture_mirror()
     assert second.provenance == "provider_observed"
     assert second.revision == first.revision + 1
+
+
+def test_change_journal_distinguishes_unrelated_and_selected_paths(mirror):
+    provider, cached = mirror
+    provider.docs = {
+        "chats/room/meta.json": {"v": 1},
+        "users/alice.json": {"v": 1},
+    }
+    provider.cursor = 1
+    cached.refresh()
+    position = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+    def request(expected=position):
+        return MirrorChangeRequest(
+            expected, ("chats/room/meta.json",), ("users",),
+        )
+
+    provider.delta = ({"outside/value.json": {"v": 2}}, set(), 2)
+    cached._refresh_delta()
+    unrelated = cached.mirror_changes_since(request())
+    assert unrelated.status == "unchanged"
+
+    position = unrelated.position
+    provider.delta = ({"users/alice.json": {"v": 2}}, set(), 3)
+    cached._refresh_delta()
+    changed = cached.mirror_changes_since(request(position))
+    assert changed.status == "changed"
+
+
+def test_change_journal_cursor_only_gap_and_base_decline(mirror):
+    provider, cached = mirror
+    provider.docs = {"chats/room/meta.json": {"v": 1}}
+    provider.cursor = 1
+    cached.refresh()
+    position = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+    request = MirrorChangeRequest(position, ("chats/room/meta.json",), ())
+    assert provider.mirror_changes_since(request).reason == "unsupported"
+
+    provider.delta = ({}, set(), 2)
+    cached._refresh_delta()
+    evidence = cached.mirror_changes_since(request)
+    assert evidence.status == "unchanged"
+    with cached._lock:
+        cached._mirror_change_journal.clear()
+        cached._mirror_change_bytes = 0
+    assert cached.mirror_changes_since(request).reason == "journal_gap"
+
+
+def test_change_journal_eviction_and_oversize_change_fail_closed(mirror, monkeypatch):
+    provider, cached = mirror
+    provider.docs = {"chats/room/meta.json": {"v": 1}}
+    cached.refresh()
+    position = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+    request = MirrorChangeRequest(position, ("chats/room/meta.json",), ())
+
+    for revision in range(257):
+        cached.put_doc(f"outside/{revision}.json", {"v": revision})
+    assert cached.mirror_changes_since(request).reason == "journal_gap"
+
+    position = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+    monkeypatch.setattr("agentbridge.transport.cache._CHANGE_JOURNAL_PATHS", 1)
+    provider.docs = {
+        "chats/room/meta.json": {"v": 2},
+        "users/alice.json": {"v": 1},
+    }
+    cached.refresh()
+    unknown = cached.mirror_changes_since(
+        MirrorChangeRequest(position, (), ("users",)),
+    )
+    assert unknown.status == "unknown" and unknown.reason == "unknown_change"
+
+
+def test_change_journal_tracks_delete_and_authority_safety_change(mirror):
+    provider, cached = mirror
+    provider.docs = {"users/alice.json": {"v": 1}}
+    cached.refresh()
+    position = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+
+    def request(expected):
+        return MirrorChangeRequest(expected, (), ("users",))
+
+    cached.delete_doc("users/alice.json")
+    deleted = cached.mirror_changes_since(request(position))
+    assert deleted.status == "changed"
+
+    position = deleted.position
+    with cached._lock:
+        with cached._captured_mutation_locked() as mutation:
+            cached._docs["users/alice.json"] = {"v": 1}
+            cached._authority_unsafe.add("users/alice.json")
+            mutation.add("users/alice.json")
+    assert cached.mirror_changes_since(request(position)).status == "changed"
+
+
+def test_change_journal_bootstrap_transition_is_unknown(tmp_path: Path):
+    provider = MemoryProvider()
+    snapshot = tmp_path / "mirror.json"
+    snapshot.write_text(json.dumps({
+        "v": 1, "cache_key": provider.cache_key, "saved": 1,
+        "cursor": 3, "docs": {"users/a.json": {"v": 1}},
+        "chat_ids": [],
+    }), encoding="utf-8")
+    cached = CachingTransport(provider, auto_refresh=False, snapshot_path=snapshot)
+    before = MirrorExpectedPosition.from_observation(cached.capture_mirror())
+    provider.docs = {"users/a.json": {"v": 1}}
+    provider.cursor = 3
+    cached.refresh()
+    evidence = cached.mirror_changes_since(
+        MirrorChangeRequest(before, (), ("users",)),
+    )
+    assert evidence.status == "unknown" and evidence.reason == "unknown_change"
 
 
 def test_delta_alias_cursor_only_revocation_and_tombstone(mirror):

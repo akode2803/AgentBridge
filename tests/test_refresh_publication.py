@@ -160,6 +160,10 @@ def test_failed_external_mutation_during_chat_collection_remains_pending(clouds,
     try:
         runtime = mesh.local_inputs
         assert runtime.ingest(chat_rig.CHAT)
+        # Model a fresh process / evicted volatile journal token so this test
+        # reaches the collection boundary where it injects the failed write.
+        with runtime._lock:
+            runtime._mirror_tokens.clear()
         original_collect = local_input_runtime.collect_document_batches
 
         def cross(transport, definition, *, consume, **kwargs):

@@ -69,6 +69,31 @@ nonce/revision pairs and provider cursors must not be used as authorization or
 substituted for durable Store generations. Existing transport reads remain the
 serving path; the outer projection cache remains disabled.
 
+## Bounded change evidence
+
+`mirror_changes_since()` is an optional constant-work query over a bounded
+process-local revision journal. A request binds one exact mirror position to at
+most 128 exact document paths and eight nonoverlapping document prefixes. It
+returns `unchanged` only when every later revision is retained, known and has no
+matching changed path. It returns `changed` when a retained path matches and
+`unknown` after restart, identity movement, journal eviction, an oversized or
+interrupted mutation, invalid mirror state, or an unsupported transport.
+
+The journal keeps at most 256 revisions, 4,096 paths and 256 KiB per mutation,
+and 1 MiB of charged path data in total. Oversized mutations become one bounded
+unknown entry. Empty entries represent proven cursor-only or equal-value mirror
+movement. Entries contain paths only: no document payloads, provider cursors,
+timestamps, membership results, trust decisions or authorization verdicts.
+
+The local ingestion owner may pair this evidence with the exact ready SQLite
+source it produced. An unchanged result permits a small SQLite source/index CAS
+that refreshes source health without moving any raw or index generation. A known
+change skips the admitted-generation precomparison and proceeds directly to one
+complete staged collection. Unknown evidence falls back to the complete bounded
+comparison. Every canonical request still recomputes membership, trust, keys and
+visibility from the admitted raw inputs; this volatile journal never authorizes
+a read or claims remote freshness.
+
 ## Selective capture
 
 `capture_mirror_selection()` captures bounded exact-path facts and complete

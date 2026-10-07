@@ -5,6 +5,7 @@ import pytest
 
 from agentbridge.store import source_selectors
 from agentbridge.transport.local_mutations import root_identity
+from agentbridge.transport.mirror_observation import MirrorExpectedPosition
 from agentbridge.transport.raw_documents import RawCollectionUnavailable, collect_document_batches
 
 
@@ -28,8 +29,10 @@ def test_cache_stream_exceeds_legacy_limit_without_retaining_all_refs(clouds, tm
         assert len(batch) <= 113
         observed.extend(batch)
 
-    assert collect_document_batches(cache, definition, consume=consume,
-                                    batch_documents=113) is None
+    position = collect_document_batches(
+        cache, definition, consume=consume, batch_documents=113,
+    )
+    assert type(position) is MirrorExpectedPosition
     assert len(observed) == 20_111
     assert len(set(observed)) == len(observed)
 
