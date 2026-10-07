@@ -136,6 +136,24 @@ def test_discovery_rotates_beyond_capacity_without_starving_later_rooms():
     assert len(visited) == 192
 
 
+def test_default_capacity_retains_large_quiet_inventory_backoff():
+    schedule = SourceSchedule()
+    rooms = [f"room-{number:03}" for number in range(133)]
+    for room in rooms:
+        assert schedule.discover(room, now=0)
+    while job := schedule.take_due(now=0.05):
+        schedule.finish(job, now=0.05)
+
+    # The live account currently has 133 message-bearing chats. Re-discovery
+    # must retain their quiet evidence instead of evicting five sources and
+    # turning the four-second discovery walk into perpetual fresh work.
+    for room in rooms:
+        assert schedule.discover(room, now=1)
+    assert len(schedule._states) == len(rooms)
+    assert all(state.idle == 1 for state in schedule._states.values())
+    assert schedule.take_due(now=4.049) is None
+
+
 def test_failures_back_off_and_success_resets_failure_delay():
     schedule = SourceSchedule(background_s=2)
     schedule.request("room", now=0)
@@ -148,6 +166,40 @@ def test_failures_back_off_and_success_resets_failure_delay():
     third = _take(schedule, 6.05, "room")
     schedule.finish(third, now=6.05, success=True)
     assert schedule.wait_s(now=6.05, maximum=100) == pytest.approx(2)
+
+
+def test_quiet_background_sources_back_off_without_counting_failures():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request("room", now=0)
+
+    expected_delays = (4, 8, 16, 32, 64, 128, 256, 300, 300)
+    now = 0.05
+    for delay in expected_delays:
+        job = _take(schedule, now, "room")
+        schedule.finish(job, now=now)
+        assert schedule._states["room"].failures == 0
+        assert schedule.wait_s(now=now, maximum=1000) == pytest.approx(delay)
+        now += delay
+
+
+def test_background_change_resets_idle_cadence_and_failure_does_not_age_idle():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request("room", now=0)
+    first = _take(schedule, 0.05, "room")
+    schedule.finish(first, now=0.05)
+    second = _take(schedule, 4.05, "room")
+    schedule.finish(second, now=4.05)
+    assert schedule.wait_s(now=4.05, maximum=100) == pytest.approx(8)
+
+    failed = _take(schedule, 12.05, "room")
+    schedule.finish(failed, now=12.05, success=False)
+    assert schedule._states["room"].idle == 2
+    assert schedule.wait_s(now=12.05, maximum=100) == pytest.approx(4)
+
+    changed = _take(schedule, 16.05, "room")
+    schedule.finish(changed, now=16.05, changed=True)
+    assert schedule._states["room"].idle == 0
+    assert schedule.wait_s(now=16.05, maximum=100) == pytest.approx(4)
 
 
 @pytest.mark.parametrize("clear", [False, True])
@@ -182,6 +234,7 @@ def test_stale_or_forged_completion_is_rejected_without_losing_running_job():
     ("constructor", "call", "match"),
     [
         ((0, 4), None, "capacity"),
+        ((2049, 4), None, "capacity"),
         ((1, 0.34), None, "cadence"),
         ((1, float("nan")), None, "cadence"),
         ((1, 4), ("request", "bad/room", 0), "chat"),
@@ -278,8 +331,26 @@ def test_persistent_pending_retry_is_bounded_and_yields_to_background():
             assert job.chat_id == 'selected'
             seen.append(job.chat_id)
             schedule.finish(job, now=now, success=False, blocked=True)
-    assert len(seen) == 5
+    assert len(seen) == 4
+    assert schedule.take_due(now=1.449) is None
+    assert _take(schedule, 1.451, 'selected')
     assert schedule._states['selected'].failures == 0
+
+
+def test_pending_mutation_coalesces_cross_room_retry_herd():
+    schedule = SourceSchedule()
+    schedule.request('background-a', now=0)
+    schedule.request('background-b', now=0)
+    schedule.request('selected', now=0, selected=True)
+
+    first = _take(schedule, 0.05, 'selected')
+    schedule.finish(first, now=0.05, success=False, blocked=True)
+    assert schedule.take_due(now=0.399) is None
+    second = _take(schedule, 0.4, 'selected')
+    schedule.finish(second, now=0.4)
+
+    background = schedule.take_due(now=0.4)
+    assert background is not None and background.chat_id.startswith('background-')
 
 
 @pytest.mark.parametrize('success,blocked', [(False, 1), (False, None), (True, True)])

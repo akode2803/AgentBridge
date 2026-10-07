@@ -44,6 +44,15 @@ _RAW_COLLECTION_FAILURE_REASONS = frozenset({
 _RAW_COLLECTION_BUDGET_REASONS = frozenset({
     'document_budget', 'byte_budget', 'path_budget', 'document_byte_budget',
 })
+_SOURCE_CHANGE_REASONS = {
+    'source_mutation_pending': 'source_mutation_pending',
+    'source_changed_before_collection': 'collection_superseded',
+    'collection_superseded': 'collection_superseded',
+    'source_changed_during_comparison': 'comparison_superseded',
+    'source_changed_during_ingestion': 'admission_superseded',
+    'ingestion_superseded': 'finalization_superseded',
+    'source_changed_during_finalization': 'finalization_superseded',
+}
 
 
 def _reconciliation_failure_reason(exc):
@@ -57,7 +66,8 @@ def _reconciliation_failure_reason(exc):
             return 'budget_exhausted'
         return 'inputs_unavailable'
     if isinstance(exc, local_source.SourceChanged):
-        return 'source_changed'
+        detail = exc.args[0] if exc.args and type(exc.args[0]) is str else ''
+        return _SOURCE_CHANGE_REASONS.get(detail, 'source_changed')
     if isinstance(exc, overlay_index.OverlayIndexUnavailable):
         return 'index_pending'
     if isinstance(exc, staged_source.StageChanged):
