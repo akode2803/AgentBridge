@@ -16,6 +16,7 @@ hard failures or explicit incomplete results.
 | Full document reconciliation | A complete snapshot heals delta-feed errors every 6 h. | Keep. Realtime Broadcast is a content-free, lossy wakeup and cannot prove completeness or authority. |
 | Browser broad refresh | No broad timer while the local SSE stream is healthy; 20 s when connected but unhealthy/background; 2.5 s when foreground and disconnected. | Keep as bounded recovery. Scoped transcript/sidebar/auxiliary lanes own the normal event path. |
 | Selected-room source admission | One room is admitted at a time; active selected work retries from 350 ms and backs off to the 4 s background cadence. | Keep serialization. It owns coherent SQLite publication and avoids competing writers. Realtime wakes it early; its timer is recovery, not a remote history poll. |
+| Quiet background source admission | Every discovered room was reconciled every 4 s indefinitely, even after a successful unchanged observation. The 128-state scheduler bound was also smaller than the live cache's 133 message-bearing chats, so discovery could evict quiet evidence and recreate fresh work. One shared pending account/lifecycle mutation could make the owner walk every due room against the same fence. | Retain up to 2,048 tiny scheduling records while keeping execution serialized and discovery batches at 32. Keep the first 4 s confirmation, then back successful unchanged rooms off through 8/16/32/64/128/256 s to a 300 s safety ceiling. A change resets the cadence. Coalesce a pending-mutation burst behind one 350 ms process-wide floor so an active selected room regains priority. A scoped Realtime sidebar frame wakes its named room immediately and keeps only that source on the 350 ms cadence for a four-second mirror-convergence window; its payload remains a scheduling hint and canonical reads still decide publication. |
 | Initial log synchronization | Four workers scan newly visible chats; ordinary ticks use one global change-feed query and read only named logs. | Keep four. Increasing it does not accelerate sidebar projection and risks more simultaneous provider reads followed by SQLite contention. Revisit after startup projection is detached and measured. |
 | Sidebar room/response bounds | At most 128 rooms and 4 MiB; every room is currently finalized sequentially before the response completes. | Keep the safety bounds. Replace the request shape in the next task: serve an admitted local sidebar snapshot immediately, then reconcile bounded rows independently. |
 | Chat history | A 50-visible-message canonical page scans at most 200 raw rows. The usual six 50-row pages retain 300 messages; an independent 600-message hard cap also applies. Older pages load only on upward demand from local SQLite. | Keep. This is already bounded and does not fetch complete remote history. It protects CPU, decryption work and DOM memory. |
@@ -36,6 +37,17 @@ This confirms the startup delay is canonical all-room projection work rather
 than response size or the four-worker log-sync ceiling. Provider transfer
 counters are process-wide and background work continued during measurement,
 so they are workload observations rather than endpoint attribution.
+
+The first v0.24.304 live sample after deploying the source-stage categories
+recorded 139 reconciliation attempts in about three minutes: 46 succeeded, 91
+lost a source CAS, and two observed mirror movement. The successful idle rooms
+were still scheduled at the fixed four-second cadence. The live cache contains
+133 message-bearing chats, so the former 128-state bound would also have defeated
+idle evidence through discovery eviction. In a deterministic ten-minute model
+of those 133 quiet rooms, the adaptive schedule performs 1,064 checks instead of
+19,950 fixed-cadence checks, a 94.7% reduction. This does not
+claim a remote-staleness bound: content-free Realtime hints still wake selected
+work, and the finite background scan remains completeness recovery.
 
 Supabase currently counts a Broadcast once for the sender and once for every
 subscriber. Its hosted quotas are 2 million Realtime messages per month on Free

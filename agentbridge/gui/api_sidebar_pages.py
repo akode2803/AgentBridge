@@ -102,11 +102,16 @@ def _timed_stage(app, chat, phase, call, *args):
     return value
 
 
-def _room(app, mesh, token, chat):
+def _room(app, mesh, token, chat, *, activity=False):
     runtime = mesh.local_inputs
     try:
         chat = _part(chat)
-        runtime.request(chat)
+        # A scoped sidebar refresh names the row that changed. Treat it as a
+        # scheduling hint for that source so quiet-background backoff does not
+        # become visible message latency. The hint carries no payload or
+        # authority; ordinary complete collection and canonical checks still
+        # decide what may be published.
+        runtime.request(chat, activity=activity)
         runtime.request_page(chat)
         session = UnreadSession(token.app_identity, token.generation, mesh.user)
         unread = runtime.unread
@@ -246,7 +251,8 @@ def refresh_sidebar(app, req, mesh, token):
     started = time.perf_counter()
     row, resolved, changed, published = None, False, False, False
     try:
-        row, resolved = _room(app, mesh, token, chat)
+        row, resolved = _room(app, mesh, token, chat,
+                              activity=bool(preferred and chat == preferred))
         if resolved and app.validate_session_read(token):
             changed = mesh.store.publish_sidebar(
                 mesh.user, chat, row, updated_ns=time.time_ns())

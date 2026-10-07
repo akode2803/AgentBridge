@@ -527,7 +527,12 @@ class GuiApp:
         """Adopt a Mesh while the caller holds ``self._lock``."""
         self._advance_session_generation()
         self.mesh = mesh
-        mesh.start()
+        # The first presence beat and the machine announcement both mutate the
+        # same coordinated document owner. Starting the heartbeat thread first
+        # lets signup race those transactions on slower Windows runners. Start
+        # every other owner now, publish the initial machine record, and only
+        # then allow presence to beat in the background.
+        mesh.start(heartbeat=False)
         try:  # R25: populate tenure + re-sign any legacy redactions (idempotent)
             mesh.harden_startup()
         except Exception:  # noqa: BLE001 — hardening must not block login
@@ -536,6 +541,7 @@ class GuiApp:
             mesh.applink.announce(["gui"])
         except Exception:  # noqa: BLE001 — presence lane must not block login
             pass
+        mesh.presence.start()
         self._sync_thread = threading.Thread(
             target=mesh.sync.run,
             kwargs={"poll_s": self.poll_s},

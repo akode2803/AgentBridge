@@ -24,11 +24,12 @@ class _State:
     failures: int = 0
     rerun_at: float | None = None
     blocked_until: float = 0.0
+    hot_until: float = 0.0
 
 
 class SourceSchedule:
-    def __init__(self, *, background_s=4.0, capacity=128):
-        if type(capacity) is not int or not 1 <= capacity <= 128:
+    def __init__(self, *, background_s=4.0, capacity=2048):
+        if type(capacity) is not int or not 1 <= capacity <= 2048:
             raise ValueError('invalid ingestion queue capacity')
         if type(background_s) not in (int, float) or not math.isfinite(background_s) or not 0.35 <= background_s <= 300:
             raise ValueError('invalid ingestion background cadence')
@@ -38,6 +39,7 @@ class SourceSchedule:
         self._states = {}
         self._selected = None
         self._lease_until = self._hot_until = 0.0
+        self._blocked_until = 0.0
         self._serial = self._order = self._selected_runs = 0
         self._running = None
 
@@ -97,9 +99,11 @@ class SourceSchedule:
             if selected:
                 self._selected, self._lease_until = chat, now + 15.0
             hot = activity or changed_route
-            if hot and chat == self._selected:
-                self._hot_until = now + 4.0
+            if hot:
+                state.hot_until = now + 4.0
                 state.idle = 0
+                if chat == self._selected:
+                    self._hot_until = state.hot_until
             # Pure lease renewal should not force a fresh scan. A hint uses
             # activity=True, regardless of whether this is the selected chat.
             if hot:
@@ -111,13 +115,16 @@ class SourceSchedule:
 
     def clear_selection(self):
         with self._lock:
+            state = self._states.get(self._selected)
+            if state is not None:
+                state.hot_until = 0.0
             self._selected = None
             self._lease_until = self._hot_until = 0.0
 
     def take_due(self, *, now):
         now = self._time(now)
         with self._lock:
-            if self._running is not None:
+            if self._running is not None or now < self._blocked_until:
                 return None
             selected = self._selected if now < self._lease_until else None
             due = [(s.due, s.order, c) for c, s in self._states.items() if s.due <= now]
@@ -143,9 +150,17 @@ class SourceSchedule:
                 raise ValueError('stale ingestion completion')
             state = self._states[job.chat_id]
             selected = job.chat_id == self._selected and now < self._lease_until
+            hot = now < state.hot_until
             if not blocked:
                 state.failures = 0 if success else min(8, state.failures + 1)
-            state.idle = 0 if changed or (selected and now < self._hot_until) else min(8, state.idle + 1)
+            # ``idle`` counts successful observations that found no source
+            # change. Failed or blocked work has its own bounded retry policy;
+            # treating it as proof that a source is quiet would compound two
+            # unrelated backoffs and delay recovery after a transient error.
+            if changed or (success and hot):
+                state.idle = 0
+            elif success:
+                state.idle = min(8, state.idle + 1)
             if changed and selected:
                 self._hot_until = now + 4.0
             if blocked:
@@ -153,14 +168,34 @@ class SourceSchedule:
                 # gate promptly for a selected lease, without admitting data
                 # or letting repeated activity hints turn it into a hot loop.
                 delay = 0.35 if selected else self.background
+                # One pending mutation can overlap many chat sources (account
+                # and lifecycle inputs are shared).  Without a process-level
+                # floor the scheduler immediately walks every other due room,
+                # producing a retry herd against the same durable fence.  This
+                # floor coalesces that burst; after it expires the selected
+                # room wins normal priority if it is active.
+                self._blocked_until = max(self._blocked_until, now + 0.35)
             elif not success:
                 # Hints can request one rerun; repeated failures cannot create
                 # an uncontrolled hot polling loop without new signals.
                 delay = min(60.0, self.background * 2 ** (state.failures - 1))
             elif selected:
                 delay = 0.35 if now < self._hot_until else min(self.background, 0.35 * 2 ** state.idle)
+            elif hot:
+                # A scoped off-room hint can precede the corresponding mirror
+                # refresh. Keep only that named source warm long enough for the
+                # persisted mirror wake to catch up; unrelated rooms retain
+                # their adaptive background cadence.
+                delay = 0.35
             else:
-                delay = self.background
+                # Background discovery used to reread every known chat every
+                # four seconds forever.  A large cached account therefore kept
+                # the single ingestion owner and SQLite writer busy even when
+                # Realtime reported no activity.  Keep the first confirmation
+                # at the configured cadence, then back quiet sources off to a
+                # five-minute safety ceiling.  A real change resets ``idle``;
+                # a hint still pulls the selected chat forward independently.
+                delay = min(300.0, self.background * 2 ** max(0, state.idle - 1))
             state.blocked_until = now + delay if blocked else 0.0
             state.due = now + delay
             if state.rerun_at is not None:
@@ -174,4 +209,5 @@ class SourceSchedule:
         with self._lock:
             if self._running is not None or not self._states:
                 return maximum
-            return min(maximum, max(0.0, min(s.due for s in self._states.values()) - now))
+            due = max(self._blocked_until, min(s.due for s in self._states.values()))
+            return min(maximum, max(0.0, due - now))

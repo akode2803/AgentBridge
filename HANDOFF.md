@@ -195,3 +195,67 @@ timeout and coordinator coverage pass locally (25 tests), and only the failed
 Windows job was rerun. Both rerun jobs passed. If the race recurs, fix the real
 startup ordering by starting the presence heartbeat after the initial machine
 announcement; do not widen the fixture timeout or weaken the coordinator fence.
+
+PR56 passed both platforms and merged as `ac68205`. The real app was restored on
+v0.24.304 with normal detailed logging after its previous fleet had already
+exited. The supervised restarter could not inspect `ps` in the restricted Codex
+session, so it restored the GUI but conservatively skipped the harness; the
+canonical `agentbridge.harness --all` process was then started directly and its
+master/agent locks renewed. The GUI showed the cached sidebar immediately and
+remained authenticated to the Supabase mesh.
+
+The first new-schema live window (about three minutes) recorded 139 source
+reconciliations: 46 successful, 91 `source_changed`, and two `mirror_changed`.
+The losses continued after startup rather than collapsing into an unknown error
+class. This exposed two independent scheduler problems: every successful quiet
+background room stayed on the four-second cadence forever, and one shared
+pending mutation could make the worker walk other due rooms before returning to
+the selected room.
+
+The local follow-up is on `codex/background-source-idle-backoff` at app version
+`0.24.305`. The live cache has 133 message-bearing chats, so source scheduling
+now retains up to 2,048 small state records rather than evicting quiet evidence
+at the former 128-state bound; execution remains serialized and discovery remains
+limited to 32 rooms per pass. Successful unchanged background sources now back
+off from the first four-second confirmation through 8/16/32/64/128/256 seconds
+to a finite 300-second safety ceiling; a real change resets the cadence. Pending-mutation failures add
+one 350 ms process-wide scheduling floor, after which the selected room regains
+normal priority. A scoped Realtime sidebar refresh also wakes only its named
+room, preventing the new idle backoff from becoming visible incoming-message
+latency while avoiding a broad all-room wake. The authority, admission and latest-successfully-ingested
+snapshot fences are unchanged. Fixed diagnostic subcategories now distinguish
+mutation, collection, comparison, admission and finalization CAS losses without
+recording exception text or source identity. A deterministic ten-minute model of
+133 quiet rooms performs 1,064 attempts versus 19,950 at the old fixed cadence
+(94.7% fewer). The focused scheduler/local-input/sidebar/diagnostics gate passes
+181 tests with four expected skips after the capacity correction; the earlier
+wider source/publication/page gate passed 375 tests with four expected skips.
+All 36 frontend module checks, Ruff and diff checks pass. A broad pytest run had
+reached 1,067 passes and 12 expected skips without a failure when it was stopped
+after review found the 128-state eviction flaw; cross-platform CI remains the
+complete final gate for this branch.
+
+PR57's first CI run failed one deterministic test on both platforms because the
+diagnostics-only fake runtime did not accept the new `activity` keyword. Windows
+also repeated the previously documented signup/presence transaction timeout, so
+GUI adoption now starts the Mesh without its presence thread, publishes the
+initial machine announcement, and only then starts presence; an ordering
+regression covers that contract without widening the fixture timeout.
+Automated review identified two valid edge cases: a scoped off-room activity hint
+could perform one unchanged attempt before mirror convergence and then inherit a
+long idle delay, and the stage-owner race captured its diagnostic category before
+converting to `collection_superseded`. The local correction gives only the named
+source a four-second/350 ms convergence window, clears it when selection closes,
+updates the test fake, and records the converted exception/category before the
+profile is emitted. The corrected focused scheduler/local-input/sidebar/recorder/
+diagnostics gate passes 194 tests with four expected skips; Ruff and diff checks
+pass. The exact failing GUI endpoint and its startup/readiness/fixture regression
+set pass 63 tests. The separate roadmap/bookkeeping commit remains on
+`codex/post-latency-roadmap` and is not part of PR57.
+
+PR57 remains the release target. After replacement CI passes, merge and deploy
+it once, then compare normal-sampling attempt rate, exact CAS-loss categories, page latency
+and the sidebar/network cue against the v0.24.304 window. If mutation-pending is
+dominant, make mutation completion wake only affected sources; if admission or
+finalization supersession dominates, fix that owner transition instead. Do not
+weaken the source CAS or turn a Realtime hint into membership authority.
