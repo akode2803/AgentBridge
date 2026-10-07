@@ -528,6 +528,33 @@ def test_journal_unrelated_change_avoids_global_mirror_scan(rig, monkeypatch):
     assert runtime.inputs(CHAT)[1].source == before
 
 
+def test_mirror_change_after_journal_query_is_ingested_on_next_attempt(
+        rig, monkeypatch):
+    mesh, provider = rig
+    runtime = mesh.local_inputs
+    assert runtime.ingest(CHAT)
+    original = staged_publication.observe_unchanged
+    crossed = []
+
+    def change_before_health_cas(*args, **kwargs):
+        provider.put_doc(STATE, {"ns": 2, "hidden": [], "starred": []})
+        crossed.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        staged_publication, 'observe_unchanged', change_before_health_cas,
+    )
+    assert runtime.ingest(CHAT) is False
+    assert crossed == [True]
+
+    monkeypatch.setattr(staged_publication, 'observe_unchanged', original)
+    assert runtime.ingest(CHAT) is True
+    reader, receipt, _index = runtime.inputs(CHAT)
+    assert reader.capture_viewer_state(receipt, 'alice').decoded() == {
+        "ns": 2, "hidden": [], "starred": [],
+    }
+
+
 def test_mirror_tokens_are_lru_bounded(rig):
     mesh, provider = rig
     runtime = mesh.local_inputs
