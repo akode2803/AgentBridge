@@ -253,9 +253,47 @@ pass. The exact failing GUI endpoint and its startup/readiness/fixture regressio
 set pass 63 tests. The separate roadmap/bookkeeping commit remains on
 `codex/post-latency-roadmap` and is not part of PR57.
 
-PR57 remains the release target. After replacement CI passes, merge and deploy
-it once, then compare normal-sampling attempt rate, exact CAS-loss categories, page latency
-and the sidebar/network cue against the v0.24.304 window. If mutation-pending is
-dominant, make mutation completion wake only affected sources; if admission or
-finalization supersession dominates, fix that owner transition instead. Do not
-weaken the source CAS or turn a Realtime hint into membership authority.
+PR57 passed both platforms and merged as `f04f1f5`. The shared checkout was
+fast-forwarded to that exact merge and the app restarted once on v0.24.305. It
+restored the authenticated cached UI, reported connected after the initial mirror
+refresh, and kept detailed logging enabled.
+
+The first post-release window separated bootstrap from steady state. During the
+moving mirror, 174 of 193 reconciliation attempts stopped at `mirror_pending`;
+median reconciliation time was 14 ms. After readiness, the durable coordinator
+contained 55 unresolved normal intents across only five selectors (52 presence,
+two machine and one chat-log occurrence) plus two quarantine sentinels. These
+fences are valid crash/ambiguous-outcome evidence and were not cleared. The one
+blocked room exposed a separate retry-owner defect: `SidebarRefreshQueue` requeued
+unresolved rows immediately, so two browser workers bypassed the source scheduler's
+backoff and produced thousands of diagnostic rows while the cached sidebar stayed
+readable.
+
+The current follow-up is `codex/sidebar-reconciliation-backoff`, v0.24.306.
+Unresolved sidebar rows now back off independently from 350 ms to a 30-second
+ceiling; other rows continue, broad refresh preserves an existing delay, and a
+scoped Realtime event wakes its named row immediately. The queue remains honestly
+incomplete and never clears a mutation fence or treats cached presentation as
+authority. Queue status separately exposes active and deferred work, so a cached
+sidebar whose only remaining room is safely backed off stays visibly stable while
+the response remains explicitly incomplete. The focused
+queue/sidebar/realtime/state/session gate passes 128 tests with four expected
+skips; Ruff and diff checks pass.
+
+The actual Supabase instance was restarted once on the branch. It restored the
+authenticated cache immediately, advanced through the normal latest-changes
+state, and showed all 19 cached chats without a persistent “Updating chats…” row
+once the remaining fenced rooms became deferred. Detailed logging stayed enabled.
+During a 79-second startup/live window the server completed 17 bounded sidebar
+refresh requests; the final 30 seconds contained ten requests spread across the
+remaining rooms, rather than the former two-worker sub-second loop. Source
+reconciliation diagnostics remain independently active and must be profiled after
+this retry-owner fix; they are not evidence that the browser queue is still hot.
+Local review and a cross-platform PR gate are next.
+
+After the retry-owner fix, profile the remaining steady-state reconciliation and
+the durable intent accumulation separately. Do not weaken the source CAS or clear
+ambiguous intents by age. Large-room member scaling is the next latency profile;
+then design the durable Realtime frontier/gap-recovery protocol, and only after
+that simplify the architecture and formalize APIs. `BACKLOG.md` records both
+post-latency phases and the member-scaling checklist near the top.

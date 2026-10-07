@@ -59,7 +59,7 @@ REASONS = frozenset({
     'continuation_expired', 'window_store_changed', 'page_inputs_changed',
     'page_mirror_changed', 'page_progress', 'source_refresh',
     'source_not_ready', 'source_mutation_pending', 'pending_mutation_budget',
-    'mutation_scope_quarantined', 'rooms_pending', 'room_limit',
+    'mutation_scope_quarantined', 'rooms_pending', 'rooms_deferred', 'room_limit',
     'inventory_pending', 'users_pending', 'response_byte_budget',
     'operation_byte_budget', 'operation_step_budget', 'page_fetch_failed',
     'refresh_request_budget', 'page_metadata_invalid', 'session_changed',

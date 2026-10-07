@@ -7,12 +7,15 @@ operation before its display presentation may be published.
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict
 
 from .context import SessionReadToken
 
 MAX_ROOMS = 128
 MAX_RUNNING = 2
+RETRY_MIN_S = 0.35
+RETRY_MAX_S = 30.0
 
 
 def _binding(token: SessionReadToken) -> tuple[str, int, object]:
@@ -24,13 +27,19 @@ def _binding(token: SessionReadToken) -> tuple[str, int, object]:
 class SidebarRefreshQueue:
     """Bounded, in-memory work positioning for one captured GUI session."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock=time.monotonic) -> None:
+        if not callable(clock):
+            raise TypeError("sidebar clock must be callable")
         self._lock = threading.Lock()
+        self._clock = clock
         self._binding: tuple[str, int, object] | None = None
         self._inventory: tuple[str, ...] = ()
         self._pending: OrderedDict[str, None] = OrderedDict()
         self._running: set[str] = set()
         self._removed: OrderedDict[str, None] = OrderedDict()
+        self._failures: dict[str, int] = {}
+        self._retry_at: dict[str, float] = {}
+        self._woken: set[str] = set()
 
     def clear(self) -> None:
         with self._lock:
@@ -39,6 +48,9 @@ class SidebarRefreshQueue:
             self._pending.clear()
             self._running.clear()
             self._removed.clear()
+            self._failures.clear()
+            self._retry_at.clear()
+            self._woken.clear()
 
     def request_inventory(self, token: SessionReadToken,
                           chat_ids: list[str]) -> None:
@@ -56,6 +68,9 @@ class SidebarRefreshQueue:
                 self._pending = OrderedDict((chat, None) for chat in inventory)
                 self._running.clear()
                 self._removed.clear()
+                self._failures.clear()
+                self._retry_at.clear()
+                self._woken.clear()
                 return
             if inventory == self._inventory:
                 return
@@ -68,6 +83,11 @@ class SidebarRefreshQueue:
             self._inventory = inventory
             self._pending = OrderedDict(
                 (chat, None) for chat in self._pending if chat in allowed)
+            self._failures = {chat: value for chat, value in self._failures.items()
+                              if chat in allowed}
+            self._retry_at = {chat: value for chat, value in self._retry_at.items()
+                              if chat in allowed}
+            self._woken.intersection_update(allowed)
             for chat in inventory:
                 if chat not in self._running:
                     self._pending.setdefault(chat, None)
@@ -79,7 +99,11 @@ class SidebarRefreshQueue:
         with self._lock:
             if binding != self._binding or chat not in self._inventory:
                 return False
-            if chat not in self._running:
+            self._failures.pop(chat, None)
+            self._retry_at.pop(chat, None)
+            if chat in self._running:
+                self._woken.add(chat)
+            else:
                 self._pending[chat] = None
                 self._pending.move_to_end(chat, last=False)
             return True
@@ -113,37 +137,65 @@ class SidebarRefreshQueue:
 
     def claim(self, token: SessionReadToken, *, preferred: str = "") -> str | None:
         binding = _binding(token)
+        now = self._clock()
         with self._lock:
             if binding != self._binding or len(self._running) >= MAX_RUNNING:
                 return None
             chat = None
             if preferred:
-                if preferred not in self._pending:
+                if (preferred not in self._pending
+                        or self._retry_at.get(preferred, 0.0) > now):
                     return None
                 chat = preferred
                 self._pending.pop(chat)
-            elif self._pending:
-                chat, _ = self._pending.popitem(last=False)
+            else:
+                for candidate in self._pending:
+                    if self._retry_at.get(candidate, 0.0) <= now:
+                        chat = candidate
+                        break
+                if chat is not None:
+                    self._pending.pop(chat)
             if chat is not None:
                 self._running.add(chat)
             return chat
 
     def finish(self, token: SessionReadToken, chat: str, *, resolved: bool) -> None:
         binding = _binding(token)
+        now = self._clock()
         with self._lock:
             if binding != self._binding:
                 return
             self._running.discard(chat)
-            if not resolved and chat in self._inventory:
+            if resolved:
+                self._failures.pop(chat, None)
+                self._retry_at.pop(chat, None)
+                self._woken.discard(chat)
+            elif chat in self._inventory:
+                failures = 1 if chat in self._woken else min(
+                    8, self._failures.get(chat, 0) + 1)
+                self._woken.discard(chat)
+                self._failures[chat] = failures
+                self._retry_at[chat] = now + min(
+                    RETRY_MAX_S, RETRY_MIN_S * 2 ** (failures - 1))
                 self._pending[chat] = None
 
     def status(self, token: SessionReadToken) -> dict:
         binding = _binding(token)
+        now = self._clock()
         with self._lock:
             if binding != self._binding:
                 return {"pending": 0, "running": 0, "complete": False,
-                        "removed": ()}
+                        "active": False, "deferred": 0,
+                        "removed": (), "retry_after_ms": 100}
             pending, running = len(self._pending), len(self._running)
+            ready = sum(self._retry_at.get(chat, 0.0) <= now
+                        for chat in self._pending)
+            waits = [max(0.0, self._retry_at.get(chat, 0.0) - now)
+                     for chat in self._pending]
+            retry_ms = max(100, min(30_000, round(min(waits) * 1000))) if waits else 100
             return {"pending": pending, "running": running,
                     "complete": pending == 0 and running == 0,
-                    "removed": tuple(sorted(self._removed))}
+                    "active": bool(ready or running),
+                    "deferred": pending - ready,
+                    "removed": tuple(sorted(self._removed)),
+                    "retry_after_ms": retry_ms}

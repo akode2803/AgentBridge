@@ -89,7 +89,7 @@ def _read_status_summary(out):
                    'operation_crypto_budget', 'operation_epoch_budget', 'operation_parent_budget',
                    'operation_proof_budget', 'operation_round_budget', 'operation_step_budget',
                    'pin_parent_budget'},
-        'sidebar_status': {'ready', 'inventory_pending', 'rooms_pending',
+        'sidebar_status': {'ready', 'inventory_pending', 'rooms_pending', 'rooms_deferred',
                            'room_limit', 'cache_pending', 'response_byte_budget',
                            'session_changed'},
         'user_status': {'ready', 'users_pending', 'user_limit', 'user_byte_budget',

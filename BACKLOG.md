@@ -16,6 +16,38 @@
 These entries track the current cloud work; historical items below are preserved.
 Source/CI completion is separate from merge, runtime activation and live acceptance.
 
+Near-term order: finish and measure the remaining known interaction delays,
+including large-member rooms; then establish the durable Realtime recovery
+protocol below; then simplify and formalize the architecture against that stable
+contract. Refactoring must not obscure latency evidence or weaken authority.
+
+- [ ] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
+  2026-10-08). After the known latency work, replace periodic per-chat safety
+  reconciliation as the normal completeness mechanism with a transport-owned,
+  durable progress contract. Realtime remains a low-latency wake rather than
+  authority. Persist transport-neutral per-stream/frontier evidence sufficient to
+  detect startup, reconnect, reordering and dropped-update gaps; perform bounded
+  targeted catch-up from the last admitted frontier; retain rare full
+  reconciliation for damaged, excessively old or unverifiable state. A cursor,
+  WAL position, notification, cached page or timestamp must never establish
+  membership, trust, keys or visibility. Specify crash/ambiguous-write behavior,
+  deduplication, pagination, retention and recovery before implementation. Test
+  dropped and reordered wakes, long offline periods, slow/intermittent networks,
+  reconnect storms, expired frontiers and selected-chat priority; measure latency,
+  requests and egress before reducing the existing safety path.
+- [ ] **Post-protocol architecture simplification and API formalization**
+  (Aryan, 2026-10-08). Start only after the durable recovery protocol and known
+  latency fixes are measured and stable. Inventory runtime layers, compatibility
+  paths and deprecated transport artifacts; rename modules, layers and APIs around
+  their actual ownership and contracts; consolidate duplicated admission,
+  invalidation, refresh and presentation paths; integrate the local node, GUI and
+  Supabase transport through explicit interfaces. Define versioned request,
+  response, continuation, event and error contracts, then document data flow,
+  concurrency, authority boundaries, invariants, operational methodology and
+  extension points. Remove obsolete artifacts only with reference/call-site and
+  migration evidence, preserve stored data and rollback, and continue protecting
+  `legacy/bridge.py` until an explicitly reviewed replacement exists.
+
 - [~] **Remove selected-ask delay behind broad inventory.** The browser awaited
   the global response before starting selected-room asks. Independent bounded
   scoped polling is integrated in PR44; 78 controlled race, Chromium and
@@ -39,6 +71,16 @@ Source/CI completion is separate from merge, runtime activation and live accepta
   Realtime hint, ingestion/queue, SSE, canonical page finalization, DOM and ACK
   separately. Requires an authorized reachable provider and independently owned
   clients; live-provider proxy403 has not been bypassed.
+- [ ] **Profile and fix large-room member scaling** (Aryan, 2026-10-08).
+  Measure first canonical page, membership/history-on-join evaluation, account and
+  key resolution, receipt/presence construction, auxiliary member decoration,
+  response serialization and browser paint across controlled member counts and
+  membership-event histories. Keep message-window work bounded, split optional
+  member/receipt decoration off the first transcript paint where safe, and retain
+  current membership, trust, key, privacy and session checks. Record wall time,
+  CPU, SQLite rows/bytes, crypto operations, response bytes and DOM work; do not
+  raise the 64-account/member safety bounds without measured resource and product
+  rationale.
 - [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
   storage policy, revocation and foreign-root/chat denials remain runtime gates.
   Notifications and cached results must not become authority.

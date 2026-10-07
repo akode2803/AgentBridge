@@ -64,8 +64,14 @@ def _state(app, *, rounds=12):
         value = api_chats.state(app, Request())
         if value.get('chats_complete'):
             return value
-        api_chats.refresh_sidebar(app, Request(method='POST', data={}))
+        refreshed = api_chats.refresh_sidebar(app, Request(method='POST', data={}))
         app.mesh.local_inputs.prepare_one()
+        # Production source admission emits a scoped read-model wake. This
+        # deterministic driver performs the work inline, so mirror that wake
+        # rather than waiting for the sidebar queue's failure backoff.
+        if refreshed.get('status') != 'ready':
+            for chat in app.mesh.tx.list_chat_ids():
+                app.sidebar_refresh.request_chat(token, chat)
     return value
 
 
@@ -116,7 +122,18 @@ def test_cached_sidebar_paints_before_canonical_reconciliation(world, monkeypatc
     cached = api_chats.state(app, Request())
     assert cached['chats_complete'] is False
     assert cached['sidebar_status'] == 'rooms_pending'
+    assert cached['sidebar_active'] is True
     assert next(row for row in cached['chats'] if row['id'] == chat)[
+        'last']['body'] == 'cached startup preview'
+
+    token = app.capture_session_read()
+    while (claimed := app.sidebar_refresh.claim(token)) is not None:
+        app.sidebar_refresh.finish(token, claimed, resolved=False)
+    deferred = api_chats.state(app, Request())
+    assert deferred['chats_complete'] is False
+    assert deferred['sidebar_status'] == 'rooms_deferred'
+    assert deferred['sidebar_active'] is False
+    assert next(row for row in deferred['chats'] if row['id'] == chat)[
         'last']['body'] == 'cached startup preview'
 
 

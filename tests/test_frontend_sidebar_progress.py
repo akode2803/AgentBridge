@@ -83,6 +83,9 @@ const policy=new Function('Mesh','App','$','updateTitleBadge','captureSessionEpo
 const base={available:true,user:'me',chats_complete:false,chats:[{id:'a'}]};
 Mesh.state=base; policy().progress();
 assert.equal(calls.at(-1).pending,true,'incomplete cached list shows delayed updating row');
+Mesh.state={...base,sidebar_active:false,sidebar_status:'rooms_deferred'};
+policy().progress();
+assert.equal(calls.at(-1).pending,false,'deferred retry does not claim active loading');
 Mesh.state={...base,chats:[]}; policy().progress();
 assert.equal(calls.at(-1).pending,true,'empty incomplete list receives one cue');
 Mesh.chatId='selected'; policy().progress();

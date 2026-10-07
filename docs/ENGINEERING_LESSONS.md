@@ -1,5 +1,28 @@
 # Engineering failure lessons
 
+## Sidebar retries bypassed source backoff (v0.24.306)
+
+The source scheduler correctly backed quiet and failed rooms off, but the browser's
+canonical sidebar queue immediately requeued every unresolved presentation. One
+room protected by a durable ambiguous-write fence therefore kept two browser
+workers retrying it every few hundred milliseconds. The cached sidebar remained
+visible, yet diagnostics and the “updating” state never settled.
+
+Safeguard: every independently owned retry queue needs its own bounded failure
+policy. Sidebar failures now back off per room while other rows continue; a scoped
+Realtime event wakes only its named room. Broad refreshes preserve an existing
+failure delay, and successful source admission emits the scoped wake that bypasses
+it. Keep the unresolved row explicitly incomplete and retain its last admitted
+presentation; retry throttling is never authority or permission to clear a durable
+mutation fence.
+
+An incomplete queue is not necessarily active work. The first retry correction
+left the browser's “Updating chats…” row visible forever because it mapped every
+incomplete state to active loading. Queue status now distinguishes runnable or
+running work from rows deferred until a retry deadline. The response remains
+explicitly incomplete while the cached list stays stable and background recovery
+continues without a permanent progress cue.
+
 ## R237: real-instance scrolling and write exhaustion
 
 Fast scrolling in Group With Muskan exposed a receipt-presence publication race:
