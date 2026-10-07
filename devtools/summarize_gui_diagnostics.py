@@ -132,9 +132,14 @@ class _ReconciliationProfile:
     })
     missing: Counter = field(default_factory=Counter)
     invalid: Counter = field(default_factory=Counter)
+    counters: dict[str, Counter] = field(default_factory=lambda: {
+        name: Counter() for name in ('status', 'reason', 'error_type')
+    })
 
     def observe(self, record: dict) -> None:
         self.events += 1
+        for name in self.counters:
+            self.counters[name][_enum(record.get(name), _COUNTERS[name])] += 1
         for name in self.values:
             if name not in record:
                 self.missing[name] += 1
@@ -152,6 +157,8 @@ class _ReconciliationProfile:
     def summary(self) -> dict:
         return {
             "events": self.events,
+            **{f"{name}_counts": dict(sorted(values.items()))
+               for name, values in self.counters.items()},
             "metrics": {
                 name: {**_distribution(values),
                        "missing": self.missing[name],

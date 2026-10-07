@@ -61,6 +61,10 @@ Schema version 2 also includes a bounded `source_reconciliation` section. It
 reports independent distributions for mirror enumeration, staged writes,
 process-local change checks, comparison, admission and finalization, plus
 examined/selected document counts.
+It also counts fixed, content-free outcomes for successful attempts and failures
+such as mirror movement, unavailable mirror input, budget exhaustion, source
+races, missing indexes and local storage errors. These categories contain no
+exception text and do not identify a chat.
 The document counters include both the admitted comparison and staged fallback
 when changed input requires two complete traversals.
 `stage_write_ms` is contained within `collect_ms`; do not add those metrics.

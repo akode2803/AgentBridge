@@ -231,6 +231,7 @@ def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path
     assert sink.set_enabled(True, sample_rate=1)
     trace.emit(
         'source_reconciliation', chat='private-chat', duration_ms=12.5,
+        status='error', reason='mirror_changed', error_type='OtherError',
         change_check_ms=0.25, collect_ms=7.5, stage_write_ms=2.0, compare_ms=1.0,
         documents_examined=20_000, documents_selected=3,
         document_bytes=144, document_batches=1,
@@ -248,6 +249,8 @@ def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path
     assert event['documents_selected'] == 3
     assert event['document_bytes'] == 144
     assert event['document_batches'] == 1
+    assert event['reason'] == 'mirror_changed'
+    assert event['error_type'] == 'OtherError'
     assert 'private_path' not in event
     assert 'private-chat' not in sink.path.read_text()
 

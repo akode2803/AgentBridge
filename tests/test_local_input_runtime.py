@@ -36,6 +36,26 @@ def _documents(value=1):
     }
 
 
+@pytest.mark.parametrize(('error', 'reason'), [
+    (RawCollectionUnavailable('mirror_changed'), 'mirror_changed'),
+    (RawCollectionUnavailable('mirror_pending'), 'mirror_pending'),
+    (RawCollectionUnavailable('unsafe_cached_value'), 'unsafe_cached_value'),
+    (RawCollectionUnavailable('invalid_or_oversize_payload'), 'invalid_payload'),
+    (RawCollectionUnavailable('document_budget'), 'budget_exhausted'),
+    (RawCollectionUnavailable('private_detail'), 'inputs_unavailable'),
+    (local_source.SourceChanged('private_detail'), 'source_changed'),
+    (overlay_index.OverlayIndexUnavailable('private_detail'), 'index_pending'),
+    (staged_source.StageChanged('private_detail'), 'source_changed'),
+    (OverflowError('private_detail'), 'budget_exhausted'),
+    (OSError('private_detail'), 'storage_error'),
+    (ValueError('private_detail'), 'invalid_payload'),
+    (RuntimeError('local input ingestion stopped'), 'abort'),
+    (RuntimeError('private_detail'), 'other'),
+])
+def test_reconciliation_failure_reason_is_fixed_and_content_free(error, reason):
+    assert local_input_runtime._reconciliation_failure_reason(error) == reason
+
+
 @pytest.fixture
 def rig(clouds, tmp_path):
     provider = clouds.cached(tmp_path / "provider")
@@ -631,6 +651,7 @@ def test_failed_comparison_keeps_partial_collection_counters(rig, monkeypatch):
     profile = next(fields for phase, fields in events
                    if phase == 'source_reconciliation')
     assert profile['status'] == 'error'
+    assert profile['reason'] == 'inputs_unavailable'
     assert profile['compare_ms'] == profile['collect_ms'] == 2.0
     assert profile['documents_examined'] == 1
     assert profile['documents_selected'] == 1
@@ -662,6 +683,7 @@ def test_reconciliation_profile_survives_cleanup_failure(rig, monkeypatch):
                    if phase == 'source_reconciliation')
     assert profile['status'] == 'error'
     assert profile['error_type'] == 'OSError'
+    assert profile['reason'] == 'storage_error'
     assert profile['sample_ref'] == 'a' * 16
     assert profile['cleanup_ms'] == 2.0
 

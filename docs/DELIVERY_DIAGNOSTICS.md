@@ -19,6 +19,9 @@ metrics mean no candidate was built. These overlapping values must not be summed
 selected inputs unchanged, collection and comparison metrics are absent. A
 missing change-check value means the process had no matching volatile token; it
 does not mean the source was unchanged.
+The source-reconciliation summary groups only fixed failure categories. Mirror
+movement, mirror availability, budget, source-race, index and storage outcomes
+are distinguishable without retaining exception text, paths or chat identifiers.
 The counters describe local work only; they do not prove remote completeness,
 freshness or authority. A
 random per-attempt sampling tag makes fast background attempts eligible for the

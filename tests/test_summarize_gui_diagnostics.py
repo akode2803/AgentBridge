@@ -96,6 +96,7 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
 def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
     complete = _event(
         "delivery", phase="source_reconciliation", status="ok",
+        reason="none",
         duration_ms=30, capture_claim_ms=2, change_check_ms=0.5, stage_open_ms=3,
         collect_ms=20, stage_write_ms=12, seal_ms=1, compare_ms=4,
         admit_ms=2, source_finalize_ms=1, cleanup_ms=1,
@@ -104,6 +105,7 @@ def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
     )
     partial = _event(
         "delivery", phase="source_reconciliation", status="error",
+        reason="mirror_changed", error_type="OtherError",
         duration_ms=10, collect_ms=True, documents_examined="private",
     )
     result = summary.summarize([_write(tmp_path, [complete, partial])])
@@ -111,6 +113,9 @@ def test_source_reconciliation_metrics_are_bounded_and_non_additive(tmp_path):
 
     assert result["schema_version"] == 2
     assert profile["events"] == 2
+    assert profile["status_counts"] == {"error": 1, "ok": 1}
+    assert profile["reason_counts"] == {"mirror_changed": 1, "none": 1}
+    assert profile["error_type_counts"] == {"OtherError": 1, "unknown": 1}
     assert profile["metrics"]["change_check_ms"]["samples"] == 1
     assert profile["metrics"]["change_check_ms"]["p50"] == 0.5
     assert profile["metrics"]["duration_ms"]["p50"] == 10

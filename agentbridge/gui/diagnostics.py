@@ -70,6 +70,8 @@ REASONS = frozenset({
     'source_changed', 'position_changed', 'budget_exhausted',
     'inputs_unavailable', 'key_unavailable',
     'local_inputs_changed', 'source_changed_during_finalization', 'index_pending',
+    'mirror_changed', 'mirror_pending', 'unsafe_cached_value',
+    'invalid_payload', 'unsupported_transport', 'storage_error',
 })
 MODES = frozenset({'first', 'older', 'refresh', 'latest', 'none', 'other'})
 OUTCOMES = frozenset({

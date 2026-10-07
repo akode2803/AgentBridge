@@ -37,6 +37,41 @@ class _SourceMirrorToken:
 
 _MAX_MIRROR_TOKENS = 128
 
+_RAW_COLLECTION_FAILURE_REASONS = frozenset({
+    'mirror_changed', 'mirror_pending', 'unsafe_cached_value',
+    'invalid_or_oversize_payload', 'unsupported_transport',
+})
+_RAW_COLLECTION_BUDGET_REASONS = frozenset({
+    'document_budget', 'byte_budget', 'path_budget', 'document_byte_budget',
+})
+
+
+def _reconciliation_failure_reason(exc):
+    """Map failures to fixed diagnostic categories without exception text."""
+    if isinstance(exc, RawCollectionUnavailable):
+        detail = exc.args[0] if exc.args and type(exc.args[0]) is str else ''
+        if detail in _RAW_COLLECTION_FAILURE_REASONS:
+            return ('invalid_payload' if detail == 'invalid_or_oversize_payload'
+                    else detail)
+        if detail in _RAW_COLLECTION_BUDGET_REASONS:
+            return 'budget_exhausted'
+        return 'inputs_unavailable'
+    if isinstance(exc, local_source.SourceChanged):
+        return 'source_changed'
+    if isinstance(exc, overlay_index.OverlayIndexUnavailable):
+        return 'index_pending'
+    if isinstance(exc, staged_source.StageChanged):
+        return 'source_changed'
+    if isinstance(exc, OverflowError):
+        return 'budget_exhausted'
+    if isinstance(exc, OSError):
+        return 'storage_error'
+    if isinstance(exc, ValueError):
+        return 'invalid_payload'
+    if isinstance(exc, RuntimeError) and exc.args == ('local input ingestion stopped',):
+        return 'abort'
+    return 'other'
+
 
 class LocalInputRuntime:
     def __init__(self, transport, store):
@@ -291,6 +326,7 @@ class LocalInputRuntime:
             profile = {} if profile_started is not None else None
             profile_ref = delivery_trace.sampling_reference() if profile is not None else None
             profile_status, profile_error = 'ok', None
+            profile_reason = 'none'
             collection_fields = (
                 'documents_examined', 'documents_selected',
                 'document_bytes', 'document_batches',
@@ -492,6 +528,7 @@ class LocalInputRuntime:
                 return changed
             except Exception as exc:
                 profile_status, profile_error = 'error', type(exc).__name__
+                profile_reason = _reconciliation_failure_reason(exc)
                 budget = isinstance(exc, OverflowError) or (
                     isinstance(exc, RawCollectionUnavailable) and exc.args and
                     exc.args[0] in ('document_budget', 'byte_budget', 'path_budget', 'document_byte_budget'))
@@ -522,12 +559,14 @@ class LocalInputRuntime:
                             timed('cleanup_ms', cleanup_started)
                 except BaseException as exc:
                     profile_status, profile_error = 'error', type(exc).__name__
+                    profile_reason = _reconciliation_failure_reason(exc)
                     raise
                 finally:
                     if profile is not None:
                         delivery_trace.emit(
                             'source_reconciliation', chat=chat,
                             status=profile_status, error_type=profile_error,
+                            reason=profile_reason,
                             sample_ref=profile_ref,
                             duration_ms=delivery_trace.elapsed_ms(profile_started),
                             **profile,
