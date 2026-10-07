@@ -161,7 +161,37 @@ reconciliation fell from 64.25 ms to 11.12 ms (25-attempt p95 11.70 ms). A known
 change took 66.44 ms with one scan versus 116.98 ms for the conservative unknown
 two-scan path. Ruff, diff checks, the 286-test transport/source gate, the 423-test
 publication integration gate and the complete suite pass locally: 3232 passed,
-18 skipped. The branch is pushed as stacked PR55 against PR54 and is not deployed,
-restarted or live-measured. Next: merge PR54 after Windows completes, retarget
-PR55 to main, finish its review/CI, then measure the live selected-chat path under
-normal diagnostic sampling before choosing another architectural shortcut.
+18 skipped. PR54 passed both platforms and merged as `e64ae1e`. PR55's latest
+head passed Linux and Windows, retained a clean automated review, and merged as
+`b8d42ef`. Neither change is deployed, restarted or live-measured.
+
+The existing deployed diagnostic rotations are a complete 26,347-row baseline,
+but predate the new `source_reconciliation` event. Page reads had a 1.375-second
+median and 4.644-second p95; 14 of 43 returned `local_inputs_pending`. The same
+single server process recorded 3,209 source-ingestion attempts across 133 chat
+sources: 3,102 errors, only 107 successes, and 86 sources with no success. This
+is broad background retry churn, not one selected-chat outlier. The sanitized
+old schema collapses 3,004 of those failures to `OtherError`, so it cannot decide
+whether mirror movement, persistent bad input or a budget dominates.
+
+A separate local follow-up on `codex/reconciliation-failure-diagnostics` at app
+version `0.24.304` maps reconciliation failures to fixed content-free categories
+and adds status/reason/error counts to the offline summary. It retains no raw
+exception text, path or chat identity. Its 152-test local-input/diagnostics gate,
+Ruff and diff checks pass locally. It is rebased directly onto merged main;
+publish this small diagnostic prerequisite, then deploy once under normal
+sampling. The first live
+capture should decide whether to defer the immediate 32-room startup discovery,
+make collection tolerate unrelated mirror movement, or address a persistent
+input/budget failure. Do not add a foreground full-history fallback or weaken
+the latest-successfully-ingested authority boundary.
+
+PR55's first Windows run completed 3,219 tests with 31 expected skips and failed
+one unchanged GUI runtime test at its 10-second HTTP fixture deadline. The code
+frames showed signup's machine announcement committing one mutation-coordinator
+transaction while the newly started presence heartbeat waited to begin another.
+The request never reached the mirror-journal path. The failing test plus fixture
+timeout and coordinator coverage pass locally (25 tests), and only the failed
+Windows job was rerun. Both rerun jobs passed. If the race recurs, fix the real
+startup ordering by starting the presence heartbeat after the initial machine
+announcement; do not widen the fixture timeout or weaken the coordinator fence.
