@@ -8,6 +8,11 @@ from . import staged_source
 
 
 _COMPARISON = object()
+_ADMITTED_COMPARISON = object()
+
+
+class _InputsDifferent(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,121 @@ class _EqualInputs:
     raw: docs.DocumentPosition
     index: overlay_index.OverlayIndexPosition
     seal: object
+
+
+@dataclass(frozen=True)
+class _EqualAdmittedInputs:
+    expected: owner.SourcePosition
+    raw: docs.DocumentPosition
+    index: overlay_index.OverlayIndexPosition
+    seal: object
+
+
+def identical_admitted(store, expected, chat_id, collect):
+    """Compare one complete collected selection with the admitted generation.
+
+    ``collect`` must either deliver every selected document exactly once and
+    return, or raise. A mismatch may stop collection early because no result is
+    admitted; the caller then uses the ordinary complete staged path.
+    """
+    expected = owner._expected(store, expected)
+    if not callable(collect):
+        raise ValueError('complete collector must be callable')
+    if not expected.ready or not expected.raw.initialized:
+        return False
+    conn = docs._open_reader(store.path)
+    try:
+        conn.execute('BEGIN')
+        if owner.capture_in_transaction(conn, store, expected.source_id) != expected:
+            raise owner.SourceChanged('source_changed_during_comparison')
+        row = conn.execute(
+            'SELECT build,schema FROM overlay_index_ready WHERE source=?',
+            (expected.raw.source_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        index = overlay_index.OverlayIndexPosition(expected.raw, chat_id, *row)
+        try:
+            index = overlay_index._wanted(index, store.path)
+            overlay_index._ready(conn, store.path, index)
+        except (ValueError, overlay_index.OverlayIndexUnavailable):
+            return False
+        count = conn.execute(
+            'SELECT count(*) FROM document_observation_records '
+            'WHERE source_id=?', (expected.raw.source_id,),
+        ).fetchone()[0]
+        seen = 0
+
+        def compare(batch):
+            nonlocal seen
+            serialized, _used = docs._serialize_live_documents(
+                batch,
+                max_documents=staged_source.MAX_BATCH_DOCUMENTS,
+                max_bytes=staged_source.MAX_BATCH_BYTES,
+            )
+            names = tuple(serialized)
+            marks = ','.join('?' for _ in names)
+            rows = conn.execute(
+                'SELECT path,payload,deleted FROM document_observation_records '
+                f'WHERE source_id=? AND path IN ({marks})',
+                (expected.raw.source_id, *names),
+            ).fetchall()
+            if (len(rows) != len(serialized)
+                    or any(deleted or serialized.get(path) != payload
+                           for path, payload, deleted in rows)):
+                raise _InputsDifferent
+            seen += len(serialized)
+
+        try:
+            collect(compare)
+        except _InputsDifferent:
+            return False
+        if seen != count:
+            return False
+        if owner.capture_in_transaction(conn, store, expected.source_id) != expected:
+            raise owner.SourceChanged('source_changed_during_comparison')
+        overlay_index._ready(conn, store.path, index)
+        return _EqualAdmittedInputs(
+            expected, expected.raw, index, _ADMITTED_COMPARISON,
+        )
+    finally:
+        conn.close()
+
+
+def admit_identical(store, expected, comparison, *, observed_ns):
+    """Refresh readiness after exact complete equality without a new stage."""
+    expected = owner._expected(store, expected)
+    if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
+        raise ValueError('invalid observation time')
+    if (type(comparison) is not _EqualAdmittedInputs
+            or comparison.seal is not _ADMITTED_COMPARISON
+            or comparison.expected != expected or comparison.raw != expected.raw):
+        raise owner.SourceChanged('unproven_admitted_source_equality')
+    index = overlay_index._wanted(comparison.index, store.path)
+    if index.source != expected.raw:
+        raise owner.SourceChanged('foreign_admitted_index')
+    with owner._writer(store) as conn:
+        current = owner.capture_in_transaction(conn, store, expected.source_id)
+        if current != expected or current.writes_pending:
+            raise owner.SourceChanged('source_changed_during_ingestion')
+        overlay_index._ready(conn, store.path, index)
+        # The unchanged fast path does not open a new stage, so explicitly
+        # retire candidates left by older interrupted owner revisions.
+        staged_source.abandon_superseded(
+            conn, store, expected.source_id, expected,
+        )
+        owner._advance(conn, expected.source_id, current.revision)
+        conn.execute(
+            "UPDATE local_sources SET ready_incarnation=?,ready_generation=?,"
+            "ready_cursor=?,last_success_ns=?,failures=0,error='' WHERE source=?",
+            (current.raw.incarnation, current.raw.generation, current.raw.cursor,
+             observed_ns, expected.source_id),
+        )
+        result = owner.capture_in_transaction(conn, store, expected.source_id)
+        overlay_index._ready(conn, store.path, index)
+        if not result.ready or result.raw != current.raw:
+            raise owner.SourceChanged('unchanged_admission_failed')
+    return result, index
 
 
 def identical(store, expected, candidate):

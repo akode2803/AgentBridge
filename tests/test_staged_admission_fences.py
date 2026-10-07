@@ -91,6 +91,66 @@ def test_comparison_is_stale_after_logical_revision_changes(store):
     assert not local_source.capture(store, LOGICAL).ready
 
 
+def test_complete_admitted_comparison_reuses_raw_and_index_without_stage(store):
+    ready, old_index, _ = _admit_first(store)
+    claimed = local_source.claim_collection(store, ready)
+    delivered = []
+
+    def collect(consume):
+        delivered.append(True)
+        consume({META: {'value': 1}})
+
+    proof = staged_publication.identical_admitted(
+        store, claimed, CHAT, collect,
+    )
+    assert proof and delivered == [True]
+    stable, index = staged_publication.admit_identical(
+        store, claimed, proof, observed_ns=11,
+    )
+    assert stable.ready and stable.raw == ready.raw
+    assert stable.revision > claimed.revision
+    assert index == old_index
+
+
+@pytest.mark.parametrize('documents', [
+    {META: {'value': 2}},
+    {META: {'value': 1}, 'users/alice.json': {'name': 'alice'}},
+    None,
+])
+def test_admitted_comparison_mismatch_requires_staged_fallback(store, documents):
+    ready, _old_index, _ = _admit_first(store)
+    claimed = local_source.claim_collection(store, ready)
+
+    def collect(consume):
+        if documents is not None:
+            consume(documents)
+
+    assert staged_publication.identical_admitted(
+        store, claimed, CHAT, collect,
+    ) is False
+    assert local_source.capture(store, LOGICAL) == claimed
+
+
+def test_admitted_equality_proof_is_bound_to_exact_source_revision(store):
+    ready, _old_index, _ = _admit_first(store)
+    claimed = local_source.claim_collection(store, ready)
+    proof = staged_publication.identical_admitted(
+        store, claimed, CHAT, lambda consume: consume({META: {'value': 1}}),
+    )
+    assert proof
+    with pytest.raises(local_source.SourceChanged,
+                       match='unproven_admitted_source_equality'):
+        staged_publication.admit_identical(
+            store, claimed, replace(proof, seal=object()), observed_ns=11,
+        )
+    local_source.invalidate(store, LOGICAL)
+    with pytest.raises(local_source.SourceChanged,
+                       match='source_changed_during_ingestion'):
+        staged_publication.admit_identical(
+            store, claimed, proof, observed_ns=11,
+        )
+
+
 def test_legacy_publishers_reject_mapped_stage_without_retiring_it(store, tmp_path):
     source_selectors.initialize(store)
     coordinator = MutationCoordinator(tmp_path / 'coordinator', 'root')

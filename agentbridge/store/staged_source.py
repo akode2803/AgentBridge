@@ -7,7 +7,6 @@ Admission to a logical source is a separate, caller-owned transaction.
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -149,6 +148,41 @@ def begin_raw(store, logical_source, *, expected=None, max_total_bytes=MAX_TOTAL
                   max_total_bytes=max_total_bytes, max_documents=max_documents)
 
 
+def abandon_superseded(conn, store, logical_source, expected):
+    """Make interrupted candidates from older owner revisions reclaimable.
+
+    The caller owns the Store writer transaction. This is quota housekeeping,
+    not source admission: the exact current owner still has to match before any
+    stage state changes.
+    """
+    from . import local_source
+    logical_source = docs._validate_source_id(logical_source)
+    expected = local_source._expected(store, expected)
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError('stage abandonment needs an owned transaction')
+    _schema(conn)
+    current = local_source.capture_in_transaction(conn, store, logical_source)
+    if current != expected or expected.source_id != logical_source:
+        raise StageChanged('stage_owner_changed')
+    conn.execute(
+        "UPDATE staged_sources SET phase='abandoned' WHERE logical_source=? "
+        "AND phase='building' AND (owner_epoch IS NULL OR owner_epoch<>? "
+        "OR owner_revision IS NULL OR owner_revision<>?)",
+        (logical_source, expected.epoch, expected.revision),
+    )
+    if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='local_input_generations'").fetchone():
+        conn.execute(
+            "UPDATE staged_sources SET phase='abandoned' WHERE logical_source=? "
+            "AND phase='sealed' AND (owner_epoch IS NULL OR owner_epoch<>? "
+            "OR owner_revision IS NULL OR owner_revision<>?) AND NOT EXISTS "
+            "(SELECT 1 FROM local_input_generations "
+            "WHERE physical=staged_sources.source)",
+            (logical_source, expected.epoch, expected.revision),
+        )
+
+
 def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes, max_documents):
     logical_source = docs._validate_source_id(logical_source)
     if (type(max_total_bytes) is not int or not 0 <= max_total_bytes <= MAX_TOTAL_BYTES
@@ -164,17 +198,10 @@ def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes, max_
         if expected is not None:
             from . import local_source
             expected = local_source._expected(store, expected)
-            current = local_source.capture_in_transaction(conn, store, logical_source)
-            if current != expected or expected.source_id != logical_source:
-                raise StageChanged('stage_owner_changed')
             owner_epoch, owner_revision = expected.epoch, expected.revision
             # A new invalidation/revision can abandon an interrupted old build;
             # never steal one owned by the same revision or another active call.
-            conn.execute("UPDATE staged_sources SET phase='abandoned' WHERE logical_source=? AND phase='building' AND (owner_epoch IS NULL OR owner_epoch<>? OR owner_revision IS NULL OR owner_revision<>?)",
-                         (logical_source, owner_epoch, owner_revision))
-            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_input_generations'").fetchone():
-                conn.execute("UPDATE staged_sources SET phase='abandoned' WHERE logical_source=? AND phase='sealed' AND (owner_epoch IS NULL OR owner_epoch<>? OR owner_revision IS NULL OR owner_revision<>?) AND NOT EXISTS (SELECT 1 FROM local_input_generations WHERE physical=staged_sources.source)",
-                             (logical_source, owner_epoch, owner_revision))
+            abandon_superseded(conn, store, logical_source, expected)
         existing = conn.execute("SELECT count(*),coalesce(sum(total_bytes),0),coalesce(sum(phase='building'),0) FROM (SELECT total_bytes,phase FROM staged_sources LIMIT ?)", (MAX_STAGES + 1,)).fetchone()
         if existing[0] >= MAX_STAGES or existing[1] >= MAX_GLOBAL_BYTES or existing[2] >= MAX_ACTIVE_STAGES:
             raise OverflowError('global stage capacity exceeded')
@@ -216,17 +243,17 @@ def append(store, stage, documents):
     stage = _handle(store, stage)
     if type(documents) is not dict or not 1 <= len(documents) <= MAX_BATCH_DOCUMENTS:
         raise ValueError('stage append requires 1..128 documents')
-    raw, bytes_used, observed = [], 0, []
-    for path, value in documents.items():
-        kind = _path(path, stage.chat_id) if stage.kind == 'chat' else None
+    kinds = {}
+    for path in documents:
+        kinds[path] = _path(path, stage.chat_id) if stage.kind == 'chat' else None
         if stage.kind == 'raw':
             docs._validate_document_path(path)
-        docs._validate_json_keys(value)
-        payload = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-        size = len(path.encode()) + len(payload.encode())
-        bytes_used += size
-        if bytes_used > MAX_BATCH_BYTES:
-            raise OverflowError('stage batch byte budget exceeded')
+    serialized, bytes_used = docs._serialize_live_documents(
+        documents, max_documents=MAX_BATCH_DOCUMENTS, max_bytes=MAX_BATCH_BYTES,
+    )
+    raw, observed = [], []
+    for path, payload in serialized.items():
+        kind = kinds[path]
         raw.append((stage.source_id, path, payload, 0))
         if kind is not None:
             observed.append(docs.SerializedDocumentRecord(path, payload, False))

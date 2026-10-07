@@ -33,8 +33,14 @@ bindings. Physical positions alone do not authorize a request.
    Normalization records signature inputs and shape facts, never authority verdicts.
 5. Seal only after successful enumeration. Final sealing checks constant-size
    position/counter evidence, rather than scanning all staged records.
-6. Compare complete raw generations off the root gate with bounded buffers. Equal
-   inputs may retain the existing raw/index identities, subject to the final CAS.
+6. When an admitted source and index already exist, first compare the complete
+   mirror selection directly and byte-for-byte with that admitted raw generation,
+   using bounded batches and the same mirror-position fence. Exact equality may
+   refresh readiness without creating a candidate. Any mismatch, missing row,
+   count difference, invalid index or race falls through to the ordinary staged
+   build. The staged path then compares complete raw generations off the root gate
+   with bounded buffers. Equal inputs may retain the existing raw/index identities,
+   subject to the final CAS.
 7. Under root-to-Store locking, verify the original logical owner revision, absence
    of pending local writes, exact sealed candidate owner and raw/index positions.
    Retire the old owner revision and switch the admitted pointer and readiness in
@@ -71,14 +77,28 @@ Cleanup runs between scheduled scans and rechecks foreground-selected work betwe
 chunks. The runtime does not rebuild or fold complete history on a page request.
 
 Cached collection currently enumerates the complete mirror dictionary to find a
-chat's declared selectors, then writes a complete candidate and compares it with
-the admitted generation. This is bounded but can scale with unrelated mirror
+chat's declared selectors. An unchanged admitted selection avoids the candidate
+writes and second-generation comparison, while changed inputs still build and
+admit a complete candidate. This is bounded but can scale with unrelated mirror
 documents as well as selected overlays. Opt-in diagnostics record one compact
 `source_reconciliation` observation with examined/selected counts and stage
 durations. The staged-write duration overlaps collection because each selected
-batch is written by the collector callback. The evidence is intended to choose
+batch is written by the collector callback. On the unchanged fast path,
+`collect_ms` is contained within `compare_ms`; absent stage/write/seal/cleanup
+metrics mean that no candidate was created. The evidence is intended to choose
 between a chat-scoped mirror index, precise changed-path evidence and scheduling
 changes without weakening the complete repair path.
+
+Disposable fake-provider measurements with 20,033 selected empty documents
+reduced median unchanged reconciliation from about 403 ms to 173 ms. The former
+path spent about 231 ms in repeated staged writes. These local measurements show
+the expected scaling direction; they are not live-provider or device acceptance.
+A deliberately changed last document took about 560 ms versus about 380 ms for
+the initial staged build because the safe fallback performs a complete equality
+check before rebuilding. Diagnostics count both traversals on this fallback.
+Successful unchanged admission also marks any interrupted older candidate
+reclaimable, so the fast return cannot strand active-stage capacity. Precise verified changed-path evidence can remove that
+changed-case duplicate work later; an untrusted Realtime hint cannot.
 
 ## Current GUI integration
 

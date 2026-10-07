@@ -264,6 +264,10 @@ class LocalInputRuntime:
             profile = {} if profile_started is not None else None
             profile_ref = delivery_trace.sampling_reference() if profile is not None else None
             profile_status, profile_error = 'ok', None
+            collection_fields = (
+                'documents_examined', 'documents_selected',
+                'document_bytes', 'document_batches',
+            )
 
             def timed(name, started, *, add=False):
                 if profile is None:
@@ -272,6 +276,17 @@ class LocalInputRuntime:
                     value = delivery_trace.elapsed_ms(started)
                     if value is not None:
                         profile[name] = profile.get(name, 0) + value if add else value
+                except Exception:
+                    pass  # Profiling cannot replace the ingestion result.
+
+            def merge_collection(stats):
+                if profile is None or stats is None:
+                    return
+                try:
+                    for name in collection_fields:
+                        value = stats.get(name)
+                        if type(value) is int:
+                            profile[name] = profile.get(name, 0) + value
                 except Exception:
                     pass  # Profiling cannot replace the ingestion result.
 
@@ -285,6 +300,61 @@ class LocalInputRuntime:
                 with self.coordinator.publication_gate(self.store, reader.definition):
                     expected = local_source.claim_collection(self.store, captured.source)
                 timed('capture_claim_ms', started)
+
+                def collect(consume, stats):
+                    def checked(batch):
+                        if self._stop.is_set() or self._closed:
+                            raise RuntimeError('local input ingestion stopped')
+                        consume(batch)
+
+                    collect_document_batches(
+                        self.transport._transport, reader.definition,
+                        consume=checked, stats=stats,
+                    )
+
+                def finalize(published, index):
+                    final_started = delivery_trace.queue_clock()
+                    try:
+                        receipt = reader.capture()
+                        if receipt.source != published:
+                            raise local_source.SourceChanged('ingestion_superseded')
+                        with reader.finalization(receipt) as conn:
+                            overlay_index._ready(conn, self.store.path, index)
+                    finally:
+                        timed('source_finalize_ms', final_started)
+
+                if expected.ready and expected.raw.initialized:
+                    comparison_collection = {} if profile is not None else None
+
+                    def compare_collection(consume):
+                        collect_started = delivery_trace.queue_clock()
+                        try:
+                            collect(consume, comparison_collection)
+                        finally:
+                            timed('collect_ms', collect_started, add=True)
+                            merge_collection(comparison_collection)
+
+                    started = delivery_trace.queue_clock()
+                    try:
+                        equality = staged_publication.identical_admitted(
+                            self.store, expected, reader.chat, compare_collection,
+                        )
+                    finally:
+                        timed('compare_ms', started, add=True)
+                    if equality:
+                        started = delivery_trace.queue_clock()
+                        try:
+                            with self.coordinator.publication_gate(
+                                    self.store, reader.definition):
+                                published, index = staged_publication.admit_identical(
+                                    self.store, expected, equality,
+                                    observed_ns=time.time_ns(),
+                                )
+                        finally:
+                            timed('admit_ms', started)
+                        finalize(published, index)
+                        return False
+
                 started = delivery_trace.queue_clock()
                 stage = staged_source.begin(self.store, reader.definition.source, reader.chat, expected=expected)
                 timed('stage_open_ms', started)
@@ -292,8 +362,6 @@ class LocalInputRuntime:
                 prefixes = {s.value for s in reader.definition.selectors if s.kind == 'doc_prefix'}
 
                 def append(batch):
-                    if self._stop.is_set() or self._closed:
-                        raise RuntimeError('local input ingestion stopped')
                     for path in batch:
                         document_observation._validate_document_path(path)
                         if len(path.split('/')) > 32:
@@ -309,24 +377,17 @@ class LocalInputRuntime:
                 collection = {} if profile is not None else None
                 started = delivery_trace.queue_clock()
                 try:
-                    collect_document_batches(
-                        self.transport._transport, reader.definition,
-                        consume=append, stats=collection,
-                    )
+                    collect(append, collection)
                 finally:
-                    timed('collect_ms', started)
-                    if profile is not None and collection is not None:
-                        try:
-                            profile.update(collection)
-                        except Exception:
-                            pass
+                    timed('collect_ms', started, add=True)
+                    merge_collection(collection)
                 started = delivery_trace.queue_clock()
                 staged_source.finish(self.store, stage)
                 timed('seal_ms', started)
                 reuse = None
                 started = delivery_trace.queue_clock()
                 comparison = staged_publication.identical(self.store, expected, stage)
-                timed('compare_ms', started)
+                timed('compare_ms', started, add=True)
                 if comparison:
                     # Retain unchanged raw/index identity after full comparison.
                     conn = document_observation._open_reader(self.store.path)
@@ -351,15 +412,7 @@ class LocalInputRuntime:
                 # Post-commit cleanup cannot retire the newly admitted winner.
                 if captured.source.raw.source_id != published.raw.source_id:
                     staged_source.retire_generation(self.store, captured.source.raw.source_id)
-                started = delivery_trace.queue_clock()
-                try:
-                    receipt = reader.capture()
-                    if receipt.source != published:
-                        raise local_source.SourceChanged('ingestion_superseded')
-                    with reader.finalization(receipt) as conn:
-                        overlay_index._ready(conn, self.store.path, index)
-                finally:
-                    timed('source_finalize_ms', started)
+                finalize(published, index)
                 changed = captured.source.raw != published.raw
                 if changed or not captured.source.ready:
                     # Wake terminal preparation from an admitted source change,
