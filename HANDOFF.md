@@ -404,3 +404,49 @@ still roughly 0.8 seconds warm and 2.0 seconds first at 64 members and can cross
 its one-second computation window. Next: publish the stacked branch for review,
 then finish auxiliary/member-history and browser-paint profiling without weakening
 final source checks.
+
+PR59 passed Ubuntu/Windows and merged as `528922e` on 2026-10-08. PR60 was
+retargeted to main after that merge. Its `ee09bdd` repair has a clean Codex
+rereview and passing Ubuntu CI. The replacement Windows run fixed the earlier
+auxiliary clock flake but failed during signup in `test_chat_pins_are_a_list_with_body`:
+3,262 passed, 31 skipped. The captured request frame was at the mutation
+coordinator's SQLite commit; the other listed workers were waiting. This does
+not establish the earlier concurrent presence-write race as the cause. The
+same test passes locally. The failed Windows job was rerun once (run
+`37785263540`); do not repeatedly monitor it. Retargeting did not itself start
+a new CI run. PR60 remains open, not deployed or restarted.
+
+The current branch is `codex/large-room-auxiliary-profile`, version 0.24.309,
+based on PR60. Auxiliary profile reads now capture the bounded member-account
+raw rows in one request-local batch rather than repeating the room metadata
+capture and source check per account. The batch remains charged to the ordinary
+ledger and compared at final handout; get/raw still resolves every member's
+pins, lifecycle and privacy independently. There is no cross-request authority
+memo. The new regression verifies identity-to-row mapping, batching, rejection
+after an intervening account change, and a fresh result on the next request.
+
+The 61-test authority/presentation gate and 121-test canonical page, receipt,
+unread and failing-signup gate pass locally. The opt-in reproducible benchmark
+is `uv run pytest -q -s tests/probe_member_aux.py`; it uses disposable cloud
+fixtures and compares batching enabled/disabled. Run it without simultaneous
+test workers: a contended attempt crossed the existing one-second freshness
+fence, so its timings are not an optimization comparison. Production freshness
+limits are unchanged.
+
+The isolated six-case benchmark passed. Three-sample wall-time medians at
+8/32/64 members were 99/237/514 ms without batching and 88/226/521 ms with
+batching. CPU medians were 97/234/506 ms versus 86/223/512 ms. This does not
+establish a reliable large-room latency gain. A separate instrumented 64-member
+capture reduced SQLite execute calls from 15,124 to 9,358, but lifecycle/pin
+work dominates the remaining endpoint cost. Retain the optimization as a local
+reviewable prerequisite; do not describe the large-room latency task as solved
+or release it on the strength of the earlier isolated pair alone.
+
+Next: complete independent review of the raw-account batching, then separate
+bounded member profile/presence work from live/runtime controls so a large
+roster cannot withhold the entire auxiliary response. Recompute authority on
+each companion request and preserve source/session/version rejection. Inspect
+browser cost before changing rendering: paintMeshChat regenerates HTML on
+metadata changes but already uses keyed row reconciliation, so it does not
+necessarily replace the entire transcript DOM. Lifecycle capture and pin-store
+processing remain the larger measured costs after account batching.

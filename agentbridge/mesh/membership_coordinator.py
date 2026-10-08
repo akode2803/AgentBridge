@@ -135,6 +135,7 @@ class _Round:
             raise _Stop('unavailable', 'invalid_clock')
         self.deadline = None
         self.batches, self.accounts, self.published = [], {}, {}
+        self.account_records = {}
         self.subjects, self.heads, self.states = {}, {}, {}
         self.facts, self.evidence = {}, {}
         self.meta_input = self.capture(())
@@ -168,7 +169,24 @@ class _Round:
         return value
 
     def _account_record(self, name):
+        if name in self.account_records:
+            return self.account_records[name]
         return self.capture((name,)).documents.records[1]
+
+    def prefetch_accounts(self, names):
+        """Capture raw account rows once for this round; never resolve authority.
+
+        The ordinary capture ledger and final batch comparison own these rows.
+        Trust, lifecycle dependencies and visibility still run through get/raw.
+        """
+        missing = tuple(dict.fromkeys(name for name in names
+            if name not in self.accounts and name not in self.account_records))
+        if not missing:
+            return
+        if len(set(self.accounts) | set(self.account_records) | set(missing)) > self.ledger.limits.max_accounts:
+            raise _Stop('unavailable', 'account_budget_exhausted')
+        captured = self.capture(missing)
+        self.account_records.update(zip(missing, captured.documents.records[1:], strict=True))
 
     def raw(self, name):
         if name in self.accounts:

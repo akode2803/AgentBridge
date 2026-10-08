@@ -26,8 +26,8 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   state: after the first minute, three fenced rooms remained on a fixed
   four-second source retry. v0.24.307 locally adds adaptive background backoff
   to a finite five-minute ceiling while preserving immediate route-selection
-  wake and 350 ms selected-chat retries. Focused validation passes; PR, CI and
-  live post-release attempt-rate measurement remain open.
+  wake and 350 ms selected-chat retries. PR59 passed both platforms and merged;
+  live post-release attempt-rate measurement remains open.
 
 - [ ] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
   2026-10-08). After the known latency work, replace periodic per-chat safety

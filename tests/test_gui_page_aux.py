@@ -120,6 +120,49 @@ def test_ready_aux_does_not_use_mesh_snapshot_full_history_or_provider(page_app,
     assert result['status'] == 'ready', result
 
 
+def test_member_accounts_are_batched_and_late_change_still_rejects(page_app, monkeypatch):
+    from conftest import seed_account
+    from agentbridge.mesh.local_page_source import LocalPageSource
+    from agentbridge.mesh.paths import P
+
+    app, chat = page_app
+    mesh = app.mesh
+    names = ('zulu', 'alpha', 'middle')
+    for name in names:
+        seed_account(mesh.tx, name, display='Display ' + name)
+    mesh.membership.add_members(chat, list(names))
+    mesh.post(chat, 'one')
+    _ready(app, chat)
+    assert _settled_aux(app, chat)['status'] == 'ready'
+    calls = []
+    capture = LocalPageSource.capture_authority
+
+    def observed(self, receipt, account_names=(), **kwargs):
+        calls.append(account_names)
+        return capture(self, receipt, account_names, **kwargs)
+
+    monkeypatch.setattr(LocalPageSource, 'capture_authority', observed)
+    result = _settled_aux(app, chat)
+    assert result['status'] == 'ready', result
+    assert tuple(sorted(names)) in calls
+    assert all((name,) not in calls for name in names)
+    for name in names:
+        assert result['users'][name]['display'] == 'Display ' + name
+
+    reader, receipt, index = mesh.local_inputs.inputs(chat)
+    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    prepared = operation.prepare(receipt, receipt, index)
+    assert prepared.status == 'prepared', prepared
+    account = mesh.tx.get_doc(P.user('middle'))
+    mesh.tx.put_doc(P.user('middle'), dict(account, display='Changed'))
+    final = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
+    assert final.status != 'page' and final.result is None
+    _ready(app, chat)
+    fresh = _settled_aux(app, chat)
+    assert fresh['status'] == 'ready', fresh
+    assert fresh['users']['middle']['display'] == 'Changed'
+
+
 @pytest.mark.parametrize('change', ['status', 'runtime'])
 def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     app, chat = page_app

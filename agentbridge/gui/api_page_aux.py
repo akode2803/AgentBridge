@@ -126,6 +126,7 @@ class AuxiliaryPageOperation(PageOperation):
 
     def _profiles(self, round_, snapshot, receipt, data):
         names = tuple(dict.fromkeys((self.viewer, *sorted(snapshot.members))))[:64]
+        round_.prefetch_accounts(names)
         accounts = {name: effective_account(round_, name) for name in names}
         viewer = accounts.get(self.viewer)
         if viewer is None:
