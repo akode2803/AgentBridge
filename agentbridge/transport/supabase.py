@@ -1272,9 +1272,16 @@ class _RealtimeThread:
                 timeout=10.0,
             )
             if member_auth:
-                await asyncio.wait_for(sb.auth.sign_in_with_password({
+                auth_response = await asyncio.wait_for(sb.auth.sign_in_with_password({
                     "email": email, "password": password,
                 }), timeout=10.0)
+                session = getattr(auth_response, "session", None)
+                access_token = getattr(session, "access_token", "")
+                if not access_token:
+                    raise ValidationError("Supabase member Realtime token is unavailable")
+                await asyncio.wait_for(
+                    sb.realtime.set_auth(access_token), timeout=2.0,
+                )
             self._channel = sb.channel(
                 f"ab-{self._root}",
                 RealtimeChannelOptions(config={"broadcast": {

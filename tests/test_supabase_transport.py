@@ -531,6 +531,9 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
         def __init__(self): self.credentials = []
         async def sign_in_with_password(self, credentials):
             self.credentials.append(credentials)
+            return types.SimpleNamespace(
+                session=types.SimpleNamespace(access_token="member-token"),
+            )
 
     class Channel:
         def __init__(self):
@@ -555,6 +558,8 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
         async def send_broadcast(self, *_args): pass
 
     class RealtimeClient:
+        def __init__(self): self.tokens = []
+        async def set_auth(self, token): self.tokens.append(token)
         async def close(self): pass
 
     class Client:
@@ -594,6 +599,7 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
     assert client.auth.credentials == [{
         "email": "member@example.test", "password": "secret",
     }]
+    assert client.realtime.tokens == ["member-token"]
     assert client.options["config"]["broadcast"]["replication_ready"] is True
     assert client.ch.binding[1] == {
         "table": "ab_change_events", "schema": "public", "filter": "root=eq.team",

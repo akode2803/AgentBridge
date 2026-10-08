@@ -581,6 +581,10 @@ thread, authenticates it as the already-probed REST credential class, subscribes
 to root-filtered inserts, requires all three readiness signals, and publishes
 only validated event IDs. Wrong-root/malformed payloads are counted and dropped.
 A failed member login does not silently switch the observer to the service key.
+The async client schedules its normal Realtime token propagation, so the observer
+also explicitly awaits `realtime.set_auth(member_token)` before creating/joining
+the channel; otherwise a fast join can race ahead as anonymous despite successful
+member sign-in.
 Disconnect and readiness counters join the existing benchmark, while Broadcast
 and every safety poll stay unchanged. The 208-test transport/sync/benchmark gate,
 Ruff, compilation and diff checks passed before the foundation correction. Rebase
