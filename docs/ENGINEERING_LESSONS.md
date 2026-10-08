@@ -23,6 +23,19 @@ running work from rows deferred until a retry deadline. The response remains
 explicitly incomplete while the cached list stays stable and background recovery
 continues without a permanent progress cue.
 
+The browser must learn when runnable work becomes deferred; a longer retry delay
+alone leaves its previously accepted `active` state stale. Refresh responses now
+carry the queue activity bit and the client refreshes cached state on that
+transition. An empty incomplete cache still retains a progress cue because there
+is no admitted row to show in its place.
+
+Scoped Realtime evidence must remain scoped through batching and sleep. Collapsing
+several room IDs into a broad refresh preserved every failed room's old deadline,
+and sleeping workers could not observe a later single-room wake until that
+deadline expired. The browser now retains the bounded room set and uses an
+interruptible owner-local wait, waking both workers while leaving unrelated retry
+deadlines intact.
+
 ## R237: real-instance scrolling and write exhaustion
 
 Fast scrolling in Group With Muskan exposed a receipt-presence publication race:

@@ -251,6 +251,7 @@ def refresh_sidebar(app, req, mesh, token):
         return {'ok': True, 'status': 'ready' if progress['complete'] else 'busy',
                 'changed': False, 'has_more': not progress['complete'],
                 'chats_complete': progress['complete'],
+                'sidebar_active': progress['active'],
                 'retry_after_ms': progress['retry_after_ms'],
                 'session_binding': session_read_binding(token)}
     started = time.perf_counter()
@@ -276,5 +277,6 @@ def refresh_sidebar(app, req, mesh, token):
     return {'ok': True, 'status': 'ready' if resolved else 'pending',
             'changed': changed, 'has_more': not progress['complete'],
             'chats_complete': progress['complete'],
+            'sidebar_active': progress['active'],
             'retry_after_ms': progress['retry_after_ms'] if not resolved else 0,
             'session_binding': session_read_binding(token)}

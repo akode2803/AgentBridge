@@ -135,6 +135,9 @@ def test_cached_sidebar_paints_before_canonical_reconciliation(world, monkeypatc
     assert deferred['sidebar_active'] is False
     assert next(row for row in deferred['chats'] if row['id'] == chat)[
         'last']['body'] == 'cached startup preview'
+    retry = api_chats.refresh_sidebar(app, Request(method='POST', data={}))
+    assert retry['status'] == 'busy' and retry['sidebar_active'] is False
+    assert retry['retry_after_ms'] >= 100
 
 
 def test_corrupt_sidebar_cache_queues_canonical_repair(world):

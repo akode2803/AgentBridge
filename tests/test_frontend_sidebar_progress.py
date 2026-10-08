@@ -86,7 +86,8 @@ assert.equal(calls.at(-1).pending,true,'incomplete cached list shows delayed upd
 Mesh.state={...base,sidebar_active:false,sidebar_status:'rooms_deferred'};
 policy().progress();
 assert.equal(calls.at(-1).pending,false,'deferred retry does not claim active loading');
-Mesh.state={...base,chats:[]}; policy().progress();
+Mesh.state={...base,chats:[],sidebar_active:false,sidebar_status:'rooms_deferred'};
+policy().progress();
 assert.equal(calls.at(-1).pending,true,'empty incomplete list receives one cue');
 Mesh.chatId='selected'; policy().progress();
 assert.equal(calls.at(-1).pending,false,'foreground chat owns feedback');

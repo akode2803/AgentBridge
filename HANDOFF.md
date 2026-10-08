@@ -298,6 +298,24 @@ previous four-field shape. Production code, lint, frontend checks and all other
 tests passed. The assertion now covers the expanded status contract; the focused
 sidebar/cache gate passes 48 tests with four expected skips.
 
+The next Windows run failed one unrelated delegation test after 41 minutes and
+3,252 passes. A manager thread timed out at the process-local pin-store gate, so
+the test's result dictionary remained empty; every PR-specific Windows boundary
+check passed, Ubuntu completed the full suite, and the exact failed test passes
+locally. No pin or delegation behavior was weakened on this evidence; the next
+branch run will distinguish an isolated loaded-run timeout from a recurrence.
+
+Codex Connector review then found four valid composition gaps. A deferred result
+did not update the browser's previously accepted active state; an empty incomplete
+cache could lose its only progress cue; a multi-room Realtime batch collapsed to
+a broad wake that preserved all named rooms' deadlines; and a later scoped hint
+could not interrupt two workers sleeping for up to 30 seconds. Refresh responses
+now expose queue activity, empty incomplete lists remain visibly pending, scoped
+batches retain every bounded room ID, and owner-local interruptible waits wake
+both workers without clearing unrelated backoff. The focused sidebar/Realtime
+and session/read-state gate passes 140 tests with four expected skips, all 36 frontend modules pass, and
+Ruff and diff checks pass.
+
 After the retry-owner fix, profile the remaining steady-state reconciliation and
 the durable intent accumulation separately. Do not weaken the source CAS or clear
 ambiguous intents by age. Large-room member scaling is the next latency profile;
