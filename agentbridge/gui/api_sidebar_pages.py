@@ -183,6 +183,7 @@ def capture_sidebar(app, mesh, token):
     users, users_complete, user_status = _users(mesh)
     out = {'users': users, 'chats': [], 'chats_complete': False,
            'users_complete': users_complete, 'user_status': user_status,
+           'sidebar_active': True,
            'metadata_status': {'profiles': 'pending', 'presence': 'pending',
                                'live': 'deferred'}}
     try:
@@ -215,12 +216,16 @@ def capture_sidebar(app, mesh, token):
     progress = app.sidebar_refresh.status(token)
     out['chats_complete'] = progress['complete'] and cache_ready
     out['sidebar_pending'] = progress['pending'] + progress['running']
+    out['sidebar_active'] = bool(progress['active'] or not cache_ready)
     out['chats_removed'] = list(progress['removed'])
     out['sidebar_status'] = ('cache_pending' if not cache_ready else
-                             'ready' if progress['complete'] else 'rooms_pending')
+                             'ready' if progress['complete'] else
+                             'rooms_pending' if progress['active'] else
+                             'rooms_deferred')
     if len(json.dumps(out, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
         out.update(users={}, chats=[], chats_complete=False, users_complete=False,
                    chats_removed=[], user_status='response_byte_budget',
+                   sidebar_active=False,
                    sidebar_status='response_byte_budget')
     return out
 
@@ -246,7 +251,8 @@ def refresh_sidebar(app, req, mesh, token):
         return {'ok': True, 'status': 'ready' if progress['complete'] else 'busy',
                 'changed': False, 'has_more': not progress['complete'],
                 'chats_complete': progress['complete'],
-                'retry_after_ms': 100,
+                'sidebar_active': progress['active'],
+                'retry_after_ms': progress['retry_after_ms'],
                 'session_binding': session_read_binding(token)}
     started = time.perf_counter()
     row, resolved, changed, published = None, False, False, False
@@ -271,5 +277,6 @@ def refresh_sidebar(app, req, mesh, token):
     return {'ok': True, 'status': 'ready' if resolved else 'pending',
             'changed': changed, 'has_more': not progress['complete'],
             'chats_complete': progress['complete'],
-            'retry_after_ms': 350 if not resolved else 0,
+            'sidebar_active': progress['active'],
+            'retry_after_ms': progress['retry_after_ms'] if not resolved else 0,
             'session_binding': session_read_binding(token)}

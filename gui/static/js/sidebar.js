@@ -274,7 +274,10 @@ function renderChatListSidebar() {
   const box = $("#side-chats");
   // The row is delayed, so a quick reconciliation stays visually quiet. When
   // it does appear it sits with the cached chats until the canonical pass ends.
-  const waiting = ms.chats_complete === false;
+  // Incomplete can mean a fenced room is waiting for its bounded retry. Keep
+  // that state honest without presenting background backoff as active loading.
+  const waiting = ms.chats_complete === false
+    && (ms.sidebar_active !== false || chats.length === 0);
   const session = captureSessionEpoch();
   const progress = () => syncSidebarProgress(box, {
     pending: waiting && !Mesh.chatId,

@@ -738,9 +738,30 @@ V.renderChats = renderChats;
 
 let sidebarReconcileOwner = null;
 let sidebarReconcileTimer = null;
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function sidebarPreferredChats(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(values.filter(chat => typeof chat === "string" && chat))];
+}
+function wakeSidebarReconcile(owner) {
+  for (const wake of [...owner.sleepers]) wake();
+}
+function waitSidebarReconcile(owner, ms) {
+  return new Promise(resolve => {
+    let timer = null;
+    const finish = () => {
+      if (!owner.sleepers.delete(finish)) return;
+      clearTimeout(timer);
+      resolve();
+    };
+    owner.sleepers.add(finish);
+    timer = setTimeout(finish, ms);
+  });
+}
 function resetSidebarReconcile() {
-  if (sidebarReconcileOwner) sidebarReconcileOwner.cancelled = true;
+  if (sidebarReconcileOwner) {
+    sidebarReconcileOwner.cancelled = true;
+    wakeSidebarReconcile(sidebarReconcileOwner);
+  }
   sidebarReconcileOwner = null;
   clearTimeout(sidebarReconcileTimer);
   sidebarReconcileTimer = null;
@@ -767,22 +788,12 @@ async function acceptCachedSidebar(owner) {
 
 async function reconcileSidebar(preferred = "", refreshAll = false) {
   if (!Mesh.state?.user || meshStateSnapshot().locked) return;
+  const preferredChats = sidebarPreferredChats(preferred);
   clearTimeout(sidebarReconcileTimer);
   sidebarReconcileTimer = null;
   if (sidebarReconcileOwner && !sidebarReconcileOwner.cancelled) {
-    let nudged = false;
-    if (preferred) {
-      if (!sidebarReconcileOwner.preferred
-          || sidebarReconcileOwner.preferred === preferred) {
-        sidebarReconcileOwner.preferred = preferred;
-        nudged = true;
-      } else {
-        sidebarReconcileOwner.followupChats.add(preferred);
-        if (sidebarReconcileOwner.followupChats.size > 1) {
-          sidebarReconcileOwner.followupAll = true;
-        }
-      }
-    }
+    let nudged = preferredChats.length > 0;
+    for (const chat of preferredChats) sidebarReconcileOwner.preferredChats.add(chat);
     if (refreshAll) {
       sidebarReconcileOwner.refreshAll = true;
       nudged = true;
@@ -790,22 +801,23 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
     if (nudged) {
       sidebarReconcileOwner.hasMore = true;
       sidebarReconcileOwner.hintSeq += 1;
+      wakeSidebarReconcile(sidebarReconcileOwner);
     }
     return sidebarReconcileOwner.promise;
   }
-  const owner = {ticket:captureSessionEpoch(), preferred, cancelled:false,
-    refreshAll, followupChats:new Set(), followupAll:false, changed:false, hasMore:true,
-    attempts:0, hintSeq:0, promise:null};
+  const owner = {ticket:captureSessionEpoch(), preferredChats:new Set(preferredChats),
+    cancelled:false, refreshAll, changed:false, hasMore:true, attempts:0,
+    hintSeq:0, sleepers:new Set(), promise:null};
   sidebarReconcileOwner = owner;
   const current = () => !owner.cancelled && sidebarReconcileOwner === owner
     && sessionMayApply(owner.ticket) && !meshStateSnapshot().locked;
   const worker = async () => {
     while (current() && owner.hasMore && owner.attempts < 256) {
       owner.attempts += 1;
-      const chatId = owner.preferred;
+      const chatId = owner.preferredChats.values().next().value || "";
       const all = owner.refreshAll;
       const hintSeq = owner.hintSeq;
-      owner.preferred = "";
+      if (chatId) owner.preferredChats.delete(chatId);
       owner.refreshAll = false;
       let result;
       try {
@@ -815,11 +827,15 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
       } catch { return; }
       if (!current() || result?.error) return;
       owner.changed ||= result.changed === true;
-      owner.hasMore = owner.hintSeq !== hintSeq || result.has_more === true;
-      if (chatId && result.status === "busy") owner.preferred = chatId;
-      if (result.changed === true) await acceptCachedSidebar(owner);
+      owner.hasMore = owner.hintSeq !== hintSeq || result.has_more === true
+        || owner.preferredChats.size > 0;
+      if (chatId && result.status === "busy") owner.preferredChats.add(chatId);
+      if (result.changed === true || result.sidebar_active === false) {
+        await acceptCachedSidebar(owner);
+      }
       if (result.status === "pending" || result.status === "busy") {
-        await sleep(Math.max(100, Number(result.retry_after_ms) || 350));
+        await waitSidebarReconcile(
+          owner, Math.max(100, Number(result.retry_after_ms) || 350));
       }
     }
   };
@@ -829,10 +845,10 @@ async function reconcileSidebar(preferred = "", refreshAll = false) {
       if (current() && complete === false) owner.hasMore = true;
     }
   }).finally(() => {
-    const followup = owner.followupAll ? "" : owner.followupChats.values().next().value || "";
-    const followupAll = owner.followupAll;
+    const followup = [...owner.preferredChats];
+    const followupAll = owner.refreshAll;
     if (sidebarReconcileOwner === owner) sidebarReconcileOwner = null;
-    if ((followup || followupAll) && !owner.cancelled) {
+    if ((followup.length || followupAll) && !owner.cancelled) {
       queueMicrotask(() => reconcileSidebar(followup, followupAll));
     } else if (owner.hasMore && !owner.cancelled && sessionMayApply(owner.ticket)) {
       sidebarReconcileTimer = setTimeout(() => reconcileSidebar(), 2000);
@@ -923,7 +939,7 @@ V.refreshRealtime = async frames => {
     }
   }
   if (sidebarChats.size === 1) preferred = sidebarChats.values().next().value;
-  else if (sidebarChats.size > 1) refreshAll = true;
+  else if (sidebarChats.size > 1) preferred = [...sidebarChats];
   if (App.page === "settings" || App.page === "new") {
     if (sidebar) await V.refreshSidebarCache?.(preferred, refreshAll);
     if (App.page === "new" && frames.some(frame => frame.type === "mirror_update"

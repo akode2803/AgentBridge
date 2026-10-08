@@ -172,7 +172,7 @@ await V.refreshRealtime([{type:'read_model',scope:'sidebar',chat_id:'other'}]);
 assert.deepEqual([pages,sidebars.length,aux,broad],[1,3,1,0]);
 await V.refreshRealtime([{type:'message',chat_id:'other'},
  {type:'message',chat_id:'third'}]);
-assert.deepEqual(sidebars.at(-1),['',true]);
+assert.deepEqual(sidebars.at(-1),[['other','third'],false]);
 App.page='new';await V.refreshRealtime([{type:'message',chat_id:'other'}]);
 assert.deepEqual(cached.at(-1),['other',false]);assert.equal(broad,0);
 await V.refreshRealtime([{type:'read_model',scope:'sidebar'}]);
@@ -273,6 +273,22 @@ for(const resolve of gates)resolve({status:'ready',has_more:false,changed:false}
 await rejected;await flush();
 assert.ok([...timers.values()].some(timer=>timer.ms===2000),
  'a failed final cache read settles and schedules another bounded pass');
+
+resetSidebarReconcile();refreshCalls=[];gates=[];stateComplete=false;
+rejectState=false;timers.clear();applied.length=0;
+const sleeping=reconcileSidebar();await flush();
+assert.equal(refreshCalls.length,2);
+for(const resolve of gates)resolve({status:'busy',has_more:true,changed:false,
+ retry_after_ms:30000,sidebar_active:false});
+await flush();
+assert.ok(applied.length>0,'deferred transition refreshes stale active state');
+assert.equal([...timers.values()].filter(timer=>timer.ms===30000).length,2);
+reconcileSidebar(['b','c']);await flush();
+assert.ok(refreshCalls.some(body=>body?.chat_id==='b'));
+assert.ok(refreshCalls.some(body=>body?.chat_id==='c'));
+assert.equal([...timers.values()].filter(timer=>timer.ms===30000).length,0,
+ 'scoped activity interrupts every deferred worker sleep');
+stateComplete=true;await sleeping;await flush();
 '''.replace('__SOURCE__', json.dumps(section)))
 
 
