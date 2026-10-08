@@ -954,7 +954,7 @@ def test_worker_preparation_backlog_progress_keeps_every_collection_turn(rig, mo
     (OSError('provider unavailable'), False),
     (RawCollectionUnavailable('mirror_pending'), False),
 ])
-def test_run_due_only_exact_pending_intent_uses_short_retry(rig, monkeypatch, error, blocked):
+def test_run_due_only_exact_pending_intent_uses_owned_retry(rig, monkeypatch, error, blocked):
     mesh, _provider = rig
     runtime = mesh.local_inputs
     now = [10.0]

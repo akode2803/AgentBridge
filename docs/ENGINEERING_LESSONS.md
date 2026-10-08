@@ -1,5 +1,21 @@
 # Engineering failure lessons
 
+## Durable fences are not transient source failures (v0.24.307)
+
+After sidebar retries were bounded, three rooms protected by ambiguous-write or
+quarantine fences still performed a source reconciliation every four seconds.
+The scan could never clear those fences: only the exact successful mutation
+completion or an operator-reviewed recovery can do that. Treating the blocked
+result as an ordinary background failure therefore spent steady-state work
+without increasing freshness.
+
+Safeguard: retain a separate blocked-attempt counter. Inactive blocked sources
+back off through the normal finite safety cadence to five minutes, while a new
+foreground route selection interrupts the delay once and then retains the 350 ms
+selected-chat cadence. Background discovery and activity hints cannot turn a
+durable ambiguity into a hot loop. Scheduling never clears the intent, restores
+readiness or substitutes for authority.
+
 ## Sidebar retries bypassed source backoff (v0.24.306)
 
 The source scheduler correctly backed quiet and failed rooms off, but the browser's

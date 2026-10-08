@@ -21,6 +21,14 @@ including large-member rooms; then establish the durable Realtime recovery
 protocol below; then simplify and formalize the architecture against that stable
 contract. Refactoring must not obscure latency evidence or weaken authority.
 
+- [~] **Bound steady-state reconciliation behind durable mutation fences.**
+  The merged v0.24.306 app separated startup mirror convergence from steady
+  state: after the first minute, three fenced rooms remained on a fixed
+  four-second source retry. v0.24.307 locally adds adaptive background backoff
+  to a finite five-minute ceiling while preserving immediate route-selection
+  wake and 350 ms selected-chat retries. Focused validation passes; PR, CI and
+  live post-release attempt-rate measurement remain open.
+
 - [ ] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
   2026-10-08). After the known latency work, replace periodic per-chat safety
   reconciliation as the normal completeness mechanism with a transport-owned,

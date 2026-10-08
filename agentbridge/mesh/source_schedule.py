@@ -22,6 +22,7 @@ class _State:
     order: int
     idle: int = 0
     failures: int = 0
+    blocked: int = 0
     rerun_at: float | None = None
     blocked_until: float = 0.0
     hot_until: float = 0.0
@@ -98,6 +99,11 @@ class SourceSchedule:
             changed_route = selected and self._selected != chat
             if selected:
                 self._selected, self._lease_until = chat, now + 15.0
+            if changed_route:
+                # Explicit foreground demand may interrupt a long background
+                # ambiguity backoff once. Subsequent lease renewals cannot;
+                # another blocked result installs the selected 350 ms floor.
+                state.blocked_until = 0.0
             hot = activity or changed_route
             if hot:
                 state.hot_until = now + 4.0
@@ -151,7 +157,10 @@ class SourceSchedule:
             state = self._states[job.chat_id]
             selected = job.chat_id == self._selected and now < self._lease_until
             hot = now < state.hot_until
-            if not blocked:
+            if blocked:
+                state.blocked = min(8, state.blocked + 1)
+            else:
+                state.blocked = 0
                 state.failures = 0 if success else min(8, state.failures + 1)
             # ``idle`` counts successful observations that found no source
             # change. Failed or blocked work has its own bounded retry policy;
@@ -167,7 +176,15 @@ class SourceSchedule:
                 # Durable overlapping writes are not IO failures. Retry the
                 # gate promptly for a selected lease, without admitting data
                 # or letting repeated activity hints turn it into a hot loop.
-                delay = 0.35 if selected else self.background
+                # A selected chat stays responsive because completion of the
+                # exact durable mutation may make its next canonical attempt
+                # readable.  Inactive rooms cannot repair an ambiguous intent
+                # by rescanning the same local source, so back them off to the
+                # same finite safety ceiling as other quiet background work.
+                # A new route selection still pulls that room forward through
+                # ``request(..., selected=True)`` without clearing the fence.
+                delay = (0.35 if selected else
+                         min(300.0, self.background * 2 ** (state.blocked - 1)))
                 # One pending mutation can overlap many chat sources (account
                 # and lifecycle inputs are shared).  Without a process-level
                 # floor the scheduler immediately walks every other due room,

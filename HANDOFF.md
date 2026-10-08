@@ -322,3 +322,45 @@ ambiguous intents by age. Large-room member scaling is the next latency profile;
 then design the durable Realtime frontier/gap-recovery protocol, and only after
 that simplify the architecture and formalize APIs. `BACKLOG.md` records both
 post-latency phases and the member-scaling checklist near the top.
+
+PR58 passed both platforms and merged as `8776e1f`. The shared checkout was
+fast-forwarded to that exact merge and the actual Supabase app restarted once on
+v0.24.306 with detailed logging retained. Its cached 19-row sidebar painted
+immediately; by the settled observation it showed no loading cue and no chat was
+selected. The recorder lacks a process field in its offline summary, so the live
+analysis filtered raw sanitized rows by the new server PID and restart timestamp
+rather than mixing rotations from older builds.
+
+The 279-second v0.24.306 window cleanly separated phases. During the first minute,
+261 sampled reconciliations covered 111 opaque room references: 223 stopped at
+`mirror_pending`, 31 at `source_mutation_pending`, seven succeeded, and median
+duration was 14.7 ms. After 180 seconds the mirror-pending class was gone. The
+next 99 seconds recorded 73 mutation-pending attempts across three recurring
+rooms (24–25 attempts each) and one unrelated success. This is a fixed
+four-second steady-state loop, not startup work or a sidebar-worker bypass.
+
+The durable coordinator was inspected read-only. It retains 58 active intents:
+53 exact presence documents, two exact machine documents and three chat-log
+scopes. Its 64 quarantined historical log intents remain represented by two
+permanent sentinel fences. No intent was cleared or inferred safe by age. The
+three recurring source references align in count with the three active/sentinel
+chat-log scopes; this is correlation, not identity disclosure or recovery proof.
+
+The current follow-up is `codex/steady-state-reconciliation-profile`, app version
+v0.24.307. `SourceSchedule` now counts durable blocked outcomes independently.
+Inactive blocked sources back off through 4/8/16/32/64/128/256 seconds to the
+existing finite 300-second safety ceiling. A new user route selection interrupts
+that background delay once, after which a still-blocked selected chat retains the
+existing 350 ms retry. Repeated discovery, ordinary activity hints and lease
+renewal cannot collapse the durable-fence backoff. No source readiness, mutation
+intent, CAS, canonical authority or Realtime semantics changed. Three permanently
+blocked rooms model as 24 attempts in the first ten minutes rather than about 450,
+a 94.7% reduction; their eventual safety checks continue.
+
+The focused source scheduler/runtime gate passes 104 tests. The earlier combined
+source/sidebar/Realtime boundary passed 152 tests before the foreground wake
+addition; Ruff and diff checks pass after it. Run the combined boundary once on
+the final tree, commit, open the PR and use cross-platform CI as the broad gate.
+After merge, restart once and confirm the settled source-attempt cadence. Then
+profile large-member-room latency before starting the durable Realtime frontier
+and targeted recovery protocol.

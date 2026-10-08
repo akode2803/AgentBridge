@@ -296,6 +296,50 @@ def test_pending_retry_hints_cannot_shorten_floor(active):
     assert _take(schedule, 0.2 + delay, 'room')
 
 
+def test_background_pending_mutation_uses_finite_adaptive_backoff():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request('room', now=0)
+    now = 0.05
+    for count, delay in enumerate((4, 8, 16, 32, 64, 128, 256, 300, 300), 1):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False, blocked=True)
+        state = schedule._states['room']
+        assert state.blocked == min(8, count)
+        assert state.failures == 0 and state.idle == 0
+        assert schedule.wait_s(now=now, maximum=1000) == pytest.approx(delay)
+        # Repeated background discovery and activity cannot turn a durable
+        # ambiguity into a hot retry loop.
+        schedule.discover('room', now=now + 0.01)
+        schedule.request('room', now=now + 0.02, activity=True)
+        assert schedule.take_due(now=now + delay - 0.001) is None
+        now += delay
+
+    recovered = _take(schedule, now, 'room')
+    schedule.finish(recovered, now=now)
+    assert schedule._states['room'].blocked == 0
+
+
+def test_new_route_selection_interrupts_background_pending_backoff_once():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request('room', now=0)
+    now = 0.05
+    for delay in (4, 8, 16):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False, blocked=True)
+        now += delay
+
+    assert schedule.wait_s(now=now - 16, maximum=100) == pytest.approx(16)
+    schedule.request('room', now=now - 15, selected=True)
+    foreground = _take(schedule, now - 14.95, 'room')
+    schedule.finish(foreground, now=now - 14.95, success=False, blocked=True)
+    assert schedule.wait_s(now=now - 14.95, maximum=100) == pytest.approx(0.35)
+
+    # Renewing the same route is not another user transition and cannot turn
+    # the durable fence into request-driven busy polling.
+    schedule.request('room', now=now - 14.9, selected=True)
+    assert schedule.take_due(now=now - 14.601) is None
+
+
 def test_pending_retry_preserves_io_failures_and_success_resets():
     schedule = SourceSchedule()
     schedule.request('room', now=0, selected=True)
