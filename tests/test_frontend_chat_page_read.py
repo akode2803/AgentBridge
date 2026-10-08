@@ -54,6 +54,18 @@ assert.equal(result.pageData.read_cutoff_ns,'1790000000000000001');
 assert.equal(calls[0].cursor,null);
 assert.equal(calls[0].anchor,null);
 
+const deferredQueue = [];
+const deferred = createChatPageRead({fetchPage:() => deferredQueue.shift(),
+  maxPages:2,maxMessages:4,maxBytes:2000});
+deferred.reset(binding(),'room',1);
+deferredQueue.push(page(['late-tick'],'vd',null,[],{
+  read_ack_token:'d'.repeat(64),metadata_status:{pins:'ready',receipts:'pending'},
+}));
+const deferredResult = await deferred.read('first');
+assert.deepEqual(deferredResult.receiptRequests,[{
+  chat_id:'room',page_version:'vd',read_ack_token:'d'.repeat(64),
+}]);
+
 queue.push(page(['m2','m3'],'v1','c2',['m3']));
 result = await reader.read('older');
 assert.deepEqual(ids(result),['m2','m3','m4','m5']);

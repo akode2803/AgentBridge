@@ -555,6 +555,15 @@ def test_page_operation_window_before_is_separate_from_strict_continuation(page_
 @pytest.mark.parametrize("revoke_after_race", [False, True])
 def test_presence_publication_race_defers_receipts_without_losing_history(page_app, monkeypatch, revoke_after_race):
     app, _self_chat = page_app
+    # Exercise the inline compatibility path directly. Normal group transcript
+    # pages now defer this decoration to /chat_page_receipts before paint.
+    operation = api_pages.PageOperation
+
+    def inline_receipts(*args, **kwargs):
+        kwargs['defer_group_receipts'] = False
+        return operation(*args, **kwargs)
+
+    monkeypatch.setattr(api_pages, 'PageOperation', inline_receipts)
     app.mesh.accounts.create_human('peer', 'peer-pass')
     chat = api_chats.create_chat(app, Request(data={
         'name': 'Presence race', 'members': ['peer'],

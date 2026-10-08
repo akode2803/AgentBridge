@@ -23,7 +23,7 @@ from . import (
     api_chats,
     api_collections,
     api_diagnostics,
-    api_pages, api_page_aux,
+    api_pages, api_page_aux, api_page_receipts,
     api_files,
     api_membership,
     api_messages,
@@ -61,7 +61,7 @@ CONTENT_TYPES = {
 GET_ROUTES: dict = {}
 POST_ROUTES: dict = {}
 RAW_ROUTES: dict = {}
-for mod in (api_auth, api_chats, api_pages, api_page_aux, api_collections,
+for mod in (api_auth, api_chats, api_pages, api_page_aux, api_page_receipts, api_collections,
             api_diagnostics, api_messages, api_membership,
             api_profile, api_agents, api_files, api_runtime, api_updates):
     GET_ROUTES.update(mod.GET)

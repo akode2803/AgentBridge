@@ -41,13 +41,106 @@ function abortPagedAux(owner) {
   owner?.auxAbort?.abort();
   if (owner) owner.auxAbort = null;
 }
+function abortPagedReceipts(owner) {
+  owner?.receiptAbort?.abort();
+  if (owner) owner.receiptAbort = null;
+}
 function resetPagedView() {
   clearTimeout(pageOwner?.readAck?.retryTimer);
   abortPagedAux(pageOwner);
+  abortPagedReceipts(pageOwner);
   pageOwner = null;
   clearTimeout(pageRetryTimer);
   pageRetryTimer = null;
   pageRead.invalidate?.("route_changed");
+}
+
+function receiptMap(response) {
+  if (!response?.receipts || typeof response.receipts !== "object"
+      || Array.isArray(response.receipts)) return null;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(response.receipts)).length > 1024 * 1024) return null;
+  } catch { return null; }
+  const rows = Object.entries(response.receipts);
+  if (rows.length > 200) return null;
+  const result = new Map();
+  for (const [id, value] of rows) {
+    if (!id || id.length > 256 || !value || typeof value !== "object" || Array.isArray(value)
+        || !["sent", "delivered", "read"].includes(value.state)
+        || !Number.isSafeInteger(value.total) || value.total < 0 || value.total > 64) return null;
+    for (const field of ["read_by", "delivered_to", "pending"]) {
+      if (!Array.isArray(value[field]) || value[field].length > 64
+          || value[field].some(name => typeof name !== "string" || !name || name.length > 256)) return null;
+    }
+    result.set(id, value);
+  }
+  return result;
+}
+
+function syncRetainedReceipts(owner, messages, meta) {
+  if (!owner?.receiptSnapshot?.size) return;
+  const decorated = [];
+  for (const message of messages) {
+    const receipt = owner.receiptSnapshot.get(message.id);
+    if (receipt) { message.receipt = receipt; decorated.push(message); }
+  }
+  const tr = $("#transcript");
+  if (tr && decorated.length) syncReceiptTicks(tr, decorated, isDmLike(meta), true);
+}
+
+// Receipt privacy and per-member lifecycle checks can dominate a large room.
+// Run them after canonical paint, one exact opaque page at a time, and merge
+// only tick decoration into rows that still belong to this route/session page.
+async function refreshPagedReceipts(owner, requests = []) {
+  owner.receiptQueue ||= new Map();
+  for (const request of requests) {
+    owner.receiptQueue.set(request.read_ack_token, request);
+    while (owner.receiptQueue.size > 6) {
+      owner.receiptQueue.delete(owner.receiptQueue.keys().next().value);
+    }
+  }
+  if (owner.receiptAbort || !owner.receiptQueue.size) return;
+  const abort = new AbortController();
+  owner.receiptAbort = abort;
+  try {
+    while (!abort.signal.aborted && pageOwner === owner && owner.current()
+           && owner.receiptQueue.size) {
+      const [handle, request] = owner.receiptQueue.entries().next().value;
+      let response = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          response = await api("/api/mesh/chat_page_receipts", request,
+            {sideEffects:false, timeoutMs:8000, signal:abort.signal});
+        } catch { response = null; }
+        if (abort.signal.aborted || pageOwner !== owner || !owner.current()) return;
+        if (response?.status !== "pending") break;
+        await new Promise(resolve => setTimeout(resolve,
+          pageRetryDelay(response, attempt + 1)));
+      }
+      owner.receiptQueue.delete(handle);
+      if (!response || !samePageBinding(response.session_binding, BrowserSession.snapshot().binding)) continue;
+      if (response.status === "forbidden") {
+        retireDeniedMeshChat(owner.chatId); renderSidebar(); resetPagedView();
+        $("#content").innerHTML = ""; location.hash = "#/chats"; return;
+      }
+      if (response.status === "reset_required") {
+        if (owner.busy) owner.refreshDirty = true;
+        else void renderPagedChat(false, null, {realtime:true});
+        continue;
+      }
+      if (response.chat_id !== owner.chatId || response.page_version !== owner.pageVersion) continue;
+      if (response.status !== "ready") continue;
+      const receipts = receiptMap(response);
+      if (!receipts) continue;
+      owner.receiptSnapshot ||= new Map();
+      for (const [id, value] of receipts) owner.receiptSnapshot.set(id, value);
+      const messages = [...receipts].map(([id, receipt]) => ({id, mine:true, receipt}));
+      syncReceiptTicks($("#transcript"), messages,
+        isDmLike(pageRead.snapshot().pageData?.meta || {}), true);
+    }
+  } finally {
+    if (owner.receiptAbort === abort) owner.receiptAbort = null;
+  }
 }
 document.addEventListener("ab:session-reset", resetPagedView);
 document.addEventListener("ab:lock-epoch", resetPagedView);
@@ -329,7 +422,12 @@ async function renderPagedChat(force, kind = null, options = {}) {
     owner.ready = true;
     abortPagedAux(owner);
     owner.pageRevision = (owner.pageRevision || 0) + 1;
-    if (owner.pageVersion !== result.pageVersion) owner.auxSnapshot = null;
+    if (owner.pageVersion !== result.pageVersion) {
+      owner.auxSnapshot = null;
+      abortPagedReceipts(owner);
+      owner.receiptQueue = new Map();
+      owner.receiptSnapshot = new Map();
+    }
     owner.pageVersion = result.pageVersion;
     owner.retries = 0;
     if (mode === "older") { owner.browsing = true; owner.wantOlder = false; }
@@ -351,6 +449,13 @@ async function renderPagedChat(force, kind = null, options = {}) {
     if (!painted || pageOwner !== owner || !owner.current()) return;
     const tr = $("#transcript");
     if (!tr) return;
+    if (owner.receiptSnapshot?.size) {
+      const retained = new Set(result.messages.map(message => message.id));
+      for (const id of owner.receiptSnapshot.keys()) {
+        if (!retained.has(id)) owner.receiptSnapshot.delete(id);
+      }
+    }
+    syncRetainedReceipts(owner, result.messages, data.meta);
     canonicalDeliveryDom(chatId, result.messages, tr);
     syncPagedAuxControls(data, presentation, data.metadata_status,
       {agents_paused:data.meta.agents_paused});
@@ -414,6 +519,7 @@ async function renderPagedChat(force, kind = null, options = {}) {
     if (Mesh.detailsView) { pane.hidden = false; await V.renderChatDetails(); }
     if (pageOwner === owner && owner.current()) {
       void refreshPagedAux(owner, owner.pageRevision, result.pageVersion, data);
+      void refreshPagedReceipts(owner, result.receiptRequests);
     }
     // This is a bounded canonical sidebar request; it never gates first paint.
     if (mode !== "older" && options.sidebar !== false) void refreshPagedSidebar(owner);

@@ -22,7 +22,7 @@ export function pageRetryDelay(response, attempts = 1, realtime = false) {
 function noData(status, reason = null, evictedIds = [], retry = null) {
   return {status, reason, pageData: null, messages: [], evictedIds,
           hasMore: false, continuation: null, pageVersion: null,
-          retry_after_ms: retry};
+          receiptRequests: [], retry_after_ms: retry};
 }
 
 function jsonCopy(value, maxBytes) {
@@ -73,7 +73,7 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
   let pageMeta = null;
   let starredById = new Map();
 
-  function pageResult(accepted) {
+  function pageResult(accepted, receiptRequests = []) {
     const messages = accepted.messages;
     const kept = new Set(messages.map(message => message.id));
     for (const id of starredById.keys()) if (!kept.has(id)) starredById.delete(id);
@@ -88,6 +88,7 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
       historyExhausted: accepted.historyExhausted,
       scanBudgetExhausted: accepted.scanBudgetExhausted,
       pageCount: accepted.pageCount, messageCount: accepted.messageCount,
+      receiptRequests,
     };
   }
 
@@ -129,6 +130,7 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
       active = operation;
       let draftStars = new Map();
       let draftRead = null;
+      const receiptRequests = [];
       try {
         for (let attempt = 0; attempt < 6; attempt++) {
           const current = attempt === 0 ? ticket : pages.begin("refresh");
@@ -150,6 +152,12 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
           const data = response?.status === "page" ? metadata(response, owner, maxMessages) : null;
           if (response?.status === "page" && !data) {
             return clear("unavailable", "page_metadata_invalid");
+          }
+          if (data && response.metadata_status.receipts === "pending"
+              && data.read_ack_token) {
+            receiptRequests.push({chat_id:owner.chatId,
+              page_version:response.page_version,
+              read_ack_token:data.read_ack_token});
           }
           if (data && (!draftRead || BigInt(data.read_cutoff_ns || "0")
               > BigInt(draftRead.read_cutoff_ns || "0"))) draftRead = data;
@@ -184,7 +192,7 @@ export function createChatPageRead({fetchPage, maxPages = 6, maxMessages = 600,
           }
           pageMeta = {...data, read_cutoff_ns:draftRead?.read_cutoff_ns,
                       read_ack_token:draftRead?.read_ack_token};
-          return pageResult(accepted);
+          return pageResult(accepted, receiptRequests);
         }
         return clear("unavailable", "refresh_request_budget");
       } finally {

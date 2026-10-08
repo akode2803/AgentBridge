@@ -79,7 +79,7 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   Realtime hint, ingestion/queue, SSE, canonical page finalization, DOM and ACK
   separately. Requires an authorized reachable provider and independently owned
   clients; live-provider proxy403 has not been bypassed.
-- [ ] **Profile and fix large-room member scaling** (Aryan, 2026-10-08).
+- [~] **Profile and fix large-room member scaling** (Aryan, 2026-10-08).
   Measure first canonical page, membership/history-on-join evaluation, account and
   key resolution, receipt/presence construction, auxiliary member decoration,
   response serialization and browser paint across controlled member counts and
@@ -88,7 +88,19 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   current membership, trust, key, privacy and session checks. Record wall time,
   CPU, SQLite rows/bytes, crypto operations, response bytes and DOM work; do not
   raise the 64-account/member safety bounds without measured resource and product
-  rationale.
+  rationale. The first controlled 1/8/32/64-member profile isolated receipt
+  privacy/lifecycle decoration as the dominant transcript cost: a 64-member warm
+  page was roughly 0.56--0.61 s and captured 65 accounts plus 64 lifecycle
+  subjects, while its response stayed about 6 KiB. v0.24.308 defers group receipt
+  decoration behind the canonical paint and binds each follow-up to the exact
+  session/chat/page/read token. It reauthorizes from current admitted inputs and
+  patches only retained tick slots. In the same fixture, warmed 8/32/64-member
+  pages were roughly 0.06--0.09 s and the 64-member first page was about 0.19 s;
+  account/lifecycle capture on the transcript path stayed at the viewer only.
+  The bounded receipt work remains linear after paint. Auxiliary profiles still
+  repeat per-member resolution (about 0.8 s warm and about 2.0 s first at 64 in
+  the latest run) and may cross their computation-freshness window. Membership-
+  event history and real-browser paint profiling remain open before completion.
 - [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
   storage policy, revocation and foreign-root/chat denials remain runtime gates.
   Notifications and cached results must not become authority.
