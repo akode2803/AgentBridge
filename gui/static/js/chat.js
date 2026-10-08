@@ -43,7 +43,11 @@ function abortPagedAux(owner) {
 }
 function abortPagedReceipts(owner) {
   owner?.receiptAbort?.abort();
-  if (owner) owner.receiptAbort = null;
+  if (owner) {
+    owner.receiptAbort = null;
+    clearTimeout(owner.receiptRetryTimer);
+    owner.receiptRetryTimer = null;
+  }
 }
 function resetPagedView() {
   clearTimeout(pageOwner?.readAck?.retryTimer);
@@ -93,6 +97,10 @@ function syncRetainedReceipts(owner, messages, meta) {
 // only tick decoration into rows that still belong to this route/session page.
 async function refreshPagedReceipts(owner, requests = []) {
   owner.receiptQueue ||= new Map();
+  if (requests.length && owner.receiptRetryTimer != null) {
+    clearTimeout(owner.receiptRetryTimer);
+    owner.receiptRetryTimer = null;
+  }
   for (const request of requests) {
     owner.receiptQueue.set(request.read_ack_token, request);
     while (owner.receiptQueue.size > 6) {
@@ -102,6 +110,7 @@ async function refreshPagedReceipts(owner, requests = []) {
   if (owner.receiptAbort || !owner.receiptQueue.size) return;
   const abort = new AbortController();
   owner.receiptAbort = abort;
+  let retryResponse = null;
   try {
     while (!abort.signal.aborted && pageOwner === owner && owner.current()
            && owner.receiptQueue.size) {
@@ -116,6 +125,10 @@ async function refreshPagedReceipts(owner, requests = []) {
         if (response?.status !== "pending") break;
         await new Promise(resolve => setTimeout(resolve,
           pageRetryDelay(response, attempt + 1)));
+      }
+      if (!response || response.status === "pending") {
+        retryResponse = response || {status:"unavailable"};
+        return;
       }
       owner.receiptQueue.delete(handle);
       if (!response || !samePageBinding(response.session_binding, BrowserSession.snapshot().binding)) continue;
@@ -140,6 +153,13 @@ async function refreshPagedReceipts(owner, requests = []) {
     }
   } finally {
     if (owner.receiptAbort === abort) owner.receiptAbort = null;
+    if (retryResponse && owner.receiptRetryTimer == null
+        && pageOwner === owner && owner.current()) {
+      owner.receiptRetryTimer = setTimeout(() => {
+        owner.receiptRetryTimer = null;
+        if (pageOwner === owner && owner.current()) void refreshPagedReceipts(owner);
+      }, pageRetryDelay(retryResponse, 4));
+    }
   }
 }
 document.addEventListener("ab:session-reset", resetPagedView);
@@ -261,6 +281,7 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
     paged:true, historyRead:true,
     aux, guard:current});
   if (painted && current()) {
+    syncRetainedReceipts(owner, data.messages, data.meta);
     syncPagedAuxControls(pageData, presentation, status, response);
     const names = $("#chat-top .chat-head-sub");
     if (names && data.meta.kind !== "dm") {

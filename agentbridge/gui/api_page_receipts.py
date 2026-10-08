@@ -87,6 +87,10 @@ def chat_page_receipts(app, req, mesh, token):
         if presentation is None or presentation.receipts_json is None:
             return _pending(token, 'receipt_inputs_pending')
         receipts = json.loads(presentation.receipts_json)
+        send_statuses = final.result.send_statuses or {}
+        for message_id, value in receipts.items():
+            if message_id in send_statuses:
+                value['transport'] = send_statuses[message_id]
         encoded = json.dumps(receipts, sort_keys=True, separators=(',', ':'),
                              allow_nan=False).encode()
         if (type(receipts) is not dict or len(receipts) > position.limit

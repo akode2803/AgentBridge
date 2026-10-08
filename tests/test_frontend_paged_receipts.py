@@ -79,6 +79,19 @@ assert.equal(owner.receiptSnapshot.has('m2'),false);
 assert.equal(ticks.length,2);
 assert.deepEqual(refreshes,[]);
 
+// Exhausting the short pending burst retains the page request and retries it
+// on the bounded timer instead of permanently dropping blank tick slots.
+queue.push({status:'pending',retry_after_ms:350,session_binding:binding});
+queue.push({status:'pending',retry_after_ms:350,session_binding:binding});
+queue.push({status:'pending',retry_after_ms:350,session_binding:binding});
+queue.push({status:'ready',chat_id:'room',page_version:'v1',session_binding:binding,
+  receipts:{m2:receipt}});
+await apiFns.refreshPagedReceipts(owner,[{chat_id:'room',page_version:'v1',
+  read_ack_token:'d'.repeat(64)}]);
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(owner.receiptSnapshot.get('m2'),receipt);
+assert.equal(owner.receiptQueue.size,0);
+
 // A changed exact cut asks for a fresh canonical page even though the compact
 // reset response deliberately carries no chat payload.
 queue.push({status:'reset_required',reason:'receipt_page_inputs_changed',

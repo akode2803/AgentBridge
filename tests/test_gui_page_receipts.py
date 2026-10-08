@@ -53,9 +53,30 @@ def test_group_first_page_defers_receipts_then_returns_exact_decoration(page_app
     assert result['chat_id'] == chat
     assert result['page_version'] == page['page_version']
     assert result['session_binding'] == page['session_binding']
-    assert result['receipts'][message.id] == {
+    receipt = result['receipts'][message.id]
+    transport = receipt.pop('transport')
+    assert receipt == {
         'state': 'delivered', 'read_by': [], 'delivered_to': ['peer'],
         'pending': [], 'total': 1,
+    }
+    assert transport['state'] == 'sent'
+    assert transport['accepted_ns'] > 0
+
+
+def test_deferred_receipts_preserve_local_transport_status(page_app):
+    app, _self_chat = page_app
+    chat, message, page = _group_page(app)
+    with app.mesh.store._conn() as conn:
+        conn.execute(
+            "UPDATE local_send_status SET state='failed',accepted_ns=0 "
+            "WHERE chat_id=? AND message_id=?",
+            (chat, message.id),
+        )
+
+    result = _receipts(app, page)
+    assert result['status'] == 'ready', result
+    assert result['receipts'][message.id]['transport'] == {
+        'state': 'failed', 'accepted_ns': 0, 'client_ref': '',
     }
 
 
