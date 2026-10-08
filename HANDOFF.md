@@ -463,7 +463,19 @@ wider server gate passes 158 tests. Ruff, JavaScript syntax and diff checks pass
 
 Opt-in browser diagnostics now record content-free `aux_controls` and
 `aux_members` read and paint durations. This provides the missing real-app split
-between endpoint time and keyed DOM reconciliation. Next: land the auxiliary lane
-checkpoint after PR60, collect those measurements in a real 64-member room, then
-profile membership-event history. Do not raise the 64-member safety bound until
-those measurements establish the resource and product rationale.
+between endpoint time and keyed DOM reconciliation. Do not raise the 64-member
+safety bound until the real-app measurements establish the resource and product
+rationale.
+
+The membership-history read profile is now complete for a 513-event controlled
+case. `tests/probe_membership_history.py` holds the current roster at 64 members
+while applying 0/16/64/256 remove-and-rejoin cycles. Across the checkpoints,
+canonical page medians stayed 28--39 ms, controls 23--29 ms and member decoration
+304--312 ms; at 256 cycles specifically they were 31/23/310 ms. The signed info
+history grew from 1 to 513 rows and materialized metadata from 6.2 to 16.9 KiB.
+This is evidence that current reads use the materialized boundary plus bounded
+suffix rather than refolding the historical events. It does not measure the cost
+of performing/materializing hundreds of mutations. The next task remains real-app
+`aux_controls`/`aux_members` browser-paint capture after the reviewed code is
+running, followed by deciding whether lifecycle/pin resolution needs a deeper
+algorithmic change. Keep the current member/account bounds until that evidence.

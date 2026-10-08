@@ -104,8 +104,13 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   314--321 ms; the browser requests and paints controls first, then members.
   Both lanes independently recompute current authority and reject source,
   session or page-version changes. Opt-in diagnostics now time each lane's read
-  and browser paint. Membership-event history and real-browser paint measurements
-  remain open before completion.
+  and browser paint. A disposable constant-roster probe then grew the room from
+  1 to 513 signed membership events (0 to 256 remove/rejoin cycles): canonical
+  page medians stayed 28--39 ms, controls 23--29 ms and member decoration
+  304--312 ms while materialized metadata grew from 6.2 to 16.9 KiB. This
+  confirms current reads use the materialized boundary plus bounded suffix for
+  the measured range rather than refolding membership history. Mutation/
+  materialization scaling and real-browser paint measurements remain open.
 - [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
   storage policy, revocation and foreign-root/chat denials remain runtime gates.
   Notifications and cached results must not become authority.
