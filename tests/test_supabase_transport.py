@@ -159,6 +159,17 @@ def test_changed_logs_is_a_global_cursor_feed(tx):
     assert pairs2 == [("c2", "sue@box.jsonl")] and cursor2 == 4
 
 
+def test_changed_logs_is_explicitly_keyset_bounded(tx):
+    for index in range(1_001):
+        tx.append_log(f"c{index}", "ann@box.jsonl", {"id": f"m{index}"})
+    first_pairs, first_cursor = tx.changed_logs(0)
+    second_pairs, second_cursor = tx.changed_logs(first_cursor)
+    assert len(first_pairs) == 1_000
+    assert first_cursor == 1_000
+    assert second_pairs == [("c1000", "ann@box.jsonl")]
+    assert second_cursor == 1_001
+
+
 def test_corrupt_log_row_is_skipped_not_stuck(tx):
     tx.append_log("c1", "log.jsonl", {"id": "m1"})
     tx._client.db["ab_logs"].append({          # a hand-corrupted row

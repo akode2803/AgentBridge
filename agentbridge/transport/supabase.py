@@ -661,6 +661,7 @@ class SupabaseTransport(Transport):
         rows = self._retry(
             lambda: self._sb().table("ab_logs").select("id,chat_id,log_name")
             .eq("root", self.root).gt("id", int(cursor)).order("id")
+            .limit(1_000)
             .execute()
         ).data
         self._count(rows)

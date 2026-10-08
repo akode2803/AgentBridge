@@ -1033,6 +1033,19 @@ class CachingTransport(Transport):
     def changed_logs(self, cursor: int) -> tuple[list[tuple[str, str]], int]:
         return self.inner.changed_logs(cursor)
 
+    @property
+    def supports_change_ledger(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_change_ledger
+
+    def change_ledger_capability(self):
+        return self.inner.change_ledger_capability()
+
+    def change_ledger_epoch(self):
+        return self.inner.change_ledger_epoch()
+
+    def change_ledger_events(self, after_cursor: int, *, limit: int):
+        return self.inner.change_ledger_events(after_cursor, limit=limit)
+
     def append_log(self, chat_id: str, log_name: str, record: dict) -> None:
         self.inner.append_log(chat_id, log_name, record)
         with self._lock:

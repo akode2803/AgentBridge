@@ -519,3 +519,23 @@ lane and continue the durable Realtime frontier protocol. Rapid route switching
 also still shows the deliberately blank transition surface while the new room's
 fresh page loads; handle that as a separate bounded presentation-cache design,
 without treating cached DOM as membership authority.
+
+The durable Realtime design is now recorded in
+`docs/DURABLE_REALTIME_FRONTIER.md`. Review rejected a mutable per-room frontier:
+it would serialize concurrent senders on a hot row and still provide no replay.
+The accepted direction is an append-only, content-free, RLS-filtered change
+ledger inserted in the same transaction as each document/log mutation. A root
+visibility event closes membership add/remove gaps; a rarely updated epoch and
+minimum recoverable cursor handle retention without becoming another hot row.
+Realtime is the wake, the ledger is durable delivery evidence, and current raw
+documents/logs remain the only authority inputs.
+
+Stage 0 is implemented locally on `codex/durable-realtime-frontier-design`:
+immutable event, page, epoch and capability contracts; explicit delegation
+through cache and mutation-owner wrappers; a deterministic fake covering lost,
+duplicate and reordered notifications; and an explicit 1,000-row keyset bound on
+the existing Supabase log-change read. Unsupported schemas still report no
+capability and retain current polling. The 195-test transport/sync gate and Ruff,
+compile and diff checks pass. Next, install the provider schema and triggers in
+read-only observation mode, validate RLS and write amplification, then implement
+the bounded catch-up owner. Do not reduce safety polling yet.

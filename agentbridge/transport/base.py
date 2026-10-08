@@ -38,6 +38,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .change_ledger import (
+    ChangeLedgerCapability,
+    ChangeLedgerEpoch,
+    ChangeLedgerPage,
+)
+
 from .mirror_observation import (
     MirrorCaptureUnavailable,
     MirrorChangeEvidence,
@@ -135,6 +141,23 @@ class Transport(ABC):
         cold boot never looks like a lost hint.
         """
         pass
+
+    # OPTIONAL durable Realtime recovery contract. Implementations must return
+    # immutable, validated ledger rows admitted by provider RLS. Positions are
+    # delivery evidence only and never authorize a local or canonical read.
+    supports_change_ledger: bool = False
+
+    def change_ledger_capability(self) -> ChangeLedgerCapability | None:
+        return None
+
+    def change_ledger_epoch(self) -> ChangeLedgerEpoch:
+        raise NotImplementedError(f"{type(self).__name__} has no change ledger")
+
+    def change_ledger_events(
+        self, after_cursor: int, *, limit: int,
+    ) -> ChangeLedgerPage:
+        del after_cursor, limit
+        raise NotImplementedError(f"{type(self).__name__} has no change ledger")
 
     # ------------------------------------------------------------------ docs
     @abstractmethod

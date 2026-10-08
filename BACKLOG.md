@@ -29,7 +29,7 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   wake and 350 ms selected-chat retries. PR59 passed both platforms and merged;
   live post-release attempt-rate measurement remains open.
 
-- [ ] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
+- [~] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
   2026-10-08). After the known latency work, replace periodic per-chat safety
   reconciliation as the normal completeness mechanism with a transport-owned,
   durable progress contract. Realtime remains a low-latency wake rather than
@@ -43,6 +43,16 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   dropped and reordered wakes, long offline periods, slow/intermittent networks,
   reconnect storms, expired frontiers and selected-chat priority; measure latency,
   requests and egress before reducing the existing safety path.
+  The reviewed design contract is in
+  [DURABLE_REALTIME_FRONTIER.md](docs/DURABLE_REALTIME_FRONTIER.md): a
+  database-owned, RLS-filtered append-only root/chat change ledger advances
+  atomically with underlying documents/logs; subscription uses replication-ready plus a
+  buffered catch-up handshake; existing durable doc/log positions remain local
+  completion evidence. Broadcast Replay is a bounded reconnect optimization,
+  not completeness evidence. Stage 0 now has immutable transport-neutral event,
+  epoch, page and capability contracts, explicit wrapper delegation, a
+  deterministic lossy-notification fake, and an explicitly bounded legacy log
+  feed. The Supabase schema and read-only observation stage remains next.
 - [ ] **Post-protocol architecture simplification and API formalization**
   (Aryan, 2026-10-08). Start only after the durable recovery protocol and known
   latency fixes are measured and stable. Inventory runtime layers, compatibility
