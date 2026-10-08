@@ -549,3 +549,11 @@ the expanded transport boundary passes 203 tests and Ruff/diff checks. Before
 enabling the protocol, obtain current-head review, install it deliberately, then
 measure actual RLS replay plans, added database writes/WAL/Realtime messages and
 the root-epoch conflict check under concurrent sends.
+
+The existing Realtime thread currently joins its public Broadcast channel with
+an API key only. That is sufficient for the old content-free poke but is an
+anonymous session under RLS. The ledger observer must first sign the async client
+in as the same member credential class as PostgREST (or explicitly retain legacy
+service mode), then require three readiness signals: channel `SUBSCRIBED`, the
+`postgres_changes` system acknowledgement, and the `system` replication-ready
+acknowledgement. Do not mark the ledger live from the current Broadcast-ready bit.

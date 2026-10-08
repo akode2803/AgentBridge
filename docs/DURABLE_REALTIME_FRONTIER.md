@@ -110,14 +110,21 @@ traffic only after live ledger delivery and recovery measurements.
 One authenticated Realtime channel subscribes to authorized changes on
 `ab_change_events` for the configured root. Channel setup requests
 `replication_ready`; the Python client already exposes Postgres-change and system
-callbacks, and its channel configuration passes Broadcast options through.
+callbacks, and its channel configuration passes Broadcast options through. The
+async Realtime client must sign in with the same member credential class as the
+PostgREST client before joining; an API key by itself is an anonymous session and
+cannot be mistaken for member-scoped RLS. Legacy service-key mode remains an
+explicit compatibility mode, with canonical local reads still recomputing
+authority.
 
 Startup and reconnect follow this order:
 
 1. Open the channel and retain only the largest validated event ID as a wake.
-2. Wait for both the normal subscription acknowledgement and the successful
-   replication-ready system event. A timeout or channel error enters recovery;
-   it never declares the stream current.
+2. Wait for the normal channel subscription acknowledgement, the successful
+   `postgres_changes` system acknowledgement, and the successful
+   replication-ready `system` event. A timeout, token/session mismatch or either
+   system error enters recovery; it never declares the stream current. Refreshing
+   a member token rejoins and repeats this handshake.
 3. Read the root epoch/floor, compare it with the durable local event cursor, and
    query RLS-filtered events using `WHERE root = ? AND id > ? ORDER BY id LIMIT ?`.
 4. Coalesce each event page by stream/domain, then catch up underlying documents
