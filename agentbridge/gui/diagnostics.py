@@ -75,7 +75,10 @@ REASONS = frozenset({
     'mirror_changed', 'mirror_pending', 'unsafe_cached_value',
     'invalid_payload', 'unsupported_transport', 'storage_error',
 })
-MODES = frozenset({'first', 'older', 'refresh', 'latest', 'none', 'other'})
+MODES = frozenset({
+    'first', 'older', 'refresh', 'aux_controls', 'aux_members',
+    'latest', 'none', 'other',
+})
 OUTCOMES = frozenset({
     'started', 'completed', 'failed', 'aborted', 'retained', 'cleared',
     'rendered', 'skipped', 'retry', 'visible', 'hidden', 'enabled',

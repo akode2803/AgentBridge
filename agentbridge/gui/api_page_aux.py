@@ -25,9 +25,11 @@ _PENDING_INPUTS = (local_source.SourceChanged, aux_inputs.AuxInputsUnavailable,
 
 
 class AuxiliaryPageOperation(PageOperation):
-    def __init__(self, app, mesh, chat, **kwargs):
+    def __init__(self, app, mesh, chat, *, lane='all', **kwargs):
+        if lane not in {'all', 'controls', 'members'}:
+            raise ValueError('invalid auxiliary lane')
         super().__init__(mesh, chat, limit=1, scan_budget=1, summary_only=True, **kwargs)
-        self.app = app
+        self.app, self.lane = app, lane
 
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
         from .api_runtime import contributor_rows, authority_rows
@@ -36,55 +38,60 @@ class AuxiliaryPageOperation(PageOperation):
                   'profiles': 'pending', 'presence': 'pending'}
         data = {'feeds': [], 'tasks': [], 'runs': [], 'users': {}, 'metadata_status': status}
         fences = []
-        auxiliary = runtime.auxiliary
-        for scope, chat in (('status', ''), ('runtime', self.chat)):
-            auxiliary.request(scope, chat)
-            try:
-                _reader, observed, inputs = auxiliary.inputs(scope, chat,
-                    max_bytes=min(8 * 1024 * 1024, round_.ledger.remaining()))
-            except _PENDING_INPUTS:
-                continue
-            round_.ledger.charge(inputs.captured_bytes)
-            raw = inputs.documents.documents()
-            fences.append(observed)
-            if scope == 'status':
-                data['feeds'] = self._feeds(round_, snapshot, raw)
-                status['live'] = 'ready'
-                continue
-            # Every ledger dependency comes from captured chat/raw inputs; the
-            # legacy validators receive no provider, Store or snapshot fallback.
-            with self.source_reader._read(receipt) as (conn, _):
-                state = document_observation._capture_selected(conn, self.mesh.store.path,
-                    receipt.source.raw, (P.state(self.chat, self.viewer),),
-                    max_documents=1, max_bytes=min(4 * 1024 * 1024, round_.ledger.remaining()))
-                keys = aux_inputs.capture_prefix(conn, self.mesh.store.path, receipt.source.raw,
-                    f'chats/{self.chat}/keys', max_documents=64,
-                    max_bytes=min(4 * 1024 * 1024, round_.ledger.remaining()))
-            round_.ledger.charge(keys.captured_bytes)
-            round_.ledger.charge(sum(len(row.payload_json.encode()) for row in state.records if row.payload_json))
-            epochs = [doc for doc in keys.documents.documents().values()
-                      if isinstance(doc, dict) and isinstance(doc.get('epoch'), int)]
-            latest = max(epochs, key=lambda doc: doc['epoch']) if epochs else None
-            adapter = RuntimePageView(round_, snapshot, raw,
-                latest_key=(latest['epoch'], latest) if latest is not None else None,
-                key_lookup=lambda epoch: sealer.key(self.chat, epoch),
-                state_document=state.documents().get(P.state(self.chat, self.viewer)),
-                encrypted=type(self.mesh.sealer) is E2EESealer)
-            data['agents_paused'] = read_pause(adapter.directory, adapter.tx,
-                                               chat_id=self.chat, snapshot=snapshot, source='cached')
-            status['pause'] = 'ready'
-            data['tasks'] = contributor_rows(adapter, self.chat)
-            data['runs'] = authority_rows(adapter, self.chat)
-            status['runtime'] = 'ready'
-        display = self._profiles(round_, snapshot, receipt, data)
+        if self.lane != 'members':
+            auxiliary = runtime.auxiliary
+            for scope, chat in (('status', ''), ('runtime', self.chat)):
+                auxiliary.request(scope, chat)
+                try:
+                    _reader, observed, inputs = auxiliary.inputs(scope, chat,
+                        max_bytes=min(8 * 1024 * 1024, round_.ledger.remaining()))
+                except _PENDING_INPUTS:
+                    continue
+                round_.ledger.charge(inputs.captured_bytes)
+                raw = inputs.documents.documents()
+                fences.append(observed)
+                if scope == 'status':
+                    data['feeds'] = self._feeds(round_, snapshot, raw)
+                    status['live'] = 'ready'
+                    continue
+                # Every ledger dependency comes from captured chat/raw inputs; the
+                # legacy validators receive no provider, Store or snapshot fallback.
+                with self.source_reader._read(receipt) as (conn, _):
+                    state = document_observation._capture_selected(conn, self.mesh.store.path,
+                        receipt.source.raw, (P.state(self.chat, self.viewer),),
+                        max_documents=1, max_bytes=min(4 * 1024 * 1024, round_.ledger.remaining()))
+                    keys = aux_inputs.capture_prefix(conn, self.mesh.store.path, receipt.source.raw,
+                        f'chats/{self.chat}/keys', max_documents=64,
+                        max_bytes=min(4 * 1024 * 1024, round_.ledger.remaining()))
+                round_.ledger.charge(keys.captured_bytes)
+                round_.ledger.charge(sum(len(row.payload_json.encode()) for row in state.records
+                                         if row.payload_json))
+                epochs = [doc for doc in keys.documents.documents().values()
+                          if isinstance(doc, dict) and isinstance(doc.get('epoch'), int)]
+                latest = max(epochs, key=lambda doc: doc['epoch']) if epochs else None
+                adapter = RuntimePageView(round_, snapshot, raw,
+                    latest_key=(latest['epoch'], latest) if latest is not None else None,
+                    key_lookup=lambda epoch: sealer.key(self.chat, epoch),
+                    state_document=state.documents().get(P.state(self.chat, self.viewer)),
+                    encrypted=type(self.mesh.sealer) is E2EESealer)
+                data['agents_paused'] = read_pause(adapter.directory, adapter.tx,
+                                                   chat_id=self.chat, snapshot=snapshot,
+                                                   source='cached')
+                status['pause'] = 'ready'
+                data['tasks'] = contributor_rows(adapter, self.chat)
+                data['runs'] = authority_rows(adapter, self.chat)
+                status['runtime'] = 'ready'
+        display = None if self.lane == 'controls' else self._profiles(
+            round_, snapshot, receipt, data)
         # Preserve real lifecycle/presence rechecks separately from the short
         # computation-freshness budget below. Only successful finalization may
         # register this deadline as a content-free future invalidation.
         self.revalidation_deadline = round_.deadline
         # Live controls use wall-clock expiration. They are presentation only;
         # time never establishes membership, and long computation must retry.
-        deadline = round_.now + 1_000_000_000
-        round_.deadline = deadline if round_.deadline is None else min(round_.deadline, deadline)
+        if self.lane != 'members':
+            deadline = round_.now + 1_000_000_000
+            round_.deadline = deadline if round_.deadline is None else min(round_.deadline, deadline)
         encoded = json.dumps(data, ensure_ascii=False, allow_nan=False)
         round_.ledger.charge(len(encoded.encode()))
         if len(encoded.encode()) > 4 * 1024 * 1024:
@@ -191,6 +198,9 @@ class AuxiliaryPageOperation(PageOperation):
 @authed_read_token
 def chat_aux(app, req, mesh, token):
     chat = _part(req.params.get('id', ''))
+    lane = req.params.get('lane', 'all')
+    if type(lane) is not str or lane not in {'all', 'controls', 'members'}:
+        return _pending(token, 'invalid_auxiliary_lane', status='reset_required')
     runtime = mesh.local_inputs
     if runtime is None:
         return _pending(token, 'local_paging_disabled', status='unavailable')
@@ -203,7 +213,7 @@ def chat_aux(app, req, mesh, token):
         except (local_source.SourceChanged, overlay_index.OverlayIndexUnavailable, OSError, sqlite3.Error):
             return _pending(token, 'local_inputs_pending')
         if operation is None:
-            operation = AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+            operation = AuxiliaryPageOperation(app, mesh, chat, lane=lane, source_reader=reader)
         work = operation.prepare(receipt, receipt, index)
         if work.status == 'restart':
             continue
@@ -221,7 +231,8 @@ def chat_aux(app, req, mesh, token):
         if final.status != 'page' or final.result is None:
             return _pending(token, final.reason or 'auxiliary_changed', status=final.status)
         payload = json.loads(final.result.presentation.decoration_json)
-        return {'status': 'ready', 'chat_id': chat, 'session_binding': session_read_binding(token),
+        return {'status': 'ready', 'chat_id': chat, 'lane': lane,
+                'session_binding': session_read_binding(token),
                 'page_version': app.page_cursors.version(token, chat, final.result.page,
                     local_trust_version=final.result.local_trust_version), **payload}
     return _pending(token, 'auxiliary_progress')

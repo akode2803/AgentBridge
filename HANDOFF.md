@@ -442,11 +442,28 @@ work dominates the remaining endpoint cost. Retain the optimization as a local
 reviewable prerequisite; do not describe the large-room latency task as solved
 or release it on the strength of the earlier isolated pair alone.
 
-Next: complete independent review of the raw-account batching, then separate
-bounded member profile/presence work from live/runtime controls so a large
-roster cannot withhold the entire auxiliary response. Recompute authority on
-each companion request and preserve source/session/version rejection. Inspect
-browser cost before changing rendering: paintMeshChat regenerates HTML on
-metadata changes but already uses keyed row reconciliation, so it does not
-necessarily replace the entire transcript DOM. Lifecycle capture and pin-store
-processing remain the larger measured costs after account batching.
+The independent local review is complete. The auxiliary endpoint now exposes
+separately bounded `controls` and `members` lanes while preserving the compatible
+combined operation. Each lane starts from current admitted SQLite inputs,
+recomputes membership/history-on-join, trust, keys, lifecycle and visibility as
+needed, and performs the same final source/session/page checks. The browser runs
+the controls lane first so member lifecycle and pin work cannot contend with or
+withhold typing/runtime/pause presentation; it then merges member profiles only
+for the same route, session and canonical page version. Retention is display-only
+and cannot authorize an action.
+
+The isolated six-case lane benchmark passes. At 64 members, controls take roughly
+37--51 ms with or without member batching and remain essentially flat across the
+tested roster sizes. The batched member lane takes 314/319/321 ms across three
+samples, versus 452/496/653 ms without batching; the former combined path took
+446/468/490 ms without batching. A cProfile run remains dominated by per-member
+lifecycle and pin resolution, not raw account capture. The focused browser lane,
+stale-route/session/version, read/retention and server authority checks pass; the
+wider server gate passes 158 tests. Ruff, JavaScript syntax and diff checks pass.
+
+Opt-in browser diagnostics now record content-free `aux_controls` and
+`aux_members` read and paint durations. This provides the missing real-app split
+between endpoint time and keyed DOM reconciliation. Next: land the auxiliary lane
+checkpoint after PR60, collect those measurements in a real 64-member room, then
+profile membership-event history. Do not raise the 64-member safety bound until
+those measurements establish the resource and product rationale.

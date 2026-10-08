@@ -242,60 +242,118 @@ function pagedAuxDisplay(pageData, response) {
          runs:response.metadata_status.runtime === "ready" ? response.runs : []}};
 }
 
+function mergePagedAuxLane(previous, response) {
+  if (response.lane === "all") return response;
+  const merged = previous ? {...previous,
+    metadata_status:{...previous.metadata_status}, users:{...previous.users}} : {
+    ...response, metadata_status:{...response.metadata_status},
+    feeds:[], tasks:[], runs:[], users:{},
+  };
+  for (const field of ["status", "chat_id", "session_binding", "page_version"]) {
+    merged[field] = response[field];
+  }
+  if (response.lane === "controls") {
+    for (const field of ["live", "runtime", "pause"]) {
+      merged.metadata_status[field] = response.metadata_status[field];
+    }
+    merged.feeds = response.feeds;
+    merged.tasks = response.tasks;
+    merged.runs = response.runs;
+    if (typeof response.agents_paused === "boolean") {
+      merged.agents_paused = response.agents_paused;
+    } else delete merged.agents_paused;
+  } else {
+    for (const field of ["profiles", "presence"]) {
+      merged.metadata_status[field] = response.metadata_status[field];
+    }
+    merged.users = {...response.users};
+  }
+  merged.lane = "merged";
+  return merged;
+}
+
 // One companion read for each successful canonical page pass, including an
 // unchanged history window. It owns no transcript rows or continuing access.
 async function refreshPagedAux(owner, revision, pageVersion, pageData) {
+  abortPagedAux(owner);
   const abort = new AbortController();
   owner.auxAbort = abort;
-  let response;
-  try {
-    response = await api(`/api/mesh/chat_aux?id=${encodeURIComponent(owner.chatId)}`,
-      undefined, {sideEffects:false, timeoutMs:8000, signal:abort.signal});
-  } catch { return; } // Next canonical page poll retries a pending companion.
   const current = () => !abort.signal.aborted && pageOwner === owner
     && owner.auxAbort === abort && owner.pageRevision === revision
     && owner.pageVersion === pageVersion && owner.current();
-  if (current() && response?.status === "forbidden"
-      && samePageBinding(response.session_binding, pageData.session_binding)) {
-    retireDeniedMeshChat(owner.chatId);
-    renderSidebar();
-    resetPagedView();
-    $("#content").innerHTML = "";
-    location.hash = "#/chats";
-    return;
-  }
-  if (!current() || response?.status !== "ready" || response.chat_id !== owner.chatId
-      || response.page_version !== pageVersion
-      || !samePageBinding(response.session_binding, pageData.session_binding)) return;
-  const status = response.metadata_status;
-  if (!status || typeof status !== "object" || Array.isArray(status)
-      || !Array.isArray(response.feeds) || response.feeds.length > 64
-      || !Array.isArray(response.tasks) || response.tasks.length > 50
-      || !Array.isArray(response.runs) || response.runs.length > 50
-      || !response.users || typeof response.users !== "object"
-      || Array.isArray(response.users) || Object.keys(response.users).length > 64) return;
-  const {data,presentation,aux} = pagedAuxDisplay(pageData, response);
-  const tr = $("#transcript");
-  const anchor = tr ? captureTranscriptAnchor(tr) : null;
-  const painted = await paintMeshChat(false, null, {data, presentation,
-    paged:true, historyRead:true,
-    aux, guard:current});
-  if (painted && current()) {
-    syncRetainedReceipts(owner, data.messages, data.meta);
-    syncPagedAuxControls(pageData, presentation, status, response);
-    const names = $("#chat-top .chat-head-sub");
-    if (names && data.meta.kind !== "dm") {
-      names.textContent = (data.meta.members || []).filter(name => name !== data.me)
-        .map(name => meshDn(name, presentation)).concat("You").join(", ");
+  const fetchLane = async lane => {
+    const started = performance.now();
+    try {
+      const response = await api(
+        `/api/mesh/chat_aux?id=${encodeURIComponent(owner.chatId)}&lane=${lane}`,
+        undefined, {sideEffects:false, timeoutMs:8000, signal:abort.signal});
+      diagnostic("page_read", {mode:`aux_${lane}`,
+        duration_ms:performance.now()-started, status:response?.status});
+      return response;
+    } catch (error) {
+      diagnostic("page_read", {mode:`aux_${lane}`,
+        duration_ms:performance.now()-started,
+        outcome:error?.name === "AbortError" ? "aborted" : "failed"});
+      return null;
     }
-    if (data.meta.kind === "dm") {
-      syncDmHeaderPresence(status.presence === "ready" ? presentation
-        : {user:data.me,users:{}}, data.meta);
+  };
+  try {
+    // Give user-visible controls the server first. Starting the member lane in
+    // parallel can make its lifecycle/pin work compete for the same process and
+    // local stores, undermining the priority boundary this split provides.
+    for (const lane of ["controls", "members"]) {
+      if (!current()) break;
+      const response = await fetchLane(lane);
+      if (current() && response?.status === "forbidden"
+          && samePageBinding(response.session_binding, pageData.session_binding)) {
+        retireDeniedMeshChat(owner.chatId);
+        renderSidebar();
+        resetPagedView();
+        $("#content").innerHTML = "";
+        location.hash = "#/chats";
+        return;
+      }
+      if (!current() || response?.status !== "ready" || response.lane !== lane
+          || response.chat_id !== owner.chatId || response.page_version !== pageVersion
+          || !samePageBinding(response.session_binding, pageData.session_binding)) continue;
+      const status = response.metadata_status;
+      if (!status || typeof status !== "object" || Array.isArray(status)
+          || !Array.isArray(response.feeds) || response.feeds.length > 64
+          || !Array.isArray(response.tasks) || response.tasks.length > 50
+          || !Array.isArray(response.runs) || response.runs.length > 50
+          || !response.users || typeof response.users !== "object"
+          || Array.isArray(response.users) || Object.keys(response.users).length > 64) continue;
+      const retained = owner.auxSnapshot?.pageVersion === pageVersion
+        ? owner.auxSnapshot.response : null;
+      const merged = mergePagedAuxLane(retained, response);
+      const {data,presentation,aux} = pagedAuxDisplay(pageData, merged);
+      const tr = $("#transcript");
+      const anchor = tr ? captureTranscriptAnchor(tr) : null;
+      const paintStarted = performance.now();
+      const painted = await paintMeshChat(false, null, {data, presentation,
+        paged:true, historyRead:true, aux, guard:current});
+      diagnostic("page_paint", {mode:`aux_${lane}`,
+        outcome:painted === false ? "skipped" : "completed",
+        duration_ms:performance.now()-paintStarted, rows:data.messages?.length || 0});
+      if (!painted || !current()) continue;
+      syncRetainedReceipts(owner, data.messages, data.meta);
+      syncPagedAuxControls(pageData, presentation, merged.metadata_status, merged);
+      const names = $("#chat-top .chat-head-sub");
+      if (names && data.meta.kind !== "dm") {
+        names.textContent = (data.meta.members || []).filter(name => name !== data.me)
+          .map(name => meshDn(name, presentation)).concat("You").join(", ");
+      }
+      if (data.meta.kind === "dm") {
+        syncDmHeaderPresence(merged.metadata_status.presence === "ready" ? presentation
+          : {user:data.me,users:{}}, data.meta);
+      }
+      // UI-only retention for the same canonical page version. Every action
+      // still reauthorizes, and a new version/session clears this decoration.
+      owner.auxSnapshot = {pageVersion, response:merged};
+      if (anchor) restoreTranscriptAnchor($("#transcript"), anchor);
     }
-    // UI-only retention for the same canonical page version. Every action
-    // still reauthorizes, and a new version/session clears this decoration.
-    owner.auxSnapshot = {pageVersion, response};
-    if (anchor) restoreTranscriptAnchor($("#transcript"), anchor);
+  } finally {
+    if (owner.auxAbort === abort) owner.auxAbort = null;
   }
 }
 

@@ -97,10 +97,15 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   patches only retained tick slots. In the same fixture, warmed 8/32/64-member
   pages were roughly 0.06--0.09 s and the 64-member first page was about 0.19 s;
   account/lifecycle capture on the transcript path stayed at the viewer only.
-  The bounded receipt work remains linear after paint. Auxiliary profiles still
-  repeat per-member resolution (about 0.8 s warm and about 2.0 s first at 64 in
-  the latest run) and may cross their computation-freshness window. Membership-
-  event history and real-browser paint profiling remain open before completion.
+  The bounded receipt work remains linear after paint. v0.24.309 batches raw
+  member-account capture within each request and separates auxiliary controls
+  from member profile/presence decoration. At 64 members, isolated controls now
+  complete in roughly 37--51 ms while the batched member lane takes roughly
+  314--321 ms; the browser requests and paints controls first, then members.
+  Both lanes independently recompute current authority and reject source,
+  session or page-version changes. Opt-in diagnostics now time each lane's read
+  and browser paint. Membership-event history and real-browser paint measurements
+  remain open before completion.
 - [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
   storage policy, revocation and foreign-root/chat denials remain runtime gates.
   Notifications and cached results must not become authority.

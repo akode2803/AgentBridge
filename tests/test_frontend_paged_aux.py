@@ -40,7 +40,7 @@ const pageData={me:'alice',meta:{id:'room',members:['alice','bot']},
 const Mesh={state:{user:'alice',users:{alice:{kind:'human'}}},
   agentsView:false,agentsFromComposer:false};
 const ICONS={pause:'P',hand:'H'};
-const calls=[],paints=[],restores=[];
+const calls=[],paints=[],restores=[],diagnostics=[];
 let current=owner;
 let resets=0,forceReset=()=>{};
 const content={innerHTML:'canonical'};
@@ -60,8 +60,8 @@ const document={createElement(tag){return {tag,id:'',disabled:false,
   innerHTML:'',className:'',textContent:'',
   addEventListener(){},remove(){if(tag==='span') title.badge=null;
     else pill.button=null;}};}};
-const api=(_path,_body,options)=>new Promise(resolve=>{
-  calls.push({resolve,options});
+const api=(path,_body,options)=>new Promise(resolve=>{
+  calls.push({path,resolve,options});
 });
 const retired=[];
 const deps={Mesh,ICONS,$,document,api,location,
@@ -70,44 +70,61 @@ const deps={Mesh,ICONS,$,document,api,location,
   captureTranscriptAnchor:()=>({candidates:[{id:'m',offset:1}]}),
   restoreTranscriptAnchor:()=>restores.push('restored'),
   syncRetainedReceipts:()=>restores.push('receipts'),
+  diagnostic:(event,fields)=>diagnostics.push({event,...fields}),
   paintMeshChat:async(_force,_trace,prepared)=>{
     paints.push(prepared);return true;},
 };
 const build=new Function(...Object.keys(deps),
   `let pageOwner=arguments[arguments.length-1];${source};
-   return {refreshPagedAux,abortPagedAux,syncPagedAuxControls,pagedAuxDisplay,
+   return {refreshPagedAux,abortPagedAux,syncPagedAuxControls,pagedAuxDisplay,mergePagedAuxLane,
            setOwner:o=>pageOwner=o};`);
-const {refreshPagedAux,abortPagedAux,syncPagedAuxControls,pagedAuxDisplay,setOwner}=
+const {refreshPagedAux,abortPagedAux,syncPagedAuxControls,pagedAuxDisplay,mergePagedAuxLane,setOwner}=
   build(...Object.values(deps),owner);
 forceReset=()=>{abortPagedAux(owner);setOwner(null);};
-const response=(extra={})=>({status:'ready',chat_id:'room',page_version:'v1',
-  session_binding:{...binding},metadata_status:{live:'ready',runtime:'ready',
-    pause:'ready',profiles:'ready',presence:'pending'},
-  agents_paused:true,feeds:[{agent:'bot'}],tasks:[{id:'task'}],runs:[{run_id:'run'}],
-  users:{bot:{kind:'agent',owners:['alice']}},...extra});
+const response=(lane='all',extra={})=>({status:'ready',chat_id:'room',page_version:'v1',lane,
+  session_binding:{...binding},metadata_status:{
+    live:lane==='members'?'pending':'ready',runtime:lane==='members'?'pending':'ready',
+    pause:lane==='members'?'pending':'ready',profiles:lane==='controls'?'pending':'ready',
+    presence:'pending'},
+  ...(lane==='members'?{feeds:[],tasks:[],runs:[],users:{bot:{kind:'agent',owners:['alice']}}}
+    :lane==='controls'?{agents_paused:true,feeds:[{agent:'bot'}],tasks:[{id:'task'}],
+      runs:[{run_id:'run'}],users:{}}
+    :{agents_paused:true,feeds:[{agent:'bot'}],tasks:[{id:'task'}],runs:[{run_id:'run'}],
+      users:{bot:{kind:'agent',owners:['alice']}}}),...extra});
+const settle=async(pending,controls=response('controls'),members=response('members'))=>{
+  assert.equal(calls.length,1);
+  assert.match(calls[0].path,/lane=controls$/);
+  calls.shift().resolve(controls);
+  await new Promise(resolve=>setImmediate(resolve));
+  if(calls.length){
+    assert.equal(calls.length,1);assert.match(calls[0].path,/lane=members$/);
+    calls.shift().resolve(members);
+  }
+  await pending;
+};
 
 // An old response cannot repaint after another canonical page revision.
 let pending=refreshPagedAux(owner,1,'v1',pageData);
 assert.equal(calls.length,1);
 owner.pageRevision=2;
-calls.shift().resolve(response());await pending;
+await settle(pending);
 assert.equal(paints.length,0);
 
 // Exact session and raw/trust version both fence the companion handout.
 for(const altered of [
-  response({page_version:'v2'}),
-  response({session_binding:{...binding,viewer:'other'}}),
-  response({chat_id:'elsewhere'}),
-  response({status:'forbidden',session_binding:{...binding,viewer:'other'}}),
+  {page_version:'v2'},
+  {session_binding:{...binding,viewer:'other'}},
+  {chat_id:'elsewhere'},
+  {status:'forbidden',session_binding:{...binding,viewer:'other'}},
   {status:'pending'},
 ]) {
   pending=refreshPagedAux(owner,2,'v1',pageData);
-  calls.shift().resolve(altered);await pending;
+  await settle(pending,response('controls',altered),response('members',altered));
   assert.equal(paints.length,0);
 }
 
 pending=refreshPagedAux(owner,2,'v1',pageData);
-calls.shift().resolve(response({status:'forbidden'}));await pending;
+await settle(pending,response('controls',{status:'forbidden'}),response('members'));
 assert.equal(resets,1);
 assert.deepEqual(retired,['room']);
 assert.equal(location.hash,'#/chats');
@@ -120,20 +137,21 @@ pending=refreshPagedAux(owner,2,'v1',pageData);
 const stale=calls.shift();
 abortPagedAux(owner);
 assert.equal(stale.options.signal.aborted,true);
-stale.resolve(response());await pending;
+stale.resolve(response('controls'));await pending;
 assert.equal(paints.length,0);
 setOwner(null);
 pending=refreshPagedAux(owner,2,'v1',pageData);
-calls.shift().resolve(response());await pending;
+await pending;
+assert.equal(calls.length,0);
 assert.equal(paints.length,0);
 setOwner(owner);
 
 // A same-owner completed companion overlays selected users, pause and compact
 // captured cards on the canonical rows, preserving viewport by row anchor.
 pending=refreshPagedAux(owner,2,'v1',pageData);
-calls.shift().resolve(response());await pending;
-assert.equal(paints.length,1);
-const supplied=paints[0];
+await settle(pending);
+assert.equal(paints.length,2);
+const supplied=paints[1];
 assert.equal(supplied.paged,true);
 assert.equal(supplied.historyRead,true); // never mark-read from aux paint
 assert.deepEqual(supplied.aux,{feeds:[{agent:'bot'}],tasks:[{id:'task'}],
@@ -145,8 +163,18 @@ assert.equal(pageData.meta.agents_paused,true);
 assert.equal(pause.disabled,false);
 assert.ok(title.badge);
 assert.equal(pill.button.disabled,false);
-assert.deepEqual(restores,['receipts','restored']);
-const retained=pagedAuxDisplay(pageData,response());
+assert.deepEqual(restores,['receipts','restored','receipts','restored']);
+assert.deepEqual(diagnostics.filter(row=>row.event==='page_read').slice(-2)
+  .map(row=>row.mode),['aux_controls','aux_members']);
+assert.deepEqual(diagnostics.filter(row=>row.event==='page_paint').slice(-2)
+  .map(row=>row.mode),['aux_controls','aux_members']);
+const combined=mergePagedAuxLane(response('controls'),response('members'));
+const controlsAgain=mergePagedAuxLane(combined,response('controls',{
+  feeds:[{agent:'new'}],tasks:[],runs:[]}));
+assert.equal(controlsAgain.users.bot.kind,'agent');
+assert.equal(controlsAgain.metadata_status.profiles,'ready');
+assert.deepEqual(controlsAgain.feeds,[{agent:'new'}]);
+const retained=pagedAuxDisplay(pageData,combined);
 assert.deepEqual(retained.aux,{feeds:[{agent:'bot'}],tasks:[{id:'task'}],
   runs:[{run_id:'run'}]});
 assert.equal(retained.presentation.users.bot.owners[0],'alice');

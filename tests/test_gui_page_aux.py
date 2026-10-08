@@ -24,8 +24,11 @@ def page_app(base_page_app):
     return base_page_app
 
 
-def _aux(app, chat):
-    return api_page_aux.chat_aux(app, Request(params={'id': chat}))
+def _aux(app, chat, lane=None):
+    params = {'id': chat}
+    if lane is not None:
+        params['lane'] = lane
+    return api_page_aux.chat_aux(app, Request(params=params))
 
 
 def _ready(app, chat):
@@ -42,6 +45,15 @@ def _settled_aux(app, chat):
             return result
         assert app.mesh.local_inputs.prepare_one()
     pytest.fail('auxiliary proofs did not converge')
+
+
+def _settled_lane(app, chat, lane):
+    for _ in range(12):
+        result = _aux(app, chat, lane)
+        if result.get('reason') != 'overlay_proofs':
+            return result
+        assert app.mesh.local_inputs.prepare_one()
+    pytest.fail(f'{lane} auxiliary proofs did not converge')
 
 
 def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app):
@@ -62,6 +74,46 @@ def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app
     assert result['agents_paused'] is True
     assert result['tasks'] == [] and result['runs'] == []
     assert any(f['human'] and f['agent'] == 'bob' for f in result['feeds'])
+
+
+def test_selected_aux_lanes_are_independently_bounded(page_app, monkeypatch):
+    app, chat = page_app
+    mesh = app.mesh
+    mesh.post(chat, 'one message')
+    publish_pause(mesh, paused=True, chat_id=chat)
+    _ready(app, chat)
+
+    operation = api_page_aux.AuxiliaryPageOperation
+    profiles = operation._profiles
+    with monkeypatch.context() as patch:
+        patch.setattr(operation, '_profiles',
+                      lambda *_args, **_kwargs: pytest.fail('controls evaluated members'))
+        controls = _settled_lane(app, chat, 'controls')
+    assert controls['status'] == 'ready' and controls['lane'] == 'controls'
+    assert controls['metadata_status']['pause'] == 'ready'
+    assert controls['metadata_status']['profiles'] == 'pending'
+    assert controls['users'] == {}
+
+    called = []
+    with monkeypatch.context() as patch:
+        patch.setattr(operation, '_feeds',
+                      lambda *_args, **_kwargs: pytest.fail('members evaluated controls'))
+        patch.setattr(operation, '_profiles',
+                      lambda *args, **kwargs: (called.append(True), profiles(*args, **kwargs))[1])
+        members = _settled_lane(app, chat, 'members')
+    assert called and members['status'] == 'ready' and members['lane'] == 'members'
+    assert members['metadata_status']['profiles'] == 'ready'
+    assert members['metadata_status']['live'] == 'pending'
+    assert members['feeds'] == [] and members['tasks'] == [] and members['runs'] == []
+    assert mesh.user in members['users']
+
+
+def test_selected_aux_rejects_unknown_lane(page_app):
+    app, chat = page_app
+    result = _aux(app, chat, 'everything')
+    assert result['status'] == 'reset_required'
+    assert result['reason'] == 'invalid_auxiliary_lane'
+    assert not {'users', 'feeds', 'tasks', 'runs'} & result.keys()
 
 
 def test_nonempty_canonical_runtime_rows_match_retained_projection(page_app, clouds):
@@ -150,7 +202,8 @@ def test_member_accounts_are_batched_and_late_change_still_rejects(page_app, mon
         assert result['users'][name]['display'] == 'Display ' + name
 
     reader, receipt, index = mesh.local_inputs.inputs(chat)
-    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='members', source_reader=reader)
     prepared = operation.prepare(receipt, receipt, index)
     assert prepared.status == 'prepared', prepared
     account = mesh.tx.get_doc(P.user('middle'))
@@ -171,7 +224,8 @@ def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     publish_pause(mesh, paused=False, chat_id=chat)
     _ready(app, chat)
     reader, receipt, index = mesh.local_inputs.inputs(chat)
-    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='controls', source_reader=reader)
     prepared = operation.prepare(receipt, receipt, index)
     if prepared.status == 'work' and prepared.reason == 'overlay_proofs':
         for path, pub in prepared.work:
@@ -201,7 +255,8 @@ def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(
     presence = mesh.local_inputs.presence
     assert presence.ingest().ready
     reader, receipt, index = mesh.local_inputs.inputs(chat)
-    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='members', source_reader=reader)
     prepared = operation.prepare(receipt, receipt, index)
     if prepared.status == 'work' and prepared.reason == 'overlay_proofs':
         for path, pub in prepared.work:
