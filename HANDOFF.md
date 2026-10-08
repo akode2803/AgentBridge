@@ -357,10 +357,19 @@ intent, CAS, canonical authority or Realtime semantics changed. Three permanentl
 blocked rooms model as 24 attempts in the first ten minutes rather than about 450,
 a 94.7% reduction; their eventual safety checks continue.
 
-The focused source scheduler/runtime gate passes 104 tests. The earlier combined
-source/sidebar/Realtime boundary passed 152 tests before the foreground wake
-addition; Ruff and diff checks pass after it. Run the combined boundary once on
-the final tree, commit, open the PR and use cross-platform CI as the broad gate.
-After merge, restart once and confirm the settled source-attempt cadence. Then
-profile large-member-room latency before starting the durable Realtime frontier
-and targeted recovery protocol.
+PR59 Codex review found two foreground composition gaps. Reopening the same room
+after its lease expired did not interrupt the remembered route's background
+delay, and repeated selected-room fence checks could saturate the background
+counter before the user navigated away. The corrected policy treats an expired
+lease as a foreground transition, resets background ambiguity aging on that
+transition, and does not count selected 350 ms retries as background attempts.
+Ordinary activity and Realtime hints still cannot shorten a durable-fence delay.
+The exact post-outbox mutation-settlement callback now carries a distinct signal
+that clears only the obsolete scheduling delay after the durable intent is gone;
+the collector still performs every source CAS and canonical authority check.
+
+The corrected combined scheduler/source/sidebar/Realtime/page gate passes 265
+tests with four expected skips; Ruff and diff checks pass. Head remains on PR59
+with replacement cross-platform CI/review required. After merge, restart once and
+confirm the settled source-attempt cadence. Then continue the large-member-room
+latency branch before starting the durable Realtime frontier protocol.

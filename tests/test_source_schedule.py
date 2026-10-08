@@ -357,6 +357,38 @@ def test_same_route_selection_after_expired_lease_interrupts_background_backoff(
     assert schedule.wait_s(now=15.451, maximum=100) == pytest.approx(0.35)
 
 
+def test_foreground_blocked_attempts_do_not_age_background_ambiguity_backoff():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request('room', now=0, selected=True)
+    now = 0.05
+    for _ in range(10):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False, blocked=True)
+        assert schedule._states['room'].blocked == 0
+        now += 0.35
+    schedule.clear_selection()
+    job = _take(schedule, now, 'room')
+    schedule.finish(job, now=now, success=False, blocked=True)
+    assert schedule.wait_s(now=now, maximum=100) == pytest.approx(4)
+
+
+def test_exact_mutation_settlement_interrupts_obsolete_background_fence_delay():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request('room', now=0)
+    now = 0.05
+    for delay in (4, 8, 16, 32, 64, 128, 256, 300):
+        job = _take(schedule, now, 'room')
+        schedule.finish(job, now=now, success=False, blocked=True)
+        now += delay
+    assert schedule._states['room'].blocked == 8
+    schedule.request('room', now=now - 299, activity=True)
+    assert schedule.take_due(now=now - 0.001) is None
+
+    schedule.request('room', now=now - 298, settled=True)
+    assert schedule._states['room'].blocked == 0
+    assert _take(schedule, now - 297.949, 'room')
+
+
 def test_pending_retry_preserves_io_failures_and_success_resets():
     schedule = SourceSchedule()
     schedule.request('room', now=0, selected=True)

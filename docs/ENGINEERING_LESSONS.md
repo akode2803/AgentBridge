@@ -16,6 +16,13 @@ selected-chat cadence. Background discovery and activity hints cannot turn a
 durable ambiguity into a hot loop. Scheduling never clears the intent, restores
 readiness or substitutes for authority.
 
+Foreground retries and background ambiguity aging are separate. A selected room
+can retry at 350 ms without saturating the five-minute background counter, and a
+later deselection begins at the first background delay. Ordinary activity and
+Realtime hints still cannot bypass a durable fence. Only the exact local mutation
+settlement callback clears the obsolete delay, after the durable intent has been
+deleted; it schedules a normal collector and grants no source or authority verdict.
+
 ## Sidebar retries bypassed source backoff (v0.24.306)
 
 The source scheduler correctly backed quiet and failed rooms off, but the browser's

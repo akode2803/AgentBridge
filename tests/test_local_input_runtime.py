@@ -340,7 +340,7 @@ def test_local_append_settlement_always_queues_full_reconciliation(rig, monkeypa
     )
     with pytest.raises(RuntimeError, match='page preparation unavailable'):
         runtime.local_append_settled(CHAT, {'kind': 'message'})
-    assert queued == [(CHAT, {'activity': True})]
+    assert queued == [(CHAT, {'activity': True, 'settled': True})]
 
 
 def test_unsafe_collection_retires_readiness_and_persists_bounded_health(rig):

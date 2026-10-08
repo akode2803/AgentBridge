@@ -56,13 +56,14 @@ class SourceSchedule:
             raise ValueError('invalid scheduling chat')
         return chat
 
-    def request(self, chat_id, *, now, selected=False, activity=False):
+    def request(self, chat_id, *, now, selected=False, activity=False, settled=False):
         """Coalesce bursts; renewing the same route alone does not undo backoff.
 
         False means the bounded background queue is full. Its caller can retain
         one reconcile-needed bit, not accumulate another unbounded queue.
         """
-        return self._request(chat_id, now=now, selected=selected, activity=activity)
+        return self._request(chat_id, now=now, selected=selected,
+                             activity=activity, settled=settled)
 
     def discover(self, chat_id, *, now):
         """Admit a background discovery, rotating an idle slot when full.
@@ -72,10 +73,11 @@ class SourceSchedule:
         """
         return self._request(chat_id, now=now, reconcile=True)
 
-    def _request(self, chat_id, *, now, selected=False, activity=False,
+    def _request(self, chat_id, *, now, selected=False, activity=False, settled=False,
                  reconcile=False):
         chat, now = self._chat(chat_id), self._time(now)
-        if type(selected) is not bool or type(activity) is not bool:
+        if (type(selected) is not bool or type(activity) is not bool
+                or type(settled) is not bool):
             raise ValueError('invalid scheduling flags')
         with self._lock:
             state = self._states.get(chat)
@@ -108,7 +110,16 @@ class SourceSchedule:
                 # ambiguity backoff once. Subsequent lease renewals cannot;
                 # another blocked result installs the selected 350 ms floor.
                 state.blocked_until = 0.0
-            hot = activity or changed_route
+                state.blocked = 0
+            if settled:
+                # This signal follows deletion of the exact durable mutation
+                # intent. Unlike an ordinary Realtime/activity hint, it proves
+                # the old fence delay is obsolete without proving source data,
+                # freshness or authority. The scheduled collector still does
+                # every normal CAS and canonical input check.
+                state.blocked_until = 0.0
+                state.blocked = 0
+            hot = activity or changed_route or settled
             if hot:
                 state.hot_until = now + 4.0
                 state.idle = 0
@@ -162,7 +173,12 @@ class SourceSchedule:
             selected = job.chat_id == self._selected and now < self._lease_until
             hot = now < state.hot_until
             if blocked:
-                state.blocked = min(8, state.blocked + 1)
+                # Foreground retries stay responsive but do not age the
+                # separate background ambiguity cadence. Navigating away from
+                # a selected room therefore starts at the first bounded
+                # background delay rather than inheriting five minutes.
+                if not selected:
+                    state.blocked = min(8, state.blocked + 1)
             else:
                 state.blocked = 0
                 state.failures = 0 if success else min(8, state.failures + 1)
