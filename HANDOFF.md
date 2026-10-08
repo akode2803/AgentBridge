@@ -373,3 +373,34 @@ tests with four expected skips; Ruff and diff checks pass. Head remains on PR59
 with replacement cross-platform CI/review required. After merge, restart once and
 confirm the settled source-attempt cadence. Then continue the large-member-room
 latency branch before starting the durable Realtime frontier protocol.
+
+Large-room transcript scaling is implemented locally on
+`codex/large-room-member-profile` at app version `0.24.308`. The first controlled
+profile showed warm canonical page medians growing from roughly 31--50 ms at one
+member to 0.56--0.61 seconds at 64, with first 64-member pages around 0.70--0.84
+seconds. Instrumentation attributed the growth to receipt privacy/lifecycle
+decoration: the 64-member page captured 65 accounts and 64 lifecycle subjects and
+charged about 2.6 MiB of bounded ledger work for a roughly 6 KiB response.
+
+Normal group pages now defer that optional work until after canonical paint. A
+new receipt-only endpoint accepts the existing opaque page/read token, recomputes
+current membership, history-on-join, trust, keys, overlays, privacy and canonical
+selection from admitted SQLite inputs, verifies the exact retained position/trust/
+page version, and returns only message-ID receipt decoration. The browser queues
+at most six retained page requests, rejects route/session/page changes, patches
+only existing tick slots, and prunes decoration with the bounded DOM window. The
+token is positioning and equality evidence only, never authority.
+
+In the same fixture after the split, warmed 8/32/64-member canonical pages were
+roughly 0.06--0.09 seconds, the 64-member first page was about 0.19 seconds, and
+the transcript path captured only the viewer account/lifecycle subject. Focused
+authority/page/read-ack tests pass 108 cases; focused browser ownership/render
+tests pass nine cases. The complete v0.24.308 receipt tree before PR59's final
+scheduler review correction passed 3,273 tests with 18 expected skips; the final
+scheduler delta and its composition gate pass 265 tests with four expected skips.
+Ruff, JS syntax and diff checks pass. The measured receipt work remains linear but
+occurs after paint. Auxiliary profile/presence decoration is
+still roughly 0.8 seconds warm and 2.0 seconds first at 64 members and can cross
+its one-second computation window. Next: publish the stacked branch for review,
+then finish auxiliary/member-history and browser-paint profiling without weakening
+final source checks.

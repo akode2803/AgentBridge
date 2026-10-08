@@ -77,7 +77,8 @@ def chat_page(app, req, mesh, token):
                                       window_before=anchor.before if anchor else None,
                                       window_inclusive=anchor.inclusive if anchor else False,
                                       expected_position=expected, limit=limit,
-                                      defer_receipts=defer_receipts)
+                                      defer_receipts=defer_receipts,
+                                      defer_group_receipts=True)
         work = operation.prepare(receipt, receipt, index)
         record_page_stage(app, req, chat, 'prepare', work.status,
                           work.reason or 'none', attempt=attempt)

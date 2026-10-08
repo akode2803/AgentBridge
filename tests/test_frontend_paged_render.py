@@ -92,7 +92,8 @@ const deps={App,Mesh,diagnostic:()=>{},canonicalDeliveryDom:()=>{},BrowserSessio
   captureTranscriptAnchor:()=>{anchorCaptures++;return {candidates:[]};},
   restoreTranscriptAnchor:()=>{anchorRestores++;},
   pruneTranscriptResources:()=>{prunes++;},
-  abortPagedAux:()=>{},refreshPagedAux:async()=>{},
+  abortPagedAux:()=>{},abortPagedReceipts:()=>{},refreshPagedAux:async()=>{},
+  refreshPagedReceipts:async()=>{},syncRetainedReceipts:()=>{},
   pagedAuxDisplay:(pageData,response)=>{
     auxDisplayCalls.push(response);
     return {data:{...pageData,_paged:true},presentation:Mesh.state,

@@ -69,6 +69,7 @@ const deps={Mesh,ICONS,$,document,api,location,
   resetPagedView:()=>{resets++;forceReset();},
   captureTranscriptAnchor:()=>({candidates:[{id:'m',offset:1}]}),
   restoreTranscriptAnchor:()=>restores.push('restored'),
+  syncRetainedReceipts:()=>restores.push('receipts'),
   paintMeshChat:async(_force,_trace,prepared)=>{
     paints.push(prepared);return true;},
 };
@@ -144,7 +145,7 @@ assert.equal(pageData.meta.agents_paused,true);
 assert.equal(pause.disabled,false);
 assert.ok(title.badge);
 assert.equal(pill.button.disabled,false);
-assert.deepEqual(restores,['restored']);
+assert.deepEqual(restores,['receipts','restored']);
 const retained=pagedAuxDisplay(pageData,response());
 assert.deepEqual(retained.aux,{feeds:[{agent:'bot'}],tasks:[{id:'task'}],
   runs:[{run_id:'run'}]});

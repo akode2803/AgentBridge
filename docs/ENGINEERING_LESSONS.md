@@ -23,6 +23,25 @@ Realtime hints still cannot bypass a durable fence. Only the exact local mutatio
 settlement callback clears the obsolete delay, after the durable intent has been
 deleted; it schedules a normal collector and grants no source or authority verdict.
 
+## Optional member decoration owned first transcript paint (v0.24.308)
+
+Large-room transcript selection appeared to scale with member count even when the
+message window and response stayed small. Instrumentation showed that receipt
+presentation captured every member account and lifecycle subject before returning
+the canonical page. At 64 members this consumed roughly 0.56--0.61 seconds on a
+warm page and charged about 2.6 MiB of bounded ledger input for a roughly 6 KiB
+response. Message selection, decryption and receipt assembly were not the cause.
+
+Safeguard: optional per-member decoration must not own the first readable
+transcript. Group pages now return the canonical message window first, then use a
+page-bound companion to recompute current membership, trust, keys, privacy and
+receipt state. The opaque token retains positioning only and cannot authorize the
+follow-up. The browser validates session/chat/page ownership, bounds its request
+queue and retained receipt map, and changes only receipt tick slots. A changed
+input cut requests a fresh canonical page; it never applies stale decoration.
+Keep auxiliary profiles separate: they remain linear and are the next measured
+large-room bottleneck.
+
 ## Sidebar retries bypassed source backoff (v0.24.306)
 
 The source scheduler correctly backed quiet and failed rooms off, but the browser's

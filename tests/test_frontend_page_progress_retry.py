@@ -80,7 +80,8 @@ function rig() {
     viewReadMayApply:()=>false,App:{page:'chats'},renderSidebar:()=>log.push('sidebar'),
     acknowledgedDelivery:(chatId,readNs)=>nativeAcks.push({chatId,readNs}),
     refreshPagedSidebar:page=>{sidebarOwners.push(page);},
-    $:q=>q==='#transcript'?transcript:null,abortPagedAux:()=>{},Date:{now:()=>now},
+    $:q=>q==='#transcript'?transcript:null,abortPagedAux:()=>{},abortPagedReceipts:()=>{},
+    Date:{now:()=>now},
     document:{hasFocus:()=>focused,addEventListener:(name,fn)=>events.set(name,fn)},
     setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id),
     api:(path,data)=>{calls.push({path,data});log.push('post:'+data.read_ack_token);

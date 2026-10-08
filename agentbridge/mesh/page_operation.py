@@ -267,7 +267,8 @@ class PageOperation:
     def __init__(self, mesh, chat_id, *, source_reader, before=None, expected_position=None,
                  window_before=None, window_inclusive=False,
                  limit=50, scan_budget=1000, limits=PageOperationLimits(),
-                 summary_only=False, defer_receipts=False, unread_candidate=None):
+                 summary_only=False, defer_receipts=False,
+                 defer_group_receipts=False, unread_candidate=None):
         authority_observation._part(chat_id)
         self.mesh, self.chat = mesh, chat_id
         if (type(source_reader) is not LocalPageSource or source_reader.store is not mesh.store
@@ -286,6 +287,9 @@ class PageOperation:
         if type(defer_receipts) is not bool:
             raise ValueError('invalid receipt mode')
         self.defer_receipts = defer_receipts
+        if type(defer_group_receipts) is not bool:
+            raise ValueError('invalid group receipt mode')
+        self.defer_group_receipts = defer_group_receipts
         self._transport, self._store = mesh.tx, mesh.store
         self.viewer, self.machine = mesh.messaging.user, mesh.messaging.machine
         self.before = None if before is None else raw_pages._key(before)
@@ -425,7 +429,11 @@ class PageOperation:
                     pins_json = (self._pin_presentation(round_, snapshot, source_binding, index,
                         expected, sealer, history, verifier, proofs)
                         if not self.summary_only else None)
-                    receipts_json, presence = ((None, None) if self.summary_only or self.defer_receipts else
+                    defer_receipts = (self.summary_only or self.defer_receipts
+                                      or self.defer_group_receipts
+                                      and snapshot.kind is not ChatKind.DM
+                                      and any(name != self.viewer for name in snapshot.members))
+                    receipts_json, presence = ((None, None) if defer_receipts else
                         self._receipt_presentation(round_, snapshot,
                             source_binding, index, expected, selection, proofs))
                     decoration, auxiliary, display_presence = self._decorate(

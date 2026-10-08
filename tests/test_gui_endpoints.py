@@ -784,8 +784,14 @@ def test_typing_and_selected_aux_feed(rig):
     assert feeds and feeds[0]["typing"] and feeds[0]["agent"] == "fable"
 
 
-def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig):
+def test_selected_aux_owns_liveliness_and_sidebar_remains_bounded(rig, monkeypatch):
     """Live decorations arrive through the selected auxiliary read."""
+    # This test exercises selection and filtering, not the one-second
+    # computation-freshness rejection. Keep the final handoff clock stable so
+    # a loaded Windows runner cannot turn elapsed wall time into a flaky result.
+    from agentbridge.mesh import membership_coordinator
+    monkeypatch.setattr(membership_coordinator._Round, 'clock',
+                        lambda _round, previous: previous)
     rig.signup()
     rig.peer_account("fable")
     cid = rig.post("/api/mesh/create_chat", name="Live",
