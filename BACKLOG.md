@@ -64,6 +64,12 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   boundary pass. Live installation, concurrent-transaction proof against the
   disposable provider, RLS query-plan/write-amplification measurement and
   Realtime observation are still required; safety scheduling is unchanged.
+  A stacked local observer now upgrades the existing Realtime channel only when
+  a ledger listener exists. It binds the async socket to the REST credential
+  class, requires channel, Postgres-change and replication-ready acknowledgements,
+  emits validated event IDs only, and exports bounded counters. It does not yet
+  persist a cursor or run catch-up. Live schema/RLS measurement and review remain
+  ahead of any polling reduction.
 - [ ] **Post-protocol architecture simplification and API formalization**
   (Aryan, 2026-10-08). Start only after the durable recovery protocol and known
   latency fixes are measured and stable. Inventory runtime layers, compatibility

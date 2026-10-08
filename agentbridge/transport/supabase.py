@@ -172,6 +172,8 @@ class SupabaseTransport(Transport):
         self._rt_retry_at = 0.0
         self._rt_ready_since = 0.0
         self._watchers: list[_HintWatcher] = []
+        self._ledger_listener_lock = threading.Lock()
+        self._ledger_listeners: list[Any] = []
         self._bucket_ready = False
         # R76: does ab_docs carry the delta columns (seq/deleted)? None =
         # unprobed; False re-probes on a slow leash so pasting the migration
@@ -191,6 +193,8 @@ class SupabaseTransport(Transport):
                        "rt_active": 0, "rt_active_peak": 0,
                        "broadcast_sent": 0, "broadcast_failures": 0,
                        "broadcast_skipped": 0,
+                       "ledger_events": 0, "ledger_ready": 0,
+                       "ledger_invalid_events": 0,
                        "since": time.time()}
 
     @property
@@ -451,6 +455,49 @@ class SupabaseTransport(Transport):
             return ChangeLedgerPage(after_cursor, events, len(rows) == limit)
         except (AttributeError, TypeError, ValueError) as exc:
             raise TransportError("Supabase returned an invalid change ledger page") from exc
+
+    def subscribe_change_ledger(self, callback):
+        """Observe validated event IDs; callers still replay durable pages."""
+        if not callable(callback):
+            raise TypeError("change ledger callback must be callable")
+        if self.change_ledger_capability() is None:
+            raise NotImplementedError("Supabase change ledger is unavailable")
+        with self._ledger_listener_lock:
+            self._ledger_listeners.append(callback)
+        self._ensure_rt()
+
+        def unsubscribe() -> None:
+            with self._ledger_listener_lock:
+                if callback in self._ledger_listeners:
+                    self._ledger_listeners.remove(callback)
+
+        return unsubscribe
+
+    def _ledger_observation_requested(self) -> bool:
+        with self._ledger_listener_lock:
+            return self._ledger_ready is True and bool(self._ledger_listeners)
+
+    def _on_ledger_event(self, event_id: object) -> None:
+        if type(event_id) is not int or event_id < 1 or event_id > MAX_LEDGER_INTEGER:
+            self._rt_metric("ledger_invalid_events")
+            return
+        self._rt_metric("ledger_events")
+        self._on_hint()
+        with self._ledger_listener_lock:
+            listeners = list(self._ledger_listeners)
+        for callback in listeners:
+            try:
+                callback(event_id)
+            except Exception:  # noqa: BLE001 - observer cannot break Realtime
+                pass
+
+    def change_ledger_realtime_status(self) -> str:
+        if self._ledger_observation_requested():
+            self._ensure_rt()
+        rt = self._rt
+        if rt is None or not rt.observes_change_ledger():
+            return "disconnected" if self._ledger_ready else "unsupported"
+        return rt.change_ledger_status()
 
     # ------------------------------------------------------------------ docs
     def get_doc(self, path: str, default: Any = None) -> Any:
@@ -937,8 +984,11 @@ class SupabaseTransport(Transport):
         with self._rt_lock:
             if self._closed:
                 return None
+            observe_ledger = self._ledger_observation_requested()
             if self._rt is not None and self._rt.alive():
-                return self._rt if self._rt.status() in {"connecting", "ready"} else None
+                if (not observe_ledger or self._rt.observes_change_ledger()):
+                    return (self._rt if self._rt.status() in {"connecting", "ready"}
+                            else None)
             old, self._rt = self._rt, None
             if old is not None:
                 failed = old.status() == "disconnected"
@@ -967,7 +1017,11 @@ class SupabaseTransport(Transport):
             try:
                 self._rt_metric("rt_open_attempts")
                 self._rt = _RealtimeThread(
-                    self._env, self.root, self._on_hint, self._rt_metric)
+                    self._env, self.root, self._on_hint, self._rt_metric,
+                    observe_ledger=observe_ledger,
+                    on_ledger_event=self._on_ledger_event,
+                    ledger_auth_mode=self.auth_mode,
+                )
             except Exception:  # noqa: BLE001 — no realtime = poll-only
                 self._rt = None
                 with self._rt_state_lock:
@@ -1071,11 +1125,16 @@ class _RealtimeThread:
     Sends and receives change hints; any failure just goes quiet."""
 
     def __init__(self, env: dict[str, str], root: str, on_hint,
-                 on_metric=lambda _name: None) -> None:
+                 on_metric=lambda _name: None, *, observe_ledger: bool = False,
+                 on_ledger_event=lambda _event_id: None,
+                 ledger_auth_mode: str = "") -> None:
         self._env = env
         self._root = root
         self._on_hint = on_hint
         self._on_metric = on_metric
+        self._observe_ledger = bool(observe_ledger)
+        self._on_ledger_event = on_ledger_event
+        self._ledger_auth_mode = ledger_auth_mode
         self._loop = asyncio.new_event_loop()
         self._channel = None
         self._ready = threading.Event()
@@ -1085,6 +1144,10 @@ class _RealtimeThread:
         self._task = None
         self._started = threading.Event()
         self._counted_ready = False
+        self._ledger_pg_ready = False
+        self._ledger_replication_ready = False
+        self._ledger_joined = False
+        self._ledger_ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="ab-supabase-rt")
         self._thread.start()
@@ -1116,6 +1179,7 @@ class _RealtimeThread:
             if not self._closing and self._state != "disconnected":
                 self._state = "disconnected"
                 self._ready.clear()
+                self._ledger_ready.clear()
                 changed = True
         if changed:
             try:
@@ -1130,38 +1194,116 @@ class _RealtimeThread:
             if value == "SUBSCRIBED":
                 self._state = "ready"
                 self._ready.set()
+                self._ledger_joined = True
                 if not self._counted_ready:
                     self._counted_ready = True
                     self._on_metric("rt_ready")
+                self._maybe_mark_ledger_ready()
         if value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
             self._mark_disconnected()
+
+    def _system_status(self, payload) -> None:
+        extension = str(getattr(payload, "extension", "") or "")
+        message = str(getattr(payload, "message", "") or "")
+        status = str(getattr(payload, "status", "") or "").lower()
+        if status != "ok":
+            self._mark_disconnected()
+            return
+        if extension == "postgres_changes":
+            self._ledger_pg_ready = True
+        elif extension == "system" and message == "Replication connection established":
+            self._ledger_replication_ready = True
+        self._maybe_mark_ledger_ready()
+
+    def _maybe_mark_ledger_ready(self) -> None:
+        if (self._ledger_joined and self._ledger_pg_ready
+                and self._ledger_replication_ready
+                and not self._ledger_ready.is_set()):
+            self._ledger_ready.set()
+            self._on_metric("ledger_ready")
+
+    def _postgres_change(self, payload) -> None:
+        try:
+            data = payload.get("data") or {}
+            record = data.get("record") or {}
+            if record.get("root") != self._root:
+                raise ValueError("wrong root")
+            event_id = record.get("id")
+            if type(event_id) is not int:
+                raise ValueError("invalid event id")
+        except (AttributeError, TypeError, ValueError):
+            self._on_metric("ledger_invalid_events")
+            return
+        self._on_ledger_event(event_id)
 
     async def _main(self) -> None:
         from realtime import RealtimeChannelOptions
         from supabase import acreate_client
 
-        # R84: the poke channel is a PUBLIC broadcast carrying {"r": 1} —
-        # content-free by design (SCALING.md §3) — so the publishable key
-        # suffices; the secret key only rides here on a pre-R84 machine.
-        key = (self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
-               or self._env.get("SUPABASE_SECRET_KEY", ""))
+        # Broadcast alone is public. Ledger observation is RLS-filtered and
+        # therefore must join as the same member credential class as PostgREST,
+        # or explicitly use the legacy service credential.
+        publishable = self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
+        secret = self._env.get("SUPABASE_SECRET_KEY", "")
+        email = self._env.get("SUPABASE_MEMBER_EMAIL", "")
+        password = self._env.get("SUPABASE_MEMBER_PASSWORD", "")
+        member_auth = (
+            self._observe_ledger
+            and self._ledger_auth_mode.startswith("member:")
+            and publishable and email and password
+        )
+        service_auth = (
+            self._observe_ledger
+            and (self._ledger_auth_mode == "service"
+                 or self._ledger_auth_mode.endswith(":service"))
+            and bool(secret)
+        )
+        key = publishable or secret
+        if service_auth:
+            key = secret
+        if self._observe_ledger and not (member_auth or service_auth):
+            raise ValidationError("Supabase ledger Realtime identity is unavailable")
+        if not key:
+            raise ValidationError("Supabase Realtime credential is unavailable")
         sb = None
         try:
             sb = await asyncio.wait_for(
                 acreate_client(self._env.get("SUPABASE_URL", ""), key),
                 timeout=10.0,
             )
+            if member_auth:
+                await asyncio.wait_for(sb.auth.sign_in_with_password({
+                    "email": email, "password": password,
+                }), timeout=10.0)
             self._channel = sb.channel(
                 f"ab-{self._root}",
-                RealtimeChannelOptions(config={"broadcast": {"self": False}}))
+                RealtimeChannelOptions(config={"broadcast": {
+                    "self": False,
+                    "replication_ready": self._observe_ledger,
+                }}))
             self._channel.on_broadcast("change", lambda _p: self._on_hint())
+            if self._observe_ledger:
+                from realtime import RealtimePostgresChangesListenEvent
+                self._channel.on_postgres_changes(
+                    RealtimePostgresChangesListenEvent.Insert,
+                    self._postgres_change,
+                    table="ab_change_events",
+                    schema="public",
+                    filter=f"root=eq.{self._root}",
+                )
+                self._channel.on_system(self._system_status)
             await asyncio.wait_for(
                 self._channel.subscribe(self._subscription_status),
                 timeout=10.0,
             )
+            ledger_ready_deadline = time.monotonic() + 10.0
             while not self._closing:
                 await asyncio.sleep(1.0)
                 if self.status() == "disconnected":
+                    return
+                if (self._observe_ledger and not self._ledger_ready.is_set()
+                        and time.monotonic() >= ledger_ready_deadline):
+                    self._mark_disconnected()
                     return
                 joined = getattr(self._channel, "is_joined", False)
                 joined = joined() if callable(joined) else bool(joined)
@@ -1191,6 +1333,16 @@ class _RealtimeThread:
         with self._state_lock:
             return self._state
 
+    def observes_change_ledger(self) -> bool:
+        return self._observe_ledger
+
+    def change_ledger_status(self) -> str:
+        if not self._observe_ledger:
+            return "unsupported"
+        if self._ledger_ready.is_set():
+            return "ready"
+        return "disconnected" if self.status() == "disconnected" else "connecting"
+
     def alive(self) -> bool:
         return self._thread.is_alive()
 
@@ -1216,6 +1368,7 @@ class _RealtimeThread:
             self._closing = True
             self._state = "closed"
         self._ready.clear()
+        self._ledger_ready.clear()
         try:
             self._started.wait(timeout=0.25)
             task = self._task

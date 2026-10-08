@@ -175,6 +175,12 @@ class LocalMutationTransport(Transport):
     def change_ledger_events(self, after_cursor, *, limit):
         return self._transport.change_ledger_events(after_cursor, limit=limit)
 
+    def subscribe_change_ledger(self, callback):
+        return self._transport.subscribe_change_ledger(callback)
+
+    def change_ledger_realtime_status(self):
+        return self._transport.change_ledger_realtime_status()
+
     def suggest_poll_s(self, default):
         return self._transport.suggest_poll_s(default)
 

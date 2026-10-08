@@ -19,7 +19,8 @@ import urllib.request
 COUNTERS = (
     "queries", "rx_bytes", "blob_bytes", "rt_open_attempts", "rt_ready",
     "rt_disconnects", "rt_socket_closes", "broadcast_sent",
-    "broadcast_failures", "broadcast_skipped",
+    "broadcast_failures", "broadcast_skipped", "ledger_events",
+    "ledger_ready", "ledger_invalid_events",
 )
 
 

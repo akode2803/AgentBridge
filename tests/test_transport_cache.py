@@ -638,6 +638,13 @@ def test_change_ledger_capability_delegates_through_the_wrapper():
             )
             return ChangeLedgerPage(after_cursor, (event,), False)
 
+        def subscribe_change_ledger(self, callback):
+            callback(12)
+            return lambda: None
+
+        def change_ledger_realtime_status(self):
+            return "ready"
+
     plain = CachingTransport(BulkTransport(), auto_refresh=False)
     assert plain.supports_change_ledger is False
     assert plain.change_ledger_capability() is None
@@ -646,6 +653,10 @@ def test_change_ledger_capability_delegates_through_the_wrapper():
     assert ledger.change_ledger_capability() == ChangeLedgerCapability(1, 100)
     assert ledger.change_ledger_epoch().minimum_cursor == 0
     assert ledger.change_ledger_events(4, limit=100).cursor == 5
+    seen = []
+    ledger.subscribe_change_ledger(seen.append)
+    assert seen == [12]
+    assert ledger.change_ledger_realtime_status() == "ready"
 
 
 # ------------------------------------------------------------------ factory

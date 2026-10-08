@@ -572,7 +572,20 @@ names the complete RPC contract rather than inferring readiness from one table.
 The latest focused transport/schema gate passes 149 tests, the complete suite
 passes 3,308 with 18 expected skips, all 36 frontend modules pass, Ruff and diff
 checks are clean, and the complete schema parses as 102 PostgreSQL statements.
-Push PR63, obtain a current-head rereview/CI, then rebase the already implemented
-member-authenticated Realtime observer branch onto this corrected foundation. Do
-not install the schema or reduce polling until the disposable-provider concurrency
-and live RLS evidence is complete.
+The repair is pushed as `50ae2f9`, its three review threads are resolved, and a
+current-head rereview plus replacement CI have been requested.
+
+The stacked `codex/realtime-ledger-observer` branch implements that observation
+contract without adding a socket. A listener upgrades the existing Realtime
+thread, authenticates it as the already-probed REST credential class, subscribes
+to root-filtered inserts, requires all three readiness signals, and publishes
+only validated event IDs. Wrong-root/malformed payloads are counted and dropped.
+A failed member login does not silently switch the observer to the service key.
+Disconnect and readiness counters join the existing benchmark, while Broadcast
+and every safety poll stay unchanged. The 208-test transport/sync/benchmark gate,
+Ruff, compilation and diff checks passed before the foundation correction. Rebase
+and rerun that gate against the commit-safe page contract, then publish the
+observer as its own stacked PR after PR63 is review-clean; after the schema is
+deliberately installed, run RLS/write-amplification/Realtime measurements before
+building the cursor owner. Do not install the schema or reduce polling until the
+disposable-provider concurrency and live RLS evidence is complete.
