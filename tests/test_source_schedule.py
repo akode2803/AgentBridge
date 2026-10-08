@@ -340,6 +340,23 @@ def test_new_route_selection_interrupts_background_pending_backoff_once():
     assert schedule.take_due(now=now - 14.601) is None
 
 
+def test_same_route_selection_after_expired_lease_interrupts_background_backoff():
+    schedule = SourceSchedule(background_s=4)
+    schedule.request('room', now=0, selected=True)
+    # The remembered route survives, but its lease expires while the browser
+    # is suspended. This completion therefore installs background backoff.
+    job = _take(schedule, 15.1, 'room')
+    schedule.finish(job, now=15.1, success=False, blocked=True)
+    assert schedule.wait_s(now=15.1, maximum=100) == pytest.approx(4)
+
+    # Reopening that same route is a new foreground transition. One immediate
+    # retry is allowed; if still blocked, the 350 ms selected floor returns.
+    schedule.request('room', now=15.2, selected=True)
+    foreground = _take(schedule, 15.451, 'room')
+    schedule.finish(foreground, now=15.451, success=False, blocked=True)
+    assert schedule.wait_s(now=15.451, maximum=100) == pytest.approx(0.35)
+
+
 def test_pending_retry_preserves_io_failures_and_success_resets():
     schedule = SourceSchedule()
     schedule.request('room', now=0, selected=True)

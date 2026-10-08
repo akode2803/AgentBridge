@@ -96,7 +96,11 @@ class SourceSchedule:
                 state = self._states[chat] = _State(now + 0.05, self._order)
             self._order += 1
             state.order = self._order
-            changed_route = selected and self._selected != chat
+            # A browser can sleep past the foreground lease while the stored
+            # route ID remains unchanged. Selecting that room again is a real
+            # foreground transition and must interrupt its background fence
+            # backoff just like selecting a different room.
+            changed_route = selected and (self._selected != chat or now >= self._lease_until)
             if selected:
                 self._selected, self._lease_until = chat, now + 15.0
             if changed_route:
