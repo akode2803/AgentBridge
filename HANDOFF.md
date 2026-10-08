@@ -404,3 +404,89 @@ still roughly 0.8 seconds warm and 2.0 seconds first at 64 members and can cross
 its one-second computation window. Next: publish the stacked branch for review,
 then finish auxiliary/member-history and browser-paint profiling without weakening
 final source checks.
+
+PR59 passed Ubuntu/Windows and merged as `528922e` on 2026-10-08. PR60's first
+replacement Windows run failed during signup in
+`test_chat_pins_are_a_list_with_body` after 3,262 passes and 31 skips; the
+captured request frame was at the mutation coordinator's SQLite commit and did
+not establish the earlier concurrent presence-write race as its cause. The one
+authorized rerun then passed alongside Ubuntu and the clean Codex rereview.
+PR60 merged as `64b0580` on 2026-10-08. It has not been deployed or restarted.
+
+The current branch is `codex/large-room-auxiliary-profile`, version 0.24.309,
+based on PR60. Auxiliary profile reads now capture the bounded member-account
+raw rows in one request-local batch rather than repeating the room metadata
+capture and source check per account. The batch remains charged to the ordinary
+ledger and compared at final handout; get/raw still resolves every member's
+pins, lifecycle and privacy independently. There is no cross-request authority
+memo. The new regression verifies identity-to-row mapping, batching, rejection
+after an intervening account change, and a fresh result on the next request.
+
+The 61-test authority/presentation gate and 121-test canonical page, receipt,
+unread and failing-signup gate pass locally. The opt-in reproducible benchmark
+is `uv run pytest -q -s tests/probe_member_aux.py`; it uses disposable cloud
+fixtures and compares batching enabled/disabled. Run it without simultaneous
+test workers: a contended attempt crossed the existing one-second freshness
+fence, so its timings are not an optimization comparison. Production freshness
+limits are unchanged.
+
+The isolated six-case benchmark passed. Three-sample wall-time medians at
+8/32/64 members were 99/237/514 ms without batching and 88/226/521 ms with
+batching. CPU medians were 97/234/506 ms versus 86/223/512 ms. This does not
+establish a reliable large-room latency gain. A separate instrumented 64-member
+capture reduced SQLite execute calls from 15,124 to 9,358, but lifecycle/pin
+work dominates the remaining endpoint cost. Retain the optimization as a local
+reviewable prerequisite; do not describe the large-room latency task as solved
+or release it on the strength of the earlier isolated pair alone.
+
+The independent local review is complete. The auxiliary endpoint now exposes
+separately bounded `controls` and `members` lanes while preserving the compatible
+combined operation. Each lane starts from current admitted SQLite inputs,
+recomputes membership/history-on-join, trust, keys, lifecycle and visibility as
+needed, and performs the same final source/session/page checks. The browser runs
+the controls lane first so member lifecycle and pin work cannot contend with or
+withhold typing/runtime/pause presentation; it then merges member profiles only
+for the same route, session and canonical page version. Retention is display-only
+and cannot authorize an action.
+
+The isolated six-case lane benchmark passes. At 64 members, controls take roughly
+37--51 ms with or without member batching and remain essentially flat across the
+tested roster sizes. The batched member lane takes 314/319/321 ms across three
+samples, versus 452/496/653 ms without batching; the former combined path took
+446/468/490 ms without batching. A cProfile run remains dominated by per-member
+lifecycle and pin resolution, not raw account capture. The focused browser lane,
+stale-route/session/version, read/retention and server authority checks pass; the
+wider server gate passes 158 tests. Ruff, JavaScript syntax and diff checks pass.
+
+Opt-in browser diagnostics now record content-free `aux_controls` and
+`aux_members` read, inclusive paint and paintMeshChat reconciliation durations.
+The paint-only observation uses the distinct `page_reconcile` event so the
+existing `page_paint` contract continues to include its page read. This provides
+the missing real-app split between endpoint time and keyed DOM work. Do not raise the 64-member
+safety bound until the real-app measurements establish the resource and product
+rationale.
+
+The membership-history read profile is now complete for a 513-event controlled
+case. `tests/probe_membership_history.py` holds the current roster at 64 members
+while applying 0/16/64/256 remove-and-rejoin cycles. Across the checkpoints,
+canonical page medians stayed 28--39 ms, controls 23--29 ms and member decoration
+304--312 ms; at 256 cycles specifically they were 31/23/310 ms. The signed info
+history grew from 1 to 513 rows and materialized metadata from 6.2 to 16.9 KiB.
+This is evidence that current reads use the materialized boundary plus bounded
+suffix rather than refolding the historical events. It does not measure the cost
+of performing/materializing hundreds of mutations. The next task remains real-app
+`aux_controls`/`aux_members` browser-paint capture after the reviewed code is
+running, followed by deciding whether lifecycle/pin resolution needs a deeper
+algorithmic change. Keep the current member/account bounds until that evidence.
+
+PR61 (`codex/large-room-auxiliary-profile`) contains the batching, lane split,
+diagnostics and history probe. It was opened stacked on PR60, then retargeted to
+main immediately after PR60 merged. The first Codex review found three valid
+gaps. Prefetched rows are now reserved against the account cap before any
+lifecycle dependency capture; an oversized multi-account capture bisects while
+retaining the operation-wide byte/step ledger; and the new paint-only timing is
+the distinct `page_reconcile` event while `page_paint` remains inclusive of its
+read. The focused auxiliary/diagnostics gate passes 114 tests, and the wider
+membership/page-operation authority gate passes 111 tests with two expected
+skips. JavaScript syntax, Ruff and diff checks pass. Push this repair and require
+a current-head rereview plus replacement cross-platform CI before merge.

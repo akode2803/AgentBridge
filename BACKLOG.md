@@ -26,8 +26,8 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   state: after the first minute, three fenced rooms remained on a fixed
   four-second source retry. v0.24.307 locally adds adaptive background backoff
   to a finite five-minute ceiling while preserving immediate route-selection
-  wake and 350 ms selected-chat retries. Focused validation passes; PR, CI and
-  live post-release attempt-rate measurement remain open.
+  wake and 350 ms selected-chat retries. PR59 passed both platforms and merged;
+  live post-release attempt-rate measurement remains open.
 
 - [ ] **Durable Realtime frontier and targeted recovery protocol** (Aryan,
   2026-10-08). After the known latency work, replace periodic per-chat safety
@@ -97,10 +97,21 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   patches only retained tick slots. In the same fixture, warmed 8/32/64-member
   pages were roughly 0.06--0.09 s and the 64-member first page was about 0.19 s;
   account/lifecycle capture on the transcript path stayed at the viewer only.
-  The bounded receipt work remains linear after paint. Auxiliary profiles still
-  repeat per-member resolution (about 0.8 s warm and about 2.0 s first at 64 in
-  the latest run) and may cross their computation-freshness window. Membership-
-  event history and real-browser paint profiling remain open before completion.
+  The bounded receipt work remains linear after paint. v0.24.309 batches raw
+  member-account capture within each request and separates auxiliary controls
+  from member profile/presence decoration. At 64 members, isolated controls now
+  complete in roughly 37--51 ms while the batched member lane takes roughly
+  314--321 ms; the browser requests and paints controls first, then members.
+  Both lanes independently recompute current authority and reject source,
+  session or page-version changes. Opt-in diagnostics now time each lane's read,
+  inclusive paint and paintMeshChat reconciliation separately. A disposable
+  constant-roster probe then grew the room from
+  1 to 513 signed membership events (0 to 256 remove/rejoin cycles): canonical
+  page medians stayed 28--39 ms, controls 23--29 ms and member decoration
+  304--312 ms while materialized metadata grew from 6.2 to 16.9 KiB. This
+  confirms current reads use the materialized boundary plus bounded suffix for
+  the measured range rather than refolding membership history. Mutation/
+  materialization scaling and real-browser paint measurements remain open.
 - [ ] **Verify live authorization and reconnect/replay.** Deployed Auth/RLS/RPC/
   storage policy, revocation and foreign-root/chat denials remain runtime gates.
   Notifications and cached results must not become authority.

@@ -16,17 +16,17 @@ let expiryDue = null;
 const lifetimeMs = 300000;
 const tabRef = [...crypto.getRandomValues(new Uint8Array(8))]
   .map(n => n.toString(16).padStart(2, "0")).join("");
-const eventNames = new Set(["client_request", "page_read", "page_paint",
+const eventNames = new Set(["client_request", "page_read", "page_paint", "page_reconcile",
   "transcript_state", "realtime", "client_error", "route", "delivery"]);
 const enums = {
   flow:new Set(["sent", "received"]),
-  status:new Set(["ok", "error", "page", "pending", "reset_required", "unavailable",
+  status:new Set(["ok", "ready", "error", "page", "pending", "reset_required", "unavailable",
     "forbidden", "locked", "busy", "stale", "unsupported"]),
   reason:new Set(["page_inputs_changed", "receipt_presence_changed", "local_inputs_pending",
     "page_progress", "page_unavailable", "page_changed", "source_changed",
     "overlay_proofs", "session_changed", "position_changed", "budget_exhausted",
     "empty_raw_transition"]),
-  mode:new Set(["first", "older", "refresh"]),
+  mode:new Set(["first", "older", "refresh", "aux_controls", "aux_members"]),
   outcome:new Set(["enabled", "changed", "received", "completed", "skipped", "disconnected", "started", "failed", "retry", "aborted"]),
   phase:new Set(["browser_request_started", "browser_response", "browser_request_failed",
     "canonical_dom", "native_ack", "retry_scheduled", "refresh_queued",

@@ -135,6 +135,7 @@ class _Round:
             raise _Stop('unavailable', 'invalid_clock')
         self.deadline = None
         self.batches, self.accounts, self.published = [], {}, {}
+        self.account_records = {}
         self.subjects, self.heads, self.states = {}, {}, {}
         self.facts, self.evidence = {}, {}
         self.meta_input = self.capture(())
@@ -168,7 +169,38 @@ class _Round:
         return value
 
     def _account_record(self, name):
+        if name in self.account_records:
+            return self.account_records[name]
+        if len(set(self.accounts) | set(self.account_records)) >= self.ledger.limits.max_accounts:
+            raise _Stop('unavailable', 'account_budget_exhausted')
         return self.capture((name,)).documents.records[1]
+
+    def prefetch_accounts(self, names):
+        """Capture raw account rows once for this round; never resolve authority.
+
+        The ordinary capture ledger and final batch comparison own these rows.
+        Trust, lifecycle dependencies and visibility still run through get/raw.
+        """
+        missing = tuple(dict.fromkeys(name for name in names
+            if name not in self.accounts and name not in self.account_records))
+        if not missing:
+            return
+        if len(set(self.accounts) | set(self.account_records) | set(missing)) > self.ledger.limits.max_accounts:
+            raise _Stop('unavailable', 'account_budget_exhausted')
+        self._prefetch_account_batch(missing)
+
+    def _prefetch_account_batch(self, names):
+        """Bisect only a per-capture byte overflow; keep the operation ledger."""
+        try:
+            captured = self.capture(names)
+        except OverflowError:
+            if len(names) == 1:
+                raise
+            middle = len(names) // 2
+            self._prefetch_account_batch(names[:middle])
+            self._prefetch_account_batch(names[middle:])
+            return
+        self.account_records.update(zip(names, captured.documents.records[1:], strict=True))
 
     def raw(self, name):
         if name in self.accounts:

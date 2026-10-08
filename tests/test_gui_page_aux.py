@@ -1,6 +1,8 @@
 """Selected auxiliary presentation reuses canonical membership and source cuts."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from agentbridge.core.timekit import utcnow_iso
@@ -24,8 +26,11 @@ def page_app(base_page_app):
     return base_page_app
 
 
-def _aux(app, chat):
-    return api_page_aux.chat_aux(app, Request(params={'id': chat}))
+def _aux(app, chat, lane=None):
+    params = {'id': chat}
+    if lane is not None:
+        params['lane'] = lane
+    return api_page_aux.chat_aux(app, Request(params=params))
 
 
 def _ready(app, chat):
@@ -42,6 +47,41 @@ def _settled_aux(app, chat):
             return result
         assert app.mesh.local_inputs.prepare_one()
     pytest.fail('auxiliary proofs did not converge')
+
+
+def _settled_lane(app, chat, lane):
+    for _ in range(12):
+        result = _aux(app, chat, lane)
+        if result.get('reason') != 'overlay_proofs':
+            return result
+        assert app.mesh.local_inputs.prepare_one()
+    pytest.fail(f'{lane} auxiliary proofs did not converge')
+
+
+def test_account_prefetch_chunks_byte_overflow_and_reserves_the_account_cap():
+    from agentbridge.mesh.membership_coordinator import _Round, _Stop
+
+    round_ = object.__new__(_Round)
+    round_.accounts, round_.account_records = {}, {}
+    round_.ledger = SimpleNamespace(limits=SimpleNamespace(max_accounts=5))
+    calls = []
+
+    def capture(names):
+        calls.append(names)
+        if len(names) > 2:
+            raise OverflowError('fixture capture ceiling')
+        return SimpleNamespace(documents=SimpleNamespace(
+            records=(object(), *(object() for _ in names))))
+
+    round_.capture = capture
+    names = tuple(f'user-{n}' for n in range(5))
+    round_.prefetch_accounts(names)
+    assert set(round_.account_records) == set(names)
+    assert [len(batch) for batch in calls] == [5, 2, 3, 1, 2]
+    round_.capture = lambda _names: pytest.fail('captured beyond reserved account cap')
+    with pytest.raises(_Stop) as caught:
+        round_._account_record('external-owner')
+    assert caught.value.reason == 'account_budget_exhausted'
 
 
 def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app):
@@ -62,6 +102,46 @@ def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app
     assert result['agents_paused'] is True
     assert result['tasks'] == [] and result['runs'] == []
     assert any(f['human'] and f['agent'] == 'bob' for f in result['feeds'])
+
+
+def test_selected_aux_lanes_are_independently_bounded(page_app, monkeypatch):
+    app, chat = page_app
+    mesh = app.mesh
+    mesh.post(chat, 'one message')
+    publish_pause(mesh, paused=True, chat_id=chat)
+    _ready(app, chat)
+
+    operation = api_page_aux.AuxiliaryPageOperation
+    profiles = operation._profiles
+    with monkeypatch.context() as patch:
+        patch.setattr(operation, '_profiles',
+                      lambda *_args, **_kwargs: pytest.fail('controls evaluated members'))
+        controls = _settled_lane(app, chat, 'controls')
+    assert controls['status'] == 'ready' and controls['lane'] == 'controls'
+    assert controls['metadata_status']['pause'] == 'ready'
+    assert controls['metadata_status']['profiles'] == 'pending'
+    assert controls['users'] == {}
+
+    called = []
+    with monkeypatch.context() as patch:
+        patch.setattr(operation, '_feeds',
+                      lambda *_args, **_kwargs: pytest.fail('members evaluated controls'))
+        patch.setattr(operation, '_profiles',
+                      lambda *args, **kwargs: (called.append(True), profiles(*args, **kwargs))[1])
+        members = _settled_lane(app, chat, 'members')
+    assert called and members['status'] == 'ready' and members['lane'] == 'members'
+    assert members['metadata_status']['profiles'] == 'ready'
+    assert members['metadata_status']['live'] == 'pending'
+    assert members['feeds'] == [] and members['tasks'] == [] and members['runs'] == []
+    assert mesh.user in members['users']
+
+
+def test_selected_aux_rejects_unknown_lane(page_app):
+    app, chat = page_app
+    result = _aux(app, chat, 'everything')
+    assert result['status'] == 'reset_required'
+    assert result['reason'] == 'invalid_auxiliary_lane'
+    assert not {'users', 'feeds', 'tasks', 'runs'} & result.keys()
 
 
 def test_nonempty_canonical_runtime_rows_match_retained_projection(page_app, clouds):
@@ -120,6 +200,50 @@ def test_ready_aux_does_not_use_mesh_snapshot_full_history_or_provider(page_app,
     assert result['status'] == 'ready', result
 
 
+def test_member_accounts_are_batched_and_late_change_still_rejects(page_app, monkeypatch):
+    from conftest import seed_account
+    from agentbridge.mesh.local_page_source import LocalPageSource
+    from agentbridge.mesh.paths import P
+
+    app, chat = page_app
+    mesh = app.mesh
+    names = ('zulu', 'alpha', 'middle')
+    for name in names:
+        seed_account(mesh.tx, name, display='Display ' + name)
+    mesh.membership.add_members(chat, list(names))
+    mesh.post(chat, 'one')
+    _ready(app, chat)
+    assert _settled_aux(app, chat)['status'] == 'ready'
+    calls = []
+    capture = LocalPageSource.capture_authority
+
+    def observed(self, receipt, account_names=(), **kwargs):
+        calls.append(account_names)
+        return capture(self, receipt, account_names, **kwargs)
+
+    monkeypatch.setattr(LocalPageSource, 'capture_authority', observed)
+    result = _settled_aux(app, chat)
+    assert result['status'] == 'ready', result
+    assert tuple(sorted(names)) in calls
+    assert all((name,) not in calls for name in names)
+    for name in names:
+        assert result['users'][name]['display'] == 'Display ' + name
+
+    reader, receipt, index = mesh.local_inputs.inputs(chat)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='members', source_reader=reader)
+    prepared = operation.prepare(receipt, receipt, index)
+    assert prepared.status == 'prepared', prepared
+    account = mesh.tx.get_doc(P.user('middle'))
+    mesh.tx.put_doc(P.user('middle'), dict(account, display='Changed'))
+    final = app.finalize_page_read(app.capture_session_read(), prepared.prepared)
+    assert final.status != 'page' and final.result is None
+    _ready(app, chat)
+    fresh = _settled_aux(app, chat)
+    assert fresh['status'] == 'ready', fresh
+    assert fresh['users']['middle']['display'] == 'Changed'
+
+
 @pytest.mark.parametrize('change', ['status', 'runtime'])
 def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     app, chat = page_app
@@ -128,7 +252,8 @@ def test_late_aux_source_mutation_rejects_prepared_finalizer(page_app, change):
     publish_pause(mesh, paused=False, chat_id=chat)
     _ready(app, chat)
     reader, receipt, index = mesh.local_inputs.inputs(chat)
-    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='controls', source_reader=reader)
     prepared = operation.prepare(receipt, receipt, index)
     if prepared.status == 'work' and prepared.reason == 'overlay_proofs':
         for path, pub in prepared.work:
@@ -158,7 +283,8 @@ def test_late_display_presence_publication_rejects_cut_and_allows_fresh_read(
     presence = mesh.local_inputs.presence
     assert presence.ingest().ready
     reader, receipt, index = mesh.local_inputs.inputs(chat)
-    operation = api_page_aux.AuxiliaryPageOperation(app, mesh, chat, source_reader=reader)
+    operation = api_page_aux.AuxiliaryPageOperation(
+        app, mesh, chat, lane='members', source_reader=reader)
     prepared = operation.prepare(receipt, receipt, index)
     if prepared.status == 'work' and prepared.reason == 'overlay_proofs':
         for path, pub in prepared.work:
