@@ -22,6 +22,7 @@ class _State:
     order: int
     idle: int = 0
     failures: int = 0
+    blocked: int = 0
     rerun_at: float | None = None
     blocked_until: float = 0.0
     hot_until: float = 0.0
@@ -55,13 +56,14 @@ class SourceSchedule:
             raise ValueError('invalid scheduling chat')
         return chat
 
-    def request(self, chat_id, *, now, selected=False, activity=False):
+    def request(self, chat_id, *, now, selected=False, activity=False, settled=False):
         """Coalesce bursts; renewing the same route alone does not undo backoff.
 
         False means the bounded background queue is full. Its caller can retain
         one reconcile-needed bit, not accumulate another unbounded queue.
         """
-        return self._request(chat_id, now=now, selected=selected, activity=activity)
+        return self._request(chat_id, now=now, selected=selected,
+                             activity=activity, settled=settled)
 
     def discover(self, chat_id, *, now):
         """Admit a background discovery, rotating an idle slot when full.
@@ -71,10 +73,11 @@ class SourceSchedule:
         """
         return self._request(chat_id, now=now, reconcile=True)
 
-    def _request(self, chat_id, *, now, selected=False, activity=False,
+    def _request(self, chat_id, *, now, selected=False, activity=False, settled=False,
                  reconcile=False):
         chat, now = self._chat(chat_id), self._time(now)
-        if type(selected) is not bool or type(activity) is not bool:
+        if (type(selected) is not bool or type(activity) is not bool
+                or type(settled) is not bool):
             raise ValueError('invalid scheduling flags')
         with self._lock:
             state = self._states.get(chat)
@@ -95,10 +98,28 @@ class SourceSchedule:
                 state = self._states[chat] = _State(now + 0.05, self._order)
             self._order += 1
             state.order = self._order
-            changed_route = selected and self._selected != chat
+            # A browser can sleep past the foreground lease while the stored
+            # route ID remains unchanged. Selecting that room again is a real
+            # foreground transition and must interrupt its background fence
+            # backoff just like selecting a different room.
+            changed_route = selected and (self._selected != chat or now >= self._lease_until)
             if selected:
                 self._selected, self._lease_until = chat, now + 15.0
-            hot = activity or changed_route
+            if changed_route:
+                # Explicit foreground demand may interrupt a long background
+                # ambiguity backoff once. Subsequent lease renewals cannot;
+                # another blocked result installs the selected 350 ms floor.
+                state.blocked_until = 0.0
+                state.blocked = 0
+            if settled:
+                # This signal follows deletion of the exact durable mutation
+                # intent. Unlike an ordinary Realtime/activity hint, it proves
+                # the old fence delay is obsolete without proving source data,
+                # freshness or authority. The scheduled collector still does
+                # every normal CAS and canonical input check.
+                state.blocked_until = 0.0
+                state.blocked = 0
+            hot = activity or changed_route or settled
             if hot:
                 state.hot_until = now + 4.0
                 state.idle = 0
@@ -151,7 +172,15 @@ class SourceSchedule:
             state = self._states[job.chat_id]
             selected = job.chat_id == self._selected and now < self._lease_until
             hot = now < state.hot_until
-            if not blocked:
+            if blocked:
+                # Foreground retries stay responsive but do not age the
+                # separate background ambiguity cadence. Navigating away from
+                # a selected room therefore starts at the first bounded
+                # background delay rather than inheriting five minutes.
+                if not selected:
+                    state.blocked = min(8, state.blocked + 1)
+            else:
+                state.blocked = 0
                 state.failures = 0 if success else min(8, state.failures + 1)
             # ``idle`` counts successful observations that found no source
             # change. Failed or blocked work has its own bounded retry policy;
@@ -167,7 +196,15 @@ class SourceSchedule:
                 # Durable overlapping writes are not IO failures. Retry the
                 # gate promptly for a selected lease, without admitting data
                 # or letting repeated activity hints turn it into a hot loop.
-                delay = 0.35 if selected else self.background
+                # A selected chat stays responsive because completion of the
+                # exact durable mutation may make its next canonical attempt
+                # readable.  Inactive rooms cannot repair an ambiguous intent
+                # by rescanning the same local source, so back them off to the
+                # same finite safety ceiling as other quiet background work.
+                # A new route selection still pulls that room forward through
+                # ``request(..., selected=True)`` without clearing the fence.
+                delay = (0.35 if selected else
+                         min(300.0, self.background * 2 ** (state.blocked - 1)))
                 # One pending mutation can overlap many chat sources (account
                 # and lifecycle inputs are shared).  Without a process-level
                 # floor the scheduler immediately walks every other due room,

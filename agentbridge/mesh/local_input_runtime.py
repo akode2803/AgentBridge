@@ -195,14 +195,15 @@ class LocalInputRuntime:
         return LocalPageSource(self.coordinator, self.store, chat)
 
     @delivery_trace.observed('ingestion_queued', chat_arg=1)
-    def request(self, chat, *, selected=False, activity=False):
+    def request(self, chat, *, selected=False, activity=False, settled=False):
         # Validate through the canonical path selector before queue admission.
         chat = self.reader(chat).chat
         with self._lock:
             if self._closed:
                 return False
             accepted = self.schedule.request(chat, now=time.monotonic(),
-                                             selected=selected, activity=activity)
+                                             selected=selected, activity=activity,
+                                             settled=settled)
             if accepted and selected:
                 self._selected = chat
                 if self._page_preparation is not None:
@@ -295,7 +296,7 @@ class LocalInputRuntime:
             # The exact fast admission is only a latest-successful local
             # snapshot. Keep the complete transport-neutral collector scheduled
             # even if terminal-page preparation itself is temporarily broken.
-            self.request(chat, activity=True)
+            self.request(chat, activity=True, settled=True)
         return True
 
     def inputs(self, chat):
