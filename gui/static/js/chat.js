@@ -289,7 +289,7 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
         undefined, {sideEffects:false, timeoutMs:8000, signal:abort.signal});
       diagnostic("page_read", {mode:`aux_${lane}`,
         duration_ms:performance.now()-started, status:response?.status});
-      return response;
+      return {response, started};
     } catch (error) {
       diagnostic("page_read", {mode:`aux_${lane}`,
         duration_ms:performance.now()-started,
@@ -303,7 +303,8 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
     // local stores, undermining the priority boundary this split provides.
     for (const lane of ["controls", "members"]) {
       if (!current()) break;
-      const response = await fetchLane(lane);
+      const fetched = await fetchLane(lane);
+      const response = fetched?.response;
       if (current() && response?.status === "forbidden"
           && samePageBinding(response.session_binding, pageData.session_binding)) {
         retireDeniedMeshChat(owner.chatId);
@@ -332,9 +333,12 @@ async function refreshPagedAux(owner, revision, pageVersion, pageData) {
       const paintStarted = performance.now();
       const painted = await paintMeshChat(false, null, {data, presentation,
         paged:true, historyRead:true, aux, guard:current});
-      diagnostic("page_paint", {mode:`aux_${lane}`,
+      diagnostic("page_reconcile", {mode:`aux_${lane}`,
         outcome:painted === false ? "skipped" : "completed",
         duration_ms:performance.now()-paintStarted, rows:data.messages?.length || 0});
+      diagnostic("page_paint", {mode:`aux_${lane}`,
+        outcome:painted === false ? "skipped" : "completed",
+        duration_ms:performance.now()-fetched.started, rows:data.messages?.length || 0});
       if (!painted || !current()) continue;
       syncRetainedReceipts(owner, data.messages, data.meta);
       syncPagedAuxControls(pageData, presentation, merged.metadata_status, merged);

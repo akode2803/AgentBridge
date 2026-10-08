@@ -14,10 +14,11 @@ bytes delivered by the buffered reader (which may prefetch one small buffer).
 Exact nearest-rank percentiles retain at most max_records duration samples.
 
 Durations are observations, not additive stages: browser page_paint includes
-page_read, which can include multiple client_request calls; server_request can
-include page_stage work. Server ingestion timestamps cannot align browser clocks,
-and this summary does not pair the recorder's opaque request references. Never
-subtract or sum these series.
+page_read, which can include multiple client_request calls; page_reconcile is
+the paintMeshChat invocation only; server_request can include page_stage work.
+Server ingestion timestamps cannot align browser clocks, and this summary does
+not pair the recorder's opaque request references. Never subtract or sum these
+series.
 Missing page_stage durations are expected for untimed prepare/finalize events.
 """
 
@@ -63,6 +64,7 @@ _RECONCILIATION_INTEGERS = (
 _NOTES = [
     "Duration series overlap; do not add or subtract them.",
     "Browser page_paint includes page_read, not just rendering time.",
+    "Browser page_reconcile measures the paintMeshChat invocation only.",
     "Server page_stage work can be included in server_request durations.",
     "Missing durations are not zero; many page_stage events are untimed.",
     "No cross-clock alignment, request pairing, or file deduplication is inferred.",

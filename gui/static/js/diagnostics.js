@@ -16,7 +16,7 @@ let expiryDue = null;
 const lifetimeMs = 300000;
 const tabRef = [...crypto.getRandomValues(new Uint8Array(8))]
   .map(n => n.toString(16).padStart(2, "0")).join("");
-const eventNames = new Set(["client_request", "page_read", "page_paint",
+const eventNames = new Set(["client_request", "page_read", "page_paint", "page_reconcile",
   "transcript_state", "realtime", "client_error", "route", "delivery"]);
 const enums = {
   flow:new Set(["sent", "received"]),

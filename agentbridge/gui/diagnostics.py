@@ -31,7 +31,7 @@ CONTEXT_BOOKKEEPING_BYTES = 96
 _TAB = re.compile(r'[0-9a-f]{16}\Z')
 
 EVENTS = frozenset({
-    'client_request', 'page_read', 'page_paint', 'transcript_state',
+    'client_request', 'page_read', 'page_paint', 'page_reconcile', 'transcript_state',
     'realtime', 'client_error', 'route', 'server_request', 'page_stage', 'delivery',
 })
 ROUTES = frozenset({

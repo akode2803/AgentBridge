@@ -103,8 +103,9 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   complete in roughly 37--51 ms while the batched member lane takes roughly
   314--321 ms; the browser requests and paints controls first, then members.
   Both lanes independently recompute current authority and reject source,
-  session or page-version changes. Opt-in diagnostics now time each lane's read
-  and browser paint. A disposable constant-roster probe then grew the room from
+  session or page-version changes. Opt-in diagnostics now time each lane's read,
+  inclusive paint and paintMeshChat reconciliation separately. A disposable
+  constant-roster probe then grew the room from
   1 to 513 signed membership events (0 to 256 remove/rejoin cycles): canonical
   page medians stayed 28--39 ms, controls 23--29 ms and member decoration
   304--312 ms while materialized metadata grew from 6.2 to 16.9 KiB. This

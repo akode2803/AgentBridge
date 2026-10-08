@@ -1,6 +1,8 @@
 """Selected auxiliary presentation reuses canonical membership and source cuts."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from agentbridge.core.timekit import utcnow_iso
@@ -54,6 +56,32 @@ def _settled_lane(app, chat, lane):
             return result
         assert app.mesh.local_inputs.prepare_one()
     pytest.fail(f'{lane} auxiliary proofs did not converge')
+
+
+def test_account_prefetch_chunks_byte_overflow_and_reserves_the_account_cap():
+    from agentbridge.mesh.membership_coordinator import _Round, _Stop
+
+    round_ = object.__new__(_Round)
+    round_.accounts, round_.account_records = {}, {}
+    round_.ledger = SimpleNamespace(limits=SimpleNamespace(max_accounts=5))
+    calls = []
+
+    def capture(names):
+        calls.append(names)
+        if len(names) > 2:
+            raise OverflowError('fixture capture ceiling')
+        return SimpleNamespace(documents=SimpleNamespace(
+            records=(object(), *(object() for _ in names))))
+
+    round_.capture = capture
+    names = tuple(f'user-{n}' for n in range(5))
+    round_.prefetch_accounts(names)
+    assert set(round_.account_records) == set(names)
+    assert [len(batch) for batch in calls] == [5, 2, 3, 1, 2]
+    round_.capture = lambda _names: pytest.fail('captured beyond reserved account cap')
+    with pytest.raises(_Stop) as caught:
+        round_._account_record('external-owner')
+    assert caught.value.reason == 'account_budget_exhausted'
 
 
 def test_selected_aux_sources_reach_ready_and_match_pause_live_baseline(page_app):

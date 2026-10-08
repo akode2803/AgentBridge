@@ -405,16 +405,13 @@ its one-second computation window. Next: publish the stacked branch for review,
 then finish auxiliary/member-history and browser-paint profiling without weakening
 final source checks.
 
-PR59 passed Ubuntu/Windows and merged as `528922e` on 2026-10-08. PR60 was
-retargeted to main after that merge. Its `ee09bdd` repair has a clean Codex
-rereview and passing Ubuntu CI. The replacement Windows run fixed the earlier
-auxiliary clock flake but failed during signup in `test_chat_pins_are_a_list_with_body`:
-3,262 passed, 31 skipped. The captured request frame was at the mutation
-coordinator's SQLite commit; the other listed workers were waiting. This does
-not establish the earlier concurrent presence-write race as the cause. The
-same test passes locally. The failed Windows job was rerun once (run
-`37785263540`); do not repeatedly monitor it. Retargeting did not itself start
-a new CI run. PR60 remains open, not deployed or restarted.
+PR59 passed Ubuntu/Windows and merged as `528922e` on 2026-10-08. PR60's first
+replacement Windows run failed during signup in
+`test_chat_pins_are_a_list_with_body` after 3,262 passes and 31 skips; the
+captured request frame was at the mutation coordinator's SQLite commit and did
+not establish the earlier concurrent presence-write race as its cause. The one
+authorized rerun then passed alongside Ubuntu and the clean Codex rereview.
+PR60 merged as `64b0580` on 2026-10-08. It has not been deployed or restarted.
 
 The current branch is `codex/large-room-auxiliary-profile`, version 0.24.309,
 based on PR60. Auxiliary profile reads now capture the bounded member-account
@@ -462,8 +459,10 @@ stale-route/session/version, read/retention and server authority checks pass; th
 wider server gate passes 158 tests. Ruff, JavaScript syntax and diff checks pass.
 
 Opt-in browser diagnostics now record content-free `aux_controls` and
-`aux_members` read and paint durations. This provides the missing real-app split
-between endpoint time and keyed DOM reconciliation. Do not raise the 64-member
+`aux_members` read, inclusive paint and paintMeshChat reconciliation durations.
+The paint-only observation uses the distinct `page_reconcile` event so the
+existing `page_paint` contract continues to include its page read. This provides
+the missing real-app split between endpoint time and keyed DOM work. Do not raise the 64-member
 safety bound until the real-app measurements establish the resource and product
 rationale.
 
@@ -479,3 +478,15 @@ of performing/materializing hundreds of mutations. The next task remains real-ap
 `aux_controls`/`aux_members` browser-paint capture after the reviewed code is
 running, followed by deciding whether lifecycle/pin resolution needs a deeper
 algorithmic change. Keep the current member/account bounds until that evidence.
+
+PR61 (`codex/large-room-auxiliary-profile`) contains the batching, lane split,
+diagnostics and history probe. It was opened stacked on PR60, then retargeted to
+main immediately after PR60 merged. The first Codex review found three valid
+gaps. Prefetched rows are now reserved against the account cap before any
+lifecycle dependency capture; an oversized multi-account capture bisects while
+retaining the operation-wide byte/step ledger; and the new paint-only timing is
+the distinct `page_reconcile` event while `page_paint` remains inclusive of its
+read. The focused auxiliary/diagnostics gate passes 114 tests, and the wider
+membership/page-operation authority gate passes 111 tests with two expected
+skips. JavaScript syntax, Ruff and diff checks pass. Push this repair and require
+a current-head rereview plus replacement cross-platform CI before merge.

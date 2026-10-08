@@ -50,6 +50,11 @@ d.configureDiagnostics(false);
 await tick();assert.equal(requests.length,4,'disable clears queued events');
 listeners.error({message:'PRIVATE',filename:'SECRET'});
 assert.equal(timers.size,0);assert.equal(disconnects,1);
+d.configureDiagnostics(true);
+d.diagnostic('page_reconcile',{mode:'aux_members',status:'ready',duration_ms:7});
+await tick();
+assert.deepEqual(requests.at(-1).body.events.filter(e=>e.event==='page_reconcile').map(e=>
+  [e.event,e.mode,e.status,e.duration_ms]),[['page_reconcile','aux_members','ready',7]]);
 '''.replace('__SOURCE__', json.dumps(source))
     runner = tmp_path / 'diagnostics.mjs'
     runner.write_text(script, encoding='utf-8')

@@ -168,6 +168,8 @@ assert.deepEqual(diagnostics.filter(row=>row.event==='page_read').slice(-2)
   .map(row=>row.mode),['aux_controls','aux_members']);
 assert.deepEqual(diagnostics.filter(row=>row.event==='page_paint').slice(-2)
   .map(row=>row.mode),['aux_controls','aux_members']);
+assert.deepEqual(diagnostics.filter(row=>row.event==='page_reconcile').slice(-2)
+  .map(row=>row.mode),['aux_controls','aux_members']);
 const combined=mergePagedAuxLane(response('controls'),response('members'));
 const controlsAgain=mergePagedAuxLane(combined,response('controls',{
   feeds:[{agent:'new'}],tasks:[],runs:[]}));

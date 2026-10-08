@@ -150,6 +150,11 @@ def test_record_failure_counter_and_server_only_schema(tmp_path, monkeypatch):
     assert sanitized['request_seq'] == 2**53 - 1 and sanitized['sqlite_extended_code'] == 517
     client = Diagnostics._sanitize(event, client=True)
     assert not {'request_seq', 'attempt', 'sqlite_extended_code', 'sqlite_primary_code', 'sqlite_category'} & client.keys()
+    aux = Diagnostics._sanitize({'event': 'page_reconcile', 'mode': 'aux_controls',
+        'status': 'ready', 'duration_ms': 3.5}, client=True)
+    assert {key: aux[key] for key in ('event', 'mode', 'status', 'duration_ms')} == {
+        'event': 'page_reconcile', 'mode': 'aux_controls',
+        'status': 'ready', 'duration_ms': 3.5}
     for key in ('request_seq', 'attempt', 'sqlite_extended_code', 'sqlite_primary_code'):
         for value in (True, -1, 2**54, 'PRIVATE'):
             assert key not in Diagnostics._sanitize({**event, key: value})

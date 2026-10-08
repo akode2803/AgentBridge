@@ -69,6 +69,8 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
         _event("page_read", "browser", duration_ms=80, mode="first", **common),
         _event("page_paint", "browser", duration_ms=100, mode="first",
                outcome="completed", **common),
+        _event("page_reconcile", "browser", duration_ms=20, mode="aux_members",
+               outcome="completed", **common),
         _event(duration_ms=50, **common),
         _event("page_stage", phase="sidebar", duration_ms=40, **common),
         _event("page_stage", phase="inputs", duration_ms=5, **common),
@@ -78,6 +80,7 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
     result = summary.summarize([_write(tmp_path, records)])
     browser = {row["event"]: row for row in result["series"]["browser"]}
     assert browser["page_paint"]["duration_ms"]["p50"] == 100
+    assert browser["page_reconcile"]["duration_ms"]["p50"] == 20
     assert browser["page_read"]["duration_ms"]["p50"] == 80
     assert browser["client_request"]["duration_ms"]["p50"] == 60
     assert _one(result)["duration_ms"]["p50"] == 50
@@ -87,6 +90,7 @@ def test_overlapping_layers_and_phases_are_never_combined(tmp_path):
     assert stages["prepare"]["duration_ms"]["missing"] == 1
     assert stages["finalize"]["duration_ms"]["p50"] is None
     assert "overlap" in result["notes"][0]
+    assert any("page_reconcile" in note for note in result["notes"])
     assert not {"total_ms", "render_ms", "network_ms"} & set(result)
     # Server-only stage categorization must not relabel client-supplied events.
     path = _write(tmp_path, [_event("page_stage", "browser", duration_ms=2)])
