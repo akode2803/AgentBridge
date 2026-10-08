@@ -109,7 +109,10 @@ def test_sidebar_refresh_queue_is_session_bound_and_caps_parallel_claims():
     queue.finish(token, second, resolved=True)
     queue.finish(token, third, resolved=True)
     assert queue.status(token) == {
-        "pending": 0, "running": 0, "complete": True, "removed": ()}
+        "pending": 0, "running": 0, "complete": True,
+        "active": False, "deferred": 0, "removed": (),
+        "retry_after_ms": 100,
+    }
 
     assert queue.request_chat(token, "b")
     assert queue.claim(token, preferred="b") == "b"

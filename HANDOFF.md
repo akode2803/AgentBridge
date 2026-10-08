@@ -291,6 +291,13 @@ reconciliation diagnostics remain independently active and must be profiled afte
 this retry-owner fix; they are not evidence that the browser queue is still hot.
 Local review and a cross-platform PR gate are next.
 
+PR58's first Ubuntu run completed 3,265 tests and found one stale exact-dictionary
+assertion in `test_sidebar_cache`: queue status intentionally gained `active`,
+`deferred` and `retry_after_ms`, while the older contract test still expected the
+previous four-field shape. Production code, lint, frontend checks and all other
+tests passed. The assertion now covers the expanded status contract; the focused
+sidebar/cache gate passes 48 tests with four expected skips.
+
 After the retry-owner fix, profile the remaining steady-state reconciliation and
 the durable intent accumulation separately. Do not weaken the source CAS or clear
 ambiguous intents by age. Large-room member scaling is the next latency profile;
