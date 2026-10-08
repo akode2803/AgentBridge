@@ -490,3 +490,32 @@ read. The focused auxiliary/diagnostics gate passes 114 tests, and the wider
 membership/page-operation authority gate passes 111 tests with two expected
 skips. JavaScript syntax, Ruff and diff checks pass. Push this repair and require
 a current-head rereview plus replacement cross-platform CI before merge.
+
+The pre-PR61 v0.24.306 baseline accepted 25,722 bounded diagnostic records. Its
+combined `/api/mesh/chat_aux` calls had a 423 ms p50, 1.62 s p95 and 18
+unavailable plus three aborted results among 27 samples. It also recorded 6,439
+`source_mutation_pending` outcomes. Keep that window separate from current-code
+evidence.
+
+PR61 passed Ubuntu and Windows, received a clean current-head rereview and merged
+as `fa254d0` on 2026-10-08. The local app independently advanced to v0.24.309
+(server PID 22407) with detailed logging enabled; this round did not restart it.
+Real-app upward paging retained 50 through 250 messages without transcript
+blanking. Keyed DOM reconciliation for successful auxiliary lanes was 0--1 ms,
+confirming that the remaining delay is server work rather than paint.
+
+The live capture exposed a composition defect: canonical refreshes repeatedly
+aborted deferred member decoration, including five member-lane aborts in the
+controlled browser tab and no completion. The follow-up branch is
+`codex/stable-aux-decoration`, version 0.24.310. It keys companion ownership to
+both page version and the retained message-ID window, so an identical canonical
+refresh preserves the in-flight request while a changed version or older-page
+growth still retires it. The focused browser orchestration regression passes.
+All 147 frontend module tests pass. The 82-test page/Realtime gate passes with
+one expected skip, the 93-test auxiliary/presentation/diagnostics gate passes,
+and Ruff, JavaScript syntax and diff checks are clean. Review and publish the
+follow-up for cross-platform CI. After it lands, capture a completed real member
+lane and continue the durable Realtime frontier protocol. Rapid route switching
+also still shows the deliberately blank transition surface while the new room's
+fresh page loads; handle that as a separate bounded presentation-cache design,
+without treating cached DOM as membership authority.

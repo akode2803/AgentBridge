@@ -39,9 +39,11 @@ const Mesh = {chatId:'room',state:{user:'alice',chats:[
   {id:'room',last:{ns:60},unread:2,forced_unread:true},
 ]},select:{ids:new Set()},msgExpand:{},pendingRead:null};
 let anchorCaptures=0,anchorRestores=0,prunes=0,paints=0,sidebar=0,retired=0;
+let auxStarts=0,auxAborts=0;
 const calls=[], modes=[];
 let paintAllowed=true;
 let pageVersion='v1';
+let pageMessageIds=['m'];
 const auxDisplayCalls=[];
 let pendingOlder=false, savedPlan=false;
 let timerSeq=0;
@@ -80,7 +82,8 @@ const pageRead = {
     }
     if (mode==='refresh') savedPlan=false;
     return {status:'page', pageData:{me:'alice',read_cutoff_ns:cutoff,read_ack_token:readToken,
-      meta:{id:'room'},metadata_status:{}}, messages:[{id:'m',ns:60}],
+      meta:{id:'room'},metadata_status:{}},
+      messages:pageMessageIds.map((id,index)=>({id,ns:60+index})),
       evictedIds:[],hasMore:true,pageVersion};
   },
 };
@@ -92,7 +95,9 @@ const deps={App,Mesh,diagnostic:()=>{},canonicalDeliveryDom:()=>{},BrowserSessio
   captureTranscriptAnchor:()=>{anchorCaptures++;return {candidates:[]};},
   restoreTranscriptAnchor:()=>{anchorRestores++;},
   pruneTranscriptResources:()=>{prunes++;},
-  abortPagedAux:()=>{},abortPagedReceipts:()=>{},refreshPagedAux:async()=>{},
+  abortPagedAux:(owner)=>{if(owner?.auxAbort){auxAborts++;owner.auxAbort=null;}},
+  abortPagedReceipts:()=>{},
+  refreshPagedAux:async(owner)=>{auxStarts++;owner.auxAbort={abort(){}};},
   refreshPagedReceipts:async()=>{},syncRetainedReceipts:()=>{},
   pagedAuxDisplay:(pageData,response)=>{
     auxDisplayCalls.push(response);
@@ -131,11 +136,17 @@ assert.equal(prunes,1);
 assert.equal(getOwner().visibleReadNs,cutoff); // retain exact decimal, never a Number
 assert.equal(getOwner().visibleReadToken,readToken);
 assert.equal(getOwner().visibleReadVersion,'v1');
+assert.equal(auxStarts,1);
+const firstAux=getOwner().auxAbort;
 
 // Explicit Jump to latest ignores the old scroll anchor, moves to bottom,
 // and acknowledges the painted page's token/version, never a caller cutoff.
 transcript.scrollTop=100;
 await renderPagedChat(false,'first');
+assert.equal(getOwner().auxAbort,firstAux,
+  'an identical canonical window must not starve its in-flight aux read');
+assert.equal(auxStarts,1);
+assert.equal(auxAborts,0);
 assert.deepEqual(modes,['first','first']);
 assert.equal(anchorCaptures,1);
 assert.equal(anchorRestores,1);
@@ -152,7 +163,12 @@ assert.equal(Object.hasOwn(Mesh,'readTail'),false);
 // A historical page preserves its position, does not advance the read cursor,
 // and its scroll listener fetches older only at the top while idle.
 transcript.scrollTop=300;
+const auxBeforeWindowGrowth={starts:auxStarts,aborts:auxAborts};
+pageMessageIds=['older','m'];
 await renderPagedChat(false,'older');
+assert.equal(auxAborts,auxBeforeWindowGrowth.aborts+1,
+  'retained-window growth retires aux work even at the same page version');
+assert.equal(auxStarts,auxBeforeWindowGrowth.starts+1);
 assert.equal(getOwner().browsing,true);
 assert.equal(anchorCaptures,2);
 assert.equal(anchorRestores,2);
@@ -198,10 +214,14 @@ assert.equal(timers.filter(timer=>!timer.cancelled&&!timer.ran).length,0);
 getOwner().auxSnapshot={pageVersion:'v1',response:{aux:{feeds:[{agent:'bot'}]}}};
 await renderPagedChat(false,'first');
 assert.deepEqual(auxDisplayCalls.at(-1),{aux:{feeds:[{agent:'bot'}]}});
+const auxBeforeVersionChange={starts:auxStarts,aborts:auxAborts};
 pageVersion='v2';
 await renderPagedChat(false,'first');
 assert.equal(getOwner().auxSnapshot,null);
 assert.equal(auxDisplayCalls.at(-1),null);
+assert.equal(auxAborts,auxBeforeVersionChange.aborts+1,
+  'a changed canonical version retires stale aux work');
+assert.equal(auxStarts,auxBeforeVersionChange.starts+1);
 
 // A superseded same-route paint must not prune, restore or mark anything.
 paintAllowed=false;

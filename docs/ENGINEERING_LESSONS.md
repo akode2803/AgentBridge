@@ -1,5 +1,22 @@
 # Engineering failure lessons
 
+## Identical canonical refreshes starved deferred decoration (v0.24.310)
+
+The large-room split made the transcript readable before optional member
+profiles, but every successful canonical refresh still aborted and restarted
+the companion request. In an active room whose refresh cadence was shorter than
+the member lifecycle/pin read, controls sometimes painted while the member lane
+was repeatedly aborted. Green endpoint and browser ownership tests missed the
+composition failure because none held a companion read across an identical
+canonical refresh.
+
+Safeguard: fence companion work by both canonical page version and the exact
+retained message-ID window. An identical refresh keeps its in-flight companion;
+a changed version or older-page expansion still aborts it before it can paint.
+Test the scheduler composition directly, and use live diagnostics to distinguish
+endpoint time, aborts and DOM reconciliation rather than treating a deferred
+endpoint's isolated benchmark as product completion.
+
 ## Durable fences are not transient source failures (v0.24.307)
 
 After sidebar retries were bounded, three rooms protected by ambiguous-write or

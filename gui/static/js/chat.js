@@ -503,8 +503,21 @@ async function renderPagedChat(force, kind = null, options = {}) {
       return;
     }
     owner.ready = true;
-    abortPagedAux(owner);
-    owner.pageRevision = (owner.pageRevision || 0) + 1;
+    // A canonical refresh can return the exact page window while its deferred
+    // member decoration is still running. Restarting that optional work on
+    // every identical refresh starves the member lane in an active room whose
+    // refresh cadence is shorter than the profile/lifecycle read. Fence aux
+    // work by both the canonical page version and the retained message window:
+    // older-page growth must still retire an in-flight paint even when the raw
+    // generation itself did not change.
+    const auxWindowKey = JSON.stringify(result.messages.map(message => message.id));
+    const auxWindowChanged = owner.pageVersion !== result.pageVersion
+      || owner.auxWindowKey !== auxWindowKey;
+    if (auxWindowChanged) {
+      abortPagedAux(owner);
+      owner.pageRevision = (owner.pageRevision || 0) + 1;
+      owner.auxWindowKey = auxWindowKey;
+    }
     if (owner.pageVersion !== result.pageVersion) {
       owner.auxSnapshot = null;
       abortPagedReceipts(owner);
@@ -601,7 +614,11 @@ async function renderPagedChat(force, kind = null, options = {}) {
     }
     if (Mesh.detailsView) { pane.hidden = false; await V.renderChatDetails(); }
     if (pageOwner === owner && owner.current()) {
-      void refreshPagedAux(owner, owner.pageRevision, result.pageVersion, data);
+      // Keep the exact same-window companion read alive across a canonical
+      // refresh. A changed page/window above already aborted and revised it.
+      if (auxWindowChanged || !owner.auxAbort) {
+        void refreshPagedAux(owner, owner.pageRevision, result.pageVersion, data);
+      }
       void refreshPagedReceipts(owner, result.receiptRequests);
     }
     // This is a bounded canonical sidebar request; it never gates first paint.
