@@ -53,6 +53,12 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   epoch, page and capability contracts, explicit wrapper delegation, a
   deterministic lossy-notification fake, and an explicitly bounded legacy log
   feed. The Supabase schema and read-only observation stage remains next.
+  Local Stage 1 work now includes the append-only tables, transaction-bound
+  triggers, member/chat RLS, Realtime publication setup, capability/epoch probe,
+  and bounded event-page reader. PostgreSQL syntax parsing and the 203-test
+  transport boundary pass. Live installation, RLS query-plan/write-amplification
+  measurement and Realtime observation are still required; safety scheduling is
+  unchanged.
 - [ ] **Post-protocol architecture simplification and API formalization**
   (Aryan, 2026-10-08). Start only after the durable recovery protocol and known
   latency fixes are measured and stable. Inventory runtime layers, compatibility

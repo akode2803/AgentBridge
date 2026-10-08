@@ -42,6 +42,14 @@ from typing import Any
 
 from ..core.errors import TransportError, ValidationError
 from .base import Transport, TransportProfile, Watcher
+from .change_ledger import (
+    ChangeLedgerCapability,
+    ChangeLedgerEpoch,
+    ChangeLedgerEvent,
+    ChangeLedgerPage,
+    MAX_LEDGER_INTEGER,
+    MAX_LEDGER_PAGE_SIZE,
+)
 from .health import classify_transport_error, retry_inline
 
 __all__ = ["SupabaseTransport", "load_supabase_env"]
@@ -70,6 +78,8 @@ _HINT_LOG_S = 0.1             # first idle message pokes promptly; floor caps bu
 # only these flip the driver into legacy full-snapshot mode
 _MISSING_COL_MARKS = ("42703", "PGRST204", "does not exist", "Could not find")
 _DELTA_REPROBE_S = 60.0       # legacy mode re-probes (a paste upgrades live)
+_LEDGER_REPROBE_S = 60.0
+_LEDGER_SCHEMA_VERSION = 1
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -170,6 +180,8 @@ class SupabaseTransport(Transport):
         self._ret_min: bool | None = None  # library accepts returning="minimal"?
         self._effects_ready: bool | None = None
         self._effects_reprobe = 0.0
+        self._ledger_ready: bool | None = None
+        self._ledger_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -350,6 +362,95 @@ class SupabaseTransport(Transport):
                 # can't tell yet (offline?) — stay unprobed, decide later
                 return False
         return bool(self._delta)
+
+    # ----------------------------------------------------- durable change log
+    @property
+    def supports_change_ledger(self) -> bool:  # type: ignore[override]
+        return self.change_ledger_capability() is not None
+
+    def change_ledger_capability(self) -> ChangeLedgerCapability | None:
+        """Probe the exact observation-only ledger schema on a slow leash."""
+        now = time.monotonic()
+        if self._ledger_ready is True:
+            return ChangeLedgerCapability(_LEDGER_SCHEMA_VERSION)
+        if self._ledger_ready is False and now < self._ledger_reprobe:
+            return None
+        try:
+            rows = self._sb().table("ab_change_epochs") \
+                .select("epoch,minimum_cursor,schema_version") \
+                .eq("root", self.root).limit(1).execute().data
+            self._count(rows)
+            if len(rows) != 1:
+                self._ledger_ready = False
+            else:
+                epoch = ChangeLedgerEpoch(
+                    str(rows[0].get("epoch", "")),
+                    rows[0].get("minimum_cursor"),
+                    rows[0].get("schema_version"),
+                )
+                self._ledger_ready = epoch.schema_version == _LEDGER_SCHEMA_VERSION
+        except Exception as exc:  # noqa: BLE001 - unavailable retains polling
+            if _is_missing_column(exc):
+                self._ledger_ready = False
+            elif self._ledger_ready is None:
+                return None
+        if not self._ledger_ready:
+            self._ledger_reprobe = now + _LEDGER_REPROBE_S
+            return None
+        return ChangeLedgerCapability(_LEDGER_SCHEMA_VERSION)
+
+    def change_ledger_epoch(self) -> ChangeLedgerEpoch:
+        if self.change_ledger_capability() is None:
+            raise TransportError("Supabase change ledger is unavailable")
+        rows = self._retry(lambda: self._sb().table("ab_change_epochs")
+                           .select("epoch,minimum_cursor,schema_version")
+                           .eq("root", self.root).limit(1).execute()).data
+        self._count(rows)
+        if len(rows) != 1:
+            self._ledger_ready = False
+            raise TransportError("Supabase change ledger epoch is unavailable")
+        try:
+            epoch = ChangeLedgerEpoch(
+                str(rows[0].get("epoch", "")),
+                rows[0].get("minimum_cursor"),
+                rows[0].get("schema_version"),
+            )
+        except ValueError as exc:
+            raise TransportError("Supabase change ledger epoch is invalid") from exc
+        if epoch.schema_version != _LEDGER_SCHEMA_VERSION:
+            self._ledger_ready = False
+            raise TransportError("Supabase change ledger version is unsupported")
+        return epoch
+
+    def change_ledger_events(
+        self, after_cursor: int, *, limit: int,
+    ) -> ChangeLedgerPage:
+        capability = self.change_ledger_capability()
+        if capability is None:
+            raise TransportError("Supabase change ledger is unavailable")
+        if type(after_cursor) is not int \
+                or after_cursor < 0 or after_cursor > MAX_LEDGER_INTEGER:
+            raise ValueError("after_cursor must be a non-negative integer")
+        if type(limit) is not int or limit < 1 or limit > capability.max_page_size:
+            raise ValueError("invalid change ledger page limit")
+        rows = self._retry(lambda: self._sb().table("ab_change_events")
+                           .select("id,stream_kind,stream_id,domain,doc_head,log_head")
+                           .eq("root", self.root).gt("id", after_cursor)
+                           .order("id").limit(min(limit + 1, MAX_LEDGER_PAGE_SIZE + 1))
+                           .execute()).data
+        self._count(rows)
+        try:
+            events = tuple(ChangeLedgerEvent(
+                event_id=row.get("id"),
+                stream_kind=row.get("stream_kind"),
+                stream_id=row.get("stream_id"),
+                domain=row.get("domain"),
+                doc_head=row.get("doc_head"),
+                log_head=row.get("log_head"),
+            ) for row in rows[:limit])
+            return ChangeLedgerPage(after_cursor, events, len(rows) > limit)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TransportError("Supabase returned an invalid change ledger page") from exc
 
     # ------------------------------------------------------------------ docs
     def get_doc(self, path: str, default: Any = None) -> Any:

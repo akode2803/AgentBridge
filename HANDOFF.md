@@ -539,3 +539,13 @@ capability and retain current polling. The 195-test transport/sync gate and Ruff
 compile and diff checks pass. Next, install the provider schema and triggers in
 read-only observation mode, validate RLS and write amplification, then implement
 the bounded catch-up owner. Do not reduce safety polling yet.
+
+PR62 merged after its Ubuntu and Windows gates passed. The next local Stage 1
+slice adds `ab_change_events`/`ab_change_epochs`, transaction-bound private
+triggers, member/chat RLS, idempotent Realtime publication setup, and a bounded
+Supabase capability/epoch/page reader. It does not subscribe, schedule catch-up,
+or alter polling yet. The complete schema parses as 96 PostgreSQL statements;
+the expanded transport boundary passes 203 tests and Ruff/diff checks. Before
+enabling the protocol, obtain current-head review, install it deliberately, then
+measure actual RLS replay plans, added database writes/WAL/Realtime messages and
+the root-epoch conflict check under concurrent sends.

@@ -13,6 +13,7 @@ import pytest
 
 from agentbridge.core.errors import ConfigError, TransportError, ValidationError
 from agentbridge.transport import CachingTransport, make_transport
+from agentbridge.transport.change_ledger import ChangeLedgerCapability
 from agentbridge.transport.supabase import SupabaseTransport
 
 from fake_cloud import FakeClient
@@ -168,6 +169,57 @@ def test_changed_logs_is_explicitly_keyset_bounded(tx):
     assert first_cursor == 1_000
     assert second_pairs == [("c1000", "ann@box.jsonl")]
     assert second_cursor == 1_001
+
+
+def test_change_ledger_probe_epoch_and_bounded_pages(tx):
+    tx._client.db["ab_change_epochs"] = [{
+        "root": "team",
+        "epoch": "12345678-1234-5678-9234-567812345678",
+        "minimum_cursor": 3,
+        "schema_version": 1,
+    }]
+    tx._client.db["ab_change_events"] = [
+        {"id": 4, "root": "team", "stream_kind": "root", "stream_id": "",
+         "domain": "docs", "doc_head": 7, "log_head": None},
+        {"id": 8, "root": "team", "stream_kind": "chat", "stream_id": "c1",
+         "domain": "logs", "doc_head": None, "log_head": 12},
+        {"id": 11, "root": "team", "stream_kind": "root", "stream_id": "",
+         "domain": "visibility", "doc_head": None, "log_head": None},
+    ]
+    assert tx.change_ledger_capability() == ChangeLedgerCapability(1)
+    assert tx.supports_change_ledger is True
+    assert tx.change_ledger_epoch().minimum_cursor == 3
+    first = tx.change_ledger_events(3, limit=2)
+    assert [event.event_id for event in first.events] == [4, 8]
+    assert first.cursor == 8 and first.has_more is True
+    second = tx.change_ledger_events(first.cursor, limit=2)
+    assert [event.event_id for event in second.events] == [11]
+    assert second.cursor == 11 and second.has_more is False
+
+
+def test_change_ledger_is_optional_and_invalid_rows_fail_closed(tx):
+    assert tx.change_ledger_capability() is None
+    assert tx.supports_change_ledger is False
+    with pytest.raises(TransportError, match="unavailable"):
+        tx.change_ledger_epoch()
+
+    tx._ledger_ready = None
+    tx._ledger_reprobe = 0
+    tx._client.db["ab_change_epochs"] = [{
+        "root": "team",
+        "epoch": "12345678-1234-5678-9234-567812345678",
+        "minimum_cursor": 0,
+        "schema_version": 1,
+    }]
+    tx._client.db["ab_change_events"] = [{
+        "id": 1, "root": "team", "stream_kind": "chat", "stream_id": "c1",
+        "domain": "logs", "doc_head": 1, "log_head": None,
+    }]
+    assert tx.change_ledger_capability() == ChangeLedgerCapability(1)
+    with pytest.raises(TransportError, match="invalid change ledger page"):
+        tx.change_ledger_events(0, limit=10)
+    with pytest.raises(ValueError, match="page limit"):
+        tx.change_ledger_events(0, limit=1_001)
 
 
 def test_corrupt_log_row_is_skipped_not_stuck(tx):
