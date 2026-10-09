@@ -36,7 +36,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .change_ledger import (
     ChangeLedgerCapability,
@@ -158,6 +158,15 @@ class Transport(ABC):
     ) -> ChangeLedgerPage:
         del after_cursor, limit
         raise NotImplementedError(f"{type(self).__name__} has no change ledger")
+
+    def subscribe_change_ledger(
+        self, callback: Callable[[int], None],
+    ) -> Callable[[], None]:
+        del callback
+        raise NotImplementedError(f"{type(self).__name__} has no change ledger")
+
+    def change_ledger_realtime_status(self) -> str:
+        return "unsupported"
 
     # ------------------------------------------------------------------ docs
     @abstractmethod

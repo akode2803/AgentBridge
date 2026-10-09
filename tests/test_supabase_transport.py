@@ -263,6 +263,27 @@ def test_change_ledger_is_optional_and_invalid_rows_fail_closed(tx):
         tx.change_ledger_events(0, limit=1_001)
 
 
+def test_change_ledger_listener_receives_only_validated_positions(tx):
+    tx._client.db["_change_ledger_version"] = 1
+    tx._client.db["ab_change_epochs"] = [{
+        "root": "team",
+        "epoch": "12345678-1234-5678-9234-567812345678",
+        "minimum_cursor": 0,
+        "schema_version": 1,
+    }]
+    received = []
+    unsubscribe = tx.subscribe_change_ledger(received.append)
+    tx._on_ledger_event(8)
+    tx._on_ledger_event("9")
+    assert received == [8]
+    assert tx.transfer_stats()["ledger_events"] == 1
+    assert tx.transfer_stats()["ledger_invalid_events"] == 1
+    assert tx.change_ledger_realtime_status() == "disconnected"
+    unsubscribe()
+    tx._on_ledger_event(10)
+    assert received == [8]
+
+
 def test_corrupt_log_row_is_skipped_not_stuck(tx):
     tx.append_log("c1", "log.jsonl", {"id": "m1"})
     tx._client.db["ab_logs"].append({          # a hand-corrupted row
@@ -376,7 +397,7 @@ def test_dead_realtime_thread_is_replaced(monkeypatch):
     made = []
 
     class FakeRealtime:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             self.live = True
             self.closed = False
             self.metric = _args[-1]
@@ -418,7 +439,7 @@ def test_short_lived_realtime_flaps_increase_backoff(monkeypatch):
     monkeypatch.setattr(mod.random, "random", lambda: 1.0)
 
     class FakeRealtime:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             self.live = True
             self.metric = _args[-1]
             self.metric("rt_ready")
@@ -500,6 +521,150 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
     assert wakes == ["disconnect"]
     assert client.ch.unsubscribed and client.realtime.closed
     assert metrics.count("rt_socket_closes") == 1
+    rt.close()
+
+
+def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
+    from agentbridge.transport.supabase import _RealtimeThread
+
+    class Auth:
+        def __init__(self):
+            self.credentials = []
+            self.closed = False
+        async def sign_in_with_password(self, credentials):
+            self.credentials.append(credentials)
+            return types.SimpleNamespace(
+                session=types.SimpleNamespace(access_token="member-token"),
+            )
+        async def close(self): self.closed = True
+
+    class Channel:
+        def __init__(self):
+            self.is_joined = True
+            self.is_errored = False
+            self.system = None
+            self.postgres = None
+            self.binding = None
+
+        def on_broadcast(self, *_args): return self
+        def on_system(self, callback):
+            self.system = callback
+            return self
+        def on_postgres_changes(self, event, callback, **binding):
+            self.postgres = callback
+            self.binding = (event, binding)
+            return self
+        async def subscribe(self, callback):
+            callback("SUBSCRIBED", None)
+            return self
+        async def unsubscribe(self): pass
+        async def send_broadcast(self, *_args): pass
+
+    class RealtimeClient:
+        def __init__(self): self.tokens = []
+        async def set_auth(self, token): self.tokens.append(token)
+        async def close(self): pass
+
+    class Client:
+        def __init__(self):
+            self.auth = Auth()
+            self.ch = Channel()
+            self.realtime = RealtimeClient()
+            self.options = None
+        def channel(self, _name, options):
+            self.options = options
+            return self.ch
+
+    client = Client()
+    metrics = []
+    events = []
+
+    async def create_client(*_args): return client
+
+    change_event = types.SimpleNamespace(Insert="INSERT")
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=create_client))
+    monkeypatch.setitem(sys.modules, "realtime", types.SimpleNamespace(
+        RealtimeChannelOptions=lambda **kwargs: kwargs,
+        RealtimePostgresChangesListenEvent=change_event,
+    ))
+    rt = _RealtimeThread({
+        "SUPABASE_URL": "https://x.test",
+        "SUPABASE_PUBLISHABLE_KEY": "pk",
+        "SUPABASE_MEMBER_EMAIL": "member@example.test",
+        "SUPABASE_MEMBER_PASSWORD": "secret",
+    }, "team", lambda: None, metrics.append, observe_ledger=True,
+       on_ledger_event=events.append, ledger_auth_mode="member:test")
+    deadline = time.monotonic() + 2.0
+    while (client.ch.system is None or rt.status() != "ready") \
+            and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.auth.credentials == [{
+        "email": "member@example.test", "password": "secret",
+    }]
+    assert client.realtime.tokens == ["member-token"]
+    assert client.options["config"]["broadcast"]["replication_ready"] is True
+    assert client.ch.binding[1] == {
+        "table": "ab_change_events", "schema": "public", "filter": "root=eq.team",
+    }
+    assert rt.change_ledger_status() == "connecting"
+    client.ch.system(types.SimpleNamespace(
+        extension="postgres_changes", status="ok", message="Subscribed to PostgreSQL"))
+    assert rt.change_ledger_status() == "connecting"
+    client.ch.system(types.SimpleNamespace(
+        extension="system", status="ok",
+        message="Replication connection established"))
+    assert rt.change_ledger_status() == "ready"
+    assert metrics.count("ledger_ready") == 1
+    client.ch.postgres({"data": {"record": {"root": "team", "id": 9}}})
+    client.ch.postgres({"data": {"record": {"root": "other", "id": 10}}})
+    assert events == [9]
+    assert metrics.count("ledger_invalid_events") == 1
+    rt.close()
+    assert client.auth.closed is True
+
+
+def test_realtime_member_auth_failure_does_not_silently_use_service_key(monkeypatch):
+    from agentbridge.transport.supabase import _RealtimeThread
+
+    keys = []
+
+    class Auth:
+        async def sign_in_with_password(self, _credentials):
+            raise RuntimeError("invalid member")
+
+    class RealtimeClient:
+        async def close(self): pass
+
+    class Client:
+        auth = Auth()
+        realtime = RealtimeClient()
+        def channel(self, *_args):
+            raise AssertionError("failed member auth reached channel creation")
+
+    async def create_client(_url, key):
+        keys.append(key)
+        return Client()
+
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=create_client))
+    monkeypatch.setitem(sys.modules, "realtime", types.SimpleNamespace(
+        RealtimeChannelOptions=lambda **kwargs: kwargs,
+        RealtimePostgresChangesListenEvent=types.SimpleNamespace(Insert="INSERT"),
+    ))
+    rt = _RealtimeThread({
+        "SUPABASE_URL": "https://x.test",
+        "SUPABASE_PUBLISHABLE_KEY": "pk",
+        "SUPABASE_SECRET_KEY": "service-secret",
+        "SUPABASE_MEMBER_EMAIL": "member@example.test",
+        "SUPABASE_MEMBER_PASSWORD": "bad",
+    }, "team", lambda: None, observe_ledger=True,
+       ledger_auth_mode="member:test")
+    deadline = time.monotonic() + 2.0
+    while rt.alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert keys == ["pk"]
+    assert rt.status() == "disconnected"
     rt.close()
 
 

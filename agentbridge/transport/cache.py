@@ -1046,6 +1046,12 @@ class CachingTransport(Transport):
     def change_ledger_events(self, after_cursor: int, *, limit: int):
         return self.inner.change_ledger_events(after_cursor, limit=limit)
 
+    def subscribe_change_ledger(self, callback):
+        return self.inner.subscribe_change_ledger(callback)
+
+    def change_ledger_realtime_status(self) -> str:
+        return self.inner.change_ledger_realtime_status()
+
     def append_log(self, chat_id: str, log_name: str, record: dict) -> None:
         self.inner.append_log(chat_id, log_name, record)
         with self._lock:
