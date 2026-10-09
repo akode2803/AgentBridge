@@ -1165,6 +1165,16 @@ class _RealtimeThread:
         finally:
             if not self._closing:
                 self._mark_disconnected()
+            # This thread owns the loop. Supabase Auth can leave its token
+            # refresh timer pending beyond the channel task; cancel owned
+            # tasks before closing so reconnects do not leak dead-loop work.
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(
+                    *pending, return_exceptions=True,
+                ))
             self._loop.close()
 
     def _mark_disconnected(self) -> None:
@@ -1331,6 +1341,13 @@ class _RealtimeThread:
             if callable(close):
                 try:
                     await asyncio.wait_for(close(), timeout=2.0)
+                except Exception:  # noqa: BLE001 - loop still must terminate
+                    pass
+            auth_client = getattr(sb, "auth", None) if sb is not None else None
+            close_auth = getattr(auth_client, "close", None)
+            if callable(close_auth):
+                try:
+                    await asyncio.wait_for(close_auth(), timeout=2.0)
                 except Exception:  # noqa: BLE001 - loop still must terminate
                     pass
             if self._counted_ready:

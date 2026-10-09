@@ -587,9 +587,13 @@ the channel; otherwise a fast join can race ahead as anonymous despite successfu
 member sign-in.
 Disconnect and readiness counters join the existing benchmark, while Broadcast
 and every safety poll stay unchanged. The 208-test transport/sync/benchmark gate,
-Ruff, compilation and diff checks passed before the foundation correction. Rebase
-and rerun that gate against the commit-safe page contract, then publish the
-observer as its own stacked PR after PR63 is review-clean; after the schema is
-deliberately installed, run RLS/write-amplification/Realtime measurements before
-building the cursor owner. Do not install the schema or reduce polling until the
-disposable-provider concurrency and live RLS evidence is complete.
+Ruff, compilation and diff checks passed before the foundation correction. The
+observer is now rebased as `d308483` over `50ae2f9`; the corrected Supabase,
+transport and sync boundary passes 205 tests with two expected skips. A follow-up
+review also closes the async Auth HTTP client and cancels loop-owned refresh work
+before the dedicated Realtime loop closes; the resulting focused gate passes 172
+tests with Ruff, compilation and diff checks clean. Commit and force-update the
+observer branch, then publish it as its own stacked PR after PR63 is review-clean.
+After the schema is deliberately installed, run RLS/write-amplification/Realtime
+measurements before building the cursor owner. Do not install the schema or reduce
+polling until the disposable-provider concurrency and live RLS evidence is complete.

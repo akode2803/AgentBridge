@@ -528,12 +528,15 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
     from agentbridge.transport.supabase import _RealtimeThread
 
     class Auth:
-        def __init__(self): self.credentials = []
+        def __init__(self):
+            self.credentials = []
+            self.closed = False
         async def sign_in_with_password(self, credentials):
             self.credentials.append(credentials)
             return types.SimpleNamespace(
                 session=types.SimpleNamespace(access_token="member-token"),
             )
+        async def close(self): self.closed = True
 
     class Channel:
         def __init__(self):
@@ -618,6 +621,7 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
     assert events == [9]
     assert metrics.count("ledger_invalid_events") == 1
     rt.close()
+    assert client.auth.closed is True
 
 
 def test_realtime_member_auth_failure_does_not_silently_use_service_key(monkeypatch):
