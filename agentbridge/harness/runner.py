@@ -1312,6 +1312,11 @@ class AgentRunner:
             max(0.0, announced + 1800.0 - now),
             self._handoff_check_in_s(now),
         ]
+        if not self._change_observer.active:
+            # Unsupported or failed durable-ledger setup retains the legacy
+            # broad safety scan cadence. Healthy ledger-backed Supabase runs
+            # stay entirely event/deadline driven.
+            delays.append(max(0.0, self.poll_s))
         try:
             delays.append(self._change_observer.next_check_in_s())
         except Exception:
