@@ -567,6 +567,28 @@ def test_realtime_priority_scan_does_not_walk_all_rooms(hrig, monkeypatch):
     assert runner._take_priority_chats() == []
 
 
+def test_realtime_priority_scan_requeues_transient_room_failure(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
+    attempts = []
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: priority)
+    monkeypatch.setattr(
+        runner.mesh.membership, "iter_chats_for",
+        lambda: pytest.fail("targeted retry must remain scoped"),
+    )
+
+    def fail_once_per_pass(*_args):
+        attempts.append(True)
+        raise OSError
+
+    monkeypatch.setattr(runner, "_scan_chat", fail_once_per_pass)
+
+    runner._prioritize_chat("priority", 1)
+    assert runner.scan_all(full=False) == 0
+    assert len(attempts) == 1
+    assert runner._take_priority_chats() == ["priority"]
+
+
 def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
     # Capture the real encrypted authority values outside the timed section;
@@ -2042,6 +2064,8 @@ def test_undecryptable_message_holds_the_scan_until_keys_arrive(hrig):
     last_ns, _ = runner.queue.scan_cursor(snap.id)
     assert last_ns < trigger.ns                    # held, not consumed
     assert not runner.queue.answered(snap.id, trigger.id, 0)
+    assert runner._take_priority_chats() == [snap.id]
+    runner._prioritize_chat(snap.id)
 
     # the key doc lands (the mirror refresh, in production) -> answered
     for p, doc in key_docs.items():

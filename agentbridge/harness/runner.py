@@ -333,13 +333,17 @@ class AgentRunner:
                 if chat_id in prioritized:
                     repeated.add(chat_id)
                     continue
+                # Mark before snapshot/canonical work. Any transient failure or
+                # self-priority raised below must wait for the next loop rather
+                # than being retried repeatedly inside this pass.
+                prioritized.add(chat_id)
                 try:
                     snap = self.mesh.snapshot(chat_id)
                     if not snap.is_member(self.agent):
                         continue
                     scan_room(snap)
-                    prioritized.add(chat_id)
                 except Exception:
+                    self._prioritize_chat(chat_id)
                     continue
 
         scan_priorities()
@@ -348,9 +352,11 @@ class AgentRunner:
                 scan_priorities()
                 if snap.id in prioritized:
                     continue
+                prioritized.add(snap.id)
                 try:
                     scan_room(snap)
                 except Exception:  # noqa: BLE001 — one chat never blocks the rest
+                    self._prioritize_chat(snap.id)
                     continue
         scan_priorities()
         for chat_id in repeated:
@@ -463,6 +469,11 @@ class AgentRunner:
                 added += 1
         if collect is None:
             self.queue.set_scan_cursor(chat_id, max_ns, max_edit)
+            if hold_ns:
+                # The synchronized envelope is durable, but its key inputs are
+                # not ready yet. Keep this exact room hot without restoring an
+                # all-room poll; a later key/doc wake can then heal promptly.
+                self._prioritize_chat(chat_id)
         return added
 
     def _catchup_skip(self, cand, settings: HarnessSettings) -> str | None:
