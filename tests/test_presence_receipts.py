@@ -105,6 +105,19 @@ def test_metered_profile_paces_presence_and_flips_poke():
     assert tx.pokes == 2
 
 
+def test_supabase_presence_cadence_fits_legacy_reader_window():
+    """Rolling upgrades must not make a healthy new writer flicker offline
+    for readers that still use the former 120-second stale threshold."""
+    from agentbridge.transport.supabase import SupabaseTransport
+
+    profile = SupabaseTransport.profile
+    legacy_stale_s = 120.0
+    retry_margin_s = 30.0
+    assert profile.presence_beat_s + profile.idle_poll_s \
+        <= legacy_stale_s - retry_margin_s
+    assert profile.presence_stale_s > legacy_stale_s
+
+
 def test_presence_matrix_gating(world):
     meshes, _ = world
     fable = meshes["fable"]

@@ -13,7 +13,7 @@ hard failures or explicit incomplete results.
 | Healthy foreground safety polling | Merely focusing the GUI renewed a lease that forced document and log delta queries every 3 s, even while Realtime was ready. | Remove focus-driven fast polling from the healthy path. Healthy Realtime uses the 45 s safety cadence. |
 | Foreground recovery polling | A disconnected or suspect Realtime path could take up to 3 s between foreground recovery reads. | Use a 1 s cadence only while the app is active and Realtime is disconnected or the hint watchdog is suspect. Background failure recovery remains 10 s. |
 | Realtime reconnect backoff | Exponential retry could reach 60 s. | Cap at 15 s. One root owns one socket per GUI process, so this does not create a startup channel fan-out. |
-| Metered presence heartbeat | Every GUI and harness wrote one durable presence document every 30 s. Five continuously running processes therefore produced about 14,400 API requests and corresponding platform log records per day even when idle. | Use a 60 s beat and 180 s stale window on Supabase. Sign-in, clean sign-out and state flips still publish immediately; only crash detection can take longer. This is an interim cost bound until the single local node owns one machine-level provider connection and presence lane. |
+| Metered presence heartbeat | Every GUI and harness wrote one durable presence document every 30 s. Five continuously running processes therefore produced about 14,400 API requests and corresponding platform log records per day even when idle. | Use a 45 s beat and 180 s stale window on Supabase. The beat plus the existing 45 s safety read remains within older clients' 120 s stale window during a rolling upgrade. Sign-in, clean sign-out and state flips still publish immediately; only crash detection can take longer. This is an interim cost bound until the single local node owns one machine-level provider connection and presence lane. |
 | Full document reconciliation | A complete snapshot heals delta-feed errors every 6 h. | Keep. Realtime Broadcast is a content-free, lossy wakeup and cannot prove completeness or authority. |
 | Browser broad refresh | No broad timer while the local SSE stream is healthy; 20 s when connected but unhealthy/background; 2.5 s when foreground and disconnected. | Keep as bounded recovery. Scoped transcript/sidebar/auxiliary lanes own the normal event path. |
 | Selected-room source admission | One room is admitted at a time; active selected work retries from 350 ms and backs off to the 4 s background cadence. | Keep serialization. It owns coherent SQLite publication and avoids competing writers. Realtime wakes it early; its timer is recovery, not a remote history poll. |
@@ -66,9 +66,9 @@ Logs Ingest allowance. A bounded 24-hour Unified Logs count contained 108,903
 API Gateway records out of 112,773 total records (96.6%). Samples included the
 same repeated handoff/pause prefix requests and `ab_chat_ids` calls attributed
 to the harness CPU plateau. The durable-ledger harness repair removes those
-request loops. The longer metered presence cadence halves the remaining
-predictable idle write baseline from roughly 14,400 to 7,200 requests/day for
-five continuously running processes. Log record sizes vary, so confirm bytes
+request loops. The longer metered presence cadence reduces the remaining
+predictable idle write baseline by one third, from roughly 14,400 to 9,600
+requests/day for five continuously running processes. Log record sizes vary, so confirm bytes
 over a normal post-release day rather than treating request counts as bytes.
 
 Postgres logging is already conservative (`log_statement=ddl`, duration logging
