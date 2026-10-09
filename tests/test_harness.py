@@ -567,6 +567,21 @@ def test_realtime_priority_scan_does_not_walk_all_rooms(hrig, monkeypatch):
     assert runner._take_priority_chats() == []
 
 
+def test_chat_scoped_ledger_change_queues_only_named_rooms(hrig, monkeypatch):
+    from agentbridge.harness.change_observer import HarnessChanges
+
+    runner = hrig.make_runner(responder=Scripted())
+    monkeypatch.setattr(
+        runner._change_observer, "tick",
+        lambda: HarnessChanges(chat_ids=("room-b", "room-a")),
+    )
+    runner._wake.clear()
+
+    assert runner._consume_observer_changes() is False
+    assert runner._take_priority_chats() == ["room-b", "room-a"]
+    assert not runner._wake.is_set()
+
+
 def test_full_scan_rechecks_cached_room_pause(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
     runner._chat_pause["room"] = (True, time.monotonic())

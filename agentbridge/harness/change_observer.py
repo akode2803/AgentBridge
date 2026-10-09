@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 
 from ..transport.change_ledger import ChangeLedgerEpoch
 
@@ -19,6 +20,14 @@ _MAX_PAGES_PER_TICK = 4
 _HEALTHY_AUDIT_S = 300.0
 _RECOVERY_POLL_S = 45.0
 _REPROBE_S = 60.0
+
+
+@dataclass(frozen=True)
+class HarnessChanges:
+    """Admitted delivery evidence that runtime discovery must recompute."""
+
+    full_scan: bool = False
+    chat_ids: tuple[str, ...] = ()
 
 
 class HarnessChangeObserver:
@@ -73,14 +82,6 @@ class HarnessChangeObserver:
         self._cursor = int(state["cursor"]) if same else epoch.minimum_cursor
         return same
 
-    def _save_state(self) -> None:
-        assert self._epoch is not None
-        self.store.cache_doc(_STATE_DOC, {
-            "v": 1,
-            "epoch": self._epoch.epoch,
-            "cursor": self._cursor,
-        })
-
     def _start(self) -> bool:
         now = self.clock()
         if self._started:
@@ -101,7 +102,7 @@ class HarnessChangeObserver:
                 if not callable(refresh):
                     raise RuntimeError("transport mirror cannot reset")
                 refresh()
-                self._save_state_for(epoch)
+                self._save_state_for(epoch, self._cursor)
             self._epoch = epoch
             self._unsubscribe = self.transport.subscribe_change_ledger(
                 self._signalled,
@@ -114,20 +115,25 @@ class HarnessChangeObserver:
             self._next_probe = now + _REPROBE_S
             return False
 
-    def _save_state_for(self, epoch: ChangeLedgerEpoch) -> None:
+    def _save_state_for(self, epoch: ChangeLedgerEpoch, cursor: int) -> None:
         self.store.cache_doc(_STATE_DOC, {
             "v": 1,
             "epoch": epoch.epoch,
-            "cursor": self._cursor,
+            "cursor": cursor,
         })
 
-    def tick(self) -> bool:
-        """Replay bounded pages; return whether runtime discovery should run."""
+    def tick(self) -> HarnessChanges:
+        """Replay bounded pages and return admitted work scopes.
+
+        Ledger scopes are delivery evidence only.  The runner still performs
+        current canonical membership, trust, key and visibility checks.
+        """
+        empty = HarnessChanges()
         if not self._start():
-            return False
+            return empty
         now = self.clock()
         if now < self._retry_at:
-            return False
+            return empty
         status = self.transport.change_ledger_realtime_status()
         with self._lock:
             dirty = self._dirty
@@ -135,11 +141,12 @@ class HarnessChangeObserver:
                 _HEALTHY_AUDIT_S if status == "ready" else _RECOVERY_POLL_S
             )
             if not dirty and not due:
-                return False
+                return empty
             self._dirty = False
             verify_epoch = self._verify_epoch or due
             self._verify_epoch = False
-        changed = False
+        full_scan = False
+        chat_ids: set[str] = set()
         try:
             if verify_epoch:
                 epoch = self.transport.change_ledger_epoch()
@@ -150,10 +157,10 @@ class HarnessChangeObserver:
                     if not callable(refresh):
                         raise RuntimeError("transport mirror cannot reset")
                     refresh()
+                    self._save_state_for(epoch, epoch.minimum_cursor)
                     self._epoch = epoch
                     self._cursor = epoch.minimum_cursor
-                    self._save_state()
-                    changed = True
+                    full_scan = True
                 else:
                     self._epoch = epoch
             for _ in range(_MAX_PAGES_PER_TICK):
@@ -175,9 +182,18 @@ class HarnessChangeObserver:
                         if not callable(refresh):
                             raise RuntimeError("transport mirror cannot recover")
                         refresh(visibility=visibility)
-                        changed = True
+                        for event in page.events:
+                            if event.domain == "visibility" \
+                                    or event.stream_kind == "root":
+                                full_scan = True
+                            elif event.domain == "docs":
+                                chat_ids.add(event.stream_id)
+                    # Persist before adopting the cursor in memory.  A local
+                    # save failure must replay this admitted page rather than
+                    # skipping it until process restart or the broad audit.
+                    assert self._epoch is not None
+                    self._save_state_for(self._epoch, page.cursor)
                     self._cursor = page.cursor
-                    self._save_state()
                 if not page.has_more:
                     break
             else:
@@ -186,7 +202,7 @@ class HarnessChangeObserver:
                 self.wake()
             self._last_check = now
             self._retry_at = 0.0
-            return changed
+            return HarnessChanges(full_scan, tuple(sorted(chat_ids)))
         except Exception:
             # The cursor remains at the last page whose mirror admission and
             # local save both succeeded.  Retry from there on the recovery
@@ -196,7 +212,10 @@ class HarnessChangeObserver:
                 self._verify_epoch = self._verify_epoch or verify_epoch
             self._last_check = now
             self._retry_at = now + _RECOVERY_POLL_S
-            return False
+            # Earlier pages may already be admitted and durably advanced.  Do
+            # not forget their scopes merely because a later bounded page
+            # failed; retry resumes from the last committed cursor.
+            return HarnessChanges(full_scan, tuple(sorted(chat_ids)))
 
     def close(self) -> None:
         unsubscribe, self._unsubscribe = self._unsubscribe, None
