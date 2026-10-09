@@ -626,7 +626,8 @@ row, cursor, cache generation or notification grants authority.
 The provider schema adds a live `(root, path text_pattern_ops)` prefix index and
 replaces `ab_chat_ids` with a fixed-search-path, explicitly granted
 `SECURITY DEFINER` candidate scan followed by the existing current root/chat
-authority predicates once per candidate. It also applies the Supabase-recommended
+authority predicates once per candidate; the explicitly supported legacy
+service-role mode retains its existing all-root access. It also applies the Supabase-recommended
 init-plan form to the two member self-service `auth.uid()` policies. The focused
 runtime/cache/control/Supabase gate passes 286 tests; the complete offline suite
 passes 3,321 tests with 18 expected skips; Ruff and diff checks are clean. The

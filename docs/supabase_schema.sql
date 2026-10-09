@@ -219,8 +219,13 @@ language sql stable security definer set search_path = pg_catalog as $$
   select c.chat_id
   from candidates c
   where c.chat_id <> ''
-    and public.ab_root_ok(p_root)
-    and public.ab_can_read_chat(p_root, c.chat_id)
+    and (
+      auth.role() = 'service_role'
+      or (
+        public.ab_root_ok(p_root)
+        and public.ab_can_read_chat(p_root, c.chat_id)
+      )
+    )
 $$;
 revoke all on function public.ab_chat_ids(text)
   from public, anon, authenticated;

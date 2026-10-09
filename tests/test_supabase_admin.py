@@ -58,6 +58,7 @@ def test_runtime_prefix_and_chat_discovery_avoid_full_rls_table_scans():
     assert "security definer set search_path = pg_catalog" in body
     assert "public.ab_root_ok(p_root)" in body
     assert "public.ab_can_read_chat(p_root, c.chat_id)" in body
+    assert "auth.role() = 'service_role'" in body
     assert "from public.ab_logs l" in body
     assert "from public.ab_docs d" in body
     assert "from public, anon, authenticated" in body
