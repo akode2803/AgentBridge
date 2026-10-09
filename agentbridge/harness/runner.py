@@ -2,10 +2,10 @@
 
 Lifecycle: verify this machine really hosts the agent (its account names this
 machine and the local keystore holds its identity) → start the Mesh facade
-(outbox, presence heartbeat) + a sync thread → then loop: SCAN (the poll is
-the source of truth; the transport watcher only shortens the wait) → enqueue
-new triggers into the durable queue → DISPATCH claimed (chat, sender) groups
-on a pool sized by the owner-set concurrency.
+(outbox, presence heartbeat) + a sync thread → then loop: replay durable
+provider changes, scan affected chats, and enqueue new triggers into the
+durable queue → DISPATCH claimed (chat, sender) groups on a pool sized by the
+owner-set concurrency. Startup and bounded safety audits still scan all rooms.
 
 The runner is deliberately model-agnostic: it hands deliveries to an injected
 ``Responder`` (R16's registry provides real ones) and posts what comes back.
@@ -72,6 +72,7 @@ EXIT_ALREADY_RUNNING = 3
 MAX_WORKERS = MAX_CONCURRENCY  # one hard ceiling for pool + parsed owner setting
 RATE_RETRY_S = 600.0     # capped chat: revisit in this many seconds
 BLOB_GRACE_S = 600.0     # v1 value: a lost attachment must not wedge a chat
+FULL_SCAN_AUDIT_S = 300.0  # recovery audit; realtime/ledger owns normal wakeups
 NOTICE = ("@{agent}'s harness could not produce a reply here "
           "({err}). Its responsible member can check the harness on "
           "{machine}.")
@@ -294,17 +295,35 @@ class AgentRunner:
             self._priority_chats.setdefault(chat_id, None)
         self._wake.set()
 
+    def _defer_chat(self, chat_id: str) -> None:
+        """Retry one room on the next normal loop without defeating its wait."""
+        if not chat_id:
+            return
+        with self._priority_lock:
+            self._priority_chats.setdefault(chat_id, None)
+
     def _take_priority_chats(self) -> list[str]:
         with self._priority_lock:
             chat_ids = list(self._priority_chats)
             self._priority_chats.clear()
         return chat_ids
 
-    def scan_all(self, *, collect: list | None = None, on_added=None) -> int:
-        """One truth pass: new triggers + due timers -> the queue. Returns
+    def scan_all(self, *, collect: list | None = None, on_added=None,
+                 full: bool = True) -> int:
+        """One truth pass: selected or all chats + due timers -> the queue.
+
+        ``full=False`` scans only chats named by synchronized log progress.
+        It is the normal realtime path; startup, authority/document changes,
+        unavailable ledger recovery, and periodic audits retain the full
+        membership scan. Returns
         how many items were enqueued. ``collect`` (dry-run) gathers what
         WOULD be enqueued without persisting anything. ``on_added`` runs after
         each complete room so durable work need not wait for unrelated rooms."""
+        if full:
+            # A full scan is prompted by startup, admitted document/visibility
+            # change, fallback, or audit. Re-evaluate pause controls on that
+            # cut so a resume is not hidden behind the short positive cache.
+            self._chat_pause.clear()
         settings = self.settings()
         owner = self.mesh.directory.owner_of(self.agent)
         added = 0
@@ -326,27 +345,34 @@ class AgentRunner:
                 if chat_id in prioritized:
                     repeated.add(chat_id)
                     continue
+                # Mark before snapshot/canonical work. Any transient failure or
+                # self-priority raised below must wait for the next loop rather
+                # than being retried repeatedly inside this pass.
+                prioritized.add(chat_id)
                 try:
                     snap = self.mesh.snapshot(chat_id)
                     if not snap.is_member(self.agent):
                         continue
                     scan_room(snap)
-                    prioritized.add(chat_id)
                 except Exception:
+                    self._defer_chat(chat_id)
                     continue
 
         scan_priorities()
-        for snap in self.mesh.membership.iter_chats_for():
-            scan_priorities()
-            if snap.id in prioritized:
-                continue
-            try:
-                scan_room(snap)
-            except Exception:  # noqa: BLE001 — one chat never blocks the rest
-                continue
+        if full:
+            for snap in self.mesh.membership.iter_chats_for():
+                scan_priorities()
+                if snap.id in prioritized:
+                    continue
+                prioritized.add(snap.id)
+                try:
+                    scan_room(snap)
+                except Exception:  # noqa: BLE001 — one chat never blocks the rest
+                    self._defer_chat(snap.id)
+                    continue
         scan_priorities()
         for chat_id in repeated:
-            self._prioritize_chat(chat_id)
+            self._defer_chat(chat_id)
         for t in self.timers.due():
             if self.chat_standing_down(t["chat_id"]):
                 continue  # V62: held, stays due — fires on resume
@@ -455,6 +481,11 @@ class AgentRunner:
                 added += 1
         if collect is None:
             self.queue.set_scan_cursor(chat_id, max_ns, max_edit)
+            if hold_ns:
+                # The synchronized envelope is durable, but its key inputs are
+                # not ready yet. Keep this exact room hot without restoring an
+                # all-room poll; a later key/doc wake can then heal promptly.
+                self._defer_chat(chat_id)
         return added
 
     def _catchup_skip(self, cand, settings: HarnessSettings) -> str | None:
@@ -1147,7 +1178,7 @@ class AgentRunner:
                           timers=self.timers.snapshot(),
                           paused=self.standing_down())
 
-    def tick(self) -> int:
+    def tick(self, *, full_scan: bool = True) -> int:
         """One scan+dispatch pass (the run loop's body; tests call it too)."""
         acc = self.mesh.directory.get(self.agent)
         if acc is not None and acc.deactivated:
@@ -1179,7 +1210,7 @@ class AgentRunner:
         if self.standing_down():
             self.publish_status()
             return 0
-        added = self.scan_all(on_added=self.dispatch_fill)
+        added = self.scan_all(on_added=self.dispatch_fill, full=full_scan)
         self.dispatch_handoffs()
         self.dispatch_fill()
         self.publish_status()
@@ -1249,6 +1280,7 @@ class AgentRunner:
             daemon=True, name="ab-harness-sync",
         )
         sync_thread.start()
+        last_full_scan: float | None = None
         try:
             if once:
                 self.mesh.sync.sync_once()
@@ -1269,9 +1301,18 @@ class AgentRunner:
                 self.task_ledger.retry_terminals()
                 self.run_ledger.retry_terminals()
                 self.handoff_ledger.retry_open()
-                self._change_observer.tick()
+                observer_changed = self._change_observer.tick()
                 self._consume_timer_cancels()       # V88: owner dismissals
-                self.tick()
+                now = time.monotonic()
+                full_scan = (
+                    last_full_scan is None
+                    or observer_changed
+                    or not self._change_observer.active
+                    or now - last_full_scan >= FULL_SCAN_AUDIT_S
+                )
+                self.tick(full_scan=full_scan)
+                if full_scan:
+                    last_full_scan = now
                 if time.monotonic() - announced > 1800:
                     announced = time.monotonic()
                     with contextlib.suppress(Exception):
