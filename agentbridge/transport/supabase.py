@@ -150,7 +150,11 @@ class SupabaseTransport(Transport):
     profile = TransportProfile(
         metered=True, supports_doc_delta=True,
         idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=6 * 3600.0,
-        presence_beat_s=30.0, presence_stale_s=120.0,
+        # Each durable heartbeat is also an API Gateway log entry.  A 45-second
+        # beat reduces the idle baseline while remaining inside older clients'
+        # 120-second stale window after their own 45-second safety read.  New
+        # readers retain more crash-detection jitter with the larger window.
+        presence_beat_s=45.0, presence_stale_s=180.0,
         silent_prefixes=("presence/",),   # mirrors _HINT_CLASSES' None entry
     )
 
