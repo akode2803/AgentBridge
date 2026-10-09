@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import log_position, send_status, overlay_index, page_inputs, membership_suffix, terminal_observation
+from . import (
+    harness_scan_ack, log_position, membership_suffix, overlay_index,
+    page_inputs, send_status, terminal_observation,
+)
 from .log_position import LogPosition
 from .chat_inputs import LocalChatInputs, capture as capture_chat_inputs
 from . import (
@@ -160,6 +163,7 @@ class Store:
         send_status.initialize(self._conn())
         log_position.initialize(self._conn())
         membership_input_position.initialize(self._conn())
+        harness_scan_ack.initialize(self._conn())
         lifecycle_heads.initialize(self._conn())
         document_observation.initialize(self._conn())
         overlay_index.initialize(self._conn())
@@ -379,6 +383,18 @@ class Store:
         self, expected: MembershipInputPosition,
     ) -> bool:
         return membership_input_position.matches(self.path, expected)
+
+    def pending_harness_scans(
+        self, agent: str, *, limit: int = harness_scan_ack.MAX_PENDING,
+    ) -> harness_scan_ack.PendingHarnessScans:
+        return harness_scan_ack.pending(self.path, agent, limit=limit)
+
+    def acknowledge_harness_scan(
+        self, agent: str, expected: MembershipInputPosition,
+    ) -> bool:
+        return harness_scan_ack.acknowledge(
+            self._conn(), self.path, agent, expected,
+        )
 
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:

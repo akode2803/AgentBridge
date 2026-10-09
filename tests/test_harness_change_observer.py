@@ -80,6 +80,7 @@ def test_replay_advances_only_after_mirror_admission(tmp_path):
         assert ("baseline",) in tx.calls
         assert ("refresh", True) in tx.calls
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
+        assert observer.acknowledge_full_scan() is True
 
         tx.events += (_event(3),)
         tx.listener(3)
@@ -113,8 +114,9 @@ def test_failed_mirror_admission_keeps_replay_cursor(tmp_path):
     tx.fail_refresh = True
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     try:
-        assert observer.tick() == HarnessChanges()
+        assert observer.tick() == HarnessChanges(full_scan=True)
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 0
+        assert observer.acknowledge_full_scan() is True
         tx.fail_refresh = False
         page_calls = len([call for call in tx.calls if call[0] == "page"])
         assert observer.tick() == HarnessChanges()
@@ -133,7 +135,8 @@ def test_ready_observer_queries_on_signal_or_bounded_audit(tmp_path):
     tx = _Transport()
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     try:
-        assert observer.tick() == HarnessChanges()
+        assert observer.tick() == HarnessChanges(full_scan=True)
+        assert observer.acknowledge_full_scan() is True
         pages = len([call for call in tx.calls if call[0] == "page"])
         assert observer.tick() == HarnessChanges()
         assert len([call for call in tx.calls if call[0] == "page"]) == pages
@@ -150,12 +153,44 @@ def test_ready_observer_queries_on_signal_or_bounded_audit(tmp_path):
         store.close()
 
 
+def test_unacknowledged_baseline_requires_full_scan_after_restart(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    tx = _Transport()
+    first = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert first.tick() == HarnessChanges(full_scan=True)
+        state = store.cached_doc("sync/harness_change_ledger")
+        assert state["baseline_pending"] is True
+    finally:
+        first.close()
+
+    baselines = len([call for call in tx.calls if call[0] == "baseline"])
+    second = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert second.tick() == HarnessChanges(full_scan=True)
+        assert len([call for call in tx.calls if call[0] == "baseline"]) == baselines
+        assert second.acknowledge_full_scan() is True
+        assert store.cached_doc(
+            "sync/harness_change_ledger",
+        )["baseline_pending"] is False
+    finally:
+        second.close()
+
+    third = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert third.tick() == HarnessChanges()
+    finally:
+        third.close()
+        store.close()
+
+
 def test_lower_realtime_id_rechecks_replaced_epoch_before_replay(tmp_path):
     store = Store(tmp_path / "observer.sqlite")
     tx = _Transport((_event(1), _event(2)))
     observer = HarnessChangeObserver(tx, store, lambda: None)
     try:
         assert observer.tick() == HarnessChanges(full_scan=True)
+        assert observer.acknowledge_full_scan() is True
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
         baselines = len([call for call in tx.calls if call[0] == "baseline"])
 
@@ -181,6 +216,10 @@ def test_chat_document_event_targets_only_its_room(tmp_path):
         _event(2, chat_id="room-a"),
         _event(3, domain="logs", chat_id="room-c"),
     ))
+    store.cache_doc("sync/harness_change_ledger", {
+        "v": 2, "epoch": tx.epoch.epoch, "cursor": 0,
+        "baseline_pending": False,
+    })
     observer = HarnessChangeObserver(tx, store, lambda: None)
     try:
         assert observer.tick() == HarnessChanges(
@@ -213,6 +252,10 @@ def test_later_page_failure_keeps_earlier_admitted_chat_scope(tmp_path):
         _event(1, chat_id="room-a"),
         _event(2, chat_id="room-b"),
     ))
+    store.cache_doc("sync/harness_change_ledger", {
+        "v": 2, "epoch": tx.epoch.epoch, "cursor": 0,
+        "baseline_pending": False,
+    })
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     try:
         assert observer.tick() == HarnessChanges(chat_ids=("room-a",))
@@ -231,6 +274,10 @@ def test_cursor_save_failure_replays_admitted_chat_scope(tmp_path, monkeypatch):
     store = Store(tmp_path / "observer.sqlite")
     clock = _Clock()
     tx = _Transport((_event(1, chat_id="room"),))
+    store.cache_doc("sync/harness_change_ledger", {
+        "v": 2, "epoch": tx.epoch.epoch, "cursor": 0,
+        "baseline_pending": False,
+    })
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     real_cache_doc = store.cache_doc
     fail = [True]

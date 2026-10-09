@@ -567,6 +567,98 @@ def test_realtime_priority_scan_does_not_walk_all_rooms(hrig, monkeypatch):
     assert runner._take_priority_chats() == []
 
 
+def test_successful_targeted_scan_acknowledges_message_generation(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    chat_id = "priority"
+    runner.mesh.store.upsert_messages(chat_id, [{
+        "id": "one", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "one",
+    }])
+    position = runner.mesh.store.capture_membership_input_position(chat_id)
+    priority = SimpleNamespace(id=chat_id, is_member=lambda _name: True)
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: priority)
+    monkeypatch.setattr(
+        runner.mesh.membership, "iter_chats_for",
+        lambda: pytest.fail("targeted scan must not walk all rooms"),
+    )
+    monkeypatch.setattr(runner, "_scan_chat", lambda *_args: 0)
+
+    runner._prioritize_chat(chat_id, 1)
+    assert runner.scan_all(full=False) == 0
+    assert runner.mesh.store.pending_harness_scans(runner.agent).positions == ()
+    assert runner.mesh.store.acknowledge_harness_scan(runner.agent, position) is True
+
+
+def test_message_committed_during_scan_remains_pending(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    chat_id = "priority"
+    runner.mesh.store.upsert_messages(chat_id, [{
+        "id": "one", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "one",
+    }])
+    stale = runner.mesh.store.capture_membership_input_position(chat_id)
+    priority = SimpleNamespace(id=chat_id, is_member=lambda _name: True)
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: priority)
+
+    def scan_room(*_args):
+        runner.mesh.store.upsert_messages(chat_id, [{
+            "id": "two", "ns": 2, "from": "aryan", "kind": "message",
+            "body": "two",
+        }])
+        return 0
+
+    monkeypatch.setattr(runner, "_scan_chat", scan_room)
+    runner._prioritize_chat(chat_id, 1)
+
+    assert runner.scan_all(full=False) == 0
+    current = runner.mesh.store.capture_membership_input_position(chat_id)
+    assert current.generation > stale.generation
+    assert runner.mesh.store.pending_harness_scans(runner.agent).positions == (current,)
+    assert runner._take_priority_chats() == [chat_id]
+
+
+def test_scan_that_defers_itself_does_not_acknowledge_generation(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    chat_id = "priority"
+    runner.mesh.store.upsert_messages(chat_id, [{
+        "id": "one", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "one",
+    }])
+    expected = runner.mesh.store.capture_membership_input_position(chat_id)
+    priority = SimpleNamespace(id=chat_id, is_member=lambda _name: True)
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: priority)
+
+    def defer_room(*_args):
+        runner._defer_chat(chat_id)
+        return 0
+
+    monkeypatch.setattr(runner, "_scan_chat", defer_room)
+    runner._prioritize_chat(chat_id, 1)
+
+    assert runner.scan_all(full=False) == 0
+    assert runner.mesh.store.pending_harness_scans(runner.agent).positions == (expected,)
+    assert runner._take_priority_chats() == [chat_id]
+
+
+def test_nonmember_decision_acknowledges_captured_generation(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    chat_id = "revoked"
+    runner.mesh.store.upsert_messages(chat_id, [{
+        "id": "one", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "one",
+    }])
+    revoked = SimpleNamespace(id=chat_id, is_member=lambda _name: False)
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: revoked)
+    monkeypatch.setattr(
+        runner, "_scan_chat",
+        lambda *_args: pytest.fail("nonmember room must not be scanned"),
+    )
+    runner._prioritize_chat(chat_id, 1)
+
+    assert runner.scan_all(full=False) == 0
+    assert runner.mesh.store.pending_harness_scans(runner.agent).positions == ()
+
+
 def test_chat_scoped_ledger_change_queues_only_named_rooms(hrig, monkeypatch):
     from agentbridge.harness.change_observer import HarnessChanges
 
@@ -584,6 +676,51 @@ def test_chat_scoped_ledger_change_queues_only_named_rooms(hrig, monkeypatch):
     assert "room-a" not in runner._chat_pause
     assert "other" in runner._chat_pause
     assert not runner._wake.is_set()
+
+
+def test_startup_pending_recovery_queues_only_unacknowledged_rooms(hrig):
+    runner = hrig.make_runner(responder=Scripted())
+    runner.mesh.store.upsert_messages("room-b", [{
+        "id": "b", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "b",
+    }])
+    runner.mesh.store.upsert_messages("room-a", [{
+        "id": "a", "ns": 1, "from": "aryan", "kind": "message",
+        "body": "a",
+    }])
+    room_a = runner.mesh.store.capture_membership_input_position("room-a")
+    assert runner.mesh.store.acknowledge_harness_scan(
+        runner.agent, room_a,
+    ) is True
+
+    assert runner._seed_pending_scans() is True
+    assert runner._take_priority_chats() == ["room-b"]
+
+
+def test_startup_pending_recovery_falls_back_when_owner_is_unavailable(
+    hrig, monkeypatch,
+):
+    runner = hrig.make_runner(responder=Scripted())
+    monkeypatch.setattr(
+        runner.mesh.store, "pending_harness_scans",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+
+    assert runner._seed_pending_scans() is False
+    assert runner._take_priority_chats() == []
+
+
+def test_startup_pending_recovery_falls_back_on_overflow(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    pending = SimpleNamespace(
+        positions=(SimpleNamespace(chat_id="room"),), has_more=True,
+    )
+    monkeypatch.setattr(
+        runner.mesh.store, "pending_harness_scans", lambda *_args: pending,
+    )
+
+    assert runner._seed_pending_scans() is False
+    assert runner._take_priority_chats() == ["room"]
 
 
 def test_full_scan_rechecks_cached_room_pause(hrig, monkeypatch):
