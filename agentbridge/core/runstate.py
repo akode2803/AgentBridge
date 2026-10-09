@@ -31,7 +31,7 @@ from pathlib import Path
 __all__ = ["runstate_path", "write_beat", "clear_beat", "pid_alive",
            "runner_alive", "FRESH_S"]
 
-FRESH_S = 30.0   # a beat older than this reads dead (runner writes ~5s)
+FRESH_S = 30.0   # a beat older than this reads dead (runner writes ~10s)
 
 
 def runstate_path(home: Path, agent: str) -> Path:
