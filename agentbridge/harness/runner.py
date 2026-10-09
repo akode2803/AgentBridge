@@ -308,6 +308,16 @@ class AgentRunner:
             self._priority_chats.clear()
         return chat_ids
 
+    def _consume_observer_changes(self) -> bool:
+        changes = self._change_observer.tick()
+        for chat_id in changes.chat_ids:
+            # tick() is already running because of a wake/audit. Keep the
+            # exact room queued for this pass without scheduling an immediate
+            # empty follow-up loop.
+            self._chat_pause.pop(chat_id, None)
+            self._defer_chat(chat_id)
+        return changes.full_scan
+
     def scan_all(self, *, collect: list | None = None, on_added=None,
                  full: bool = True) -> int:
         """One truth pass: selected or all chats + due timers -> the queue.
@@ -1301,12 +1311,12 @@ class AgentRunner:
                 self.task_ledger.retry_terminals()
                 self.run_ledger.retry_terminals()
                 self.handoff_ledger.retry_open()
-                observer_changed = self._change_observer.tick()
+                observer_full_scan = self._consume_observer_changes()
                 self._consume_timer_cancels()       # V88: owner dismissals
                 now = time.monotonic()
                 full_scan = (
                     last_full_scan is None
-                    or observer_changed
+                    or observer_full_scan
                     or not self._change_observer.active
                     or now - last_full_scan >= FULL_SCAN_AUDIT_S
                 )

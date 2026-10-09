@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentbridge.harness.change_observer import HarnessChangeObserver
+from agentbridge.harness.change_observer import HarnessChangeObserver, HarnessChanges
 from agentbridge.store.db import Store
 from agentbridge.transport.change_ledger import (
     ChangeLedgerCapability,
@@ -60,10 +60,11 @@ class _Transport:
         return True
 
 
-def _event(event_id, *, domain="docs"):
+def _event(event_id, *, domain="docs", chat_id=""):
     return ChangeLedgerEvent(
-        event_id, "root", "", domain,
+        event_id, "chat" if chat_id else "root", chat_id, domain,
         doc_head=event_id if domain == "docs" else None,
+        log_head=event_id if domain == "logs" else None,
     )
 
 
@@ -74,7 +75,7 @@ def test_replay_advances_only_after_mirror_admission(tmp_path):
     observer = HarnessChangeObserver(tx, store, lambda: wakes.append(True))
     try:
         assert observer.active is False
-        assert observer.tick() is True
+        assert observer.tick() == HarnessChanges(full_scan=True)
         assert observer.active is True
         assert ("baseline",) in tx.calls
         assert ("refresh", True) in tx.calls
@@ -83,7 +84,7 @@ def test_replay_advances_only_after_mirror_admission(tmp_path):
         tx.events += (_event(3),)
         tx.listener(3)
         assert wakes
-        assert observer.tick() is True
+        assert observer.tick() == HarnessChanges(full_scan=True)
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 3
     finally:
         observer.close()
@@ -98,7 +99,7 @@ def test_unavailable_ledger_stays_in_legacy_scan_mode(tmp_path):
     tx.change_ledger_capability = lambda: None
     observer = HarnessChangeObserver(tx, store, lambda: None)
     try:
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert observer.active is False
     finally:
         observer.close()
@@ -112,14 +113,14 @@ def test_failed_mirror_admission_keeps_replay_cursor(tmp_path):
     tx.fail_refresh = True
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     try:
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 0
         tx.fail_refresh = False
         page_calls = len([call for call in tx.calls if call[0] == "page"])
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert len([call for call in tx.calls if call[0] == "page"]) == page_calls
         clock.now += 46
-        assert observer.tick() is True
+        assert observer.tick() == HarnessChanges(full_scan=True)
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 1
     finally:
         observer.close()
@@ -132,17 +133,17 @@ def test_ready_observer_queries_on_signal_or_bounded_audit(tmp_path):
     tx = _Transport()
     observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
     try:
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         pages = len([call for call in tx.calls if call[0] == "page"])
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert len([call for call in tx.calls if call[0] == "page"]) == pages
 
         tx.listener(5)
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert len([call for call in tx.calls if call[0] == "page"]) == pages + 1
 
         clock.now += 301
-        assert observer.tick() is False
+        assert observer.tick() == HarnessChanges()
         assert len([call for call in tx.calls if call[0] == "page"]) == pages + 2
     finally:
         observer.close()
@@ -154,7 +155,7 @@ def test_lower_realtime_id_rechecks_replaced_epoch_before_replay(tmp_path):
     tx = _Transport((_event(1), _event(2)))
     observer = HarnessChangeObserver(tx, store, lambda: None)
     try:
-        assert observer.tick() is True
+        assert observer.tick() == HarnessChanges(full_scan=True)
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
         baselines = len([call for call in tx.calls if call[0] == "baseline"])
 
@@ -163,11 +164,91 @@ def test_lower_realtime_id_rechecks_replaced_epoch_before_replay(tmp_path):
         )
         tx.events = (_event(1),)
         tx.listener(1)
-        assert observer.tick() is True
+        assert observer.tick() == HarnessChanges(full_scan=True)
         state = store.cached_doc("sync/harness_change_ledger")
         assert state["epoch"] == tx.epoch.epoch
         assert state["cursor"] == 1
         assert len([call for call in tx.calls if call[0] == "baseline"]) == baselines + 1
+    finally:
+        observer.close()
+        store.close()
+
+
+def test_chat_document_event_targets_only_its_room(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    tx = _Transport((
+        _event(1, chat_id="room-b"),
+        _event(2, chat_id="room-a"),
+        _event(3, domain="logs", chat_id="room-c"),
+    ))
+    observer = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert observer.tick() == HarnessChanges(
+            chat_ids=("room-a", "room-b"),
+        )
+        assert ("refresh", False) in tx.calls
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 3
+    finally:
+        observer.close()
+        store.close()
+
+
+def test_later_page_failure_keeps_earlier_admitted_chat_scope(tmp_path):
+    class PagedTransport(_Transport):
+        fail_after = 1
+
+        def change_ledger_events(self, cursor, *, limit):
+            self.calls.append(("page", cursor, limit))
+            if cursor == self.fail_after:
+                raise OSError("later page unavailable")
+            rows = tuple(
+                event for event in self.events if event.event_id > cursor
+            )[:1]
+            has_more = bool(rows and rows[-1] != self.events[-1])
+            return ChangeLedgerPage(cursor, rows, has_more)
+
+    store = Store(tmp_path / "observer.sqlite")
+    clock = _Clock()
+    tx = PagedTransport((
+        _event(1, chat_id="room-a"),
+        _event(2, chat_id="room-b"),
+    ))
+    observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
+    try:
+        assert observer.tick() == HarnessChanges(chat_ids=("room-a",))
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 1
+
+        tx.fail_after = -1
+        clock.now += 46
+        assert observer.tick() == HarnessChanges(chat_ids=("room-b",))
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
+    finally:
+        observer.close()
+        store.close()
+
+
+def test_cursor_save_failure_replays_admitted_chat_scope(tmp_path, monkeypatch):
+    store = Store(tmp_path / "observer.sqlite")
+    clock = _Clock()
+    tx = _Transport((_event(1, chat_id="room"),))
+    observer = HarnessChangeObserver(tx, store, lambda: None, clock=clock)
+    real_cache_doc = store.cache_doc
+    fail = [True]
+
+    def cache_doc(path, value=None, **kwargs):
+        if fail[0] and isinstance(value, dict) and value.get("cursor") == 1:
+            raise OSError("local state unavailable")
+        return real_cache_doc(path, value, **kwargs)
+
+    monkeypatch.setattr(store, "cache_doc", cache_doc)
+    try:
+        assert observer.tick() == HarnessChanges(chat_ids=("room",))
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 0
+
+        fail[0] = False
+        clock.now += 46
+        assert observer.tick() == HarnessChanges(chat_ids=("room",))
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 1
     finally:
         observer.close()
         store.close()
