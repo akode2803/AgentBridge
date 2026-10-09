@@ -47,6 +47,7 @@ class HarnessChangeObserver:
         self._retry_at = 0.0
         self._next_probe = 0.0
         self._verify_epoch = False
+        self._baseline_pending = False
         self._unsubscribe = None
 
     @property
@@ -75,11 +76,16 @@ class HarnessChangeObserver:
         state = self.store.cached_doc(_STATE_DOC, default={})
         same = (
             isinstance(state, dict)
+            and state.get("v") == 2
             and state.get("epoch") == epoch.epoch
             and type(state.get("cursor")) is int
             and epoch.minimum_cursor <= state["cursor"]
+            and type(state.get("baseline_pending")) is bool
         )
         self._cursor = int(state["cursor"]) if same else epoch.minimum_cursor
+        self._baseline_pending = (
+            bool(state["baseline_pending"]) if same else True
+        )
         return same
 
     def _start(self) -> bool:
@@ -115,12 +121,32 @@ class HarnessChangeObserver:
             self._next_probe = now + _REPROBE_S
             return False
 
-    def _save_state_for(self, epoch: ChangeLedgerEpoch, cursor: int) -> None:
+    def _save_state_for(
+        self, epoch: ChangeLedgerEpoch, cursor: int, *,
+        baseline_pending: bool | None = None,
+    ) -> None:
         self.store.cache_doc(_STATE_DOC, {
-            "v": 1,
+            "v": 2,
             "epoch": epoch.epoch,
             "cursor": cursor,
+            "baseline_pending": (
+                self._baseline_pending
+                if baseline_pending is None else baseline_pending
+            ),
         })
+
+    def acknowledge_full_scan(self) -> bool:
+        """Durably retire a reset baseline after its canonical scan completed."""
+        if not self._started or not self._baseline_pending or self._epoch is None:
+            return True
+        try:
+            self._save_state_for(
+                self._epoch, self._cursor, baseline_pending=False,
+            )
+            self._baseline_pending = False
+            return True
+        except Exception:
+            return False
 
     def tick(self) -> HarnessChanges:
         """Replay bounded pages and return admitted work scopes.
@@ -140,12 +166,12 @@ class HarnessChangeObserver:
             due = now - self._last_check >= (
                 _HEALTHY_AUDIT_S if status == "ready" else _RECOVERY_POLL_S
             )
-            if not dirty and not due:
+            if not dirty and not due and not self._baseline_pending:
                 return empty
             self._dirty = False
             verify_epoch = self._verify_epoch or due
             self._verify_epoch = False
-        full_scan = False
+        full_scan = self._baseline_pending
         chat_ids: set[str] = set()
         try:
             if verify_epoch:
@@ -157,6 +183,7 @@ class HarnessChangeObserver:
                     if not callable(refresh):
                         raise RuntimeError("transport mirror cannot reset")
                     refresh()
+                    self._baseline_pending = True
                     self._save_state_for(epoch, epoch.minimum_cursor)
                     self._epoch = epoch
                     self._cursor = epoch.minimum_cursor

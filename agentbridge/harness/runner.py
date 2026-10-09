@@ -5,7 +5,8 @@ machine and the local keystore holds its identity) → start the Mesh facade
 (outbox, presence heartbeat) + a sync thread → then loop: replay durable
 provider changes, scan affected chats, and enqueue new triggers into the
 durable queue → DISPATCH claimed (chat, sender) groups on a pool sized by the
-owner-set concurrency. Startup and bounded safety audits still scan all rooms.
+owner-set concurrency. Startup replays durable per-room evidence; baseline
+replacement, degraded recovery and bounded safety audits still scan all rooms.
 
 The runner is deliberately model-agnostic: it hands deliveries to an injected
 ``Responder`` (R16's registry provides real ones) and posts what comes back.
@@ -308,6 +309,47 @@ class AgentRunner:
             self._priority_chats.clear()
         return chat_ids
 
+    def _chat_is_prioritized(self, chat_id: str) -> bool:
+        with self._priority_lock:
+            return chat_id in self._priority_chats
+
+    def _has_priority_chats(self) -> bool:
+        with self._priority_lock:
+            return bool(self._priority_chats)
+
+    def _capture_scan_position(self, chat_id: str):
+        try:
+            return self.mesh.store.capture_membership_input_position(chat_id)
+        except Exception:
+            return None
+
+    def _acknowledge_scan(self, chat_id: str, position) -> None:
+        if position is None or self._chat_is_prioritized(chat_id):
+            return
+        try:
+            if not self.mesh.store.acknowledge_harness_scan(
+                self.agent, position,
+            ):
+                # A message committed during the canonical scan. Its sync wake
+                # normally queued the room already; preserve an exact retry if
+                # that ephemeral callback raced or was lost.
+                self._defer_chat(chat_id)
+        except Exception:
+            # The five-minute canonical audit remains recovery while the
+            # acknowledgement owner is unavailable. Never let local evidence
+            # suppress runtime discovery or the rest of the room scan.
+            return
+
+    def _seed_pending_scans(self) -> bool:
+        """Queue durable unacknowledged rooms; report whether the page was complete."""
+        try:
+            pending = self.mesh.store.pending_harness_scans(self.agent)
+        except Exception:
+            return False
+        for position in pending.positions:
+            self._defer_chat(position.chat_id)
+        return not pending.has_more
+
     def _consume_observer_changes(self) -> bool:
         changes = self._change_observer.tick()
         for chat_id in changes.chat_ids:
@@ -323,8 +365,8 @@ class AgentRunner:
         """One truth pass: selected or all chats + due timers -> the queue.
 
         ``full=False`` scans only chats named by synchronized log progress.
-        It is the normal realtime path; startup, authority/document changes,
-        unavailable ledger recovery, and periodic audits retain the full
+        It is the normal realtime path; baseline replacement, root authority
+        changes, unavailable recovery, and periodic audits retain the full
         membership scan. Returns
         how many items were enqueued. ``collect`` (dry-run) gathers what
         WOULD be enqueued without persisting anything. ``on_added`` runs after
@@ -338,10 +380,14 @@ class AgentRunner:
         owner = self.mesh.directory.owner_of(self.agent)
         added = 0
 
-        def scan_room(snap) -> None:
+        def scan_room(snap, position=None) -> None:
             nonlocal added
+            if collect is None and position is None:
+                position = self._capture_scan_position(snap.id)
             room_added = self._scan_chat(snap, settings, owner, collect)
             added += room_added
+            if collect is None:
+                self._acknowledge_scan(snap.id, position)
             if room_added and collect is None and callable(on_added):
                 on_added()
 
@@ -360,10 +406,12 @@ class AgentRunner:
                 # than being retried repeatedly inside this pass.
                 prioritized.add(chat_id)
                 try:
+                    position = self._capture_scan_position(chat_id)
                     snap = self.mesh.snapshot(chat_id)
                     if not snap.is_member(self.agent):
+                        self._acknowledge_scan(chat_id, position)
                         continue
-                    scan_room(snap)
+                    scan_room(snap, position)
                 except Exception:
                     self._defer_chat(chat_id)
                     continue
@@ -1272,7 +1320,15 @@ class AgentRunner:
         # Realtime is the low-latency wake; durable pages recover missed wakes
         # into the synchronized mirror before runtime discovery uses them.
         # Canonical readers still recompute current authority from those inputs.
-        self._change_observer.tick()
+        startup_changes = self._change_observer.tick()
+        for chat_id in startup_changes.chat_ids:
+            self._defer_chat(chat_id)
+        pending_recovery_complete = self._seed_pending_scans()
+        startup_full_scan = (
+            startup_changes.full_scan
+            or not self._change_observer.active
+            or not pending_recovery_complete
+        )
         # R142: recovery runs once before any worker can dispatch. Running it
         # in tick() could race a live EXECUTING effect in another pool thread.
         with contextlib.suppress(Exception):
@@ -1291,6 +1347,7 @@ class AgentRunner:
         )
         sync_thread.start()
         last_full_scan: float | None = None
+        first_pass = True
         try:
             if once:
                 self.mesh.sync.sync_once()
@@ -1315,14 +1372,18 @@ class AgentRunner:
                 self._consume_timer_cancels()       # V88: owner dismissals
                 now = time.monotonic()
                 full_scan = (
-                    last_full_scan is None
+                    (first_pass and startup_full_scan)
                     or observer_full_scan
                     or not self._change_observer.active
-                    or now - last_full_scan >= FULL_SCAN_AUDIT_S
+                    or (last_full_scan is not None
+                        and now - last_full_scan >= FULL_SCAN_AUDIT_S)
                 )
                 self.tick(full_scan=full_scan)
-                if full_scan:
+                if full_scan and not self._has_priority_chats():
+                    self._change_observer.acknowledge_full_scan()
+                if full_scan or first_pass:
                     last_full_scan = now
+                first_pass = False
                 if time.monotonic() - announced > 1800:
                     announced = time.monotonic()
                     with contextlib.suppress(Exception):
