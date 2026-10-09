@@ -597,3 +597,39 @@ observer branch, then publish it as its own stacked PR after PR63 is review-clea
 After the schema is deliberately installed, run RLS/write-amplification/Realtime
 measurements before building the cursor owner. Do not install the schema or reduce
 polling until the disposable-provider concurrency and live RLS evidence is complete.
+
+PR63 and PR64 subsequently received clean current-head Codex reviews and passed
+Ubuntu and Windows CI. A live CPU investigation then isolated the harness fleet
+as a provider-load amplifier: over 90 minutes, four harnesses issued 3,866
+`ab_docs` prefix reads at 1.95 seconds average upstream time and 537
+`ab_chat_ids` calls at 4.27 seconds average. Authenticated plans showed the
+runtime handoff/pause prefix queries scanning the full document root and applying
+chat RLS row by row; cumulative `pg_stat_statements` contained 2.63 million
+prefix calls and 303,263 chat-ID calls. Stopping the idle harness fleet removed
+the active workload. Sanitized evidence is recorded in the private development
+checkpoint `SUPABASE_CPU_INVESTIGATION_2026-10-09.md`; no credentials or payloads
+are in the repository.
+
+The repair is complete locally on `codex/harness-ledger-cpu`, app version
+`0.24.311`, stacked on PR64. Handoff candidate discovery and signed chat-pause
+reads use the synchronized local mirror; mutations and claims still use the
+fresh canonical ledgers. The durable observer persists a local replay cursor,
+uses Realtime only as a wake, admits current provider rows before advancing that
+cursor, resets through a complete mirror refresh on epoch replacement, and
+backs provider failures off rather than retrying every harness tick. Ordinary
+document events perform a serialized doc-delta admission without the expensive
+chat-ID RPC; explicit visibility events retain that reconciliation. Cached
+pause enforcement fails closed whenever mirror health is degraded. No ledger
+row, cursor, cache generation or notification grants authority.
+
+The provider schema adds a live `(root, path text_pattern_ops)` prefix index and
+replaces `ab_chat_ids` with a fixed-search-path, explicitly granted
+`SECURITY DEFINER` candidate scan followed by the existing current root/chat
+authority predicates once per candidate. It also applies the Supabase-recommended
+init-plan form to the two member self-service `auth.uid()` policies. The focused
+runtime/cache/control/Supabase gate passes 285 tests; the complete offline suite
+passes 3,321 tests with 18 expected skips; Ruff and diff checks are clean. The
+app and harnesses remain intentionally stopped. Next, merge the green PR63/PR64
+prerequisites, publish this repair for current-head review and cross-platform CI,
+then deliberately apply the schema and measure provider CPU plus harness request
+rates before restarting the fleet. Do not infer the live CPU fix from local tests.
