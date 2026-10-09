@@ -55,10 +55,15 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   feed. The Supabase schema and read-only observation stage remains next.
   Local Stage 1 work now includes the append-only tables, transaction-bound
   triggers, member/chat RLS, Realtime publication setup, capability/epoch probe,
-  and bounded event-page reader. PostgreSQL syntax parsing and the 203-test
-  transport boundary pass. Live installation, RLS query-plan/write-amplification
-  measurement and Realtime observation are still required; safety scheduling is
-  unchanged.
+  and bounded event-page reader. Review exposed that identity allocation is not
+  commit ordered; the corrected provider operation now pairs concurrent shared
+  writer locks with an exclusive bounded page barrier, so a scalar replay cursor
+  cannot advance past an in-flight lower ID. Ordinary presence heartbeats are
+  excluded before ledger work, and a full 1,000-row page conservatively performs
+  one more bounded probe. PostgreSQL syntax parsing and the focused transport
+  boundary pass. Live installation, concurrent-transaction proof against the
+  disposable provider, RLS query-plan/write-amplification measurement and
+  Realtime observation are still required; safety scheduling is unchanged.
 - [ ] **Post-protocol architecture simplification and API formalization**
   (Aryan, 2026-10-08). Start only after the durable recovery protocol and known
   latency fixes are measured and stable. Inventory runtime layers, compatibility

@@ -264,7 +264,8 @@ class FakeExec:
 class FakeClient:
     def __init__(self, legacy: bool = False, *, effects_ready: bool = True):
         self.lock = threading.RLock()
-        self.db = {"_legacy": legacy, "_effects_ready": effects_ready}
+        self.db = {"_legacy": legacy, "_effects_ready": effects_ready,
+                   "_change_ledger_version": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -298,6 +299,18 @@ class FakeClient:
             return [{"chat_id": chat} for chat in sorted(ids)]
         if fn == "ab_effects_ready":
             return int(bool(self.db["_effects_ready"]))
+        if fn == "ab_change_ledger_ready":
+            return self.db.get("_change_ledger_version")
+        if fn == "ab_change_events_page":
+            root = params.get("p_root")
+            after = params.get("p_after")
+            limit = params.get("p_limit")
+            rows = [copy.deepcopy(row) for row in self.db.get("ab_change_events", [])
+                    if row.get("root") == root and row.get("id", 0) > after]
+            rows.sort(key=lambda row: row["id"])
+            return [{key: row.get(key) for key in (
+                "id", "stream_kind", "stream_id", "domain", "doc_head", "log_head",
+            )} for row in rows[:limit]]
         if fn == "ab_effect_transition":
             return self._effect_transition_locked(params)
         return []

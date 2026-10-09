@@ -557,3 +557,22 @@ in as the same member credential class as PostgREST (or explicitly retain legacy
 service mode), then require three readiness signals: channel `SUBSCRIBED`, the
 `postgres_changes` system acknowledgement, and the `system` replication-ready
 acknowledgement. Do not mark the ledger live from the current Broadcast-ready bit.
+
+PR63 review found three valid P1 gaps in the Stage 1 foundation. The local repair
+excludes `presence/` heartbeats before epoch/event work, treats an exactly full
+provider page as requiring one final bounded probe, and replaces direct event-table
+replay with `ab_change_events_page`. PostgreSQL identity allocation is not commit
+ordered: a slow lower-ID transaction can otherwise become visible after the client
+has advanced past it. Every database-owned event trigger now takes a root-scoped
+shared transaction advisory lock before event-ID allocation; the page RPC takes
+the matching exclusive transaction lock before its RLS-filtered query. Concurrent
+writers remain compatible, while a page boundary waits for existing writers and
+holds later ID allocation until its snapshot is captured. The capability probe
+names the complete RPC contract rather than inferring readiness from one table.
+The latest focused transport/schema gate passes 149 tests, the complete suite
+passes 3,308 with 18 expected skips, all 36 frontend modules pass, Ruff and diff
+checks are clean, and the complete schema parses as 102 PostgreSQL statements.
+Push PR63, obtain a current-head rereview/CI, then rebase the already implemented
+member-authenticated Realtime observer branch onto this corrected foundation. Do
+not install the schema or reduce polling until the disposable-provider concurrency
+and live RLS evidence is complete.

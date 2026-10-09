@@ -35,7 +35,8 @@ Use an append-only, content-free change ledger rather than one mutable row per
 chat. A mutable row would make concurrent senders serialize on a hot row and its
 updates would still need a separate replay mechanism. The append-only ledger
 uses the existing database transaction and a sequence-backed identity, supports
-bounded keyset replay directly, and lets clients coalesce work after retrieval.
+bounded keyset replay through a commit-safe page operation, and lets clients
+coalesce work after retrieval.
 
 ```sql
 ab_change_events(
@@ -62,8 +63,18 @@ ab_change_epochs(
 )
 ```
 
-`id`, `doc_head` and `log_head` are positioning evidence only. Gaps in `id` are
-normal because identity values are global and RLS hides other roots or chats.
+`id`, `doc_head` and `log_head` are positioning evidence only. PostgreSQL can
+allocate an identity before its transaction commits, so clients must not query
+the table directly and advance to the largest visible ID. Every event-producing
+trigger first takes a root-scoped shared transaction advisory lock. The bounded
+`ab_change_events_page` operation takes the matching exclusive lock before its
+RLS-filtered query, waiting for current writers to commit or abort and preventing
+new ID allocation until the page snapshot is captured. Writers remain concurrent
+with one another; only the brief page boundary excludes them. The page function
+is explicitly `VOLATILE`, so the query after the wait receives a fresh
+Read-Committed snapshot rather than the calling statement's pre-wait snapshot.
+Lock-hash collisions can add contention but cannot weaken correctness. Gaps in
+`id` are normal because identity values are global and RLS hides other roots or chats.
 The rows carry no message body, document value, member list, authority result or
 user activity. A client never infers a lost visible event from arithmetic on
 IDs; it queries every currently visible ledger row after its durable cursor.
@@ -126,13 +137,17 @@ Startup and reconnect follow this order:
    system error enters recovery; it never declares the stream current. Refreshing
    a member token rejoins and repeats this handshake.
 3. Read the root epoch/floor, compare it with the durable local event cursor, and
-   query RLS-filtered events using `WHERE root = ? AND id > ? ORDER BY id LIMIT ?`.
+   call the bounded RLS-filtered `ab_change_events_page` operation. Never replace
+   this operation with a direct table query: its writer barrier is what makes a
+   scalar event cursor safe across concurrent transaction commit order.
 4. Coalesce each event page by stream/domain, then catch up underlying documents
    and logs to its largest heads. Prioritize the
    selected chat, then root/visibility work, then other visible chats. Continue
    yielding to foreground selected-chat work between pages.
 5. Advance the durable event cursor only after every visible event through that
-   ID has completed its underlying import. Repeat pages until one is short.
+   ID has completed its underlying import. A full page conservatively requests
+   another page; a final empty probe is allowed so provider row caps cannot hide
+   continuation state.
 6. Compare the largest buffered wake ID with the durable cursor and repeat if
    needed. The channel is caught up only when the query is drained and no newer
    wake remains.

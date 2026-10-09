@@ -172,6 +172,7 @@ def test_changed_logs_is_explicitly_keyset_bounded(tx):
 
 
 def test_change_ledger_probe_epoch_and_bounded_pages(tx):
+    tx._client.db["_change_ledger_version"] = 1
     tx._client.db["ab_change_epochs"] = [{
         "root": "team",
         "epoch": "12345678-1234-5678-9234-567812345678",
@@ -197,6 +198,45 @@ def test_change_ledger_probe_epoch_and_bounded_pages(tx):
     assert second.cursor == 11 and second.has_more is False
 
 
+def test_full_terminal_ledger_page_uses_a_bounded_empty_probe(tx):
+    tx._client.db["_change_ledger_version"] = 1
+    tx._client.db["ab_change_epochs"] = [{
+        "root": "team",
+        "epoch": "12345678-1234-5678-9234-567812345678",
+        "minimum_cursor": 0,
+        "schema_version": 1,
+    }]
+    tx._client.db["ab_change_events"] = [
+        {"id": event_id, "root": "team", "stream_kind": "root", "stream_id": "",
+         "domain": "docs", "doc_head": event_id, "log_head": None}
+        for event_id in (1, 2)
+    ]
+    full = tx.change_ledger_events(0, limit=2)
+    assert full.cursor == 2 and full.has_more is True
+    empty = tx.change_ledger_events(full.cursor, limit=2)
+    assert empty.events == () and empty.cursor == 2 and empty.has_more is False
+
+
+def test_ledger_page_rejects_a_provider_response_over_its_requested_bound(tx,
+                                                                         monkeypatch):
+    tx._client.db["_change_ledger_version"] = 1
+    tx._ledger_ready = True
+    original = tx._client._rpc_locked
+
+    def oversized(fn, params):
+        if fn == "ab_change_events_page":
+            return [
+                {"id": event_id, "stream_kind": "root", "stream_id": "",
+                 "domain": "docs", "doc_head": event_id, "log_head": None}
+                for event_id in (1, 2)
+            ]
+        return original(fn, params)
+
+    monkeypatch.setattr(tx._client, "_rpc_locked", oversized)
+    with pytest.raises(TransportError, match="invalid change ledger page"):
+        tx.change_ledger_events(0, limit=1)
+
+
 def test_change_ledger_is_optional_and_invalid_rows_fail_closed(tx):
     assert tx.change_ledger_capability() is None
     assert tx.supports_change_ledger is False
@@ -205,6 +245,7 @@ def test_change_ledger_is_optional_and_invalid_rows_fail_closed(tx):
 
     tx._ledger_ready = None
     tx._ledger_reprobe = 0
+    tx._client.db["_change_ledger_version"] = 1
     tx._client.db["ab_change_epochs"] = [{
         "root": "team",
         "epoch": "12345678-1234-5678-9234-567812345678",

@@ -48,7 +48,6 @@ from .change_ledger import (
     ChangeLedgerEvent,
     ChangeLedgerPage,
     MAX_LEDGER_INTEGER,
-    MAX_LEDGER_PAGE_SIZE,
 )
 from .health import classify_transport_error, retry_inline
 
@@ -76,7 +75,9 @@ _HINT_DEFAULT_S = 0.25        # rare user-visible meta/roster/overlay changes
 _HINT_LOG_S = 0.1             # first idle message pokes promptly; floor caps bursts
 # tells "the schema is missing the R76 columns" apart from a network fault —
 # only these flip the driver into legacy full-snapshot mode
-_MISSING_COL_MARKS = ("42703", "PGRST204", "does not exist", "Could not find")
+_MISSING_COL_MARKS = (
+    "42703", "PGRST202", "PGRST204", "does not exist", "Could not find",
+)
 _DELTA_REPROBE_S = 60.0       # legacy mode re-probes (a paste upgrades live)
 _LEDGER_REPROBE_S = 60.0
 _LEDGER_SCHEMA_VERSION = 1
@@ -376,19 +377,11 @@ class SupabaseTransport(Transport):
         if self._ledger_ready is False and now < self._ledger_reprobe:
             return None
         try:
-            rows = self._sb().table("ab_change_epochs") \
-                .select("epoch,minimum_cursor,schema_version") \
-                .eq("root", self.root).limit(1).execute().data
-            self._count(rows)
-            if len(rows) != 1:
-                self._ledger_ready = False
-            else:
-                epoch = ChangeLedgerEpoch(
-                    str(rows[0].get("epoch", "")),
-                    rows[0].get("minimum_cursor"),
-                    rows[0].get("schema_version"),
-                )
-                self._ledger_ready = epoch.schema_version == _LEDGER_SCHEMA_VERSION
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_change_ledger_ready").execute()
+            ).data
+            self._count(ready)
+            self._ledger_ready = ready == _LEDGER_SCHEMA_VERSION
         except Exception as exc:  # noqa: BLE001 - unavailable retains polling
             if _is_missing_column(exc):
                 self._ledger_ready = False
@@ -433,13 +426,17 @@ class SupabaseTransport(Transport):
             raise ValueError("after_cursor must be a non-negative integer")
         if type(limit) is not int or limit < 1 or limit > capability.max_page_size:
             raise ValueError("invalid change ledger page limit")
-        rows = self._retry(lambda: self._sb().table("ab_change_events")
-                           .select("id,stream_kind,stream_id,domain,doc_head,log_head")
-                           .eq("root", self.root).gt("id", after_cursor)
-                           .order("id").limit(min(limit + 1, MAX_LEDGER_PAGE_SIZE + 1))
-                           .execute()).data
+        rows = self._retry(lambda: self._sb().rpc(
+            "ab_change_events_page", {
+                "p_root": self.root,
+                "p_after": after_cursor,
+                "p_limit": limit,
+            },
+        ).execute()).data
         self._count(rows)
         try:
+            if len(rows) > limit:
+                raise ValueError("provider exceeded the requested page limit")
             events = tuple(ChangeLedgerEvent(
                 event_id=row.get("id"),
                 stream_kind=row.get("stream_kind"),
@@ -447,8 +444,11 @@ class SupabaseTransport(Transport):
                 domain=row.get("domain"),
                 doc_head=row.get("doc_head"),
                 log_head=row.get("log_head"),
-            ) for row in rows[:limit])
-            return ChangeLedgerPage(after_cursor, events, len(rows) > limit)
+            ) for row in rows)
+            # A full page conservatively promises another bounded probe.  This
+            # avoids relying on PostgREST returning limit+1 through a provider
+            # response-row cap; the possible final empty probe is intentional.
+            return ChangeLedgerPage(after_cursor, events, len(rows) == limit)
         except (AttributeError, TypeError, ValueError) as exc:
             raise TransportError("Supabase returned an invalid change ledger page") from exc
 

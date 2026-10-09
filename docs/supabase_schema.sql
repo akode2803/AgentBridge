@@ -536,6 +536,62 @@ for select to authenticated using (
   )
 );
 
+-- Probe the complete replay contract rather than inferring readiness from a
+-- table that may have been installed by an older schema paste.
+create or replace function public.ab_change_ledger_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select 1
+$$;
+revoke all on function public.ab_change_ledger_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_change_ledger_ready()
+  to authenticated, service_role;
+
+-- Identity values are allocated before commit, so a direct `id > cursor`
+-- query can observe a later transaction and permanently skip an earlier one.
+-- Writers take a shared transaction lock before allocating an event id. This
+-- bounded RPC takes the matching exclusive lock: existing writers settle,
+-- later writers wait until the page snapshot is captured, and concurrent
+-- writers never block one another. RLS remains the authority filter.
+create or replace function public.ab_change_events_page(
+  p_root text, p_after bigint, p_limit integer
+) returns table (
+  id bigint,
+  stream_kind text,
+  stream_id text,
+  domain text,
+  doc_head bigint,
+  log_head bigint
+)
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+begin
+  if p_root is null or p_root = ''
+     or p_after is null or p_after < 0
+     or p_limit is null or p_limit < 1 or p_limit > 1000 then
+    raise exception 'invalid change-ledger page request'
+      using errcode = '22023';
+  end if;
+  if not public.ab_root_ok(p_root) then
+    raise exception 'change-ledger root is unavailable'
+      using errcode = '42501';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  return query
+    select e.id, e.stream_kind, e.stream_id, e.domain, e.doc_head, e.log_head
+    from public.ab_change_events e
+    where e.root = p_root and e.id > p_after
+    order by e.id
+    limit p_limit;
+end
+$$;
+revoke all on function public.ab_change_events_page(text, bigint, integer)
+  from public, anon, authenticated;
+grant execute on function public.ab_change_events_page(text, bigint, integer)
+  to authenticated, service_role;
+
 create schema if not exists private;
 revoke all on schema private from public, anon, authenticated;
 
@@ -544,6 +600,15 @@ language plpgsql security definer set search_path = pg_catalog as $$
 declare
   v_chat text;
 begin
+  -- Presence heartbeats have their own expiry/revalidation owner. Logging
+  -- each refresh would create permanent replay and Realtime traffic.
+  if new.path like 'presence/%' then
+    return new;
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || new.root, 0)
+  );
   insert into public.ab_change_epochs(root) values (new.root)
   on conflict (root) do nothing;
 
@@ -586,6 +651,9 @@ for each row execute function private.ab_record_doc_change();
 create or replace function private.ab_record_log_change() returns trigger
 language plpgsql security definer set search_path = pg_catalog as $$
 begin
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || new.root, 0)
+  );
   insert into public.ab_change_epochs(root) values (new.root)
   on conflict (root) do nothing;
   insert into public.ab_change_events(
@@ -613,6 +681,9 @@ begin
   else
     v_root := new.root;
   end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+  );
   insert into public.ab_change_epochs(root) values (v_root)
   on conflict (root) do nothing;
   insert into public.ab_change_events(
