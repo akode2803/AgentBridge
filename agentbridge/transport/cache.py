@@ -192,6 +192,10 @@ class CachingTransport(Transport):
         self._mirror_provenance = "bootstrap_unverified"
         self._mirror_invalid_reason: str | None = None
         self._lock = threading.Lock()
+        # Provider refresh is one serialized transaction per process.  The
+        # ordinary background loop and durable-ledger recovery can otherwise
+        # race the same delta cursor and publish an older mirror last.
+        self._refresh_gate = threading.RLock()
         self._authority_unsafe: set[str] = set()
         self._docs: dict[str, Any] = {}        # the mirror
         self._chat_ids: list[str] = []
@@ -521,6 +525,10 @@ class CachingTransport(Transport):
             return True
 
     def _refresh_once(self) -> bool:
+        with self._refresh_gate:
+            return self._refresh_once_locked()
+
+    def _refresh_once_locked(self) -> bool:
         t0 = _monotonic()
         # snapshot_docs = full pull + the delta cursor it is current at
         # (base default wraps get_docs with cursor 0 for feed-less drivers)
@@ -604,7 +612,7 @@ class CachingTransport(Transport):
         self._chat_writes = {c: w for c, w in self._chat_writes.items()
                              if w > floor}
 
-    def _refresh_delta(self) -> bool:
+    def _refresh_delta(self, *, reconcile_visibility: bool = True) -> bool:
         """One incremental pull (R76). Returns whether anything a poke
         SHOULD have announced changed — the hint watchdog's signal. Two
         exclusions keep that signal honest: classes whose writers
@@ -615,6 +623,12 @@ class CachingTransport(Transport):
         and pinned the live GUI suspect while Aryan typed (v0.24.155).
         Raises NotImplementedError when the driver has no live feed (the
         caller falls back to a full pull) and network errors for backoff."""
+        with self._refresh_gate:
+            return self._refresh_delta_locked(
+                reconcile_visibility=reconcile_visibility,
+            )
+
+    def _refresh_delta_locked(self, *, reconcile_visibility: bool) -> bool:
         t0 = time.monotonic()
         with self._lock:
             self._last_attempt = time.time()
@@ -631,7 +645,10 @@ class CachingTransport(Transport):
             # returning its changed meta row. Reconcile the authoritative
             # visible-id set every delta tick so removals contract the mirror
             # promptly instead of waiting for the rare full snapshot.
-            visible_ids = set(self.inner.list_chat_ids())
+            visible_ids = (
+                set(self.inner.list_chat_ids())
+                if reconcile_visibility else None
+            )
         except NotImplementedError:
             raise
         except Exception as exc:
@@ -648,7 +665,9 @@ class CachingTransport(Transport):
                 self._mirror_selection_keys_valid = (
                     self._mirror_selection_keys_valid and selection_keys_valid
                 )
-                revoked_ids = set(self._chat_ids) - visible_ids - recent_ids
+                current_ids = set(self._chat_ids)
+                observed_ids = visible_ids if visible_ids is not None else current_ids
+                revoked_ids = current_ids - observed_ids - recent_ids
                 foreign = bool(revoked_ids)
                 for path, val in changed.items():
                     wrote = self._doc_writes.get(path)
@@ -696,7 +715,7 @@ class CachingTransport(Transport):
                         if not path.startswith(revoked_prefixes)
                     }
                 self._authority_unsafe.intersection_update(self._docs)
-                self._chat_ids = sorted(visible_ids | recent_ids)
+                self._chat_ids = sorted(observed_ids | recent_ids)
                 if changed or deleted:
                     self._neg.clear()      # the world moved: re-answer misses
                 self._cursor = max(self._cursor, cursor)
@@ -715,6 +734,27 @@ class CachingTransport(Transport):
         if foreign:
             self._notify_changes()
         return foreign
+
+    def refresh_observed_changes(self, *, visibility: bool = False) -> bool:
+        """Synchronously admit one durable-ledger observation into the mirror.
+
+        A document event already names a committed provider position, so the
+        doc delta is sufficient.  Visibility events additionally reconcile
+        the RLS-filtered chat-id set.  This method never treats the event as
+        authority; it fetches the current provider rows and the ordinary mirror
+        capture records those inputs before a caller may persist its ledger
+        cursor.
+        """
+        if not self._ensure_warm(background=True):
+            raise RuntimeError("transport mirror is unavailable")
+        if self._warm and self.profile.supports_doc_delta:
+            try:
+                return self._refresh_delta(
+                    reconcile_visibility=bool(visibility),
+                )
+            except NotImplementedError:
+                pass
+        return self._refresh_once()
 
     def _start_thread(self) -> None:
         if not self.auto_refresh or (self._thread and self._thread.is_alive()):

@@ -49,9 +49,15 @@ class DelegationCoordinator:
     CLAIM_LEASE_S = 30.0
 
     def __init__(self, mesh, ledger: HandoffLedger, *, machine: str,
-                 stopping=None) -> None:
+                 stopping=None,
+                 discovery_ledger: HandoffLedger | None = None) -> None:
         self.mesh = mesh
         self.ledger = ledger
+        # Discovery is observation only.  A synchronized local mirror can
+        # therefore find candidate offers without repeating an authenticated
+        # cloud prefix scan on every harness tick.  Every transition still
+        # goes through ``ledger`` and its fresh canonical revalidation.
+        self.discovery_ledger = discovery_ledger or ledger
         self.machine = machine
         self.instance_id = hashlib.sha256(
             f"{machine}|{id(self)}|{time.time_ns()}".encode("utf-8"),
@@ -206,7 +212,7 @@ class DelegationCoordinator:
         work: list[ChildWork] = []
         for snap in self.mesh.membership.chats_for():
             try:
-                views = self.ledger.read(snap.id)
+                views = self.discovery_ledger.read(snap.id)
             except Exception:
                 continue
             for view in views:

@@ -44,6 +44,40 @@ def test_deleted_chat_rls_is_read_delete_only_for_former_members():
     assert "drop function if exists public.ab_effect_transition" in sql
 
 
+def test_runtime_prefix_and_chat_discovery_avoid_full_rls_table_scans():
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    assert "ab_docs_live_path_prefix" in sql
+    assert "(root, path text_pattern_ops)" in sql
+    assert "where not deleted" in sql
+
+    start = sql.rindex("create or replace function public.ab_chat_ids")
+    end = sql.index("grant execute on function public.ab_chat_ids", start)
+    body = sql[start:end]
+    assert "security definer set search_path = pg_catalog" in body
+    assert "public.ab_root_ok(p_root)" in body
+    assert "public.ab_can_read_chat(p_root, c.chat_id)" in body
+    assert "auth.role() = 'service_role'" in body
+    assert "from public.ab_logs l" in body
+    assert "from public.ab_docs d" in body
+    assert "from public, anon, authenticated" in body
+    grant = sql[end:sql.index(";", end) + 1]
+    assert "to authenticated, service_role" in grant
+
+
+def test_member_self_service_auth_lookup_uses_one_init_plan_per_statement():
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    assert "with check (uid = (select auth.uid()))" in _policy(
+        sql, "ab_members_claim",
+    )
+    assert "using (uid = (select auth.uid()))" in _policy(
+        sql, "ab_members_leave",
+    )
+
+
 class _Table:
     def __init__(self, client):
         self.client = client

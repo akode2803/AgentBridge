@@ -803,6 +803,33 @@ def test_delta_tick_applies_changes_without_a_full_pull(delta_mirror):
     assert tx.list_docs("users") == ["users/b.json"]
 
 
+def test_observed_doc_change_skips_visible_chat_reconciliation(delta_mirror):
+    inner, tx = delta_mirror
+    inner.put_doc("users/a.json", {"v": 1})
+    tx.refresh()
+    baseline_ids = inner.reads["list_chat_ids"]
+
+    inner.put_doc("runtime/handoff.json", {"v": 1})
+    assert tx.refresh_observed_changes(visibility=False) is True
+    assert inner.reads["get_docs_delta"] == 1
+    assert inner.reads["list_chat_ids"] == baseline_ids
+    assert tx.get_doc("runtime/handoff.json") == {"v": 1}
+
+
+def test_observed_visibility_change_reconciles_chat_ids(delta_mirror):
+    inner, tx = delta_mirror
+    inner.put_doc("chats/c1/meta.json", {"id": "c1"})
+    tx.refresh()
+    baseline_ids = inner.reads["list_chat_ids"]
+
+    inner.docs = {}
+    inner.seq += 1
+    assert tx.refresh_observed_changes(visibility=True) is True
+    assert inner.reads["get_docs_delta"] == 1
+    assert inner.reads["list_chat_ids"] == baseline_ids + 1
+    assert tx.list_chat_ids() == []
+
+
 def test_delta_meta_tombstone_drops_the_chat_id(delta_mirror):
     inner, tx = delta_mirror
     inner.put_doc("chats/c1/meta.json", {"id": "c1"})

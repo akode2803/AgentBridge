@@ -60,6 +60,7 @@ from .runtime.runs import RunLedger
 from .runtime.tasks import TaskLedger
 from .runtime.handoffs import HandoffLedger
 from .runtime.delegation import DelegationCoordinator
+from .change_observer import HarnessChangeObserver
 from .settings import MAX_CONCURRENCY, HarnessSettings
 from .timers import TimerService
 from . import triggers
@@ -134,9 +135,21 @@ class AgentRunner:
         # Register the handoff outbox handler before Mesh starts its worker so
         # a crash cannot turn a durable pending offer/decision into dead mail.
         self.handoff_ledger = HandoffLedger(self.mesh, self.task_ledger)
+        discovery_runs = RunLedger(
+            self.mesh, fresh_reads=False, register_outbox=False,
+        )
+        discovery_tasks = TaskLedger(
+            self.mesh, discovery_runs,
+            fresh_reads=False, register_outbox=False,
+        )
+        self._handoff_discovery = HandoffLedger(
+            self.mesh, discovery_tasks,
+            fresh_reads=False, register_outbox=False,
+        )
         self.delegation = DelegationCoordinator(
             self.mesh, self.handoff_ledger, machine=self.machine,
             stopping=self._stop.is_set,
+            discovery_ledger=self._handoff_discovery,
         )
         if self.responder is not None and hasattr(self.responder, "delegation"):
             self.responder.delegation = self.delegation
@@ -168,6 +181,14 @@ class AgentRunner:
         # the submitting thread, which still holds this lock
         self._inflight_lock = threading.RLock()
         self._wake = threading.Event()
+        subscribe_changes = getattr(self.mesh.tx, "subscribe_changes", None)
+        self._runtime_unsubscribe = (
+            subscribe_changes(self._wake.set)
+            if callable(subscribe_changes) else None
+        )
+        self._change_observer = HarnessChangeObserver(
+            self.mesh.tx, self.mesh.store, self._wake.set,
+        )
         self._priority_lock = threading.Lock()
         self._priority_chats: dict[str, None] = {}
         # Wake on EACH locally inserted log batch. Waiting until SyncEngine's
@@ -240,9 +261,18 @@ class AgentRunner:
             snap = self.mesh.snapshot(chat_id)
             paused = read_pause(
                 self.mesh.directory, self.mesh.tx, chat_id=chat_id,
-                snapshot=snap,
+                snapshot=snap, source="cached",
             )
-        except Exception:  # noqa: BLE001 — retain last truth; unknown fails closed
+            mirror_status = getattr(self.mesh.tx, "mirror_status", None)
+            if callable(mirror_status):
+                status = mirror_status()
+                if (not isinstance(status, dict)
+                        or status.get("state") != "online"):
+                    # During an outage retain the last admitted pause truth.
+                    # With no prior truth, stand down until the mirror can
+                    # establish one.
+                    paused = hit[0] if hit is not None else True
+        except Exception:  # noqa: BLE001 — retain last truth; unknown stands down
             paused = hit[0] if hit is not None else True
         self._chat_pause[chat_id] = (paused, now)
         return paused
@@ -1198,6 +1228,10 @@ class AgentRunner:
             self.handoff_ledger.retry_open()
         with contextlib.suppress(Exception):
             self.delegation.retry_consumptions()
+        # Realtime is the low-latency wake; durable pages recover missed wakes
+        # into the synchronized mirror before runtime discovery uses them.
+        # Canonical readers still recompute current authority from those inputs.
+        self._change_observer.tick()
         # R142: recovery runs once before any worker can dispatch. Running it
         # in tick() could race a live EXECUTING effect in another pool thread.
         with contextlib.suppress(Exception):
@@ -1235,6 +1269,7 @@ class AgentRunner:
                 self.task_ledger.retry_terminals()
                 self.run_ledger.retry_terminals()
                 self.handoff_ledger.retry_open()
+                self._change_observer.tick()
                 self._consume_timer_cancels()       # V88: owner dismissals
                 self.tick()
                 if time.monotonic() - announced > 1800:
@@ -1269,6 +1304,11 @@ class AgentRunner:
         resp_close = getattr(self.responder, "close", None)
         if callable(resp_close):
             resp_close()   # e.g. the CLI responder's qdrant path lock
+        self._change_observer.close()
+        if callable(self._runtime_unsubscribe):
+            with contextlib.suppress(Exception):
+                self._runtime_unsubscribe()
+            self._runtime_unsubscribe = None
         clear_beat(self.home, self.agent)   # V109: read dead immediately
         self.mesh.sync.stop()
         self.mesh.close()

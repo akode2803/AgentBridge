@@ -86,6 +86,13 @@ create trigger ab_docs_touch before insert or update on public.ab_docs
 update public.ab_docs set deleted = deleted where seq = 0;
 
 create index if not exists ab_docs_delta on public.ab_docs (root, seq);
+-- Prefix listings are the bounded recovery path for runtime ledgers.  The
+-- default (root, path) index cannot support LIKE 'literal-prefix%' under every
+-- project collation, which made each tiny handoff/pause lookup scan the whole
+-- root and evaluate chat RLS thousands of times.
+create index if not exists ab_docs_live_path_prefix
+  on public.ab_docs (root, path text_pattern_ops)
+  where not deleted;
 
 -- tombstones must not resurrect chat ids in the listing helper
 create or replace function public.ab_chat_ids(p_root text)
@@ -192,6 +199,39 @@ $$;
 revoke all on function public.ab_can_read_chat(text, text) from public;
 grant execute on function public.ab_can_read_chat(text, text) to authenticated;
 
+-- Discover candidate chat ids while bypassing row-by-row RLS over every log
+-- and document, then apply the same current-member/deleted-tenure authority
+-- predicate once per candidate.  The function exposes no data other than ids
+-- the caller could already read.  A fixed search_path and explicit grants are
+-- load-bearing because this is a SECURITY DEFINER boundary.
+create or replace function public.ab_chat_ids(p_root text)
+returns table (chat_id text)
+language sql stable security definer set search_path = pg_catalog as $$
+  with candidates as (
+    select distinct l.chat_id
+    from public.ab_logs l
+    where l.root = p_root
+    union
+    select distinct pg_catalog.split_part(d.path, '/', 2)
+    from public.ab_docs d
+    where d.root = p_root and d.path like 'chats/%' and not d.deleted
+  )
+  select c.chat_id
+  from candidates c
+  where c.chat_id <> ''
+    and (
+      auth.role() = 'service_role'
+      or (
+        public.ab_root_ok(p_root)
+        and public.ab_can_read_chat(p_root, c.chat_id)
+      )
+    )
+$$;
+revoke all on function public.ab_chat_ids(text)
+  from public, anon, authenticated;
+grant execute on function public.ab_chat_ids(text)
+  to authenticated, service_role;
+
 -- ab_members: SELF-claim on insert — your own uid, an unclaimed username
 -- (the PK is the arbiter, first come first served, mirroring the app
 -- directory's rule); one identity per uid per root (unique root+uid).
@@ -205,11 +245,11 @@ for select to authenticated using (public.ab_root_ok(root));
 drop policy if exists ab_members_admit on public.ab_members;
 drop policy if exists ab_members_claim on public.ab_members;
 create policy ab_members_claim on public.ab_members
-for insert to authenticated with check (uid = auth.uid());
+for insert to authenticated with check (uid = (select auth.uid()));
 
 drop policy if exists ab_members_leave on public.ab_members;
 create policy ab_members_leave on public.ab_members
-for delete to authenticated using (uid = auth.uid());
+for delete to authenticated using (uid = (select auth.uid()));
 
 -- (v2.1's ab_pending queue is retired — account creation is membership;
 -- drop it if an earlier paste created it)
