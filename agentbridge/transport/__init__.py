@@ -6,9 +6,17 @@ from pathlib import Path
 from ..core.config import validate_root_spec
 from .base import Transport, Watcher
 from .cache import CachingTransport
+from .change_ledger import (
+    ChangeLedgerCapability,
+    ChangeLedgerEpoch,
+    ChangeLedgerEvent,
+    ChangeLedgerPage,
+)
 
 __all__ = [
     "Transport", "Watcher", "CachingTransport", "make_transport", "validate_root_spec",
+    "ChangeLedgerCapability", "ChangeLedgerEpoch", "ChangeLedgerEvent",
+    "ChangeLedgerPage",
 ]
 
 

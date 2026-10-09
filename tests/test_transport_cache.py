@@ -614,6 +614,40 @@ def test_change_feed_delegates_through_the_wrapper():
     assert feed.changed_logs(3) == ([("c1", "a@m.jsonl")], 10)
 
 
+def test_change_ledger_capability_delegates_through_the_wrapper():
+    from agentbridge.transport.change_ledger import (
+        ChangeLedgerCapability, ChangeLedgerEpoch, ChangeLedgerEvent,
+        ChangeLedgerPage,
+    )
+
+    class LedgerBulk(BulkTransport):
+        supports_change_ledger = True
+
+        def change_ledger_capability(self):
+            return ChangeLedgerCapability(1, 100)
+
+        def change_ledger_epoch(self):
+            return ChangeLedgerEpoch(
+                "12345678-1234-5678-9234-567812345678", 0, 1,
+            )
+
+        def change_ledger_events(self, after_cursor, *, limit):
+            assert limit == 100
+            event = ChangeLedgerEvent(
+                after_cursor + 1, "root", "", "docs", doc_head=8,
+            )
+            return ChangeLedgerPage(after_cursor, (event,), False)
+
+    plain = CachingTransport(BulkTransport(), auto_refresh=False)
+    assert plain.supports_change_ledger is False
+    assert plain.change_ledger_capability() is None
+    ledger = CachingTransport(LedgerBulk(), auto_refresh=False)
+    assert ledger.supports_change_ledger is True
+    assert ledger.change_ledger_capability() == ChangeLedgerCapability(1, 100)
+    assert ledger.change_ledger_epoch().minimum_cursor == 0
+    assert ledger.change_ledger_events(4, limit=100).cursor == 5
+
+
 # ------------------------------------------------------------------ factory
 
 @pytest.mark.parametrize("spec", [

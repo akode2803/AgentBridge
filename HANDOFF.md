@@ -519,3 +519,60 @@ lane and continue the durable Realtime frontier protocol. Rapid route switching
 also still shows the deliberately blank transition surface while the new room's
 fresh page loads; handle that as a separate bounded presentation-cache design,
 without treating cached DOM as membership authority.
+
+The durable Realtime design is now recorded in
+`docs/DURABLE_REALTIME_FRONTIER.md`. Review rejected a mutable per-room frontier:
+it would serialize concurrent senders on a hot row and still provide no replay.
+The accepted direction is an append-only, content-free, RLS-filtered change
+ledger inserted in the same transaction as each document/log mutation. A root
+visibility event closes membership add/remove gaps; a rarely updated epoch and
+minimum recoverable cursor handle retention without becoming another hot row.
+Realtime is the wake, the ledger is durable delivery evidence, and current raw
+documents/logs remain the only authority inputs.
+
+Stage 0 is implemented locally on `codex/durable-realtime-frontier-design`:
+immutable event, page, epoch and capability contracts; explicit delegation
+through cache and mutation-owner wrappers; a deterministic fake covering lost,
+duplicate and reordered notifications; and an explicit 1,000-row keyset bound on
+the existing Supabase log-change read. Unsupported schemas still report no
+capability and retain current polling. The 195-test transport/sync gate and Ruff,
+compile and diff checks pass. Next, install the provider schema and triggers in
+read-only observation mode, validate RLS and write amplification, then implement
+the bounded catch-up owner. Do not reduce safety polling yet.
+
+PR62 merged after its Ubuntu and Windows gates passed. The next local Stage 1
+slice adds `ab_change_events`/`ab_change_epochs`, transaction-bound private
+triggers, member/chat RLS, idempotent Realtime publication setup, and a bounded
+Supabase capability/epoch/page reader. It does not subscribe, schedule catch-up,
+or alter polling yet. The complete schema parses as 96 PostgreSQL statements;
+the expanded transport boundary passes 203 tests and Ruff/diff checks. Before
+enabling the protocol, obtain current-head review, install it deliberately, then
+measure actual RLS replay plans, added database writes/WAL/Realtime messages and
+the root-epoch conflict check under concurrent sends.
+
+The existing Realtime thread currently joins its public Broadcast channel with
+an API key only. That is sufficient for the old content-free poke but is an
+anonymous session under RLS. The ledger observer must first sign the async client
+in as the same member credential class as PostgREST (or explicitly retain legacy
+service mode), then require three readiness signals: channel `SUBSCRIBED`, the
+`postgres_changes` system acknowledgement, and the `system` replication-ready
+acknowledgement. Do not mark the ledger live from the current Broadcast-ready bit.
+
+PR63 review found three valid P1 gaps in the Stage 1 foundation. The local repair
+excludes `presence/` heartbeats before epoch/event work, treats an exactly full
+provider page as requiring one final bounded probe, and replaces direct event-table
+replay with `ab_change_events_page`. PostgreSQL identity allocation is not commit
+ordered: a slow lower-ID transaction can otherwise become visible after the client
+has advanced past it. Every database-owned event trigger now takes a root-scoped
+shared transaction advisory lock before event-ID allocation; the page RPC takes
+the matching exclusive transaction lock before its RLS-filtered query. Concurrent
+writers remain compatible, while a page boundary waits for existing writers and
+holds later ID allocation until its snapshot is captured. The capability probe
+names the complete RPC contract rather than inferring readiness from one table.
+The latest focused transport/schema gate passes 149 tests, the complete suite
+passes 3,308 with 18 expected skips, all 36 frontend modules pass, Ruff and diff
+checks are clean, and the complete schema parses as 102 PostgreSQL statements.
+Push PR63, obtain a current-head rereview/CI, then rebase the already implemented
+member-authenticated Realtime observer branch onto this corrected foundation. Do
+not install the schema or reduce polling until the disposable-provider concurrency
+and live RLS evidence is complete.

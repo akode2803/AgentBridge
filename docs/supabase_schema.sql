@@ -134,7 +134,7 @@ alter table public.ab_members enable row level security;
 create or replace function public.ab_member(p_root text) returns text
 language sql stable security definer set search_path = public as $$
   select coalesce((select username from public.ab_members
-                   where root = p_root and uid = auth.uid()), '')
+                   where root = p_root and uid = (select auth.uid())), '')
 $$;
 revoke all on function public.ab_member(text) from public;
 grant execute on function public.ab_member(text) to authenticated;
@@ -471,3 +471,260 @@ for delete to authenticated using (
     or public.ab_can_read_chat(split_part(name, '/', 1), split_part(name, '/', 3))
   )
 );
+
+-- ---------------------------------------------------------------------------
+-- Durable Realtime change ledger (observation stage). Realtime notifications
+-- are low-latency wakes; these append-only rows are the bounded replay source.
+-- They contain positions and scopes, never payloads or authority verdicts.
+
+create table if not exists public.ab_change_epochs (
+  root           text primary key,
+  epoch          uuid not null default gen_random_uuid(),
+  minimum_cursor bigint not null default 0 check (minimum_cursor >= 0),
+  schema_version integer not null default 1 check (schema_version = 1),
+  updated_at     timestamptz not null default now()
+);
+
+create table if not exists public.ab_change_events (
+  id          bigint generated always as identity primary key,
+  root        text not null,
+  stream_kind text not null check (stream_kind in ('root', 'chat')),
+  stream_id   text not null default '',
+  domain      text not null check (domain in ('docs', 'logs', 'visibility')),
+  doc_head    bigint check (doc_head >= 0),
+  log_head    bigint check (log_head >= 0),
+  created_at  timestamptz not null default now(),
+  check (
+    (stream_kind = 'root' and stream_id = '')
+    or (stream_kind = 'chat' and stream_id <> '')
+  ),
+  check (
+    (domain = 'docs' and doc_head is not null and log_head is null)
+    or (
+      domain = 'logs' and stream_kind = 'chat'
+      and log_head is not null and doc_head is null
+    )
+    or (domain = 'visibility' and doc_head is null and log_head is null)
+  )
+);
+create index if not exists ab_change_events_replay
+  on public.ab_change_events (root, id);
+
+alter table public.ab_change_epochs enable row level security;
+alter table public.ab_change_events enable row level security;
+
+revoke all on table public.ab_change_epochs from public, anon, authenticated;
+revoke all on table public.ab_change_events from public, anon, authenticated;
+grant select on table public.ab_change_epochs to authenticated;
+grant select on table public.ab_change_events to authenticated;
+revoke all on sequence public.ab_change_events_id_seq
+  from public, anon, authenticated;
+
+drop policy if exists ab_change_epochs_member_select
+  on public.ab_change_epochs;
+create policy ab_change_epochs_member_select on public.ab_change_epochs
+for select to authenticated using ((select public.ab_root_ok(root)));
+
+drop policy if exists ab_change_events_member_select
+  on public.ab_change_events;
+create policy ab_change_events_member_select on public.ab_change_events
+for select to authenticated using (
+  (select public.ab_root_ok(root))
+  and (
+    stream_kind = 'root'
+    or (select public.ab_can_read_chat(root, stream_id))
+  )
+);
+
+-- Probe the complete replay contract rather than inferring readiness from a
+-- table that may have been installed by an older schema paste.
+create or replace function public.ab_change_ledger_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select 1
+$$;
+revoke all on function public.ab_change_ledger_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_change_ledger_ready()
+  to authenticated, service_role;
+
+-- Identity values are allocated before commit, so a direct `id > cursor`
+-- query can observe a later transaction and permanently skip an earlier one.
+-- Writers take a shared transaction lock before allocating an event id. This
+-- bounded RPC takes the matching exclusive lock: existing writers settle,
+-- later writers wait until the page snapshot is captured, and concurrent
+-- writers never block one another. RLS remains the authority filter.
+create or replace function public.ab_change_events_page(
+  p_root text, p_after bigint, p_limit integer
+) returns table (
+  id bigint,
+  stream_kind text,
+  stream_id text,
+  domain text,
+  doc_head bigint,
+  log_head bigint
+)
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+begin
+  if p_root is null or p_root = ''
+     or p_after is null or p_after < 0
+     or p_limit is null or p_limit < 1 or p_limit > 1000 then
+    raise exception 'invalid change-ledger page request'
+      using errcode = '22023';
+  end if;
+  if not public.ab_root_ok(p_root) then
+    raise exception 'change-ledger root is unavailable'
+      using errcode = '42501';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  return query
+    select e.id, e.stream_kind, e.stream_id, e.domain, e.doc_head, e.log_head
+    from public.ab_change_events e
+    where e.root = p_root and e.id > p_after
+    order by e.id
+    limit p_limit;
+end
+$$;
+revoke all on function public.ab_change_events_page(text, bigint, integer)
+  from public, anon, authenticated;
+grant execute on function public.ab_change_events_page(text, bigint, integer)
+  to authenticated, service_role;
+
+create schema if not exists private;
+revoke all on schema private from public, anon, authenticated;
+
+create or replace function private.ab_record_doc_change() returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_chat text;
+begin
+  -- Presence heartbeats have their own expiry/revalidation owner. Logging
+  -- each refresh would create permanent replay and Realtime traffic.
+  if new.path like 'presence/%' then
+    return new;
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || new.root, 0)
+  );
+  insert into public.ab_change_epochs(root) values (new.root)
+  on conflict (root) do nothing;
+
+  if new.path like 'chats/%' then
+    v_chat := split_part(new.path, '/', 2);
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain, doc_head
+    ) values (new.root, 'chat', v_chat, 'docs', new.seq);
+
+    if new.path = 'chats/' || v_chat || '/meta.json' then
+      if tg_op = 'INSERT' then
+        insert into public.ab_change_events(
+          root, stream_kind, stream_id, domain
+        ) values (new.root, 'root', '', 'visibility');
+      elsif old.data->'members' is distinct from new.data->'members'
+         or old.data->'tenure' is distinct from new.data->'tenure'
+         or old.data->'deleted' is distinct from new.data->'deleted'
+         or old.deleted is distinct from new.deleted then
+        insert into public.ab_change_events(
+          root, stream_kind, stream_id, domain
+        ) values (new.root, 'root', '', 'visibility');
+      end if;
+    end if;
+  else
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain, doc_head
+    ) values (new.root, 'root', '', 'docs', new.seq);
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_record_doc_change()
+  from public, anon, authenticated;
+
+drop trigger if exists ab_docs_change_ledger on public.ab_docs;
+create trigger ab_docs_change_ledger
+after insert or update on public.ab_docs
+for each row execute function private.ab_record_doc_change();
+
+create or replace function private.ab_record_log_change() returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+begin
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || new.root, 0)
+  );
+  insert into public.ab_change_epochs(root) values (new.root)
+  on conflict (root) do nothing;
+  insert into public.ab_change_events(
+    root, stream_kind, stream_id, domain, log_head
+  ) values (new.root, 'chat', new.chat_id, 'logs', new.id);
+  return new;
+end
+$$;
+revoke all on function private.ab_record_log_change()
+  from public, anon, authenticated;
+
+drop trigger if exists ab_logs_change_ledger on public.ab_logs;
+create trigger ab_logs_change_ledger
+after insert on public.ab_logs
+for each row execute function private.ab_record_log_change();
+
+create or replace function private.ab_record_root_membership_change()
+returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_root text;
+begin
+  if tg_op = 'DELETE' then
+    v_root := old.root;
+  else
+    v_root := new.root;
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+  );
+  insert into public.ab_change_epochs(root) values (v_root)
+  on conflict (root) do nothing;
+  insert into public.ab_change_events(
+    root, stream_kind, stream_id, domain
+  ) values (v_root, 'root', '', 'visibility');
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_record_root_membership_change()
+  from public, anon, authenticated;
+
+drop trigger if exists ab_members_change_ledger on public.ab_members;
+create trigger ab_members_change_ledger
+after insert or delete on public.ab_members
+for each row execute function private.ab_record_root_membership_change();
+
+-- Existing roots start at cursor zero and perform their normal complete local
+-- catch-up before observing new ledger events. No historical authority is
+-- inferred from this backfill.
+insert into public.ab_change_epochs(root)
+select root from public.ab_members
+union select root from public.ab_docs
+union select root from public.ab_logs
+on conflict (root) do nothing;
+
+-- Publication setup is idempotent and remains inert if this SQL is exercised
+-- outside a Supabase project. Only INSERT events exist on this table.
+do $$
+begin
+  if exists (
+    select 1 from pg_catalog.pg_publication where pubname = 'supabase_realtime'
+  ) and not exists (
+    select 1 from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'ab_change_events'
+  ) then
+    alter publication supabase_realtime add table public.ab_change_events;
+  end if;
+end
+$$;

@@ -36,6 +36,10 @@ class LocalMutationTransport(Transport):
         return self._transport.has_change_feed
 
     @property
+    def supports_change_ledger(self):
+        return self._transport.supports_change_ledger
+
+    @property
     def supports_exclusive_create(self):
         return self._transport.supports_exclusive_create
 
@@ -161,6 +165,15 @@ class LocalMutationTransport(Transport):
 
     def changed_logs(self, cursor):
         return self._transport.changed_logs(cursor)
+
+    def change_ledger_capability(self):
+        return self._transport.change_ledger_capability()
+
+    def change_ledger_epoch(self):
+        return self._transport.change_ledger_epoch()
+
+    def change_ledger_events(self, after_cursor, *, limit):
+        return self._transport.change_ledger_events(after_cursor, limit=limit)
 
     def suggest_poll_s(self, default):
         return self._transport.suggest_poll_s(default)
