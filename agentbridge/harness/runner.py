@@ -268,11 +268,11 @@ class AgentRunner:
                 status = mirror_status()
                 if (not isinstance(status, dict)
                         or status.get("state") != "online"):
-                    # A synchronized cached control is safe only while its
-                    # source is healthy.  During an outage retain a prior
-                    # pause, or stand down when no prior truth exists.
+                    # During an outage retain the last admitted pause truth.
+                    # With no prior truth, stand down until the mirror can
+                    # establish one.
                     paused = hit[0] if hit is not None else True
-        except Exception:  # noqa: BLE001 — retain last truth; unknown fails closed
+        except Exception:  # noqa: BLE001 — retain last truth; unknown stands down
             paused = hit[0] if hit is not None else True
         self._chat_pause[chat_id] = (paused, now)
         return paused

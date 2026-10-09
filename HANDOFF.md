@@ -620,8 +620,10 @@ rechecks the epoch on bounded audits or a notification at/below the saved cursor
 Provider failures back off rather than retrying every harness tick. Ordinary
 document events perform a serialized doc-delta admission without the expensive
 chat-ID RPC; explicit visibility events retain that reconciliation. Cached
-pause enforcement fails closed whenever mirror health is degraded. No ledger
-row, cursor, cache generation or notification grants authority.
+pause enforcement retains the last admitted pause truth while mirror health is
+degraded and stands down only when no prior truth exists, matching the accepted
+last-successful-snapshot contract. No ledger row, cursor, cache generation or
+notification grants authority.
 
 The provider schema adds a live `(root, path text_pattern_ops)` prefix index and
 replaces `ab_chat_ids` with a fixed-search-path, explicitly granted
@@ -631,7 +633,14 @@ service-role mode retains its existing all-root access. It also applies the Supa
 init-plan form to the two member self-service `auth.uid()` policies. The focused
 runtime/cache/control/Supabase gate passes 286 tests; the complete offline suite
 passes 3,321 tests with 18 expected skips; Ruff and diff checks are clean. The
-app and harnesses remain intentionally stopped. Next, merge the green PR63/PR64
-prerequisites, publish this repair for current-head review and cross-platform CI,
-then deliberately apply the schema and measure provider CPU plus harness request
-rates before restarting the fleet. Do not infer the live CPU fix from local tests.
+app and harnesses remain intentionally stopped. PR63 and PR64 are merged. PR65
+has a clean current-head Codex review and passing Ubuntu CI; its Windows job
+completed all tests with 3,308 passes and 31 skips, then hit the recurring
+fixture HTTP timeout during the final lifecycle bootstrap test. That exact test
+passes ten consecutive isolated local runs, and only the failed Windows job is
+being rerun. A read-only live preflight confirms that none of the ledger tables,
+RPCs or prefix index has been installed; the stopped-fleet 60-minute provider
+CPU was 0.39%. Merge only after exact-head Windows CI passes, then deliberately
+apply the merged schema and measure provider CPU plus harness request rates as
+the GUI and harnesses are restarted in stages. Do not infer the live CPU fix
+from local tests.

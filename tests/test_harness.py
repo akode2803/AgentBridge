@@ -756,7 +756,7 @@ def test_runner_runtime_discovery_uses_the_synchronized_mirror(hrig, monkeypatch
     assert runner.handoff_ledger.fresh_reads is True
 
 
-def test_runner_cached_pause_fails_closed_when_mirror_is_degraded(
+def test_runner_cached_pause_uses_last_truth_when_mirror_is_degraded(
         hrig, monkeypatch):
     from agentbridge.harness.runtime import controls as controls_module
 

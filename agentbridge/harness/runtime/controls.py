@@ -269,7 +269,8 @@ def read_pause(directory, tx, *, chat_id: str = "", snapshot=None,
     ``fresh`` remains the default and may merge a live runtime listing.
     ``cached`` reads one bounded synchronized mirror snapshot while applying
     the identical signature/membership rules. Enforcement callers using it
-    must fail closed whenever that mirror reports degraded health.
+    must define how a previously admitted decision behaves when that mirror
+    reports degraded health.
     """
     if source == "fresh":
         paths = tx.list_docs(pause_prefix(chat_id))
