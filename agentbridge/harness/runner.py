@@ -1312,10 +1312,12 @@ class AgentRunner:
             max(0.0, announced + 1800.0 - now),
             self._handoff_check_in_s(now),
         ]
-        if not self._change_observer.active:
+        if not self._change_observer.active or self._has_priority_chats():
             # Unsupported or failed durable-ledger setup retains the legacy
-            # broad safety scan cadence. Healthy ledger-backed Supabase runs
-            # stay entirely event/deadline driven.
+            # broad safety scan cadence. A room deliberately deferred during
+            # this pass also gets the prior short retry without manufacturing
+            # an immediate self-wake or busy loop. A healthy, quiet
+            # ledger-backed Supabase runner stays entirely deadline driven.
             delays.append(max(0.0, self.poll_s))
         try:
             delays.append(self._change_observer.next_check_in_s())

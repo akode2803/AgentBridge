@@ -227,6 +227,25 @@ def test_runner_wait_retains_legacy_poll_when_observer_is_inactive(
     assert wait == runner.poll_s
 
 
+def test_runner_wait_retries_deferred_room_on_poll_cadence(
+    hrig, monkeypatch,
+):
+    runner = hrig.make_runner()
+    monotonic_now = time.monotonic()
+    assert runner._handoff_scan_due(monotonic_now) is True
+    runner._change_observer._started = True
+    monkeypatch.setattr(
+        runner._change_observer, "next_check_in_s", lambda: 300.0,
+    )
+    runner._defer_chat("room-transient-failure")
+
+    wait = runner._next_loop_wait(
+        now=monotonic_now, last_full_scan=monotonic_now,
+        announced=monotonic_now,
+    )
+    assert wait == runner.poll_s
+
+
 def test_tick_can_skip_expensive_handoff_discovery(hrig, monkeypatch):
     runner = hrig.make_runner()
     calls = []
