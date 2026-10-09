@@ -616,7 +616,8 @@ reads use the synchronized local mirror; mutations and claims still use the
 fresh canonical ledgers. The durable observer persists a local replay cursor,
 uses Realtime only as a wake, admits current provider rows before advancing that
 cursor, resets through a complete mirror refresh on epoch replacement, and
-backs provider failures off rather than retrying every harness tick. Ordinary
+rechecks the epoch on bounded audits or a notification at/below the saved cursor.
+Provider failures back off rather than retrying every harness tick. Ordinary
 document events perform a serialized doc-delta admission without the expensive
 chat-ID RPC; explicit visibility events retain that reconciliation. Cached
 pause enforcement fails closed whenever mirror health is degraded. No ledger
@@ -627,7 +628,7 @@ replaces `ab_chat_ids` with a fixed-search-path, explicitly granted
 `SECURITY DEFINER` candidate scan followed by the existing current root/chat
 authority predicates once per candidate. It also applies the Supabase-recommended
 init-plan form to the two member self-service `auth.uid()` policies. The focused
-runtime/cache/control/Supabase gate passes 285 tests; the complete offline suite
+runtime/cache/control/Supabase gate passes 286 tests; the complete offline suite
 passes 3,321 tests with 18 expected skips; Ruff and diff checks are clean. The
 app and harnesses remain intentionally stopped. Next, merge the green PR63/PR64
 prerequisites, publish this repair for current-head review and cross-platform CI,

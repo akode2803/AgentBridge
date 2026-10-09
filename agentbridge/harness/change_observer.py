@@ -37,11 +37,18 @@ class HarnessChangeObserver:
         self._last_check = 0.0
         self._retry_at = 0.0
         self._next_probe = 0.0
+        self._verify_epoch = False
         self._unsubscribe = None
 
-    def _signalled(self, _event_id: int) -> None:
+    def _signalled(self, event_id: int) -> None:
         with self._lock:
             self._dirty = True
+            # Duplicate/out-of-order notifications are harmless.  An event at
+            # or behind our cursor can also be the first evidence of an epoch
+            # replacement whose identity sequence restarted, so verify the
+            # rare boundary before relying on the old cursor.
+            if event_id <= self._cursor:
+                self._verify_epoch = True
         self.wake()
 
     def _load_state(self, epoch: ChangeLedgerEpoch) -> bool:
@@ -90,6 +97,7 @@ class HarnessChangeObserver:
             )
             self._started = True
             self._dirty = True
+            self._verify_epoch = False
             return True
         except Exception:
             self._next_probe = now + _REPROBE_S
@@ -118,8 +126,25 @@ class HarnessChangeObserver:
             if not dirty and not due:
                 return False
             self._dirty = False
+            verify_epoch = self._verify_epoch or due
+            self._verify_epoch = False
         changed = False
         try:
+            if verify_epoch:
+                epoch = self.transport.change_ledger_epoch()
+                assert self._epoch is not None
+                if (epoch.epoch != self._epoch.epoch
+                        or self._cursor < epoch.minimum_cursor):
+                    refresh = getattr(self.transport, "refresh", None)
+                    if not callable(refresh):
+                        raise RuntimeError("transport mirror cannot reset")
+                    refresh()
+                    self._epoch = epoch
+                    self._cursor = epoch.minimum_cursor
+                    self._save_state()
+                    changed = True
+                else:
+                    self._epoch = epoch
             for _ in range(_MAX_PAGES_PER_TICK):
                 page = self.transport.change_ledger_events(
                     self._cursor, limit=_PAGE_SIZE,
@@ -157,6 +182,7 @@ class HarnessChangeObserver:
             # cadence; stale runtime discovery stays fail-closed where needed.
             with self._lock:
                 self._dirty = True
+                self._verify_epoch = self._verify_epoch or verify_epoch
             self._last_check = now
             self._retry_at = now + _RECOVERY_POLL_S
             return False

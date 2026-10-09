@@ -131,3 +131,27 @@ def test_ready_observer_queries_on_signal_or_bounded_audit(tmp_path):
     finally:
         observer.close()
         store.close()
+
+
+def test_lower_realtime_id_rechecks_replaced_epoch_before_replay(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    tx = _Transport((_event(1), _event(2)))
+    observer = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert observer.tick() is True
+        assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
+        baselines = len([call for call in tx.calls if call[0] == "baseline"])
+
+        tx.epoch = ChangeLedgerEpoch(
+            "00000000-0000-0000-0000-000000000002", 0, 1,
+        )
+        tx.events = (_event(1),)
+        tx.listener(1)
+        assert observer.tick() is True
+        state = store.cached_doc("sync/harness_change_ledger")
+        assert state["epoch"] == tx.epoch.epoch
+        assert state["cursor"] == 1
+        assert len([call for call in tx.calls if call[0] == "baseline"]) == baselines + 1
+    finally:
+        observer.close()
+        store.close()
