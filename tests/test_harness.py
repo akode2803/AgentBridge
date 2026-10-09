@@ -571,6 +571,8 @@ def test_chat_scoped_ledger_change_queues_only_named_rooms(hrig, monkeypatch):
     from agentbridge.harness.change_observer import HarnessChanges
 
     runner = hrig.make_runner(responder=Scripted())
+    runner._chat_pause["room-a"] = (True, time.monotonic())
+    runner._chat_pause["other"] = (False, time.monotonic())
     monkeypatch.setattr(
         runner._change_observer, "tick",
         lambda: HarnessChanges(chat_ids=("room-b", "room-a")),
@@ -579,6 +581,8 @@ def test_chat_scoped_ledger_change_queues_only_named_rooms(hrig, monkeypatch):
 
     assert runner._consume_observer_changes() is False
     assert runner._take_priority_chats() == ["room-b", "room-a"]
+    assert "room-a" not in runner._chat_pause
+    assert "other" in runner._chat_pause
     assert not runner._wake.is_set()
 
 

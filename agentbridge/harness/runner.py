@@ -314,6 +314,7 @@ class AgentRunner:
             # tick() is already running because of a wake/audit. Keep the
             # exact room queued for this pass without scheduling an immediate
             # empty follow-up loop.
+            self._chat_pause.pop(chat_id, None)
             self._defer_chat(chat_id)
         return changes.full_scan
 
