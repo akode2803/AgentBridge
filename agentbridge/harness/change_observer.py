@@ -40,6 +40,17 @@ class HarnessChangeObserver:
         self._verify_epoch = False
         self._unsubscribe = None
 
+    @property
+    def active(self) -> bool:
+        """Whether durable change-ledger recovery is installed.
+
+        Callers retain their legacy safety scan while the provider does not
+        support the ledger (or startup probing is failing).  Once installed,
+        log progress is routed by SyncEngine and document/visibility changes
+        are reported by :meth:`tick`.
+        """
+        return self._started
+
     def _signalled(self, event_id: int) -> None:
         with self._lock:
             self._dirty = True

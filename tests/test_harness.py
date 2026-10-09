@@ -547,6 +547,26 @@ def test_sync_priority_drops_room_when_membership_was_revoked(hrig, monkeypatch)
     assert runner._take_priority_chats() == []
 
 
+def test_realtime_priority_scan_does_not_walk_all_rooms(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
+    scanned = []
+    monkeypatch.setattr(runner.mesh, "snapshot", lambda _chat_id: priority)
+    monkeypatch.setattr(
+        runner.mesh.membership, "iter_chats_for",
+        lambda: pytest.fail("realtime scan must not walk all rooms"),
+    )
+    monkeypatch.setattr(
+        runner, "_scan_chat",
+        lambda snap, *_args: (scanned.append(snap.id) or 0),
+    )
+
+    runner._prioritize_chat("priority", 1)
+    assert runner.scan_all(full=False) == 0
+    assert scanned == ["priority"]
+    assert runner._take_priority_chats() == []
+
+
 def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
     # Capture the real encrypted authority values outside the timed section;

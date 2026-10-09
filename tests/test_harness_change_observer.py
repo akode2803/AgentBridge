@@ -73,7 +73,9 @@ def test_replay_advances_only_after_mirror_admission(tmp_path):
     wakes = []
     observer = HarnessChangeObserver(tx, store, lambda: wakes.append(True))
     try:
+        assert observer.active is False
         assert observer.tick() is True
+        assert observer.active is True
         assert ("baseline",) in tx.calls
         assert ("refresh", True) in tx.calls
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 2
@@ -85,8 +87,22 @@ def test_replay_advances_only_after_mirror_admission(tmp_path):
         assert store.cached_doc("sync/harness_change_ledger")["cursor"] == 3
     finally:
         observer.close()
+        assert observer.active is False
         store.close()
     assert ("unsubscribe",) in tx.calls
+
+
+def test_unavailable_ledger_stays_in_legacy_scan_mode(tmp_path):
+    store = Store(tmp_path / "observer.sqlite")
+    tx = _Transport()
+    tx.change_ledger_capability = lambda: None
+    observer = HarnessChangeObserver(tx, store, lambda: None)
+    try:
+        assert observer.tick() is False
+        assert observer.active is False
+    finally:
+        observer.close()
+        store.close()
 
 
 def test_failed_mirror_admission_keeps_replay_cursor(tmp_path):
