@@ -736,6 +736,63 @@ def test_reply_can_schedule_a_timer_that_fires(hrig):
 
 # --------------------------------------------------------------- stand-down
 
+def test_runner_runtime_discovery_uses_the_synchronized_mirror(hrig, monkeypatch):
+    from agentbridge.harness.runtime import controls as controls_module
+
+    snap = hrig.owner.create_chat("Cached runtime discovery", members=["helper"])
+    runner = hrig.make_runner(Scripted())
+    seen = {}
+
+    def observe(_directory, _tx, **kwargs):
+        seen.update(kwargs)
+        return False
+
+    monkeypatch.setattr(controls_module, "read_pause", observe)
+    assert runner.chat_standing_down(snap.id) is False
+    assert seen["source"] == "cached"
+    assert runner._handoff_discovery.fresh_reads is False
+    assert runner._handoff_discovery.task_ledger.fresh_reads is False
+    assert runner._handoff_discovery.run_ledger.fresh_reads is False
+    assert runner.handoff_ledger.fresh_reads is True
+
+
+def test_runner_cached_pause_fails_closed_when_mirror_is_degraded(
+        hrig, monkeypatch):
+    from agentbridge.harness.runtime import controls as controls_module
+
+    snap = hrig.owner.create_chat("Degraded runtime mirror", members=["helper"])
+    runner = hrig.make_runner(Scripted())
+    monkeypatch.setattr(controls_module, "read_pause", lambda *_args, **_kw: False)
+    monkeypatch.setattr(
+        runner.mesh.tx, "mirror_status", lambda: {"state": "offline"},
+        raising=False,
+    )
+
+    assert runner.chat_standing_down(snap.id) is True
+    runner._chat_pause[snap.id] = (False, time.monotonic() - 30)
+    assert runner.chat_standing_down(snap.id) is False
+
+
+def test_mirror_change_wakes_runtime_discovery(hrig, monkeypatch):
+    listeners = []
+    tx = hrig.clouds.bare(hrig.root)
+    monkeypatch.setattr(
+        tx, "subscribe_changes",
+        lambda callback: (listeners.append(callback) or
+                          (lambda: listeners.remove(callback))),
+        raising=False,
+    )
+    runner = AgentRunner(
+        tx, "helper", home=hrig.home, machine="devbox",
+        responder=Scripted(), poll_s=0.2,
+    )
+    hrig.runners.append(runner)
+    runner._wake.clear()
+    for listener in list(listeners):
+        listener()
+    assert runner._wake.is_set()
+
+
 def test_legacy_global_pause_does_not_hold_unrelated_agent(hrig):
     from agentbridge import crypto
     from agentbridge.core.timekit import new_id, next_ns
