@@ -295,6 +295,13 @@ class AgentRunner:
             self._priority_chats.setdefault(chat_id, None)
         self._wake.set()
 
+    def _defer_chat(self, chat_id: str) -> None:
+        """Retry one room on the next normal loop without defeating its wait."""
+        if not chat_id:
+            return
+        with self._priority_lock:
+            self._priority_chats.setdefault(chat_id, None)
+
     def _take_priority_chats(self) -> list[str]:
         with self._priority_lock:
             chat_ids = list(self._priority_chats)
@@ -312,6 +319,11 @@ class AgentRunner:
         how many items were enqueued. ``collect`` (dry-run) gathers what
         WOULD be enqueued without persisting anything. ``on_added`` runs after
         each complete room so durable work need not wait for unrelated rooms."""
+        if full:
+            # A full scan is prompted by startup, admitted document/visibility
+            # change, fallback, or audit. Re-evaluate pause controls on that
+            # cut so a resume is not hidden behind the short positive cache.
+            self._chat_pause.clear()
         settings = self.settings()
         owner = self.mesh.directory.owner_of(self.agent)
         added = 0
@@ -343,7 +355,7 @@ class AgentRunner:
                         continue
                     scan_room(snap)
                 except Exception:
-                    self._prioritize_chat(chat_id)
+                    self._defer_chat(chat_id)
                     continue
 
         scan_priorities()
@@ -356,11 +368,11 @@ class AgentRunner:
                 try:
                     scan_room(snap)
                 except Exception:  # noqa: BLE001 — one chat never blocks the rest
-                    self._prioritize_chat(snap.id)
+                    self._defer_chat(snap.id)
                     continue
         scan_priorities()
         for chat_id in repeated:
-            self._prioritize_chat(chat_id)
+            self._defer_chat(chat_id)
         for t in self.timers.due():
             if self.chat_standing_down(t["chat_id"]):
                 continue  # V62: held, stays due — fires on resume
@@ -473,7 +485,7 @@ class AgentRunner:
                 # The synchronized envelope is durable, but its key inputs are
                 # not ready yet. Keep this exact room hot without restoring an
                 # all-room poll; a later key/doc wake can then heal promptly.
-                self._prioritize_chat(chat_id)
+                self._defer_chat(chat_id)
         return added
 
     def _catchup_skip(self, cand, settings: HarnessSettings) -> str | None:

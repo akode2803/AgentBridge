@@ -567,6 +567,15 @@ def test_realtime_priority_scan_does_not_walk_all_rooms(hrig, monkeypatch):
     assert runner._take_priority_chats() == []
 
 
+def test_full_scan_rechecks_cached_room_pause(hrig, monkeypatch):
+    runner = hrig.make_runner(responder=Scripted())
+    runner._chat_pause["room"] = (True, time.monotonic())
+    monkeypatch.setattr(runner.mesh.membership, "iter_chats_for", lambda: iter(()))
+
+    assert runner.scan_all(full=True) == 0
+    assert "room" not in runner._chat_pause
+
+
 def test_realtime_priority_scan_requeues_transient_room_failure(hrig, monkeypatch):
     runner = hrig.make_runner(responder=Scripted())
     priority = SimpleNamespace(id="priority", is_member=lambda _name: True)
@@ -584,9 +593,11 @@ def test_realtime_priority_scan_requeues_transient_room_failure(hrig, monkeypatc
     monkeypatch.setattr(runner, "_scan_chat", fail_once_per_pass)
 
     runner._prioritize_chat("priority", 1)
+    runner._wake.clear()
     assert runner.scan_all(full=False) == 0
     assert len(attempts) == 1
     assert runner._take_priority_chats() == ["priority"]
+    assert not runner._wake.is_set()
 
 
 def test_sync_priority_interrupts_lazy_safety_scan_between_rooms(hrig, monkeypatch):
