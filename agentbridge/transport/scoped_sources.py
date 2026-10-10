@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..core.errors import TransportError
 from .change_ledger import MAX_LEDGER_INTEGER, MAX_LEDGER_PAGE_SIZE
 
 MAX_SOURCE_BATCH_PATHS = 128
@@ -16,6 +17,10 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_KEY_BYTES = 4_096
 MAX_SOURCE_STREAM_BYTES = 1_024
 SOURCE_ROW_WIRE_OVERHEAD = 256
+
+
+class ScopedSourceOverflow(TransportError):
+    """A valid exact-source result does not fit in one provider response."""
 
 
 def _integer(value: object, name: str, *, positive: bool = False) -> int:
@@ -153,7 +158,7 @@ def validate_source_key(value: object, name: str) -> str:
 
 __all__ = [
     "MAX_SOURCE_BATCH_PATHS", "MAX_SOURCE_BYTES", "ScopedDocumentBatch",
-    "ScopedDocumentRow", "ScopedLogPage", "ScopedLogRow",
+    "ScopedDocumentRow", "ScopedLogPage", "ScopedLogRow", "ScopedSourceOverflow",
     "SOURCE_ROW_WIRE_OVERHEAD",
     "validate_source_budget", "validate_source_cursor", "validate_source_key",
     "validate_source_paths", "validate_source_stream",

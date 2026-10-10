@@ -26,6 +26,7 @@ MAX_ACTIVE_CANDIDATES = 4
 MAX_GENERATION_HISTORY = 1_024
 MAX_PATH_BYTES = 4_096
 MAX_ID_BYTES = 1_024
+MAX_LOG_NAME_BYTES = 4_096
 MAX_INTEGER = 2**63 - 1
 _MODES = frozenset({"delta", "replace"})
 
@@ -63,8 +64,21 @@ def _text(value: object, name: str, *, max_bytes: int = MAX_ID_BYTES,
     return value
 
 
+def _raw_text(value: object, name: str, *, max_bytes: int = MAX_ID_BYTES,
+              allow_empty: bool = False) -> str:
+    if type(value) is not str or (not value and not allow_empty) or "\x00" in value:
+        raise NodeInputError(f"invalid {name}")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise NodeInputError(f"invalid {name}") from None
+    if len(encoded) > max_bytes:
+        raise NodeInputError(f"invalid {name}")
+    return value
+
+
 def _path(value: object, name: str = "document path", *, prefix: bool = False) -> str:
-    path = _text(value, name, max_bytes=MAX_PATH_BYTES, allow_empty=prefix)
+    path = _raw_text(value, name, max_bytes=MAX_PATH_BYTES, allow_empty=prefix)
     if not path and prefix:
         return path
     if path.startswith("/") or path.endswith("/") or "\\" in path:
@@ -110,8 +124,10 @@ class NodeLogRow:
 
     def __post_init__(self) -> None:
         _integer(self.id, "log row id", minimum=1)
-        object.__setattr__(self, "chat_id", _text(self.chat_id, "chat id"))
-        object.__setattr__(self, "log_name", _text(self.log_name, "log name"))
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
+        object.__setattr__(self, "log_name", _raw_text(
+            self.log_name, "log name", max_bytes=MAX_LOG_NAME_BYTES,
+        ))
         object.__setattr__(self, "payload", _payload(self.payload, "log payload"))
 
 
@@ -121,7 +137,7 @@ class NodeVisibility:
     visible: bool
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "chat_id", _text(self.chat_id, "chat id"))
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
         if type(self.visible) is not bool:
             raise NodeInputError("invalid visibility flag")
 
@@ -206,8 +222,10 @@ class NodeLogRequest:
     limit: int = 1_000
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "chat_id", _text(self.chat_id, "chat id"))
-        object.__setattr__(self, "log_name", _text(self.log_name, "log name"))
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
+        object.__setattr__(self, "log_name", _raw_text(
+            self.log_name, "log name", max_bytes=MAX_LOG_NAME_BYTES,
+        ))
         _integer(self.after_id, "log cursor")
         _integer(self.limit, "log limit", minimum=1, maximum=MAX_CAPTURE_LOG_ROWS)
 
@@ -255,7 +273,7 @@ class NodeCaptureRequest:
             raise NodeInputError("duplicate log request")
         if type(self.include_visibility) is not bool:
             raise NodeInputError("invalid visibility selection")
-        object.__setattr__(self, "visibility_after", _text(
+        object.__setattr__(self, "visibility_after", _raw_text(
             self.visibility_after, "visibility cursor", allow_empty=True))
         _integer(self.visibility_limit, "visibility limit", minimum=1,
                  maximum=MAX_CAPTURE_CHAT_IDS)

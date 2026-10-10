@@ -14,8 +14,9 @@ from agentbridge.node.admission import (
     NodeLogRow,
     NodeVisibility,
 )
-from agentbridge.node.protocol import ReplicaIdentity
+from agentbridge.node.protocol import ProtocolError, ReplicaIdentity
 from agentbridge.node.store import NodeStore
+from agentbridge.node.wire import capture_response, parse_capture_request
 
 
 def identity():
@@ -34,6 +35,198 @@ def admit(owner, batch, *, created=1, observed=2):
     owner.seal_candidate(generation, batch, observed_ns=observed)
     owner.admit_candidate(generation)
     return generation
+
+
+def test_candidate_can_require_the_captured_admitted_generation(tmp_path):
+    owner = store(tmp_path)
+    first = admit(owner, NodeInputBatch(), created=1, observed=2)
+    with pytest.raises(NodeGenerationChanged, match="admitted generation changed"):
+        owner.begin_candidate(created_ns=3, expected_generation=0)
+    candidate = owner.begin_candidate(
+        created_ns=4, expected_generation=first,
+    )
+    assert candidate == first + 1
+
+
+def test_refresh_health_preserves_admission_and_success_time(tmp_path):
+    owner = store(tmp_path)
+    generation = admit(owner, NodeInputBatch(), created=1, observed=2)
+    assert owner.note_refresh_state("catching_up", attempted_ns=7) == "catching_up"
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == generation
+    assert status.last_success_ns == 2
+    assert status.last_attempt_ns == 7
+    assert status.health == "catching_up"
+    assert owner.note_refresh_state("ready", attempted_ns=9) == "ready"
+    ready = owner.status(node_epoch="node", started_ns=1)
+    assert ready.admitted_generation == generation
+    assert ready.last_success_ns == 9
+    assert ready.health == "ready"
+
+    next_generation = admit(
+        owner, NodeInputBatch(), created=10, observed=11,
+    )
+    with pytest.raises(NodeGenerationChanged, match="admitted generation changed"):
+        owner.note_refresh_state(
+            "ready", attempted_ns=12, expected_generation=generation,
+        )
+    current = owner.status(node_epoch="node", started_ns=1)
+    assert current.admitted_generation == next_generation
+    assert current.last_success_ns == 11
+
+
+def test_refresh_token_orders_attempts_with_the_same_generation(tmp_path):
+    owner = store(tmp_path)
+    generation = admit(owner, NodeInputBatch(), created=1, observed=2)
+    older = owner.begin_refresh(
+        attempted_ns=10, expected_generation=generation,
+    )
+    newer = owner.begin_refresh(
+        attempted_ns=20, expected_generation=generation,
+    )
+    assert (older, newer) == (10, 20)
+    with pytest.raises(NodeGenerationChanged, match="refresh changed"):
+        owner.note_refresh_state(
+            "ready", attempted_ns=older, expected_generation=generation,
+            expected_attempt_ns=older,
+        )
+    assert owner.note_refresh_state(
+        "catching_up", attempted_ns=newer, expected_generation=generation,
+        expected_attempt_ns=newer,
+    ) == "catching_up"
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.last_attempt_ns == newer
+    assert status.last_success_ns == 2
+    assert status.health == "catching_up"
+
+
+def test_newer_refresh_invalidates_an_older_candidate(tmp_path):
+    owner = store(tmp_path)
+    generation = admit(owner, NodeInputBatch(), created=1, observed=2)
+    older = owner.begin_refresh(
+        attempted_ns=10, expected_generation=generation,
+    )
+    candidate = owner.begin_candidate(
+        created_ns=older, expected_generation=generation,
+        expected_attempt_ns=older,
+    )
+    owner.seal_candidate(candidate, NodeInputBatch(), observed_ns=11)
+    newer = owner.begin_refresh(
+        attempted_ns=20, expected_generation=generation,
+    )
+    with pytest.raises(NodeGenerationChanged, match="refresh changed"):
+        owner.admit_candidate(candidate, expected_attempt_ns=older)
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == generation
+    assert status.last_attempt_ns == newer
+    assert status.health == "catching_up"
+
+
+def test_partial_admission_keeps_catching_up_health(tmp_path):
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1, expected_generation=0)
+    owner.seal_candidate(generation, NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 1, False, b"{}"),),
+    ), observed_ns=2)
+    owner.admit_candidate(generation, health="catching_up")
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == generation
+    assert status.health == "catching_up"
+    assert status.last_success_ns == 2
+
+
+def test_provider_sized_log_names_are_valid_node_identities(tmp_path):
+    owner = store(tmp_path)
+    log_name = "x" * 4_096
+    generation = admit(owner, NodeInputBatch(log_rows=(
+        NodeLogRow(1, "chat-a", log_name, b"one"),
+    )))
+    captured = owner.capture(NodeCaptureRequest(
+        log_requests=(NodeLogRequest("chat-a", log_name, limit=1),),
+        expected_generation=generation, max_log_rows=1,
+        max_bytes=16 * 1024,
+    ))
+    assert captured.log_pages[0].rows == (
+        NodeLogRow(1, "chat-a", log_name, b"one"),
+    )
+
+
+def test_provider_valid_unicode_raw_identities_round_trip(tmp_path):
+    owner = store(tmp_path)
+    joiner = "\u200d"
+    path = f"users/a{joiner}.json"
+    chat_id = f"chat{joiner}a"
+    log_name = f"a{joiner}b.jsonl"
+    generation = admit(owner, NodeInputBatch(
+        documents=(NodeDocument(path, 1, False, b"{}"),),
+        log_rows=(NodeLogRow(1, chat_id, log_name, b"one"),),
+        visibility=(NodeVisibility(chat_id, True),),
+    ))
+    captured = owner.capture(NodeCaptureRequest(
+        exact_document_paths=(path,),
+        log_requests=(NodeLogRequest(chat_id, log_name, limit=1),),
+        include_visibility=True, expected_generation=generation,
+        max_documents=1, max_log_rows=1, max_bytes=16 * 1024,
+    ))
+    assert captured.documents[0].path == path
+    assert captured.log_pages[0].rows[0].log_name == log_name
+    assert captured.visibility == (chat_id,)
+
+
+def test_provider_sized_names_produce_bounded_reusable_wire_cursors(tmp_path):
+    owner = store(tmp_path)
+    chat_id = "\n" * 1_024
+    log_name = '"' * 4_096
+    generation = admit(owner, NodeInputBatch(
+        log_rows=(NodeLogRow(1, chat_id, log_name, b"one"),),
+        visibility=(NodeVisibility(chat_id, True),),
+    ))
+    captured = owner.capture(NodeCaptureRequest(
+        log_requests=(NodeLogRequest(chat_id, log_name, limit=1),),
+        include_visibility=True, expected_generation=generation,
+        max_log_rows=1, max_bytes=32 * 1024,
+    ))
+    response = capture_response(captured)
+    log_cursor = response["logs"][0]["cursor"]
+    visibility_cursor = response["visibility_cursor"]
+    assert len(log_cursor.encode()) < 8 * 1024
+    assert len(visibility_cursor.encode()) < 8 * 1024
+    request = parse_capture_request({
+        "protocol_version": 1,
+        "expected_capture": response["capture"],
+        "exact_document_paths": [],
+        "document_prefixes": [],
+        "logs": [{
+            "chat_id": chat_id, "log_name": log_name,
+            "cursor": log_cursor, "limit": 1,
+        }],
+        "include_visibility": True,
+        "visibility_cursor": visibility_cursor,
+        "visibility_limit": 1,
+        "frontier_names": [],
+        "max_documents": 0,
+        "max_log_rows": 1,
+        "max_bytes": 32 * 1024,
+    }, database_incarnation=captured.database_incarnation)
+    assert request.log_requests[0].after_id == 1
+    assert request.visibility_after == chat_id
+
+    bad = {
+        "protocol_version": 1,
+        "expected_capture": response["capture"],
+        "exact_document_paths": [], "document_prefixes": [],
+        "logs": [{
+            "chat_id": "\ud800", "log_name": log_name,
+            "cursor": log_cursor, "limit": 1,
+        }],
+        "include_visibility": False, "visibility_cursor": None,
+        "visibility_limit": 1, "frontier_names": [],
+        "max_documents": 0, "max_log_rows": 1, "max_bytes": 32 * 1024,
+    }
+    with pytest.raises(ProtocolError, match="invalid log request"):
+        parse_capture_request(
+            bad, database_incarnation=captured.database_incarnation,
+        )
 
 
 def whole_capture(owner, *, expected=None, max_bytes=8 * 1024 * 1024):

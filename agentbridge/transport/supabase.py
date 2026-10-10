@@ -57,6 +57,7 @@ from .scoped_sources import (
     ScopedDocumentRow,
     ScopedLogPage,
     ScopedLogRow,
+    ScopedSourceOverflow,
     SOURCE_ROW_WIRE_OVERHEAD,
     validate_source_budget,
     validate_source_cursor,
@@ -671,7 +672,9 @@ class SupabaseTransport(Transport):
                         or any(raw[0][key] is not None
                                for key in ("path", "seq", "data", "deleted"))):
                     raise ValueError("invalid exact document overflow")
-                raise OverflowError("exact document batch exceeds byte budget")
+                raise ScopedSourceOverflow(
+                    "Supabase document source batch exceeds byte budget",
+                )
             rows = []
             total = 0
             for row in raw:
@@ -693,9 +696,6 @@ class SupabaseTransport(Transport):
             if total > budget:
                 raise ValueError("exact document response exceeded byte budget")
             return ScopedDocumentBatch(requested, tuple(rows))
-        except OverflowError as exc:
-            raise TransportError("Supabase document source batch exceeds byte budget") \
-                from exc
         except (AttributeError, TypeError, ValueError, RecursionError,
                 UnicodeError) as exc:
             raise TransportError(
@@ -741,7 +741,9 @@ class SupabaseTransport(Transport):
                 if (len(raw) != 1 or overflow != (True,) or more != (True,)
                         or raw[0]["id"] is not None or raw[0]["line"] is not None):
                     raise ValueError("invalid exact log overflow")
-                raise OverflowError("exact log row exceeds byte budget")
+                raise ScopedSourceOverflow(
+                    "Supabase log source row exceeds byte budget",
+                )
             rows = []
             total = 0
             for row in raw:
@@ -755,8 +757,6 @@ class SupabaseTransport(Transport):
             if total > budget:
                 raise ValueError("exact log response exceeded byte budget")
             return ScopedLogPage(after, through, tuple(rows), more[0])
-        except OverflowError as exc:
-            raise TransportError("Supabase log source row exceeds byte budget") from exc
         except (AttributeError, TypeError, ValueError, UnicodeError) as exc:
             raise TransportError("Supabase returned an invalid exact log page") from exc
 

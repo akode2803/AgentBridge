@@ -312,16 +312,58 @@ class NodeStore:
             pending_mutations=pending,
         )
 
-    def begin_candidate(self, *, created_ns: int) -> int:
+    def begin_refresh(self, *, attempted_ns: int,
+                      expected_generation: int) -> int:
+        """Reserve a unique refresh token against one admitted generation."""
+        attempted = _positive_ns(attempted_ns, "refresh attempt time")
+        if (type(expected_generation) is not int
+                or not 0 <= expected_generation <= 2**63 - 1):
+            raise NodeInputError("invalid expected node generation")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT admitted_generation,last_attempt_ns,pending_mutations "
+                "FROM node_meta WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("invalid local node metadata")
+            if row[0] != expected_generation:
+                raise NodeGenerationChanged("admitted generation changed")
+            token = max(attempted, row[1] + 1)
+            if token > 2**63 - 1:
+                raise NodeInputError("refresh attempt time exhausted")
+            health = "pending" if row[2] else "catching_up"
+            conn.execute(
+                "UPDATE node_meta SET health=?,last_attempt_ns=? WHERE singleton=1",
+                (health, token),
+            )
+        return token
+
+    def begin_candidate(self, *, created_ns: int,
+                        expected_generation: int | None = None,
+                        expected_attempt_ns: int | None = None) -> int:
         """Commit one reclaimable building generation against the current cut."""
         created = _positive_ns(created_ns, "candidate creation time")
+        if (expected_generation is not None
+                and (type(expected_generation) is not int
+                     or not 0 <= expected_generation <= 2**63 - 1)):
+            raise NodeInputError("invalid expected node generation")
+        if expected_attempt_ns is not None:
+            _positive_ns(expected_attempt_ns, "expected refresh attempt")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             base = conn.execute(
-                "SELECT admitted_generation FROM node_meta WHERE singleton=1"
+                "SELECT admitted_generation,last_attempt_ns FROM node_meta "
+                "WHERE singleton=1"
             ).fetchone()
             if base is None:
                 raise sqlite3.DatabaseError("invalid local node metadata")
+            if (expected_generation is not None
+                    and base[0] != expected_generation):
+                raise NodeGenerationChanged("admitted generation changed")
+            if (expected_attempt_ns is not None
+                    and base[1] != expected_attempt_ns):
+                raise NodeGenerationChanged("node refresh changed")
             active = conn.execute(
                 "SELECT count(*) FROM node_generations "
                 "WHERE state IN ('building','sealed')").fetchone()[0]
@@ -334,9 +376,51 @@ class NodeStore:
                 "INSERT INTO node_generations(generation,base_generation,state,created_ns) "
                 "VALUES(?,?,'building',?)", (generation, base[0], created))
             conn.execute(
-                "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
-                "WHERE singleton=1", (created,))
+                "UPDATE node_meta SET health='catching_up',last_attempt_ns="
+                "MAX(last_attempt_ns,?) WHERE singleton=1", (created,))
         return generation
+
+    def note_refresh_state(self, health: str, *, attempted_ns: int,
+                           expected_generation: int | None = None,
+                           expected_attempt_ns: int | None = None) -> str:
+        """Publish source freshness without changing the admitted generation."""
+        attempted = _positive_ns(attempted_ns, "refresh attempt time")
+        if health not in ("ready", "catching_up", "degraded", "unavailable"):
+            raise NodeInputError("invalid refresh health")
+        if (expected_generation is not None
+                and (type(expected_generation) is not int
+                     or not 0 <= expected_generation <= 2**63 - 1)):
+            raise NodeInputError("invalid expected node generation")
+        if expected_attempt_ns is not None:
+            _positive_ns(expected_attempt_ns, "expected refresh attempt")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT admitted_generation,pending_mutations,last_attempt_ns,health "
+                "FROM node_meta "
+                "WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("invalid local node metadata")
+            if (expected_generation is not None
+                    and row[0] != expected_generation):
+                raise NodeGenerationChanged("admitted generation changed")
+            if (expected_attempt_ns is not None
+                    and row[2] != expected_attempt_ns):
+                raise NodeGenerationChanged("node refresh changed")
+            if expected_attempt_ns is None and attempted < row[2]:
+                return row[3]
+            effective = "pending" if row[1] else health
+            changed = conn.execute(
+                "UPDATE node_meta SET health=?,last_attempt_ns="
+                "MAX(last_attempt_ns,?),last_success_ns=CASE WHEN ?='ready' "
+                "THEN MAX(last_success_ns,?) ELSE last_success_ns END "
+                "WHERE singleton=1",
+                (effective, attempted, effective, attempted),
+            ).rowcount
+            if changed != 1:
+                raise sqlite3.DatabaseError("invalid local node metadata")
+        return effective
 
     def seal_candidate(self, generation: int, batch: NodeInputBatch, *,
                        observed_ns: int) -> None:
@@ -601,11 +685,16 @@ class NodeStore:
                 AND state IN ('superseded','abandoned')
             """, (cutoff,))
 
-    def admit_candidate(self, generation: int) -> int:
+    def admit_candidate(self, generation: int, *, health: str = "ready",
+                        expected_attempt_ns: int | None = None) -> int:
         """Atomically publish every staged family or retain the previous cut."""
         if type(generation) is not int or generation <= 0:
             raise NodeInputError("invalid candidate generation")
-        stale = False
+        if health not in ("ready", "catching_up"):
+            raise NodeInputError("invalid admitted generation health")
+        if expected_attempt_ns is not None:
+            _positive_ns(expected_attempt_ns, "expected refresh attempt")
+        stale: str | None = None
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             (base, state, observed, documents_mode, visibility_mode,
@@ -613,7 +702,8 @@ class NodeStore:
             if state != "sealed" or observed is None:
                 raise NodeGenerationChanged("candidate is not sealed")
             current = conn.execute(
-                "SELECT admitted_generation FROM node_meta WHERE singleton=1"
+                "SELECT admitted_generation,last_attempt_ns FROM node_meta "
+                "WHERE singleton=1"
             ).fetchone()
             if current is None:
                 raise sqlite3.DatabaseError("invalid local node metadata")
@@ -622,7 +712,14 @@ class NodeStore:
                     "UPDATE node_generations SET state='abandoned' "
                     "WHERE generation=?", (generation,))
                 self._clear_candidate_rows(conn, generation)
-                stale = True
+                stale = "candidate base generation changed"
+            elif (expected_attempt_ns is not None
+                  and current[1] != expected_attempt_ns):
+                conn.execute(
+                    "UPDATE node_generations SET state='abandoned' "
+                    "WHERE generation=?", (generation,))
+                self._clear_candidate_rows(conn, generation)
+                stale = "candidate refresh changed"
             else:
                 self._check_candidate_caps(
                     conn, generation, documents_mode, visibility_mode,
@@ -661,22 +758,30 @@ class NodeStore:
                 if changed != 1:
                     raise NodeGenerationChanged("candidate changed during admission")
                 conn.execute(
-                    "UPDATE node_meta SET admitted_generation=?,health='ready',"
+                    "UPDATE node_meta SET admitted_generation=?,health=?,"
                     "last_success_ns=? WHERE singleton=1",
-                    (generation, observed),
+                    (generation, health, observed),
                 )
                 self._record_changes(conn, generation, scopes)
                 self._clear_candidate_rows(conn, generation)
                 self._prune_generation_history(conn)
         if stale:
-            raise NodeGenerationChanged("candidate base generation changed")
+            raise NodeGenerationChanged(stale)
         return generation
 
-    def abandon_candidate(self, generation: int, *, health: str = "degraded") -> bool:
+    def abandon_candidate(self, generation: int, *, health: str = "degraded",
+                          expected_generation: int | None = None,
+                          expected_attempt_ns: int | None = None) -> bool:
         if type(generation) is not int or generation <= 0:
             raise NodeInputError("invalid candidate generation")
         if health not in ("degraded", "unavailable"):
             raise NodeInputError("invalid candidate failure health")
+        if (expected_generation is not None
+                and (type(expected_generation) is not int
+                     or not 0 <= expected_generation <= 2**63 - 1)):
+            raise NodeInputError("invalid expected node generation")
+        if expected_attempt_ns is not None:
+            _positive_ns(expected_attempt_ns, "expected refresh attempt")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             changed = conn.execute("""
@@ -685,8 +790,17 @@ class NodeStore:
             """, (generation,)).rowcount
             if changed:
                 self._clear_candidate_rows(conn, generation)
-                conn.execute(
-                    "UPDATE node_meta SET health=? WHERE singleton=1", (health,))
+                if expected_generation is None and expected_attempt_ns is None:
+                    conn.execute(
+                        "UPDATE node_meta SET health=? WHERE singleton=1", (health,))
+                else:
+                    conn.execute(
+                        "UPDATE node_meta SET health=? WHERE singleton=1 "
+                        "AND (? IS NULL OR admitted_generation=?) "
+                        "AND (? IS NULL OR last_attempt_ns=?)",
+                        (health, expected_generation, expected_generation,
+                         expected_attempt_ns, expected_attempt_ns),
+                    )
                 self._prune_generation_history(conn)
         return bool(changed)
 

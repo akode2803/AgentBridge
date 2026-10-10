@@ -1,7 +1,8 @@
 # Local admitted-input node architecture
 
-Status: N0 plus the N1 atomic-store and bounded local-read protocol slices are
-inactive; no GUI, harness or provider routing uses them.
+Status: N0 plus the N1 atomic-store, bounded local-read protocol and exact-source
+shadow collector slices are inactive; no GUI, harness or runtime routing uses
+them.
 
 ## Measured reason for the change
 
@@ -127,9 +128,20 @@ journal. The authenticated loopback server exposes those read operations through
 strict bounded JSON. Opaque capture continuations bind the database incarnation,
 admitted generation and exact log selection; foreign, recreated or superseded
 captures return HTTP 409, while expired or compacted change positions return
-`reset_required`. It still has no provider
-collection loop and no product client uses these routes, so it cannot affect
-product reads or create provider traffic.
+`reset_required`.
+
+The inactive shadow collector consumes at most three exact source-ledger events
+per attempt. It splits document reads under the provider's 8 MiB response cap,
+pages logs under separate row and 32 MiB attempt budgets, and publishes raw
+inputs plus replay evidence in one candidate generation. Every exact log event
+head is observed even when a lower row ID commits after a higher one. Temporary
+per-stream cursors exist only while their current replay chunk is incomplete, so
+frontier metadata stays bounded. Stable closing fences, refresh tokens and
+admitted-generation comparisons prevent stale concurrent attempts from
+publishing or overwriting source health. Cold discovery, visibility events,
+identity-less legacy events and missing exact rows remain explicit recovery work.
+No product client constructs this collector, so it cannot yet affect product
+reads or create provider traffic.
 
 ## Narrow local API
 
@@ -227,10 +239,11 @@ last admitted snapshot according to the rules above.
 - Test crash between provider read/stage/admission, cursor replacement, offline
   leave/rejoin, equal IDs/namespaces, tombstones and bounded overflow.
 
-The atomic-store sub-slice is implemented first. The remaining N1 work is the
-feature-gated Supabase collector, local protocol exposure, durable-ledger/
-visibility recovery and equivalence recorder. Do not route GUI or harness reads
-to the store while those pieces or N2 are absent.
+The atomic store, local protocol and exact-source shadow collector sub-slices are
+implemented. The remaining N1 work is cold/scoped visibility recovery, runtime
+composition behind an explicit disabled-by-default feature gate and the
+transport-equivalence recorder. Do not route GUI or harness reads to the store
+while those pieces or N2 are absent.
 
 Source sequence and identity values are allocation-ordered, not commit-ordered.
 The optional node source-ledger capability therefore adds the exact document
