@@ -44,6 +44,10 @@ class LocalMutationTransport(Transport):
         return self._transport.supports_source_ledger
 
     @property
+    def supports_scoped_source_reads(self):
+        return self._transport.supports_scoped_source_reads
+
+    @property
     def supports_exclusive_create(self):
         return self._transport.supports_exclusive_create
 
@@ -169,6 +173,17 @@ class LocalMutationTransport(Transport):
 
     def changed_logs(self, cursor):
         return self._transport.changed_logs(cursor)
+
+    def source_documents(self, paths, *, max_bytes):
+        return self._transport.source_documents(paths, max_bytes=max_bytes)
+
+    def source_log_page(
+            self, chat_id, log_name, *, after_cursor, through_cursor, limit,
+            max_bytes):
+        return self._transport.source_log_page(
+            chat_id, log_name, after_cursor=after_cursor,
+            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
+        )
 
     def source_ledger_fence(self):
         return self._transport.source_ledger_fence()
