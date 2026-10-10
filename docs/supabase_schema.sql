@@ -707,6 +707,43 @@ create trigger ab_docs_change_ledger
 after insert or update on public.ab_docs
 for each row execute function private.ab_record_doc_change();
 
+-- Physical deletion is rare (normally documents become tombstones first), but
+-- the node must never infer completeness from a ledger that silently misses a
+-- purge or an administrative hard delete. Emit one root recovery event instead
+-- of one event per deleted row, so a large tombstone sweep cannot amplify the
+-- durable ledger. Presence remains outside durable replay.
+create or replace function private.ab_record_doc_delete_scope() returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_root text;
+begin
+  for v_root in
+    select distinct d.root
+    from old_rows d
+    where d.path not like 'presence/%'
+    order by d.root
+  loop
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+    );
+    insert into public.ab_change_epochs(root) values (v_root)
+    on conflict (root) do nothing;
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain
+    ) values (v_root, 'root', '', 'visibility');
+  end loop;
+  return null;
+end
+$$;
+revoke all on function private.ab_record_doc_delete_scope()
+  from public, anon, authenticated;
+
+drop trigger if exists ab_docs_delete_scope_ledger on public.ab_docs;
+create trigger ab_docs_delete_scope_ledger
+after delete on public.ab_docs
+referencing old table as old_rows
+for each statement execute function private.ab_record_doc_delete_scope();
+
 create or replace function private.ab_record_log_change() returns trigger
 language plpgsql security definer set search_path = pg_catalog as $$
 begin
@@ -729,25 +766,67 @@ create trigger ab_logs_change_ledger
 after insert on public.ab_logs
 for each row execute function private.ab_record_log_change();
 
+-- Log deletion can remove an arbitrarily long room history. One root-scoped
+-- event is intentionally coarse but bounded; recovery must re-enumerate under
+-- current RLS before it can admit absence.
+create or replace function private.ab_record_log_delete_scope() returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_root text;
+begin
+  for v_root in
+    select distinct l.root from old_rows l order by l.root
+  loop
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+    );
+    insert into public.ab_change_epochs(root) values (v_root)
+    on conflict (root) do nothing;
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain
+    ) values (v_root, 'root', '', 'visibility');
+  end loop;
+  return null;
+end
+$$;
+revoke all on function private.ab_record_log_delete_scope()
+  from public, anon, authenticated;
+
+drop trigger if exists ab_logs_delete_scope_ledger on public.ab_logs;
+create trigger ab_logs_delete_scope_ledger
+after delete on public.ab_logs
+referencing old table as old_rows
+for each statement execute function private.ab_record_log_delete_scope();
+
 create or replace function private.ab_record_root_membership_change()
 returns trigger
 language plpgsql security definer set search_path = pg_catalog as $$
 declare
   v_root text;
+  v_roots text[];
 begin
-  if tg_op = 'DELETE' then
-    v_root := old.root;
+  if tg_op = 'INSERT' then
+    v_roots := array[new.root];
+  elsif tg_op = 'DELETE' then
+    v_roots := array[old.root];
   else
-    v_root := new.root;
+    v_roots := array[old.root, new.root];
   end if;
-  perform pg_catalog.pg_advisory_xact_lock_shared(
-    pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
-  );
-  insert into public.ab_change_epochs(root) values (v_root)
-  on conflict (root) do nothing;
-  insert into public.ab_change_events(
-    root, stream_kind, stream_id, domain
-  ) values (v_root, 'root', '', 'visibility');
+
+  for v_root in
+    select distinct roots.value
+    from pg_catalog.unnest(v_roots) as roots(value)
+    order by roots.value
+  loop
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+    );
+    insert into public.ab_change_epochs(root) values (v_root)
+    on conflict (root) do nothing;
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain
+    ) values (v_root, 'root', '', 'visibility');
+  end loop;
   if tg_op = 'DELETE' then
     return old;
   end if;
@@ -759,8 +838,32 @@ revoke all on function private.ab_record_root_membership_change()
 
 drop trigger if exists ab_members_change_ledger on public.ab_members;
 create trigger ab_members_change_ledger
-after insert or delete on public.ab_members
+after insert or update or delete on public.ab_members
 for each row execute function private.ab_record_root_membership_change();
+
+-- Source-ledger v1 did not record physical deletes or member-row updates. An
+-- existing node may therefore have acknowledged a cursor while retaining data
+-- that disappeared before v2 was installed. Advance the per-root contract and
+-- rotate its epoch exactly once so every v1 frontier requires root recovery.
+-- Set the new-row default before the backfill: a root created concurrently with
+-- this migration must be born at v2 rather than escape the invalidation cut.
+alter table public.ab_change_epochs
+  add column if not exists source_schema_version integer not null default 1;
+alter table public.ab_change_epochs
+  drop constraint if exists ab_change_epochs_source_schema_version;
+alter table public.ab_change_epochs
+  add constraint ab_change_epochs_source_schema_version check (
+    source_schema_version >= 1
+  ) not valid;
+alter table public.ab_change_epochs
+  validate constraint ab_change_epochs_source_schema_version;
+alter table public.ab_change_epochs
+  alter column source_schema_version set default 2;
+update public.ab_change_epochs
+set source_schema_version = 2,
+    epoch = pg_catalog.gen_random_uuid(),
+    updated_at = pg_catalog.now()
+where source_schema_version < 2;
 
 -- Local-node source replay.  The fence/page lock pairs with the shared writer
 -- lock above, so identity allocation order cannot be mistaken for commit order.
@@ -787,7 +890,7 @@ begin
            greatest(
              s.minimum_cursor, coalesce(tail.id, 0)
            )::bigint,
-           1
+           s.source_schema_version
     from public.ab_change_epochs s
     left join lateral (
       select e.id
@@ -850,7 +953,7 @@ grant execute on function public.ab_node_source_events_page(text, bigint, intege
 -- instead of advertising exact replay before both functions and triggers exist.
 create or replace function public.ab_node_source_ledger_ready() returns integer
 language sql stable security invoker set search_path = pg_catalog as $$
-  select 1
+  select 2
 $$;
 revoke all on function public.ab_node_source_ledger_ready()
   from public, anon, authenticated;

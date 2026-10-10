@@ -327,7 +327,7 @@ class FakeClient:
             cursor = max([minimum] + [row.get("id", 0) for row in events])
             return [{"epoch": epochs[0].get("epoch"),
                      "minimum_cursor": minimum, "cursor": cursor,
-                     "schema_version": 1}]
+                     "schema_version": 2}]
         if fn == "ab_node_source_events_page":
             root = params.get("p_root")
             after = params.get("p_after")
