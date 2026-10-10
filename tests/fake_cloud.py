@@ -265,7 +265,8 @@ class FakeClient:
     def __init__(self, legacy: bool = False, *, effects_ready: bool = True):
         self.lock = threading.RLock()
         self.db = {"_legacy": legacy, "_effects_ready": effects_ready,
-                   "_change_ledger_version": None}
+                   "_change_ledger_version": None,
+                   "_source_ledger_version": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -310,6 +311,32 @@ class FakeClient:
             rows.sort(key=lambda row: row["id"])
             return [{key: row.get(key) for key in (
                 "id", "stream_kind", "stream_id", "domain", "doc_head", "log_head",
+            )} for row in rows[:limit]]
+        if fn == "ab_node_source_ledger_ready":
+            return self.db.get("_source_ledger_version")
+        if fn == "ab_node_source_ledger_fence":
+            root = params.get("p_root")
+            epochs = [row for row in self.db.get("ab_change_epochs", [])
+                      if row.get("root") == root]
+            if len(epochs) != 1:
+                return []
+            events = [row for row in self.db.get("ab_change_events", [])
+                      if row.get("root") == root]
+            minimum = epochs[0].get("minimum_cursor")
+            cursor = max([minimum] + [row.get("id", 0) for row in events])
+            return [{"epoch": epochs[0].get("epoch"),
+                     "minimum_cursor": minimum, "cursor": cursor,
+                     "schema_version": 1}]
+        if fn == "ab_node_source_events_page":
+            root = params.get("p_root")
+            after = params.get("p_after")
+            limit = params.get("p_limit")
+            rows = [copy.deepcopy(row) for row in self.db.get("ab_change_events", [])
+                    if row.get("root") == root and row.get("id", 0) > after]
+            rows.sort(key=lambda row: row["id"])
+            return [{key: row.get(key) for key in (
+                "id", "stream_kind", "stream_id", "domain", "source_key",
+                "doc_head", "log_head",
             )} for row in rows[:limit]]
         if fn == "ab_effect_transition":
             return self._effect_transition_locked(params)

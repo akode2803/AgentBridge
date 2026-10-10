@@ -425,6 +425,27 @@ def test_tombstone_purge_parity_does_not_retire_live_logical_sources(rig):
     assert _pending(coordinator) == 0
 
 
+def test_source_ledger_reads_delegate_without_creating_mutation_intents(
+        rig, monkeypatch):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    fence = object()
+    page = object()
+    monkeypatch.setattr(
+        SupabaseTransport, "supports_source_ledger", property(lambda _self: True),
+    )
+    inner.source_ledger_fence = lambda: calls.append(("fence",)) or fence
+    inner.source_ledger_events = lambda cursor, *, limit: calls.append(
+        ("events", cursor, limit),
+    ) or page
+
+    assert proxy.supports_source_ledger is True
+    assert proxy.source_ledger_fence() is fence
+    assert proxy.source_ledger_events(17, limit=23) is page
+    assert calls == [("fence",), ("events", 17, 23)]
+    assert _pending(coordinator) == 0
+
+
 def test_proxy_explicitly_owns_every_public_base_transport_api():
     from agentbridge.transport.base import Transport
 

@@ -547,6 +547,25 @@ create table if not exists public.ab_change_events (
     or (domain = 'visibility' and doc_head is null and log_head is null)
   )
 );
+-- Exact raw identity is optional on historical rows. Current RLS can expose an
+-- old identity-less event after a prior visible fence (for example on rejoin),
+-- so NULL means the node must reconcile that event's whole root/chat scope.
+-- The constraint also rejects oversized new source identities transactionally;
+-- an RPC page cannot materialize an unbounded source key before Python checks it.
+alter table public.ab_change_events
+  add column if not exists source_key text;
+alter table public.ab_change_events
+  drop constraint if exists ab_change_events_source_identity_size;
+alter table public.ab_change_events
+  add constraint ab_change_events_source_identity_size check (
+    pg_catalog.octet_length(stream_id) <= 1024
+    and (
+      source_key is null
+      or pg_catalog.octet_length(source_key) <= 4096
+    )
+  ) not valid;
+alter table public.ab_change_events
+  validate constraint ab_change_events_source_identity_size;
 create index if not exists ab_change_events_replay
   on public.ab_change_events (root, id);
 
@@ -655,8 +674,8 @@ begin
   if new.path like 'chats/%' then
     v_chat := split_part(new.path, '/', 2);
     insert into public.ab_change_events(
-      root, stream_kind, stream_id, domain, doc_head
-    ) values (new.root, 'chat', v_chat, 'docs', new.seq);
+      root, stream_kind, stream_id, domain, source_key, doc_head
+    ) values (new.root, 'chat', v_chat, 'docs', new.path, new.seq);
 
     if new.path = 'chats/' || v_chat || '/meta.json' then
       if tg_op = 'INSERT' then
@@ -674,8 +693,8 @@ begin
     end if;
   else
     insert into public.ab_change_events(
-      root, stream_kind, stream_id, domain, doc_head
-    ) values (new.root, 'root', '', 'docs', new.seq);
+      root, stream_kind, stream_id, domain, source_key, doc_head
+    ) values (new.root, 'root', '', 'docs', new.path, new.seq);
   end if;
   return new;
 end
@@ -697,8 +716,8 @@ begin
   insert into public.ab_change_epochs(root) values (new.root)
   on conflict (root) do nothing;
   insert into public.ab_change_events(
-    root, stream_kind, stream_id, domain, log_head
-  ) values (new.root, 'chat', new.chat_id, 'logs', new.id);
+    root, stream_kind, stream_id, domain, source_key, log_head
+  ) values (new.root, 'chat', new.chat_id, 'logs', new.log_name, new.id);
   return new;
 end
 $$;
@@ -742,6 +761,101 @@ drop trigger if exists ab_members_change_ledger on public.ab_members;
 create trigger ab_members_change_ledger
 after insert or delete on public.ab_members
 for each row execute function private.ab_record_root_membership_change();
+
+-- Local-node source replay.  The fence/page lock pairs with the shared writer
+-- lock above, so identity allocation order cannot be mistaken for commit order.
+-- RLS remains the disclosure boundary; source_key is work identity only and is
+-- never a membership or visibility verdict.
+create or replace function public.ab_node_source_ledger_fence(p_root text)
+returns table (
+  epoch uuid, minimum_cursor bigint, cursor bigint, schema_version integer
+)
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+begin
+  if p_root is null or p_root = '' then
+    raise exception 'invalid source-ledger fence request' using errcode = '22023';
+  end if;
+  if auth.role() <> 'service_role' and not public.ab_root_ok(p_root) then
+    raise exception 'source-ledger root is unavailable' using errcode = '42501';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  return query
+    select s.epoch, s.minimum_cursor,
+           greatest(
+             s.minimum_cursor, coalesce(tail.id, 0)
+           )::bigint,
+           1
+    from public.ab_change_epochs s
+    left join lateral (
+      select e.id
+      from public.ab_change_events e
+      where e.root = s.root
+      order by e.id desc
+      limit 1
+    ) tail on true
+    where s.root = p_root
+    limit 1;
+end
+$$;
+
+create or replace function public.ab_node_source_events_page(
+  p_root text, p_after bigint, p_limit integer
+) returns table (
+  id bigint, stream_kind text, stream_id text, domain text,
+  source_key text, doc_head bigint, log_head bigint
+)
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+  v_minimum bigint;
+begin
+  if p_root is null or p_root = ''
+     or p_after is null or p_after < 0
+     or p_limit is null or p_limit < 1 or p_limit > 1000 then
+    raise exception 'invalid source-ledger page request' using errcode = '22023';
+  end if;
+  if auth.role() <> 'service_role' and not public.ab_root_ok(p_root) then
+    raise exception 'source-ledger root is unavailable' using errcode = '42501';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  select s.minimum_cursor into v_minimum
+  from public.ab_change_epochs s where s.root = p_root;
+  if v_minimum is null or p_after < v_minimum then
+    raise exception 'source-ledger cursor is unavailable' using errcode = '22023';
+  end if;
+  return query
+    select e.id, e.stream_kind, e.stream_id, e.domain,
+           e.source_key, e.doc_head, e.log_head
+    from public.ab_change_events e
+    where e.root = p_root and e.id > p_after
+    order by e.id
+    limit p_limit;
+end
+$$;
+revoke all on function public.ab_node_source_ledger_fence(text)
+  from public, anon, authenticated;
+revoke all on function public.ab_node_source_events_page(text, bigint, integer)
+  from public, anon, authenticated;
+grant execute on function public.ab_node_source_ledger_fence(text)
+  to authenticated, service_role;
+grant execute on function public.ab_node_source_events_page(text, bigint, integer)
+  to authenticated, service_role;
+
+-- Install the capability marker last. A partial schema paste must fail closed
+-- instead of advertising exact replay before both functions and triggers exist.
+create or replace function public.ab_node_source_ledger_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select 1
+$$;
+revoke all on function public.ab_node_source_ledger_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_node_source_ledger_ready()
+  to authenticated, service_role;
 
 -- Existing roots start at cursor zero and perform their normal complete local
 -- catch-up before observing new ledger events. No historical authority is
