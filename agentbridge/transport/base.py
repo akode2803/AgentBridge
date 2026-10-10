@@ -43,6 +43,7 @@ from .change_ledger import (
     ChangeLedgerEpoch,
     ChangeLedgerPage,
 )
+from .source_ledger import SourceLedgerFence, SourceLedgerPage
 
 from .mirror_observation import (
     MirrorCaptureUnavailable,
@@ -146,6 +147,16 @@ class Transport(ABC):
     # immutable, validated ledger rows admitted by provider RLS. Positions are
     # delivery evidence only and never authorize a local or canonical read.
     supports_change_ledger: bool = False
+    supports_source_ledger: bool = False
+
+    def source_ledger_fence(self) -> SourceLedgerFence:
+        raise NotImplementedError(f"{type(self).__name__} has no source ledger")
+
+    def source_ledger_events(
+        self, after_cursor: int, *, limit: int,
+    ) -> SourceLedgerPage:
+        del after_cursor, limit
+        raise NotImplementedError(f"{type(self).__name__} has no source ledger")
 
     def change_ledger_capability(self) -> ChangeLedgerCapability | None:
         return None

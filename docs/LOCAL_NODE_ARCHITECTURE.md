@@ -232,6 +232,20 @@ feature-gated Supabase collector, local protocol exposure, durable-ledger/
 visibility recovery and equivalence recorder. Do not route GUI or harness reads
 to the store while those pieces or N2 are absent.
 
+Source sequence and identity values are allocation-ordered, not commit-ordered.
+The optional node source-ledger capability therefore adds the exact document
+path or log name to each newly committed durable event. A node first captures an
+exclusive-lock fence, performs its cold observation, then replays every later
+event before readiness. Current RLS can later reveal a pre-capability event that
+was hidden when the fence was captured. Such an identity-less document or log
+event forces bounded reconciliation of its containing root/chat scope before the
+cursor can advance; it is never skipped or treated as an exact key. New source
+keys and stream IDs are capped transactionally before the capability reports
+ready, bounding page materialization. This is delivery/work evidence only:
+event keys, heads, cursors and epochs never establish membership, and every page
+remains filtered by current provider RLS. Presence remains owned by its separate
+ephemeral path and does not enter this durable ledger.
+
 ### N2 — shared mutation and finalization fence
 
 - Bridge every direct GUI/harness writer into one durable pending-scope owner

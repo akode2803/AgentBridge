@@ -66,3 +66,40 @@ def test_epoch_floor_and_realtime_publication_are_idempotent():
     assert "on conflict (root) do nothing" in SCHEMA
     assert "pg_catalog.pg_publication_tables" in SCHEMA
     assert "alter publication supabase_realtime add table public.ab_change_events" in SCHEMA
+
+
+def test_local_node_source_ledger_binds_exact_identity_to_the_commit_fence():
+    assert "add column if not exists source_key text" in SCHEMA
+    doc_start = SCHEMA.index("create or replace function private.ab_record_doc_change")
+    doc_end = SCHEMA.index("drop trigger if exists ab_docs_change_ledger", doc_start)
+    doc_body = SCHEMA[doc_start:doc_end]
+    assert "source_key, doc_head" in doc_body
+    assert "new.path, new.seq" in doc_body
+
+    log_start = SCHEMA.index("create or replace function private.ab_record_log_change")
+    log_end = SCHEMA.index("drop trigger if exists ab_logs_change_ledger", log_start)
+    log_body = SCHEMA[log_start:log_end]
+    assert "source_key, log_head" in log_body
+    assert "new.log_name, new.id" in log_body
+
+    for function in ("ab_node_source_ledger_fence", "ab_node_source_events_page"):
+        start = SCHEMA.index(f"create or replace function public.{function}")
+        end = SCHEMA.index(f"revoke all on function public.{function}", start)
+        body = SCHEMA[start:end]
+        assert "language plpgsql volatile security invoker" in body
+        assert body.index("pg_advisory_xact_lock(") \
+            < body.index("public.ab_change_events")
+    fence_start = SCHEMA.index(
+        "create or replace function public.ab_node_source_ledger_fence",
+    )
+    fence_end = SCHEMA.index(
+        "revoke all on function public.ab_node_source_ledger_fence", fence_start,
+    )
+    fence_body = SCHEMA[fence_start:fence_end]
+    assert "left join lateral" in fence_body
+    assert "order by e.id desc" in fence_body
+    assert "pg_catalog.max(e.id)" not in fence_body
+    assert "e.source_key" in SCHEMA
+    assert "pg_catalog.octet_length(stream_id) <= 1024" in SCHEMA
+    assert "pg_catalog.octet_length(source_key) <= 4096" in SCHEMA
+    assert "from public, anon, authenticated" in SCHEMA

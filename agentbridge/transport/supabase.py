@@ -48,8 +48,10 @@ from .change_ledger import (
     ChangeLedgerEvent,
     ChangeLedgerPage,
     MAX_LEDGER_INTEGER,
+    MAX_LEDGER_PAGE_SIZE,
 )
 from .health import classify_transport_error, retry_inline
+from .source_ledger import SourceLedgerEvent, SourceLedgerFence, SourceLedgerPage
 
 __all__ = ["SupabaseTransport", "load_supabase_env"]
 
@@ -81,6 +83,8 @@ _MISSING_COL_MARKS = (
 _DELTA_REPROBE_S = 60.0       # legacy mode re-probes (a paste upgrades live)
 _LEDGER_REPROBE_S = 60.0
 _LEDGER_SCHEMA_VERSION = 1
+_SOURCE_LEDGER_SCHEMA_VERSION = 1
+_SOURCE_LEDGER_REPROBE_S = 60.0
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -189,6 +193,8 @@ class SupabaseTransport(Transport):
         self._effects_reprobe = 0.0
         self._ledger_ready: bool | None = None
         self._ledger_reprobe = 0.0
+        self._source_ledger_ready: bool | None = None
+        self._source_ledger_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -502,6 +508,92 @@ class SupabaseTransport(Transport):
         if rt is None or not rt.observes_change_ledger():
             return "disconnected" if self._ledger_ready else "unsupported"
         return rt.change_ledger_status()
+
+    # -------------------------------------- local-node exact source ledger
+    @property
+    def supports_source_ledger(self) -> bool:  # type: ignore[override]
+        return self._source_ledger_capability()
+
+    def _source_ledger_capability(self) -> bool:
+        now = time.monotonic()
+        if self._source_ledger_ready is True:
+            return True
+        if (self._source_ledger_ready is False
+                and now < self._source_ledger_reprobe):
+            return False
+        try:
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_node_source_ledger_ready").execute(),
+            ).data
+            self._count(ready)
+            self._source_ledger_ready = (
+                type(ready) is int and ready == _SOURCE_LEDGER_SCHEMA_VERSION)
+        except Exception as exc:  # noqa: BLE001 - optional capability
+            if _is_missing_column(exc):
+                self._source_ledger_ready = False
+            elif self._source_ledger_ready is None:
+                return False
+        if not self._source_ledger_ready:
+            self._source_ledger_reprobe = now + _SOURCE_LEDGER_REPROBE_S
+        return bool(self._source_ledger_ready)
+
+    def _require_source_ledger(self) -> None:
+        if not self._source_ledger_capability():
+            raise NotImplementedError("Supabase source ledger is unavailable")
+
+    def source_ledger_fence(self) -> SourceLedgerFence:
+        self._require_source_ledger()
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_source_ledger_fence", {"p_root": self.root},
+        ).execute()).data
+        self._count(raw)
+        try:
+            if type(raw) is not list or len(raw) != 1 or type(raw[0]) is not dict:
+                raise ValueError("invalid source ledger fence row")
+            row = raw[0]
+            fence = SourceLedgerFence(
+                str(row.get("epoch", "")), row.get("minimum_cursor"),
+                row.get("cursor"), row.get("schema_version"),
+            )
+            if fence.schema_version != _SOURCE_LEDGER_SCHEMA_VERSION:
+                raise ValueError("unsupported source ledger fence")
+            return fence
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TransportError("Supabase returned an invalid source ledger fence") from exc
+
+    def source_ledger_events(
+        self, after_cursor: int, *, limit: int,
+    ) -> SourceLedgerPage:
+        self._require_source_ledger()
+        if (type(after_cursor) is not int or after_cursor < 0
+                or after_cursor > MAX_LEDGER_INTEGER):
+            raise ValueError("after_cursor must be a non-negative integer")
+        if type(limit) is not int or limit < 1 or limit > MAX_LEDGER_PAGE_SIZE:
+            raise ValueError("invalid source ledger page limit")
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_source_events_page", {
+                "p_root": self.root, "p_after": after_cursor, "p_limit": limit,
+            },
+        ).execute()).data
+        self._count(raw)
+        try:
+            if type(raw) is not list or len(raw) > limit:
+                raise ValueError("provider exceeded source ledger page")
+            required = {
+                "id", "stream_kind", "stream_id", "domain", "source_key",
+                "doc_head", "log_head",
+            }
+            if any(type(row) is not dict or not required.issubset(row) for row in raw):
+                raise ValueError("incomplete source ledger event")
+            events = tuple(SourceLedgerEvent(
+                event_id=row["id"], stream_kind=row["stream_kind"],
+                stream_id=row["stream_id"], domain=row["domain"],
+                source_key=row["source_key"], doc_head=row["doc_head"],
+                log_head=row["log_head"],
+            ) for row in raw)
+            return SourceLedgerPage(after_cursor, events, len(raw) == limit)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TransportError("Supabase returned an invalid source ledger page") from exc
 
     # ------------------------------------------------------------------ docs
     def get_doc(self, path: str, default: Any = None) -> Any:
