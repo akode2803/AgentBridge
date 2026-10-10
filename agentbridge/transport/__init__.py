@@ -12,6 +12,12 @@ from .change_ledger import (
     ChangeLedgerEvent,
     ChangeLedgerPage,
 )
+from .recovery_sources import (
+    RecoveryChat,
+    RecoveryCut,
+    RecoveryPage,
+    RecoveryStream,
+)
 from .source_ledger import SourceLedgerEvent, SourceLedgerFence, SourceLedgerPage
 from .scoped_sources import (
     ScopedDocumentBatch,
@@ -25,6 +31,7 @@ __all__ = [
     "Transport", "Watcher", "CachingTransport", "make_transport", "validate_root_spec",
     "ChangeLedgerCapability", "ChangeLedgerEpoch", "ChangeLedgerEvent",
     "ChangeLedgerPage",
+    "RecoveryChat", "RecoveryCut", "RecoveryPage", "RecoveryStream",
     "SourceLedgerEvent", "SourceLedgerFence", "SourceLedgerPage",
     "ScopedDocumentBatch", "ScopedDocumentRow", "ScopedLogPage", "ScopedLogRow",
     "ScopedSourceOverflow",

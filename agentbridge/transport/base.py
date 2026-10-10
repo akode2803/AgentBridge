@@ -43,8 +43,9 @@ from .change_ledger import (
     ChangeLedgerEpoch,
     ChangeLedgerPage,
 )
-from .source_ledger import SourceLedgerFence, SourceLedgerPage
+from .recovery_sources import RecoveryCut, RecoveryPage
 from .scoped_sources import ScopedDocumentBatch, ScopedLogPage
+from .source_ledger import SourceLedgerFence, SourceLedgerPage
 
 from .mirror_observation import (
     MirrorCaptureUnavailable,
@@ -150,6 +151,15 @@ class Transport(ABC):
     supports_change_ledger: bool = False
     supports_source_ledger: bool = False
     supports_scoped_source_reads: bool = False
+    supports_recovery_source: bool = False
+
+    def recovery_fence(self) -> RecoveryCut:
+        raise NotImplementedError(f"{type(self).__name__} has no recovery source")
+
+    def recovery_page(self, family: str, after: str | tuple[str, str] | int,
+                      *, limit: int, max_bytes: int) -> RecoveryPage:
+        del family, after, limit, max_bytes
+        raise NotImplementedError(f"{type(self).__name__} has no recovery source")
 
     def source_documents(
         self, paths: tuple[str, ...], *, max_bytes: int,
