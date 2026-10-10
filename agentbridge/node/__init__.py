@@ -1,10 +1,23 @@
-"""Inactive local admitted-input node foundation.
+"""Shadow local admitted-input node foundation.
 
-The package is deliberately not imported by the GUI or harness.  N0 only
-defines the local process, identity and status contracts; it performs no
-provider I/O and is not an authority cache.
+The package is deliberately not imported by the GUI or harness.  Its store can
+atomically admit detached provider observations, but it performs no provider I/O
+and is never a canonical authority cache.
 """
 
+from .admission import (
+    NodeCapture,
+    NodeCaptureRequest,
+    NodeChangePage,
+    NodeDocument,
+    NodeFrontier,
+    NodeGenerationChanged,
+    NodeInputBatch,
+    NodeInputError,
+    NodeLogRequest,
+    NodeLogRow,
+    NodeVisibility,
+)
 from .protocol import PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .server import LocalNodeServer
 from .store import NodeStore
@@ -12,7 +25,18 @@ from .store import NodeStore
 __all__ = [
     "PROTOCOL_VERSION",
     "LocalNodeServer",
+    "NodeCapture",
+    "NodeCaptureRequest",
+    "NodeChangePage",
+    "NodeDocument",
+    "NodeFrontier",
+    "NodeGenerationChanged",
+    "NodeInputBatch",
+    "NodeInputError",
+    "NodeLogRequest",
+    "NodeLogRow",
     "NodeStatus",
     "NodeStore",
+    "NodeVisibility",
     "ReplicaIdentity",
 ]

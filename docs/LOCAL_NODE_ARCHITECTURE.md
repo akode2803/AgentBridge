@@ -1,6 +1,7 @@
 # Local admitted-input node architecture
 
-Status: N0 foundation is inactive; no GUI, harness or provider routing uses it.
+Status: N0 plus the first N1 atomic-store slice are inactive; no GUI, harness
+or provider routing uses them.
 
 ## Measured reason for the change
 
@@ -85,16 +86,22 @@ current session/viewer from an exact admitted local cut.
 
 ## Durable replica
 
-Use a dedicated SQLite database owned only by the node. Suggested tables:
+Use a dedicated SQLite database owned only by the node. The implemented store
+uses candidate tables for a bounded detached batch and mutable admitted tables
+inside one SQLite publication transaction. This avoids copying the full retained
+log history for every incremental generation while readers still observe the old
+cut or the new cut. Its principal tables are:
 
 - `node_meta`: schema/protocol version, database incarnation, full replica
   identity, admitted generation, health, last attempt/success and current pending
   mutation state;
-- `remote_docs(path, seq, deleted, payload)`;
-- `remote_log_rows(id, chat_id, log_name, payload)` plus
+- `candidate_docs`, `candidate_log_rows`, `candidate_visibility` and
+  `candidate_frontiers`, keyed by a reclaimable building/sealed generation;
+- `remote_docs(path, seq, deleted, payload, updated_generation)`;
+- `remote_log_rows(id, chat_id, log_name, payload, updated_generation)` plus
   `(chat_id, log_name, id)` and global `id` indexes;
-- `remote_chat_visibility(chat_id)` as provider/RLS observation, never canonical
-  membership authority;
+- `remote_chat_visibility(chat_id, updated_generation)` as provider/RLS
+  observation, never canonical membership authority;
 - `remote_frontiers`: document cursor, global log cursor, durable-ledger
   epoch/cursor/minimum and complete-reconcile evidence;
 - `scope_versions(scope_kind, scope_id, generation, pending_reason)` for exact
@@ -113,6 +120,13 @@ the admitted pointer plus affected scope versions in one transaction. Temporary
 candidates are reclaimable after crashes. Full reconciliation builds a complete
 candidate and atomically replaces the admitted provider view; tombstones remain
 until that cut proves their absence.
+
+The first N1 slice implements this database boundary, one coherent multi-family
+capture, bounded forward log/visibility pages, and a retained local change
+journal. A cursor is bound to the database incarnation and retained minimum;
+foreign, future or compacted cursors return `reset_required`. It still has no
+provider collection loop or HTTP capture route, so it cannot affect product
+reads or create provider traffic.
 
 ## Narrow local API
 
@@ -210,6 +224,11 @@ last admitted snapshot according to the rules above.
   admitted inputs. Record mismatches without affecting product reads.
 - Test crash between provider read/stage/admission, cursor replacement, offline
   leave/rejoin, equal IDs/namespaces, tombstones and bounded overflow.
+
+The atomic-store sub-slice is implemented first. The remaining N1 work is the
+feature-gated Supabase collector, local protocol exposure, durable-ledger/
+visibility recovery and equivalence recorder. Do not route GUI or harness reads
+to the store while those pieces or N2 are absent.
 
 ### N2 — shared mutation and finalization fence
 
