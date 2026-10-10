@@ -55,10 +55,58 @@ def test_commit_barrier_precedes_every_event_allocation_and_page_read():
 
 def test_membership_edges_emit_root_visibility_without_a_chat_identity():
     assert "ab_members_change_ledger" in SCHEMA
-    assert "after insert or delete on public.ab_members" in SCHEMA
+    assert "after insert or update or delete on public.ab_members" in SCHEMA
     assert "values (v_root, 'root', '', 'visibility')" in SCHEMA
+    assert "v_roots := array[old.root, new.root]" in SCHEMA
+    assert "from pg_catalog.unnest(v_roots) as roots(value)" in SCHEMA
     assert "old.data->'members' is distinct from new.data->'members'" in SCHEMA
     assert "values (new.root, 'root', '', 'visibility')" in SCHEMA
+
+
+def test_source_v2_rotates_v1_epochs_before_advertising_readiness():
+    migration = SCHEMA.index(
+        "add column if not exists source_schema_version integer not null default 1",
+    )
+    new_default = SCHEMA.index(
+        "alter column source_schema_version set default 2", migration,
+    )
+    rotation = SCHEMA.index("set source_schema_version = 2", new_default)
+    ready = SCHEMA.index(
+        "create or replace function public.ab_node_source_ledger_ready", rotation,
+    )
+    body = SCHEMA[rotation:ready]
+    assert "epoch = pg_catalog.gen_random_uuid()" in body
+    assert "where source_schema_version < 2" in body
+    assert migration < new_default < rotation < ready
+
+    fence = SCHEMA.index(
+        "create or replace function public.ab_node_source_ledger_fence", rotation,
+    )
+    fence_end = SCHEMA.index("end\n$$;", fence)
+    assert "s.source_schema_version" in SCHEMA[fence:fence_end]
+
+
+def test_physical_deletes_emit_bounded_root_recovery_evidence():
+    for table, function in (
+        ("ab_docs", "ab_record_doc_delete_scope"),
+        ("ab_logs", "ab_record_log_delete_scope"),
+    ):
+        assert f"create or replace function private.{function}" in SCHEMA
+        assert f"after delete on public.{table}" in SCHEMA
+        assert "referencing old table as old_rows" in SCHEMA
+        start = SCHEMA.index(f"create or replace function private.{function}")
+        end = SCHEMA.index("drop trigger if exists", start)
+        body = SCHEMA[start:end]
+        assert body.count("insert into public.ab_change_events") == 1
+        assert "select distinct" in body
+        assert body.index("pg_advisory_xact_lock_shared") \
+            < body.index("insert into public.ab_change_events")
+        assert "values (v_root, 'root', '', 'visibility')" in body
+    doc_start = SCHEMA.index(
+        "create or replace function private.ab_record_doc_delete_scope",
+    )
+    doc_end = SCHEMA.index("drop trigger if exists", doc_start)
+    assert "where d.path not like 'presence/%'" in SCHEMA[doc_start:doc_end]
 
 
 def test_epoch_floor_and_realtime_publication_are_idempotent():
@@ -103,6 +151,9 @@ def test_local_node_source_ledger_binds_exact_identity_to_the_commit_fence():
     assert "pg_catalog.octet_length(stream_id) <= 1024" in SCHEMA
     assert "pg_catalog.octet_length(source_key) <= 4096" in SCHEMA
     assert "from public, anon, authenticated" in SCHEMA
+    assert "select 2" in SCHEMA[
+        SCHEMA.index("create or replace function public.ab_node_source_ledger_ready"):
+    ]
 
 
 def test_scoped_sources_preflight_sizes_before_payload_materialization():
