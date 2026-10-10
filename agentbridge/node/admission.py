@@ -19,6 +19,10 @@ MAX_STAGED_DOCUMENTS = 1_000_000
 MAX_STAGED_LOG_ROWS = 10_000_000
 MAX_STAGED_VISIBILITY = 200_000
 MAX_STAGED_CHUNKS = 4_096
+MAX_RECOVERY_SCOPES = 20_000
+MAX_RECOVERY_WORK = 4_096
+MAX_RECOVERY_OPAQUE_BYTES = 8_192
+MAX_RECOVERY_METADATA_BYTES = 32 * 1024 * 1024
 MAX_STAGED_BYTES = 512 * 1024 * 1024
 MAX_CAPTURE_DOCUMENTS = 20_000
 MAX_CAPTURE_LOG_REQUESTS = 64
@@ -307,6 +311,134 @@ class NodeScopePosition:
     scope_id: str
     generation: int
     pending_reason: str | None
+
+
+@dataclass(frozen=True)
+class NodeProviderCut:
+    schema_version: int
+    index_epoch: str
+    source_epoch: str
+    account_id: str
+    role: str
+    minimum_cursor: int
+    cursor: int
+
+    def __post_init__(self) -> None:
+        _integer(self.schema_version, "provider schema version", minimum=1)
+        _text(self.index_epoch, "provider index epoch")
+        _text(self.source_epoch, "provider source epoch")
+        _text(self.account_id, "provider account id")
+        _text(self.role, "provider role")
+        _integer(self.minimum_cursor, "provider minimum cursor")
+        _integer(self.cursor, "provider cursor")
+        if self.minimum_cursor > self.cursor:
+            raise NodeInputError("provider minimum exceeds cursor")
+
+
+@dataclass(frozen=True)
+class NodeRecoveryScope:
+    scope_kind: str
+    scope_id: str
+    generation: int
+
+    def __post_init__(self) -> None:
+        if self.scope_kind not in ("root", "chat") or type(self.scope_kind) is not str:
+            raise NodeInputError("invalid recovery scope")
+        if self.scope_kind == "root" and self.scope_id != "":
+            raise NodeInputError("invalid recovery root")
+        if self.scope_kind == "chat":
+            _text(self.scope_id, "recovery chat")
+        _integer(self.generation, "recovery scope generation")
+
+
+@dataclass(frozen=True)
+class NodeRecoveryWork:
+    work_id: str
+    family: str
+    scope_kind: str
+    scope_id: str
+    selection: bytes
+    checkpoint: bytes = b""
+
+    def __post_init__(self) -> None:
+        _text(self.work_id, "recovery work id", max_bytes=256)
+        if type(self.family) is not str or self.family not in (
+                "docs", "logs", "visibility", "frontiers"):
+            raise NodeInputError("invalid recovery family")
+        NodeRecoveryScope(self.scope_kind, self.scope_id, 0)
+        for name in ("selection", "checkpoint"):
+            value = _payload(getattr(self, name), f"recovery {name}")
+            if len(value) > MAX_RECOVERY_OPAQUE_BYTES:
+                raise NodeInputError(f"recovery {name} exceeds budget")
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True)
+class NodeRecoveryPlan:
+    database_incarnation: str
+    identity_digest: str
+    base_generation: int
+    replay_cursor: int
+    provider_cut: NodeProviderCut
+    scopes: tuple[NodeRecoveryScope, ...]
+    work: tuple[NodeRecoveryWork, ...]
+
+    def __post_init__(self) -> None:
+        _text(self.database_incarnation, "database incarnation")
+        _text(self.identity_digest, "identity digest")
+        _integer(self.base_generation, "recovery base generation")
+        _integer(self.replay_cursor, "recovery replay cursor")
+        if type(self.provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid recovery provider cut")
+        if not self.provider_cut.minimum_cursor <= self.replay_cursor <= self.provider_cut.cursor:
+            raise NodeInputError("recovery replay outside provider cut")
+        if (type(self.scopes) is not tuple or len(self.scopes) > MAX_RECOVERY_SCOPES
+                or any(type(scope) is not NodeRecoveryScope for scope in self.scopes)):
+            raise NodeInputError("invalid recovery scopes")
+        keys = {(s.scope_kind, s.scope_id) for s in self.scopes}
+        if len(keys) != len(self.scopes):
+            raise NodeInputError("duplicate recovery scope")
+        if ("root", "") not in keys:
+            raise NodeInputError("recovery requires whole-root scope")
+        if (type(self.work) is not tuple or len(self.work) > MAX_RECOVERY_WORK
+                or any(type(item) is not NodeRecoveryWork for item in self.work)):
+            raise NodeInputError("invalid recovery work")
+        if len({item.work_id for item in self.work}) != len(self.work):
+            raise NodeInputError("duplicate recovery work id")
+        if any((item.scope_kind, item.scope_id) not in keys for item in self.work):
+            raise NodeInputError("recovery work outside target scopes")
+        if not any(item.family == "frontiers" for item in self.work):
+            raise NodeInputError("recovery requires provider frontier work")
+        size = sum(64 + len(s.scope_id.encode("utf-8")) for s in self.scopes)
+        size += sum(128 + len(w.work_id.encode("utf-8")) + len(w.scope_id.encode(
+            "utf-8")) + len(w.selection) + 2 * len(w.checkpoint) for w in self.work)
+        if size > MAX_RECOVERY_METADATA_BYTES:
+            raise NodeInputError("recovery metadata exceeds budget")
+
+
+@dataclass(frozen=True)
+class NodeRecoveryWorkState:
+    work_id: str
+    family: str
+    scope_kind: str
+    scope_id: str
+    selection: bytes
+    checkpoint: bytes
+    outcome: str
+    page_count: int
+    row_count: int
+
+
+@dataclass(frozen=True)
+class NodeRecoveryState:
+    recovery_id: str
+    generation: int
+    plan: NodeRecoveryPlan
+    health_owner_token: int
+    replay_cursor: int
+    target_cursor: int
+    state: str
+    work: tuple[NodeRecoveryWorkState, ...]
 
 
 @dataclass(frozen=True)
