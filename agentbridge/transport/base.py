@@ -44,6 +44,7 @@ from .change_ledger import (
     ChangeLedgerPage,
 )
 from .source_ledger import SourceLedgerFence, SourceLedgerPage
+from .scoped_sources import ScopedDocumentBatch, ScopedLogPage
 
 from .mirror_observation import (
     MirrorCaptureUnavailable,
@@ -148,6 +149,20 @@ class Transport(ABC):
     # delivery evidence only and never authorize a local or canonical read.
     supports_change_ledger: bool = False
     supports_source_ledger: bool = False
+    supports_scoped_source_reads: bool = False
+
+    def source_documents(
+        self, paths: tuple[str, ...], *, max_bytes: int,
+    ) -> ScopedDocumentBatch:
+        del paths, max_bytes
+        raise NotImplementedError(f"{type(self).__name__} has no scoped source reads")
+
+    def source_log_page(
+        self, chat_id: str, log_name: str, *, after_cursor: int,
+        through_cursor: int, limit: int, max_bytes: int,
+    ) -> ScopedLogPage:
+        del chat_id, log_name, after_cursor, through_cursor, limit, max_bytes
+        raise NotImplementedError(f"{type(self).__name__} has no scoped source reads")
 
     def source_ledger_fence(self) -> SourceLedgerFence:
         raise NotImplementedError(f"{type(self).__name__} has no source ledger")

@@ -103,3 +103,33 @@ def test_local_node_source_ledger_binds_exact_identity_to_the_commit_fence():
     assert "pg_catalog.octet_length(stream_id) <= 1024" in SCHEMA
     assert "pg_catalog.octet_length(source_key) <= 4096" in SCHEMA
     assert "from public, anon, authenticated" in SCHEMA
+
+
+def test_scoped_sources_preflight_sizes_before_payload_materialization():
+    assert "generated always as (public.ab_source_json_bytes(data)) stored" in SCHEMA
+    assert "generated always as (public.ab_source_text_bytes(line)) stored" in SCHEMA
+    assert SCHEMA.count("source_bytes between 0 and 8355840") == 2
+    assert "pg_catalog.to_json(p_value)::text" in SCHEMA
+
+    docs_start = SCHEMA.index("create or replace function public.ab_node_docs_exact")
+    docs_end = SCHEMA.index("revoke all on function public.ab_node_docs_exact", docs_start)
+    docs_body = SCHEMA[docs_start:docs_end]
+    assert "security invoker" in docs_body
+    assert "candidates as materialized" in docs_body
+    assert "payload as materialized" in docs_body
+    assert docs_body.index("d.source_bytes") < docs_body.index("d.data")
+
+    logs_start = SCHEMA.index(
+        "create or replace function public.ab_node_log_exact_page",
+    )
+    logs_end = SCHEMA.index(
+        "revoke all on function public.ab_node_log_exact_page", logs_start,
+    )
+    logs_body = SCHEMA[logs_start:logs_end]
+    assert "security invoker" in logs_body
+    assert "public.ab_can_read_chat(p_root, p_chat)" in logs_body
+    assert "limit p_limit + 1" in logs_body
+    assert logs_body.index("l.source_bytes") < logs_body.index("l.line")
+
+    ready = SCHEMA.index("create or replace function public.ab_node_scoped_source_ready")
+    assert ready > docs_end and ready > logs_end

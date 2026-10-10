@@ -246,6 +246,23 @@ event keys, heads, cursors and epochs never establish membership, and every page
 remains filtered by current provider RLS. Presence remains owned by its separate
 ephemeral path and does not enter this durable ledger.
 
+Exact ledger identities feed scoped provider reads rather than a new global
+listing. Document batches contain at most 128 requested paths. Log pages bind an
+exact chat/log, an exclusive cursor, an inclusive committed cut, a row limit and
+a byte limit. Generated provider columns store the JSON response size of each
+document/log payload; narrow key/size candidates are selected before payloads,
+and a conservative per-row envelope allowance keeps the whole provider result
+inside the requested budget. Current RLS still filters the payload statement,
+and the exact-log function checks the same current chat predicate before a tail
+scan so an unauthorized room cannot force a full rejected scan. Missing rows are
+observations, not authority evidence.
+
+These reads do not solve cold visible-chat discovery or an identity-less legacy
+event. Those conditions remain explicit root/chat recovery work. A collector
+that cannot complete that recovery under its provider deadline keeps the last
+admitted generation readable, or reports a cold node unavailable; it never
+claims completeness from exact pages alone.
+
 ### N2 — shared mutation and finalization fence
 
 - Bridge every direct GUI/harness writer into one durable pending-scope owner

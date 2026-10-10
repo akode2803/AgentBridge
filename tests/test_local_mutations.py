@@ -446,6 +446,39 @@ def test_source_ledger_reads_delegate_without_creating_mutation_intents(
     assert _pending(coordinator) == 0
 
 
+def test_scoped_source_reads_delegate_without_creating_mutation_intents(
+        rig, monkeypatch):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    documents = object()
+    log_page = object()
+    monkeypatch.setattr(
+        SupabaseTransport, "supports_scoped_source_reads",
+        property(lambda _self: True),
+    )
+    inner.source_documents = lambda paths, *, max_bytes: calls.append(
+        ("documents", paths, max_bytes),
+    ) or documents
+    inner.source_log_page = lambda chat_id, log_name, **kwargs: calls.append(
+        ("log", chat_id, log_name, kwargs),
+    ) or log_page
+
+    assert proxy.supports_scoped_source_reads is True
+    assert proxy.source_documents(("users/a.json",), max_bytes=4096) is documents
+    assert proxy.source_log_page(
+        "room", "a.jsonl", after_cursor=11, through_cursor=29,
+        limit=7, max_bytes=8192,
+    ) is log_page
+    assert calls == [
+        ("documents", ("users/a.json",), 4096),
+        ("log", "room", "a.jsonl", {
+            "after_cursor": 11, "through_cursor": 29,
+            "limit": 7, "max_bytes": 8192,
+        }),
+    ]
+    assert _pending(coordinator) == 0
+
+
 def test_proxy_explicitly_owns_every_public_base_transport_api():
     from agentbridge.transport.base import Transport
 

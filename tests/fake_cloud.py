@@ -266,7 +266,8 @@ class FakeClient:
         self.lock = threading.RLock()
         self.db = {"_legacy": legacy, "_effects_ready": effects_ready,
                    "_change_ledger_version": None,
-                   "_source_ledger_version": None}
+                   "_source_ledger_version": None,
+                   "_scoped_source_version": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -338,6 +339,65 @@ class FakeClient:
                 "id", "stream_kind", "stream_id", "domain", "source_key",
                 "doc_head", "log_head",
             )} for row in rows[:limit]]
+        if fn == "ab_node_scoped_source_ready":
+            return self.db.get("_scoped_source_version")
+        if fn == "ab_node_docs_exact":
+            root = params.get("p_root")
+            paths = params.get("p_paths")
+            budget = params.get("p_max_bytes")
+            by_path = {row.get("path"): copy.deepcopy(row)
+                       for row in self.db.get("ab_docs", [])
+                       if row.get("root") == root}
+            rows = []
+            total = 0
+            for path in paths:
+                row = by_path.get(path)
+                if row is None:
+                    continue
+                deleted = bool(row.get("deleted"))
+                data = None if deleted else row.get("data")
+                payload_size = 0 if deleted else len(json.dumps(
+                    data, ensure_ascii=False, allow_nan=False,
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8"))
+                total += len(json.dumps(
+                    path, ensure_ascii=False,
+                ).encode("utf-8")) + payload_size + 256
+                rows.append({
+                    "path": path, "seq": row.get("seq"), "data": data,
+                    "deleted": deleted, "batch_overflow": False,
+                })
+            if total > budget:
+                return [{"path": None, "seq": None, "data": None,
+                         "deleted": None, "batch_overflow": True}]
+            return rows
+        if fn == "ab_node_log_exact_page":
+            rows = [copy.deepcopy(row) for row in self.db.get("ab_logs", [])
+                    if row.get("root") == params.get("p_root")
+                    and row.get("chat_id") == params.get("p_chat")
+                    and row.get("log_name") == params.get("p_log")
+                    and params.get("p_after") < row.get("id", 0)
+                    <= params.get("p_through")]
+            rows.sort(key=lambda row: row["id"])
+            candidates = rows[:params.get("p_limit") + 1]
+            selected = []
+            used = 0
+            for row in candidates:
+                size = len(json.dumps(
+                    row.get("line", ""), ensure_ascii=False,
+                ).encode("utf-8")) + 256
+                if (len(selected) >= params.get("p_limit")
+                        or used + size > params.get("p_max_bytes")):
+                    break
+                selected.append(row)
+                used += size
+            if candidates and not selected:
+                return [{"id": None, "line": None, "page_has_more": True,
+                         "page_overflow": True}]
+            more = len(selected) < len(candidates)
+            return [{"id": row.get("id"), "line": row.get("line"),
+                     "page_has_more": more, "page_overflow": False}
+                    for row in selected]
         if fn == "ab_effect_transition":
             return self._effect_transition_locked(params)
         return []
