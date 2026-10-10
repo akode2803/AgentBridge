@@ -424,7 +424,7 @@ multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
 bounded root recovery evidence for physical deletes and member-row changes, but
 does not turn an event into absence, completeness or authority proof.
 
-Store schema v6 preserves admitted inputs, ordinary resumable candidates and
+Store schema v7 preserves admitted inputs, ordinary resumable candidates and
 schema-v5 typed recoveries. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every
 new whole-root recovery now owns
@@ -470,8 +470,12 @@ unless the database session already has a nonzero statement timeout of at most
 ten seconds. A timeout is an unavailable recovery attempt, never a complete
 empty page.
 
-This source is now structurally matched by the schema-v6 typed Store operations,
-including event replay and the fresh close-token fence. The next slice adds an
-inactive executor that composes provider pages with these transactions and
-records equivalence without affecting product reads. N2 remains mandatory before
-read cutover.
+This source is now structurally matched by the schema-v7 typed Store operations,
+including event replay and the fresh close-token fence. An inactive executor
+composes them one bounded provider page or exact repair per call. Its progress,
+continuations and obligations live in the Store, so a new executor instance can
+resume without replaying accepted pages. A pending-stream index prevents each
+step from scanning already completed streams. The executor stops at a private
+sealed generation; it does not admit, schedule itself, serve GUI or harness reads,
+or claim equivalence. The next slice adds the inactive equivalence recorder and
+N2 remains mandatory before read cutover.

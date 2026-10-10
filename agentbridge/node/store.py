@@ -27,12 +27,12 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=6),
+    version INTEGER NOT NULL CHECK(version=7),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -184,6 +184,8 @@ CREATE TABLE IF NOT EXISTS recovery_streams(
     CHECK(cursor<=head),
     PRIMARY KEY(recovery_id,chat_id,log_name)
 );
+CREATE INDEX IF NOT EXISTS recovery_stream_pending
+    ON recovery_streams(recovery_id,outcome,chat_id,log_name);
 CREATE TABLE IF NOT EXISTS recovery_events(
     recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
     event_id INTEGER NOT NULL CHECK(event_id>0),
@@ -271,9 +273,12 @@ _RECOVERY_TABLES = _V5_RECOVERY_TABLES | frozenset({"recovery_events"})
 _V4_TABLES = _V3_TABLES | _V4_RECOVERY_TABLES
 _V5_TABLES = _V3_TABLES | _V5_RECOVERY_TABLES
 _V6_TABLES = _V3_TABLES | _RECOVERY_TABLES
+_V7_TABLES = _V6_TABLES
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
-_REQUIRED_INDEXES = frozenset({"one_admitted_node_generation", "remote_log_chat"})
+_REQUIRED_INDEXES = frozenset({
+    "one_admitted_node_generation", "recovery_stream_pending", "remote_log_chat",
+})
 
 
 def _positive_ns(value: object, name: str) -> int:
@@ -450,9 +455,9 @@ class NodeStore:
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(version=6),
+            version INTEGER NOT NULL CHECK(version=7),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
-        conn.execute("INSERT INTO node_schema VALUES(1,6,?)", (PROTOCOL_VERSION,))
+        conn.execute("INSERT INTO node_schema VALUES(1,7,?)", (PROTOCOL_VERSION,))
 
     def _migrate_v4(self, conn: sqlite3.Connection) -> None:
         if conn.execute(
@@ -486,9 +491,9 @@ class NodeStore:
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(version=6),
+            version INTEGER NOT NULL CHECK(version=7),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
-        conn.execute("INSERT INTO node_schema VALUES(1,6,?)", (PROTOCOL_VERSION,))
+        conn.execute("INSERT INTO node_schema VALUES(1,7,?)", (PROTOCOL_VERSION,))
 
     def _migrate_v5(self, conn: sqlite3.Connection) -> None:
         if conn.execute(
@@ -524,12 +529,30 @@ class NodeStore:
         conn.execute("INSERT INTO recovery_proof_pages "
                      "SELECT * FROM recovery_proof_pages_v5")
         conn.execute("DROP TABLE recovery_proof_pages_v5")
+        conn.execute("CREATE INDEX IF NOT EXISTS recovery_stream_pending "
+                     "ON recovery_streams(recovery_id,outcome,chat_id,log_name)")
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(version=6),
+            version INTEGER NOT NULL CHECK(version=7),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
-        conn.execute("INSERT INTO node_schema VALUES(1,6,?)", (PROTOCOL_VERSION,))
+        conn.execute("INSERT INTO node_schema VALUES(1,7,?)", (PROTOCOL_VERSION,))
+
+    def _migrate_v6(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(6, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        conn.execute("CREATE INDEX recovery_stream_pending "
+                     "ON recovery_streams(recovery_id,outcome,chat_id,log_name)")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=7),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,7,?)", (PROTOCOL_VERSION,))
 
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
@@ -561,7 +584,15 @@ class NodeStore:
                     self._migrate_v4(conn)
                 elif tables == _V5_TABLES:
                     self._migrate_v5(conn)
-                elif tables != _V6_TABLES:
+                elif tables == _V6_TABLES:
+                    version = conn.execute(
+                        "SELECT version,protocol_version FROM node_schema "
+                        "WHERE singleton=1").fetchall()
+                    if version == [(6, PROTOCOL_VERSION)]:
+                        self._migrate_v6(conn)
+                    elif version != [(SCHEMA_VERSION, PROTOCOL_VERSION)]:
+                        raise sqlite3.DatabaseError("unsupported local node schema")
+                elif tables != _V7_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -682,6 +713,27 @@ class NodeStore:
             "SELECT generation,pending_reason FROM scope_versions "
             "WHERE scope_kind=? AND scope_id=?", (kind, ident),
         ).fetchone() or (0, None)
+
+    def root_recovery_plan(self,
+                           current_provider_cut: NodeProviderCut) -> NodeRecoveryPlan:
+        """Capture the minimal local binding for a whole-root recovery plan."""
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            meta = self._check_meta(conn)
+            root_generation, pending = self._scope_generation(conn, "root", "")
+            if meta[5] or pending is not None:
+                raise NodeGenerationChanged("root recovery is locally pending")
+            return NodeRecoveryPlan(
+                meta[0], self.identity.digest, meta[1], current.cursor, current,
+                (NodeRecoveryScope("root", "", root_generation),),
+                (NodeRecoveryWork(
+                    "provider-frontiers", "frontiers", "root", "",
+                    b"provider-recovery-v1",
+                ),),
+            )
 
     def begin_recovery(self, plan: NodeRecoveryPlan, *,
                        created_ns: int) -> NodeRecoveryState:
@@ -804,10 +856,13 @@ class NodeStore:
         return row
 
     def recovery_state(self, recovery_id: str,
-                       current_provider_cut: NodeProviderCut) -> NodeRecoveryState:
+                       current_provider_cut: NodeProviderCut, *,
+                       include_counts: bool = True) -> NodeRecoveryState:
         recovery_id = self._candidate_chunk_id(recovery_id)
         if type(current_provider_cut) is not NodeProviderCut:
             raise NodeInputError("invalid current provider cut")
+        if type(include_counts) is not bool:
+            raise NodeInputError("invalid recovery count selection")
         current = NodeProviderCut(**vars(current_provider_cut))
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -841,14 +896,23 @@ class NodeStore:
                     "FROM recovery_manifests WHERE recovery_id=? ORDER BY family",
                     (recovery_id,),
                 ))
-                stream_count, pending_streams = conn.execute(
-                    "SELECT count(*),COALESCE(SUM(outcome='pending'),0) "
-                    "FROM recovery_streams WHERE recovery_id=?", (recovery_id,),
-                ).fetchone()
-                event_count, pending_events = conn.execute(
-                    "SELECT count(*),COALESCE(SUM(state='pending'),0) "
-                    "FROM recovery_events WHERE recovery_id=?", (recovery_id,),
-                ).fetchone()
+                if include_counts:
+                    stream_count, pending_streams = conn.execute(
+                        "SELECT count(*),COALESCE(SUM(outcome='pending'),0) "
+                        "FROM recovery_streams WHERE recovery_id=?", (recovery_id,),
+                    ).fetchone()
+                    event_count, pending_events = conn.execute(
+                        "SELECT count(*),COALESCE(SUM(state='pending'),0) "
+                        "FROM recovery_events WHERE recovery_id=?", (recovery_id,),
+                    ).fetchone()
+                else:
+                    stream_count = event_count = 0
+                    pending_streams = int(conn.execute(
+                        "SELECT EXISTS(SELECT 1 FROM recovery_streams "
+                        "WHERE recovery_id=? AND outcome='pending')",
+                        (recovery_id,),
+                    ).fetchone()[0])
+                    pending_events = int(replay < examined)
                 result = NodeRecoveryState(recovery_id, generation, plan,
                                            health_owner, replay, target, state, work,
                                            proof_revision, manifests, stream_count,
@@ -932,6 +996,13 @@ class NodeStore:
             raise NodeInputError("invalid recovery stream checkpoint") from None
         marker = NodeRecoveryStreamHead(chat, log, 1)
         return marker.chat_id, marker.log_name
+
+    @classmethod
+    def decode_recovery_stream_checkpoint(cls, value: bytes) -> tuple[str, str]:
+        """Decode a Store-owned stream-manifest continuation."""
+        if type(value) is not bytes or len(value) > MAX_RECOVERY_OPAQUE_BYTES:
+            raise NodeInputError("invalid recovery stream checkpoint")
+        return ("", "") if not value else cls._decode_stream_checkpoint(value)
 
     @staticmethod
     def _proof_page_digest(kind: str, key: str, revision: int,
@@ -1629,6 +1700,29 @@ class NodeStore:
             raise NodeGenerationChanged("recovery binding changed")
         return result
 
+    def next_recovery_stream(
+            self, recovery_id: str,
+            current_provider_cut: NodeProviderCut,
+    ) -> NodeRecoveryStreamState | None:
+        """Return the first pending stream through its bounded state index."""
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._bound_recovery(conn, recovery_id, current)
+            if row is not None:
+                value = conn.execute(
+                    "SELECT chat_id,log_name,head,cursor,outcome,page_count,row_count "
+                    "FROM recovery_streams WHERE recovery_id=? AND outcome='pending' "
+                    "ORDER BY chat_id,log_name LIMIT 1", (recovery_id,),
+                ).fetchone()
+                result = None if value is None else NodeRecoveryStreamState(*value)
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return result
+
     def seal_recovery(self, recovery_id: str,
                       current_provider_cut: NodeProviderCut, *,
                       observed_ns: int, close_token: str | None = None) -> None:
@@ -1673,20 +1767,16 @@ class NodeStore:
             "SELECT count(*),COALESCE(SUM(outcome IN ('complete','complete_empty')),0) "
             "FROM recovery_manifests WHERE recovery_id=?", (recovery_id,),
         ).fetchone()
-        pending_streams = conn.execute(
-            "SELECT count(*) FROM recovery_streams WHERE recovery_id=? "
-            "AND outcome='pending'", (recovery_id,),
-        ).fetchone()[0]
-        pending_events = conn.execute(
-            "SELECT count(*) FROM recovery_events WHERE recovery_id=? "
-            "AND state='pending'", (recovery_id,),
-        ).fetchone()[0]
+        pending_stream = conn.execute(
+            "SELECT 1 FROM recovery_streams WHERE recovery_id=? "
+            "AND outcome='pending' LIMIT 1", (recovery_id,),
+        ).fetchone()
         cursors = conn.execute(
             "SELECT replay_cursor,event_examined_cursor,event_terminal_cursor "
             "FROM provider_recoveries WHERE recovery_id=?", (recovery_id,),
         ).fetchone()
-        return (manifests == (3, 3) and pending_streams == 0
-                and pending_events == 0 and cursors == (target, target, target))
+        return (manifests == (3, 3) and pending_stream is None
+                and cursors == (target, target, target))
 
     def prepare_recovery_close(self, recovery_id: str,
                                current_provider_cut: NodeProviderCut) -> str:

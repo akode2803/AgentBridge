@@ -19,12 +19,14 @@ from .admission import (
     NodeVisibility,
 )
 from .protocol import PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
+from .recovery import InactiveRecoveryExecutor, RecoveryStepResult
 from .server import LocalNodeServer
 from .store import NodeStore
 
 __all__ = [
     "PROTOCOL_VERSION",
     "LocalNodeServer",
+    "InactiveRecoveryExecutor",
     "NodeCapture",
     "NodeCaptureRequest",
     "NodeChangePage",
@@ -39,4 +41,5 @@ __all__ = [
     "NodeStore",
     "NodeVisibility",
     "ReplicaIdentity",
+    "RecoveryStepResult",
 ]

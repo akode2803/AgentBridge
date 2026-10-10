@@ -74,7 +74,7 @@ def test_v3_migration_preserves_admitted_and_resumable_generic_candidate(tmp_pat
             .fetchone() == (b"a",)
         assert conn.execute("SELECT state FROM node_generations WHERE generation=?",
                             (sealed,)).fetchone() == ("sealed",)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (6,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (7,)
 
 
 def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
@@ -131,7 +131,7 @@ def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
             (recovery.generation,),
         ).fetchone() == (0,)
         assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (6,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (7,)
 
 
 def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
@@ -143,6 +143,7 @@ def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
     assert owner.stage_recovery_documents(
         state.recovery_id, cut, "page-1", 0, b"", page, has_more=True)
     with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX recovery_stream_pending")
         conn.execute("DROP TABLE recovery_events")
         conn.execute("ALTER TABLE recovery_proof_pages RENAME TO proof_pages_v6")
         conn.execute("""CREATE TABLE recovery_proof_pages(
@@ -164,9 +165,41 @@ def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
     assert reopened.recovery_state(
         state.recovery_id, cut).generation == state.generation
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (6,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (7,)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_v6_migration_adds_bounded_pending_stream_index(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    plan, cut = recovery_plan(owner)
+    state = owner.begin_recovery(plan, created_ns=10)
+    owner.stage_recovery_streams(
+        state.recovery_id, cut, "streams", 0, b"",
+        (NodeRecoveryStreamHead("a", "main", 1),), has_more=False)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX recovery_stream_pending")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("CREATE TABLE node_schema(singleton INTEGER PRIMARY KEY,"
+                     "version INTEGER CHECK(version=6),protocol_version INTEGER)")
+        conn.execute("INSERT INTO node_schema VALUES(1,6,1)")
+
+    reopened = NodeStore(path, identity())
+    pending = reopened.next_recovery_stream(state.recovery_id, cut)
+    assert pending is not None and (pending.chat_id, pending.log_name) == ("a", "main")
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (7,)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='recovery_stream_pending'"
+        ).fetchone() == (1,)
+        plan = " ".join(row[3] for row in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT chat_id,log_name FROM recovery_streams "
+            "WHERE recovery_id=? AND outcome='pending' "
+            "ORDER BY chat_id,log_name LIMIT 1", (state.recovery_id,),
+        ))
+        assert "recovery_stream_pending" in plan
 
 
 def test_recovery_reopens_retries_and_rejects_generic_bypass(tmp_path):
@@ -842,7 +875,7 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (6, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (7, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
 
 
@@ -886,7 +919,7 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version,protocol_version FROM node_schema"
-        ).fetchone() == (6, 1)
+        ).fetchone() == (7, 1)
         assert conn.execute(
             "SELECT state FROM node_generations WHERE generation=1"
         ).fetchone() == ("abandoned",)
