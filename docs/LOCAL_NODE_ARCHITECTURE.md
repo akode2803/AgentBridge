@@ -424,9 +424,10 @@ multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
 bounded root recovery evidence for physical deletes and member-row changes, but
 does not turn an event into absence, completeness or authority proof.
 
-Store schema v5 preserves admitted inputs and ordinary resumable candidates,
-while retiring only v4 provider recoveries because their caller-described work
-lists cannot be upgraded into proof. Every new whole-root recovery now owns
+Store schema v6 preserves admitted inputs, ordinary resumable candidates and
+schema-v5 typed recoveries. The v4 migration retires only v4 provider recoveries
+because their caller-described work lists cannot be upgraded into proof. Every
+new whole-root recovery now owns
 exactly three mandatory, typed inventories: documents, currently visible chats,
 and visible log streams. Their keyset checkpoint, terminal outcome and counts
 commit with the candidate rows and an idempotent proof-page receipt. Stream
@@ -444,13 +445,17 @@ an idempotent retry. Delayed responses behind an advanced target fail without
 destroying newer work. Per-page and aggregate row, byte, receipt and metadata
 budgets remain hard bounds. Maximum-size stream identities use a bounded binary
 continuation rather than encoded JSON expansion. The v4 generic page method now
-fails closed and v5 recovery sealing remains disabled: the three closed
-inventories still do not prove that every event between the opening and closing
-fences was examined and applied. Durable event obligations, separate examined
-and applied replay cursors, ambiguous-event restart rules and a fresh close-token
-fence are the next store slice. Neither these checkpoints nor the local node
-assert authority or completeness. No GUI or harness read cutover occurs before
-that work and N2.
+fails closed. Durable ordered event obligations keep examined and applied replay
+cursors separate. Exact document/log repairs can complete out of order, while
+the replay cursor advances monotonically only across the satisfied prefix.
+Root, visibility and identity-less events abandon the private recovery and
+require a new whole-root attempt. A fresh close token binds the final proof
+revision and target; seal derives source frontiers from that unchanged closing
+fence. Receipt and byte budgets reserve the remaining known proof work and the
+final seal batch, so an accepted proof prefix cannot consume its closing slot.
+The Store can now seal and atomically admit a proven recovery, but no background
+executor invokes this path and no GUI or harness read has cut over. N2 and
+equivalence recording remain mandatory before product routing.
 
 The inactive Supabase recovery source now supplies the provider half of that
 next step. An authenticated member can capture one coherent current-authority
@@ -465,9 +470,8 @@ unless the database session already has a nonzero statement timeout of at most
 ten seconds. A timeout is an unavailable recovery attempt, never a complete
 empty page.
 
-This source is now structurally matched by the v5 typed Store operations, but no
-background executor invokes them and the Store does not yet persist or apply the
-event interval needed for a seal. The next slice adds that durable event/replay
-proof and fresh close-token fence, then an inactive executor can compose the
-provider pages with these transactions. It still does not seal, admit or affect
-product reads. N2 and equivalence recording remain mandatory before read cutover.
+This source is now structurally matched by the schema-v6 typed Store operations,
+including event replay and the fresh close-token fence. The next slice adds an
+inactive executor that composes provider pages with these transactions and
+records equivalence without affecting product reads. N2 remains mandatory before
+read cutover.
