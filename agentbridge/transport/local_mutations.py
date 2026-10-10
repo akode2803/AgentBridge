@@ -48,6 +48,10 @@ class LocalMutationTransport(Transport):
         return self._transport.supports_scoped_source_reads
 
     @property
+    def supports_recovery_source(self):
+        return self._transport.supports_recovery_source
+
+    @property
     def supports_exclusive_create(self):
         return self._transport.supports_exclusive_create
 
@@ -190,6 +194,14 @@ class LocalMutationTransport(Transport):
 
     def source_ledger_events(self, after_cursor, *, limit):
         return self._transport.source_ledger_events(after_cursor, limit=limit)
+
+    def recovery_fence(self):
+        return self._transport.recovery_fence()
+
+    def recovery_page(self, family, after, *, limit, max_bytes):
+        return self._transport.recovery_page(
+            family, after, limit=limit, max_bytes=max_bytes,
+        )
 
     def change_ledger_capability(self):
         return self._transport.change_ledger_capability()

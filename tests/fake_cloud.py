@@ -267,7 +267,8 @@ class FakeClient:
         self.db = {"_legacy": legacy, "_effects_ready": effects_ready,
                    "_change_ledger_version": None,
                    "_source_ledger_version": None,
-                   "_scoped_source_version": None}
+                   "_scoped_source_version": None,
+                   "_recovery_version": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -303,6 +304,13 @@ class FakeClient:
             return int(bool(self.db["_effects_ready"]))
         if fn == "ab_change_ledger_ready":
             return self.db.get("_change_ledger_version")
+        if fn == "ab_node_recovery_ready":
+            return (self.db.get("_recovery_version")
+                    if self.db.get("_recovery_role", "authenticated")
+                    == "authenticated"
+                    and self.db.get("_recovery_timeout_ok", True) else 0)
+        if fn in ("ab_node_recovery_fence", "ab_node_recovery_page"):
+            return self._recovery_rpc(fn, params)
         if fn == "ab_change_events_page":
             root = params.get("p_root")
             after = params.get("p_after")
@@ -401,6 +409,111 @@ class FakeClient:
         if fn == "ab_effect_transition":
             return self._effect_transition_locked(params)
         return []
+
+    def _recovery_rpc(self, fn, params):
+        """Offline response shape; SQL locking/RLS require provider tests."""
+        root = params["p_root"]
+        if (self.db.get("_recovery_version") != 1
+                or not self.db.get("_recovery_timeout_ok", True)):
+            raise ValueError("recovery source schema is unavailable")
+        if (self.db.get("_recovery_denied")
+                or self.db.get("_recovery_role", "authenticated") != "authenticated"):
+            raise ValueError("recovery root is unavailable")
+        epoch = next((row for row in self.db.get("ab_change_epochs", [])
+                      if row["root"] == root), None)
+        if epoch is None or epoch.get("source_schema_version") != 2:
+            raise ValueError("recovery source schema is unavailable")
+        minimum = epoch["minimum_cursor"]
+        tail = max([minimum] + [row["id"] for row in
+                   self.db.get("ab_change_events", []) if row["root"] == root])
+        cut = {"schema_version": 1, "index_contract": "root-manifest-v1",
+               "source_schema_version": 2, "source_epoch": epoch["epoch"],
+               "account_id": self.db.get("_recovery_account",
+                                         "12345678-1234-5678-9234-567812345679"),
+               "role": "authenticated", "minimum_cursor": minimum,
+               "cursor": tail}
+        if fn == "ab_node_recovery_fence":
+            return cut
+        family = params["p_family"]
+        after, after_log, after_id = (params[key] for key in (
+            "p_after", "p_after_log", "p_after_id"))
+        visible = self.db.get("_recovery_visible_chats")
+
+        def can_read(path):
+            if not path.startswith("chats/") or visible is None:
+                return True
+            return path.split("/")[1] in visible
+
+        if family == "documents":
+            rows = [{"path": row["path"], "seq": row["seq"],
+                     "deleted": bool(row.get("deleted")),
+                     "data": None if row.get("deleted") else copy.deepcopy(row["data"])}
+                    for row in self.db.get("ab_docs", [])
+                    if row["root"] == root and row["path"] > after
+                    and not row["path"].startswith("presence/")
+                    and can_read(row["path"])]
+            rows.sort(key=lambda row: row["path"])
+        elif family == "chats":
+            rows = [row["path"].split("/")[1]
+                    for row in self.db.get("ab_docs", [])
+                    if row["root"] == root and row["path"].startswith("chats/")
+                    and row["path"] == f"chats/{row['path'].split('/')[1]}/meta.json"
+                    and row["path"].split("/")[1] > after and can_read(row["path"])]
+            rows.sort()
+        elif family == "streams":
+            heads = {}
+            for row in self.db.get("ab_logs", []):
+                pair = (row["chat_id"], row["log_name"])
+                if (row["root"] == root and pair > (after, after_log)
+                        and can_read(f"chats/{row['chat_id']}/meta.json")):
+                    heads[pair] = max(heads.get(pair, 0), row["id"])
+            rows = [{"chat_id": chat, "log_name": log, "head": heads[chat, log]}
+                    for chat, log in sorted(heads)]
+        else:
+            if after_id < minimum or after_id > tail:
+                raise ValueError("recovery replay cursor unavailable")
+            rows = [{field: copy.deepcopy(row.get(field)) for field in (
+                "id", "stream_kind", "stream_id", "domain", "source_key",
+                "doc_head", "log_head")}
+                    for row in self.db.get("ab_change_events", [])
+                    if row["root"] == root and after_id < row["id"] <= tail
+                    and (row["stream_kind"] == "root"
+                         or visible is None or row["stream_id"] in visible)]
+            rows.sort(key=lambda row: row["id"])
+        selected = []
+        used = 0
+        budget = params["p_max_bytes"] - 1024
+        for row in rows[:params["p_limit"] + 1]:
+            if len(selected) >= params["p_limit"]:
+                break
+            size = len(json.dumps(row, ensure_ascii=False).encode("utf-8")) + 256
+            next_continuation = (
+                [row["chat_id"], row["log_name"]] if family == "streams" else
+                row["path"] if family == "documents" else
+                row if family == "chats" else row["id"]
+            )
+            continuation_size = len(json.dumps(
+                next_continuation, ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            if used + size + continuation_size > budget:
+                break
+            used += size
+            selected.append(row)
+        overflow = bool(rows) and not selected
+        more = len(selected) < len(rows)
+        outcome = ("overflow" if overflow else "empty_terminal" if not rows
+                   else "page")
+        continuation = ((selected[-1]["path"] if family == "documents" else
+                         selected[-1] if family == "chats" else
+                         [selected[-1]["chat_id"], selected[-1]["log_name"]]
+                         if family == "streams" else selected[-1]["id"])
+                        if selected else
+            [after, after_log] if family == "streams" else
+            after_id if family == "events" else after)
+        return {"cut": cut, "rows": selected, "has_more": more,
+                "empty_terminal": not rows, "overflow": overflow,
+                "outcome": outcome, "continuation": continuation}
 
     def _effect_transition_locked(self, params):
         """Model the schema's ordered atomic lane, without authenticating a caller.
