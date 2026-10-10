@@ -21,6 +21,9 @@ MAX_STAGED_VISIBILITY = 200_000
 MAX_STAGED_CHUNKS = 4_096
 MAX_RECOVERY_SCOPES = 20_000
 MAX_RECOVERY_WORK = 4_096
+MAX_RECOVERY_MANIFEST_PAGE = 256
+MAX_RECOVERY_STREAMS = 200_000
+MAX_RECOVERY_EVENTS = 200_000
 MAX_RECOVERY_OPAQUE_BYTES = 8_192
 MAX_RECOVERY_METADATA_BYTES = 32 * 1024 * 1024
 MAX_STAGED_BYTES = 512 * 1024 * 1024
@@ -430,6 +433,100 @@ class NodeRecoveryWorkState:
 
 
 @dataclass(frozen=True)
+class NodeRecoveryStreamHead:
+    chat_id: str
+    log_name: str
+    head: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
+        object.__setattr__(self, "log_name", _raw_text(
+            self.log_name, "log name", max_bytes=MAX_LOG_NAME_BYTES,
+        ))
+        _integer(self.head, "recovery stream head", minimum=1)
+
+
+@dataclass(frozen=True)
+class NodeRecoveryManifestState:
+    family: str
+    checkpoint: bytes
+    outcome: str
+    page_count: int
+    row_count: int
+
+
+@dataclass(frozen=True)
+class NodeRecoveryStreamState:
+    chat_id: str
+    log_name: str
+    head: int
+    cursor: int
+    outcome: str
+    page_count: int
+    row_count: int
+
+
+@dataclass(frozen=True)
+class NodeRecoveryEvent:
+    event_id: int
+    stream_kind: str
+    stream_id: str
+    domain: str
+    source_key: str | None
+    doc_head: int | None
+    log_head: int | None
+
+    def __post_init__(self) -> None:
+        _integer(self.event_id, "recovery event id", minimum=1)
+        if self.stream_kind not in ("root", "chat"):
+            raise NodeInputError("invalid recovery event scope")
+        stream_id = _raw_text(
+            self.stream_id, "recovery event stream", allow_empty=True)
+        if ((self.stream_kind == "root" and stream_id)
+                or (self.stream_kind == "chat" and not stream_id)):
+            raise NodeInputError("invalid recovery event scope")
+        object.__setattr__(self, "stream_id", stream_id)
+        if self.domain == "docs":
+            _integer(self.doc_head, "recovery document head")
+            if self.log_head is not None:
+                raise NodeInputError("invalid recovery document event")
+            if self.source_key is not None:
+                object.__setattr__(self, "source_key", _path(self.source_key))
+                if self.stream_kind == "chat":
+                    pieces = self.source_key.split("/")
+                    if (len(pieces) < 3 or pieces[0] != "chats"
+                            or pieces[1] != self.stream_id):
+                        raise NodeInputError(
+                            "recovery document event scope does not match path")
+        elif self.domain == "logs":
+            if self.stream_kind != "chat" or self.doc_head is not None:
+                raise NodeInputError("invalid recovery log event")
+            _integer(self.log_head, "recovery log head", minimum=1)
+            if self.source_key is not None:
+                object.__setattr__(self, "source_key", _raw_text(
+                    self.source_key, "recovery log name",
+                    max_bytes=MAX_LOG_NAME_BYTES,
+                ))
+        elif self.domain == "visibility":
+            if (self.source_key is not None or self.doc_head is not None
+                    or self.log_head is not None):
+                raise NodeInputError("invalid recovery visibility event")
+        else:
+            raise NodeInputError("invalid recovery event domain")
+
+    @property
+    def requires_restart(self) -> bool:
+        return (self.stream_kind == "root" or self.domain == "visibility"
+                or self.source_key is None)
+
+
+@dataclass(frozen=True)
+class NodeRecoveryEventState:
+    event: NodeRecoveryEvent
+    state: str
+
+
+@dataclass(frozen=True)
 class NodeRecoveryState:
     recovery_id: str
     generation: int
@@ -439,6 +536,15 @@ class NodeRecoveryState:
     target_cursor: int
     state: str
     work: tuple[NodeRecoveryWorkState, ...]
+    proof_revision: int = 0
+    manifests: tuple[NodeRecoveryManifestState, ...] = ()
+    stream_count: int = 0
+    pending_stream_count: int = 0
+    event_examined_cursor: int = 0
+    event_terminal_cursor: int | None = None
+    event_count: int = 0
+    pending_event_count: int = 0
+    close_prepared: bool = False
 
 
 @dataclass(frozen=True)

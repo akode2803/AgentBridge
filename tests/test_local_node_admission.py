@@ -856,7 +856,7 @@ def test_empty_inactive_v1_database_migrates_without_rebinding(tmp_path):
     assert status.database_incarnation == "incarnation-v1"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (4, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (7, 1)
         assert conn.execute(
             "SELECT minimum_cursor FROM local_change_state").fetchone() == (0,)
 
