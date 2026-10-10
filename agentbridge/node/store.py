@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 from .admission import (
-    MAX_ACTIVE_CANDIDATES, MAX_BATCH_DOCUMENTS, MAX_BATCH_FRONTIERS,
-    MAX_BATCH_VISIBILITY,
+    MAX_ACTIVE_CANDIDATES, MAX_BATCH_FRONTIERS, MAX_STAGED_BYTES,
+    MAX_STAGED_CHUNKS, MAX_STAGED_DOCUMENTS, MAX_STAGED_LOG_ROWS,
+    MAX_STAGED_VISIBILITY,
     MAX_CHANGE_PAGE, MAX_CHANGE_ROWS, MAX_GENERATION_HISTORY,
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
@@ -19,12 +21,12 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=2),
+    version INTEGER NOT NULL CHECK(version=3),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -52,12 +54,14 @@ CREATE TABLE IF NOT EXISTS node_generations(
     created_ns INTEGER NOT NULL CHECK(created_ns>=0),
     observed_ns INTEGER CHECK(observed_ns IS NULL OR observed_ns>=0),
     documents_mode TEXT CHECK(documents_mode IS NULL OR documents_mode IN ('delta','replace')),
+    logs_mode TEXT CHECK(logs_mode IS NULL OR logs_mode IN ('delta','replace')),
     visibility_mode TEXT CHECK(visibility_mode IS NULL OR visibility_mode IN ('delta','replace')),
     frontiers_mode TEXT CHECK(frontiers_mode IS NULL OR frontiers_mode IN ('delta','replace')),
     document_count INTEGER NOT NULL DEFAULT 0 CHECK(document_count>=0),
     log_count INTEGER NOT NULL DEFAULT 0 CHECK(log_count>=0),
     visibility_count INTEGER NOT NULL DEFAULT 0 CHECK(visibility_count>=0),
     frontier_count INTEGER NOT NULL DEFAULT 0 CHECK(frontier_count>=0),
+    chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count>=0),
     total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes>=0)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_admitted_node_generation
@@ -83,6 +87,16 @@ CREATE TABLE IF NOT EXISTS candidate_frontiers(
     generation INTEGER NOT NULL REFERENCES node_generations(generation),
     name TEXT NOT NULL, epoch TEXT, cursor INTEGER, minimum_cursor INTEGER,
     PRIMARY KEY(generation,name)
+);
+CREATE TABLE IF NOT EXISTS candidate_chunks(
+    generation INTEGER NOT NULL REFERENCES node_generations(generation),
+    chunk_id TEXT NOT NULL, digest TEXT NOT NULL,
+    document_count INTEGER NOT NULL CHECK(document_count>=0),
+    log_count INTEGER NOT NULL CHECK(log_count>=0),
+    visibility_count INTEGER NOT NULL CHECK(visibility_count>=0),
+    frontier_count INTEGER NOT NULL CHECK(frontier_count>=0),
+    total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
+    PRIMARY KEY(generation,chunk_id)
 );
 CREATE TABLE IF NOT EXISTS remote_docs(
     path TEXT PRIMARY KEY, seq INTEGER NOT NULL, deleted INTEGER NOT NULL
@@ -131,6 +145,13 @@ _V2_TABLES = frozenset({
     "candidate_frontiers", "remote_docs", "remote_log_rows",
     "remote_chat_visibility", "remote_frontiers", "scope_versions",
     "local_changes", "local_change_state",
+})
+_V3_TABLES = frozenset({
+    "node_schema", "node_identity", "node_meta", "node_generations",
+    "candidate_docs", "candidate_log_rows", "candidate_visibility",
+    "candidate_frontiers", "candidate_chunks", "remote_docs",
+    "remote_log_rows", "remote_chat_visibility", "remote_frontiers",
+    "scope_versions", "local_changes", "local_change_state",
 })
 _REQUIRED_INDEXES = frozenset({"one_admitted_node_generation", "remote_log_chat"})
 
@@ -245,6 +266,55 @@ class NodeStore:
             SCHEMA_VERSION, PROTOCOL_VERSION))
         conn.execute("INSERT INTO local_change_state VALUES(1,0)")
 
+    def _migrate_v2(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(2, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        # V2 never resumed building candidates after process loss. Retire any
+        # such private work before adding resumable chunk receipts.
+        conn.execute(
+            "UPDATE node_generations SET state='abandoned' "
+            "WHERE state IN ('building','sealed')"
+        )
+        for table in ("candidate_docs", "candidate_log_rows",
+                      "candidate_visibility", "candidate_frontiers"):
+            conn.execute(f"DELETE FROM {table}")
+        conn.execute(
+            "ALTER TABLE node_generations ADD COLUMN logs_mode TEXT "
+            "CHECK(logs_mode IS NULL OR logs_mode IN ('delta','replace'))"
+        )
+        conn.execute(
+            "ALTER TABLE node_generations ADD COLUMN chunk_count INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(chunk_count>=0)"
+        )
+        conn.execute("""
+            CREATE TABLE candidate_chunks(
+                generation INTEGER NOT NULL REFERENCES node_generations(generation),
+                chunk_id TEXT NOT NULL, digest TEXT NOT NULL,
+                document_count INTEGER NOT NULL CHECK(document_count>=0),
+                log_count INTEGER NOT NULL CHECK(log_count>=0),
+                visibility_count INTEGER NOT NULL CHECK(visibility_count>=0),
+                frontier_count INTEGER NOT NULL CHECK(frontier_count>=0),
+                total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
+                PRIMARY KEY(generation,chunk_id)
+            )
+        """)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""
+            CREATE TABLE node_schema(
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                version INTEGER NOT NULL CHECK(version=3),
+                protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
+            )
+        """)
+        conn.execute(
+            "INSERT INTO node_schema VALUES(1,?,?)",
+            (SCHEMA_VERSION, PROTOCOL_VERSION),
+        )
+
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
             with conn:
@@ -266,7 +336,9 @@ class NodeStore:
                     conn.execute("INSERT INTO local_change_state VALUES(1,0)")
                 elif tables == _V1_TABLES:
                     self._migrate_v1(conn)
-                elif tables != _V2_TABLES:
+                elif tables == _V2_TABLES:
+                    self._migrate_v2(conn)
+                elif tables != _V3_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -422,56 +494,195 @@ class NodeStore:
                 raise sqlite3.DatabaseError("invalid local node metadata")
         return effective
 
-    def seal_candidate(self, generation: int, batch: NodeInputBatch, *,
-                       observed_ns: int) -> None:
+    @staticmethod
+    def _candidate_chunk_id(value: object) -> str:
+        if type(value) is not str or not value or "\x00" in value:
+            raise NodeInputError("invalid candidate chunk id")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise NodeInputError("invalid candidate chunk id") from None
+        if len(encoded) > 256:
+            raise NodeInputError("invalid candidate chunk id")
+        return value
+
+    @staticmethod
+    def _batch_digest(batch: NodeInputBatch) -> str:
+        digest = hashlib.sha256()
+
+        def add(value: str | bytes | int | bool | None) -> None:
+            if value is None:
+                raw = b"n"
+            elif type(value) is bytes:
+                raw = b"b" + value
+            elif type(value) is str:
+                raw = b"s" + value.encode("utf-8")
+            elif type(value) is bool:
+                raw = b"t" if value else b"f"
+            else:
+                raw = b"i" + str(value).encode("ascii")
+            digest.update(len(raw).to_bytes(8, "big"))
+            digest.update(raw)
+
+        add("modes")
+        for mode in (
+            batch.documents_mode, batch.logs_mode, batch.visibility_mode,
+            batch.frontiers_mode,
+        ):
+            add(mode)
+        add("documents")
+        add(len(batch.documents))
+        for row in batch.documents:
+            for value in (row.path, row.seq, row.deleted, row.payload):
+                add(value)
+        add("log_rows")
+        add(len(batch.log_rows))
+        for row in batch.log_rows:
+            for value in (row.id, row.chat_id, row.log_name, row.payload):
+                add(value)
+        add("visibility")
+        add(len(batch.visibility))
+        for row in batch.visibility:
+            add(row.chat_id)
+            add(row.visible)
+        add("frontiers")
+        add(len(batch.frontiers))
+        for row in batch.frontiers:
+            for value in (
+                row.name, row.epoch, row.cursor, row.minimum_cursor,
+            ):
+                add(value)
+        return digest.hexdigest()
+
+    def stage_candidate_batch(self, generation: int, chunk_id: str,
+                              batch: NodeInputBatch) -> bool:
+        """Durably append one bounded, idempotent recovery chunk.
+
+        The candidate remains private until a separate seal and admission. A
+        retry with the same id and bytes is a no-op; reusing an id for different
+        bytes fails closed.
+        """
         if type(generation) is not int or generation <= 0:
             raise NodeInputError("invalid candidate generation")
+        chunk = self._candidate_chunk_id(chunk_id)
         batch = detached_batch(batch)
+        digest = self._batch_digest(batch)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state,documents_mode,logs_mode,visibility_mode,"
+                "frontiers_mode,document_count,log_count,visibility_count,"
+                "frontier_count,chunk_count,total_bytes FROM node_generations "
+                "WHERE generation=?",
+                (generation,)).fetchone()
+            if row is None or row[0] != "building":
+                raise NodeGenerationChanged("candidate is not building")
+            modes = (
+                batch.documents_mode, batch.logs_mode, batch.visibility_mode,
+                batch.frontiers_mode,
+            )
+            prior_modes = row[1:5]
+            if all(value is None for value in prior_modes):
+                conn.execute(
+                    "UPDATE node_generations SET documents_mode=?,logs_mode=?,"
+                    "visibility_mode=?,frontiers_mode=? WHERE generation=?",
+                    (*modes, generation),
+                )
+            elif prior_modes != modes:
+                raise NodeInputError("candidate batch modes changed")
+            prior = conn.execute(
+                "SELECT digest FROM candidate_chunks "
+                "WHERE generation=? AND chunk_id=?", (generation, chunk),
+            ).fetchone()
+            if prior is not None:
+                if prior != (digest,):
+                    raise NodeInputError("candidate chunk id was reused")
+                return False
+            try:
+                conn.executemany(
+                    "INSERT INTO candidate_docs VALUES(?,?,?,?,?)",
+                    ((generation, value.path, value.seq, int(value.deleted),
+                      value.payload) for value in batch.documents),
+                )
+                conn.executemany(
+                    "INSERT INTO candidate_log_rows VALUES(?,?,?,?,?)",
+                    ((generation, value.id, value.chat_id, value.log_name,
+                      value.payload) for value in batch.log_rows),
+                )
+                conn.executemany(
+                    "INSERT INTO candidate_visibility VALUES(?,?,?)",
+                    ((generation, value.chat_id, int(value.visible))
+                     for value in batch.visibility),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise NodeInputError("candidate chunks overlap") from exc
+            conn.executemany(
+                "INSERT INTO candidate_frontiers VALUES(?,?,?,?,?) "
+                "ON CONFLICT(generation,name) DO UPDATE SET epoch=excluded.epoch,"
+                "cursor=excluded.cursor,minimum_cursor=excluded.minimum_cursor",
+                ((generation, value.name, value.epoch, value.cursor,
+                  value.minimum_cursor) for value in batch.frontiers),
+            )
+            conn.execute(
+                "INSERT INTO candidate_chunks VALUES(?,?,?,?,?,?,?,?)",
+                (generation, chunk, digest, len(batch.documents),
+                 len(batch.log_rows), len(batch.visibility),
+                 len(batch.frontiers), batch.byte_size),
+            )
+            counts = (
+                row[5] + len(batch.documents),
+                row[6] + len(batch.log_rows),
+                row[7] + len(batch.visibility),
+                conn.execute("SELECT count(*) FROM candidate_frontiers WHERE generation=?",
+                             (generation,)).fetchone()[0],
+                row[9] + 1,
+                row[10] + batch.byte_size,
+            )
+            if (counts[0] > MAX_STAGED_DOCUMENTS
+                    or counts[1] > MAX_STAGED_LOG_ROWS
+                    or counts[2] > MAX_STAGED_VISIBILITY
+                    or counts[3] > MAX_BATCH_FRONTIERS
+                    or counts[4] > MAX_STAGED_CHUNKS
+                    or counts[5] > MAX_STAGED_BYTES):
+                raise NodeInputError("staged candidate exceeds node budget")
+            conn.execute(
+                "UPDATE node_generations SET document_count=?,log_count=?,"
+                "visibility_count=?,frontier_count=?,chunk_count=?,total_bytes=? "
+                "WHERE generation=?", (*counts, generation),
+            )
+        return True
+
+    def seal_staged_candidate(self, generation: int, *, observed_ns: int) -> None:
+        if type(generation) is not int or generation <= 0:
+            raise NodeInputError("invalid candidate generation")
         observed = _positive_ns(observed_ns, "candidate observation time")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT state FROM node_generations WHERE generation=?",
-                (generation,)).fetchone()
-            if row != ("building",):
-                raise NodeGenerationChanged("candidate is not building")
-            conn.executemany(
-                "INSERT INTO candidate_docs VALUES(?,?,?,?,?)",
-                ((generation, value.path, value.seq, int(value.deleted), value.payload)
-                 for value in batch.documents),
-            )
-            conn.executemany(
-                "INSERT INTO candidate_log_rows VALUES(?,?,?,?,?)",
-                ((generation, value.id, value.chat_id, value.log_name, value.payload)
-                 for value in batch.log_rows),
-            )
-            conn.executemany(
-                "INSERT INTO candidate_visibility VALUES(?,?,?)",
-                ((generation, value.chat_id, int(value.visible))
-                 for value in batch.visibility),
-            )
-            conn.executemany(
-                "INSERT INTO candidate_frontiers VALUES(?,?,?,?,?)",
-                ((generation, value.name, value.epoch, value.cursor,
-                  value.minimum_cursor) for value in batch.frontiers),
-            )
+                "SELECT state,documents_mode,logs_mode,visibility_mode,"
+                "frontiers_mode FROM node_generations WHERE generation=?",
+                (generation,),
+            ).fetchone()
+            if (row is None or row[0] != "building"
+                    or any(value is None for value in row[1:])):
+                raise NodeGenerationChanged("candidate is not staged")
             changed = conn.execute(
-                "UPDATE node_generations SET state='sealed',observed_ns=?,"
-                "documents_mode=?,visibility_mode=?,frontiers_mode=?,"
-                "document_count=?,log_count=?,visibility_count=?,frontier_count=?,"
-                "total_bytes=? WHERE generation=? AND state='building'",
-                (observed, batch.documents_mode, batch.visibility_mode,
-                 batch.frontiers_mode, len(batch.documents), len(batch.log_rows),
-                 len(batch.visibility), len(batch.frontiers), batch.byte_size,
-                 generation),
+                "UPDATE node_generations SET state='sealed',observed_ns=? "
+                "WHERE generation=? AND state='building'",
+                (observed, generation),
             ).rowcount
             if changed != 1:
                 raise NodeGenerationChanged("candidate changed while sealing")
 
+    def seal_candidate(self, generation: int, batch: NodeInputBatch, *,
+                       observed_ns: int) -> None:
+        self.stage_candidate_batch(generation, "one-shot", batch)
+        self.seal_staged_candidate(generation, observed_ns=observed_ns)
+
     @staticmethod
     def _candidate_row(conn: sqlite3.Connection, generation: int) -> tuple:
         row = conn.execute(
-            "SELECT base_generation,state,observed_ns,documents_mode,"
+            "SELECT base_generation,state,observed_ns,documents_mode,logs_mode,"
             "visibility_mode,frontiers_mode FROM node_generations "
             "WHERE generation=?", (generation,)).fetchone()
         if row is None:
@@ -550,7 +761,8 @@ class NodeStore:
 
     @staticmethod
     def _check_candidate_caps(conn: sqlite3.Connection, generation: int,
-                              documents_mode: str, visibility_mode: str,
+                              documents_mode: str, logs_mode: str,
+                              visibility_mode: str,
                               frontiers_mode: str) -> None:
         if documents_mode == "delta":
             total = conn.execute("""
@@ -559,8 +771,17 @@ class NodeStore:
                     UNION SELECT path FROM candidate_docs WHERE generation=?
                 )
             """, (generation,)).fetchone()[0]
-            if total > MAX_BATCH_DOCUMENTS:
+            if total > MAX_STAGED_DOCUMENTS:
                 raise NodeInputError("admitted documents exceed node budget")
+        if logs_mode == "delta":
+            total = conn.execute("""
+                SELECT count(*) FROM (
+                    SELECT id FROM remote_log_rows
+                    UNION SELECT id FROM candidate_log_rows WHERE generation=?
+                )
+            """, (generation,)).fetchone()[0]
+            if total > MAX_STAGED_LOG_ROWS:
+                raise NodeInputError("admitted log rows exceed node budget")
         if visibility_mode == "delta":
             total = conn.execute("""
                 SELECT count(*) FROM (
@@ -572,7 +793,7 @@ class NodeStore:
                         WHERE generation=? AND visible=1
                 )
             """, (generation, generation)).fetchone()[0]
-            if total > MAX_BATCH_VISIBILITY:
+            if total > MAX_STAGED_VISIBILITY:
                 raise NodeInputError("admitted visibility exceeds node budget")
         if frontiers_mode == "delta":
             total = conn.execute("""
@@ -586,7 +807,8 @@ class NodeStore:
 
     @staticmethod
     def _apply_candidate(conn: sqlite3.Connection, generation: int,
-                         documents_mode: str, visibility_mode: str,
+                         documents_mode: str, logs_mode: str,
+                         visibility_mode: str,
                          frontiers_mode: str) -> None:
         if documents_mode == "replace":
             conn.execute("DELETE FROM remote_docs")
@@ -605,6 +827,8 @@ class NodeStore:
         """, (generation,)).fetchone()
         if conflict is not None:
             raise NodeInputError("log row identity conflict")
+        if logs_mode == "replace":
+            conn.execute("DELETE FROM remote_log_rows")
         conn.execute("""
             INSERT OR IGNORE INTO remote_log_rows(
                 id,chat_id,log_name,payload,updated_generation)
@@ -671,7 +895,8 @@ class NodeStore:
     @staticmethod
     def _clear_candidate_rows(conn: sqlite3.Connection, generation: int) -> None:
         for table in ("candidate_docs", "candidate_log_rows",
-                      "candidate_visibility", "candidate_frontiers"):
+                      "candidate_visibility", "candidate_frontiers",
+                      "candidate_chunks"):
             conn.execute(f"DELETE FROM {table} WHERE generation=?", (generation,))
 
     @staticmethod
@@ -697,7 +922,7 @@ class NodeStore:
         stale: str | None = None
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            (base, state, observed, documents_mode, visibility_mode,
+            (base, state, observed, documents_mode, logs_mode, visibility_mode,
              frontiers_mode) = self._candidate_row(conn, generation)
             if state != "sealed" or observed is None:
                 raise NodeGenerationChanged("candidate is not sealed")
@@ -722,17 +947,26 @@ class NodeStore:
                 stale = "candidate refresh changed"
             else:
                 self._check_candidate_caps(
-                    conn, generation, documents_mode, visibility_mode,
+                    conn, generation, documents_mode, logs_mode, visibility_mode,
                     frontiers_mode)
                 doc_paths = self._changed_document_paths(
                     conn, generation, documents_mode)
                 visible = self._changed_visibility(
                     conn, generation, visibility_mode)
-                log_chats = tuple(row[0] for row in conn.execute("""
-                    SELECT DISTINCT c.chat_id FROM candidate_log_rows c
-                    LEFT JOIN remote_log_rows r ON r.id=c.id
-                    WHERE c.generation=? AND r.id IS NULL ORDER BY c.chat_id
-                """, (generation,)))
+                if logs_mode == "replace":
+                    log_chats = tuple(row[0] for row in conn.execute("""
+                        SELECT chat_id FROM (
+                            SELECT chat_id FROM remote_log_rows
+                            UNION SELECT chat_id FROM candidate_log_rows
+                                WHERE generation=?
+                        ) ORDER BY chat_id
+                    """, (generation,)))
+                else:
+                    log_chats = tuple(row[0] for row in conn.execute("""
+                        SELECT DISTINCT c.chat_id FROM candidate_log_rows c
+                        LEFT JOIN remote_log_rows r ON r.id=c.id
+                        WHERE c.generation=? AND r.id IS NULL ORDER BY c.chat_id
+                    """, (generation,)))
                 scopes: set[tuple[str, str]] = {
                     ("chat", chat) for chat in (*visible, *log_chats)
                 }
@@ -742,7 +976,7 @@ class NodeStore:
                 if self._frontiers_changed(conn, generation, frontiers_mode):
                     scopes.add(("root", ""))
                 self._apply_candidate(
-                    conn, generation, documents_mode, visibility_mode,
+                    conn, generation, documents_mode, logs_mode, visibility_mode,
                     frontiers_mode)
                 if base:
                     changed = conn.execute(

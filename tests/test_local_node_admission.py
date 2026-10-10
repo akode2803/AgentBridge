@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 import pytest
 
@@ -279,6 +280,294 @@ def test_candidate_is_invisible_until_all_families_admit(tmp_path):
     assert after.frontiers == (NodeFrontier("documents", "epoch-1", 7, 0),)
     assert after.health == "ready"
     assert after.last_success_ns == 20
+
+
+def test_staged_candidate_chunks_remain_private_and_resume_after_reopen(tmp_path):
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=10)
+    first = NodeInputBatch(
+        documents=(NodeDocument("accounts/alice.json", 1, False, b"alice"),),
+        log_rows=(NodeLogRow(1, "chat-a", "alice", b"one"),),
+        documents_mode="replace", logs_mode="replace",
+        visibility_mode="replace", frontiers_mode="replace",
+    )
+    assert owner.stage_candidate_batch(generation, "docs:0001", first)
+    assert not owner.stage_candidate_batch(generation, "docs:0001", first)
+
+    reopened = NodeStore(owner.path, identity())
+    before = whole_capture(reopened)
+    assert before.generation == 0
+    assert before.documents == ()
+    assert before.log_pages[0].rows == ()
+
+    second = NodeInputBatch(
+        documents=(NodeDocument("chats/chat-a/meta.json", 2, False, b"meta"),),
+        visibility=(NodeVisibility("chat-a", True),),
+        frontiers=(NodeFrontier("provider-source-ledger", "epoch", 8, 0),),
+        documents_mode="replace", logs_mode="replace",
+        visibility_mode="replace", frontiers_mode="replace",
+    )
+    assert reopened.stage_candidate_batch(generation, "docs:0002", second)
+    reopened.seal_staged_candidate(generation, observed_ns=20)
+    reopened.admit_candidate(generation)
+    after = whole_capture(reopened, expected=generation)
+    assert [row.path for row in after.documents] == [
+        "accounts/alice.json", "chats/chat-a/meta.json",
+    ]
+    assert [row.id for row in after.log_pages[0].rows] == [1]
+    assert after.visibility == ("chat-a",)
+
+
+def test_staged_chunk_id_and_overlap_fail_without_partial_stage(tmp_path):
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1)
+    first = NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 1, False, b"one"),),
+    )
+    owner.stage_candidate_batch(generation, "chunk", first)
+    with pytest.raises(NodeInputError, match="reused"):
+        owner.stage_candidate_batch(generation, "chunk", NodeInputBatch(
+            documents=(NodeDocument("users/b.json", 1, False, b"two"),),
+        ))
+    with pytest.raises(NodeInputError, match="overlap"):
+        owner.stage_candidate_batch(generation, "other", NodeInputBatch(
+            documents=(NodeDocument("users/a.json", 1, False, b"one"),),
+        ))
+    owner.seal_staged_candidate(generation, observed_ns=2)
+    owner.admit_candidate(generation)
+    captured = owner.capture(NodeCaptureRequest(
+        document_prefixes=("users",), max_documents=10, max_bytes=1_000,
+    ))
+    assert [(row.path, row.payload) for row in captured.documents] == [
+        ("users/a.json", b"one"),
+    ]
+
+
+def test_staged_chunks_cannot_change_replacement_contract(tmp_path):
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1)
+    owner.stage_candidate_batch(generation, "first", NodeInputBatch(
+        documents_mode="replace", logs_mode="replace",
+        visibility_mode="replace", frontiers_mode="replace",
+    ))
+    with pytest.raises(NodeInputError, match="modes changed"):
+        owner.stage_candidate_batch(generation, "second", NodeInputBatch())
+
+
+def test_staged_frontier_updates_are_cumulative_and_chunk_retries_are_inert(tmp_path):
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1)
+    first = NodeInputBatch(frontiers=(
+        NodeFrontier("provider-source-ledger", "epoch", 10, 2),
+    ))
+    second = NodeInputBatch(frontiers=(
+        NodeFrontier("provider-source-ledger", "epoch", 20, 3),
+        NodeFrontier("provider-documents", "epoch", 7, 1),
+    ))
+    assert owner.stage_candidate_batch(generation, "ledger:0001", first)
+    assert owner.stage_candidate_batch(generation, "ledger:0002", second)
+    assert not owner.stage_candidate_batch(generation, "ledger:0001", first)
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT frontier_count FROM node_generations WHERE generation=?",
+            (generation,),
+        ).fetchone() == (2,)
+        assert conn.execute(
+            "SELECT name,cursor,minimum_cursor FROM candidate_frontiers "
+            "WHERE generation=? ORDER BY name", (generation,),
+        ).fetchall() == [
+            ("provider-documents", 7, 1),
+            ("provider-source-ledger", 20, 3),
+        ]
+
+
+def test_staged_budget_failure_rolls_back_the_whole_chunk(tmp_path, monkeypatch):
+    from agentbridge.node import store as store_module
+
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1)
+    monkeypatch.setattr(store_module, "MAX_STAGED_DOCUMENTS", 1)
+    first = NodeInputBatch(documents=(
+        NodeDocument("users/a.json", 1, False, b"a"),
+    ))
+    owner.stage_candidate_batch(generation, "first", first)
+    with pytest.raises(NodeInputError, match="staged candidate exceeds"):
+        owner.stage_candidate_batch(generation, "overflow", NodeInputBatch(
+            documents=(NodeDocument("users/b.json", 1, False, b"b"),),
+            frontiers=(NodeFrontier("must-rollback", None, 2, 0),),
+        ))
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT path FROM candidate_docs WHERE generation=?", (generation,),
+        ).fetchall() == [("users/a.json",)]
+        assert conn.execute(
+            "SELECT name FROM candidate_frontiers WHERE generation=?", (generation,),
+        ).fetchall() == []
+        assert conn.execute(
+            "SELECT chunk_id FROM candidate_chunks WHERE generation=?", (generation,),
+        ).fetchall() == [("first",)]
+        assert conn.execute(
+            "SELECT document_count,frontier_count FROM node_generations "
+            "WHERE generation=?", (generation,),
+        ).fetchone() == (1, 0)
+    assert not owner.stage_candidate_batch(generation, "first", first)
+
+
+def test_empty_staged_chunks_have_a_durable_candidate_limit(tmp_path, monkeypatch):
+    from agentbridge.node import store as store_module
+
+    owner = store(tmp_path)
+    generation = owner.begin_candidate(created_ns=1)
+    monkeypatch.setattr(store_module, "MAX_STAGED_CHUNKS", 1)
+    empty = NodeInputBatch()
+    assert owner.stage_candidate_batch(generation, "empty:0001", empty)
+    assert not owner.stage_candidate_batch(generation, "empty:0001", empty)
+    with pytest.raises(NodeInputError, match="staged candidate exceeds"):
+        owner.stage_candidate_batch(generation, "empty:0002", empty)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT chunk_count FROM node_generations WHERE generation=?",
+            (generation,),
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT chunk_id FROM candidate_chunks WHERE generation=?",
+            (generation,),
+        ).fetchall() == [("empty:0001",)]
+
+
+def test_staged_candidate_cannot_publish_after_a_newer_refresh(tmp_path):
+    owner = store(tmp_path)
+    admitted = admit(owner, NodeInputBatch(), created=1, observed=2)
+    older = owner.begin_refresh(attempted_ns=10, expected_generation=admitted)
+    candidate = owner.begin_candidate(
+        created_ns=older, expected_generation=admitted,
+        expected_attempt_ns=older,
+    )
+    owner.stage_candidate_batch(candidate, "part:0001", NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 1, False, b"a"),),
+    ))
+    owner.seal_staged_candidate(candidate, observed_ns=11)
+    newer = owner.begin_refresh(attempted_ns=20, expected_generation=admitted)
+
+    with pytest.raises(NodeGenerationChanged, match="refresh changed"):
+        owner.admit_candidate(candidate, expected_attempt_ns=older)
+    assert whole_capture(owner, expected=admitted).documents == ()
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?", (candidate,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM candidate_chunks WHERE generation=?", (candidate,),
+        ).fetchone() == (0,)
+    assert owner.status(node_epoch="node", started_ns=1).last_attempt_ns == newer
+
+
+def test_capture_sees_only_the_old_cut_during_staged_promotion(tmp_path, monkeypatch):
+    owner = store(tmp_path)
+    admitted = admit(owner, NodeInputBatch(documents=(
+        NodeDocument("users/current.json", 1, False, b"old"),
+    )), created=1, observed=2)
+    candidate = owner.begin_candidate(created_ns=3, expected_generation=admitted)
+    owner.stage_candidate_batch(candidate, "all", NodeInputBatch(
+        documents=(NodeDocument("users/current.json", 2, False, b"new"),),
+        documents_mode="replace", logs_mode="replace",
+        visibility_mode="replace", frontiers_mode="replace",
+    ))
+    owner.seal_staged_candidate(candidate, observed_ns=4)
+
+    applied = threading.Event()
+    release = threading.Event()
+    failures = []
+    original = NodeStore._apply_candidate
+
+    def blocking_apply(conn, *args):
+        original(conn, *args)
+        applied.set()
+        if not release.wait(5):
+            raise RuntimeError("test did not release promotion")
+
+    monkeypatch.setattr(NodeStore, "_apply_candidate", staticmethod(blocking_apply))
+
+    def promote():
+        try:
+            owner.admit_candidate(candidate)
+        except BaseException as exc:  # pragma: no cover - reported by assertion
+            failures.append(exc)
+
+    worker = threading.Thread(target=promote, daemon=True)
+    worker.start()
+    try:
+        assert applied.wait(5)
+        during = owner.capture(NodeCaptureRequest(
+            document_prefixes=("users",), max_documents=10, max_bytes=1_000,
+        ))
+        assert during.generation == admitted
+        assert during.documents[0].payload == b"old"
+    finally:
+        release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert failures == []
+    after = owner.capture(NodeCaptureRequest(
+        document_prefixes=("users",), max_documents=10, max_bytes=1_000,
+    ))
+    assert after.generation == candidate
+    assert after.documents[0].payload == b"new"
+
+
+def test_log_replacement_removes_rows_absent_from_complete_candidate(tmp_path):
+    owner = store(tmp_path)
+    first = admit(owner, NodeInputBatch(log_rows=(
+        NodeLogRow(1, "chat-a", "alice", b"one"),
+        NodeLogRow(2, "chat-b", "bob", b"two"),
+    )))
+    candidate = owner.begin_candidate(created_ns=3, expected_generation=first)
+    owner.stage_candidate_batch(candidate, "all", NodeInputBatch(
+        log_rows=(NodeLogRow(1, "chat-a", "alice", b"one"),),
+        logs_mode="replace",
+    ))
+    owner.seal_staged_candidate(candidate, observed_ns=4)
+    owner.admit_candidate(candidate)
+    assert owner.capture(NodeCaptureRequest(
+        log_requests=(NodeLogRequest("chat-b", "bob", limit=10),),
+        max_log_rows=10, max_bytes=1_000,
+    )).log_pages[0].rows == ()
+
+
+def test_incremental_admission_uses_the_full_staged_replica_caps(
+        tmp_path, monkeypatch):
+    from agentbridge.node import store as store_module
+
+    owner = store(tmp_path)
+    monkeypatch.setattr(store_module, "MAX_STAGED_DOCUMENTS", 2)
+    monkeypatch.setattr(store_module, "MAX_STAGED_VISIBILITY", 2)
+    first = admit(owner, NodeInputBatch(
+        documents=(
+            NodeDocument("users/a.json", 1, False, b"a"),
+            NodeDocument("users/b.json", 1, False, b"b"),
+        ),
+        visibility=(
+            NodeVisibility("chat-a", True),
+            NodeVisibility("chat-b", True),
+        ),
+        documents_mode="replace", visibility_mode="replace",
+    ))
+    candidate = owner.begin_candidate(created_ns=3, expected_generation=first)
+    owner.seal_candidate(candidate, NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 2, False, b"new"),),
+        visibility=(NodeVisibility("chat-a", True),),
+    ), observed_ns=4)
+    owner.admit_candidate(candidate)
+    captured = owner.capture(NodeCaptureRequest(
+        document_prefixes=("users",), max_documents=10, max_bytes=1_000,
+        include_visibility=True, visibility_limit=10,
+    ))
+    assert [(row.path, row.payload) for row in captured.documents] == [
+        ("users/a.json", b"new"), ("users/b.json", b"b"),
+    ]
+    assert captured.visibility == ("chat-a", "chat-b")
 
 
 def test_delta_and_replace_preserve_log_history_but_replace_other_families(tmp_path):
@@ -567,7 +856,7 @@ def test_empty_inactive_v1_database_migrates_without_rebinding(tmp_path):
     assert status.database_incarnation == "incarnation-v1"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (2, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (3, 1)
         assert conn.execute(
             "SELECT minimum_cursor FROM local_change_state").fetchone() == (0,)
 

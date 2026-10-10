@@ -15,6 +15,11 @@ MAX_BATCH_LOG_ROWS = 100_000
 MAX_BATCH_VISIBILITY = 100_000
 MAX_BATCH_FRONTIERS = 128
 MAX_BATCH_BYTES = 64 * 1024 * 1024
+MAX_STAGED_DOCUMENTS = 1_000_000
+MAX_STAGED_LOG_ROWS = 10_000_000
+MAX_STAGED_VISIBILITY = 200_000
+MAX_STAGED_CHUNKS = 4_096
+MAX_STAGED_BYTES = 512 * 1024 * 1024
 MAX_CAPTURE_DOCUMENTS = 20_000
 MAX_CAPTURE_LOG_REQUESTS = 64
 MAX_CAPTURE_LOG_ROWS = 20_000
@@ -169,6 +174,7 @@ class NodeInputBatch:
     visibility: tuple[NodeVisibility, ...] = ()
     frontiers: tuple[NodeFrontier, ...] = ()
     documents_mode: str = "delta"
+    logs_mode: str = "delta"
     visibility_mode: str = "delta"
     frontiers_mode: str = "delta"
 
@@ -183,7 +189,10 @@ class NodeInputBatch:
             if type(values) is not tuple or len(values) > maximum or any(
                     type(value) is not expected for value in values):
                 raise NodeInputError(f"invalid {name}")
-        for mode in (self.documents_mode, self.visibility_mode, self.frontiers_mode):
+        for mode in (
+            self.documents_mode, self.logs_mode, self.visibility_mode,
+            self.frontiers_mode,
+        ):
             if type(mode) is not str or mode not in _MODES:
                 raise NodeInputError("invalid batch replacement mode")
         if len({row.path for row in self.documents}) != len(self.documents):
@@ -368,6 +377,7 @@ def detached_batch(value: NodeInputBatch) -> NodeInputBatch:
             row.name, row.epoch, row.cursor, row.minimum_cursor)
             for row in value.frontiers),
         documents_mode=value.documents_mode,
+        logs_mode=value.logs_mode,
         visibility_mode=value.visibility_mode,
         frontiers_mode=value.frontiers_mode,
     )
