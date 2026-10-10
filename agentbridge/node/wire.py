@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from typing import Any
 
@@ -46,6 +47,33 @@ def _untoken(value: Any, kind: str, fields: set[str]) -> dict[str, Any]:
             or decoded["v"] != PROTOCOL_VERSION or decoded["kind"] != kind):
         raise ProtocolError("invalid continuation")
     return decoded
+
+
+def _log_selection(chat_id: str, log_name: str) -> str:
+    try:
+        raw = json.dumps(
+            (chat_id, log_name), ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ProtocolError("invalid log request") from None
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _cursor_text(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(
+        b"=",
+    ).decode("ascii")
+
+
+def _parse_cursor_text(value: Any) -> str:
+    if type(value) is not str:
+        raise ProtocolError("invalid visibility continuation")
+    try:
+        raw = value.encode("ascii")
+        raw += b"=" * (-len(raw) % 4)
+        return base64.b64decode(raw, altchars=b"-_", validate=True).decode("utf-8")
+    except (UnicodeError, ValueError):
+        raise ProtocolError("invalid visibility continuation") from None
 
 
 def _incarnation(value: Any, expected: str) -> None:
@@ -107,9 +135,9 @@ def parse_capture_request(value: Any, *, database_incarnation: str) -> NodeCaptu
         if raw["cursor"] is not None:
             token = _untoken(
                 raw["cursor"], "log",
-                {"db", "generation", "chat", "log", "after"})
+                {"db", "generation", "selection", "after"})
             _incarnation(token["db"], database_incarnation)
-            if token["chat"] != chat_id or token["log"] != log_name:
+            if token["selection"] != _log_selection(chat_id, log_name):
                 raise ProtocolError("continuation selection changed")
             bind_cursor_generation(token)
             after = _integer(token["after"], "log continuation")
@@ -121,9 +149,7 @@ def parse_capture_request(value: Any, *, database_incarnation: str) -> NodeCaptu
             {"db", "generation", "after"})
         _incarnation(token["db"], database_incarnation)
         bind_cursor_generation(token)
-        if type(token["after"]) is not str:
-            raise ProtocolError("invalid visibility continuation")
-        visibility_after = token["after"]
+        visibility_after = _parse_cursor_text(token["after"])
     max_bytes = _integer(value["max_bytes"], "capture byte limit")
     if max_bytes > MAX_WIRE_CAPTURE_BYTES:
         raise ProtocolError("capture byte limit exceeds wire maximum")
@@ -169,8 +195,9 @@ def capture_response(value: NodeCapture) -> dict[str, Any]:
             {"chat_id": page.request.chat_id, "log_name": page.request.log_name,
              "cursor": _token(
                  "log", db=db, generation=value.generation,
-                 chat=page.request.chat_id,
-                 log=page.request.log_name, after=page.cursor),
+                 selection=_log_selection(
+                     page.request.chat_id, page.request.log_name,
+                 ), after=page.cursor),
              "has_more": page.has_more,
              "rows": [{"id": row.id, "payload": _blob(row.payload)}
                       for row in page.rows]}
@@ -179,7 +206,7 @@ def capture_response(value: NodeCapture) -> dict[str, Any]:
         "visibility": list(value.visibility),
         "visibility_cursor": _token(
             "visibility", db=db, generation=value.generation,
-            after=value.visibility_cursor),
+            after=_cursor_text(value.visibility_cursor)),
         "visibility_has_more": value.visibility_has_more,
         "frontiers": [
             {"name": row.name, "epoch": row.epoch, "cursor": row.cursor,

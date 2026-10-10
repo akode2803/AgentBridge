@@ -18,6 +18,7 @@ from .scoped_sources import (
     ScopedDocumentRow,
     ScopedLogPage,
     ScopedLogRow,
+    ScopedSourceOverflow,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "ChangeLedgerPage",
     "SourceLedgerEvent", "SourceLedgerFence", "SourceLedgerPage",
     "ScopedDocumentBatch", "ScopedDocumentRow", "ScopedLogPage", "ScopedLogRow",
+    "ScopedSourceOverflow",
 ]
 
 
