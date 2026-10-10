@@ -857,6 +857,198 @@ revoke all on function public.ab_node_source_ledger_ready()
 grant execute on function public.ab_node_source_ledger_ready()
   to authenticated, service_role;
 
+-- Exact, response-bounded payload reads for the inactive local node. Stored
+-- sizes are generated without firing the document/log change triggers during
+-- migration. They make the byte preflight narrow: payload values are selected
+-- only after their exact keys and cumulative admitted size are known.
+create or replace function public.ab_source_json_bytes(p_value jsonb)
+returns integer language sql immutable strict set search_path = pg_catalog as $$
+  select pg_catalog.octet_length(
+    pg_catalog.convert_to(p_value::text, 'UTF8')
+  )::integer
+$$;
+create or replace function public.ab_source_text_bytes(p_value text)
+returns integer language sql immutable strict set search_path = pg_catalog as $$
+  select pg_catalog.octet_length(
+    pg_catalog.convert_to(pg_catalog.to_json(p_value)::text, 'UTF8')
+  )::integer
+$$;
+revoke all on function public.ab_source_json_bytes(jsonb)
+  from public, anon, authenticated;
+revoke all on function public.ab_source_text_bytes(text)
+  from public, anon, authenticated;
+grant execute on function public.ab_source_json_bytes(jsonb)
+  to authenticated, service_role;
+grant execute on function public.ab_source_text_bytes(text)
+  to authenticated, service_role;
+
+alter table public.ab_docs add column if not exists source_bytes integer
+  generated always as (public.ab_source_json_bytes(data)) stored;
+alter table public.ab_logs add column if not exists source_bytes integer
+  generated always as (public.ab_source_text_bytes(line)) stored;
+alter table public.ab_docs
+  drop constraint if exists ab_docs_node_source_size;
+alter table public.ab_docs add constraint ab_docs_node_source_size check (
+  source_bytes between 0 and 8355840
+) not valid;
+alter table public.ab_docs validate constraint ab_docs_node_source_size;
+alter table public.ab_logs
+  drop constraint if exists ab_logs_node_source_size;
+alter table public.ab_logs add constraint ab_logs_node_source_size check (
+  source_bytes between 0 and 8355840
+) not valid;
+alter table public.ab_logs validate constraint ab_logs_node_source_size;
+
+create or replace function public.ab_node_docs_exact(
+  p_root text, p_paths text[], p_max_bytes bigint
+) returns table (
+  path text, seq bigint, data jsonb, deleted boolean, batch_overflow boolean
+)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+  v_count integer;
+begin
+  v_count := pg_catalog.cardinality(p_paths);
+  if p_root is null or p_root = ''
+     or v_count is null or v_count < 1 or v_count > 128
+     or p_max_bytes is null or p_max_bytes < 1 or p_max_bytes > 8388608
+     or pg_catalog.array_ndims(p_paths) <> 1
+     or exists (
+       select 1 from pg_catalog.unnest(p_paths) requested(path)
+       where requested.path is null or requested.path = ''
+          or pg_catalog.octet_length(requested.path) > 4096
+     )
+     or (
+       select pg_catalog.count(distinct requested.path)
+       from pg_catalog.unnest(p_paths) requested(path)
+     ) <> v_count then
+    raise exception 'invalid exact-document source request' using errcode = '22023';
+  end if;
+  if auth.role() <> 'service_role' and not public.ab_root_ok(p_root) then
+    raise exception 'exact-document source root is unavailable'
+      using errcode = '42501';
+  end if;
+
+  return query
+    with requested(path, ord) as (
+      select value, ordinality
+      from pg_catalog.unnest(p_paths) with ordinality request(value, ordinality)
+    ), candidates as materialized (
+      select r.ord, d.path, d.seq, d.deleted,
+             (public.ab_source_text_bytes(d.path)
+              + case when d.deleted then 0 else d.source_bytes end
+              + 256)::bigint as row_bytes
+      from requested r
+      join public.ab_docs d on d.root = p_root and d.path = r.path
+    ), state as materialized (
+      select coalesce(pg_catalog.sum(c.row_bytes), 0)::bigint as bytes
+      from candidates c
+    ), payload as materialized (
+      select c.ord, d.path, d.seq,
+             case when d.deleted then null else d.data end as data,
+             d.deleted
+      from candidates c
+      cross join state s
+      join public.ab_docs d on d.root = p_root and d.path = c.path
+      where s.bytes <= p_max_bytes
+    ), result as (
+      select p.ord, p.path, p.seq, p.data, p.deleted, false as batch_overflow
+      from payload p
+      union all
+      select 0::bigint, null::text, null::bigint, null::jsonb, null::boolean, true
+      from state s where s.bytes > p_max_bytes
+    )
+    select r.path, r.seq, r.data, r.deleted, r.batch_overflow
+    from result r order by r.ord;
+end
+$$;
+
+create or replace function public.ab_node_log_exact_page(
+  p_root text, p_chat text, p_log text, p_after bigint, p_through bigint,
+  p_limit integer, p_max_bytes bigint
+) returns table (
+  id bigint, line text, page_has_more boolean, page_overflow boolean
+)
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+begin
+  if p_root is null or p_root = ''
+     or p_chat is null or p_chat = '' or pg_catalog.octet_length(p_chat) > 1024
+     or p_log is null or p_log = '' or pg_catalog.octet_length(p_log) > 4096
+     or p_after is null or p_after < 0
+     or p_through is null or p_through < p_after
+     or p_limit is null or p_limit < 1 or p_limit > 1000
+     or p_max_bytes is null or p_max_bytes < 1 or p_max_bytes > 8388608 then
+    raise exception 'invalid exact-log source request' using errcode = '22023';
+  end if;
+  if auth.role() <> 'service_role' and (
+    not public.ab_root_ok(p_root)
+    or not public.ab_can_read_chat(p_root, p_chat)
+  ) then
+    return;
+  end if;
+
+  return query
+    with candidates as materialized (
+      select l.id, (l.source_bytes + 256)::bigint as row_bytes
+      from public.ab_logs l
+      where l.root = p_root and l.chat_id = p_chat and l.log_name = p_log
+        and l.id > p_after and l.id <= p_through
+      order by l.id
+      limit p_limit + 1
+    ), ranked as materialized (
+      select c.id, c.row_bytes,
+             pg_catalog.row_number() over (order by c.id) as rn,
+             pg_catalog.sum(c.row_bytes) over (
+               order by c.id rows between unbounded preceding and current row
+             ) as cumulative_bytes
+      from candidates c
+    ), selected as materialized (
+      select r.id
+      from ranked r
+      where r.rn <= p_limit and r.cumulative_bytes <= p_max_bytes
+    ), state as materialized (
+      select (select pg_catalog.count(*) from candidates) as candidates,
+             (select pg_catalog.count(*) from selected) as selected,
+             (select r.row_bytes from ranked r where r.rn = 1) as first_bytes
+    ), payload as materialized (
+      select l.id, l.line
+      from selected s
+      join public.ab_logs l on l.id = s.id
+      where l.root = p_root and l.chat_id = p_chat and l.log_name = p_log
+    )
+    select p.id, p.line, st.candidates > st.selected, false
+    from payload p cross join state st
+    union all
+    select null, null, true, true
+    from state st
+    where st.candidates > 0 and st.selected = 0
+      and st.first_bytes > p_max_bytes
+    order by id nulls first;
+end
+$$;
+
+revoke all on function public.ab_node_docs_exact(text, text[], bigint)
+  from public, anon, authenticated;
+revoke all on function public.ab_node_log_exact_page(
+  text, text, text, bigint, bigint, integer, bigint
+) from public, anon, authenticated;
+grant execute on function public.ab_node_docs_exact(text, text[], bigint)
+  to authenticated, service_role;
+grant execute on function public.ab_node_log_exact_page(
+  text, text, text, bigint, bigint, integer, bigint
+) to authenticated, service_role;
+
+-- Capability marker last: a failed rewrite, validation, function or grant
+-- leaves callers on the previous path rather than advertising unsafe bounds.
+create or replace function public.ab_node_scoped_source_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select 1
+$$;
+revoke all on function public.ab_node_scoped_source_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_node_scoped_source_ready()
+  to authenticated, service_role;
+
 -- Existing roots start at cursor zero and perform their normal complete local
 -- catch-up before observing new ledger events. No historical authority is
 -- inferred from this backfill.

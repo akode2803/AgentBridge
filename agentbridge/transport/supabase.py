@@ -51,6 +51,19 @@ from .change_ledger import (
     MAX_LEDGER_PAGE_SIZE,
 )
 from .health import classify_transport_error, retry_inline
+from .scoped_sources import (
+    MAX_SOURCE_BYTES,
+    ScopedDocumentBatch,
+    ScopedDocumentRow,
+    ScopedLogPage,
+    ScopedLogRow,
+    SOURCE_ROW_WIRE_OVERHEAD,
+    validate_source_budget,
+    validate_source_cursor,
+    validate_source_key,
+    validate_source_paths,
+    validate_source_stream,
+)
 from .source_ledger import SourceLedgerEvent, SourceLedgerFence, SourceLedgerPage
 
 __all__ = ["SupabaseTransport", "load_supabase_env"]
@@ -85,6 +98,8 @@ _LEDGER_REPROBE_S = 60.0
 _LEDGER_SCHEMA_VERSION = 1
 _SOURCE_LEDGER_SCHEMA_VERSION = 1
 _SOURCE_LEDGER_REPROBE_S = 60.0
+_SCOPED_SOURCE_SCHEMA_VERSION = 1
+_SCOPED_SOURCE_REPROBE_S = 60.0
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -195,6 +210,8 @@ class SupabaseTransport(Transport):
         self._ledger_reprobe = 0.0
         self._source_ledger_ready: bool | None = None
         self._source_ledger_reprobe = 0.0
+        self._scoped_source_ready: bool | None = None
+        self._scoped_source_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -594,6 +611,154 @@ class SupabaseTransport(Transport):
             return SourceLedgerPage(after_cursor, events, len(raw) == limit)
         except (AttributeError, TypeError, ValueError) as exc:
             raise TransportError("Supabase returned an invalid source ledger page") from exc
+
+    # -------------------------------------- local-node scoped source reads
+    @property
+    def supports_scoped_source_reads(self) -> bool:  # type: ignore[override]
+        return self._scoped_source_capability()
+
+    def _scoped_source_capability(self) -> bool:
+        now = time.monotonic()
+        if self._scoped_source_ready is True:
+            return True
+        if (self._scoped_source_ready is False
+                and now < self._scoped_source_reprobe):
+            return False
+        try:
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_node_scoped_source_ready").execute(),
+            ).data
+            self._count(ready)
+            self._scoped_source_ready = (
+                type(ready) is int and ready == _SCOPED_SOURCE_SCHEMA_VERSION)
+        except Exception as exc:  # noqa: BLE001 - optional capability
+            if _is_missing_column(exc):
+                self._scoped_source_ready = False
+            elif self._scoped_source_ready is None:
+                return False
+        if not self._scoped_source_ready:
+            self._scoped_source_reprobe = now + _SCOPED_SOURCE_REPROBE_S
+        return bool(self._scoped_source_ready)
+
+    def _require_scoped_source(self) -> None:
+        if not self._scoped_source_capability():
+            raise NotImplementedError("Supabase scoped source reads are unavailable")
+
+    def source_documents(
+        self, paths: tuple[str, ...], *, max_bytes: int = MAX_SOURCE_BYTES,
+    ) -> ScopedDocumentBatch:
+        self._require_scoped_source()
+        requested = validate_source_paths(paths)
+        budget = validate_source_budget(max_bytes)
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_docs_exact", {
+                "p_root": self.root, "p_paths": list(requested),
+                "p_max_bytes": budget,
+            },
+        ).execute()).data
+        self._count(raw)
+        required = {"path", "seq", "data", "deleted", "batch_overflow"}
+        try:
+            if (type(raw) is not list or len(raw) > len(requested)
+                    or any(type(row) is not dict or not required.issubset(row)
+                           for row in raw)):
+                raise ValueError("invalid exact document response")
+            overflow = tuple(row["batch_overflow"] for row in raw)
+            if any(type(value) is not bool for value in overflow):
+                raise ValueError("invalid exact document metadata")
+            if any(overflow):
+                if (len(raw) != 1 or overflow != (True,)
+                        or any(raw[0][key] is not None
+                               for key in ("path", "seq", "data", "deleted"))):
+                    raise ValueError("invalid exact document overflow")
+                raise OverflowError("exact document batch exceeds byte budget")
+            rows = []
+            total = 0
+            for row in raw:
+                deleted = row["deleted"]
+                if type(deleted) is not bool or (deleted and row["data"] is not None):
+                    raise ValueError("invalid exact document tombstone")
+                payload = None if deleted else json.dumps(
+                    row["data"], ensure_ascii=False, allow_nan=False,
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                value = ScopedDocumentRow(
+                    row["path"], row["seq"], deleted, payload,
+                )
+                total += len(json.dumps(
+                    value.path, ensure_ascii=False,
+                ).encode("utf-8")) + SOURCE_ROW_WIRE_OVERHEAD
+                total += 0 if payload is None else len(payload)
+                rows.append(value)
+            if total > budget:
+                raise ValueError("exact document response exceeded byte budget")
+            return ScopedDocumentBatch(requested, tuple(rows))
+        except OverflowError as exc:
+            raise TransportError("Supabase document source batch exceeds byte budget") \
+                from exc
+        except (AttributeError, TypeError, ValueError, RecursionError,
+                UnicodeError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid exact document batch",
+            ) from exc
+
+    def source_log_page(
+        self, chat_id: str, log_name: str, *, after_cursor: int,
+        through_cursor: int, limit: int, max_bytes: int = MAX_SOURCE_BYTES,
+    ) -> ScopedLogPage:
+        self._require_scoped_source()
+        chat = validate_source_stream(chat_id, "source chat")
+        log = validate_source_key(log_name, "source log")
+        after = validate_source_cursor(after_cursor, "source log cursor")
+        through = validate_source_cursor(through_cursor, "source log cut")
+        if after > through:
+            raise ValueError("source log cursor exceeds its cut")
+        if type(limit) is not int or not 1 <= limit <= MAX_LEDGER_PAGE_SIZE:
+            raise ValueError("invalid source log page limit")
+        budget = validate_source_budget(max_bytes)
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_log_exact_page", {
+                "p_root": self.root, "p_chat": chat, "p_log": log,
+                "p_after": after, "p_through": through, "p_limit": limit,
+                "p_max_bytes": budget,
+            },
+        ).execute()).data
+        self._count(raw)
+        required = {"id", "line", "page_has_more", "page_overflow"}
+        try:
+            if (type(raw) is not list or len(raw) > limit
+                    or any(type(row) is not dict or not required.issubset(row)
+                           for row in raw)):
+                raise ValueError("invalid exact log response")
+            if not raw:
+                return ScopedLogPage(after, through, (), False)
+            overflow = tuple(row["page_overflow"] for row in raw)
+            more = tuple(row["page_has_more"] for row in raw)
+            if (any(type(value) is not bool for value in overflow + more)
+                    or len(set(more)) != 1):
+                raise ValueError("invalid exact log metadata")
+            if any(overflow):
+                if (len(raw) != 1 or overflow != (True,) or more != (True,)
+                        or raw[0]["id"] is not None or raw[0]["line"] is not None):
+                    raise ValueError("invalid exact log overflow")
+                raise OverflowError("exact log row exceeds byte budget")
+            rows = []
+            total = 0
+            for row in raw:
+                if type(row["line"]) is not str:
+                    raise ValueError("invalid exact log payload")
+                payload = row["line"].encode("utf-8")
+                total += len(json.dumps(
+                    row["line"], ensure_ascii=False,
+                ).encode("utf-8")) + SOURCE_ROW_WIRE_OVERHEAD
+                rows.append(ScopedLogRow(row["id"], payload))
+            if total > budget:
+                raise ValueError("exact log response exceeded byte budget")
+            return ScopedLogPage(after, through, tuple(rows), more[0])
+        except OverflowError as exc:
+            raise TransportError("Supabase log source row exceeds byte budget") from exc
+        except (AttributeError, TypeError, ValueError, UnicodeError) as exc:
+            raise TransportError("Supabase returned an invalid exact log page") from exc
 
     # ------------------------------------------------------------------ docs
     def get_doc(self, path: str, default: Any = None) -> Any:
