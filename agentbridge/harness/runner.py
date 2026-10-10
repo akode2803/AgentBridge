@@ -1306,6 +1306,7 @@ class AgentRunner:
 
     def _next_loop_wait(
         self, *, now: float, last_full_scan: float, announced: float,
+        scanned_through_ns: int,
     ) -> float:
         delays = [
             max(0.0, last_full_scan + FULL_SCAN_AUDIT_S - now),
@@ -1325,8 +1326,8 @@ class AgentRunner:
             delays.append(HANDOFF_RECOVERY_S)
         wall_now = time.time_ns()
         for future_ns in (
-            self.timers.next_future_ns(now_ns=wall_now),
-            self.queue.next_future_ns(now_ns=wall_now),
+            self.timers.next_future_ns(now_ns=scanned_through_ns),
+            self.queue.next_future_ns(now_ns=scanned_through_ns),
         ):
             if future_ns is not None:
                 delays.append(max(0.0, (future_ns - wall_now) / 1e9))
@@ -1457,6 +1458,12 @@ class AgentRunner:
                 # advances its recovery deadline; this avoids a redundant
                 # second discovery pass shortly after the broader audit.
                 handoff_scan = self._handoff_scan_due(now, force=full_scan)
+                # Deadlines at or before this fence are observed by the timer
+                # and queue scans in tick().  A deadline that crosses while
+                # the pass is running must remain visible below and force an
+                # immediate next pass instead of being mistaken for work that
+                # was already examined.
+                scanned_through_ns = time.time_ns()
                 self.tick(
                     full_scan=full_scan, handoff_scan=handoff_scan,
                 )
@@ -1473,6 +1480,7 @@ class AgentRunner:
                 wait_s = self._next_loop_wait(
                     now=time.monotonic(), last_full_scan=last_full_scan,
                     announced=announced,
+                    scanned_through_ns=scanned_through_ns,
                 )
                 self._wake.wait(wait_s)
         finally:

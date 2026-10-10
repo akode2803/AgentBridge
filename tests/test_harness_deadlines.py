@@ -205,9 +205,61 @@ def test_runner_wait_uses_earliest_timer_or_queue_deadline(hrig, monkeypatch):
 
     wait = runner._next_loop_wait(
         now=monotonic_now, last_full_scan=monotonic_now,
-        announced=monotonic_now,
+        announced=monotonic_now, scanned_through_ns=wall_now,
     )
     assert 0.8 <= wait <= 1.0
+
+
+def test_runner_wait_does_not_hide_deadline_crossed_during_pass(
+    hrig, monkeypatch,
+):
+    runner = hrig.make_runner()
+    monotonic_now = time.monotonic()
+    scanned_through_ns = 1_000_000_000
+    assert runner._handoff_scan_due(monotonic_now) is True
+    runner._change_observer._started = True
+    monkeypatch.setattr(
+        runner._change_observer, "next_check_in_s", lambda: 300.0,
+    )
+    runner.timers.set(
+        "room", scanned_through_ns + 1, "crosses during the pass",
+    )
+    monkeypatch.setattr(
+        runner_module.time, "time_ns", lambda: scanned_through_ns + 2,
+    )
+
+    wait = runner._next_loop_wait(
+        now=monotonic_now, last_full_scan=monotonic_now,
+        announced=monotonic_now, scanned_through_ns=scanned_through_ns,
+    )
+    assert wait == 0.0
+
+
+def test_runner_wait_does_not_hide_queue_deadline_crossed_during_pass(
+    hrig, monkeypatch,
+):
+    runner = hrig.make_runner()
+    monotonic_now = time.monotonic()
+    scanned_through_ns = 1_000_000_000
+    assert runner._handoff_scan_due(monotonic_now) is True
+    runner._change_observer._started = True
+    monkeypatch.setattr(
+        runner._change_observer, "next_check_in_s", lambda: 300.0,
+    )
+    assert runner.queue.offer(WorkItem(
+        key="room|retry", chat_id="room", kind="message",
+        msg_id="retry", sender="aryan", ns=1,
+        next_ns=scanned_through_ns + 1,
+    )) is True
+    monkeypatch.setattr(
+        runner_module.time, "time_ns", lambda: scanned_through_ns + 2,
+    )
+
+    wait = runner._next_loop_wait(
+        now=monotonic_now, last_full_scan=monotonic_now,
+        announced=monotonic_now, scanned_through_ns=scanned_through_ns,
+    )
+    assert wait == 0.0
 
 
 def test_runner_wait_retains_legacy_poll_when_observer_is_inactive(
@@ -222,7 +274,7 @@ def test_runner_wait_retains_legacy_poll_when_observer_is_inactive(
 
     wait = runner._next_loop_wait(
         now=monotonic_now, last_full_scan=monotonic_now,
-        announced=monotonic_now,
+        announced=monotonic_now, scanned_through_ns=time.time_ns(),
     )
     assert wait == runner.poll_s
 
@@ -241,7 +293,7 @@ def test_runner_wait_retries_deferred_room_on_poll_cadence(
 
     wait = runner._next_loop_wait(
         now=monotonic_now, last_full_scan=monotonic_now,
-        announced=monotonic_now,
+        announced=monotonic_now, scanned_through_ns=time.time_ns(),
     )
     assert wait == runner.poll_s
 
