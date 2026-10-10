@@ -477,5 +477,16 @@ continuations and obligations live in the Store, so a new executor instance can
 resume without replaying accepted pages. A pending-stream index prevents each
 step from scanning already completed streams. The executor stops at a private
 sealed generation; it does not admit, schedule itself, serve GUI or harness reads,
-or claim equivalence. The next slice adds the inactive equivalence recorder and
-N2 remains mandatory before read cutover.
+or claim equivalence.
+
+The inactive equivalence recorder accepts only a complete replacement reference
+captured between identical opening and closing provider cuts. It compares the
+sealed candidate inside one Store transaction, rechecking the full local binding
+and requiring the provider cursor to equal the sealed target. It writes an
+owner-only evidence file containing counts, digests, mismatch families and
+hashed mismatch keys; it never writes payloads, admits the candidate or changes
+product reads. Its input carrier is deliberately bounded to one validated node
+batch. Larger independent references need a resumable Store-owned reference
+manifest rather than an unbounded legacy `read_log` call. The next slice adds
+that independent current-path reference collector; N2 remains mandatory before
+read cutover.

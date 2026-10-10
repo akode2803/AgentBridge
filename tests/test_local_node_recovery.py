@@ -1,12 +1,19 @@
-"""Inactive transport-to-Store recovery executor checks."""
+"""Inactive transport-to-Store recovery and equivalence checks."""
 
+import json
 import sqlite3
 
 import pytest
 
-from agentbridge.node.admission import NodeCaptureRequest, NodeGenerationChanged
+from agentbridge.node.admission import (
+    NodeCaptureRequest, NodeDocument, NodeFrontier, NodeGenerationChanged,
+    NodeInputBatch, NodeInputError, NodeLogRow, NodeVisibility,
+)
+from agentbridge.node.equivalence import (
+    RecoveryEquivalenceRecorder, RecoveryEquivalenceReference,
+)
 from agentbridge.node.protocol import ReplicaIdentity
-from agentbridge.node.recovery import InactiveRecoveryExecutor
+from agentbridge.node.recovery import InactiveRecoveryExecutor, _provider_cut
 from agentbridge.node.store import NodeStore
 from agentbridge.transport.supabase import SupabaseTransport
 from fake_cloud import FakeClient
@@ -61,6 +68,26 @@ def run_to_seal(executor, recovery_id=None):
     raise AssertionError("recovery did not seal within its bounded fixture work")
 
 
+def exact_reference(*, log_payload=b"sealed"):
+    return NodeInputBatch(
+        documents=(
+            NodeDocument(
+                "chats/c1/meta.json", 1, False,
+                b'{"members":{"user":true}}',
+            ),
+            NodeDocument("users/a.json", 2, False, b'{"name":"a"}'),
+        ),
+        log_rows=(NodeLogRow(7, "c1", "main", log_payload),),
+        visibility=(NodeVisibility("c1", True),),
+        frontiers=(
+            NodeFrontier("provider-source-ledger", EPOCH, 0, 0),
+            NodeFrontier("provider-source-replay", EPOCH, 0, 0),
+        ),
+        documents_mode="replace", logs_mode="replace",
+        visibility_mode="replace", frontiers_mode="replace",
+    )
+
+
 def test_executor_resumes_one_bounded_step_at_a_time_and_keeps_result_private(tmp_path):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     tx, _client = transport()
@@ -92,6 +119,75 @@ def test_executor_resumes_one_bounded_step_at_a_time_and_keeps_result_private(tm
     with sqlite3.connect(owner.path) as conn:
         assert conn.execute(
             "SELECT id,payload FROM remote_log_rows").fetchall() == [(7, b"sealed")]
+
+
+def test_equivalence_recorder_preserves_private_equal_and_mismatch_evidence(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    sealed, _actions = run_to_seal(InactiveRecoveryExecutor(owner, tx))
+    recorder = RecoveryEquivalenceRecorder(owner, tmp_path / "evidence")
+    current = _provider_cut(tx.recovery_fence())
+
+    equal_reference = RecoveryEquivalenceReference(
+        current, current, exact_reference(), "deterministic-current-path")
+    equal = recorder.compare(sealed.recovery_id, equal_reference, observed_ns=100)
+    assert equal.outcome == "equal"
+    assert equal.candidate_digest == equal.reference_digest
+    assert json.loads(open(equal.evidence_path, encoding="utf-8").read())[
+        "outcome"] == "equal"
+
+    mismatch_reference = RecoveryEquivalenceReference(
+        current, current, exact_reference(log_payload=b"different"),
+        "deterministic-current-path")
+    mismatch = recorder.compare(
+        sealed.recovery_id, mismatch_reference, observed_ns=101)
+    assert mismatch.outcome == "mismatch"
+    assert mismatch.mismatched_families == ("logs",)
+    evidence = json.loads(open(mismatch.evidence_path, encoding="utf-8").read())
+    assert evidence["candidate_digest"] is None
+    assert set(evidence["mismatch_tokens"]) == {"logs"}
+
+    # Diagnostic evidence cannot publish the recovery candidate.
+    assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == 0
+
+
+def test_equivalence_reference_rejects_a_moving_provider_cut():
+    cut = _provider_cut(transport()[0].recovery_fence())
+    moved = type(cut)(
+        cut.schema_version, cut.index_epoch, cut.source_epoch, cut.account_id,
+        cut.role, cut.minimum_cursor, cut.cursor + 1,
+    )
+    with pytest.raises(NodeInputError, match="moved"):
+        RecoveryEquivalenceReference(
+            cut, moved, exact_reference(), "moving-current-path")
+
+
+def test_equivalence_stale_binding_cleanup_commits_before_rejection(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    sealed, _actions = run_to_seal(InactiveRecoveryExecutor(owner, tx))
+    recorder = RecoveryEquivalenceRecorder(owner, tmp_path / "evidence")
+    old = _provider_cut(tx.recovery_fence())
+    changed = type(old)(
+        old.schema_version, old.index_epoch, "replacement-source-epoch",
+        old.account_id, old.role, old.minimum_cursor, old.cursor,
+    )
+    stale = RecoveryEquivalenceReference(
+        changed, changed, exact_reference(), "stale-current-path")
+    with pytest.raises(NodeGenerationChanged, match="binding changed"):
+        recorder.compare(sealed.recovery_id, stale, observed_ns=102)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
+    prior = RecoveryEquivalenceReference(
+        old, old, exact_reference(), "old-current-path")
+    with pytest.raises(NodeGenerationChanged, match="unknown recovery"):
+        recorder.compare(sealed.recovery_id, prior, observed_ns=103)
+    assert not (tmp_path / "evidence").exists()
 
 
 def test_executor_replays_change_arriving_during_inventory(tmp_path):

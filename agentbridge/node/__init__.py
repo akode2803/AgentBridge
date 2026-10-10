@@ -19,6 +19,10 @@ from .admission import (
     NodeVisibility,
 )
 from .protocol import PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
+from .equivalence import (
+    RecoveryEquivalenceRecorder, RecoveryEquivalenceReference,
+    RecoveryEquivalenceResult,
+)
 from .recovery import InactiveRecoveryExecutor, RecoveryStepResult
 from .server import LocalNodeServer
 from .store import NodeStore
@@ -41,5 +45,8 @@ __all__ = [
     "NodeStore",
     "NodeVisibility",
     "ReplicaIdentity",
+    "RecoveryEquivalenceRecorder",
+    "RecoveryEquivalenceReference",
+    "RecoveryEquivalenceResult",
     "RecoveryStepResult",
 ]
