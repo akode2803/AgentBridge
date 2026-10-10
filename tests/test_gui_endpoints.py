@@ -6,10 +6,13 @@ profile/privacy/blocks/password, agents + the stand-down switches.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
+import socket
 import time
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -146,6 +149,23 @@ def test_raw_body_above_limit_is_rejected_not_truncated(rig, monkeypatch):
     assert exc.value.code == 413
     body = json.loads(exc.value.read())
     assert "exceeds" in body["error"]
+
+
+def test_oversized_body_rejection_does_not_wait_for_declared_body(rig, monkeypatch):
+    monkeypatch.setattr(gui_app, "MAX_BODY", 8)
+    target = urllib.parse.urlsplit(rig.base)
+    with socket.create_connection((target.hostname, target.port), timeout=2) as client:
+        client.sendall(
+            b"POST /api/mesh/upload HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 9\r\n"
+            b"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        response = http.client.HTTPResponse(client)
+        response.begin()
+        assert response.status == 413
+        assert response.getheader("Connection") == "close"
+        response.read()
 
 
 def test_staging_is_atomic_account_scoped_and_retained_on_failed_commit(
