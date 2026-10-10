@@ -25,7 +25,7 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (1, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (2, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
 
 
@@ -42,9 +42,12 @@ def test_store_never_repairs_missing_identity_or_incarnation(tmp_path, table):
     original = NodeStore(path, identity()).status(node_epoch="one", started_ns=1)
     with sqlite3.connect(path) as conn:
         conn.execute(
-            "INSERT INTO node_generations VALUES(1,'admitted',1)")
+            "INSERT INTO node_generations("
+            "generation,base_generation,state,created_ns,observed_ns,"
+            "documents_mode,visibility_mode,frontiers_mode) "
+            "VALUES(1,0,'admitted',1,1,'replace','replace','replace')")
         conn.execute(
-            "INSERT INTO remote_docs VALUES(1,'members/user.json',1,0,?)",
+            "INSERT INTO remote_docs VALUES('members/user.json',1,0,?,1)",
             (b"{}",),
         )
         conn.execute(f"DELETE FROM {table}")
