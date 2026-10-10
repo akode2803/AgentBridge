@@ -9,8 +9,11 @@ import time
 import pytest
 
 from agentbridge.node.protocol import ReplicaIdentity, parse_status
+from agentbridge.node.admission import (
+    NodeDocument, NodeFrontier, NodeInputBatch, NodeLogRow, NodeVisibility,
+)
 from agentbridge.node.server import (
-    MAX_ACTIVE_REQUESTS, REQUEST_DEADLINE_S, LocalNodeServer,
+    MAX_ACTIVE_REQUESTS, MAX_REQUEST_BODY, REQUEST_DEADLINE_S, LocalNodeServer,
 )
 
 
@@ -34,6 +37,75 @@ def request(server, *, token=None, origin=None, host=None, path="/v1/status"):
     raw = response.read()
     conn.close()
     return response.status, json.loads(raw)
+
+
+def post(server, path, value, *, token=None, content_type="application/json",
+         origin=None):
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=4)
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Host": f"127.0.0.1:{server.port}",
+        "Authorization": f"Bearer {token if token is not None else server.token}",
+        "Content-Type": content_type,
+    }
+    if origin is not None:
+        headers["Origin"] = origin
+    conn.request("POST", path, body=raw, headers=headers)
+    response = conn.getresponse()
+    body = response.read()
+    conn.close()
+    return response.status, json.loads(body)
+
+
+def post_raw(server, path, raw, *, content_type="application/json"):
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=4)
+    conn.request("POST", path, body=raw, headers={
+        "Host": f"127.0.0.1:{server.port}",
+        "Authorization": f"Bearer {server.token}",
+        "Content-Type": content_type,
+    })
+    response = conn.getresponse()
+    body = response.read()
+    conn.close()
+    return response.status, json.loads(body)
+
+
+def capture_request(**changes):
+    value = {
+        "protocol_version": 1,
+        "expected_capture": None,
+        "exact_document_paths": [],
+        "document_prefixes": [""],
+        "logs": [{"chat_id": "chat-a", "log_name": "alice",
+                  "cursor": None, "limit": 1}],
+        "include_visibility": True,
+        "visibility_cursor": None,
+        "visibility_limit": 10,
+        "frontier_names": [],
+        "max_documents": 10,
+        "max_log_rows": 10,
+        "max_bytes": 10_000,
+    }
+    value.update(changes)
+    return value
+
+
+def seed(server):
+    assert server.store is not None
+    generation = server.store.begin_candidate(created_ns=1)
+    server.store.seal_candidate(generation, NodeInputBatch(
+        documents=(NodeDocument("chats/chat-a/meta.json", 1, False, b"meta"),),
+        log_rows=(
+            NodeLogRow(1, "chat-a", "alice", b"one"),
+            NodeLogRow(2, "chat-a", "alice", b"two"),
+        ),
+        visibility=(NodeVisibility("chat-a", True),),
+        frontiers=(NodeFrontier("logs", "epoch", 2, 0),),
+        documents_mode="replace", visibility_mode="replace",
+        frontiers_mode="replace",
+    ), observed_ns=2)
+    server.store.admit_candidate(generation)
+    return generation
 
 
 def test_authenticated_status_and_private_publication(tmp_path):
@@ -65,6 +137,144 @@ def test_status_rejects_wrong_token_browser_origin_host_and_route(tmp_path):
         assert request(server, origin="http://127.0.0.1")[0] == 403
         assert request(server, host="localhost")[0] == 400
         assert request(server, path="/v1/unknown")[0] == 404
+
+
+def test_authenticated_capture_uses_opaque_bound_continuations(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        generation = seed(server)
+        status, first = post(server, "/v1/capture", capture_request())
+        assert status == 200
+        assert first["generation"] == generation
+        assert first["documents"] == [{
+            "deleted": False, "path": "chats/chat-a/meta.json",
+            "payload": "bWV0YQ==", "seq": 1,
+        }]
+        assert [row["id"] for row in first["logs"][0]["rows"]] == [1]
+        assert first["logs"][0]["has_more"] is True
+        assert first["visibility"] == ["chat-a"]
+
+        second_request = capture_request(
+            expected_capture=first["capture"],
+            logs=[{"chat_id": "chat-a", "log_name": "alice",
+                   "cursor": first["logs"][0]["cursor"], "limit": 1}],
+            visibility_cursor=first["visibility_cursor"],
+        )
+        status, second = post(server, "/v1/capture", second_request)
+        assert status == 200
+        assert [row["id"] for row in second["logs"][0]["rows"]] == [2]
+        assert second["logs"][0]["has_more"] is False
+        assert second["visibility"] == []
+
+
+def test_capture_rejects_stale_generation_and_rebound_log_cursor(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        seed(server)
+        status, first = post(server, "/v1/capture", capture_request())
+        assert status == 200
+
+        rebound = capture_request(logs=[{
+            "chat_id": "chat-b", "log_name": "alice",
+            "cursor": first["logs"][0]["cursor"], "limit": 1,
+        }])
+        assert post(server, "/v1/capture", rebound)[0] == 400
+
+        assert server.store is not None
+        generation = server.store.begin_candidate(created_ns=3)
+        server.store.seal_candidate(generation, NodeInputBatch(
+            documents=(NodeDocument(
+                "chats/chat-a/meta.json", 2, False, b"new-meta"),),
+        ), observed_ns=4)
+        server.store.admit_candidate(generation)
+        stale = capture_request(expected_capture=first["capture"])
+        assert post(server, "/v1/capture", stale) == (
+            409, {"error": "generation_changed"})
+        implicit_stale = capture_request(logs=[{
+            "chat_id": "chat-a", "log_name": "alice",
+            "cursor": first["logs"][0]["cursor"], "limit": 1,
+        }])
+        assert post(server, "/v1/capture", implicit_stale) == (
+            409, {"error": "generation_changed"})
+
+
+def test_change_route_pages_and_foreign_cursor_resets(tmp_path):
+    with LocalNodeServer(tmp_path / "one", identity()) as first_server:
+        seed(first_server)
+        status, first = post(first_server, "/v1/changes", {
+            "protocol_version": 1, "cursor": None, "limit": 1,
+        })
+        assert status == 200
+        assert first["status"] == "ok"
+        assert first["has_more"] is True
+        status, second = post(first_server, "/v1/changes", {
+            "protocol_version": 1, "cursor": first["cursor"], "limit": 10,
+        })
+        assert status == 200
+        assert second["status"] == "ok"
+        foreign_cursor = second["cursor"]
+    with LocalNodeServer(tmp_path / "two", identity()) as second_server:
+        status, value = post(second_server, "/v1/changes", {
+            "protocol_version": 1, "cursor": foreign_cursor, "limit": 10,
+        })
+        assert (status, value) == (409, {"error": "reset_required"})
+
+
+def test_change_route_reports_compacted_cursor_reset(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        assert server.store is not None
+        generation = server.store.begin_candidate(created_ns=1)
+        documents = tuple(NodeDocument(
+            f"chats/chat-{index:04d}/meta.json", 1, False, b"x")
+            for index in range(4_097))
+        server.store.seal_candidate(
+            generation, NodeInputBatch(documents=documents), observed_ns=2)
+        server.store.admit_candidate(generation)
+        status, value = post(server, "/v1/changes", {
+            "protocol_version": 1, "cursor": None, "limit": 10,
+        })
+        assert status == 200
+        assert value["status"] == "reset_required"
+        assert value["changes"] == []
+        assert value["has_more"] is False
+        assert value["minimum_cursor"] != value["cursor"]
+
+
+def test_capture_route_rejects_bad_shape_media_type_and_budget(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        seed(server)
+        assert post(server, "/v1/capture", {}, token="wrong")[0] == 401
+        assert post(server, "/v1/capture", capture_request(),
+                    content_type="text/plain")[0] == 400
+        oversized = capture_request(max_bytes=8 * 1024 * 1024 + 1)
+        assert post(server, "/v1/capture", oversized)[0] == 400
+        extra = capture_request()
+        extra["unexpected"] = True
+        assert post(server, "/v1/capture", extra)[0] == 400
+
+        assert post(server, "/v1/capture", capture_request(),
+                    origin="http://127.0.0.1")[0] == 403
+        assert post_raw(server, "/v1/capture", b"{" + b"x" * MAX_REQUEST_BODY
+                        )[0] == 413
+        deeply_nested = b'{"x":' + b"[" * 1_100 + b"0" + b"]" * 1_100 + b"}"
+        assert post_raw(server, "/v1/capture", deeply_nested)[0] == 400
+
+
+@pytest.mark.parametrize("version", [True, 1.0])
+def test_read_routes_require_exact_integer_protocol_version(tmp_path, version):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        capture = capture_request(protocol_version=version)
+        assert post(server, "/v1/capture", capture)[0] == 400
+        assert post(server, "/v1/changes", {
+            "protocol_version": version, "cursor": None, "limit": 10,
+        })[0] == 400
+
+
+def test_read_routes_reject_unencodable_cursor_as_bad_request(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        assert post(server, "/v1/capture", capture_request(
+            expected_capture="\ud800"))[0] == 400
+        assert post(server, "/v1/changes", {
+            "protocol_version": 1, "cursor": "\ud800", "limit": 10,
+        })[0] == 400
 
 
 def test_duplicate_owner_fails_closed(tmp_path):

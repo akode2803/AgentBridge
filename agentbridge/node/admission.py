@@ -7,6 +7,7 @@ cannot execute code while the node transaction is open.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 MAX_BATCH_DOCUMENTS = 100_000
@@ -50,7 +51,8 @@ def _integer(value: object, name: str, *, minimum: int = 0,
 
 def _text(value: object, name: str, *, max_bytes: int = MAX_ID_BYTES,
           allow_empty: bool = False) -> str:
-    if type(value) is not str or (not value and not allow_empty) or "\x00" in value:
+    if (type(value) is not str or (not value and not allow_empty)
+            or any(unicodedata.category(char).startswith("C") for char in value)):
         raise NodeInputError(f"invalid {name}")
     try:
         encoded = value.encode("utf-8")

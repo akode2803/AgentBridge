@@ -150,8 +150,12 @@ def parse_status(value: Any, *, expected_identity: ReplicaIdentity,
     return NodeStatus(**value)
 
 
-def encode_json(value: dict[str, Any]) -> bytes:
-    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(raw) > MAX_STATUS_BYTES:
+def encode_json(value: dict[str, Any], *, max_bytes: int = MAX_STATUS_BYTES) -> bytes:
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 32 * 1024 * 1024:
+        raise ProtocolError("invalid node response budget")
+    raw = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    if len(raw) > max_bytes:
         raise ProtocolError("node response exceeds budget")
     return raw

@@ -1,7 +1,7 @@
 # Local admitted-input node architecture
 
-Status: N0 plus the first N1 atomic-store slice are inactive; no GUI, harness
-or provider routing uses them.
+Status: N0 plus the N1 atomic-store and bounded local-read protocol slices are
+inactive; no GUI, harness or provider routing uses them.
 
 ## Measured reason for the change
 
@@ -121,36 +121,38 @@ candidates are reclaimable after crashes. Full reconciliation builds a complete
 candidate and atomically replaces the admitted provider view; tombstones remain
 until that cut proves their absence.
 
-The first N1 slice implements this database boundary, one coherent multi-family
+The first N1 slices implement this database boundary, one coherent multi-family
 capture, bounded forward log/visibility pages, and a retained local change
-journal. A cursor is bound to the database incarnation and retained minimum;
-foreign, future or compacted cursors return `reset_required`. It still has no
-provider collection loop or HTTP capture route, so it cannot affect product
-reads or create provider traffic.
+journal. The authenticated loopback server exposes those read operations through
+strict bounded JSON. Opaque capture continuations bind the database incarnation,
+admitted generation and exact log selection; foreign, recreated or superseded
+captures return HTTP 409, while expired or compacted change positions return
+`reset_required`. It still has no provider
+collection loop and no product client uses these routes, so it cannot affect
+product reads or create provider traffic.
 
 ## Narrow local API
 
-All replies include protocol version, node epoch, database incarnation, admitted
-generation, affected scope versions and source-health metadata. Multi-family
-captures require one bounded capture handle bound to one admitted generation, or
-one request that returns documents, logs and visibility from the same SQLite read
-transaction. Independent successful endpoint calls do not establish a coherent
-combined cut.
+Status replies publish the node epoch and database incarnation. Capture replies
+include protocol version, an opaque generation handle, admitted generation,
+affected scope versions and source-health metadata. Multi-family captures use one
+request that returns documents, logs, frontiers and visibility from the same
+SQLite read transaction; subsequent pages present the returned generation handle
+or fail with `generation_changed`. Independent successful requests do not
+establish a coherent combined cut.
 
 Read operations:
 
-- `GET /v1/status`: liveness, health, last success, Realtime/ledger state and
-  bounded transfer counters;
-- `POST /v1/capture/docs`: exact allowlisted paths/prefix budgets from one SQLite
-  read transaction;
-- `POST /v1/capture/logs`: reverse/forward keyset rows for named chats/logs and
-  exact frontiers;
-- `POST /v1/capture/visibility`: bounded provider-visible chat IDs;
-- `POST /v1/capture/changes`: durable local keyset replay after a client cursor.
+- `GET /v1/status`: liveness, identity binding, health and last successful
+  admission;
+- `POST /v1/capture`: exact document paths/prefixes, forward log pages, bounded
+  provider-visible chat IDs and exact frontiers from one SQLite read transaction;
+- `POST /v1/changes`: durable local keyset replay after a client cursor.
   Retention exposes its minimum cursor and database incarnation; an expired,
   foreign or compacted cursor returns `reset_required`, never an apparently
   complete empty delta;
-- `GET /v1/events`: content-free scoped wake stream with reconnect cursor.
+- `GET /v1/events`: planned content-free scoped wake stream with reconnect
+  cursor.
 
 Mutation operations are added only after shadow reads are equivalent:
 
@@ -308,9 +310,9 @@ to the store while those pieces or N2 are absent.
 
 ## First implementation slice
 
-Implement N0 only: versioned protocol values, bounded validators, node SQLite
+N0 is complete: versioned protocol values, bounded validators, node SQLite
 identity/meta/scope schema, exclusive owner lease and authenticated loopback
-`/v1/status`. Keep it inactive and dependency-light. This creates a reviewable
-foundation without making cached state authoritative or adding a second provider
-writer. After exact review, build N1 shadow ingestion around existing
-SupabaseTransport change-ledger and CachingTransport admission primitives.
+`/v1/status`. The atomic N1 store and bounded `/v1/capture` and `/v1/changes`
+read routes are also implemented but inactive. Next, add the feature-gated
+Supabase collector, durable visibility recovery and equivalence recorder before
+any GUI or harness read cutover.
