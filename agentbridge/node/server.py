@@ -1,22 +1,32 @@
-"""Authenticated loopback status server for the inactive N0 node."""
+"""Authenticated loopback read server for the inactive local node."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import socket
+import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ..core.lock import SingleInstance
-from .protocol import PROTOCOL_VERSION, ReplicaIdentity, encode_json
+from .admission import (
+    NodeCaptureOverflow, NodeGenerationChanged, NodeInputError,
+)
+from .protocol import PROTOCOL_VERSION, ProtocolError, ReplicaIdentity, encode_json
 from .security import atomic_private_bytes, atomic_private_json, private_directory
 from .store import NodeStore
+from .wire import (
+    MAX_WIRE_REQUEST_BYTES, MAX_WIRE_RESPONSE_BYTES, CursorReset,
+    capture_response, change_response, parse_capture_request,
+    parse_change_request,
+)
 
-MAX_REQUEST_BODY = 1024
+MAX_REQUEST_BODY = MAX_WIRE_REQUEST_BYTES
 MAX_ACTIVE_REQUESTS = 16
 SOCKET_TIMEOUT_S = 2.0
 REQUEST_DEADLINE_S = 2.0
@@ -192,8 +202,19 @@ class LocalNodeServer:
             def log_message(self, _format, *_args) -> None:
                 return
 
-            def _reply(self, status: int, value: dict | None = None) -> None:
-                body = encode_json(value or {"error": "request_rejected"})
+            def _reply(self, status: int, value: dict | None = None, *,
+                       max_bytes: int | None = None) -> None:
+                self.close_connection = True
+                try:
+                    if max_bytes is None:
+                        body = encode_json(value or {"error": "request_rejected"})
+                    else:
+                        body = encode_json(
+                            value or {"error": "request_rejected"},
+                            max_bytes=max_bytes)
+                except ProtocolError:
+                    status = 503
+                    body = encode_json({"error": "node_unavailable"})
                 try:
                     self.send_response(status)
                     self.send_header("Content-Type", "application/json")
@@ -203,45 +224,63 @@ class LocalNodeServer:
                     self.end_headers()
                     self.wfile.write(body)
                 except OSError:
-                    self.close_connection = True
+                    pass
 
-            def _authorized(self) -> bool:
+            def _authorized(self, *, allow_body: bool = False) -> int | None:
                 server = self.server
                 assert isinstance(server, _Server)
                 if server.stopping.is_set():
                     self._reply(503)
-                    return False
+                    return None
                 if self.headers.get("Origin") is not None:
                     self._reply(403)
-                    return False
+                    return None
                 expected_host = f"127.0.0.1:{server.server_port}"
                 if self.headers.get("Host") != expected_host:
                     self._reply(400)
-                    return False
+                    return None
                 if self.headers.get("Transfer-Encoding") is not None:
                     self._reply(400)
-                    return False
+                    return None
                 raw_length = self.headers.get("Content-Length", "0")
                 try:
                     length = int(raw_length)
                 except ValueError:
                     self._reply(400)
-                    return False
+                    return None
                 if length < 0 or length > MAX_REQUEST_BODY:
                     self._reply(413)
-                    return False
-                if length:
+                    return None
+                if length and not allow_body:
                     self._reply(400)
-                    return False
+                    return None
                 supplied = self.headers.get("Authorization", "")
                 if not secrets.compare_digest(
                         supplied, f"Bearer {token}"):
                     self._reply(401)
-                    return False
-                return True
+                    return None
+                return length
+
+            def _json_body(self, length: int) -> dict | None:
+                if length <= 0 or self.headers.get_content_type() != "application/json":
+                    self._reply(400)
+                    return None
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    self._reply(400)
+                    return None
+                try:
+                    value = json.loads(raw)
+                except (ValueError, UnicodeDecodeError, RecursionError):
+                    self._reply(400)
+                    return None
+                if type(value) is not dict:
+                    self._reply(400)
+                    return None
+                return value
 
             def do_GET(self) -> None:  # noqa: N802
-                if not self._authorized():
+                if self._authorized() is None:
                     return
                 if self.path != "/v1/status":
                     self._reply(404)
@@ -258,8 +297,52 @@ class LocalNodeServer:
                 self._reply(200, status.as_dict())
 
             def do_POST(self) -> None:  # noqa: N802
-                if self._authorized():
+                length = self._authorized(allow_body=True)
+                if length is None:
+                    return
+                if self.path not in ("/v1/capture", "/v1/changes"):
                     self._reply(404)
+                    return
+                value = self._json_body(length)
+                if value is None:
+                    return
+                server = self.server
+                assert isinstance(server, _Server)
+                if server.stopping.is_set():
+                    self._reply(503)
+                    return
+                try:
+                    status = store.status(
+                        node_epoch=node_epoch, started_ns=started_ns)
+                    if self.path == "/v1/capture":
+                        request = parse_capture_request(
+                            value,
+                            database_incarnation=status.database_incarnation)
+                        response = capture_response(store.capture(request))
+                    else:
+                        incarnation, after, limit = parse_change_request(
+                            value,
+                            database_incarnation=status.database_incarnation)
+                        response = change_response(store.capture_changes(
+                            database_incarnation=incarnation,
+                            after_cursor=after, limit=limit))
+                except CursorReset:
+                    self._reply(409, {"error": "reset_required"})
+                    return
+                except NodeGenerationChanged:
+                    self._reply(409, {"error": "generation_changed"})
+                    return
+                except NodeCaptureOverflow:
+                    self._reply(413, {"error": "capture_budget_exceeded"})
+                    return
+                except (ProtocolError, NodeInputError):
+                    self._reply(400)
+                    return
+                except sqlite3.Error:
+                    self._reply(503, {"error": "node_unavailable"})
+                    return
+                self._reply(
+                    200, response, max_bytes=MAX_WIRE_RESPONSE_BYTES)
 
         return Handler
 
