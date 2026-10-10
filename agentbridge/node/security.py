@@ -128,6 +128,18 @@ def _windows_restrict(path: Path, *, directory: bool) -> None:
         if result:
             raise LocalSecurityError("could not protect local node files")
 
+        # Administrator tokens can create files whose default owner is the
+        # Administrators group rather than the token user.  The protected DACL
+        # above grants this user FILE_ALL_ACCESS (including WRITE_OWNER), so now
+        # bind ownership to the same user SID.  Doing this as a second call is
+        # intentional: the pre-existing descriptor may not grant WRITE_OWNER.
+        result = advapi.SetNamedSecurityInfoW(
+            str(path), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+            sid, None, None, None,
+        )
+        if result:
+            raise LocalSecurityError("could not assign local node owner")
+
         owner = wintypes.LPVOID()
         dacl = wintypes.LPVOID()
         descriptor = wintypes.LPVOID()
@@ -142,11 +154,13 @@ def _windows_restrict(path: Path, *, directory: bool) -> None:
         try:
             control = wintypes.WORD()
             revision = wintypes.DWORD()
-            if (not advapi.GetSecurityDescriptorControl(
-                    descriptor, ctypes.byref(control), ctypes.byref(revision))
-                    or not control.value & SE_DACL_PROTECTED
-                    or not advapi.EqualSid(owner, sid)):
-                raise LocalSecurityError("local node files are not owner-only")
+            if not advapi.GetSecurityDescriptorControl(
+                    descriptor, ctypes.byref(control), ctypes.byref(revision)):
+                raise LocalSecurityError("could not verify local node files")
+            if not control.value & SE_DACL_PROTECTED:
+                raise LocalSecurityError("local node DACL is not protected")
+            if not advapi.EqualSid(owner, sid):
+                raise LocalSecurityError("local node owner does not match")
             acl = ctypes.cast(dacl, ctypes.POINTER(ACL)).contents
             if acl.AceCount != 1:
                 raise LocalSecurityError("local node files are not owner-only")
