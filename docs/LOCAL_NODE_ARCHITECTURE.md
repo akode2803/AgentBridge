@@ -96,8 +96,9 @@ cut or the new cut. Its principal tables are:
 - `node_meta`: schema/protocol version, database incarnation, full replica
   identity, admitted generation, health, last attempt/success and current pending
   mutation state;
-- `candidate_docs`, `candidate_log_rows`, `candidate_visibility` and
-  `candidate_frontiers`, keyed by a reclaimable building/sealed generation;
+- `candidate_docs`, `candidate_log_rows`, `candidate_visibility`,
+  `candidate_frontiers` and `candidate_chunks`, keyed by a reclaimable
+  building/sealed generation;
 - `remote_docs(path, seq, deleted, payload, updated_generation)`;
 - `remote_log_rows(id, chat_id, log_name, payload, updated_generation)` plus
   `(chat_id, log_name, id)` and global `id` indexes;
@@ -115,12 +116,29 @@ cut or the new cut. Its principal tables are:
   operation whose provider attempt is already ambiguous; it may not turn that
   reconciliation rule into permission for a new attempt.
 
-Provider input is detached and bounded before SQLite admission. A refresh stages
-rows under one candidate generation, validates counts/types/frontiers, and moves
-the admitted pointer plus affected scope versions in one transaction. Temporary
-candidates are reclaimable after crashes. Full reconciliation builds a complete
-candidate and atomically replaces the admitted provider view; tombstones remain
-until that cut proves their absence.
+Provider input is detached and bounded before SQLite admission. A refresh can
+stage multiple idempotent chunks under one private candidate generation. Each
+chunk and its receipt commit together, so restart can retry an acknowledged
+chunk without duplicating it. Reusing a chunk identity with different bytes,
+overlapping immutable rows, changing replacement modes or exceeding a cumulative
+budget fails the whole chunk. Sealing prevents further staging. Final admission
+moves the admitted pointer, current raw families, affected scope versions and
+local change rows in one SQLite transaction. Readers therefore observe the old
+cut or the new cut, never a partially staged candidate.
+
+The staging ceilings are one million documents, ten million log rows, 200,000
+visibility rows, 128 current frontiers, 4,096 durable chunk receipts and 512 MiB
+of accounted raw input. The receipt cap also bounds empty or metadata-only
+chunks; an exact duplicate retry does not consume it again. These are hard
+failure bounds for an inactive recovery candidate, not recommended working-set
+sizes or a claim that promotion at the ceilings has acceptable latency.
+Individual chunks retain the smaller 64 MiB and per-family batch caps.
+Atomic promotion is intentionally allowed to scale with the staged recovery
+scope at N1; large-scope transaction duration, temporary disk usage and the
+rollback-journal read/write lock interval must be measured before activation.
+Temporary candidates are reclaimable after crashes. Full reconciliation builds
+a complete candidate and atomically replaces the admitted provider view;
+tombstones remain until that cut proves their absence.
 
 The first N1 slices implement this database boundary, one coherent multi-family
 capture, bounded forward log/visibility pages, and a retained local change
@@ -219,6 +237,34 @@ Clients no longer repeat this scan when attaching to a ready node. A node that
 cannot prove its recovery state reports `catching_up` while still serving the
 last admitted snapshot according to the rules above.
 
+### Recovery staging boundary
+
+Durable multi-chunk staging is only the local atomic-publication prerequisite.
+It is not a resumable provider recovery protocol by itself. Before cold/scoped
+recovery can use it, the recovery owner must persist an identity distinct from a
+short refresh token. That identity binds the database incarnation, provider and
+schema/index epochs, principal, base admitted generation and scope versions,
+target scopes, provider cut, page checkpoints, replay position and per-family
+completion proofs. A fetched chunk and the checkpoint that authorizes its next
+page must enter SQLite together. Resume rechecks every binding before continuing;
+otherwise it abandons the private candidate.
+
+Candidate discovery is private work evidence only. The provider principal comes
+from the authenticated connection, never a caller field, and current provider
+RLS plus current canonical membership/history-on-join/trust/key/lifecycle rules
+are re-evaluated for every product request. Continuations must bind endpoint,
+root, principal, index epoch, scope and selection without exposing rejected room
+identities or a hidden global position.
+
+The current source ledger does not yet prove physical document/log deletion or
+member-row update/remap coverage. Absence therefore cannot be admitted from it.
+The recovery protocol must first extend that mutation evidence or explicitly
+leave those scopes incomplete. It also needs per-scope, per-family completion
+states that distinguish complete-empty, denied, failed and truncated work. A
+start fence plus bounded enumeration must replay intervening events instead of
+requiring provider quiescence; leave/rejoin, a newly visible room behind the
+enumeration cursor and late lower log IDs remain mandatory cases.
+
 ## Staged delivery
 
 ### N0 — executable protocol and schema, inactive
@@ -240,10 +286,12 @@ last admitted snapshot according to the rules above.
   leave/rejoin, equal IDs/namespaces, tombstones and bounded overflow.
 
 The atomic store, local protocol and exact-source shadow collector sub-slices are
-implemented. The remaining N1 work is cold/scoped visibility recovery, runtime
-composition behind an explicit disabled-by-default feature gate and the
-transport-equivalence recorder. Do not route GUI or harness reads to the store
-while those pieces or N2 are absent.
+implemented. Durable multi-chunk private staging is the next store prerequisite;
+it does not make cold/scoped recovery complete. The remaining N1 work is source
+mutation coverage, the bound recovery identity/checkpoint/completion protocol,
+private current-authority discovery, runtime composition behind an explicit
+disabled-by-default feature gate and the transport-equivalence recorder. Do not
+route GUI or harness reads to the store while those pieces or N2 are absent.
 
 Source sequence and identity values are allocation-ordered, not commit-ordered.
 The optional node source-ledger capability therefore adds the exact document
@@ -352,11 +400,14 @@ claims completeness from exact pages alone.
 - Windows owner lock, protected DACL, token/state/database replacement, shutdown
   and crash recovery are covered before activation.
 
-## First implementation slice
+## Current implementation boundary
 
 N0 is complete: versioned protocol values, bounded validators, node SQLite
 identity/meta/scope schema, exclusive owner lease and authenticated loopback
 `/v1/status`. The atomic N1 store and bounded `/v1/capture` and `/v1/changes`
-read routes are also implemented but inactive. Next, add the feature-gated
-Supabase collector, durable visibility recovery and equivalence recorder before
-any GUI or harness read cutover.
+read routes plus the feature-gated exact-source shadow collector are implemented
+but inactive. The store can durably accumulate a bounded private candidate over
+multiple idempotent chunks and publish it atomically. Next, add delete/member-
+update evidence and the durable provider recovery identity, checkpoints and
+completion proofs before private visibility discovery and equivalence recording.
+No GUI or harness read cutover occurs before that work and N2.
