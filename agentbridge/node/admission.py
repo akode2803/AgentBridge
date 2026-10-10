@@ -21,6 +21,8 @@ MAX_STAGED_VISIBILITY = 200_000
 MAX_STAGED_CHUNKS = 4_096
 MAX_RECOVERY_SCOPES = 20_000
 MAX_RECOVERY_WORK = 4_096
+MAX_RECOVERY_MANIFEST_PAGE = 256
+MAX_RECOVERY_STREAMS = 200_000
 MAX_RECOVERY_OPAQUE_BYTES = 8_192
 MAX_RECOVERY_METADATA_BYTES = 32 * 1024 * 1024
 MAX_STAGED_BYTES = 512 * 1024 * 1024
@@ -430,6 +432,40 @@ class NodeRecoveryWorkState:
 
 
 @dataclass(frozen=True)
+class NodeRecoveryStreamHead:
+    chat_id: str
+    log_name: str
+    head: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
+        object.__setattr__(self, "log_name", _raw_text(
+            self.log_name, "log name", max_bytes=MAX_LOG_NAME_BYTES,
+        ))
+        _integer(self.head, "recovery stream head", minimum=1)
+
+
+@dataclass(frozen=True)
+class NodeRecoveryManifestState:
+    family: str
+    checkpoint: bytes
+    outcome: str
+    page_count: int
+    row_count: int
+
+
+@dataclass(frozen=True)
+class NodeRecoveryStreamState:
+    chat_id: str
+    log_name: str
+    head: int
+    cursor: int
+    outcome: str
+    page_count: int
+    row_count: int
+
+
+@dataclass(frozen=True)
 class NodeRecoveryState:
     recovery_id: str
     generation: int
@@ -439,6 +475,10 @@ class NodeRecoveryState:
     target_cursor: int
     state: str
     work: tuple[NodeRecoveryWorkState, ...]
+    proof_revision: int = 0
+    manifests: tuple[NodeRecoveryManifestState, ...] = ()
+    stream_count: int = 0
+    pending_stream_count: int = 0
 
 
 @dataclass(frozen=True)

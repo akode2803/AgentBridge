@@ -8,8 +8,9 @@ import agentbridge.node.store as node_store
 from agentbridge.node.protocol import ReplicaIdentity
 from agentbridge.node.store import NodeStore
 from agentbridge.node.admission import (
-    NodeDocument, NodeFrontier, NodeGenerationChanged, NodeInputBatch, NodeInputError,
-    NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
+    NodeDocument, NodeGenerationChanged, NodeInputBatch, NodeInputError,
+    NodeLogRow, NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope,
+    NodeRecoveryStreamHead, NodeRecoveryWork,
 )
 
 
@@ -46,8 +47,9 @@ def test_v3_migration_preserves_admitted_and_resumable_generic_candidate(tmp_pat
     sealed = owner.begin_candidate(created_ns=4)
     owner.seal_candidate(sealed, NodeInputBatch(), observed_ns=5)
     with sqlite3.connect(path) as conn:
-        for table in ("recovery_pages", "recovery_work", "recovery_scopes",
-                      "provider_recoveries"):
+        for table in ("recovery_proof_pages", "recovery_streams",
+                      "recovery_manifests", "recovery_pages", "recovery_work",
+                      "recovery_scopes", "provider_recoveries"):
             conn.execute(f"DROP TABLE {table}")
         conn.execute("DROP TABLE node_schema")
         conn.execute("CREATE TABLE node_schema(singleton INTEGER PRIMARY KEY,"
@@ -61,7 +63,64 @@ def test_v3_migration_preserves_admitted_and_resumable_generic_candidate(tmp_pat
             .fetchone() == (b"a",)
         assert conn.execute("SELECT state FROM node_generations WHERE generation=?",
                             (sealed,)).fetchone() == ("sealed",)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (4,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (5,)
+
+
+def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    admitted = owner.begin_candidate(created_ns=1)
+    owner.seal_candidate(admitted, NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 1, False, b"admitted"),)),
+        observed_ns=2)
+    owner.admit_candidate(admitted)
+    generic = owner.begin_candidate(created_ns=3)
+    generic_batch = NodeInputBatch(
+        documents=(NodeDocument("users/b.json", 2, False, b"generic"),))
+    owner.stage_candidate_batch(generic, "generic", generic_batch)
+    status = owner.status(node_epoch="node", started_ns=1)
+    with sqlite3.connect(path) as conn:
+        root_generation = conn.execute(
+            "SELECT generation FROM scope_versions WHERE scope_kind='root' "
+            "AND scope_id=''"
+        ).fetchone()[0]
+    cut = NodeProviderCut(1, "index", "source", "account", "member", 0, 5)
+    plan = NodeRecoveryPlan(
+        status.database_incarnation, owner.identity.digest,
+        status.admitted_generation, 0, cut,
+        (NodeRecoveryScope("root", "", root_generation),),
+        (NodeRecoveryWork("frontier", "frontiers", "root", "", b"ledger"),),
+    )
+    recovery = owner.begin_recovery(plan, created_ns=4)
+    owner.stage_recovery_documents(
+        recovery.recovery_id, cut, "recovery-docs", 0, b"",
+        (NodeDocument("users/recovery.json", 3, False, b"private"),),
+        has_more=False)
+    with sqlite3.connect(path) as conn:
+        for table in ("recovery_proof_pages", "recovery_streams",
+                      "recovery_manifests"):
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("CREATE TABLE node_schema(singleton INTEGER PRIMARY KEY,"
+                     "version INTEGER CHECK(version=4),protocol_version INTEGER)")
+        conn.execute("INSERT INTO node_schema VALUES(1,4,1)")
+
+    reopened = NodeStore(path, identity())
+    assert reopened.stage_candidate_batch(generic, "generic", generic_batch) is False
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT payload FROM remote_docs WHERE path='users/a.json'"
+        ).fetchone() == (b"admitted",)
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (recovery.generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM candidate_docs WHERE generation=?",
+            (recovery.generation,),
+        ).fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (5,)
 
 
 def test_recovery_reopens_retries_and_rejects_generic_bypass(tmp_path):
@@ -71,26 +130,92 @@ def test_recovery_reopens_retries_and_rejects_generic_bypass(tmp_path):
     state = owner.begin_recovery(plan, created_ns=10)
     resumed = NodeStore(path, identity()).recovery_state(state.recovery_id, cut)
     assert resumed.generation == state.generation
-    page = NodeInputBatch(documents=(NodeDocument("users/a.json", 1, False, b"a"),),
-                          documents_mode="replace", logs_mode="replace",
-                          visibility_mode="replace", frontiers_mode="replace")
-    args = (state.recovery_id, cut, "page-1", "documents", 0, b"", b"next",
-            "pending", 0, page)
-    assert owner.stage_recovery_page(*args) is True
-    assert owner.stage_recovery_page(*args) is False
+    documents = (NodeDocument("users/a.json", 1, False, b"a"),)
+    args = (state.recovery_id, cut, "page-1", 0, b"", documents)
+    assert owner.stage_recovery_documents(*args, has_more=True) is True
+    assert owner.stage_recovery_documents(*args, has_more=True) is False
     with pytest.raises(NodeInputError, match="reused"):
-        owner.stage_recovery_page(*args[:-1], NodeInputBatch(
-            documents_mode="replace", logs_mode="replace",
-            visibility_mode="replace", frontiers_mode="replace"))
+        owner.stage_recovery_documents(
+            state.recovery_id, cut, "page-1", 0, b"",
+            (NodeDocument("users/b.json", 2, False, b"b"),), has_more=True)
     resumed_page = owner.recovery_state(state.recovery_id, cut)
-    assert resumed_page.work[0].checkpoint == b"next"
-    assert resumed_page.plan.work[0].checkpoint == b""
+    documents_state = {item.family: item for item in resumed_page.manifests}["documents"]
+    assert documents_state.checkpoint == b"users/a.json"
+    assert documents_state.outcome == "pending"
+    assert resumed_page.proof_revision == 1
     with pytest.raises(NodeInputError, match="recovery candidate"):
         owner.stage_candidate_batch(state.generation, "generic", NodeInputBatch())
     with pytest.raises(NodeInputError, match="recovery candidate"):
         owner.seal_staged_candidate(state.generation, observed_ns=12)
     with pytest.raises(NodeInputError, match="replay proof"):
         owner.seal_recovery(state.recovery_id, cut, observed_ns=13)
+    with pytest.raises(NodeInputError, match="typed recovery pages"):
+        owner.stage_recovery_page(
+            state.recovery_id, cut, "legacy", "documents", 0, b"", b"next",
+            "pending", 0, NodeInputBatch())
+
+
+def test_typed_recovery_manifests_derive_and_complete_stream_obligations(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    plan, cut = recovery_plan(owner)
+    state = owner.begin_recovery(plan, created_ns=10)
+    assert owner.stage_recovery_documents(
+        state.recovery_id, cut, "documents-empty", 0, b"", (), has_more=False)
+    assert owner.stage_recovery_chats(
+        state.recovery_id, cut, "chats", 0, b"", ("a", "b"), has_more=False)
+    assert owner.stage_recovery_streams(
+        state.recovery_id, cut, "streams", 0, b"",
+        (NodeRecoveryStreamHead("a", "main", 7),
+         NodeRecoveryStreamHead("b", "main", 1)), has_more=False)
+    assert owner.stage_recovery_log_page(
+        state.recovery_id, cut, "a-log", "a", "main", 0, 0,
+        (NodeLogRow(2, "a", "main", b"two"),
+         NodeLogRow(7, "a", "main", b"seven")), has_more=False)
+    assert owner.stage_recovery_log_page(
+        state.recovery_id, cut, "b-log", "b", "main", 0, 0, (),
+        has_more=False)
+    # The positive provider head can name a physically deleted historical row.
+    # Exact terminal exhaustion closes the payload scan, but sealing remains
+    # disabled until root-delete event replay is also proven.
+
+    resumed = owner.recovery_state(state.recovery_id, cut)
+    manifests = {item.family: item for item in resumed.manifests}
+    assert manifests["documents"].outcome == "complete_empty"
+    assert manifests["chats"].outcome == "complete"
+    assert manifests["streams"].outcome == "complete"
+    assert resumed.stream_count == 2
+    assert resumed.pending_stream_count == 0
+    streams = owner.recovery_streams(state.recovery_id, cut, limit=1)
+    assert [(item.chat_id, item.cursor, item.outcome) for item in streams] == [
+        ("a", 7, "complete")]
+    streams = owner.recovery_streams(
+        state.recovery_id, cut, after=("a", "main"), limit=1)
+    assert [(item.chat_id, item.cursor, item.outcome) for item in streams] == [
+        ("b", 1, "complete_empty")]
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT chat_id FROM candidate_visibility ORDER BY chat_id"
+        ).fetchall() == [("a",), ("b",)]
+        assert conn.execute(
+            "SELECT id FROM candidate_log_rows ORDER BY id"
+        ).fetchall() == [(2,), (7,)]
+
+
+def test_stream_manifest_maximum_raw_identity_checkpoint_is_resumable(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    plan, cut = recovery_plan(owner)
+    state = owner.begin_recovery(plan, created_ns=10)
+    first = NodeRecoveryStreamHead("\x01" * 1024, '"' * 4096, 1)
+    assert owner.stage_recovery_streams(
+        state.recovery_id, cut, "first", 0, b"", (first,), has_more=True)
+    checkpoint = {item.family: item for item in owner.recovery_state(
+        state.recovery_id, cut).manifests}["streams"].checkpoint
+    assert len(checkpoint) <= node_store.MAX_RECOVERY_OPAQUE_BYTES
+    assert owner.stage_recovery_streams(
+        state.recovery_id, cut, "second", 1, checkpoint,
+        (NodeRecoveryStreamHead("z", "last", 1),), has_more=False)
+    with pytest.raises(NodeInputError, match="stream head"):
+        NodeRecoveryStreamHead("room", "main", 0)
 
 
 @pytest.mark.parametrize("changed", ["schema", "index", "source", "account",
@@ -163,17 +288,14 @@ def test_recovery_target_extension_and_reclaim_cleanup(tmp_path):
     assert resumed.target_cursor == 8
     page_cut = NodeProviderCut(1, cut.index_epoch, cut.source_epoch,
                                cut.account_id, cut.role, 0, 9)
-    modes = dict(documents_mode="replace", logs_mode="replace",
-                 visibility_mode="replace", frontiers_mode="replace")
-    assert owner.stage_recovery_page(
-        state.recovery_id, page_cut, "page", "documents", 0, b"", b"next",
-        "pending", 0, NodeInputBatch(**modes),
-    )
+    assert owner.stage_recovery_documents(
+        state.recovery_id, page_cut, "page", 0, b"", (), has_more=False)
     assert owner.recovery_state(state.recovery_id, page_cut).target_cursor == 9
     assert owner.reclaim_candidates(before_ns=11) == 1
     with sqlite3.connect(owner.path) as conn:
         for table in ("provider_recoveries", "recovery_scopes", "recovery_work",
-                      "recovery_pages"):
+                      "recovery_pages", "recovery_manifests", "recovery_streams",
+                      "recovery_proof_pages"):
             assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
 
 
@@ -181,47 +303,47 @@ def test_recovery_page_and_checkpoint_roll_back_together(tmp_path):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     plan, cut = recovery_plan(owner)
     state = owner.begin_recovery(plan, created_ns=10)
-    modes = dict(documents_mode="replace", logs_mode="replace",
-                 visibility_mode="replace", frontiers_mode="replace")
-    first = NodeInputBatch(documents=(NodeDocument("users/a.json", 1, False, b"a"),),
-                           **modes)
-    owner.stage_recovery_page(state.recovery_id, cut, "first", "documents", 0,
-                              b"", b"one", "pending", 0, first)
-    overlapping = NodeInputBatch(documents=(NodeDocument(
-        "users/a.json", 2, False, b"changed"),), **modes)
+    owner.stage_recovery_streams(
+        state.recovery_id, cut, "streams", 0, b"",
+        (NodeRecoveryStreamHead("a", "one", 1),
+         NodeRecoveryStreamHead("b", "two", 1)), has_more=False)
+    owner.stage_recovery_log_page(
+        state.recovery_id, cut, "first", "a", "one", 0, 0,
+        (NodeLogRow(1, "a", "one", b"a"),), has_more=False)
     with pytest.raises(NodeInputError, match="overlap"):
-        owner.stage_recovery_page(state.recovery_id, cut, "second", "documents", 1,
-                                  b"one", b"two", "pending", 0, overlapping)
+        owner.stage_recovery_log_page(
+            state.recovery_id, cut, "second", "b", "two", 0, 0,
+            (NodeLogRow(1, "b", "two", b"changed"),), has_more=False)
     resumed = NodeStore(owner.path, identity()).recovery_state(state.recovery_id, cut)
-    assert resumed.work[0].checkpoint == b"one"
-    assert resumed.work[0].page_count == 1
+    streams = owner.recovery_streams(state.recovery_id, cut)
+    assert [(item.chat_id, item.cursor, item.page_count) for item in streams] == [
+        ("a", 1, 1), ("b", 0, 0)]
+    assert resumed.proof_revision == 2
     with sqlite3.connect(owner.path) as conn:
-        assert conn.execute("SELECT count(*) FROM recovery_pages").fetchone() == (1,)
-        assert conn.execute("SELECT payload FROM candidate_docs").fetchone() == (b"a",)
+        assert conn.execute("SELECT count(*) FROM recovery_proof_pages").fetchone() == (2,)
+        assert conn.execute("SELECT payload FROM candidate_log_rows").fetchone() == (b"a",)
 
 
 def test_recovery_page_revision_rejects_checkpoint_aba_and_old_retry_is_inert(tmp_path):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     plan, cut = recovery_plan(owner)
     state = owner.begin_recovery(plan, created_ns=10)
-    modes = dict(documents_mode="replace", logs_mode="replace",
-                 visibility_mode="replace", frontiers_mode="replace")
-    first = (state.recovery_id, cut, "first", "documents", 0,
-             b"", b"a", "pending", 0, NodeInputBatch(**modes))
-    assert owner.stage_recovery_page(*first)
-    assert owner.stage_recovery_page(
-        state.recovery_id, cut, "second", "documents", 1,
-        b"a", b"", "pending", 0, NodeInputBatch(**modes),
-    )
-    assert owner.stage_recovery_page(*first) is False
+    first = (state.recovery_id, cut, "first", 0, b"",
+             (NodeDocument("a", 1, False, b"a"),))
+    assert owner.stage_recovery_documents(*first, has_more=True)
+    assert owner.stage_recovery_documents(
+        state.recovery_id, cut, "second", 1, b"a",
+        (NodeDocument("b", 2, False, b"b"),), has_more=False)
+    assert owner.stage_recovery_documents(*first, has_more=True) is False
     with pytest.raises(NodeInputError, match="checkpoint changed"):
-        owner.stage_recovery_page(
-            state.recovery_id, cut, "delayed", "documents", 0,
-            b"", b"stale", "pending", 0, NodeInputBatch(**modes),
-        )
+        owner.stage_recovery_documents(
+            state.recovery_id, cut, "delayed", 0, b"",
+            (NodeDocument("c", 3, False, b"c"),), has_more=False)
     resumed = owner.recovery_state(state.recovery_id, cut)
-    assert resumed.work[0].checkpoint == b""
-    assert resumed.work[0].page_count == 2
+    manifest = {item.family: item for item in resumed.manifests}["documents"]
+    assert manifest.checkpoint == b"b"
+    assert manifest.page_count == 2
+    assert manifest.outcome == "complete"
 
 
 def test_stale_recovery_cleanup_prunes_generation_history(tmp_path, monkeypatch):
@@ -280,15 +402,25 @@ def test_recovery_metadata_budget_counts_utf8_bytes(tmp_path, monkeypatch):
          NodeRecoveryWork("frontier", "frontiers", "root", "", b"ledger")),
     )
     state = owner.begin_recovery(plan, created_ns=10)
-    monkeypatch.setattr(node_store, "MAX_RECOVERY_METADATA_BYTES", 5_000)
+    monkeypatch.setattr(node_store, "MAX_RECOVERY_METADATA_BYTES", 100)
     with pytest.raises(NodeInputError, match="metadata exceeds"):
-        owner.stage_recovery_page(
-            state.recovery_id, cut, "page", "docs", 0, checkpoint,
-            b"y" * 1_500, "pending", 0, NodeInputBatch(
-                documents_mode="replace", logs_mode="replace",
-                visibility_mode="replace", frontiers_mode="replace",
-            ),
-        )
+        owner.stage_recovery_documents(
+            state.recovery_id, cut, "page", 0, b"", (), has_more=False)
+
+
+def test_recovery_begin_counts_mandatory_manifest_metadata_atomically(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    plan, _cut = recovery_plan(owner)
+    monkeypatch.setattr(node_store, "MAX_RECOVERY_METADATA_BYTES", 500)
+    with pytest.raises(NodeInputError, match="metadata exceeds"):
+        owner.begin_recovery(plan, created_ns=10)
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.health == "inactive"
+    assert status.last_attempt_ns == 0
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute("SELECT count(*) FROM node_generations").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
 
 
 def test_recovery_input_bounds_and_family_gate(tmp_path):
@@ -305,12 +437,11 @@ def test_recovery_input_bounds_and_family_gate(tmp_path):
     with pytest.raises(NodeInputError, match="work id"):
         NodeRecoveryWork("é" * 129, "docs", "root", "", b"all")
     state = owner.begin_recovery(plan, created_ns=10)
-    with pytest.raises(NodeInputError, match="work family"):
-        owner.stage_recovery_page(state.recovery_id, cut, "wrong", "documents", 0,
-            b"", b"one", "pending", 0, NodeInputBatch(
-                frontiers_mode="replace", documents_mode="replace",
-                logs_mode="replace", visibility_mode="replace",
-                frontiers=(NodeFrontier("provider-source-ledger", "source-1", 5, 0),)))
+    with pytest.raises(NodeInputError, match="strictly ordered"):
+        owner.stage_recovery_documents(
+            state.recovery_id, cut, "wrong", 0, b"",
+            (NodeDocument("b", 1, False, b"b"),
+             NodeDocument("a", 2, False, b"a")), has_more=False)
     with sqlite3.connect(owner.path) as conn:
         assert conn.execute("SELECT count(*) FROM recovery_pages").fetchone() == (0,)
 
@@ -325,7 +456,7 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (4, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (5, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
 
 
@@ -348,8 +479,9 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
             "INSERT INTO candidate_docs VALUES(1,'users/a.json',1,0,?)",
             (b"{}",),
         )
-        for table in ("recovery_pages", "recovery_work", "recovery_scopes",
-                      "provider_recoveries"):
+        for table in ("recovery_proof_pages", "recovery_streams",
+                      "recovery_manifests", "recovery_pages", "recovery_work",
+                      "recovery_scopes", "provider_recoveries"):
             conn.execute(f"DROP TABLE {table}")
         conn.execute("DROP TABLE candidate_chunks")
         conn.execute("ALTER TABLE node_generations DROP COLUMN chunk_count")
@@ -368,7 +500,7 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version,protocol_version FROM node_schema"
-        ).fetchone() == (4, 1)
+        ).fetchone() == (5, 1)
         assert conn.execute(
             "SELECT state FROM node_generations WHERE generation=1"
         ).fetchone() == ("abandoned",)

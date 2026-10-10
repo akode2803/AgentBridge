@@ -16,20 +16,22 @@ from .admission import (
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeInputBatch, NodeInputError, NodeLogPage, NodeLogRow, NodeScopePosition,
+    NodeVisibility,
     NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
-    NodeRecoveryState, NodeRecoveryWorkState, MAX_RECOVERY_METADATA_BYTES,
-    MAX_RECOVERY_OPAQUE_BYTES,
+    NodeRecoveryManifestState, NodeRecoveryState, NodeRecoveryStreamHead,
+    NodeRecoveryStreamState, NodeRecoveryWorkState, MAX_RECOVERY_MANIFEST_PAGE,
+    MAX_RECOVERY_METADATA_BYTES, MAX_RECOVERY_OPAQUE_BYTES, MAX_RECOVERY_STREAMS,
     detached_batch, detached_capture_request,
 )
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=4),
+    version INTEGER NOT NULL CHECK(version=5),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -115,8 +117,17 @@ CREATE TABLE IF NOT EXISTS provider_recoveries(
     start_target_cursor INTEGER NOT NULL CHECK(start_target_cursor>=0),
     target_cursor INTEGER NOT NULL CHECK(target_cursor>=0), state TEXT NOT NULL
         CHECK(state IN ('building','sealed')),
+    proof_version INTEGER NOT NULL CHECK(proof_version=1),
+    proof_revision INTEGER NOT NULL CHECK(proof_revision>=0),
+    event_examined_cursor INTEGER NOT NULL CHECK(event_examined_cursor>=0),
+    event_terminal_cursor INTEGER CHECK(event_terminal_cursor IS NULL OR
+        event_terminal_cursor>=0),
+    close_token TEXT, close_revision INTEGER CHECK(close_revision IS NULL OR
+        close_revision>=0),
     CHECK(minimum_cursor<=start_cursor AND start_cursor<=replay_cursor),
-    CHECK(replay_cursor<=target_cursor AND start_target_cursor<=target_cursor)
+    CHECK(replay_cursor<=event_examined_cursor AND event_examined_cursor<=target_cursor),
+    CHECK(start_target_cursor<=target_cursor),
+    CHECK((close_token IS NULL)=(close_revision IS NULL))
 );
 CREATE TABLE IF NOT EXISTS recovery_scopes(
     recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
@@ -149,6 +160,35 @@ CREATE TABLE IF NOT EXISTS recovery_pages(
     PRIMARY KEY(recovery_id,chunk_id),
     FOREIGN KEY(recovery_id,work_id)
         REFERENCES recovery_work(recovery_id,work_id)
+);
+CREATE TABLE IF NOT EXISTS recovery_manifests(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    family TEXT NOT NULL CHECK(family IN ('documents','chats','streams')),
+    initial_checkpoint BLOB NOT NULL, checkpoint BLOB NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN
+        ('pending','complete','complete_empty')),
+    page_count INTEGER NOT NULL CHECK(page_count>=0),
+    row_count INTEGER NOT NULL CHECK(row_count>=0),
+    PRIMARY KEY(recovery_id,family)
+);
+CREATE TABLE IF NOT EXISTS recovery_streams(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    chat_id TEXT NOT NULL, log_name TEXT NOT NULL,
+    head INTEGER NOT NULL CHECK(head>=0),
+    cursor INTEGER NOT NULL CHECK(cursor>=0),
+    outcome TEXT NOT NULL CHECK(outcome IN
+        ('pending','complete','complete_empty')),
+    page_count INTEGER NOT NULL CHECK(page_count>=0),
+    row_count INTEGER NOT NULL CHECK(row_count>=0),
+    CHECK(cursor<=head),
+    PRIMARY KEY(recovery_id,chat_id,log_name)
+);
+CREATE TABLE IF NOT EXISTS recovery_proof_pages(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    chunk_id TEXT NOT NULL, page_kind TEXT NOT NULL CHECK(page_kind IN
+        ('documents','chats','streams','log')),
+    page_key TEXT NOT NULL, digest TEXT NOT NULL,
+    PRIMARY KEY(recovery_id,chunk_id)
 );
 CREATE TABLE IF NOT EXISTS remote_docs(
     path TEXT PRIMARY KEY, seq INTEGER NOT NULL, deleted INTEGER NOT NULL
@@ -205,10 +245,14 @@ _V3_TABLES = frozenset({
     "remote_log_rows", "remote_chat_visibility", "remote_frontiers",
     "scope_versions", "local_changes", "local_change_state",
 })
-_RECOVERY_TABLES = frozenset({
+_V4_RECOVERY_TABLES = frozenset({
     "provider_recoveries", "recovery_scopes", "recovery_work", "recovery_pages",
 })
-_V4_TABLES = _V3_TABLES | _RECOVERY_TABLES
+_RECOVERY_TABLES = _V4_RECOVERY_TABLES | frozenset({
+    "recovery_manifests", "recovery_streams", "recovery_proof_pages",
+})
+_V4_TABLES = _V3_TABLES | _V4_RECOVERY_TABLES
+_V5_TABLES = _V3_TABLES | _RECOVERY_TABLES
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({"one_admitted_node_generation", "remote_log_chat"})
@@ -388,9 +432,45 @@ class NodeStore:
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(version=4),
+            version INTEGER NOT NULL CHECK(version=5),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
-        conn.execute("INSERT INTO node_schema VALUES(1,4,?)", (PROTOCOL_VERSION,))
+        conn.execute("INSERT INTO node_schema VALUES(1,5,?)", (PROTOCOL_VERSION,))
+
+    def _migrate_v4(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(4, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        # V4 recoveries recorded caller-described work but lacked a closed,
+        # Store-owned inventory. They cannot be upgraded into proof. Retire
+        # only those private generations; admitted and generic candidates stay.
+        generations = tuple(row[0] for row in conn.execute(
+            "SELECT generation FROM provider_recoveries ORDER BY generation"
+        ))
+        for generation in generations:
+            for table in ("candidate_docs", "candidate_log_rows",
+                          "candidate_visibility", "candidate_frontiers",
+                          "candidate_chunks"):
+                conn.execute(f"DELETE FROM {table} WHERE generation=?", (generation,))
+            conn.execute(
+                "UPDATE node_generations SET state='abandoned' "
+                "WHERE generation=? AND state IN ('building','sealed')",
+                (generation,),
+            )
+        for table in ("recovery_pages", "recovery_work", "recovery_scopes",
+                      "provider_recoveries"):
+            conn.execute(f"DROP TABLE {table}")
+        for statement in _RECOVERY_SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=5),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,5,?)", (PROTOCOL_VERSION,))
 
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
@@ -418,7 +498,9 @@ class NodeStore:
                     self._migrate_v3(conn)
                 elif tables == _V3_TABLES:
                     self._migrate_v3(conn)
-                elif tables != _V4_TABLES:
+                elif tables == _V4_TABLES:
+                    self._migrate_v4(conn)
+                elif tables != _V5_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -575,13 +657,20 @@ class NodeStore:
             conn.execute("INSERT INTO node_generations(generation,base_generation,"
                          "state,created_ns) VALUES(?,?,'building',?)",
                          (generation, plan.base_generation, created))
-            conn.execute("INSERT INTO provider_recoveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (recovery_id, generation, plan.database_incarnation,
-                          plan.identity_digest, plan.base_generation, health_owner_token,
-                          plan.replay_cursor, plan.replay_cursor, cut.schema_version, cut.index_epoch,
-                          cut.source_epoch, cut.account_id, cut.role,
-                          cut.minimum_cursor, cut.cursor, cut.cursor,
-                          "building"))
+            conn.execute("""INSERT INTO provider_recoveries(
+                recovery_id,generation,database_incarnation,identity_digest,
+                base_generation,health_owner_token,start_cursor,replay_cursor,
+                schema_version,index_epoch,source_epoch,account_id,role,
+                minimum_cursor,start_target_cursor,target_cursor,state,
+                proof_version,proof_revision,event_examined_cursor,
+                event_terminal_cursor,close_token,close_revision)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,NULL,NULL,NULL)
+            """, (recovery_id, generation, plan.database_incarnation,
+                   plan.identity_digest, plan.base_generation, health_owner_token,
+                   plan.replay_cursor, plan.replay_cursor, cut.schema_version,
+                   cut.index_epoch, cut.source_epoch, cut.account_id, cut.role,
+                   cut.minimum_cursor, cut.cursor, cut.cursor, "building",
+                   plan.replay_cursor))
             conn.executemany("INSERT INTO recovery_scopes VALUES(?,?,?,?)",
                              ((recovery_id, s.scope_kind, s.scope_id, s.generation)
                               for s in plan.scopes))
@@ -590,15 +679,24 @@ class NodeStore:
                                w.scope_id, w.selection, w.checkpoint, w.checkpoint,
                                "pending", 0, 0)
                               for w in plan.work))
+            conn.executemany(
+                "INSERT INTO recovery_manifests VALUES(?,?,X'',X'','pending',0,0)",
+                ((recovery_id, family)
+                 for family in ("documents", "chats", "streams")),
+            )
+            if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
+                raise NodeInputError("recovery metadata exceeds budget")
             conn.execute("UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
                          "WHERE singleton=1", (health_owner_token,))
+        manifests = tuple(NodeRecoveryManifestState(family, b"", "pending", 0, 0)
+                          for family in ("chats", "documents", "streams"))
         return NodeRecoveryState(recovery_id, generation, plan,
                                  health_owner_token, plan.replay_cursor,
                                  plan.provider_cut.cursor,
                                  "building", tuple(
             NodeRecoveryWorkState(w.work_id, w.family, w.scope_kind, w.scope_id,
                                   w.selection, w.checkpoint, "pending", 0, 0)
-            for w in plan.work))
+            for w in plan.work), 0, manifests, 0, 0)
 
     def _bound_recovery(self, conn: sqlite3.Connection, recovery_id: str,
                         current: NodeProviderCut) -> tuple | None:
@@ -606,19 +704,24 @@ class NodeStore:
                            "base_generation,health_owner_token,start_cursor,replay_cursor,"
                            "schema_version,index_epoch,"
                            "source_epoch,account_id,role,minimum_cursor,"
-                           "start_target_cursor,target_cursor,state "
+                           "start_target_cursor,target_cursor,state,proof_version,"
+                           "proof_revision,event_examined_cursor,event_terminal_cursor,"
+                           "close_token,close_revision "
                            "FROM provider_recoveries WHERE recovery_id=?",
                            (recovery_id,)).fetchone()
         if row is None:
             raise NodeGenerationChanged("unknown recovery")
-        (generation, incarnation, digest, base, health_owner, start, replay, schema, index, source,
-         account, role, _minimum, _start_target, target, state) = row
+        (generation, incarnation, digest, base, health_owner, start, replay, schema,
+         index, source, account, role, _minimum, _start_target, target, state,
+         proof_version, _proof_revision, examined, _terminal, _close_token,
+         _close_revision) = row
         meta = self._check_meta(conn)
         stale = (meta[0] != incarnation or self.identity.digest != digest
                  or meta[1] != base or bool(meta[5])
                  or current.schema_version != schema or current.index_epoch != index
                  or current.source_epoch != source or current.minimum_cursor > replay
-                 or current.account_id != account or current.role != role)
+                 or current.account_id != account or current.role != role
+                 or proof_version != 1 or examined < replay or examined > target)
         for kind, ident, scope_generation in conn.execute(
                 "SELECT scope_kind,scope_id,generation FROM recovery_scopes "
                 "WHERE recovery_id=?", (recovery_id,)):
@@ -648,8 +751,10 @@ class NodeStore:
             conn.execute("BEGIN IMMEDIATE")
             row = self._bound_recovery(conn, recovery_id, current)
             if row is not None:
-                (generation, incarnation, digest, base, health_owner, start, replay, schema, index,
-                 source, account, role, minimum, start_target, target, state) = row
+                (generation, incarnation, digest, base, health_owner, start, replay,
+                 schema, index, source, account, role, minimum, start_target,
+                 target, state, _proof_version, proof_revision, _examined,
+                 _terminal, _close_token, _close_revision) = row
                 scopes = tuple(NodeRecoveryScope(kind, ident, value) for kind, ident, value
                                in conn.execute("SELECT scope_kind,scope_id,generation "
                                                "FROM recovery_scopes WHERE recovery_id=? "
@@ -668,8 +773,20 @@ class NodeStore:
                                                               w.scope_kind, w.scope_id,
                                                               w.selection, initial[w.work_id])
                                               for w in work))
+                manifests = tuple(NodeRecoveryManifestState(*values) for values in
+                                  conn.execute(
+                    "SELECT family,checkpoint,outcome,page_count,row_count "
+                    "FROM recovery_manifests WHERE recovery_id=? ORDER BY family",
+                    (recovery_id,),
+                ))
+                stream_count, pending_streams = conn.execute(
+                    "SELECT count(*),COALESCE(SUM(outcome='pending'),0) "
+                    "FROM recovery_streams WHERE recovery_id=?", (recovery_id,),
+                ).fetchone()
                 result = NodeRecoveryState(recovery_id, generation, plan,
-                                           health_owner, replay, target, state, work)
+                                           health_owner, replay, target, state, work,
+                                           proof_revision, manifests, stream_count,
+                                           pending_streams)
         if row is None:
             raise NodeGenerationChanged("recovery binding changed")
         return result
@@ -685,11 +802,12 @@ class NodeStore:
             conn.execute("BEGIN IMMEDIATE")
             row = self._bound_recovery(conn, recovery_id, current)
             if row is not None:
-                if row[-1] != "building":
+                if row[15] != "building":
                     raise NodeGenerationChanged("recovery is not building")
-                target = max(row[-2], current.cursor)
-                conn.execute("UPDATE provider_recoveries SET target_cursor=? "
-                             "WHERE recovery_id=?", (target, recovery_id))
+                target = max(row[14], current.cursor)
+                conn.execute("UPDATE provider_recoveries SET target_cursor=?,"
+                             "proof_revision=proof_revision+? WHERE recovery_id=?",
+                             (target, int(target != row[14]), recovery_id))
         if row is None:
             raise NodeGenerationChanged("recovery binding changed")
         return target
@@ -701,104 +819,374 @@ class NodeStore:
                             next_checkpoint: bytes, outcome: str,
                             expected_replay_cursor: int,
                             batch: NodeInputBatch) -> bool:
+        # V4 accepted arbitrary caller-described work rows. Those rows cannot
+        # prove a complete v5 source inventory, even when every caller item is
+        # marked complete. Keep the compatibility surface visibly fail-closed.
+        raise NodeInputError("typed recovery pages are required for v5 proof")
+
+    @staticmethod
+    def _recovery_batch(*, documents: tuple[NodeDocument, ...] = (),
+                        log_rows: tuple[NodeLogRow, ...] = (),
+                        visibility: tuple = ()) -> NodeInputBatch:
+        return detached_batch(NodeInputBatch(
+            documents=documents, log_rows=log_rows, visibility=visibility,
+            documents_mode="replace", logs_mode="replace",
+            visibility_mode="replace", frontiers_mode="replace",
+        ))
+
+    @staticmethod
+    def _stream_checkpoint(chat_id: str, log_name: str) -> bytes:
+        chat = chat_id.encode("utf-8")
+        log = log_name.encode("utf-8")
+        return len(chat).to_bytes(2, "big") + chat + log
+
+    @staticmethod
+    def _decode_stream_checkpoint(value: bytes) -> tuple[str, str]:
+        if len(value) < 3:
+            raise NodeInputError("invalid recovery stream checkpoint")
+        chat_size = int.from_bytes(value[:2], "big")
+        if chat_size < 1 or len(value) <= 2 + chat_size:
+            raise NodeInputError("invalid recovery stream checkpoint")
+        try:
+            chat = value[2:2 + chat_size].decode("utf-8")
+            log = value[2 + chat_size:].decode("utf-8")
+        except UnicodeDecodeError:
+            raise NodeInputError("invalid recovery stream checkpoint") from None
+        marker = NodeRecoveryStreamHead(chat, log, 1)
+        return marker.chat_id, marker.log_name
+
+    @staticmethod
+    def _proof_page_digest(kind: str, key: str, revision: int,
+                           cut: NodeProviderCut, checkpoint: bytes,
+                           has_more: bool, batch: NodeInputBatch,
+                           extra: object = None) -> str:
+        cut_value = (cut.schema_version, cut.index_epoch, cut.source_epoch,
+                     cut.account_id, cut.role, cut.minimum_cursor, cut.cursor)
+        return hashlib.sha256(repr((
+            kind, key, revision, cut_value, checkpoint, has_more, extra,
+            NodeStore._batch_digest(batch),
+        )).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _check_page_request(expected_revision: int, checkpoint: bytes,
+                            has_more: bool) -> bytes:
+        if (type(expected_revision) is not int
+                or not 0 <= expected_revision <= MAX_STAGED_CHUNKS):
+            raise NodeInputError("invalid recovery proof revision")
+        if type(checkpoint) is not bytes or len(checkpoint) > MAX_RECOVERY_OPAQUE_BYTES:
+            raise NodeInputError("invalid recovery checkpoint")
+        if type(has_more) is not bool:
+            raise NodeInputError("invalid recovery continuation flag")
+        return bytes(checkpoint)
+
+    def _proof_page_start(self, conn: sqlite3.Connection, recovery_id: str,
+                          current: NodeProviderCut, chunk: str, kind: str,
+                          key: str, digest: str) -> tuple[tuple | None, bool]:
+        row = self._bound_recovery(conn, recovery_id, current)
+        if row is None:
+            return None, False
+        prior = conn.execute(
+            "SELECT page_kind,page_key,digest FROM recovery_proof_pages "
+            "WHERE recovery_id=? AND chunk_id=?", (recovery_id, chunk),
+        ).fetchone()
+        if prior is not None:
+            if prior != (kind, key, digest):
+                raise NodeInputError("recovery proof page id was reused")
+            return row, True
+        if row[15] != "building":
+            raise NodeGenerationChanged("recovery is not building")
+        return row, False
+
+    @staticmethod
+    def _proof_metadata_size(conn: sqlite3.Connection, recovery_id: str) -> int:
+        work = conn.execute("SELECT COALESCE(SUM(length(selection)+"
+            "length(initial_checkpoint)+length(checkpoint)+"
+            "length(CAST(work_id AS BLOB))+length(CAST(scope_id AS BLOB))+128),0) "
+            "FROM recovery_work WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+        scopes = conn.execute("SELECT COALESCE(SUM("
+            "length(CAST(scope_id AS BLOB))+64),0) FROM recovery_scopes "
+            "WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+        manifests = conn.execute("SELECT COALESCE(SUM(length(initial_checkpoint)+"
+            "length(checkpoint)+length(CAST(family AS BLOB))+96),0) "
+            "FROM recovery_manifests WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+        streams = conn.execute("SELECT COALESCE(SUM(length(CAST(chat_id AS BLOB))+"
+            "length(CAST(log_name AS BLOB))+112),0) FROM recovery_streams "
+            "WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+        pages = conn.execute("SELECT COALESCE(SUM(length(CAST(chunk_id AS BLOB))+"
+            "length(CAST(page_kind AS BLOB))+length(CAST(page_key AS BLOB))+"
+            "length(CAST(digest AS BLOB))+80),0) FROM recovery_proof_pages "
+            "WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+        return work + scopes + manifests + streams + pages
+
+    def _finish_proof_page(self, conn: sqlite3.Connection, recovery_id: str,
+                           generation: int, current: NodeProviderCut,
+                           target: int, chunk: str, kind: str, key: str,
+                           digest: str, batch: NodeInputBatch) -> None:
+        self._stage_batch(conn, generation, chunk, batch, self._batch_digest(batch))
+        conn.execute("INSERT INTO recovery_proof_pages VALUES(?,?,?,?,?)",
+                     (recovery_id, chunk, kind, key, digest))
+        if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
+            raise NodeInputError("recovery metadata exceeds budget")
+        conn.execute("UPDATE provider_recoveries SET target_cursor=?,"
+                     "proof_revision=proof_revision+1 WHERE recovery_id=?",
+                     (max(target, current.cursor), recovery_id))
+
+    def _stage_recovery_manifest(self, recovery_id: str,
+                                 current_provider_cut: NodeProviderCut,
+                                 chunk_id: str, family: str,
+                                 expected_revision: int,
+                                 expected_checkpoint: bytes,
+                                 values: tuple, has_more: bool) -> bool:
         recovery_id = self._candidate_chunk_id(recovery_id)
         chunk = self._candidate_chunk_id(chunk_id)
-        work_id = self._candidate_chunk_id(work_id)
+        if family not in ("documents", "chats", "streams"):
+            raise NodeInputError("invalid recovery manifest")
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        checkpoint = self._check_page_request(
+            expected_revision, expected_checkpoint, has_more)
+        if type(values) is not tuple or len(values) > MAX_RECOVERY_MANIFEST_PAGE:
+            raise NodeInputError("invalid recovery manifest page")
+        if has_more and not values:
+            raise NodeInputError("continued recovery page is empty")
+
+        if family == "documents":
+            if any(type(value) is not NodeDocument for value in values):
+                raise NodeInputError("invalid recovery documents")
+            batch = self._recovery_batch(documents=values)
+            keys = tuple(value.path.encode("utf-8") for value in batch.documents)
+            extra: object = keys
+        elif family == "chats":
+            if any(type(value) is not str for value in values):
+                raise NodeInputError("invalid recovery chats")
+            visibility = tuple(NodeVisibility(value, True) for value in values)
+            batch = self._recovery_batch(visibility=visibility)
+            keys = tuple(value.chat_id.encode("utf-8") for value in batch.visibility)
+            extra = keys
+        else:
+            if any(type(value) is not NodeRecoveryStreamHead for value in values):
+                raise NodeInputError("invalid recovery streams")
+            values = tuple(NodeRecoveryStreamHead(**vars(value)) for value in values)
+            batch = self._recovery_batch()
+            pairs = tuple((value.chat_id, value.log_name) for value in values)
+            keys = tuple(self._stream_checkpoint(*pair) for pair in pairs)
+            extra = tuple((value.chat_id, value.log_name, value.head)
+                          for value in values)
+        if family == "streams":
+            if pairs != tuple(sorted(pairs)) or len(set(pairs)) != len(pairs):
+                raise NodeInputError("recovery manifest page is not strictly ordered")
+            if checkpoint:
+                marker = self._decode_stream_checkpoint(checkpoint)
+                if pairs and pairs[0] <= marker:
+                    raise NodeInputError("recovery manifest page precedes checkpoint")
+        else:
+            if keys != tuple(sorted(keys)) or len(set(keys)) != len(keys):
+                raise NodeInputError("recovery manifest page is not strictly ordered")
+            if keys and keys[0] <= checkpoint:
+                raise NodeInputError("recovery manifest page precedes checkpoint")
+        next_checkpoint = keys[-1] if keys else checkpoint
+        digest = self._proof_page_digest(
+            family, family, expected_revision, current, checkpoint,
+            has_more, batch, extra,
+        )
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row, duplicate = self._proof_page_start(
+                conn, recovery_id, current, chunk, family, family, digest)
+            if duplicate:
+                return False
+            if row is not None:
+                generation, target = row[0], row[14]
+                manifest = conn.execute(
+                    "SELECT checkpoint,outcome,page_count,row_count "
+                    "FROM recovery_manifests WHERE recovery_id=? AND family=?",
+                    (recovery_id, family),
+                ).fetchone()
+                if manifest is None:
+                    raise sqlite3.DatabaseError("missing recovery manifest")
+                stored, outcome, page_count, row_count = manifest
+                if (outcome != "pending" or page_count != expected_revision
+                        or stored != checkpoint):
+                    raise NodeInputError("recovery manifest checkpoint changed")
+                if family == "streams":
+                    stream_count = conn.execute(
+                        "SELECT count(*) FROM recovery_streams WHERE recovery_id=?",
+                        (recovery_id,),
+                    ).fetchone()[0]
+                    if stream_count + len(values) > MAX_RECOVERY_STREAMS:
+                        raise NodeInputError("recovery stream inventory exceeds budget")
+                    try:
+                        conn.executemany(
+                            "INSERT INTO recovery_streams VALUES(?,?,?,?,0,'pending',0,0)",
+                            ((recovery_id, value.chat_id, value.log_name, value.head)
+                             for value in values),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise NodeInputError("recovery stream pages overlap") from exc
+                final = "pending" if has_more else (
+                    "complete_empty" if row_count + len(values) == 0 else "complete")
+                conn.execute("UPDATE recovery_manifests SET checkpoint=?,outcome=?,"
+                             "page_count=?,row_count=? WHERE recovery_id=? AND family=?",
+                             (next_checkpoint, final, page_count + 1,
+                              row_count + len(values), recovery_id, family))
+                self._finish_proof_page(
+                    conn, recovery_id, generation, current, target, chunk,
+                    family, family, digest, batch)
+                result = True
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return result
+
+    def stage_recovery_documents(self, recovery_id: str,
+                                 current_provider_cut: NodeProviderCut,
+                                 chunk_id: str, expected_revision: int,
+                                 expected_checkpoint: bytes,
+                                 documents: tuple[NodeDocument, ...], *,
+                                 has_more: bool) -> bool:
+        return self._stage_recovery_manifest(
+            recovery_id, current_provider_cut, chunk_id, "documents",
+            expected_revision, expected_checkpoint, documents, has_more)
+
+    def stage_recovery_chats(self, recovery_id: str,
+                             current_provider_cut: NodeProviderCut,
+                             chunk_id: str, expected_revision: int,
+                             expected_checkpoint: bytes, chat_ids: tuple[str, ...], *,
+                             has_more: bool) -> bool:
+        return self._stage_recovery_manifest(
+            recovery_id, current_provider_cut, chunk_id, "chats",
+            expected_revision, expected_checkpoint, chat_ids, has_more)
+
+    def stage_recovery_streams(self, recovery_id: str,
+                               current_provider_cut: NodeProviderCut,
+                               chunk_id: str, expected_revision: int,
+                               expected_checkpoint: bytes,
+                               streams: tuple[NodeRecoveryStreamHead, ...], *,
+                               has_more: bool) -> bool:
+        return self._stage_recovery_manifest(
+            recovery_id, current_provider_cut, chunk_id, "streams",
+            expected_revision, expected_checkpoint, streams, has_more)
+
+    def stage_recovery_log_page(self, recovery_id: str,
+                                current_provider_cut: NodeProviderCut,
+                                chunk_id: str, chat_id: str, log_name: str,
+                                expected_revision: int, expected_cursor: int,
+                                rows: tuple[NodeLogRow, ...], *,
+                                has_more: bool) -> bool:
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        chunk = self._candidate_chunk_id(chunk_id)
+        stream = NodeRecoveryStreamHead(chat_id, log_name, 1)
         if type(current_provider_cut) is not NodeProviderCut:
             raise NodeInputError("invalid current provider cut")
         current = NodeProviderCut(**vars(current_provider_cut))
         if (type(expected_revision) is not int
                 or not 0 <= expected_revision <= MAX_STAGED_CHUNKS):
-            raise NodeInputError("invalid recovery work revision")
-        for checkpoint in (expected_checkpoint, next_checkpoint):
-            if type(checkpoint) is not bytes or len(checkpoint) > MAX_RECOVERY_OPAQUE_BYTES:
-                raise NodeInputError("invalid recovery checkpoint")
-        if type(outcome) is not str or outcome not in (
-                "pending", "complete", "denied", "failed", "truncated"):
-            raise NodeInputError("invalid recovery outcome")
-        if (type(expected_replay_cursor) is not int
-                or not 0 <= expected_replay_cursor <= 2**63 - 1):
-            raise NodeInputError("invalid recovery replay cursor")
-        batch = detached_batch(batch)
-        if any(mode != "replace" for mode in (
-                batch.documents_mode, batch.logs_mode, batch.visibility_mode,
-                batch.frontiers_mode)):
-            raise NodeInputError("whole-root recovery requires replace batches")
-        cut_digest = (current.schema_version, current.index_epoch,
-                      current.source_epoch, current.account_id, current.role,
-                      current.minimum_cursor, current.cursor)
-        digest = hashlib.sha256(repr((work_id, expected_revision, cut_digest,
-                                      expected_checkpoint,
-                                      next_checkpoint, outcome,
-                                      expected_replay_cursor,
-                                      self._batch_digest(batch))).encode("utf-8")).hexdigest()
+            raise NodeInputError("invalid recovery stream revision")
+        if type(expected_cursor) is not int or not 0 <= expected_cursor <= 2**63 - 1:
+            raise NodeInputError("invalid recovery stream cursor")
+        if type(has_more) is not bool or type(rows) is not tuple or len(
+                rows) > MAX_RECOVERY_MANIFEST_PAGE:
+            raise NodeInputError("invalid recovery log page")
+        if any(type(value) is not NodeLogRow for value in rows):
+            raise NodeInputError("invalid recovery log rows")
+        batch = self._recovery_batch(log_rows=rows)
+        if any((value.chat_id, value.log_name) != (stream.chat_id, stream.log_name)
+               for value in batch.log_rows):
+            raise NodeInputError("recovery log row crosses stream")
+        ids = tuple(value.id for value in batch.log_rows)
+        if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
+            raise NodeInputError("recovery log page is not strictly ordered")
+        if ids and ids[0] <= expected_cursor:
+            raise NodeInputError("recovery log page precedes cursor")
+        if has_more and not ids:
+            raise NodeInputError("continued recovery page is empty")
+        key = hashlib.sha256(self._stream_checkpoint(
+            stream.chat_id, stream.log_name)).hexdigest()
+        digest = self._proof_page_digest(
+            "log", key, expected_revision, current,
+            str(expected_cursor).encode("ascii"), has_more, batch,
+        )
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            prior = conn.execute("SELECT work_id,digest FROM recovery_pages "
-                                 "WHERE recovery_id=? AND chunk_id=?",
-                                 (recovery_id, chunk)).fetchone()
-            if prior is not None:
-                if prior != (work_id, digest):
-                    raise NodeInputError("recovery page id was reused")
+            row, duplicate = self._proof_page_start(
+                conn, recovery_id, current, chunk, "log", key, digest)
+            if duplicate:
                 return False
+            if row is not None:
+                generation, target = row[0], row[14]
+                state = conn.execute(
+                    "SELECT head,cursor,outcome,page_count,row_count "
+                    "FROM recovery_streams WHERE recovery_id=? AND chat_id=? "
+                    "AND log_name=?", (recovery_id, stream.chat_id, stream.log_name),
+                ).fetchone()
+                if state is None:
+                    raise NodeInputError("unknown recovery stream")
+                head, cursor, outcome, page_count, row_count = state
+                if (outcome != "pending" or page_count != expected_revision
+                        or cursor != expected_cursor):
+                    raise NodeInputError("recovery stream checkpoint changed")
+                if ids and ids[-1] > head:
+                    raise NodeInputError("recovery log row exceeds captured head")
+                if has_more and ids[-1] >= head:
+                    raise NodeInputError("recovery log continuation exceeds head")
+                # A stream head is a captured upper fence, not a promise that
+                # its historical row still exists. Physical deletion can leave
+                # a positive head with an empty exact range. A terminal source
+                # page therefore proves exhaustion through the head; the later
+                # event-replay proof must still account for the root delete.
+                next_cursor = ids[-1] if has_more else head
+                final = "pending" if has_more else (
+                    "complete_empty" if row_count + len(ids) == 0 else "complete")
+                conn.execute("UPDATE recovery_streams SET cursor=?,outcome=?,"
+                             "page_count=?,row_count=? WHERE recovery_id=? "
+                             "AND chat_id=? AND log_name=?",
+                             (next_cursor, final, page_count + 1,
+                              row_count + len(ids), recovery_id,
+                              stream.chat_id, stream.log_name))
+                self._finish_proof_page(
+                    conn, recovery_id, generation, current, target, chunk,
+                    "log", key, digest, batch)
+                result = True
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return result
+
+    def recovery_streams(self, recovery_id: str,
+                         current_provider_cut: NodeProviderCut, *,
+                         after: tuple[str, str] | None = None,
+                         limit: int = MAX_RECOVERY_MANIFEST_PAGE
+                         ) -> tuple[NodeRecoveryStreamState, ...]:
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        if (type(limit) is not int or not 1 <= limit <= MAX_RECOVERY_MANIFEST_PAGE):
+            raise NodeInputError("invalid recovery stream limit")
+        if after is not None:
+            if (type(after) is not tuple or len(after) != 2
+                    or any(type(value) is not str for value in after)):
+                raise NodeInputError("invalid recovery stream continuation")
+            marker = NodeRecoveryStreamHead(after[0], after[1], 1)
+            after = (marker.chat_id, marker.log_name)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = self._bound_recovery(conn, recovery_id, current)
             if row is not None:
-                (generation, _, _, _, _, _, stored_replay, _, _, _, _, _, _, _,
-                 target, state) = row
-                if state != "building":
-                    raise NodeGenerationChanged("recovery is not building")
-                work = conn.execute("SELECT family,checkpoint,outcome,page_count,row_count "
-                                    "FROM recovery_work WHERE recovery_id=? AND work_id=?",
-                                    (recovery_id, work_id)).fetchone()
-                if work is None:
-                    raise NodeInputError("unknown recovery work")
-                family, checkpoint, status, page_count, row_count = work
-                actual = ("docs" if batch.documents else "logs" if batch.log_rows
-                          else "visibility" if batch.visibility else "frontiers"
-                          if batch.frontiers else None)
-                nonempty = sum(bool(rows) for rows in (
-                    batch.documents, batch.log_rows, batch.visibility, batch.frontiers))
-                if nonempty > 1 or (actual is not None and actual != family):
-                    raise NodeInputError("recovery page crosses work family")
-                if (status != "pending" or page_count != expected_revision
-                        or checkpoint != expected_checkpoint
-                        or (outcome == "pending" and next_checkpoint == checkpoint)
-                        or expected_replay_cursor != stored_replay):
-                    raise NodeInputError("recovery page checkpoint changed")
-                count = len(batch.documents) + len(batch.log_rows) + len(
-                    batch.visibility) + len(batch.frontiers)
-                if outcome in ("denied", "failed", "truncated") and count:
-                    raise NodeInputError("failed recovery page contains rows")
-                metadata = conn.execute("SELECT COALESCE(SUM(length(selection)+"
-                    "length(initial_checkpoint)+length(checkpoint)+"
-                    "length(CAST(work_id AS BLOB))+length(CAST(scope_id AS BLOB))+128),0) "
-                    "FROM recovery_work WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
-                metadata += conn.execute("SELECT COALESCE(SUM("
-                    "length(CAST(scope_id AS BLOB))+64),0) "
-                    "FROM recovery_scopes WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
-                metadata += conn.execute("SELECT COALESCE(SUM("
-                    "length(CAST(chunk_id AS BLOB))+length(CAST(work_id AS BLOB))+"
-                    "length(CAST(digest AS BLOB))+64),0) FROM recovery_pages "
-                    "WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
-                if (metadata + len(next_checkpoint) - len(checkpoint)
-                        + len(chunk.encode("utf-8")) + len(work_id.encode("utf-8"))
-                        + len(digest.encode("ascii")) + 64
-                        > MAX_RECOVERY_METADATA_BYTES):
-                    raise NodeInputError("recovery metadata exceeds budget")
-                self._stage_batch(conn, generation, chunk, batch,
-                                  self._batch_digest(batch))
-                conn.execute("INSERT INTO recovery_pages VALUES(?,?,?,?)",
-                             (recovery_id, chunk, work_id, digest))
-                final = ("complete_empty" if outcome == "complete"
-                         and row_count + count == 0 else outcome)
-                conn.execute("UPDATE recovery_work SET checkpoint=?,outcome=?,"
-                             "page_count=?,row_count=? WHERE recovery_id=? AND work_id=?",
-                             (next_checkpoint, final, page_count + 1,
-                              row_count + count, recovery_id, work_id))
-                conn.execute("UPDATE provider_recoveries SET target_cursor=? "
-                             "WHERE recovery_id=?",
-                             (max(target, current.cursor), recovery_id))
-                result = True
+                if after is None:
+                    values = conn.execute(
+                        "SELECT chat_id,log_name,head,cursor,outcome,page_count,row_count "
+                        "FROM recovery_streams WHERE recovery_id=? "
+                        "ORDER BY chat_id,log_name LIMIT ?", (recovery_id, limit),
+                    )
+                else:
+                    values = conn.execute(
+                        "SELECT chat_id,log_name,head,cursor,outcome,page_count,row_count "
+                        "FROM recovery_streams WHERE recovery_id=? AND "
+                        "(chat_id>? OR (chat_id=? AND log_name>?)) "
+                        "ORDER BY chat_id,log_name LIMIT ?",
+                        (recovery_id, after[0], after[0], after[1], limit),
+                    )
+                result = tuple(NodeRecoveryStreamState(*value) for value in values)
         if row is None:
             raise NodeGenerationChanged("recovery binding changed")
         return result
@@ -1275,7 +1663,9 @@ class NodeStore:
             "SELECT recovery_id FROM provider_recoveries WHERE generation=?",
             (generation,)).fetchone()
         if recovery:
-            for table in ("recovery_pages", "recovery_work", "recovery_scopes"):
+            for table in ("recovery_proof_pages", "recovery_streams",
+                          "recovery_manifests", "recovery_pages", "recovery_work",
+                          "recovery_scopes"):
                 conn.execute(f"DELETE FROM {table} WHERE recovery_id=?", recovery)
             conn.execute("DELETE FROM provider_recoveries WHERE recovery_id=?", recovery)
         for table in ("candidate_docs", "candidate_log_rows",
