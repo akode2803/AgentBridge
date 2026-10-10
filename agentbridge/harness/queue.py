@@ -296,6 +296,29 @@ class WorkQueue:
             for d in items
         ]
 
+    def next_future_ns(self, *, now_ns: int | None = None) -> int | None:
+        """Earliest future retry/lease transition after the current claim pass.
+
+        Due pending work is deliberately omitted: dispatch has just attempted
+        it, and active worker completion or a state mutation wakes the runner.
+        Including it would turn a capacity-limited queue into a busy loop.
+        """
+        now = time.time_ns() if now_ns is None else int(now_ns)
+        future: list[int] = []
+        with self._lock:
+            for data in self._pending().values():
+                item = WorkItem.from_dict(data)
+                raw = item.next_ns if item.status == "pending" else item.lease_ns
+                if item.status not in {"pending", "running"}:
+                    continue
+                try:
+                    deadline = int(raw or 0)
+                except (TypeError, ValueError):
+                    continue
+                if deadline > now:
+                    future.append(deadline)
+        return min(future, default=None)
+
     # ------------------------------------------------------ answered ledger
     def _ledger(self, chat_id: str) -> dict[str, str]:
         return self.store.cached_doc(ANSWERED_DOC.format(chat=chat_id), default={}) or {}

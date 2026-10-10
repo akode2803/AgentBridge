@@ -148,6 +148,22 @@ class HarnessChangeObserver:
         except Exception:
             return False
 
+    def next_check_in_s(self) -> float:
+        """Monotonic delay until the next required provider-ledger check."""
+        now = self.clock()
+        if not self._started:
+            return max(0.0, self._next_probe - now)
+        if now < self._retry_at:
+            return self._retry_at - now
+        status = self.transport.change_ledger_realtime_status()
+        with self._lock:
+            if self._dirty:
+                return 0.0
+            interval = (
+                _HEALTHY_AUDIT_S if status == "ready" else _RECOVERY_POLL_S
+            )
+            return max(0.0, self._last_check + interval - now)
+
     def tick(self) -> HarnessChanges:
         """Replay bounded pages and return admitted work scopes.
 

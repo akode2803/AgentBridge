@@ -198,6 +198,19 @@ class TimerService:
             key=lambda t: t.get("at_ns", 0),
         )
 
+    def next_future_ns(self, *, now_ns: int | None = None) -> int | None:
+        """Earliest timer still in the future; already-due work was just scanned."""
+        now = time.time_ns() if now_ns is None else int(now_ns)
+        future = []
+        for timer in self._all().values():
+            try:
+                deadline = int(timer.get("at_ns", 0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if deadline > now:
+                future.append(deadline)
+        return min(future, default=None)
+
     def pop(self, timer_id: str, *, reschedule: bool = False) -> dict | None:
         """Remove a timer (it fired, or the owner cancelled it). V88: the
         FIRE paths pass ``reschedule=True`` so a recurring timer re-arms for

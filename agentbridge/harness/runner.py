@@ -74,6 +74,8 @@ MAX_WORKERS = MAX_CONCURRENCY  # one hard ceiling for pool + parsed owner settin
 RATE_RETRY_S = 600.0     # capped chat: revisit in this many seconds
 BLOB_GRACE_S = 600.0     # v1 value: a lost attachment must not wedge a chat
 FULL_SCAN_AUDIT_S = 300.0  # recovery audit; realtime/ledger owns normal wakeups
+HANDOFF_RECOVERY_S = 30.0  # crash-left child claim lease / missed-wake recovery
+RUNSTATE_BEAT_S = 10.0     # one third of runstate.FRESH_S (30 seconds)
 NOTICE = ("@{agent}'s harness could not produce a reply here "
           "({err}). Its responsible member can check the harness on "
           "{machine}.")
@@ -183,13 +185,16 @@ class AgentRunner:
         # the submitting thread, which still holds this lock
         self._inflight_lock = threading.RLock()
         self._wake = threading.Event()
+        self._handoff_wake_lock = threading.Lock()
+        self._handoff_dirty = True
+        self._next_handoff_recovery = 0.0
         subscribe_changes = getattr(self.mesh.tx, "subscribe_changes", None)
         self._runtime_unsubscribe = (
-            subscribe_changes(self._wake.set)
+            subscribe_changes(self._runtime_changed)
             if callable(subscribe_changes) else None
         )
         self._change_observer = HarnessChangeObserver(
-            self.mesh.tx, self.mesh.store, self._wake.set,
+            self.mesh.tx, self.mesh.store, self._runtime_changed,
         )
         self._priority_lock = threading.Lock()
         self._priority_chats: dict[str, None] = {}
@@ -289,6 +294,26 @@ class AgentRunner:
         return HarnessSettings.from_account(self.mesh.directory.get(self.agent))
 
     # ----------------------------------------------------------------- scan
+    def _runtime_changed(self) -> None:
+        with self._handoff_wake_lock:
+            self._handoff_dirty = True
+        self._wake.set()
+
+    def _handoff_scan_due(self, now: float, *, force: bool = False) -> bool:
+        with self._handoff_wake_lock:
+            if (not force and not self._handoff_dirty
+                    and now < self._next_handoff_recovery):
+                return False
+            self._handoff_dirty = False
+            self._next_handoff_recovery = now + HANDOFF_RECOVERY_S
+            return True
+
+    def _handoff_check_in_s(self, now: float) -> float:
+        with self._handoff_wake_lock:
+            if self._handoff_dirty:
+                return 0.0
+            return max(0.0, self._next_handoff_recovery - now)
+
     def _prioritize_chat(self, chat_id: str, _count: int = 0) -> None:
         if not chat_id:
             return
@@ -615,7 +640,10 @@ class AgentRunner:
     def _child_done(self, handoff_id: str) -> None:
         with self._inflight_lock:
             self._child_inflight.pop(handoff_id, None)
-        self._wake.set()
+        # A finished child frees delegation capacity.  Mark discovery dirty,
+        # rather than merely waking the loop, so the next pass claims another
+        # ready handoff without waiting for the bounded recovery scan.
+        self._runtime_changed()
 
     def _done(self, gkey) -> None:
         with self._inflight_lock:
@@ -1236,7 +1264,8 @@ class AgentRunner:
                           timers=self.timers.snapshot(),
                           paused=self.standing_down())
 
-    def tick(self, *, full_scan: bool = True) -> int:
+    def tick(self, *, full_scan: bool = True,
+             handoff_scan: bool = True) -> int:
         """One scan+dispatch pass (the run loop's body; tests call it too)."""
         acc = self.mesh.directory.get(self.agent)
         if acc is not None and acc.deactivated:
@@ -1269,10 +1298,43 @@ class AgentRunner:
             self.publish_status()
             return 0
         added = self.scan_all(on_added=self.dispatch_fill, full=full_scan)
-        self.dispatch_handoffs()
+        if handoff_scan:
+            self.dispatch_handoffs()
         self.dispatch_fill()
         self.publish_status()
         return added
+
+    def _next_loop_wait(
+        self, *, now: float, last_full_scan: float, announced: float,
+    ) -> float:
+        delays = [
+            max(0.0, last_full_scan + FULL_SCAN_AUDIT_S - now),
+            max(0.0, announced + 1800.0 - now),
+            self._handoff_check_in_s(now),
+        ]
+        if not self._change_observer.active or self._has_priority_chats():
+            # Unsupported or failed durable-ledger setup retains the legacy
+            # broad safety scan cadence. A room deliberately deferred during
+            # this pass also gets the prior short retry without manufacturing
+            # an immediate self-wake or busy loop. A healthy, quiet
+            # ledger-backed Supabase runner stays entirely deadline driven.
+            delays.append(max(0.0, self.poll_s))
+        try:
+            delays.append(self._change_observer.next_check_in_s())
+        except Exception:
+            delays.append(HANDOFF_RECOVERY_S)
+        wall_now = time.time_ns()
+        for future_ns in (
+            self.timers.next_future_ns(now_ns=wall_now),
+            self.queue.next_future_ns(now_ns=wall_now),
+        ):
+            if future_ns is not None:
+                delays.append(max(0.0, (future_ns - wall_now) / 1e9))
+        return min(delays)
+
+    def _runstate_heartbeat(self) -> None:
+        while not self._stop.wait(RUNSTATE_BEAT_S):
+            write_beat(self.home, self.agent)
 
     def attach_cli_responder(self) -> None:
         """The default production responder: the R16 registry + CLI engine."""
@@ -1346,6 +1408,11 @@ class AgentRunner:
             daemon=True, name="ab-harness-sync",
         )
         sync_thread.start()
+        beat_thread = threading.Thread(
+            target=self._runstate_heartbeat,
+            daemon=True, name=f"ab-runstate-{self.agent}",
+        )
+        beat_thread.start()
         last_full_scan: float | None = None
         first_pass = True
         try:
@@ -1357,7 +1424,15 @@ class AgentRunner:
                         break
                 return
             while not self._stop.is_set():
-                write_beat(self.home, self.agent)   # V109: process truth
+                # Clear the wake consumed by this pass before doing work. Any
+                # event that arrives during the pass stays set, so the final
+                # wait cannot erase it and add one recovery-period of latency.
+                self._wake.clear()
+                # stop() sets both flags. If it raced the loop condition just
+                # before the clear above, retain the stop truth even though
+                # that wake byte was consumed.
+                if self._stop.is_set():
+                    break
                 # V129: self-heal a finish-less death between runs too — a
                 # doc still "running" for a chat with no in-flight group in
                 # THIS process is an orphan (the crash paths all try to
@@ -1378,7 +1453,13 @@ class AgentRunner:
                     or (last_full_scan is not None
                         and now - last_full_scan >= FULL_SCAN_AUDIT_S)
                 )
-                self.tick(full_scan=full_scan)
+                # A full scan includes handoff discovery and therefore also
+                # advances its recovery deadline; this avoids a redundant
+                # second discovery pass shortly after the broader audit.
+                handoff_scan = self._handoff_scan_due(now, force=full_scan)
+                self.tick(
+                    full_scan=full_scan, handoff_scan=handoff_scan,
+                )
                 if full_scan and not self._has_priority_chats():
                     self._change_observer.acknowledge_full_scan()
                 if full_scan or first_pass:
@@ -1388,9 +1469,18 @@ class AgentRunner:
                     announced = time.monotonic()
                     with contextlib.suppress(Exception):
                         self.mesh.applink.announce(["harness"])
-                self._wake.wait(self.poll_s)
-                self._wake.clear()
+                assert last_full_scan is not None
+                wait_s = self._next_loop_wait(
+                    now=time.monotonic(), last_full_scan=last_full_scan,
+                    announced=announced,
+                )
+                self._wake.wait(wait_s)
         finally:
+            # Stop and join the writer before close() removes the heartbeat.
+            # Otherwise an atomic write already in flight could recreate stale
+            # "alive" state after clear_beat().
+            self.stop()
+            beat_thread.join()
             self.close()
 
     def drain(self, timeout: float = 30.0) -> int:
