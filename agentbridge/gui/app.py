@@ -12,6 +12,7 @@ import json
 import logging
 import socket
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +70,7 @@ for mod in (api_auth, api_chats, api_pages, api_page_aux, api_page_receipts, api
     RAW_ROUTES.update(getattr(mod, "RAW_POST", {}))
 
 MAX_BODY = 64 * 1024 * 1024  # JSON bodies and raw uploads alike
+MAX_REJECT_DRAIN = 64 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,12 +115,12 @@ class Handler(BaseHTTPRequestHandler):
             diagnostic_limit = (64 * 1024 if path == '/api/diagnostics/events'
                                 else 1024 if path == '/api/diagnostics' else None)
             if diagnostic_limit is not None and length > diagnostic_limit:
-                self.close_connection = True
+                self._prepare_body_rejection(length)
                 self._json({"error": "diagnostics setting too large"} if path == '/api/diagnostics'
                            else {"ok": True, "accepted": 0, "dropped": True})
                 return
             if length > MAX_BODY:
-                self.close_connection = True
+                self._prepare_body_rejection(length)
                 self._json({"error": "request body exceeds the 64 MB limit"},
                            status=413)
                 return
@@ -147,6 +149,34 @@ class Handler(BaseHTTPRequestHandler):
                       diagnostic_ref=self.headers.get("X-AgentBridge-Diagnostic"))
         self._reply(dispatch(handler, self.app, req))
 
+    def _prepare_body_rejection(self, length: int) -> None:
+        """Close cleanly after a bounded discard of an already-sent body.
+
+        Windows resets a TCP connection closed with unread receive data, which
+        can hide the intended 413 response from an otherwise well-behaved local
+        client.  Drain only small rejected bodies; a hostile declared length
+        must never make rejection perform unbounded reads.
+        """
+        self.close_connection = True
+        if length <= MAX_REJECT_DRAIN:
+            previous_timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + 0.1
+            try:
+                remaining = length
+                while remaining:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.connection.settimeout(left)
+                    chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
+
     # ------------------------------------------------------------- replies
     def _reply(self, out) -> None:
         if isinstance(out, Response):
@@ -168,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
