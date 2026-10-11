@@ -28,6 +28,8 @@ from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdenti
 from .security import private_directory, protect_path
 
 SCHEMA_VERSION = 7
+RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
+REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
@@ -714,9 +716,10 @@ class NodeStore:
             "WHERE scope_kind=? AND scope_id=?", (kind, ident),
         ).fetchone() or (0, None)
 
-    def root_recovery_plan(self,
-                           current_provider_cut: NodeProviderCut) -> NodeRecoveryPlan:
-        """Capture the minimal local binding for a whole-root recovery plan."""
+    def _root_recovery_plan(
+        self, current_provider_cut: NodeProviderCut, *, work_id: str,
+        selection: bytes,
+    ) -> NodeRecoveryPlan:
         if type(current_provider_cut) is not NodeProviderCut:
             raise NodeInputError("invalid current provider cut")
         current = NodeProviderCut(**vars(current_provider_cut))
@@ -730,10 +733,25 @@ class NodeStore:
                 meta[0], self.identity.digest, meta[1], current.cursor, current,
                 (NodeRecoveryScope("root", "", root_generation),),
                 (NodeRecoveryWork(
-                    "provider-frontiers", "frontiers", "root", "",
-                    b"provider-recovery-v1",
+                    work_id, "frontiers", "root", "", selection,
                 ),),
             )
+
+    def root_recovery_plan(self,
+                           current_provider_cut: NodeProviderCut) -> NodeRecoveryPlan:
+        """Capture the minimal local binding for a whole-root recovery plan."""
+        return self._root_recovery_plan(
+            current_provider_cut, work_id="provider-frontiers",
+            selection=RECOVERY_PLAN_SELECTION,
+        )
+
+    def root_reference_plan(self,
+                            current_provider_cut: NodeProviderCut) -> NodeRecoveryPlan:
+        """Capture a separately tagged private reference-collection plan."""
+        return self._root_recovery_plan(
+            current_provider_cut, work_id="provider-reference-frontiers",
+            selection=REFERENCE_PLAN_SELECTION,
+        )
 
     def begin_recovery(self, plan: NodeRecoveryPlan, *,
                        created_ns: int) -> NodeRecoveryState:
@@ -922,6 +940,29 @@ class NodeStore:
         if row is None:
             raise NodeGenerationChanged("recovery binding changed")
         return result
+
+    def recovery_opening_cut(self, recovery_id: str) -> NodeProviderCut:
+        """Return a locally bound run's immutable opening provider cut.
+
+        This is resume metadata, never a claim that the provider still has the
+        same cut. Reference collection compares it with a fresh fence before
+        every provider operation and again before sealing.
+        """
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            stored = conn.execute(
+                "SELECT schema_version,index_epoch,source_epoch,account_id,role,"
+                "minimum_cursor,start_target_cursor FROM provider_recoveries "
+                "WHERE recovery_id=?", (recovery_id,),
+            ).fetchone()
+            if stored is None:
+                raise NodeGenerationChanged("unknown recovery")
+            opening = NodeProviderCut(*stored)
+            row = self._bound_recovery(conn, recovery_id, opening)
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return opening
 
     def extend_recovery_target(self, recovery_id: str,
                                current_provider_cut: NodeProviderCut) -> int:
@@ -1157,7 +1198,9 @@ class NodeStore:
                                  chunk_id: str, family: str,
                                  expected_revision: int,
                                  expected_checkpoint: bytes,
-                                 values: tuple, has_more: bool) -> bool:
+                                 values: tuple, has_more: bool, *,
+                                 derived_visibility: tuple[NodeVisibility, ...] = (),
+                                 required_selection: bytes | None = None) -> bool:
         recovery_id = self._candidate_chunk_id(recovery_id)
         chunk = self._candidate_chunk_id(chunk_id)
         if family not in ("documents", "chats", "streams"):
@@ -1171,11 +1214,18 @@ class NodeStore:
             raise NodeInputError("invalid recovery manifest page")
         if has_more and not values:
             raise NodeInputError("continued recovery page is empty")
+        if (type(derived_visibility) is not tuple
+                or any(type(value) is not NodeVisibility
+                       for value in derived_visibility)
+                or (derived_visibility and family != "documents")
+                or required_selection not in (None, REFERENCE_PLAN_SELECTION)):
+            raise NodeInputError("invalid recovery manifest derivation")
 
         if family == "documents":
             if any(type(value) is not NodeDocument for value in values):
                 raise NodeInputError("invalid recovery documents")
-            batch = self._recovery_batch(documents=values)
+            batch = self._recovery_batch(
+                documents=values, visibility=derived_visibility)
             keys = tuple(value.path.encode("utf-8") for value in batch.documents)
             extra: object = keys
         elif family == "chats":
@@ -1213,6 +1263,14 @@ class NodeStore:
         )
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            if required_selection is not None:
+                selections = conn.execute(
+                    "SELECT selection FROM recovery_work WHERE recovery_id=?",
+                    (recovery_id,),
+                ).fetchall()
+                if selections != [(required_selection,)]:
+                    raise NodeInputError(
+                        "reference documents require a reference run")
             row, duplicate = self._proof_page_start(
                 conn, recovery_id, current, chunk, family, family, digest)
             if duplicate:
@@ -1556,6 +1614,34 @@ class NodeStore:
         return self._stage_recovery_manifest(
             recovery_id, current_provider_cut, chunk_id, "documents",
             expected_revision, expected_checkpoint, documents, has_more)
+
+    def stage_reference_documents(self, recovery_id: str,
+                                  current_provider_cut: NodeProviderCut,
+                                  chunk_id: str, expected_revision: int,
+                                  expected_checkpoint: bytes,
+                                  documents: tuple[NodeDocument, ...], *,
+                                  has_more: bool) -> bool:
+        """Stage exact reference documents plus visibility derived from meta.
+
+        The run tag is checked inside the same transaction that stages the
+        page, so ordinary recovery cannot substitute document paths for its
+        independently enumerated visible-chat manifest.
+        """
+        chat_ids = []
+        for document in documents:
+            if type(document) is not NodeDocument:
+                raise NodeInputError("invalid recovery documents")
+            parts = document.path.split("/")
+            if (len(parts) == 3 and parts[0] == "chats" and parts[1]
+                    and parts[2] == "meta.json"):
+                chat_ids.append(parts[1])
+        visibility = tuple(NodeVisibility(chat_id, True) for chat_id in chat_ids)
+        return self._stage_recovery_manifest(
+            recovery_id, current_provider_cut, chunk_id, "documents",
+            expected_revision, expected_checkpoint, documents, has_more,
+            derived_visibility=visibility,
+            required_selection=REFERENCE_PLAN_SELECTION,
+        )
 
     def stage_recovery_chats(self, recovery_id: str,
                              current_provider_cut: NodeProviderCut,
@@ -2313,6 +2399,13 @@ class NodeStore:
                 "base_generation,health_owner_token FROM provider_recoveries "
                 "WHERE generation=?",
                 (generation,)).fetchone()
+            if recovery:
+                selections = conn.execute(
+                    "SELECT selection FROM recovery_work WHERE recovery_id=?",
+                    (recovery[0],),
+                ).fetchall()
+                if (REFERENCE_PLAN_SELECTION,) in selections:
+                    raise NodeInputError("reference candidate cannot be admitted")
             if recovery and recovery[1] != "sealed":
                 raise NodeGenerationChanged("recovery is not sealed")
             current = conn.execute(

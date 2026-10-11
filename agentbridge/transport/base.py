@@ -44,6 +44,9 @@ from .change_ledger import (
     ChangeLedgerPage,
 )
 from .recovery_sources import RecoveryCut, RecoveryPage
+from .reference_sources import (
+    ReferenceDocumentPage, ReferenceLogPage, ReferenceStreamPage,
+)
 from .scoped_sources import ScopedDocumentBatch, ScopedLogPage
 from .source_ledger import SourceLedgerFence, SourceLedgerPage
 
@@ -152,6 +155,7 @@ class Transport(ABC):
     supports_source_ledger: bool = False
     supports_scoped_source_reads: bool = False
     supports_recovery_source: bool = False
+    supports_reference_source: bool = False
 
     def recovery_fence(self) -> RecoveryCut:
         raise NotImplementedError(f"{type(self).__name__} has no recovery source")
@@ -160,6 +164,24 @@ class Transport(ABC):
                       *, limit: int, max_bytes: int) -> RecoveryPage:
         del family, after, limit, max_bytes
         raise NotImplementedError(f"{type(self).__name__} has no recovery source")
+
+    def reference_documents(self, after: str, *, limit: int,
+                            max_bytes: int) -> ReferenceDocumentPage:
+        del after, limit, max_bytes
+        raise NotImplementedError(f"{type(self).__name__} has no reference source")
+
+    def reference_streams(
+        self, after: tuple[str, str], *, limit: int,
+    ) -> ReferenceStreamPage:
+        del after, limit
+        raise NotImplementedError(f"{type(self).__name__} has no reference source")
+
+    def reference_log_page(
+        self, chat_id: str, log_name: str, *, after_cursor: int,
+        through_cursor: int, limit: int, max_bytes: int,
+    ) -> ReferenceLogPage:
+        del chat_id, log_name, after_cursor, through_cursor, limit, max_bytes
+        raise NotImplementedError(f"{type(self).__name__} has no reference source")
 
     def source_documents(
         self, paths: tuple[str, ...], *, max_bytes: int,

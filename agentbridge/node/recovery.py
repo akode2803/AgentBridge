@@ -22,7 +22,7 @@ from .admission import (
     NodeProviderCut, NodeRecoveryEvent, NodeRecoveryState,
     NodeRecoveryStreamHead,
 )
-from .store import NodeStore
+from .store import NodeStore, RECOVERY_PLAN_SELECTION
 
 EXACT_LOG_PAGE_ROWS = MAX_RECOVERY_MANIFEST_PAGE
 
@@ -69,6 +69,12 @@ class InactiveRecoveryExecutor:
         if (not self.transport.supports_recovery_source
                 or not self.transport.supports_scoped_source_reads):
             raise NotImplementedError("transport recovery source is unavailable")
+
+    @staticmethod
+    def _require_plan(state: NodeRecoveryState) -> None:
+        if (len(state.plan.work) != 1
+                or state.plan.work[0].selection != RECOVERY_PLAN_SELECTION):
+            raise NodeInputError("recovery executor received a different run kind")
 
     def _restart(self, state: NodeRecoveryState, reason: str) -> None:
         self.store.abandon_candidate(
@@ -240,6 +246,7 @@ class InactiveRecoveryExecutor:
             )
         state = self.store.recovery_state(
             recovery_id, current, include_counts=False)
+        self._require_plan(state)
         if state.state == "sealed":
             return RecoveryStepResult(
                 "sealed", state.recovery_id, state.generation,
