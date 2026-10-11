@@ -264,6 +264,18 @@ class MutationCoordinator:
 
     @staticmethod
     def _registered_node(root, path):
+        if root.execute(
+                "SELECT 1 FROM mutation_nodes WHERE path=? AND ("
+                "typeof(path)!='text' OR length(CAST(path AS BLOB))>16384 OR "
+                "typeof(database_incarnation)!='text' OR "
+                "length(CAST(database_incarnation AS BLOB))>4096 OR "
+                "typeof(identity_digest)!='text' OR length(identity_digest)!=64 OR "
+                "typeof(provider_endpoint)!='text' OR "
+                "length(CAST(provider_endpoint AS BLOB))>2048 OR "
+                "typeof(root)!='text' OR length(CAST(root AS BLOB))>1024) LIMIT 1",
+                (path,),
+        ).fetchone():
+            raise owner.SourceChanged('invalid_node_registration')
         row = root.execute(
             'SELECT database_incarnation,identity_digest,provider_endpoint,root '
             'FROM mutation_nodes WHERE path=?', (path,),

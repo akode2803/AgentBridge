@@ -32,12 +32,15 @@ MAX_RECOVERY_OPAQUE_BYTES = 8_192
 MAX_RECOVERY_METADATA_BYTES = 32 * 1024 * 1024
 MAX_STAGED_BYTES = 512 * 1024 * 1024
 MAX_CAPTURE_DOCUMENTS = 20_000
+MAX_CAPTURE_EXACT_DOCUMENTS = 128
+MAX_CAPTURE_DOCUMENT_PREFIXES = 8
 MAX_CAPTURE_LOG_REQUESTS = 64
 MAX_CAPTURE_LOG_ROWS = 20_000
 MAX_CAPTURE_CHAT_IDS = 20_000
 MAX_CAPTURE_BYTES = 32 * 1024 * 1024
 MAX_CAPTURE_SCOPE_POSITIONS = (
-    1 + MAX_CAPTURE_DOCUMENTS + MAX_CAPTURE_LOG_REQUESTS + MAX_CAPTURE_CHAT_IDS
+    1 + MAX_CAPTURE_DOCUMENTS + MAX_CAPTURE_EXACT_DOCUMENTS
+    + MAX_CAPTURE_LOG_REQUESTS + MAX_CAPTURE_CHAT_IDS
 )
 MAX_CHANGE_PAGE = 1_000
 MAX_CHANGE_ROWS = 4_096
@@ -273,9 +276,10 @@ class NodeCaptureRequest:
 
     def __post_init__(self) -> None:
         if type(self.exact_document_paths) is not tuple or len(
-                self.exact_document_paths) > 128:
+                self.exact_document_paths) > MAX_CAPTURE_EXACT_DOCUMENTS:
             raise NodeInputError("invalid exact document paths")
-        if type(self.document_prefixes) is not tuple or len(self.document_prefixes) > 8:
+        if (type(self.document_prefixes) is not tuple
+                or len(self.document_prefixes) > MAX_CAPTURE_DOCUMENT_PREFIXES):
             raise NodeInputError("invalid document prefixes")
         paths = tuple(_path(value) for value in self.exact_document_paths)
         prefixes = tuple(_path(value, "document prefix", prefix=True)

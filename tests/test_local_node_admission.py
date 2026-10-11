@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from agentbridge.node.admission import (
+    MAX_CAPTURE_CHAT_IDS,
+    MAX_CAPTURE_DOCUMENTS,
+    MAX_CAPTURE_EXACT_DOCUMENTS,
+    MAX_CAPTURE_LOG_REQUESTS,
     MAX_CAPTURE_SCOPE_POSITIONS,
     NodeCaptureOverflow,
     NodeCaptureRequest,
@@ -57,6 +61,60 @@ def test_finalization_position_accepts_maximum_capture_scope_union():
 
 def store(tmp_path):
     return NodeStore(tmp_path / "node" / "replica.sqlite3", identity())
+
+
+def test_capture_accepts_maximum_distinct_scope_union(tmp_path, monkeypatch):
+    owner = store(tmp_path)
+    documents = tuple(
+        NodeDocument(f"chats/document-{index}/message.json", index, False, b"")
+        for index in range(MAX_CAPTURE_DOCUMENTS)
+    )
+    visible = tuple(f"visible-{index}" for index in range(MAX_CAPTURE_CHAT_IDS))
+    exact = tuple(
+        f"chats/exact-{index}/missing.json"
+        for index in range(MAX_CAPTURE_EXACT_DOCUMENTS)
+    )
+    logs = tuple(
+        NodeLogRequest(f"log-{index}", "main", 0, 1)
+        for index in range(MAX_CAPTURE_LOG_REQUESTS)
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_documents",
+        staticmethod(lambda _conn, _request, _budget: documents),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_log_pages",
+        staticmethod(lambda _conn, _request, _budget: ()),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_visibility",
+        staticmethod(lambda _conn, _request, _budget: (visible, False)),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_frontiers",
+        staticmethod(lambda _conn, _request, _budget: ()),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_scope_positions",
+        staticmethod(lambda _conn, keys, _budget: tuple(
+            NodeScopePosition(kind, ident, 0, None)
+            for kind, ident in sorted(keys)
+        )),
+    )
+
+    capture = owner.capture(NodeCaptureRequest(
+        exact_document_paths=exact,
+        document_prefixes=("",),
+        log_requests=logs,
+        include_visibility=True,
+        visibility_limit=MAX_CAPTURE_CHAT_IDS,
+        max_documents=MAX_CAPTURE_DOCUMENTS,
+        max_log_rows=MAX_CAPTURE_LOG_REQUESTS,
+        max_bytes=32 * 1024 * 1024,
+    ))
+
+    assert len(capture.scope_positions) == MAX_CAPTURE_SCOPE_POSITIONS
+    assert owner.finalization_position(capture).scope_positions == capture.scope_positions
 
 
 def admit(owner, batch, *, created=1, observed=2):

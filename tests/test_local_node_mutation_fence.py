@@ -118,6 +118,20 @@ def test_node_position_is_rechecked_under_finalization_cut(world):
             pytest.fail("stale node position reached caller")
 
 
+def test_finalization_preflights_keyed_node_registration(world):
+    root, store, _node, definition, position = world
+    with sqlite3.connect(root.path) as conn:
+        conn.execute(
+            "UPDATE mutation_nodes SET database_incarnation=zeroblob(4097) "
+            "WHERE path=?", (position.database_path,),
+        )
+
+    with pytest.raises(local_source.SourceChanged, match="invalid_node_registration"):
+        with root.finalization_cut(
+                store, definition, node_position=position):
+            pytest.fail("corrupt node registration reached caller")
+
+
 def test_finalization_reservation_retires_node_before_external_call(world):
     root, store, node, definition, position = world
     ticket = FinalizationMutation(
