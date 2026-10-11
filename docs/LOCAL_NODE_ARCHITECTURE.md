@@ -300,11 +300,16 @@ mandatory cases.
 
 The atomic store, local protocol, exact-source shadow collector, durable
 multi-chunk private staging, source-ledger v2 mutation evidence, typed recovery
-proof and independent reference collector are implemented. They remain inactive.
-The remaining N1 work is runtime composition behind an explicit
-disabled-by-default feature gate plus measured diagnostic runs against an
-installed matching provider schema. Do not route GUI or harness reads to the
-store while that evidence or N2 is absent.
+proof and independent reference collector are implemented. The private runtime
+composition is also implemented behind an exact, disabled-by-default feature
+gate. One call advances at most one provider data page; accepted continuations
+live in the Store, so replacing the coordinator does not restart work. It first
+seals recovery, then an independent reference at the same provider cut, and
+records their Store-to-Store comparison without admitting either candidate.
+Provider movement abandons both sides and begins a fresh bounded attempt. The
+remaining N1 gate is a measured diagnostic run against an installed matching
+provider schema. Do not route GUI or harness reads to the store while that
+evidence or N2 is absent.
 
 Source sequence and identity values are allocation-ordered, not commit-ordered.
 The optional node source-ledger capability therefore adds the exact document
@@ -509,5 +514,10 @@ transaction and streams their digests without reconstructing a full
 `NodeInputBatch`. It writes only owner-protected counts, digests, mismatch
 families and hashed mismatch keys. The comparison transaction can be long for a
 very large history; that is an explicit inactive-diagnostic limitation, not a
-product read path. No GUI, harness, scheduler or activation route uses this work,
-and N2 remains mandatory before read cutover.
+product read path. The disabled diagnostic coordinator composes those primitives
+without a GUI, harness or scheduler import. Its environment gate accepts only
+the explicit value `1`; absence and malformed values remain off and perform no
+provider I/O. Completion writes private equivalence evidence while the admitted
+generation remains unchanged. Repeated calls after completion may record a new
+observation; the diagnostic caller owns stopping policy. N2 remains mandatory
+before read cutover.
