@@ -170,8 +170,18 @@ def _is_unique_violation(err: Exception) -> bool:
 
 def _check(path: str) -> str:
     """Validate POSIX-relative logical record paths."""
-    p = (path or "").replace("\\", "/").strip("/")
-    if not p or ".." in p.split("/"):
+    if type(path) is not str:
+        raise ValidationError(f"bad transport path: {path!r}")
+    p = path.replace("\\", "/").strip("/")
+    if not p or "\x00" in p:
+        raise ValidationError(f"bad transport path: {path!r}")
+    try:
+        encoded = p.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValidationError(f"bad transport path: {path!r}") from None
+    parts = p.split("/")
+    if (len(encoded) > 4096 or len(parts) > 32
+            or any(part in ("", ".", "..") for part in parts)):
         raise ValidationError(f"bad transport path: {path!r}")
     return p
 
@@ -880,6 +890,10 @@ class SupabaseTransport(Transport):
                 path = row["path"]
                 if type(path) is not str or path <= after or path.startswith("presence/"):
                     raise ValueError("invalid reference document keyset")
+                # Reject a legacy noncanonical identity before the exact-data
+                # request. Reference collection must fail closed without
+                # fetching payload bytes that the local node cannot admit.
+                validate_source_paths((path,))
                 deleted = row["deleted"]
                 if type(deleted) is not bool:
                     raise ValueError("invalid reference document deletion state")

@@ -63,7 +63,7 @@ class InactiveReferenceExecutor:
         self.store.abandon_candidate(
             state.generation,
             expected_generation=state.plan.base_generation,
-            expected_attempt_ns=state.health_owner_token,
+            expected_attempt_ns=state.health_owner_token or None,
         )
         raise NodeGenerationChanged(reason)
 
@@ -157,6 +157,10 @@ class InactiveReferenceExecutor:
         """Start or advance one private reference without admitting it."""
         self._require_source()
         current = _provider_cut(self.transport.recovery_fence())
+        discovered = reference_id is None
+        if discovered:
+            reference_id = self.store.resumable_recovery_id(
+                current, selection=REFERENCE_PLAN_SELECTION)
         if reference_id is None:
             plan = self.store.root_reference_plan(current)
             state = self.store.begin_recovery(plan, created_ns=attempted_ns)
@@ -175,6 +179,11 @@ class InactiveReferenceExecutor:
             return ReferenceStepResult(
                 "sealed", state.recovery_id, state.generation,
                 "already-sealed", opening.cursor,
+            )
+        if discovered:
+            return ReferenceStepResult(
+                "building", state.recovery_id, state.generation,
+                "resumed", opening.cursor,
             )
         progress = self._manifest_step(state, opening)
         if progress is not None:

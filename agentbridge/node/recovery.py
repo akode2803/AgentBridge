@@ -237,6 +237,10 @@ class InactiveRecoveryExecutor:
         self._require_source()
         fence = self.transport.recovery_fence()
         current = _provider_cut(fence)
+        discovered = recovery_id is None
+        if discovered:
+            recovery_id = self.store.resumable_recovery_id(
+                current, selection=RECOVERY_PLAN_SELECTION)
         if recovery_id is None:
             plan = self.store.root_recovery_plan(current)
             state = self.store.begin_recovery(plan, created_ns=attempted_ns)
@@ -251,6 +255,11 @@ class InactiveRecoveryExecutor:
             return RecoveryStepResult(
                 "sealed", state.recovery_id, state.generation,
                 "already-sealed", state.target_cursor,
+            )
+        if discovered:
+            return RecoveryStepResult(
+                "building", state.recovery_id, state.generation,
+                "resumed", state.target_cursor,
             )
         progress = self._manifest_step(state)
         if progress is not None:

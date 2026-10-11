@@ -780,7 +780,9 @@ class NodeStore:
             generation = conn.execute(
                 "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
             ).fetchone()[0]
-            health_owner_token = max(created, meta[3] + 1)
+            is_reference = (len(plan.work) == 1
+                            and plan.work[0].selection == REFERENCE_PLAN_SELECTION)
+            health_owner_token = 0 if is_reference else max(created, meta[3] + 1)
             if health_owner_token > 2**63 - 1:
                 raise NodeInputError("recovery attempt time exhausted")
             recovery_id = secrets.token_hex(24)
@@ -817,8 +819,11 @@ class NodeStore:
             )
             if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
                 raise NodeInputError("recovery metadata exceeds budget")
-            conn.execute("UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
-                         "WHERE singleton=1", (health_owner_token,))
+            if not is_reference:
+                conn.execute(
+                    "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
+                    "WHERE singleton=1", (health_owner_token,),
+                )
         manifests = tuple(NodeRecoveryManifestState(family, b"", "pending", 0, 0)
                           for family in ("chats", "documents", "streams"))
         return NodeRecoveryState(recovery_id, generation, plan,
@@ -963,6 +968,37 @@ class NodeStore:
         if row is None:
             raise NodeGenerationChanged("recovery binding changed")
         return opening
+
+    def resumable_recovery_id(
+        self, current_provider_cut: NodeProviderCut, *, selection: bytes,
+    ) -> str | None:
+        """Discover one durable active run after process-local state is lost."""
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        if selection not in (RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION):
+            raise NodeInputError("invalid recovery run selection")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        result = None
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            candidates = tuple(row[0] for row in conn.execute(
+                "SELECT DISTINCT r.recovery_id FROM provider_recoveries r "
+                "JOIN recovery_work w ON w.recovery_id=r.recovery_id "
+                "WHERE r.state IN ('building','sealed') AND w.selection=? "
+                "ORDER BY r.generation",
+                (selection,),
+            ))
+            for recovery_id in candidates:
+                selections = conn.execute(
+                    "SELECT selection FROM recovery_work WHERE recovery_id=? "
+                    "ORDER BY work_id", (recovery_id,),
+                ).fetchall()
+                if selections != [(selection,)]:
+                    continue
+                if self._bound_recovery(conn, recovery_id, current) is not None:
+                    result = recovery_id
+                    break
+        return result
 
     def extend_recovery_target(self, recovery_id: str,
                                current_provider_cut: NodeProviderCut) -> int:
@@ -2528,7 +2564,8 @@ class NodeStore:
                 self._clear_candidate_rows(conn, generation)
                 if recovery_owner is not None:
                     owned_generation, owned_attempt = recovery_owner
-                    if ((expected_generation is None
+                    if (owned_attempt > 0
+                            and (expected_generation is None
                          or expected_generation == owned_generation)
                             and (expected_attempt_ns is None
                                  or expected_attempt_ns == owned_attempt)):

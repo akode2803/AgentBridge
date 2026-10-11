@@ -198,6 +198,62 @@ def test_reference_and_recovery_executors_reject_each_others_runs(tmp_path):
         )
 
 
+def test_reference_executor_discovers_durable_run_after_restart(tmp_path):
+    path = tmp_path / "node.sqlite3"
+    source, _client = transport()
+    started = InactiveReferenceExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=10)
+    resumed = InactiveReferenceExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=11)
+    assert resumed.reference_id == started.reference_id
+    assert resumed.generation == started.generation
+    assert resumed.action == "resumed"
+
+
+def test_reference_collection_never_takes_product_health_ownership(tmp_path):
+    store = NodeStore(tmp_path / "node.sqlite3", identity())
+    source, client = transport()
+    recovery = InactiveRecoveryExecutor(store, source).step(
+        None, attempted_ns=50)
+    owned = store.status(node_epoch="node", started_ns=1)
+    assert (owned.health, owned.last_attempt_ns) == ("catching_up", 50)
+
+    reference = InactiveReferenceExecutor(store, source).step(
+        None, attempted_ns=51)
+    during_reference = store.status(node_epoch="node", started_ns=1)
+    assert reference.generation != recovery.generation
+    assert (during_reference.health, during_reference.last_attempt_ns) == (
+        "catching_up", 50)
+
+    client.db["ab_change_events"].append({
+        "root": "team", "id": 1, "stream_kind": "root", "stream_id": "",
+        "domain": "docs", "source_key": "users/a.json",
+        "doc_head": 2, "log_head": None,
+    })
+    with pytest.raises(NodeGenerationChanged, match="moved during collection"):
+        InactiveReferenceExecutor(store, source).step(
+            reference.reference_id, attempted_ns=52)
+    after_reference = store.status(node_epoch="node", started_ns=1)
+    assert (after_reference.health, after_reference.last_attempt_ns) == (
+        "catching_up", 50)
+
+
+def test_reference_start_does_not_prevent_recovery_health_completion(tmp_path):
+    store = NodeStore(tmp_path / "node.sqlite3", identity())
+    source, _client = transport()
+    recovery = run_recovery_to_seal(InactiveRecoveryExecutor(store, source))
+    assert store.status(node_epoch="node", started_ns=1).last_attempt_ns == 50
+    InactiveReferenceExecutor(store, source).step(None, attempted_ns=51)
+
+    store.admit_candidate(
+        recovery.generation,
+        expected_attempt_ns=50,
+    )
+    status = store.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == recovery.generation
+    assert status.health == "ready"
+
+
 def test_store_owned_reference_compares_without_in_memory_batch(tmp_path):
     store = NodeStore(tmp_path / "node.sqlite3", identity())
     source, _client = transport()

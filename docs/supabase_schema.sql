@@ -799,25 +799,13 @@ after delete on public.ab_logs
 referencing old table as old_rows
 for each statement execute function private.ab_record_log_delete_scope();
 
-create or replace function private.ab_record_root_membership_change()
-returns trigger
+create or replace function private.ab_record_membership_roots(p_roots text[])
+returns void
 language plpgsql security definer set search_path = pg_catalog as $$
 declare
   v_root text;
-  v_roots text[];
 begin
-  if tg_op = 'INSERT' then
-    v_roots := array[new.root];
-  elsif tg_op = 'DELETE' then
-    v_roots := array[old.root];
-  else
-    v_roots := array[old.root, new.root];
-  end if;
-
-  for v_root in
-    select distinct roots.value
-    from pg_catalog.unnest(v_roots) as roots(value)
-    order by roots.value
+  foreach v_root in array coalesce(p_roots, array[]::text[])
   loop
     perform pg_catalog.pg_advisory_xact_lock_shared(
       pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
@@ -828,19 +816,75 @@ begin
       root, stream_kind, stream_id, domain
     ) values (v_root, 'root', '', 'visibility');
   end loop;
-  if tg_op = 'DELETE' then
-    return old;
-  end if;
-  return new;
 end
 $$;
-revoke all on function private.ab_record_root_membership_change()
+revoke all on function private.ab_record_membership_roots(text[])
+  from public, anon, authenticated;
+
+create or replace function private.ab_record_membership_insert()
+returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_roots text[];
+begin
+  select pg_catalog.array_agg(roots.root order by roots.root) into v_roots
+  from (select distinct member.root from new_rows member) roots;
+  perform private.ab_record_membership_roots(v_roots);
+  return null;
+end
+$$;
+create or replace function private.ab_record_membership_update()
+returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_roots text[];
+begin
+  select pg_catalog.array_agg(roots.root order by roots.root) into v_roots
+  from (
+    select member.root from old_rows member
+    union
+    select member.root from new_rows member
+  ) roots;
+  perform private.ab_record_membership_roots(v_roots);
+  return null;
+end
+$$;
+create or replace function private.ab_record_membership_delete()
+returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_roots text[];
+begin
+  select pg_catalog.array_agg(roots.root order by roots.root) into v_roots
+  from (select distinct member.root from old_rows member) roots;
+  perform private.ab_record_membership_roots(v_roots);
+  return null;
+end
+$$;
+revoke all on function private.ab_record_membership_insert()
+  from public, anon, authenticated;
+revoke all on function private.ab_record_membership_update()
+  from public, anon, authenticated;
+revoke all on function private.ab_record_membership_delete()
   from public, anon, authenticated;
 
 drop trigger if exists ab_members_change_ledger on public.ab_members;
-create trigger ab_members_change_ledger
-after insert or update or delete on public.ab_members
-for each row execute function private.ab_record_root_membership_change();
+drop function if exists private.ab_record_root_membership_change();
+drop trigger if exists ab_members_insert_change_ledger on public.ab_members;
+drop trigger if exists ab_members_update_change_ledger on public.ab_members;
+drop trigger if exists ab_members_delete_change_ledger on public.ab_members;
+create trigger ab_members_insert_change_ledger
+after insert on public.ab_members
+referencing new table as new_rows
+for each statement execute function private.ab_record_membership_insert();
+create trigger ab_members_update_change_ledger
+after update on public.ab_members
+referencing old table as old_rows new table as new_rows
+for each statement execute function private.ab_record_membership_update();
+create trigger ab_members_delete_change_ledger
+after delete on public.ab_members
+referencing old table as old_rows
+for each statement execute function private.ab_record_membership_delete();
 
 -- Source-ledger v1 did not record physical deletes or member-row updates. An
 -- existing node may therefore have acknowledged a cursor while retaining data
@@ -1366,6 +1410,10 @@ begin
   if pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
     raise exception 'recovery requires read committed isolation' using errcode = '22023';
   end if;
+  if auth.uid() is null or auth.role() <> 'authenticated'
+     or not public.ab_root_ok(p_root) then
+    raise exception 'recovery root is unavailable' using errcode = '42501';
+  end if;
   perform pg_catalog.set_config('lock_timeout', case
     when pg_catalog.current_setting('lock_timeout') = '0'
       or pg_catalog.current_setting('lock_timeout')::interval
@@ -1399,6 +1447,19 @@ begin
            null::text stream_id, null::text domain,
            null::text source_key,
            (case when pg_catalog.octet_length(d.path) > 4096
+                       or pg_catalog.left(d.path, 1) = '/'
+                       or pg_catalog.right(d.path, 1) = '/'
+                       or pg_catalog.strpos(d.path, '//') <> 0
+                       or pg_catalog.strpos(d.path, E'\\') <> 0
+                       or pg_catalog.cardinality(
+                         pg_catalog.string_to_array(d.path, '/')
+                       ) > 32
+                       or pg_catalog.array_position(
+                         pg_catalog.string_to_array(d.path, '/'), '.'
+                       ) is not null
+                       or pg_catalog.array_position(
+                         pg_catalog.string_to_array(d.path, '/'), '..'
+                       ) is not null
               then p_max_bytes + 1
               else public.ab_source_text_bytes(d.path)
                  + case when d.deleted then 0 else d.source_bytes end + 256
@@ -1571,6 +1632,10 @@ begin
   if pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
     raise exception 'recovery requires read committed isolation' using errcode = '22023';
   end if;
+  if auth.uid() is null or auth.role() <> 'authenticated'
+     or not public.ab_root_ok(p_root) then
+    raise exception 'recovery root is unavailable' using errcode = '42501';
+  end if;
   perform pg_catalog.set_config('lock_timeout', case
     when pg_catalog.current_setting('lock_timeout') = '0'
       or pg_catalog.current_setting('lock_timeout')::interval
@@ -1640,6 +1705,12 @@ drop trigger if exists ab_recovery_log_immutable on public.ab_logs;
 create trigger ab_recovery_log_immutable
 before update on public.ab_logs for each row
 execute function private.ab_recovery_immutable_identity();
+-- Remove redundant guard names from the short-lived review schema. The two
+-- canonical triggers above remain the sole identity/update guards.
+drop trigger if exists ab_recovery_doc_identity_fixed on public.ab_docs;
+drop trigger if exists ab_recovery_logs_append_only on public.ab_logs;
+drop function if exists private.ab_recovery_doc_identity_fixed();
+drop function if exists private.ab_recovery_log_append_only();
 create or replace function private.ab_recovery_no_truncate()
 returns trigger language plpgsql set search_path = pg_catalog as $$
 begin
@@ -1694,9 +1765,12 @@ create trigger ab_recovery_member_root_fixed
 before update on public.ab_members for each row
 execute function private.ab_recovery_member_root_fixed();
 
--- Validate the identities a page must copy before it can advertise v1. A
--- legacy oversized row makes installation fail before the marker rather than
--- turning a bounded continuation into an unbounded allocation.
+-- Validate the bounded identities a page must copy before it can advertise
+-- v1. Canonical path rules are enforced by current writers and by the bounded
+-- page expression below rather than by a validated table constraint: older
+-- releases accepted empty/dot segments, and upgrading must not fail merely
+-- because one such legacy identity still needs operator-led create/delete
+-- migration. Recovery for that root fails closed at the exact legacy row.
 alter table public.ab_docs
   drop constraint if exists ab_docs_recovery_path_size;
 alter table public.ab_docs add constraint ab_docs_recovery_path_size check (
@@ -1775,6 +1849,7 @@ create or replace function public.ab_node_recovery_ready() returns integer
 language sql stable security invoker set search_path = pg_catalog as $$
   select case
     when auth.role() = 'authenticated' and auth.uid() is not null
+      and pg_catalog.current_setting('transaction_isolation') = 'read committed'
       and pg_catalog.current_setting('statement_timeout')::interval
           > interval '0 seconds'
       and pg_catalog.current_setting('statement_timeout')::interval

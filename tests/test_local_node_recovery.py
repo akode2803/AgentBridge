@@ -151,6 +151,18 @@ def test_equivalence_recorder_preserves_private_equal_and_mismatch_evidence(tmp_
     assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == 0
 
 
+def test_recovery_executor_discovers_durable_run_after_restart(tmp_path):
+    path = tmp_path / "node.sqlite3"
+    source, _client = transport()
+    started = InactiveRecoveryExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=10)
+    resumed = InactiveRecoveryExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=11)
+    assert resumed.recovery_id == started.recovery_id
+    assert resumed.generation == started.generation
+    assert resumed.action == "resumed"
+
+
 def test_equivalence_reference_rejects_a_moving_provider_cut():
     cut = _provider_cut(transport()[0].recovery_fence())
     moved = type(cut)(
