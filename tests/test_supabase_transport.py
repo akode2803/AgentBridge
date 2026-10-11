@@ -119,10 +119,20 @@ def test_get_docs_bulk_read(tx):
 
 
 def test_path_discipline(tx):
-    with pytest.raises(ValidationError):
-        tx.put_doc("../escape.json", {})
-    with pytest.raises(ValidationError):
-        tx.get_blob("a/../../b")
+    invalid = (
+        "../escape.json", "a/../../b", "a//b", "a/./b", "nul\x00path",
+        "/", "a/" * 32 + "b", "é" * 2049,
+    )
+    for path in invalid:
+        with pytest.raises(ValidationError):
+            tx.put_doc(path, {})
+    tx.put_doc("x" * 4096, {"boundary": "bytes"})
+    tx.put_doc("/".join(["a"] * 32), {"boundary": "segments"})
+    tx.put_doc("users/name\u200dpart.json", {"boundary": "unicode"})
+    tx.put_doc("/users\\member.json/", {})
+    assert tx.list_docs("users/") == [
+        "users/member.json", "users/name\u200dpart.json",
+    ]
 
 
 # ------------------------------------------------------------------- logs

@@ -91,6 +91,24 @@ def test_reference_document_metadata_payload_race_is_rejected(source, monkeypatc
         transport.reference_documents("", limit=128, max_bytes=8 * 1024 * 1024)
 
 
+def test_reference_rejects_legacy_noncanonical_path_before_payload(source, monkeypatch):
+    transport, client = source
+    client.db["ab_docs"] = [{
+        "root": "team", "path": "users//legacy.json", "seq": 1,
+        "deleted": False, "data": {"name": "legacy"},
+    }]
+    exact_calls = []
+
+    def exact(function, params):
+        exact_calls.append((function, params))
+        raise AssertionError("invalid reference identity reached payload read")
+
+    monkeypatch.setattr(transport, "_reference_exact", exact)
+    with pytest.raises(TransportError, match="invalid reference document page"):
+        transport.reference_documents("", limit=128, max_bytes=8 * 1024 * 1024)
+    assert exact_calls == []
+
+
 def test_reference_document_distinguishes_json_null_from_tombstone(source):
     transport, client = source
     client.db["ab_docs"] = [{

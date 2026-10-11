@@ -307,22 +307,32 @@ def test_recovery_sql_guards_timeout_event_order_and_stream_head_races():
     assert SCHEMA.count("'agentbridge-log-head:'") >= 2
 
 
-def test_recovery_sql_freezes_source_identities_and_validates_document_paths():
-    assert "create trigger ab_recovery_doc_identity_fixed" in SCHEMA
+def test_recovery_sql_freezes_source_identities_and_bounds_legacy_paths():
+    assert "create trigger ab_recovery_doc_identity" in SCHEMA
     assert "new.root is distinct from old.root" in SCHEMA
     assert "new.path is distinct from old.path" in SCHEMA
-    assert "create trigger ab_recovery_logs_append_only" in SCHEMA
-    assert "message logs are append-only" in SCHEMA
+    assert "create trigger ab_recovery_log_immutable" in SCHEMA
+    assert "source log rows are immutable" in SCHEMA
+    assert "create trigger ab_recovery_doc_identity_fixed" not in SCHEMA
+    assert "create trigger ab_recovery_logs_append_only" not in SCHEMA
+    assert "drop trigger if exists ab_recovery_doc_identity_fixed" in SCHEMA
+    assert "drop trigger if exists ab_recovery_logs_append_only" in SCHEMA
     constraint = SCHEMA[
         SCHEMA.index("alter table public.ab_docs add constraint "
                      "ab_docs_recovery_path_size"):
         SCHEMA.index("alter table public.ab_docs validate constraint "
                      "ab_docs_recovery_path_size")
     ]
-    assert "pg_catalog.left(path, 1) <> '/'" in constraint
-    assert "pg_catalog.right(path, 1) <> '/'" in constraint
-    assert "pg_catalog.strpos(path, '//') = 0" in constraint
-    assert "pg_catalog.strpos(path, E'\\\\') = 0" in constraint
-    assert "pg_catalog.cardinality(pg_catalog.string_to_array(path, '/')) <= 32" \
-        in constraint
-    assert "array_position" in constraint
+    assert "pg_catalog.octet_length(path) between 1 and 4096" in constraint
+    assert "string_to_array" not in constraint
+    page = SCHEMA[SCHEMA.index(
+        "create or replace function public.ab_node_recovery_page("):
+        SCHEMA.index("create or replace function public.ab_node_recovery_fence(")
+    ]
+    assert "pg_catalog.left(d.path, 1) = '/'" in page
+    assert "pg_catalog.right(d.path, 1) = '/'" in page
+    assert "pg_catalog.strpos(d.path, '//') <> 0" in page
+    assert "pg_catalog.strpos(d.path, E'\\\\') <> 0" in page
+    assert "pg_catalog.cardinality(" in page
+    assert "pg_catalog.string_to_array(d.path, '/')" in page
+    assert "pg_catalog.array_position(" in page

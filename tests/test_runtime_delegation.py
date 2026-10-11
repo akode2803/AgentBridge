@@ -147,14 +147,16 @@ def test_manager_retained_agent_tool_returns_once_without_room_post(
 
         # First pass accepts; the manager then authorizes while its provider call
         # remains blocked. A later pass atomically claims the child.
-        def accepted():
-            destination.claim_ready(exclude=set())
-            views = source_handoffs.read(chat_id, "run-1")
-            return bool(views and views[0].events[-1].state
-                        is HandoffState.ACCEPTED)
+        claimed = []
 
-        _wait_until(accepted, timeout=10)
-        work = _wait_until(
+        def accepted_or_claimed():
+            claimed.extend(destination.claim_ready(exclude=set()))
+            views = source_handoffs.read(chat_id, "run-1")
+            states = [event.state for event in views[0].events] if views else []
+            return bool(claimed or HandoffState.ACCEPTED in states)
+
+        _wait_until(accepted_or_claimed, timeout=10)
+        work = claimed[0] if claimed else _wait_until(
             lambda: destination.claim_ready(exclude=set()), timeout=10,
         )[0]
         responder = _ChildResponder()

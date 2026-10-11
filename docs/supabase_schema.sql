@@ -1447,6 +1447,19 @@ begin
            null::text stream_id, null::text domain,
            null::text source_key,
            (case when pg_catalog.octet_length(d.path) > 4096
+                       or pg_catalog.left(d.path, 1) = '/'
+                       or pg_catalog.right(d.path, 1) = '/'
+                       or pg_catalog.strpos(d.path, '//') <> 0
+                       or pg_catalog.strpos(d.path, E'\\') <> 0
+                       or pg_catalog.cardinality(
+                         pg_catalog.string_to_array(d.path, '/')
+                       ) > 32
+                       or pg_catalog.array_position(
+                         pg_catalog.string_to_array(d.path, '/'), '.'
+                       ) is not null
+                       or pg_catalog.array_position(
+                         pg_catalog.string_to_array(d.path, '/'), '..'
+                       ) is not null
               then p_max_bytes + 1
               else public.ab_source_text_bytes(d.path)
                  + case when d.deleted then 0 else d.source_bytes end + 256
@@ -1692,6 +1705,12 @@ drop trigger if exists ab_recovery_log_immutable on public.ab_logs;
 create trigger ab_recovery_log_immutable
 before update on public.ab_logs for each row
 execute function private.ab_recovery_immutable_identity();
+-- Remove redundant guard names from the short-lived review schema. The two
+-- canonical triggers above remain the sole identity/update guards.
+drop trigger if exists ab_recovery_doc_identity_fixed on public.ab_docs;
+drop trigger if exists ab_recovery_logs_append_only on public.ab_logs;
+drop function if exists private.ab_recovery_doc_identity_fixed();
+drop function if exists private.ab_recovery_log_append_only();
 create or replace function private.ab_recovery_no_truncate()
 returns trigger language plpgsql set search_path = pg_catalog as $$
 begin
@@ -1730,36 +1749,6 @@ create trigger ab_recovery_events_append_only
 before update or delete on public.ab_change_events for each row
 execute function private.ab_recovery_no_event_rewrite();
 
-create or replace function private.ab_recovery_doc_identity_fixed()
-returns trigger language plpgsql set search_path = pg_catalog as $$
-begin
-  if new.root is distinct from old.root
-     or new.path is distinct from old.path then
-    raise exception 'document identity is immutable' using errcode = '22023';
-  end if;
-  return new;
-end
-$$;
-revoke all on function private.ab_recovery_doc_identity_fixed()
-  from public, anon, authenticated;
-drop trigger if exists ab_recovery_doc_identity_fixed on public.ab_docs;
-create trigger ab_recovery_doc_identity_fixed
-before update on public.ab_docs for each row
-execute function private.ab_recovery_doc_identity_fixed();
-
-create or replace function private.ab_recovery_log_append_only()
-returns trigger language plpgsql set search_path = pg_catalog as $$
-begin
-  raise exception 'message logs are append-only' using errcode = '22023';
-end
-$$;
-revoke all on function private.ab_recovery_log_append_only()
-  from public, anon, authenticated;
-drop trigger if exists ab_recovery_logs_append_only on public.ab_logs;
-create trigger ab_recovery_logs_append_only
-before update on public.ab_logs for each row
-execute function private.ab_recovery_log_append_only();
-
 create or replace function private.ab_recovery_member_root_fixed()
 returns trigger language plpgsql set search_path = pg_catalog as $$
 begin
@@ -1776,24 +1765,16 @@ create trigger ab_recovery_member_root_fixed
 before update on public.ab_members for each row
 execute function private.ab_recovery_member_root_fixed();
 
--- Validate the identities a page must copy before it can advertise v1. A
--- legacy oversized row makes installation fail before the marker rather than
--- turning a bounded continuation into an unbounded allocation.
+-- Validate the bounded identities a page must copy before it can advertise
+-- v1. Canonical path rules are enforced by current writers and by the bounded
+-- page expression below rather than by a validated table constraint: older
+-- releases accepted empty/dot segments, and upgrading must not fail merely
+-- because one such legacy identity still needs operator-led create/delete
+-- migration. Recovery for that root fails closed at the exact legacy row.
 alter table public.ab_docs
   drop constraint if exists ab_docs_recovery_path_size;
 alter table public.ab_docs add constraint ab_docs_recovery_path_size check (
   pg_catalog.octet_length(path) between 1 and 4096
-  and pg_catalog.left(path, 1) <> '/'
-  and pg_catalog.right(path, 1) <> '/'
-  and pg_catalog.strpos(path, '//') = 0
-  and pg_catalog.strpos(path, E'\\') = 0
-  and pg_catalog.cardinality(pg_catalog.string_to_array(path, '/')) <= 32
-  and pg_catalog.array_position(
-    pg_catalog.string_to_array(path, '/'), '.'
-  ) is null
-  and pg_catalog.array_position(
-    pg_catalog.string_to_array(path, '/'), '..'
-  ) is null
 ) not valid;
 alter table public.ab_docs validate constraint ab_docs_recovery_path_size;
 alter table public.ab_logs
