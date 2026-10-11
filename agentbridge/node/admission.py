@@ -343,6 +343,26 @@ class NodeCoordinatorRegistration:
 
 
 @dataclass(frozen=True)
+class NodeRecoveryClaim:
+    """Opaque coordinator/node cut that may authorize one full replacement."""
+
+    claim_id: str
+    claim_digest: str
+    coordinator_path: str
+    coordinator_identity: str
+    coordinator_epoch: str
+    root_revision: int
+    database_path: str
+    database_incarnation: str
+    identity_digest: str
+    provider_endpoint: str
+    root: str
+    base_generation: int
+    root_scope_generation: int
+    fence_tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class NodeFinalizationPosition:
     """Payload-free node receipt rechecked inside a root finalization cut."""
 

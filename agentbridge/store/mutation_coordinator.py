@@ -30,7 +30,7 @@ _NORMAL_TOKEN = re.compile(r'[0-9a-f]{64}\Z')
 _SENTINEL_TOKEN = re.compile(r'q[0-9a-f]{63}\Z')
 _COORDINATOR_EPOCH = re.compile(r'[0-9a-f]{32}\Z')
 _SCHEMA = {
-    'mutation_root': 'CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL,format INTEGER NOT NULL CHECK(format=2))',
+    'mutation_root': 'CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL,format INTEGER NOT NULL CHECK(format=3),revision INTEGER NOT NULL CHECK(revision>=0))',
     'mutation_stores': 'CREATE TABLE mutation_stores(path TEXT PRIMARY KEY,incarnation TEXT NOT NULL,source_epoch TEXT NOT NULL)',
     'mutation_nodes': 'CREATE TABLE mutation_nodes(path TEXT PRIMARY KEY,database_incarnation TEXT NOT NULL,identity_digest TEXT NOT NULL,provider_endpoint TEXT NOT NULL,root TEXT NOT NULL)',
     'mutation_intents': 'CREATE TABLE mutation_intents(token TEXT PRIMARY KEY)',
@@ -38,6 +38,9 @@ _SCHEMA = {
 }
 _V1_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
                    'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)')
+_V2_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
+                   'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL,'
+                   'format INTEGER NOT NULL CHECK(format=2))')
 _QUARANTINE_SCHEMA = {
     'quarantine_intents': 'CREATE TABLE quarantine_intents(token TEXT PRIMARY KEY,sentinel TEXT NOT NULL)',
     'quarantine_scopes': 'CREATE TABLE quarantine_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
@@ -76,7 +79,7 @@ class MutationCoordinator:
             if not found:
                 for statement in _SCHEMA.values():
                     conn.execute(statement)
-                conn.execute('INSERT INTO mutation_root VALUES(1,?,?,2)',
+                conn.execute('INSERT INTO mutation_root VALUES(1,?,?,3,0)',
                              (self.identity, secrets.token_hex(16)))
             else:
                 root_sql = conn.execute(
@@ -94,9 +97,23 @@ class MutationCoordinator:
                     # its exact schema check, even if it starts after migration.
                     conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_v1')
                     conn.execute(_SCHEMA['mutation_root'])
-                    conn.execute('INSERT INTO mutation_root VALUES(1,?,?,2)',
+                    conn.execute('INSERT INTO mutation_root VALUES(1,?,?,3,0)',
                                  (self.identity, secrets.token_hex(16)))
                     conn.execute('DROP TABLE mutation_root_v1')
+                elif root_sql == (_V2_ROOT_SCHEMA,):
+                    row = conn.execute(
+                        'SELECT identity,epoch FROM mutation_root WHERE singleton=1'
+                    ).fetchone()
+                    if (row is None or row[0] != self.identity
+                            or type(row[1]) is not str
+                            or _COORDINATOR_EPOCH.fullmatch(row[1]) is None):
+                        raise owner.SourceChanged('mutation_root_changed')
+                    # Preserve the coordinator epoch so an already-bound v9
+                    # node does not acquire a new owner by migration alone.
+                    conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_v2')
+                    conn.execute(_SCHEMA['mutation_root'])
+                    conn.execute('INSERT INTO mutation_root VALUES(1,?,?,3,0)', row)
+                    conn.execute('DROP TABLE mutation_root_v2')
                 node_schema = conn.execute(
                     "SELECT sql FROM sqlite_master WHERE name='mutation_nodes'"
                 ).fetchone()
@@ -149,10 +166,13 @@ class MutationCoordinator:
         for name, sql in {**_SCHEMA, **_QUARANTINE_SCHEMA}.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
-        row = conn.execute('SELECT identity,epoch,format FROM mutation_root WHERE singleton=1').fetchone()
+        row = conn.execute(
+            'SELECT identity,epoch,format,revision FROM mutation_root WHERE singleton=1'
+        ).fetchone()
         if (row is None or row[0] != self.identity or type(row[1]) is not str or len(row[1]) != 32
                 or any(c not in '0123456789abcdef' for c in row[1])
-                or row[2] != 2
+                or row[2] != 3 or type(row[3]) is not int
+                or not 0 <= row[3] <= 2**63 - 1
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
         tokens = conn.execute('SELECT token FROM mutation_intents LIMIT ?', (MAX_PENDING + 1,)).fetchall()
@@ -187,6 +207,23 @@ class MutationCoordinator:
             raise owner.SourceChanged('orphan_mutation_scope')
         self._quarantine_audit(conn, sentinels)
         return row[1]
+
+    @staticmethod
+    def _root_revision(conn):
+        row = conn.execute(
+            'SELECT revision FROM mutation_root WHERE singleton=1').fetchone()
+        if row is None or type(row[0]) is not int or not 0 <= row[0] <= 2**63 - 1:
+            raise owner.SourceChanged('mutation_root_changed')
+        return row[0]
+
+    @staticmethod
+    def _advance_root_revision(conn):
+        revision = MutationCoordinator._root_revision(conn)
+        if revision >= 2**63 - 1:
+            raise owner.SourceChanged('mutation_root_revision_exhausted')
+        conn.execute(
+            'UPDATE mutation_root SET revision=revision+1 WHERE singleton=1')
+        return revision + 1
 
     @staticmethod
     def _quarantine_audit(conn, sentinels):
@@ -322,6 +359,11 @@ class MutationCoordinator:
                 if existing != registration:
                     raise owner.SourceChanged('registered_node_replaced')
                 with NodeStore.coordinator_cut(registration) as node_conn:
+                    NodeStore.coordinator_bind_owner(
+                        node_conn, coordinator_path=str(self.path),
+                        coordinator_identity=self.identity,
+                        coordinator_epoch=self.epoch,
+                    )
                     NodeStore.coordinator_require_fences(
                         node_conn, coordinator_epoch=self.epoch,
                         tokens=self._pending_tokens(root),
@@ -331,6 +373,11 @@ class MutationCoordinator:
                 raise owner.SourceChanged('mutation_node_budget')
             pending = self._pending_tokens(root)
             with NodeStore.coordinator_cut(registration) as node_conn:
+                NodeStore.coordinator_bind_owner(
+                    node_conn, coordinator_path=str(self.path),
+                    coordinator_identity=self.identity,
+                    coordinator_epoch=self.epoch,
+                )
                 # Private work collected before coordinator ownership cannot
                 # prove it observed mutations that already completed.
                 NodeStore.coordinator_abandon_candidates(node_conn)
@@ -356,7 +403,32 @@ class MutationCoordinator:
                 registration.identity_digest, registration.provider_endpoint,
                 registration.root,
             ))
+            self._advance_root_revision(root)
         return registration
+
+    def claim_node_recovery(self, node):
+        """Capture one immutable root/node cut without reading the provider."""
+        from ..node.store import NodeStore
+
+        if type(node) is not NodeStore:
+            raise ValueError('invalid local node')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            if (root.execute('SELECT 1 FROM mutation_intents LIMIT 1').fetchone()
+                    or root.execute('SELECT 1 FROM quarantine_intents LIMIT 1').fetchone()):
+                raise owner.SourceChanged('root_mutation_pending')
+            revision = self._root_revision(root)
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                return NodeStore.coordinator_claim_recovery(
+                    node_conn, registration,
+                    coordinator_path=str(self.path),
+                    coordinator_identity=self.identity,
+                    coordinator_epoch=self.epoch,
+                    root_revision=revision,
+                )
 
     def _retire_nodes(self, root, token, *, state='active', skip_path=None):
         from ..node.store import NodeStore
@@ -433,6 +505,7 @@ class MutationCoordinator:
                     raise owner.SourceChanged('registration_revision_unavailable')
                 conn.execute('UPDATE local_sources SET revision=revision+1,ready_incarnation=NULL,ready_generation=NULL,ready_cursor=NULL')
             root.execute('INSERT INTO mutation_stores VALUES(?,?,?)', (path, current.raw.incarnation, current.epoch))
+            self._advance_root_revision(root)
 
     def _retire(self, root, changes, *, skip_path=None):
         for path, incarnation, epoch in self._stores(root):
@@ -459,6 +532,7 @@ class MutationCoordinator:
             token = self._insert_intent(conn, changes)
             self._retire_nodes(conn, token)
             self._retire(conn, changes)
+            self._advance_root_revision(conn)
             result = MutationIntent(str(self.path), self.epoch, token, changes)
         return result
 
@@ -524,6 +598,7 @@ class MutationCoordinator:
                 self._retire_nodes(conn, sentinel)
                 issued.append((sentinel, rows, len(members)))
             self._schema(conn)  # Validate the replacement fence before commit.
+            self._advance_root_revision(conn)
             return tuple(issued)
 
     def complete(self, value):
@@ -566,6 +641,7 @@ class MutationCoordinator:
             if conn.execute('DELETE FROM mutation_intents WHERE token=?', (token,)).rowcount != 1:
                 raise owner.SourceChanged('mutation_intent_missing')
             conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
+            self._advance_root_revision(conn)
 
     @contextmanager
     def publication_gate(self, store, value):
@@ -677,5 +753,6 @@ class MutationCoordinator:
                 # Root exclusion persists throughout fanout and the root commit.
                 self._retire_nodes(root, intent.token, skip_path=node_path)
                 self._retire(root, intent.selectors, skip_path=str(store.path))
+                self._advance_root_revision(root)
         if intent is not None:
             mutation._committed(intent)

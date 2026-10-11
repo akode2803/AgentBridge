@@ -19,7 +19,7 @@ from .admission import (
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeCandidateCapacityError, NodeInputBatch, NodeInputError,
     NodeLogPage, NodeLogRow, NodeScopePosition,
-    NodeCoordinatorRegistration, NodeFinalizationPosition,
+    NodeCoordinatorRegistration, NodeFinalizationPosition, NodeRecoveryClaim,
     NodeVisibility,
     NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
     NodeRecoveryEvent, NodeRecoveryEventState, NodeRecoveryManifestState,
@@ -31,7 +31,7 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
@@ -40,7 +40,7 @@ DIAGNOSTIC_REFERENCE_PLAN_SELECTION = b"provider-diagnostic-reference-v1"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=8),
+    version INTEGER NOT NULL CHECK(version=9),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -259,6 +259,56 @@ CREATE TABLE IF NOT EXISTS node_mutation_scopes(
     FOREIGN KEY(coordinator_epoch,token)
         REFERENCES node_mutation_fences(coordinator_epoch,token)
 );
+CREATE TABLE IF NOT EXISTS node_coordinator_owner(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    coordinator_path TEXT NOT NULL,
+    coordinator_identity TEXT NOT NULL,
+    coordinator_epoch TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_recovery_claims(
+    singleton INTEGER NOT NULL UNIQUE CHECK(singleton=1),
+    claim_id TEXT PRIMARY KEY,
+    claim_digest TEXT NOT NULL UNIQUE,
+    coordinator_path TEXT NOT NULL,
+    coordinator_identity TEXT NOT NULL,
+    coordinator_epoch TEXT NOT NULL,
+    root_revision INTEGER NOT NULL CHECK(root_revision>=0),
+    database_incarnation TEXT NOT NULL,
+    identity_digest TEXT NOT NULL,
+    base_generation INTEGER NOT NULL CHECK(base_generation>=0),
+    root_scope_generation INTEGER NOT NULL CHECK(root_scope_generation>=0)
+);
+CREATE TABLE IF NOT EXISTS node_recovery_claim_fences(
+    claim_id TEXT NOT NULL REFERENCES node_recovery_claims(claim_id),
+    coordinator_epoch TEXT NOT NULL,
+    token TEXT NOT NULL,
+    PRIMARY KEY(claim_id,coordinator_epoch,token)
+);
+CREATE TABLE IF NOT EXISTS claimed_recoveries(
+    recovery_id TEXT PRIMARY KEY REFERENCES provider_recoveries(recovery_id),
+    claim_id TEXT NOT NULL UNIQUE REFERENCES node_recovery_claims(claim_id),
+    claim_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_admission_permits(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    recovery_id TEXT NOT NULL UNIQUE,
+    database_incarnation TEXT NOT NULL,
+    base_generation INTEGER NOT NULL CHECK(base_generation>=0),
+    destination_generation INTEGER NOT NULL CHECK(destination_generation>0),
+    claim_digest TEXT NOT NULL,
+    root_revision INTEGER NOT NULL CHECK(root_revision>=0),
+    old_pending_count INTEGER NOT NULL CHECK(old_pending_count>=0),
+    new_pending_count INTEGER NOT NULL CHECK(new_pending_count=0)
+);
+CREATE TABLE IF NOT EXISTS node_recovery_receipts(
+    recovery_id TEXT PRIMARY KEY,
+    admitted_generation INTEGER NOT NULL CHECK(admitted_generation>0),
+    claim_digest TEXT NOT NULL,
+    coordinator_path TEXT NOT NULL,
+    coordinator_identity TEXT NOT NULL,
+    coordinator_epoch TEXT NOT NULL,
+    root_revision INTEGER NOT NULL CHECK(root_revision>=0)
+);
 CREATE TABLE IF NOT EXISTS local_changes(
     seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL,
     scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL, kind TEXT NOT NULL
@@ -302,6 +352,11 @@ _V7_TABLES = _V6_TABLES
 _V8_TABLES = _V7_TABLES | frozenset({
     "node_mutation_fences", "node_mutation_scopes",
 })
+_V9_TABLES = _V8_TABLES | frozenset({
+    "node_coordinator_owner", "node_recovery_claims",
+    "node_recovery_claim_fences", "claimed_recoveries",
+    "node_admission_permits", "node_recovery_receipts",
+})
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({
@@ -312,6 +367,8 @@ MAX_NODE_MUTATION_SCOPES = MAX_NODE_MUTATION_FENCES * 8
 _NODE_PENDING_REASON = "local_mutation"
 _COORDINATOR_EPOCH = re.compile(r"[0-9a-f]{32}\Z")
 _COORDINATOR_TOKEN = re.compile(r"(?:[0-9a-f]{64}|q[0-9a-f]{63})\Z")
+_CLAIM_ID = re.compile(r"[0-9a-f]{48}\Z")
+_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _PENDING_MUTATION_GUARD = """CREATE TRIGGER node_pending_mutation_guard
 BEFORE UPDATE ON node_meta
 WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
@@ -321,6 +378,7 @@ WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
 BEGIN
     SELECT RAISE(ABORT,'local node mutation pending');
 END"""
+_V8_PENDING_MUTATION_GUARD = _PENDING_MUTATION_GUARD
 
 
 def _positive_ns(value: object, name: str) -> int:
@@ -399,6 +457,50 @@ def _node_position(value: object) -> NodeFinalizationPosition:
         registration.database_path, registration.database_incarnation,
         registration.identity_digest, registration.provider_endpoint,
         registration.root, value.admitted_generation, positions,
+    )
+
+
+def _recovery_claim(value: object) -> NodeRecoveryClaim:
+    if type(value) is not NodeRecoveryClaim:
+        raise ValueError("invalid node recovery claim")
+    registration = _node_registration(NodeCoordinatorRegistration(
+        value.database_path, value.database_incarnation, value.identity_digest,
+        value.provider_endpoint, value.root,
+    ))
+    coordinator = Path(value.coordinator_path)
+    tokens = value.fence_tokens
+    if (type(value.claim_id) is not str or _CLAIM_ID.fullmatch(value.claim_id) is None
+            or type(value.claim_digest) is not str
+            or _DIGEST.fullmatch(value.claim_digest) is None
+            or not coordinator.is_absolute()
+            or str(coordinator.resolve()) != value.coordinator_path
+            or len(value.coordinator_path.encode("utf-8")) > 16_384
+            or type(value.coordinator_identity) is not str
+            or not value.coordinator_identity
+            or len(value.coordinator_identity.encode("utf-8")) > 4_096
+            or type(value.coordinator_epoch) is not str
+            or _COORDINATOR_EPOCH.fullmatch(value.coordinator_epoch) is None
+            or type(value.root_revision) is not int
+            or not 0 <= value.root_revision <= 2**63 - 1
+            or type(value.base_generation) is not int
+            or not 0 <= value.base_generation <= 2**63 - 1
+            or type(value.root_scope_generation) is not int
+            or not 0 <= value.root_scope_generation <= 2**63 - 1
+            or type(tokens) is not tuple
+            or len(tokens) > MAX_NODE_MUTATION_FENCES
+            or tokens != tuple(sorted(tokens))
+            or len(set(tokens)) != len(tokens)
+            or any(type(token) is not str
+                   or _COORDINATOR_TOKEN.fullmatch(token) is None
+                   for token in tokens)):
+        raise ValueError("invalid node recovery claim")
+    return NodeRecoveryClaim(
+        value.claim_id, value.claim_digest, value.coordinator_path,
+        value.coordinator_identity, value.coordinator_epoch, value.root_revision,
+        registration.database_path, registration.database_incarnation,
+        registration.identity_digest, registration.provider_endpoint,
+        registration.root, value.base_generation, value.root_scope_generation,
+        tuple(tokens),
     )
 
 
@@ -539,6 +641,251 @@ class NodeStore:
             raise sqlite3.DatabaseError("orphan local node pending state")
         return count
 
+    @staticmethod
+    def _claim_digest(
+        registration: NodeCoordinatorRegistration, *, coordinator_path: str,
+        coordinator_identity: str, coordinator_epoch: str, root_revision: int,
+        base_generation: int, root_scope_generation: int,
+        fence_tokens: tuple[str, ...],
+    ) -> str:
+        return hashlib.sha256(repr((
+            "node-recovery-claim-v1", coordinator_path, coordinator_identity,
+            coordinator_epoch, root_revision, registration.database_path,
+            registration.database_incarnation, registration.identity_digest,
+            registration.provider_endpoint, registration.root, base_generation,
+            root_scope_generation, fence_tokens,
+        )).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _check_coordinator_state(cls, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT 1 FROM node_recovery_claim_fences LIMIT 1 OFFSET ?",
+                (MAX_NODE_MUTATION_FENCES,)).fetchone():
+            raise sqlite3.DatabaseError("local node recovery claim budget exceeded")
+        if conn.execute(
+                "SELECT 1 FROM claimed_recoveries LIMIT 1 OFFSET 1").fetchone():
+            raise sqlite3.DatabaseError("multiple claimed local recoveries")
+        if conn.execute(
+                "SELECT 1 FROM node_recovery_receipts LIMIT 1 OFFSET ?",
+                (MAX_GENERATION_HISTORY,)).fetchone():
+            raise sqlite3.DatabaseError("local node recovery receipt budget exceeded")
+        owners = conn.execute(
+            "SELECT singleton,coordinator_path,coordinator_identity,coordinator_epoch "
+            "FROM node_coordinator_owner LIMIT 2").fetchall()
+        if len(owners) > 1:
+            raise sqlite3.DatabaseError("invalid local node coordinator owner")
+        if owners:
+            singleton, path, identity, epoch = owners[0]
+            if (singleton != 1 or type(path) is not str or not Path(path).is_absolute()
+                    or str(Path(path).resolve()) != path
+                    or len(path.encode("utf-8")) > 16_384
+                    or type(identity) is not str or not identity
+                    or len(identity.encode("utf-8")) > 4_096
+                    or type(epoch) is not str
+                    or _COORDINATOR_EPOCH.fullmatch(epoch) is None):
+                raise sqlite3.DatabaseError("invalid local node coordinator owner")
+        claims = conn.execute(
+            "SELECT singleton,claim_id,claim_digest,coordinator_path,coordinator_identity,"
+            "coordinator_epoch,root_revision,database_incarnation,identity_digest,"
+            "base_generation,root_scope_generation FROM node_recovery_claims "
+            "LIMIT 2").fetchall()
+        if len(claims) > 1:
+            raise sqlite3.DatabaseError("multiple local node recovery claims")
+        mappings = conn.execute(
+            "SELECT recovery_id,claim_id,claim_digest FROM claimed_recoveries "
+            "LIMIT 2").fetchall()
+        if len(mappings) > 1:
+            raise sqlite3.DatabaseError("multiple claimed local recoveries")
+        if mappings and (not claims or mappings[0][1:] != (claims[0][1], claims[0][2])
+                         or type(mappings[0][0]) is not str
+                         or _CLAIM_ID.fullmatch(mappings[0][0]) is None
+                         or conn.execute(
+                             "SELECT 1 FROM provider_recoveries WHERE recovery_id=?",
+                             (mappings[0][0],)).fetchone() is None):
+            raise sqlite3.DatabaseError("invalid claimed local recovery")
+        if claims:
+            (singleton, claim_id, digest, path, identity, epoch, revision, incarnation,
+             identity_digest, base, scope_generation) = claims[0]
+            if (singleton != 1
+                    or type(claim_id) is not str or _CLAIM_ID.fullmatch(claim_id) is None
+                    or type(digest) is not str or _DIGEST.fullmatch(digest) is None
+                    or not owners or (path, identity, epoch) != owners[0][1:]
+                    or type(revision) is not int or not 0 <= revision <= 2**63 - 1
+                    or type(incarnation) is not str or not incarnation
+                    or type(identity_digest) is not str
+                    or _DIGEST.fullmatch(identity_digest) is None
+                    or type(base) is not int or not 0 <= base <= 2**63 - 1
+                    or type(scope_generation) is not int
+                    or not 0 <= scope_generation <= 2**63 - 1):
+                raise sqlite3.DatabaseError("invalid local node recovery claim")
+            tokens = tuple(row[0] for row in conn.execute(
+                "SELECT token FROM node_recovery_claim_fences WHERE claim_id=? "
+                "AND coordinator_epoch=? ORDER BY token LIMIT ?",
+                (claim_id, epoch, MAX_NODE_MUTATION_FENCES + 1),
+            ))
+            if (len(tokens) > MAX_NODE_MUTATION_FENCES
+                    or any(type(token) is not str
+                           or _COORDINATOR_TOKEN.fullmatch(token) is None
+                           for token in tokens)):
+                raise sqlite3.DatabaseError("local node recovery claim budget exceeded")
+            registration = NodeCoordinatorRegistration(
+                str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve()),
+                incarnation, identity_digest,
+                conn.execute("SELECT provider_endpoint FROM node_identity "
+                             "WHERE singleton=1").fetchone()[0],
+                conn.execute("SELECT root FROM node_identity WHERE singleton=1").fetchone()[0],
+            )
+            expected = cls._claim_digest(
+                registration, coordinator_path=path, coordinator_identity=identity,
+                coordinator_epoch=epoch, root_revision=revision,
+                base_generation=base, root_scope_generation=scope_generation,
+                fence_tokens=tokens,
+            )
+            if expected != digest:
+                raise sqlite3.DatabaseError("local node recovery claim digest mismatch")
+        if conn.execute("""
+            SELECT 1 FROM node_recovery_claim_fences f
+            LEFT JOIN node_recovery_claims c ON c.claim_id=f.claim_id
+            WHERE c.claim_id IS NULL OR f.coordinator_epoch!=c.coordinator_epoch
+               OR typeof(f.token)!='text' OR length(f.token)!=64
+            LIMIT 1
+        """).fetchone():
+            raise sqlite3.DatabaseError("invalid local node recovery claim fence")
+        if conn.execute("SELECT 1 FROM node_admission_permits LIMIT 1").fetchone():
+            raise sqlite3.DatabaseError("orphan local node admission permit")
+        receipts = conn.execute(
+            "SELECT recovery_id,admitted_generation,claim_digest,coordinator_path,"
+            "coordinator_identity,coordinator_epoch,root_revision "
+            "FROM node_recovery_receipts ORDER BY recovery_id LIMIT ?",
+            (MAX_GENERATION_HISTORY + 1,),
+        ).fetchall()
+        for (recovery_id, generation, digest, path, identity, epoch,
+             revision) in receipts:
+            if (type(recovery_id) is not str
+                    or _CLAIM_ID.fullmatch(recovery_id) is None
+                    or type(generation) is not int or generation <= 0
+                    or type(digest) is not str or _DIGEST.fullmatch(digest) is None
+                    or type(path) is not str or not Path(path).is_absolute()
+                    or str(Path(path).resolve()) != path
+                    or len(path.encode("utf-8")) > 16_384
+                    or type(identity) is not str or not identity
+                    or len(identity.encode("utf-8")) > 4_096
+                    or type(epoch) is not str
+                    or _COORDINATOR_EPOCH.fullmatch(epoch) is None
+                    or type(revision) is not int
+                    or not 0 <= revision <= 2**63 - 1):
+                raise sqlite3.DatabaseError("invalid local node recovery receipt")
+
+    @staticmethod
+    def coordinator_bind_owner(
+        conn: sqlite3.Connection, *, coordinator_path: str,
+        coordinator_identity: str, coordinator_epoch: str,
+    ) -> None:
+        if (not conn.in_transaction or type(coordinator_path) is not str
+                or not Path(coordinator_path).is_absolute()
+                or str(Path(coordinator_path).resolve()) != coordinator_path
+                or len(coordinator_path.encode("utf-8")) > 16_384
+                or type(coordinator_identity) is not str
+                or not coordinator_identity
+                or len(coordinator_identity.encode("utf-8")) > 4_096
+                or type(coordinator_epoch) is not str
+                or _COORDINATOR_EPOCH.fullmatch(coordinator_epoch) is None):
+            raise ValueError("invalid local node coordinator owner")
+        NodeStore._check_mutation_fences(conn)
+        NodeStore._check_coordinator_state(conn)
+        wanted = (coordinator_path, coordinator_identity, coordinator_epoch)
+        current = conn.execute(
+            "SELECT coordinator_path,coordinator_identity,coordinator_epoch "
+            "FROM node_coordinator_owner WHERE singleton=1").fetchone()
+        if current is not None:
+            if current != wanted:
+                raise NodeGenerationChanged("local node coordinator owner changed")
+            return
+        if conn.execute("SELECT 1 FROM node_mutation_fences LIMIT 1").fetchone():
+            raise NodeGenerationChanged("unowned local node mutation fences")
+        conn.execute("INSERT INTO node_coordinator_owner VALUES(1,?,?,?)", wanted)
+        NodeStore._check_coordinator_state(conn)
+
+    @classmethod
+    def coordinator_claim_recovery(
+        cls, conn: sqlite3.Connection, registration: NodeCoordinatorRegistration, *,
+        coordinator_path: str, coordinator_identity: str,
+        coordinator_epoch: str, root_revision: int,
+    ) -> NodeRecoveryClaim:
+        registration = _node_registration(registration)
+        if (not conn.in_transaction or type(root_revision) is not int
+                or not 0 <= root_revision <= 2**63 - 1):
+            raise ValueError("invalid local node recovery claim")
+        cls.coordinator_bind_owner(
+            conn, coordinator_path=coordinator_path,
+            coordinator_identity=coordinator_identity,
+            coordinator_epoch=coordinator_epoch,
+        )
+        cls._check_mutation_fences(conn)
+        cls._check_coordinator_state(conn)
+        meta = cls._check_meta(conn)
+        root_generation, pending = cls._scope_generation(conn, "root", "")
+        fences = conn.execute(
+            "SELECT coordinator_epoch,token,state FROM node_mutation_fences "
+            "ORDER BY token LIMIT ?", (MAX_NODE_MUTATION_FENCES + 1,),
+        ).fetchall()
+        if (len(fences) > MAX_NODE_MUTATION_FENCES
+                or any(epoch != coordinator_epoch or state != "completed"
+                       for epoch, _token, state in fences)):
+            raise NodeGenerationChanged("local node fences are not claimable")
+        tokens = tuple(token for _epoch, token, _state in fences)
+        if ((bool(tokens) != (pending == _NODE_PENDING_REASON))
+                or meta[5] != len(tokens)):
+            raise sqlite3.DatabaseError("invalid local node pending claim state")
+        if conn.execute(
+                "SELECT 1 FROM node_generations WHERE state IN ('building','sealed') "
+                "LIMIT 1").fetchone():
+            raise NodeGenerationChanged("local node private work is active")
+        digest = cls._claim_digest(
+            registration, coordinator_path=coordinator_path,
+            coordinator_identity=coordinator_identity,
+            coordinator_epoch=coordinator_epoch, root_revision=root_revision,
+            base_generation=meta[1], root_scope_generation=root_generation,
+            fence_tokens=tokens,
+        )
+        existing = conn.execute(
+            "SELECT claim_id,claim_digest,root_revision,database_incarnation,"
+            "identity_digest,base_generation,root_scope_generation "
+            "FROM node_recovery_claims WHERE singleton=1").fetchone()
+        if existing is not None:
+            claim_id, stored, revision, incarnation, identity_digest, base, scope = existing
+            stored_tokens = tuple(row[0] for row in conn.execute(
+                "SELECT token FROM node_recovery_claim_fences WHERE claim_id=? "
+                "ORDER BY token", (claim_id,),
+            ))
+            if ((stored, revision, incarnation, identity_digest, base, scope,
+                 stored_tokens) != (digest, root_revision,
+                                    registration.database_incarnation,
+                                    registration.identity_digest, meta[1],
+                                    root_generation, tokens)):
+                raise NodeGenerationChanged("local node recovery claim changed")
+        else:
+            claim_id = secrets.token_hex(24)
+            conn.execute(
+                "INSERT INTO node_recovery_claims VALUES(1,?,?,?,?,?,?,?,?,?,?)",
+                (claim_id, digest, coordinator_path, coordinator_identity,
+                 coordinator_epoch, root_revision, registration.database_incarnation,
+                 registration.identity_digest, meta[1], root_generation),
+            )
+            conn.executemany(
+                "INSERT INTO node_recovery_claim_fences VALUES(?,?,?)",
+                ((claim_id, coordinator_epoch, token) for token in tokens),
+            )
+        claim = NodeRecoveryClaim(
+            claim_id, digest, coordinator_path, coordinator_identity,
+            coordinator_epoch, root_revision, registration.database_path,
+            registration.database_incarnation, registration.identity_digest,
+            registration.provider_endpoint, registration.root, meta[1],
+            root_generation, tokens,
+        )
+        cls._check_coordinator_state(conn)
+        return _recovery_claim(claim)
+
     def coordinator_registration(self) -> NodeCoordinatorRegistration:
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
@@ -600,6 +947,7 @@ class NodeStore:
                 raise NodeGenerationChanged("registered local node replaced")
             cls._check_mutation_guard(conn)
             cls._check_mutation_fences(conn)
+            cls._check_coordinator_state(conn)
             if checked is not None:
                 if meta[1] != checked.admitted_generation:
                     raise NodeGenerationChanged("admitted node generation changed")
@@ -989,13 +1337,92 @@ class NodeStore:
             PRIMARY KEY(coordinator_epoch,token,scope_kind,scope_id),
             FOREIGN KEY(coordinator_epoch,token)
                 REFERENCES node_mutation_fences(coordinator_epoch,token))""")
-        conn.execute(_PENDING_MUTATION_GUARD)
+        conn.execute(_V8_PENDING_MUTATION_GUARD)
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
             version INTEGER NOT NULL CHECK(version=8),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
         conn.execute("INSERT INTO node_schema VALUES(1,8,?)", (PROTOCOL_VERSION,))
+
+    def _migrate_v8(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(8, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        if conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='node_pending_mutation_guard'").fetchone() not in (
+                    (_V8_PENDING_MUTATION_GUARD,), (_PENDING_MUTATION_GUARD,)):
+            raise sqlite3.DatabaseError("invalid local node mutation guard")
+        self._check_mutation_fences(conn)
+        # Pre-v9 private work has no immutable coordinator claim. Retain the
+        # admitted cut and every pending fence, but retire all private candidates.
+        generations = tuple(row[0] for row in conn.execute(
+            "SELECT generation FROM node_generations "
+            "WHERE state IN ('building','sealed') ORDER BY generation"
+        ))
+        for generation in generations:
+            self._clear_candidate_rows(conn, generation)
+        if generations:
+            conn.executemany(
+                "UPDATE node_generations SET state='abandoned' WHERE generation=?",
+                ((generation,) for generation in generations),
+            )
+        conn.execute("""CREATE TABLE node_coordinator_owner(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            coordinator_path TEXT NOT NULL,
+            coordinator_identity TEXT NOT NULL,
+            coordinator_epoch TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE node_recovery_claims(
+            singleton INTEGER NOT NULL UNIQUE CHECK(singleton=1),
+            claim_id TEXT PRIMARY KEY,
+            claim_digest TEXT NOT NULL UNIQUE,
+            coordinator_path TEXT NOT NULL,
+            coordinator_identity TEXT NOT NULL,
+            coordinator_epoch TEXT NOT NULL,
+            root_revision INTEGER NOT NULL CHECK(root_revision>=0),
+            database_incarnation TEXT NOT NULL,
+            identity_digest TEXT NOT NULL,
+            base_generation INTEGER NOT NULL CHECK(base_generation>=0),
+            root_scope_generation INTEGER NOT NULL CHECK(root_scope_generation>=0))""")
+        conn.execute("""CREATE TABLE node_recovery_claim_fences(
+            claim_id TEXT NOT NULL REFERENCES node_recovery_claims(claim_id),
+            coordinator_epoch TEXT NOT NULL,
+            token TEXT NOT NULL,
+            PRIMARY KEY(claim_id,coordinator_epoch,token))""")
+        conn.execute("""CREATE TABLE claimed_recoveries(
+            recovery_id TEXT PRIMARY KEY REFERENCES provider_recoveries(recovery_id),
+            claim_id TEXT NOT NULL UNIQUE REFERENCES node_recovery_claims(claim_id),
+            claim_digest TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE node_admission_permits(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            recovery_id TEXT NOT NULL UNIQUE,
+            database_incarnation TEXT NOT NULL,
+            base_generation INTEGER NOT NULL CHECK(base_generation>=0),
+            destination_generation INTEGER NOT NULL CHECK(destination_generation>0),
+            claim_digest TEXT NOT NULL,
+            root_revision INTEGER NOT NULL CHECK(root_revision>=0),
+            old_pending_count INTEGER NOT NULL CHECK(old_pending_count>=0),
+            new_pending_count INTEGER NOT NULL CHECK(new_pending_count=0))""")
+        conn.execute("""CREATE TABLE node_recovery_receipts(
+            recovery_id TEXT PRIMARY KEY,
+            admitted_generation INTEGER NOT NULL CHECK(admitted_generation>0),
+            claim_digest TEXT NOT NULL,
+            coordinator_path TEXT NOT NULL,
+            coordinator_identity TEXT NOT NULL,
+            coordinator_epoch TEXT NOT NULL,
+            root_revision INTEGER NOT NULL CHECK(root_revision>=0))""")
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
+        conn.execute(_PENDING_MUTATION_GUARD)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=9),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,9,?)", (PROTOCOL_VERSION,))
 
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
@@ -1041,17 +1468,20 @@ class NodeStore:
                             [(SCHEMA_VERSION, PROTOCOL_VERSION)],
                     ):
                         raise sqlite3.DatabaseError("unsupported local node schema")
-                elif tables not in (_V7_TABLES, _V8_TABLES):
+                elif tables not in (_V7_TABLES, _V8_TABLES, _V9_TABLES):
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 version = conn.execute(
                     "SELECT version,protocol_version FROM node_schema "
                     "WHERE singleton=1").fetchall()
                 if version == [(7, PROTOCOL_VERSION)]:
                     self._migrate_v7(conn)
+                    version = [(8, PROTOCOL_VERSION)]
+                if version == [(8, PROTOCOL_VERSION)]:
+                    self._migrate_v8(conn)
                 tables = frozenset(row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name NOT LIKE 'sqlite_%'"))
-                if tables != _V8_TABLES:
+                if tables != _V9_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -1062,6 +1492,7 @@ class NodeStore:
                 self._check_identity(conn)
                 self._check_meta(conn)
                 self._check_mutation_fences(conn)
+                self._check_coordinator_state(conn)
                 rows = conn.execute(
                     "SELECT minimum_cursor FROM local_change_state "
                     "WHERE singleton=1").fetchall()
@@ -2957,6 +3388,11 @@ class NodeStore:
             "SELECT recovery_id FROM provider_recoveries WHERE generation=?",
             (generation,)).fetchone()
         if recovery:
+            if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='claimed_recoveries'").fetchone():
+                conn.execute(
+                    "DELETE FROM claimed_recoveries WHERE recovery_id=?", recovery)
             for table in ("recovery_proof_pages", "recovery_events", "recovery_streams",
                           "recovery_manifests", "recovery_pages", "recovery_work",
                           "recovery_scopes"):
