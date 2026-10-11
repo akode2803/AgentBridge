@@ -492,6 +492,27 @@ class MutationCoordinator:
                 return node.coordinator_admit_claimed_recovery(
                     node_conn, registration, claim, recovery_id)
 
+    def abandon_node_recovery(self, node, claim, recovery_id):
+        """Retire one exact private recovery while preserving every fence."""
+        from ..node.admission import NodeRecoveryClaim
+        from ..node.store import NodeStore
+
+        if (type(node) is not NodeStore or type(claim) is not NodeRecoveryClaim
+                or type(recovery_id) is not str):
+            raise ValueError('invalid claimed local node abandonment')
+        if (claim.coordinator_path != str(self.path)
+                or claim.coordinator_identity != self.identity
+                or claim.coordinator_epoch != self.epoch):
+            raise owner.SourceChanged('node_recovery_claim_changed')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                return node.coordinator_abandon_claimed_recovery(
+                    node_conn, registration, claim, recovery_id)
+
     def _retire_nodes(self, root, token, *, state='active', skip_path=None):
         from ..node.store import NodeStore
 
