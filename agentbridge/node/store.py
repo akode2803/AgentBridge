@@ -14,6 +14,7 @@ from .admission import (
     MAX_STAGED_CHUNKS, MAX_STAGED_DOCUMENTS, MAX_STAGED_LOG_ROWS,
     MAX_STAGED_VISIBILITY,
     MAX_CHANGE_PAGE, MAX_CHANGE_ROWS, MAX_GENERATION_HISTORY,
+    MAX_CAPTURE_SCOPE_POSITIONS,
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeCandidateCapacityError, NodeInputBatch, NodeInputError,
@@ -374,7 +375,7 @@ def _node_position(value: object) -> NodeFinalizationPosition:
     if (type(value.admitted_generation) is not int
             or not 0 <= value.admitted_generation <= 2**63 - 1
             or type(value.scope_positions) is not tuple
-            or not 1 <= len(value.scope_positions) <= 20_001
+            or not 1 <= len(value.scope_positions) <= MAX_CAPTURE_SCOPE_POSITIONS
             or any(type(item) is not NodeScopePosition
                    for item in value.scope_positions)):
         raise ValueError("invalid node finalization position")
@@ -629,6 +630,7 @@ class NodeStore:
             "SELECT count(*) FROM node_mutation_fences").fetchone()[0]
         if count >= MAX_NODE_MUTATION_FENCES:
             raise NodeCandidateCapacityError("too many local node mutation fences")
+        NodeStore.coordinator_abandon_candidates(conn)
         generation, _pending = NodeStore._scope_generation(conn, "root", "")
         if generation >= 2**63 - 1:
             raise NodeInputError("local node scope revision exhausted")
@@ -642,9 +644,6 @@ class NodeStore:
             ON CONFLICT(scope_kind,scope_id) DO UPDATE SET
                 generation=excluded.generation,pending_reason=excluded.pending_reason
         """, (generation + 1,))
-        conn.execute(
-            "UPDATE node_generations SET state='abandoned' "
-            "WHERE state IN ('building','sealed')")
         conn.execute(
             "UPDATE node_meta SET pending_mutations=?,health='pending' "
             "WHERE singleton=1", (count + 1,))

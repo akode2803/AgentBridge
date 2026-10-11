@@ -187,6 +187,30 @@ def test_registration_discards_candidate_that_missed_completed_mutation(tmp_path
         ).fetchone() == ("abandoned",)
 
 
+def test_mutation_start_clears_rows_before_abandoning_private_candidate(world):
+    root, _store, node, _definition, _position = world
+    generation = node.begin_candidate(created_ns=3)
+    node.seal_candidate(generation, NodeInputBatch(documents=(
+        NodeDocument("users/private.json", 2, False, b"private"),
+    )), observed_ns=4)
+
+    root.begin((S("doc_exact", "users/later.json"),))
+
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM candidate_docs WHERE generation=?",
+            (generation,),
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM candidate_chunks WHERE generation=?",
+            (generation,),
+        ).fetchone() == (0,)
+
+
 def test_database_guard_blocks_pre_v8_writer_while_fence_is_pending(world):
     root, _store, node, _definition, _position = world
     root.begin((S("doc_exact", "chats/room/meta.json"),))

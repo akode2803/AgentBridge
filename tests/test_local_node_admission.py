@@ -1,9 +1,11 @@
 import sqlite3
 import threading
+from pathlib import Path
 
 import pytest
 
 from agentbridge.node.admission import (
+    MAX_CAPTURE_SCOPE_POSITIONS,
     NodeCaptureOverflow,
     NodeCaptureRequest,
     NodeDocument,
@@ -11,10 +13,13 @@ from agentbridge.node.admission import (
     NodeGenerationChanged,
     NodeInputBatch,
     NodeInputError,
+    NodeFinalizationPosition,
     NodeLogRequest,
     NodeLogRow,
+    NodeScopePosition,
     NodeVisibility,
 )
+from agentbridge.node import store as node_store
 from agentbridge.node.protocol import ProtocolError, ReplicaIdentity
 from agentbridge.node.store import NodeStore
 from agentbridge.node.wire import capture_response, parse_capture_request
@@ -25,6 +30,29 @@ def identity():
         provider_endpoint="https://example.test", root="supabase://mesh",
         principal="member", machine="desktop",
     )
+
+
+def test_finalization_position_accepts_maximum_capture_scope_union():
+    positions = tuple(
+        NodeScopePosition("chat", f"chat-{index:05d}", 0, None)
+        for index in range(MAX_CAPTURE_SCOPE_POSITIONS - 1)
+    ) + (NodeScopePosition("root", "", 0, None),)
+    value = NodeFinalizationPosition(
+        str(Path("/tmp/node.sqlite").resolve()), "incarnation", "1" * 64,
+        "https://example.test", "supabase://mesh", 0, positions,
+    )
+
+    assert node_store._node_position(value).scope_positions == positions
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        node_store._node_position(NodeFinalizationPosition(
+            value.database_path, value.database_incarnation,
+            value.identity_digest, value.provider_endpoint, value.root,
+            value.admitted_generation,
+            positions[:-1] + (
+                NodeScopePosition("chat", "chat-over-limit", 0, None),
+                positions[-1],
+            ),
+        ))
 
 
 def store(tmp_path):
