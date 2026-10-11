@@ -26,6 +26,7 @@ from agentbridge.transport.source_ledger import (
 )
 
 EPOCH = "12345678-1234-5678-9234-567812345678"
+V2_EPOCH = "87654321-4321-4765-8765-876543210987"
 
 
 class ScriptedTransport(Transport):
@@ -162,7 +163,7 @@ def frontier(cursor, minimum=3):
 
 
 def fence(cursor, minimum=3):
-    return SourceLedgerFence(EPOCH, minimum, cursor, 1)
+    return SourceLedgerFence(EPOCH, minimum, cursor, 2)
 
 
 def test_disabled_collector_performs_no_provider_or_store_work(tmp_path):
@@ -187,6 +188,30 @@ def test_cold_node_stays_catching_up_without_global_fallback(tmp_path):
     assert status.admitted_generation == 0
     assert status.health == "catching_up"
     assert status.last_success_ns == 0
+
+
+def test_source_contract_epoch_rotation_invalidates_equal_v1_cursor(tmp_path):
+    owner = store(tmp_path)
+    generation = admit(owner, NodeInputBatch(
+        documents=(NodeDocument("users/a.json", 1, False, b'old'),),
+        frontiers=(frontier(3),),
+    ))
+    provider = ScriptedTransport(fences=(
+        SourceLedgerFence(V2_EPOCH, 3, 3, 2),
+    ))
+    result = ShadowCollector(
+        provider, owner, enabled=True, clock_ns=lambda: 10,
+    ).run_once()
+    assert result.state == "catching_up"
+    assert result.recovery_scopes == ("root",)
+    captured = owner.capture(NodeCaptureRequest(
+        exact_document_paths=("users/a.json",),
+        frontier_names=(SOURCE_LEDGER_FRONTIER,), max_documents=1,
+    ))
+    assert captured.generation == generation
+    assert captured.documents[0].payload == b'old'
+    assert captured.frontiers[0].epoch == EPOCH
+    assert captured.health == "catching_up"
 
 
 def test_exact_document_and_log_work_admits_one_atomic_generation(tmp_path):

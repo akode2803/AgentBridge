@@ -256,14 +256,23 @@ are re-evaluated for every product request. Continuations must bind endpoint,
 root, principal, index epoch, scope and selection without exposing rejected room
 identities or a hidden global position.
 
-The current source ledger does not yet prove physical document/log deletion or
-member-row update/remap coverage. Absence therefore cannot be admitted from it.
-The recovery protocol must first extend that mutation evidence or explicitly
-leave those scopes incomplete. It also needs per-scope, per-family completion
-states that distinguish complete-empty, denied, failed and truncated work. A
-start fence plus bounded enumeration must replay intervening events instead of
-requiring provider quiescence; leave/rejoin, a newly visible room behind the
-enumeration cursor and late lower log IDs remain mandatory cases.
+Source-ledger version 2 adds conservative mutation evidence for physical
+document/log deletion and member-row insert, update, remap and deletion. A bulk
+physical delete emits one identity-less root recovery event per affected root,
+not one event per row; presence-only document deletion remains outside durable
+replay. A member remap emits old- and new-root events in deterministic root
+order. Installing v2 rotates every existing provider source epoch once, so a
+node cannot reuse a v1 cursor that may predate unrecorded physical deletion.
+These events and the rotated epoch prove only that recovery work is required.
+They do not prove which row is absent, that a recovered scope is complete, or
+that a removed principal will observe the old-root event after current RLS
+revokes access.
+The recovery protocol therefore still needs private current-authority discovery
+and per-scope, per-family completion states that distinguish complete-empty,
+denied, failed and truncated work. A start fence plus bounded enumeration must
+replay intervening events instead of requiring provider quiescence; leave/rejoin,
+a newly visible room behind the enumeration cursor and late lower log IDs remain
+mandatory cases.
 
 ## Staged delivery
 
@@ -285,11 +294,11 @@ enumeration cursor and late lower log IDs remain mandatory cases.
 - Test crash between provider read/stage/admission, cursor replacement, offline
   leave/rejoin, equal IDs/namespaces, tombstones and bounded overflow.
 
-The atomic store, local protocol and exact-source shadow collector sub-slices are
-implemented. Durable multi-chunk private staging is the next store prerequisite;
-it does not make cold/scoped recovery complete. The remaining N1 work is source
-mutation coverage, the bound recovery identity/checkpoint/completion protocol,
-private current-authority discovery, runtime composition behind an explicit
+The atomic store, local protocol, exact-source shadow collector, durable
+multi-chunk private staging and source-ledger v2 mutation-evidence sub-slices are
+implemented. They do not make cold/scoped recovery complete. The remaining N1
+work is the bounded recovery identity/checkpoint/completion protocol, private
+current-authority discovery, runtime composition behind an explicit
 disabled-by-default feature gate and the transport-equivalence recorder. Do not
 route GUI or harness reads to the store while those pieces or N2 are absent.
 
@@ -407,7 +416,9 @@ identity/meta/scope schema, exclusive owner lease and authenticated loopback
 `/v1/status`. The atomic N1 store and bounded `/v1/capture` and `/v1/changes`
 read routes plus the feature-gated exact-source shadow collector are implemented
 but inactive. The store can durably accumulate a bounded private candidate over
-multiple idempotent chunks and publish it atomically. Next, add delete/member-
-update evidence and the durable provider recovery identity, checkpoints and
-completion proofs before private visibility discovery and equivalence recording.
+multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
+bounded root recovery evidence for physical deletes and member-row changes, but
+does not turn an event into absence, completeness or authority proof. Next, add
+the durable provider recovery identity, checkpoints and completion proofs before
+private current-authority discovery and equivalence recording.
 No GUI or harness read cutover occurs before that work and N2.

@@ -16,7 +16,7 @@ EPOCH = "12345678-1234-5678-9234-567812345678"
 @pytest.fixture
 def tx():
     client = FakeClient()
-    client.db["_source_ledger_version"] = 1
+    client.db["_source_ledger_version"] = 2
     client.db["ab_change_epochs"] = [{
         "root": "team", "epoch": EPOCH, "minimum_cursor": 3,
         "schema_version": 1,
@@ -40,7 +40,7 @@ def tx():
 
 def test_source_fence_and_pages_preserve_exact_raw_identity(tx):
     assert tx.supports_source_ledger is True
-    assert tx.source_ledger_fence() == SourceLedgerFence(EPOCH, 3, 6, 1)
+    assert tx.source_ledger_fence() == SourceLedgerFence(EPOCH, 3, 6, 2)
 
     first = tx.source_ledger_events(3, limit=2)
     assert first.has_more is True and first.cursor == 5
@@ -55,7 +55,7 @@ def test_source_fence_and_pages_preserve_exact_raw_identity(tx):
     assert second.events[0].source_key is None
 
 
-@pytest.mark.parametrize("malformed", [True, 1.0, "1", [1], None])
+@pytest.mark.parametrize("malformed", [True, 1, 1.0, "2", [2], None])
 def test_source_ledger_capability_requires_an_exact_version(tx, malformed):
     tx._client.db["_source_ledger_version"] = malformed
     tx._source_ledger_ready = None
@@ -90,7 +90,7 @@ def test_source_ledger_rejects_missing_identity_field_and_malformed_fence(
     def malformed(fn, params):
         if fn == "ab_node_source_ledger_fence":
             return [{"epoch": EPOCH, "minimum_cursor": 8, "cursor": 7,
-                     "schema_version": 1}]
+                     "schema_version": 2}]
         return original(fn, params)
 
     monkeypatch.setattr(tx._client, "_rpc_locked", malformed)
