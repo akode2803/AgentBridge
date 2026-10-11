@@ -255,6 +255,19 @@ def test_root_revision_movement_rejects_claimed_recovery_start(world, tmp_path):
     assert replacement.claim_id != claim.claim_id
 
 
+def test_claimed_recovery_rejects_provider_principal_rebind(world):
+    root, _store, node, _definition, _position = world
+    claim = root.claim_node_recovery(node)
+    wrong = NodeProviderCut(
+        1, "index:source-v1", "source-epoch", "bob", "member", 0, 5)
+
+    with pytest.raises(NodeGenerationChanged, match="provider principal changed"):
+        root.begin_node_recovery(node, claim, wrong, created_ns=10)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
+
+
 def test_later_mutation_invalidates_claimed_recovery_before_provider_page(world):
     root, _store, node, _definition, _position = world
     claim = root.claim_node_recovery(node)

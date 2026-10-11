@@ -30,10 +30,11 @@ from agentbridge.transport.supabase import SupabaseTransport
 from fake_cloud import FakeClient
 
 EPOCH = "12345678-1234-5678-9234-567812345678"
+ACCOUNT = "12345678-1234-5678-9234-567812345679"
 
 
 def identity():
-    return ReplicaIdentity("https://x.test", "supabase://team", "user", "mac")
+    return ReplicaIdentity("https://x.test", "supabase://team", ACCOUNT, "mac")
 
 
 def transport():
@@ -292,6 +293,26 @@ def test_coordinator_admission_consumes_claim_and_is_idempotent(tmp_path):
             "SELECT admitted_generation,claim_digest FROM node_recovery_receipts "
             "WHERE recovery_id=?", (sealed.recovery_id,),
         ).fetchone() == (admitted, claim.claim_digest)
+
+
+def test_coordinator_admission_rejects_sealed_principal_rebind(tmp_path):
+    owner, root, claim, sealed = sealed_claimed_recovery(tmp_path)
+    with sqlite3.connect(owner.path) as conn:
+        conn.execute(
+            "UPDATE provider_recoveries SET account_id=? WHERE recovery_id=?",
+            ("12345678-1234-5678-9234-567812345680", sealed.recovery_id),
+        )
+
+    with pytest.raises(NodeGenerationChanged, match="claimed local recovery changed"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+    assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == 0
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("sealed",)
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
 
 
 def test_coordinator_admission_failure_rolls_back_permit_and_publication(
@@ -765,7 +786,8 @@ data = json.loads(claim_json)
 data["fence_tokens"] = tuple(data["fence_tokens"])
 claim = NodeRecoveryClaim(**data)
 node = NodeStore(node_path, ReplicaIdentity(
-    claim.provider_endpoint, claim.root, "user", "mac"))
+    claim.provider_endpoint, claim.root,
+    "12345678-1234-5678-9234-567812345679", "mac"))
 root = MutationCoordinator(home, root_identity)
 if phase == "before_node_commit":
     NodeStore._clear_candidate_rows = staticmethod(

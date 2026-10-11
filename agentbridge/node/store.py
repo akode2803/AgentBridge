@@ -1239,6 +1239,7 @@ class NodeStore:
         if not conn.in_transaction or type(current_provider_cut) is not NodeProviderCut:
             raise ValueError("local node coordinator cut required")
         current = NodeProviderCut(**vars(current_provider_cut))
+        self._check_provider_principal(current)
         claim = self._require_recovery_claim(conn, registration, claim)
         plan = NodeRecoveryPlan(
             claim.database_incarnation, claim.identity_digest,
@@ -1303,7 +1304,7 @@ class NodeStore:
         bound = conn.execute("""
             SELECT m.claim_id,m.claim_digest,r.generation,r.state,
                    r.database_incarnation,r.identity_digest,r.base_generation,
-                   g.state,g.claim_id,g.claim_digest
+                   r.account_id,g.state,g.claim_id,g.claim_digest
             FROM claimed_recoveries m
             JOIN provider_recoveries r ON r.recovery_id=m.recovery_id
             JOIN node_generations g ON g.generation=r.generation
@@ -1314,7 +1315,8 @@ class NodeStore:
                 or bound[4:7] != (
                     claim.database_incarnation, claim.identity_digest,
                     claim.base_generation)
-                or bound[7:] != (
+                or bound[7] != self.identity.principal
+                or bound[8:] != (
                     "sealed", claim.claim_id, claim.claim_digest)):
             raise NodeGenerationChanged("claimed local recovery changed")
         generation = bound[2]
@@ -2361,6 +2363,7 @@ class NodeStore:
         if type(current_provider_cut) is not NodeProviderCut:
             raise NodeInputError("invalid current provider cut")
         current = NodeProviderCut(**vars(current_provider_cut))
+        self._check_provider_principal(current)
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
             meta = self._check_meta(conn)
@@ -2448,12 +2451,17 @@ class NodeStore:
             raise NodeInputError("invalid required candidate slots")
         return plan, created
 
+    def _check_provider_principal(self, cut: NodeProviderCut) -> None:
+        if cut.account_id != self.identity.principal:
+            raise NodeGenerationChanged("provider principal changed")
+
     def _begin_recovery_in_transaction(
         self, conn: sqlite3.Connection, plan: NodeRecoveryPlan, *, created: int,
         required_candidate_slots: int, claim: NodeRecoveryClaim | None,
     ) -> NodeRecoveryState:
         if not conn.in_transaction:
             raise ValueError("local node coordinator cut required")
+        self._check_provider_principal(plan.provider_cut)
         meta = self._check_meta(conn)
         claimed = claim is not None
         expected_pending = (len(claim.fence_tokens) if claim is not None else 0)
@@ -2607,6 +2615,7 @@ class NodeStore:
         stale = (meta[0] != incarnation or self.identity.digest != digest
                  or meta[1] != base or claim_stale
                  or (claim is None and bool(meta[5]))
+                 or account != self.identity.principal
                  or current.schema_version != schema or current.index_epoch != index
                  or current.source_epoch != source or current.minimum_cursor > replay
                  or current.account_id != account or current.role != role
@@ -4300,7 +4309,8 @@ class NodeStore:
                 raise NodeGenerationChanged("candidate is not sealed")
             recovery = conn.execute(
                 "SELECT recovery_id,state,database_incarnation,identity_digest,"
-                "base_generation,health_owner_token FROM provider_recoveries "
+                "base_generation,health_owner_token,account_id "
+                "FROM provider_recoveries "
                 "WHERE generation=?",
                 (generation,)).fetchone()
             if recovery:
@@ -4335,7 +4345,8 @@ class NodeStore:
                 recovery_stale = (current[2] != recovery[2]
                                   or self.identity.digest != recovery[3]
                                   or current[0] != recovery[4]
-                                  or bool(current[3]))
+                                  or bool(current[3])
+                                  or recovery[6] != self.identity.principal)
                 for kind, ident, scope_generation in conn.execute(
                         "SELECT scope_kind,scope_id,generation FROM recovery_scopes "
                         "WHERE recovery_id=?", (recovery[0],)):
