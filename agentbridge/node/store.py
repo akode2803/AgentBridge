@@ -1429,6 +1429,55 @@ class NodeStore:
         return receipt[0]
 
     @classmethod
+    def coordinator_abandon_claimed_recovery(
+        cls, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+        claim: NodeRecoveryClaim, recovery_id: str,
+    ) -> bool:
+        """Retire one exact private claim without consuming mutation fences."""
+        if (not conn.in_transaction or type(recovery_id) is not str
+                or _CLAIM_ID.fullmatch(recovery_id) is None):
+            raise ValueError("invalid claimed local node abandonment")
+        registration = _node_registration(registration)
+        claim = _recovery_claim(claim)
+        if NodeCoordinatorRegistration(
+                claim.database_path, claim.database_incarnation,
+                claim.identity_digest, claim.provider_endpoint,
+                claim.root) != registration:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        cls._check_coordinator_state(conn)
+        stored = cls._stored_recovery_claim(conn, registration)
+        if stored is None:
+            return False
+        if stored != claim:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        mapping = conn.execute(
+            "SELECT c.claim_id,c.claim_digest,r.generation,r.state "
+            "FROM claimed_recoveries c JOIN provider_recoveries r "
+            "ON r.recovery_id=c.recovery_id WHERE c.recovery_id=?",
+            (recovery_id,),
+        ).fetchone()
+        if (mapping is None or mapping[:2] != (
+                claim.claim_id, claim.claim_digest)
+                or mapping[3] not in ("building", "sealed")):
+            raise NodeGenerationChanged("claimed local recovery changed")
+        generation = mapping[2]
+        changed = conn.execute(
+            "UPDATE node_generations SET state='abandoned' "
+            "WHERE generation=? AND state IN ('building','sealed')",
+            (generation,),
+        ).rowcount
+        if changed != 1:
+            raise NodeGenerationChanged("claimed local recovery changed")
+        cls._clear_candidate_rows(conn, generation)
+        conn.execute("DELETE FROM node_recovery_claim_fences")
+        conn.execute("DELETE FROM node_recovery_claims")
+        cls._prune_generation_history(conn)
+        cls._check_mutation_fences(conn)
+        cls._check_coordinator_state(conn)
+        return True
+
+    @classmethod
     def _invalidate_recovery_claim(cls, conn: sqlite3.Connection) -> None:
         """Retire claim-owned private work before a later local mutation."""
         mapping = conn.execute(
@@ -1472,6 +1521,40 @@ class NodeStore:
         if len(rows) > 1:
             raise sqlite3.DatabaseError("multiple claimed local recoveries")
         return None if not rows else rows[0][0]
+
+    def claimed_recovery(self) -> tuple[NodeRecoveryClaim, str] | None:
+        """Return the exact durable claim/recovery pair for its coordinator.
+
+        This is resumable local work metadata, not authority or provider
+        freshness.  The mutation coordinator rechecks the complete claim while
+        holding root -> node exclusion before it can admit the recovery.
+        """
+        registration = self.coordinator_registration()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            self._check_identity(conn)
+            self._check_mutation_guard(conn)
+            self._check_mutation_fences(conn)
+            self._check_coordinator_state(conn)
+            claim = self._stored_recovery_claim(conn, registration)
+            rows = conn.execute(
+                "SELECT recovery_id,claim_id,claim_digest "
+                "FROM claimed_recoveries LIMIT 2"
+            ).fetchall()
+            if len(rows) > 1:
+                raise sqlite3.DatabaseError("multiple claimed local recoveries")
+            if not rows:
+                if claim is not None:
+                    raise sqlite3.DatabaseError(
+                        "local node recovery claim has no recovery")
+                return None
+            recovery_id, claim_id, claim_digest = rows[0]
+            if (claim is None or claim.claim_id != claim_id
+                    or claim.claim_digest != claim_digest):
+                raise sqlite3.DatabaseError(
+                    "claimed local recovery does not match its claim")
+            claim = self._require_recovery_claim(conn, registration, claim)
+        return claim, recovery_id
 
     def finalization_position(self, capture: NodeCapture) -> NodeFinalizationPosition:
         if type(capture) is not NodeCapture:

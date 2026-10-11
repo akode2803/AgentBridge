@@ -32,6 +32,7 @@ from .diagnostic_runtime import (
     diagnostic_runtime_enabled,
 )
 from .recovery import ClaimedRecoveryExecutor, InactiveRecoveryExecutor, RecoveryStepResult
+from .recovery_runtime import LocalNodeRecoveryRuntime, NodeRecoveryRuntimeResult
 from .server import LocalNodeServer
 from .store import NodeStore
 
@@ -39,6 +40,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "LocalNodeServer",
     "LocalNodeDiagnosticRuntime",
+    "LocalNodeRecoveryRuntime",
     "ClaimedRecoveryExecutor",
     "InactiveRecoveryExecutor",
     "NodeCapture",
@@ -57,6 +59,7 @@ __all__ = [
     "NodeLogRow",
     "NodeStatus",
     "NodeDiagnosticStepResult",
+    "NodeRecoveryRuntimeResult",
     "NodeStore",
     "NodeVisibility",
     "ReplicaIdentity",

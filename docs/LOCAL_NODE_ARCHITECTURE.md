@@ -561,6 +561,23 @@ publish an old claim, and competing starts/admissions converge on one durable
 recovery. These checks are release evidence for the inactive operation, not a
 membership verdict or permission to route product reads.
 
+The inactive recovery runtime composes that operation with the existing
+mutation-owned transport. Construction synchronously registers the node with
+the shared coordinator before any recovery step. A cold, pending, failed or
+interrupted node resumes durable claimed work, while a clean ready restart does
+not manufacture a whole-root scan. Content-free requests are coalesced in
+process; durable mutation fences and claimed work are also rediscovered if a
+notification is lost. One explicit step performs at most one bounded provider
+recovery operation and admits a sealed result only through the root -> node
+coordinator transaction. An ambiguous admission response retains the exact
+claim/recovery pair and its originating request revision for receipt resolution.
+A definitively invalid claim is retired under the same coordinator exclusion;
+that removes only its private candidate and preserves every mutation fence,
+newer claim, admitted generation and committed receipt. The runtime creates no
+thread, timer, GUI/harness import, server route or product-read fallback.
+Loopback-owner composition, Realtime/ledger scheduling and product input
+conversion remain separate activation work.
+
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every
