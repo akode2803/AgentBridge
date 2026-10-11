@@ -644,3 +644,45 @@ CPU was 0.39%. Merge only after exact-head Windows CI passes, then deliberately
 apply the merged schema and measure provider CPU plus harness request rates as
 the GUI and harnesses are restarted in stages. Do not infer the live CPU fix
 from local tests.
+
+## Current local-node checkpoint — 2026-10-11
+
+The later local-node recovery stack supersedes the older transport checkpoint
+above. Its durable implementation record is
+`~/.agentbridge/dev-tasks/1092b6e37b13bbe8/LOCAL_NODE_RECOVERY_V5_PLAN_2026-10-11.md`.
+PRs #78--#84 are merged through merge commit `7840bfe`. Corrected PR #85 head
+`ce4c825` is based directly on `main`; PR #86 remains stacked on #85 and its
+rebased command implementation commit is `f6215cd`. The app and harness remain
+stopped. No provider schema installation, live diagnostic activation, deploy or
+restart has occurred.
+
+PR #85 composes the typed recovery, independent reference and Store-to-Store
+equivalence recorder behind an exact disabled-by-default gate. It advances at
+most one provider data page per call, resumes from SQLite, rejects incompatible
+provider cuts before scanning and is not imported by GUI or harness startup.
+Diagnostic recovery has a distinct, inadmissible run identity; both sides are
+health-neutral and use diagnostic-only selections. Start reserves two candidate
+slots, a reference-start capacity race cleans up the first half, and successful
+evidence recording abandons both private candidates. Capability preflight now
+runs before any candidate is created. A zero-token diagnostic repair restart is
+treated as health-unowned, and a capacity retry transactionally retires only
+stale or orphaned diagnostic references when no bound diagnostic recovery
+remains; ordinary independent-reference work is unaffected. PR #86 adds the
+separate one-shot operator command. The command touches neither config nor
+provider while disabled, derives its identity-bound Store/evidence path from
+the authenticated provider account, emits only bounded progress/error
+categories and exits after one step.
+
+Corrected PR #85 head passes a 305-test broader local-node/source/transport-cache
+gate and a 149-test focused recovery/reference/store/admission/source gate, plus
+Ruff, compilation and diff checks. The earlier complete local suite on the PR
+passed 3,548 tests with 20 skips before this bounded review correction. GPT-Astra's
+corrected-tree review is clean and independently passed 80 focused tests. The
+rebased #86 command/runtime/recovery/reference gate passes 34 tests with Ruff,
+compilation and diff checks clean. New hosted CI and connector review for #85/#86
+are pending and must not be polled;
+incorporate the user's completion signal and any current-head findings. After
+the stack merges, provider-schema installation is a separate explicit release
+action. Only then run the one-shot diagnostic repeatedly and record step count,
+wall time, counts, digests and restart reasons. Equality is delivery evidence,
+never membership authority. Product reads remain on the existing path until N2.

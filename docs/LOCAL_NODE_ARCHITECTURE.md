@@ -532,3 +532,17 @@ generation and its health timestamps remain unchanged, then reclaims both
 private candidates. Repeated calls after completion may record a new
 observation; the diagnostic caller owns stopping policy. N2 remains mandatory
 before read cutover.
+
+The operator entry point is deliberately one-shot and separate from normal app
+startup:
+
+```text
+AGENTBRIDGE_LOCAL_NODE_DIAGNOSTIC=1 \
+  python -m agentbridge.devtools.local_node_diagnostic
+```
+
+It derives an identity-bound private Store and evidence directory under the
+configured AgentBridge home, performs one coordinator step, prints only bounded
+content-free progress, and exits. Repeating the same command resumes accepted
+Store work. Errors expose only a fixed exception category. This is a diagnostic
+tool, not a background scheduler or product read route.
