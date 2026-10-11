@@ -2,9 +2,11 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
+import agentbridge.node.store as node_store
 from agentbridge.node.admission import (
     NodeCaptureRequest, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeInputBatch, NodeInputError, NodeLogRow, NodeVisibility,
@@ -237,6 +239,156 @@ def test_claimed_recovery_seals_but_cannot_use_ordinary_admission(tmp_path):
     assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == 0
 
 
+def test_coordinator_admission_consumes_claim_and_is_idempotent(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    intent = root.begin((source_selectors.Selector(
+        "doc_exact", "users/earlier.json"),))
+    root.complete(intent)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+
+    admitted = root.admit_node_recovery(owner, claim, sealed.recovery_id)
+    repeated = root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    assert admitted == sealed.generation == repeated
+    assert owner.capture(NodeCaptureRequest(
+        document_prefixes=("",), include_visibility=True,
+        visibility_limit=10, max_documents=10, max_bytes=8192,
+    )).generation == admitted
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.health == "ready" and status.pending_mutations == 0
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute("SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM claimed_recoveries").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM node_mutation_fences").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT admitted_generation,claim_digest FROM node_recovery_receipts "
+            "WHERE recovery_id=?", (sealed.recovery_id,),
+        ).fetchone() == (admitted, claim.claim_digest)
+
+
+def test_coordinator_admission_failure_rolls_back_permit_and_publication(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(NodeStore, "_apply_candidate", staticmethod(fail_publish))
+    with pytest.raises(OSError, match="injected publication failure"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == 0
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute("SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("sealed",)
+        assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (1,)
+
+
+def test_lost_admission_response_recovers_from_retained_receipt(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+    original = root._transaction
+
+    @contextmanager
+    def lose_response(**kwargs):
+        with original(**kwargs) as conn:
+            yield conn
+            raise OSError("root commit response lost")
+
+    monkeypatch.setattr(root, "_transaction", lose_response)
+    with pytest.raises(OSError, match="root commit response lost"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+    monkeypatch.setattr(root, "_transaction", original)
+
+    assert root.admit_node_recovery(
+        owner, claim, sealed.recovery_id) == sealed.generation
+    assert owner.capture(NodeCaptureRequest(max_bytes=1024)).generation == (
+        sealed.generation)
+
+
+def test_retained_receipt_survives_later_root_mutation(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+    admitted = root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    later = root.begin((source_selectors.Selector(
+        "doc_exact", "users/later.json"),))
+    root.complete(later)
+    before = owner.status(node_epoch="node", started_ns=1)
+
+    assert root.admit_node_recovery(
+        owner, claim, sealed.recovery_id) == admitted
+    after = owner.status(node_epoch="node", started_ns=1)
+    assert before.pending_mutations == after.pending_mutations == 1
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_mutation_fences"
+        ).fetchall() == [("completed",)]
+
+
+def test_old_generation_pruning_cascades_retained_receipt(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+    admitted = root.admit_node_recovery(owner, claim, sealed.recovery_id)
+    replacement = owner.begin_candidate(created_ns=20)
+    owner.seal_candidate(replacement, NodeInputBatch(), observed_ns=21)
+    owner.admit_candidate(replacement)
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "DELETE FROM node_generations WHERE generation=? "
+            "AND state='superseded'", (admitted,),
+        ).rowcount == 1
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_receipts WHERE recovery_id=?",
+            (sealed.recovery_id,),
+        ).fetchone() == (0,)
+
+    assert NodeStore(owner.path, identity()).status(
+        node_epoch="node", started_ns=1).admitted_generation == replacement
+
+
 def test_database_guard_blocks_version_nine_writer_from_admitting_claim(tmp_path):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     tx, _client = transport()
@@ -297,10 +449,14 @@ def test_v9_migration_backfills_active_claim_generation_tag(tmp_path):
     root.register_node(owner)
     started = ClaimedRecoveryExecutor(owner, tx, root).step(None, attempted_ns=10)
     with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER node_recovery_receipt_prune")
+        conn.execute("DROP TRIGGER node_admission_permit_consumer")
         conn.execute("DROP TRIGGER node_claimed_generation_guard")
         conn.execute("DROP TRIGGER node_claim_tag_immutable_guard")
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_digest")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_id")
+        conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -314,7 +470,7 @@ def test_v9_migration_backfills_active_claim_generation_tag(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version FROM node_schema WHERE singleton=1"
-        ).fetchone() == (10,)
+        ).fetchone() == (11,)
         assert conn.execute(
             "SELECT claim_id,claim_digest FROM node_generations "
             "WHERE generation=?", (started.generation,),
@@ -342,10 +498,14 @@ def test_v9_migration_retires_unmapped_active_claim_work(tmp_path):
             "DELETE FROM claimed_recoveries WHERE recovery_id=?",
             (result.recovery_id,),
         )
+        conn.execute("DROP TRIGGER node_recovery_receipt_prune")
+        conn.execute("DROP TRIGGER node_admission_permit_consumer")
         conn.execute("DROP TRIGGER node_claimed_generation_guard")
         conn.execute("DROP TRIGGER node_claim_tag_immutable_guard")
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_digest")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_id")
+        conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -364,6 +524,45 @@ def test_v9_migration_retires_unmapped_active_claim_work(tmp_path):
         assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (1,)
     with pytest.raises(NodeGenerationChanged, match="candidate is not sealed"):
         reopened.admit_candidate(result.generation)
+
+
+def test_v10_migration_preserves_tagged_claim_and_installs_permit_guards(tmp_path):
+    path = tmp_path / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    started = ClaimedRecoveryExecutor(owner, tx, root).step(None, attempted_ns=10)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER node_recovery_receipt_prune")
+        conn.execute("DROP TRIGGER node_admission_permit_consumer")
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
+        conn.execute("DROP TRIGGER node_claimed_generation_guard")
+        conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
+        conn.execute(node_store._V10_CLAIMED_GENERATION_GUARD)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=10),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,10,1)")
+
+    reopened = NodeStore(path, identity())
+
+    assert reopened.claimed_recovery_id() == started.recovery_id
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT version FROM node_schema WHERE singleton=1"
+        ).fetchone() == (11,)
+        assert {
+            name for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        } == {
+            "node_pending_mutation_guard", "node_claimed_generation_guard",
+            "node_claim_tag_immutable_guard", "node_admission_permit_consumer",
+            "node_recovery_receipt_prune",
+        }
 
 
 def test_equivalence_reference_rejects_a_moving_provider_cut():

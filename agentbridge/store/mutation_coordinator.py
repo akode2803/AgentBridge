@@ -460,6 +460,38 @@ class MutationCoordinator:
         return node.recovery_state(
             recovery_id, current_provider_cut, include_counts=False)
 
+    def admit_node_recovery(self, node, claim, recovery_id):
+        """Admit one claimed recovery while excluding every root mutation."""
+        from ..node.admission import NodeRecoveryClaim
+        from ..node.store import NodeStore
+
+        if (type(node) is not NodeStore or type(claim) is not NodeRecoveryClaim
+                or type(recovery_id) is not str):
+            raise ValueError('invalid claimed local node admission')
+        if (claim.coordinator_path != str(self.path)
+                or claim.coordinator_identity != self.identity
+                or claim.coordinator_epoch != self.epoch):
+            raise owner.SourceChanged('node_recovery_claim_changed')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                receipt = node.coordinator_recovery_receipt(
+                    node_conn, registration, claim, recovery_id)
+                if receipt is not None:
+                    return receipt
+                if (root.execute(
+                        'SELECT 1 FROM mutation_intents LIMIT 1').fetchone()
+                        or root.execute(
+                            'SELECT 1 FROM quarantine_intents LIMIT 1').fetchone()):
+                    raise owner.SourceChanged('root_mutation_pending')
+                if claim.root_revision != self._root_revision(root):
+                    raise owner.SourceChanged('node_recovery_claim_changed')
+                return node.coordinator_admit_claimed_recovery(
+                    node_conn, registration, claim, recovery_id)
+
     def _retire_nodes(self, root, token, *, state='active', skip_path=None):
         from ..node.store import NodeStore
 
