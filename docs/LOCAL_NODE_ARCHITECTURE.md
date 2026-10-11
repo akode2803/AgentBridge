@@ -532,7 +532,22 @@ writers from admitting claim-owned work; the v9 migration backfills a validated
 mapping and retires active private work when legacy claim ownership is unprovable.
 Ordinary recovery creation is blocked while an unconsumed claim exists and
 ordinary candidate admission explicitly rejects claim-owned generations.
-Atomic fence consumption and product routing remain separate and inactive.
+Product routing remains separate and inactive.
+
+The inactive coordinator admission operation holds the root writer before the
+node writer, revalidates the exact claim and sealed full-replacement recovery,
+then publishes candidate rows, consumes every claimed fence, clears pending
+scope state, advances the admitted generation and records a durable receipt in
+one node transaction. A temporary database permit is exact to that recovery,
+incarnation, base and destination generation, claim digest and root revision,
+and old/new pending counts. The generation and metadata triggers validate it;
+the metadata transition deletes it in the same statement. No permit can commit
+as a reusable bypass. A lost response is recovered only from the exact retained
+receipt, and that receipt is consulted before newer root revisions or mutations
+can reject the historical retry. A database trigger couples receipt retirement
+to pruning of its superseded generation, including pruning performed by an
+already-running older writer. Product reads remain disconnected pending the
+active-change and crash validation matrix.
 
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries

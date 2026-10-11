@@ -31,7 +31,7 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
@@ -40,7 +40,7 @@ DIAGNOSTIC_REFERENCE_PLAN_SELECTION = b"provider-diagnostic-reference-v1"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=10),
+    version INTEGER NOT NULL CHECK(version=11),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -372,7 +372,7 @@ _COORDINATOR_EPOCH = re.compile(r"[0-9a-f]{32}\Z")
 _COORDINATOR_TOKEN = re.compile(r"(?:[0-9a-f]{64}|q[0-9a-f]{63})\Z")
 _CLAIM_ID = re.compile(r"[0-9a-f]{48}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_PENDING_MUTATION_GUARD = """CREATE TRIGGER node_pending_mutation_guard
+_V10_PENDING_MUTATION_GUARD = """CREATE TRIGGER node_pending_mutation_guard
 BEFORE UPDATE ON node_meta
 WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
     NEW.pending_mutations<OLD.pending_mutations OR
@@ -381,8 +381,8 @@ WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
 BEGIN
     SELECT RAISE(ABORT,'local node mutation pending');
 END"""
-_V8_PENDING_MUTATION_GUARD = _PENDING_MUTATION_GUARD
-_CLAIMED_GENERATION_GUARD = """CREATE TRIGGER node_claimed_generation_guard
+_V8_PENDING_MUTATION_GUARD = _V10_PENDING_MUTATION_GUARD
+_V10_CLAIMED_GENERATION_GUARD = """CREATE TRIGGER node_claimed_generation_guard
 BEFORE UPDATE OF state ON node_generations
 WHEN OLD.claim_id IS NOT NULL AND OLD.state='sealed' AND NEW.state='admitted'
 BEGIN
@@ -394,9 +394,119 @@ WHEN NOT (OLD.claim_id IS NEW.claim_id AND OLD.claim_digest IS NEW.claim_digest)
 BEGIN
     SELECT RAISE(ABORT,'local node recovery claim tag is immutable');
 END"""
+_PENDING_MUTATION_GUARD = """CREATE TRIGGER node_pending_mutation_guard
+BEFORE UPDATE ON node_meta
+WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
+    NEW.pending_mutations<OLD.pending_mutations OR
+    NEW.admitted_generation!=OLD.admitted_generation OR
+    NEW.health!='pending') AND NOT EXISTS (
+        SELECT 1 FROM node_admission_permits p
+        JOIN provider_recoveries r ON r.recovery_id=p.recovery_id
+        JOIN node_generations g ON g.generation=p.destination_generation
+        JOIN claimed_recoveries m ON m.recovery_id=p.recovery_id
+        JOIN node_recovery_claims c ON c.claim_id=m.claim_id
+        WHERE p.singleton=1
+          AND p.database_incarnation=OLD.database_incarnation
+          AND p.database_incarnation=c.database_incarnation
+          AND p.base_generation=OLD.admitted_generation
+          AND p.base_generation=r.base_generation
+          AND p.base_generation=c.base_generation
+          AND p.destination_generation=NEW.admitted_generation
+          AND p.destination_generation=r.generation
+          AND p.claim_digest=m.claim_digest
+          AND p.claim_digest=c.claim_digest
+          AND p.claim_digest=g.claim_digest
+          AND p.root_revision=c.root_revision
+          AND p.old_pending_count=OLD.pending_mutations
+          AND p.new_pending_count=NEW.pending_mutations
+          AND p.new_pending_count=0
+          AND r.state='sealed' AND g.state='admitted'
+          AND g.claim_id=c.claim_id
+          AND NEW.database_incarnation=OLD.database_incarnation
+          AND NEW.last_attempt_ns=OLD.last_attempt_ns
+          AND NEW.last_success_ns>=OLD.last_success_ns
+          AND NEW.health='ready'
+    )
+BEGIN
+    SELECT RAISE(ABORT,'local node mutation pending');
+END"""
+_CLAIMED_GENERATION_GUARD = """CREATE TRIGGER node_claimed_generation_guard
+BEFORE UPDATE OF state ON node_generations
+WHEN OLD.claim_id IS NOT NULL AND OLD.state='sealed' AND NEW.state='admitted'
+ AND NOT EXISTS (
+    SELECT 1 FROM node_admission_permits p
+    JOIN provider_recoveries r ON r.recovery_id=p.recovery_id
+    JOIN claimed_recoveries m ON m.recovery_id=p.recovery_id
+    JOIN node_recovery_claims c ON c.claim_id=m.claim_id
+    JOIN node_meta n ON n.singleton=1
+    WHERE p.singleton=1
+      AND p.destination_generation=OLD.generation
+      AND p.destination_generation=r.generation
+      AND p.base_generation=OLD.base_generation
+      AND p.base_generation=r.base_generation
+      AND p.base_generation=n.admitted_generation
+      AND p.base_generation=c.base_generation
+      AND p.database_incarnation=n.database_incarnation
+      AND p.database_incarnation=c.database_incarnation
+      AND p.claim_digest=OLD.claim_digest
+      AND p.claim_digest=m.claim_digest
+      AND p.claim_digest=c.claim_digest
+      AND p.root_revision=c.root_revision
+      AND p.old_pending_count=n.pending_mutations
+      AND p.new_pending_count=0
+      AND OLD.claim_id=c.claim_id
+      AND r.state='sealed'
+ )
+BEGIN
+    SELECT RAISE(ABORT,'claimed local recovery requires coordinator admission');
+END"""
+_ADMISSION_PERMIT_CONSUMER = """CREATE TRIGGER node_admission_permit_consumer
+AFTER UPDATE ON node_meta
+WHEN EXISTS (
+    SELECT 1 FROM node_admission_permits p
+    JOIN provider_recoveries r ON r.recovery_id=p.recovery_id
+    JOIN node_generations g ON g.generation=p.destination_generation
+    JOIN claimed_recoveries m ON m.recovery_id=p.recovery_id
+    JOIN node_recovery_claims c ON c.claim_id=m.claim_id
+    WHERE p.singleton=1
+      AND p.database_incarnation=OLD.database_incarnation
+      AND p.database_incarnation=c.database_incarnation
+      AND p.base_generation=OLD.admitted_generation
+      AND p.base_generation=r.base_generation
+      AND p.base_generation=c.base_generation
+      AND p.destination_generation=NEW.admitted_generation
+      AND p.destination_generation=r.generation
+      AND p.claim_digest=m.claim_digest
+      AND p.claim_digest=c.claim_digest
+      AND p.claim_digest=g.claim_digest
+      AND p.root_revision=c.root_revision
+      AND p.old_pending_count=OLD.pending_mutations
+      AND p.new_pending_count=NEW.pending_mutations
+      AND p.new_pending_count=0
+      AND r.state='sealed' AND g.state='admitted'
+      AND g.claim_id=c.claim_id
+      AND NEW.database_incarnation=OLD.database_incarnation
+      AND NEW.last_attempt_ns=OLD.last_attempt_ns
+      AND NEW.last_success_ns>=OLD.last_success_ns
+      AND NEW.health='ready'
+ )
+BEGIN
+    DELETE FROM node_admission_permits WHERE singleton=1;
+    SELECT CASE WHEN changes()!=1
+        THEN RAISE(ABORT,'local node admission permit was not consumed') END;
+END"""
+_RECOVERY_RECEIPT_PRUNE = """CREATE TRIGGER node_recovery_receipt_prune
+AFTER DELETE ON node_generations
+WHEN OLD.state='superseded'
+BEGIN
+    DELETE FROM node_recovery_receipts
+    WHERE admitted_generation=OLD.generation;
+END"""
 _NODE_GUARDS = ("\n" + _PENDING_MUTATION_GUARD + ";\n"
                 + _CLAIMED_GENERATION_GUARD + ";\n"
-                + _CLAIM_TAG_IMMUTABLE_GUARD + ";\n")
+                + _CLAIM_TAG_IMMUTABLE_GUARD + ";\n"
+                + _ADMISSION_PERMIT_CONSUMER + ";\n"
+                + _RECOVERY_RECEIPT_PRUNE + ";\n")
 
 
 def _positive_ns(value: object, name: str) -> int:
@@ -584,6 +694,8 @@ class NodeStore:
             "node_pending_mutation_guard": _PENDING_MUTATION_GUARD,
             "node_claimed_generation_guard": _CLAIMED_GENERATION_GUARD,
             "node_claim_tag_immutable_guard": _CLAIM_TAG_IMMUTABLE_GUARD,
+            "node_admission_permit_consumer": _ADMISSION_PERMIT_CONSUMER,
+            "node_recovery_receipt_prune": _RECOVERY_RECEIPT_PRUNE,
         }
         actual = dict(conn.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
@@ -915,6 +1027,27 @@ class NodeStore:
                     or type(revision) is not int
                     or not 0 <= revision <= 2**63 - 1):
                 raise sqlite3.DatabaseError("invalid local node recovery receipt")
+        if conn.execute("""
+            SELECT 1 FROM node_recovery_receipts r
+            LEFT JOIN node_generations g ON g.generation=r.admitted_generation
+            WHERE g.generation IS NULL OR g.claim_id IS NULL
+               OR g.claim_digest!=r.claim_digest
+               OR g.state NOT IN ('admitted','superseded')
+            LIMIT 1
+        """).fetchone() or conn.execute("""
+            SELECT 1 FROM node_generations g
+            LEFT JOIN node_recovery_receipts r
+              ON r.admitted_generation=g.generation
+             AND r.claim_digest=g.claim_digest
+            WHERE g.claim_id IS NOT NULL
+              AND g.state IN ('admitted','superseded')
+              AND r.recovery_id IS NULL
+            LIMIT 1
+        """).fetchone() or conn.execute("""
+            SELECT 1 FROM node_recovery_receipts
+            GROUP BY admitted_generation HAVING count(*)!=1 LIMIT 1
+        """).fetchone():
+            raise sqlite3.DatabaseError("invalid local node recovery receipt")
 
     @staticmethod
     def coordinator_bind_owner(
@@ -1144,6 +1277,156 @@ class NodeStore:
         )
         self._check_coordinator_state(conn)
         return state.recovery_id, state
+
+    def coordinator_admit_claimed_recovery(
+        self, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+        claim: NodeRecoveryClaim, recovery_id: str,
+    ) -> int:
+        """Publish one exact claimed recovery and consume its permit atomically."""
+        if (not conn.in_transaction or type(recovery_id) is not str
+                or _CLAIM_ID.fullmatch(recovery_id) is None):
+            raise ValueError("invalid claimed local node admission")
+        registration = _node_registration(registration)
+        claim = _recovery_claim(claim)
+        if NodeCoordinatorRegistration(
+                claim.database_path, claim.database_incarnation,
+                claim.identity_digest, claim.provider_endpoint,
+                claim.root) != registration:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        self._check_coordinator_state(conn)
+        receipt = self.coordinator_recovery_receipt(
+            conn, registration, claim, recovery_id)
+        if receipt is not None:
+            return receipt
+        claim = self._require_recovery_claim(conn, registration, claim)
+        bound = conn.execute("""
+            SELECT m.claim_id,m.claim_digest,r.generation,r.state,
+                   r.database_incarnation,r.identity_digest,r.base_generation,
+                   g.state,g.claim_id,g.claim_digest
+            FROM claimed_recoveries m
+            JOIN provider_recoveries r ON r.recovery_id=m.recovery_id
+            JOIN node_generations g ON g.generation=r.generation
+            WHERE m.recovery_id=?
+        """, (recovery_id,)).fetchone()
+        if (bound is None or bound[0] != claim.claim_id
+                or bound[1] != claim.claim_digest or bound[3] != "sealed"
+                or bound[4:7] != (
+                    claim.database_incarnation, claim.identity_digest,
+                    claim.base_generation)
+                or bound[7:] != (
+                    "sealed", claim.claim_id, claim.claim_digest)):
+            raise NodeGenerationChanged("claimed local recovery changed")
+        generation = bound[2]
+        (base, state, observed, documents_mode, logs_mode, visibility_mode,
+         frontiers_mode) = self._candidate_row(conn, generation)
+        if (state != "sealed" or observed is None or base != claim.base_generation
+                or (documents_mode, logs_mode, visibility_mode, frontiers_mode)
+                != ("replace", "replace", "replace", "replace")):
+            raise NodeGenerationChanged("claimed local recovery is not publishable")
+        self._check_candidate_caps(
+            conn, generation, documents_mode, logs_mode,
+            visibility_mode, frontiers_mode,
+        )
+        scopes = self._candidate_change_scopes(
+            conn, generation, documents_mode, logs_mode,
+            visibility_mode, frontiers_mode,
+        )
+        scopes.add(("root", ""))
+        self._prune_generation_history(conn)
+        if conn.execute(
+                "SELECT count(*) FROM node_recovery_receipts").fetchone()[0] >= (
+                    MAX_GENERATION_HISTORY):
+            raise NodeCandidateCapacityError(
+                "local node recovery receipt budget exceeded")
+        old_pending = len(claim.fence_tokens)
+        conn.execute(
+            "INSERT INTO node_admission_permits VALUES(1,?,?,?,?,?,?,?,0)",
+            (recovery_id, claim.database_incarnation, claim.base_generation,
+             generation, claim.claim_digest, claim.root_revision, old_pending),
+        )
+        self._apply_candidate(
+            conn, generation, documents_mode, logs_mode,
+            visibility_mode, frontiers_mode,
+        )
+        if base:
+            changed = conn.execute(
+                "UPDATE node_generations SET state='superseded' "
+                "WHERE generation=? AND state='admitted'", (base,),
+            ).rowcount
+            if changed != 1:
+                raise sqlite3.DatabaseError("admitted generation is inconsistent")
+        changed = conn.execute(
+            "UPDATE node_generations SET state='admitted' "
+            "WHERE generation=? AND state='sealed'", (generation,),
+        ).rowcount
+        if changed != 1:
+            raise NodeGenerationChanged("candidate changed during admission")
+        changed = conn.execute(
+            "UPDATE node_meta SET admitted_generation=?,pending_mutations=0,"
+            "health='ready',last_success_ns=MAX(last_success_ns,?) "
+            "WHERE singleton=1", (generation, observed),
+        ).rowcount
+        if changed != 1 or conn.execute(
+                "SELECT 1 FROM node_admission_permits LIMIT 1").fetchone():
+            raise sqlite3.DatabaseError("local node admission permit was not consumed")
+        conn.execute("DELETE FROM node_mutation_scopes")
+        conn.execute("DELETE FROM node_mutation_fences")
+        self._record_changes(conn, generation, scopes)
+        conn.execute(
+            "INSERT INTO node_recovery_receipts VALUES(?,?,?,?,?,?,?)",
+            (recovery_id, generation, claim.claim_digest,
+             claim.coordinator_path, claim.coordinator_identity,
+             claim.coordinator_epoch, claim.root_revision),
+        )
+        self._clear_candidate_rows(conn, generation)
+        conn.execute("DELETE FROM node_recovery_claim_fences")
+        conn.execute("DELETE FROM node_recovery_claims")
+        self._prune_generation_history(conn)
+        self._check_mutation_fences(conn)
+        self._check_coordinator_state(conn)
+        return generation
+
+    @classmethod
+    def coordinator_recovery_receipt(
+        cls, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+        claim: NodeRecoveryClaim, recovery_id: str,
+    ) -> int | None:
+        """Resolve an exact committed recovery without consulting fresh authority."""
+        if (not conn.in_transaction or type(recovery_id) is not str
+                or _CLAIM_ID.fullmatch(recovery_id) is None):
+            raise ValueError("invalid claimed local node admission")
+        registration = _node_registration(registration)
+        claim = _recovery_claim(claim)
+        if NodeCoordinatorRegistration(
+                claim.database_path, claim.database_incarnation,
+                claim.identity_digest, claim.provider_endpoint,
+                claim.root) != registration:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        cls._check_coordinator_state(conn)
+        receipt = conn.execute(
+            "SELECT admitted_generation,claim_digest,coordinator_path,"
+            "coordinator_identity,coordinator_epoch,root_revision "
+            "FROM node_recovery_receipts WHERE recovery_id=?",
+            (recovery_id,),
+        ).fetchone()
+        if receipt is None:
+            return None
+        expected = (
+            receipt[0], claim.claim_digest, claim.coordinator_path,
+            claim.coordinator_identity, claim.coordinator_epoch,
+            claim.root_revision,
+        )
+        generation = conn.execute(
+            "SELECT state,claim_digest FROM node_generations "
+            "WHERE generation=?", (receipt[0],),
+        ).fetchone()
+        if (receipt != expected or generation is None
+                or generation[0] not in ("admitted", "superseded")
+                or generation[1] != claim.claim_digest):
+            raise NodeGenerationChanged("claimed local recovery receipt changed")
+        return receipt[0]
 
     @classmethod
     def _invalidate_recovery_claim(cls, conn: sqlite3.Connection) -> None:
@@ -1647,8 +1930,8 @@ class NodeStore:
         self._check_meta(conn)
         if conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='trigger' "
-                "AND name='node_pending_mutation_guard'").fetchone() not in (
-                    (_V8_PENDING_MUTATION_GUARD,), (_PENDING_MUTATION_GUARD,)):
+                "AND name='node_pending_mutation_guard'").fetchone() != (
+                    _V8_PENDING_MUTATION_GUARD,):
             raise sqlite3.DatabaseError("invalid local node mutation guard")
         self._check_mutation_fences(conn)
         # Pre-v9 private work has no immutable coordinator claim. Retain the
@@ -1709,7 +1992,7 @@ class NodeStore:
             coordinator_epoch TEXT NOT NULL,
             root_revision INTEGER NOT NULL CHECK(root_revision>=0))""")
         conn.execute("DROP TRIGGER node_pending_mutation_guard")
-        conn.execute(_PENDING_MUTATION_GUARD)
+        conn.execute(_V10_PENDING_MUTATION_GUARD)
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -1727,7 +2010,8 @@ class NodeStore:
         triggers = dict(conn.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
         ).fetchall())
-        if triggers != {"node_pending_mutation_guard": _PENDING_MUTATION_GUARD}:
+        if triggers != {
+                "node_pending_mutation_guard": _V10_PENDING_MUTATION_GUARD}:
             raise sqlite3.DatabaseError("invalid local node mutation guard")
         self._check_mutation_fences(conn)
         conn.execute("ALTER TABLE node_generations ADD COLUMN claim_id TEXT")
@@ -1754,7 +2038,7 @@ class NodeStore:
                 JOIN provider_recoveries r ON r.recovery_id=c.recovery_id
             )
         """)
-        conn.execute(_CLAIMED_GENERATION_GUARD)
+        conn.execute(_V10_CLAIMED_GENERATION_GUARD)
         conn.execute(_CLAIM_TAG_IMMUTABLE_GUARD)
         self._check_coordinator_state(conn)
         conn.execute("DROP TABLE node_schema")
@@ -1763,6 +2047,37 @@ class NodeStore:
             version INTEGER NOT NULL CHECK(version=10),
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
         conn.execute("INSERT INTO node_schema VALUES(1,10,?)", (PROTOCOL_VERSION,))
+
+    def _migrate_v10(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(10, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        expected = {
+            "node_pending_mutation_guard": _V10_PENDING_MUTATION_GUARD,
+            "node_claimed_generation_guard": _V10_CLAIMED_GENERATION_GUARD,
+            "node_claim_tag_immutable_guard": _CLAIM_TAG_IMMUTABLE_GUARD,
+        }
+        if dict(conn.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
+        ).fetchall()) != expected:
+            raise sqlite3.DatabaseError("invalid local node mutation guard")
+        self._check_mutation_fences(conn)
+        self._check_coordinator_state(conn)
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
+        conn.execute("DROP TRIGGER node_claimed_generation_guard")
+        conn.execute(_PENDING_MUTATION_GUARD)
+        conn.execute(_CLAIMED_GENERATION_GUARD)
+        conn.execute(_ADMISSION_PERMIT_CONSUMER)
+        conn.execute(_RECOVERY_RECEIPT_PRUNE)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=11),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,11,?)", (PROTOCOL_VERSION,))
 
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
@@ -1820,6 +2135,9 @@ class NodeStore:
                     version = [(9, PROTOCOL_VERSION)]
                 if version == [(9, PROTOCOL_VERSION)]:
                     self._migrate_v9(conn)
+                    version = [(10, PROTOCOL_VERSION)]
+                if version == [(10, PROTOCOL_VERSION)]:
+                    self._migrate_v10(conn)
                 tables = frozenset(row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name NOT LIKE 'sqlite_%'"))
@@ -3671,6 +3989,37 @@ class NodeStore:
             WHERE c.name IS NULL LIMIT 1
         """, (generation,)).fetchone() is not None
 
+    @classmethod
+    def _candidate_change_scopes(
+        cls, conn: sqlite3.Connection, generation: int, documents_mode: str,
+        logs_mode: str, visibility_mode: str, frontiers_mode: str,
+    ) -> set[tuple[str, str]]:
+        doc_paths = cls._changed_document_paths(conn, generation, documents_mode)
+        visible = cls._changed_visibility(conn, generation, visibility_mode)
+        if logs_mode == "replace":
+            log_chats = tuple(row[0] for row in conn.execute("""
+                SELECT chat_id FROM (
+                    SELECT chat_id FROM remote_log_rows
+                    UNION SELECT chat_id FROM candidate_log_rows
+                        WHERE generation=?
+                ) ORDER BY chat_id
+            """, (generation,)))
+        else:
+            log_chats = tuple(row[0] for row in conn.execute("""
+                SELECT DISTINCT c.chat_id FROM candidate_log_rows c
+                LEFT JOIN remote_log_rows r ON r.id=c.id
+                WHERE c.generation=? AND r.id IS NULL ORDER BY c.chat_id
+            """, (generation,)))
+        scopes: set[tuple[str, str]] = {
+            ("chat", chat) for chat in (*visible, *log_chats)
+        }
+        for path in doc_paths:
+            chat = _chat_scope(path)
+            scopes.add(("chat", chat) if chat else ("root", ""))
+        if cls._frontiers_changed(conn, generation, frontiers_mode):
+            scopes.add(("root", ""))
+        return scopes
+
     @staticmethod
     def _check_candidate_caps(conn: sqlite3.Connection, generation: int,
                               documents_mode: str, logs_mode: str,
@@ -3840,6 +4189,12 @@ class NodeStore:
             (MAX_GENERATION_HISTORY,)).fetchone()[0]
         if cutoff > 0:
             conn.execute("""
+                DELETE FROM node_recovery_receipts WHERE admitted_generation IN (
+                    SELECT generation FROM node_generations WHERE generation<=?
+                    AND state IN ('superseded','abandoned')
+                )
+            """, (cutoff,))
+            conn.execute("""
                 DELETE FROM node_generations WHERE generation<=?
                 AND state IN ('superseded','abandoned')
             """, (cutoff,))
@@ -3923,32 +4278,10 @@ class NodeStore:
                 self._check_candidate_caps(
                     conn, generation, documents_mode, logs_mode, visibility_mode,
                     frontiers_mode)
-                doc_paths = self._changed_document_paths(
-                    conn, generation, documents_mode)
-                visible = self._changed_visibility(
-                    conn, generation, visibility_mode)
-                if logs_mode == "replace":
-                    log_chats = tuple(row[0] for row in conn.execute("""
-                        SELECT chat_id FROM (
-                            SELECT chat_id FROM remote_log_rows
-                            UNION SELECT chat_id FROM candidate_log_rows
-                                WHERE generation=?
-                        ) ORDER BY chat_id
-                    """, (generation,)))
-                else:
-                    log_chats = tuple(row[0] for row in conn.execute("""
-                        SELECT DISTINCT c.chat_id FROM candidate_log_rows c
-                        LEFT JOIN remote_log_rows r ON r.id=c.id
-                        WHERE c.generation=? AND r.id IS NULL ORDER BY c.chat_id
-                    """, (generation,)))
-                scopes: set[tuple[str, str]] = {
-                    ("chat", chat) for chat in (*visible, *log_chats)
-                }
-                for path in doc_paths:
-                    chat = _chat_scope(path)
-                    scopes.add(("chat", chat) if chat else ("root", ""))
-                if self._frontiers_changed(conn, generation, frontiers_mode):
-                    scopes.add(("root", ""))
+                scopes = self._candidate_change_scopes(
+                    conn, generation, documents_mode, logs_mode,
+                    visibility_mode, frontiers_mode,
+                )
                 self._apply_candidate(
                     conn, generation, documents_mode, logs_mode, visibility_mode,
                     frontiers_mode)
