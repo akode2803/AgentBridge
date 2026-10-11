@@ -99,6 +99,10 @@ cut or the new cut. Its principal tables are:
 - `candidate_docs`, `candidate_log_rows`, `candidate_visibility`,
   `candidate_frontiers` and `candidate_chunks`, keyed by a reclaimable
   building/sealed generation;
+- `provider_recoveries`, three mandatory `recovery_manifests`, derived
+  `recovery_streams` and idempotent `recovery_proof_pages`, all private to one
+  proof-versioned candidate. A stream inventory page and the payload obligations
+  it creates commit together;
 - `remote_docs(path, seq, deleted, payload, updated_generation)`;
 - `remote_log_rows(id, chat_id, log_name, payload, updated_generation)` plus
   `(chat_id, log_name, id)` and global `id` indexes;
@@ -418,24 +422,40 @@ read routes plus the feature-gated exact-source shadow collector are implemented
 but inactive. The store can durably accumulate a bounded private candidate over
 multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
 bounded root recovery evidence for physical deletes and member-row changes, but
-does not turn an event into absence, completeness or authority proof. Next, add
-the durable provider recovery identity, checkpoints and completion proofs before
-private current-authority discovery and equivalence recording. Store schema v4
-now preserves existing admitted inputs and generic private candidates while
-binding a whole-root recovery to the database, identity, scope positions and
-provider epoch and authenticated account/role. Each private page receipt binds
-the observed cut, monotonic work revision, checkpoint transition, outcome and
-staged bytes in one transaction; its closing target advances with that commit.
-An older delayed response cannot discard newer work, and failure cleanup cannot
-overwrite health published by a newer refresh. The store deliberately does not
-seal these recovery candidates: checkpoint tokens and page results do not prove
-a closed work inventory or replay of every provider event. Existing v4 recovery
-work must be restarted or explicitly upgraded by a later proof-version migration;
-it cannot silently acquire a future completion proof. A durable provider
-event/replay evidence contract, including ambiguous-event restart,
-current-authority manifest and recovery execution is the next implementation
-step. Neither these checkpoints nor the local node assert authority/completeness.
-No GUI or harness read cutover occurs before that work and N2.
+does not turn an event into absence, completeness or authority proof.
+
+Store schema v7 preserves admitted inputs, ordinary resumable candidates and
+schema-v5 typed recoveries. The v4 migration retires only v4 provider recoveries
+because their caller-described work lists cannot be upgraded into proof. Every
+new whole-root recovery now owns
+exactly three mandatory, typed inventories: documents, currently visible chats,
+and visible log streams. Their keyset checkpoint, terminal outcome and counts
+commit with the candidate rows and an idempotent proof-page receipt. Stream
+inventory rows create `(chat, log, captured head)` payload obligations in that
+same SQLite transaction; those obligations are resumed through a bounded Store
+query and completed only by typed exact-log pages. Positive stream heads are
+required. A terminal exact-log page may be empty when the historical head row
+was physically deleted; it proves current range exhaustion only, while the
+later root-delete event must still be replayed before sealing.
+
+All typed page calls recheck the database incarnation, full replica identity,
+base generation, pending state, scope positions, provider schema/index/source
+epochs, authenticated account/role and compaction floor before accepting even
+an idempotent retry. Delayed responses behind an advanced target fail without
+destroying newer work. Per-page and aggregate row, byte, receipt and metadata
+budgets remain hard bounds. Maximum-size stream identities use a bounded binary
+continuation rather than encoded JSON expansion. The v4 generic page method now
+fails closed. Durable ordered event obligations keep examined and applied replay
+cursors separate. Exact document/log repairs can complete out of order, while
+the replay cursor advances monotonically only across the satisfied prefix.
+Root, visibility and identity-less events abandon the private recovery and
+require a new whole-root attempt. A fresh close token binds the final proof
+revision and target; seal derives source frontiers from that unchanged closing
+fence. Receipt and byte budgets reserve the remaining known proof work and the
+final seal batch, so an accepted proof prefix cannot consume its closing slot.
+The Store can now seal and atomically admit a proven recovery, but no background
+executor invokes this path and no GUI or harness read has cut over. N2 and
+equivalence recording remain mandatory before product routing.
 
 The inactive Supabase recovery source now supplies the provider half of that
 next step. An authenticated member can capture one coherent current-authority
@@ -450,10 +470,23 @@ unless the database session already has a nonzero statement timeout of at most
 ten seconds. A timeout is an unavailable recovery attempt, never a complete
 empty page.
 
-This source is not yet composed with the v4 recovery candidate. It does not
-persist a closed inventory, replay ambiguous events, seal or admit recovery
-work, run a background executor, or affect product reads. The next store slice
-must version a closed per-family inventory and replay proof, then an inactive
-executor can join each fetched page and its successor checkpoint in one local
-transaction. A fresh closing fence must match the replay target before sealing;
-N2 and equivalence recording remain mandatory before read cutover.
+This source is now structurally matched by the schema-v7 typed Store operations,
+including event replay and the fresh close-token fence. An inactive executor
+composes them one bounded provider page or exact repair per call. Its progress,
+continuations and obligations live in the Store, so a new executor instance can
+resume without replaying accepted pages. A pending-stream index prevents each
+step from scanning already completed streams. The executor stops at a private
+sealed generation; it does not admit, schedule itself, serve GUI or harness reads,
+or claim equivalence.
+
+The inactive equivalence recorder accepts only a complete replacement reference
+captured between identical opening and closing provider cuts. It compares the
+sealed candidate inside one Store transaction, rechecking the full local binding
+and requiring the provider cursor to equal the sealed target. It writes an
+owner-only evidence file containing counts, digests, mismatch families and
+hashed mismatch keys; it never writes payloads, admits the candidate or changes
+product reads. Its input carrier is deliberately bounded to one validated node
+batch. Larger independent references need a resumable Store-owned reference
+manifest rather than an unbounded legacy `read_log` call. The next slice adds
+that independent current-path reference collector; N2 remains mandatory before
+read cutover.
