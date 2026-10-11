@@ -81,8 +81,9 @@ def log_frontier_name(chat_id: str, log_name: str) -> str:
 class ShadowCollector:
     """One explicitly enabled bounded refresh attempt.
 
-    No runtime constructs this class yet.  The explicit flag prevents tests or
-    future composition code from opening provider lanes by importing the module.
+    Only an explicitly driven local-node owner constructs this class.  The
+    explicit flag prevents imports and passive composition from opening a
+    provider lane.
     """
 
     def __init__(

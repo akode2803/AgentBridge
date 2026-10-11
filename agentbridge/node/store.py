@@ -1524,6 +1524,49 @@ class NodeStore:
             raise sqlite3.DatabaseError("multiple claimed local recoveries")
         return None if not rows else rows[0][0]
 
+    def has_incremental_source_position(self) -> bool:
+        """Return whether the admitted cut can resume exact-ledger collection.
+
+        This is local work-routing evidence only.  It neither proves provider
+        freshness nor carries an authority verdict; the collector still
+        rechecks the provider fence and admits detached raw inputs atomically.
+        """
+        names = ("provider-source-ledger", "provider-source-replay")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            self._check_identity(conn)
+            self._check_mutation_guard(conn)
+            self._check_mutation_fences(conn)
+            self._check_coordinator_state(conn)
+            meta = self._check_meta(conn)
+            rows = conn.execute(
+                "SELECT name,epoch,cursor,minimum_cursor,updated_generation "
+                "FROM remote_frontiers WHERE name IN (?,?) ORDER BY name",
+                names,
+            ).fetchall()
+        admitted_generation = meta[1]
+        if (type(admitted_generation) is not int
+                or not 0 <= admitted_generation <= 2**63 - 1):
+            raise sqlite3.DatabaseError("invalid local node metadata")
+        if admitted_generation == 0 or len(rows) != 2:
+            return False
+        positions = {row[0]: row[1:] for row in rows}
+        if set(positions) != set(names):
+            return False
+        ledger = positions[names[0]]
+        replay = positions[names[1]]
+        if (type(ledger[0]) is not str or not ledger[0]
+                or ledger[0] != replay[0]):
+            return False
+        for row in (ledger, replay):
+            if (type(row[1]) is not int or row[1] < 0
+                    or type(row[2]) is not int or row[2] < 0
+                    or type(row[3]) is not int
+                    or not 0 < row[3] <= admitted_generation):
+                return False
+        return (ledger[2] == replay[2] and ledger[3] == replay[3]
+                and ledger[2] <= ledger[1] <= replay[1])
+
     def claimed_recovery(self) -> tuple[NodeRecoveryClaim, str] | None:
         """Return the exact durable claim/recovery pair for its coordinator.
 

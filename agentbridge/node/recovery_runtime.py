@@ -74,7 +74,8 @@ class LocalNodeRecoveryRuntime:
         return (self.store.claimed_recovery_id() is not None
                 or status.admitted_generation == 0
                 or status.pending_mutations > 0
-                or status.health != "ready")
+                or (status.health != "ready"
+                    and not self.store.has_incremental_source_position()))
 
     def pending(self) -> bool:
         with self._state_lock:
