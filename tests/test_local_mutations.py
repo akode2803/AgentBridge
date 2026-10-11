@@ -508,6 +508,47 @@ def test_recovery_source_reads_delegate_without_creating_mutation_intents(
     assert _pending(coordinator) == 0
 
 
+def test_reference_source_reads_delegate_without_creating_mutation_intents(
+        rig, monkeypatch):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    documents = object()
+    streams = object()
+    logs = object()
+    monkeypatch.setattr(
+        SupabaseTransport, "supports_reference_source",
+        property(lambda _self: True),
+    )
+    inner.reference_documents = lambda after, **kwargs: calls.append(
+        ("documents", after, kwargs),
+    ) or documents
+    inner.reference_streams = lambda after, **kwargs: calls.append(
+        ("streams", after, kwargs),
+    ) or streams
+    inner.reference_log_page = lambda chat, log, **kwargs: calls.append(
+        ("log", chat, log, kwargs),
+    ) or logs
+
+    assert proxy.supports_reference_source is True
+    assert proxy.reference_documents(
+        "users/a.json", limit=11, max_bytes=4096,
+    ) is documents
+    assert proxy.reference_streams(("room", "a.jsonl"), limit=12) is streams
+    assert proxy.reference_log_page(
+        "room", "a.jsonl", after_cursor=5, through_cursor=29,
+        limit=7, max_bytes=8192,
+    ) is logs
+    assert calls == [
+        ("documents", "users/a.json", {"limit": 11, "max_bytes": 4096}),
+        ("streams", ("room", "a.jsonl"), {"limit": 12}),
+        ("log", "room", "a.jsonl", {
+            "after_cursor": 5, "through_cursor": 29,
+            "limit": 7, "max_bytes": 8192,
+        }),
+    ]
+    assert _pending(coordinator) == 0
+
+
 def test_proxy_explicitly_owns_every_public_base_transport_api():
     from agentbridge.transport.base import Transport
 

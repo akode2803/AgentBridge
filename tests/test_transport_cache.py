@@ -659,6 +659,80 @@ def test_change_ledger_capability_delegates_through_the_wrapper():
     assert ledger.change_ledger_realtime_status() == "ready"
 
 
+def test_local_node_source_reads_delegate_through_the_wrapper():
+    inner = BulkTransport()
+    cached = CachingTransport(inner, auto_refresh=False)
+    calls = []
+    inner.supports_source_ledger = True
+    inner.supports_scoped_source_reads = True
+    inner.supports_recovery_source = True
+    inner.supports_reference_source = True
+    inner.source_documents = lambda paths, **kwargs: calls.append(
+        ("documents", paths, kwargs)) or "documents"
+    inner.source_log_page = lambda chat, log, **kwargs: calls.append(
+        ("source-log", chat, log, kwargs)) or "source-log"
+    inner.source_ledger_fence = lambda: calls.append(
+        ("source-fence",)) or "source-fence"
+    inner.source_ledger_events = lambda after, **kwargs: calls.append(
+        ("source-events", after, kwargs)) or "source-events"
+    inner.recovery_fence = lambda: calls.append(
+        ("recovery-fence",)) or "recovery-fence"
+    inner.recovery_page = lambda family, after, **kwargs: calls.append(
+        ("recovery-page", family, after, kwargs)) or "recovery-page"
+    inner.reference_documents = lambda after, **kwargs: calls.append(
+        ("reference-documents", after, kwargs)) or "reference-documents"
+    inner.reference_streams = lambda after, **kwargs: calls.append(
+        ("reference-streams", after, kwargs)) or "reference-streams"
+    inner.reference_log_page = lambda chat, log, **kwargs: calls.append(
+        ("reference-log", chat, log, kwargs)) or "reference-log"
+
+    assert cached.supports_source_ledger is True
+    assert cached.supports_scoped_source_reads is True
+    assert cached.supports_recovery_source is True
+    assert cached.supports_reference_source is True
+    assert cached.source_documents(("users/a.json",), max_bytes=4096) == "documents"
+    assert cached.source_log_page(
+        "room", "main", after_cursor=1, through_cursor=2,
+        limit=3, max_bytes=4096,
+    ) == "source-log"
+    assert cached.source_ledger_fence() == "source-fence"
+    assert cached.source_ledger_events(4, limit=5) == "source-events"
+    assert cached.recovery_fence() == "recovery-fence"
+    assert cached.recovery_page(
+        "events", 6, limit=7, max_bytes=8192,
+    ) == "recovery-page"
+    assert cached.reference_documents(
+        "users/a.json", limit=8, max_bytes=4096,
+    ) == "reference-documents"
+    assert cached.reference_streams(("room", "main"), limit=9) == (
+        "reference-streams")
+    assert cached.reference_log_page(
+        "room", "main", after_cursor=10, through_cursor=11,
+        limit=12, max_bytes=8192,
+    ) == "reference-log"
+    assert calls == [
+        ("documents", ("users/a.json",), {"max_bytes": 4096}),
+        ("source-log", "room", "main", {
+            "after_cursor": 1, "through_cursor": 2,
+            "limit": 3, "max_bytes": 4096,
+        }),
+        ("source-fence",),
+        ("source-events", 4, {"limit": 5}),
+        ("recovery-fence",),
+        ("recovery-page", "events", 6, {
+            "limit": 7, "max_bytes": 8192,
+        }),
+        ("reference-documents", "users/a.json", {
+            "limit": 8, "max_bytes": 4096,
+        }),
+        ("reference-streams", ("room", "main"), {"limit": 9}),
+        ("reference-log", "room", "main", {
+            "after_cursor": 10, "through_cursor": 11,
+            "limit": 12, "max_bytes": 8192,
+        }),
+    ]
+
+
 # ------------------------------------------------------------------ factory
 
 @pytest.mark.parametrize("spec", [

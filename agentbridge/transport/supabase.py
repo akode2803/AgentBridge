@@ -61,8 +61,11 @@ from .recovery_sources import (
     RecoveryStream,
     validate_recovery_after,
 )
+from .reference_sources import (
+    ReferenceDocumentPage, ReferenceLogPage, ReferenceStreamPage,
+)
 from .scoped_sources import (
-    MAX_SOURCE_BYTES,
+    MAX_SOURCE_BATCH_PATHS, MAX_SOURCE_BYTES,
     ScopedDocumentBatch,
     ScopedDocumentRow,
     ScopedLogPage,
@@ -112,6 +115,8 @@ _SOURCE_LEDGER_REPROBE_S = 60.0
 _SCOPED_SOURCE_SCHEMA_VERSION = 1
 _SCOPED_SOURCE_REPROBE_S = 60.0
 _RECOVERY_SOURCE_REPROBE_S = 60.0
+_REFERENCE_SOURCE_SCHEMA_VERSION = 1
+_REFERENCE_SOURCE_REPROBE_S = 60.0
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -226,6 +231,8 @@ class SupabaseTransport(Transport):
         self._scoped_source_reprobe = 0.0
         self._recovery_source_ready: bool | None = None
         self._recovery_source_reprobe = 0.0
+        self._reference_source_ready: bool | None = None
+        self._reference_source_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -773,6 +780,242 @@ class SupabaseTransport(Transport):
         except (AttributeError, TypeError, ValueError, UnicodeError,
                 RecursionError) as exc:
             raise TransportError("Supabase returned an invalid recovery page") from exc
+
+    # ---------------------------- independent inactive reference source
+    @property
+    def supports_reference_source(self) -> bool:  # type: ignore[override]
+        # All three capabilities are explicit. An older schema may support
+        # recovery but lack the independent metadata/payload RPCs.
+        return (self._recovery_source_capability()
+                and self._reference_source_capability())
+
+    def _reference_source_capability(self) -> bool:
+        now = time.monotonic()
+        if (self._reference_source_ready is not None
+                and now < self._reference_source_reprobe):
+            return self._reference_source_ready
+        try:
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_node_reference_ready").execute(),
+            ).data
+            self._count(ready)
+            self._reference_source_ready = (
+                type(ready) is int
+                and ready == _REFERENCE_SOURCE_SCHEMA_VERSION)
+        except Exception as exc:  # noqa: BLE001 - optional capability
+            if _is_missing_column(exc):
+                self._reference_source_ready = False
+            elif self._reference_source_ready is None:
+                return False
+        self._reference_source_reprobe = now + _REFERENCE_SOURCE_REPROBE_S
+        return bool(self._reference_source_ready)
+
+    def _require_reference_source(self) -> None:
+        if not self.supports_reference_source:
+            raise NotImplementedError("Supabase reference source is unavailable")
+
+    @staticmethod
+    def _reference_limit(
+        limit: object, maximum: int = MAX_RECOVERY_PAGE_ROWS,
+    ) -> int:
+        if type(limit) is not int or not 1 <= limit <= maximum:
+            raise ValueError("invalid reference page limit")
+        return limit
+
+    @staticmethod
+    def _reference_size(value: object, name: str) -> int:
+        if type(value) is not int or not 0 <= value <= MAX_SOURCE_BYTES:
+            raise ValueError(f"invalid reference {name} size")
+        return value
+
+    def _reference_metadata_page(
+        self, family: str, after: str, after_log: str, limit: int,
+    ) -> tuple[list[dict], bool]:
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_reference_page", {
+                "p_root": self.root, "p_family": family,
+                "p_after": after, "p_after_log": after_log,
+                "p_limit": limit,
+            },
+        ).execute()).data
+        self._count(raw)
+        if (type(raw) is not dict or set(raw) != {"rows", "has_more"}
+                or type(raw["rows"]) is not list
+                or len(raw["rows"]) > limit
+                or type(raw["has_more"]) is not bool
+                or raw["has_more"] and not raw["rows"]):
+            raise ValueError("invalid reference metadata page")
+        return raw["rows"], raw["has_more"]
+
+    def _reference_exact(self, function: str, params: dict) -> list[dict]:
+        raw = self._retry(lambda: self._sb().rpc(function, params).execute()).data
+        self._count(raw)
+        if (type(raw) is not dict or set(raw) != {"rows", "overflow"}
+                or type(raw["rows"]) is not list
+                or type(raw["overflow"]) is not bool
+                or raw["overflow"] and raw["rows"]):
+            raise ValueError("invalid reference exact response")
+        if raw["overflow"]:
+            raise ScopedSourceOverflow(
+                "Supabase reference payload exceeds byte budget")
+        return raw["rows"]
+
+    def reference_documents(
+        self, after: str, *, limit: int,
+        max_bytes: int = MAX_SOURCE_BYTES,
+    ) -> ReferenceDocumentPage:
+        self._require_reference_source()
+        after = validate_recovery_after(after, "documents")
+        count = self._reference_limit(limit, MAX_SOURCE_BATCH_PATHS)
+        budget = validate_source_budget(max_bytes)
+        try:
+            raw, provider_more = self._reference_metadata_page(
+                "documents", after, "", count)
+            required = {"path", "seq", "deleted", "source_bytes"}
+            if any(type(row) is not dict or set(row) != required for row in raw):
+                raise ValueError("invalid reference document metadata")
+            selected = []
+            used = 0
+            for row in raw[:count]:
+                path = row["path"]
+                if type(path) is not str or path <= after or path.startswith("presence/"):
+                    raise ValueError("invalid reference document keyset")
+                deleted = row["deleted"]
+                if type(deleted) is not bool:
+                    raise ValueError("invalid reference document deletion state")
+                payload_size = self._reference_size(
+                    row["source_bytes"], "document")
+                row_size = (len(json.dumps(path, ensure_ascii=False).encode("utf-8"))
+                            + (0 if deleted else payload_size)
+                            + SOURCE_ROW_WIRE_OVERHEAD)
+                if row_size > budget - used:
+                    break
+                selected.append(row)
+                used += row_size
+            if raw and not selected:
+                raise ScopedSourceOverflow(
+                    "Supabase reference document exceeds byte budget")
+            paths = tuple(row["path"] for row in selected)
+            payload_rows = [] if not paths else self._reference_exact(
+                "ab_node_reference_docs_exact", {
+                    "p_root": self.root, "p_paths": list(paths),
+                    "p_max_bytes": budget,
+                })
+            required_payload = {
+                "path", "seq", "deleted", "source_bytes", "data",
+            }
+            if any(type(row) is not dict or set(row) != required_payload
+                   for row in payload_rows):
+                raise ValueError("invalid reference document payload")
+            observed = []
+            for row in payload_rows:
+                deleted = row["deleted"]
+                if (type(deleted) is not bool
+                        or deleted and row["data"] is not None):
+                    raise ValueError("invalid reference document tombstone")
+                payload = None if deleted else json.dumps(
+                    row["data"], ensure_ascii=False, allow_nan=False,
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                observed.append(ScopedDocumentRow(
+                    row["path"], row["seq"], deleted, payload))
+            if len(observed) != len(selected):
+                raise ValueError("reference document changed during payload read")
+            rows = []
+            for metadata, value in zip(selected, observed, strict=True):
+                if (value.path != metadata["path"]
+                        or value.seq != metadata["seq"]
+                        or value.deleted != metadata["deleted"]
+                        or payload_rows[len(rows)]["source_bytes"]
+                        != metadata["source_bytes"]):
+                    raise ValueError("reference document changed during payload read")
+                rows.append(value)
+            more = provider_more or len(selected) < len(raw)
+            return ReferenceDocumentPage(after, tuple(rows), more, count)
+        except ScopedSourceOverflow:
+            raise
+        except (AttributeError, TypeError, ValueError, UnicodeError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid reference document page") from exc
+
+    def reference_streams(
+        self, after: tuple[str, str], *, limit: int,
+    ) -> ReferenceStreamPage:
+        self._require_reference_source()
+        after = validate_recovery_after(after, "streams")
+        count = self._reference_limit(limit)
+        try:
+            raw, provider_more = self._reference_metadata_page(
+                "streams", after[0], after[1], count)
+            required = {"chat_id", "log_name", "head"}
+            if any(type(row) is not dict or set(row) != required for row in raw):
+                raise ValueError("invalid reference stream metadata")
+            streams = tuple(RecoveryStream(**row) for row in raw)
+            return ReferenceStreamPage(
+                after, streams, provider_more, count)
+        except (AttributeError, TypeError, ValueError, UnicodeError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid reference stream page") from exc
+
+    def reference_log_page(
+        self, chat_id: str, log_name: str, *, after_cursor: int,
+        through_cursor: int, limit: int,
+        max_bytes: int = MAX_SOURCE_BYTES,
+    ) -> ReferenceLogPage:
+        self._require_reference_source()
+        chat = validate_source_stream(chat_id, "reference chat")
+        log = validate_source_key(log_name, "reference log")
+        after = validate_source_cursor(after_cursor, "reference log cursor")
+        through = validate_source_cursor(through_cursor, "reference log head")
+        if after > through:
+            raise ValueError("reference log cursor exceeds head")
+        count = self._reference_limit(limit)
+        budget = validate_source_budget(max_bytes)
+        try:
+            metadata = self._retry(lambda: self._sb().table("ab_logs")
+                .select("id,source_bytes").eq("root", self.root)
+                .eq("chat_id", chat).eq("log_name", log).gt("id", after)
+                .lte("id", through).order("id").limit(count + 1).execute()).data
+            self._count(metadata)
+            if type(metadata) is not list or len(metadata) > count + 1:
+                raise ValueError("invalid reference log metadata")
+            selected = []
+            used = 0
+            for row in metadata[:count]:
+                if type(row) is not dict or set(("id", "source_bytes")) - set(row):
+                    raise ValueError("invalid reference log metadata")
+                row_size = (self._reference_size(row["source_bytes"], "log")
+                            + SOURCE_ROW_WIRE_OVERHEAD)
+                if row_size > budget - used:
+                    break
+                selected.append(row)
+                used += row_size
+            if metadata and not selected:
+                raise ScopedSourceOverflow(
+                    "Supabase reference log row exceeds byte budget")
+            ids = [row["id"] for row in selected]
+            payload = [] if not ids else self._reference_exact(
+                "ab_node_reference_logs_exact", {
+                    "p_root": self.root, "p_chat": chat, "p_log": log,
+                    "p_ids": ids, "p_max_bytes": budget,
+                })
+            if type(payload) is not list or len(payload) != len(selected):
+                raise ValueError("reference log changed during payload read")
+            rows = []
+            for expected, row in zip(selected, payload, strict=True):
+                if (type(row) is not dict or row.get("id") != expected["id"]
+                        or row.get("source_bytes") != expected["source_bytes"]
+                        or type(row.get("line")) is not str):
+                    raise ValueError("reference log changed during payload read")
+                rows.append(ScopedLogRow(row["id"], row["line"].encode("utf-8")))
+            more = (len(selected) < len(metadata)
+                    or bool(selected and selected[-1]["id"] < through))
+            return ReferenceLogPage(after, through, tuple(rows), more, count)
+        except ScopedSourceOverflow:
+            raise
+        except (AttributeError, TypeError, ValueError, UnicodeError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid reference log page") from exc
 
     # -------------------------------------- local-node scoped source reads
     @property

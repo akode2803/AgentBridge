@@ -52,6 +52,10 @@ class LocalMutationTransport(Transport):
         return self._transport.supports_recovery_source
 
     @property
+    def supports_reference_source(self):
+        return self._transport.supports_reference_source
+
+    @property
     def supports_exclusive_create(self):
         return self._transport.supports_exclusive_create
 
@@ -201,6 +205,22 @@ class LocalMutationTransport(Transport):
     def recovery_page(self, family, after, *, limit, max_bytes):
         return self._transport.recovery_page(
             family, after, limit=limit, max_bytes=max_bytes,
+        )
+
+    def reference_documents(self, after, *, limit, max_bytes):
+        return self._transport.reference_documents(
+            after, limit=limit, max_bytes=max_bytes,
+        )
+
+    def reference_streams(self, after, *, limit):
+        return self._transport.reference_streams(after, limit=limit)
+
+    def reference_log_page(
+            self, chat_id, log_name, *, after_cursor, through_cursor, limit,
+            max_bytes):
+        return self._transport.reference_log_page(
+            chat_id, log_name, after_cursor=after_cursor,
+            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
         )
 
     def change_ledger_capability(self):

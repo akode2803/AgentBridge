@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import threading
 import time
 from dataclasses import replace
@@ -55,8 +56,9 @@ class FakeQuery:
         self.db, self.table = db, table
         self._lock = lock if lock is not None else threading.RLock()
         self.filters = []
-        self._like = self._gt = self._lt = self._order = None
-        self._desc = False
+        self._like = self._gt = self._lt = self._lte = None
+        self._in = None
+        self._orders = []
         self._limit = self._range = None
         self._cols = ""
         self._op = ("select", None)
@@ -85,8 +87,12 @@ class FakeQuery:
         self.filters.append((col, copy.deepcopy(val)))
         return self
 
+    def in_(self, col, values):
+        self._in = (col, tuple(copy.deepcopy(values)))
+        return self
+
     def like(self, col, pat):
-        self._like = (col, pat.rstrip("%"))
+        self._like = (col, str(pat))
         return self
 
     def gt(self, col, val):
@@ -97,8 +103,12 @@ class FakeQuery:
         self._lt = (col, val)
         return self
 
+    def lte(self, col, val):
+        self._lte = (col, val)
+        return self
+
     def order(self, col="id", desc=False):
-        self._order, self._desc = col, bool(desc)
+        self._orders.append((col, bool(desc)))
         return self
 
     def limit(self, n):
@@ -112,11 +122,20 @@ class FakeQuery:
     def _match(self, row):
         if any(row.get(col) != val for col, val in self.filters):
             return False
-        if self._like and not str(row.get(self._like[0], "")).startswith(self._like[1]):
-            return False
+        if self._like:
+            pattern = "".join(
+                ".*" if char == "%" else "." if char == "_" else re.escape(char)
+                for char in self._like[1]
+            )
+            if re.fullmatch(pattern, str(row.get(self._like[0], ""))) is None:
+                return False
         if self._gt and not row.get(self._gt[0], 0) > self._gt[1]:
             return False
         if self._lt and not str(row.get(self._lt[0], "")) < str(self._lt[1]):
+            return False
+        if self._lte and not row.get(self._lte[0], 0) <= self._lte[1]:
+            return False
+        if self._in and row.get(self._in[0]) not in self._in[1]:
             return False
         return True
 
@@ -126,9 +145,8 @@ class FakeQuery:
         mentioned = set(self._cols.replace(" ", "").split(","))
         mentioned |= {c for c, _ in self.filters}
         mentioned |= set(payload or ())
-        if self._order:
-            mentioned.add(self._order)
-        for comparison in (self._like, self._gt, self._lt):
+        mentioned |= {col for col, _desc in self._orders}
+        for comparison in (self._like, self._gt, self._lt, self._lte, self._in):
             if comparison:
                 mentioned.add(comparison[0])
         if {"seq", "deleted"} & mentioned:
@@ -186,13 +204,31 @@ class FakeQuery:
             rows[:] = keep
             return FakeResult([{"deleted": gone}])
         out = [r for r in rows if self._match(r)]
-        if self._order:
-            out.sort(key=lambda r: r.get(self._order) or 0, reverse=self._desc)
+        # Python's stable sort lets repeated PostgREST order() calls model a
+        # composite ordering without teaching the fake query grammar.
+        for col, desc in reversed(self._orders):
+            out.sort(key=lambda r, key=col: r.get(key) or 0, reverse=desc)
         if self._limit is not None:
             out = out[:self._limit]
+        max_rows = self.db.get("_postgrest_max_rows")
+        if type(max_rows) is int and max_rows >= 0:
+            out = out[:max_rows]
         if self._range:
             lo, hi = self._range
             out = out[lo:hi + 1]
+        out = copy.deepcopy(out)
+        if "source_bytes" in self._cols:
+            for row in out:
+                if "source_bytes" in row:
+                    continue
+                if self.table == "ab_logs":
+                    row["source_bytes"] = len(json.dumps(
+                        str(row.get("line", "")), ensure_ascii=False,
+                    ).encode("utf-8"))
+                elif self.table == "ab_docs":
+                    row["source_bytes"] = len(json.dumps(
+                        row.get("data"), ensure_ascii=False, sort_keys=True,
+                    ).encode("utf-8"))
         return FakeResult(out)
 
 
@@ -268,7 +304,8 @@ class FakeClient:
                    "_change_ledger_version": None,
                    "_source_ledger_version": None,
                    "_scoped_source_version": None,
-                   "_recovery_version": None}
+                   "_recovery_version": None,
+                   "_reference_version": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -309,6 +346,16 @@ class FakeClient:
                     if self.db.get("_recovery_role", "authenticated")
                     == "authenticated"
                     and self.db.get("_recovery_timeout_ok", True) else 0)
+        if fn == "ab_node_reference_ready":
+            return (self.db.get("_reference_version")
+                    if self.db.get("_recovery_role", "authenticated")
+                    == "authenticated"
+                    and self.db.get("_recovery_timeout_ok", True) else 0)
+        if fn == "ab_node_reference_page":
+            return self._reference_rpc(params)
+        if fn in ("ab_node_reference_docs_exact",
+                  "ab_node_reference_logs_exact"):
+            return self._reference_exact_rpc(fn, params)
         if fn in ("ab_node_recovery_fence", "ab_node_recovery_page"):
             return self._recovery_rpc(fn, params)
         if fn == "ab_change_events_page":
@@ -409,6 +456,103 @@ class FakeClient:
         if fn == "ab_effect_transition":
             return self._effect_transition_locked(params)
         return []
+
+    def _reference_rpc(self, params):
+        """Metadata-only page returned as one JSON value, outside row caps."""
+        if self.db.get("_reference_version") != 1:
+            raise ValueError("reference source schema is unavailable")
+        root = params.get("p_root")
+        family = params.get("p_family")
+        after = params.get("p_after")
+        after_log = params.get("p_after_log")
+        limit = params.get("p_limit")
+        visible = self.db.get("_recovery_visible_chats")
+
+        def can_read(chat_id):
+            return visible is None or chat_id in visible
+
+        if family == "documents":
+            rows = []
+            for source in self.db.get("ab_docs", []):
+                path = source.get("path")
+                if (source.get("root") != root or not isinstance(path, str)
+                        or path <= after or path.startswith("presence/")):
+                    continue
+                if path.startswith("chats/") and not can_read(path.split("/")[1]):
+                    continue
+                deleted = bool(source.get("deleted"))
+                size = 0 if deleted else len(json.dumps(
+                    source.get("data"), ensure_ascii=False, sort_keys=True,
+                ).encode("utf-8"))
+                rows.append({"path": path, "seq": source.get("seq"),
+                             "deleted": deleted, "source_bytes": size})
+            rows.sort(key=lambda row: row["path"])
+        elif family == "streams":
+            rows = [{"chat_id": row.get("chat_id"),
+                     "log_name": row.get("log_name"), "head": row.get("head")}
+                    for row in self.db.get("ab_log_stream_heads", [])
+                    if row.get("root") == root
+                    and (row.get("chat_id"), row.get("log_name"))
+                    > (after, after_log)
+                    and can_read(row.get("chat_id"))]
+            rows.sort(key=lambda row: (row["chat_id"], row["log_name"]))
+        else:
+            raise ValueError("invalid reference family")
+        return {"rows": rows[:limit], "has_more": len(rows) > limit}
+
+    def _reference_exact_rpc(self, fn, params):
+        """Exact payloads in one JSON value, outside PostgREST row caps."""
+        if self.db.get("_reference_version") != 1:
+            raise ValueError("reference source schema is unavailable")
+        root = params.get("p_root")
+        budget = params.get("p_max_bytes")
+        visible = self.db.get("_recovery_visible_chats")
+
+        def can_read(chat_id):
+            return visible is None or chat_id in visible
+
+        rows = []
+        used = 0
+        if fn == "ab_node_reference_docs_exact":
+            by_path = {row.get("path"): row for row in self.db.get("ab_docs", [])
+                       if row.get("root") == root}
+            for path in params.get("p_paths", []):
+                source = by_path.get(path)
+                if source is None:
+                    continue
+                if path.startswith("chats/") and not can_read(path.split("/")[1]):
+                    continue
+                deleted = bool(source.get("deleted"))
+                data = None if deleted else copy.deepcopy(source.get("data"))
+                size = 0 if deleted else len(json.dumps(
+                    data, ensure_ascii=False, sort_keys=True,
+                ).encode("utf-8"))
+                used += len(json.dumps(path, ensure_ascii=False).encode("utf-8")) \
+                    + size + 256
+                rows.append({"path": path, "seq": source.get("seq"),
+                             "deleted": deleted, "source_bytes": size,
+                             "data": data})
+        else:
+            wanted = set(params.get("p_ids", []))
+            chat = params.get("p_chat")
+            log = params.get("p_log")
+            if can_read(chat):
+                sources = [row for row in self.db.get("ab_logs", [])
+                           if row.get("root") == root
+                           and row.get("chat_id") == chat
+                           and row.get("log_name") == log
+                           and row.get("id") in wanted]
+                sources.sort(key=lambda row: params["p_ids"].index(row["id"]))
+                for source in sources:
+                    line = source.get("line")
+                    size = len(json.dumps(
+                        str(line), ensure_ascii=False,
+                    ).encode("utf-8"))
+                    used += size + 256
+                    rows.append({"id": source.get("id"), "line": line,
+                                 "source_bytes": size})
+        return {"rows": [] if used > budget else rows,
+                "overflow": used > budget}
 
     def _recovery_rpc(self, fn, params):
         """Offline response shape; SQL locking/RLS require provider tests."""

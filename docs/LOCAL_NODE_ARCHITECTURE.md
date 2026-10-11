@@ -299,12 +299,12 @@ mandatory cases.
   leave/rejoin, equal IDs/namespaces, tombstones and bounded overflow.
 
 The atomic store, local protocol, exact-source shadow collector, durable
-multi-chunk private staging and source-ledger v2 mutation-evidence sub-slices are
-implemented. They do not make cold/scoped recovery complete. The remaining N1
-work is the bounded recovery identity/checkpoint/completion protocol, private
-current-authority discovery, runtime composition behind an explicit
-disabled-by-default feature gate and the transport-equivalence recorder. Do not
-route GUI or harness reads to the store while those pieces or N2 are absent.
+multi-chunk private staging, source-ledger v2 mutation evidence, typed recovery
+proof and independent reference collector are implemented. They remain inactive.
+The remaining N1 work is runtime composition behind an explicit
+disabled-by-default feature gate plus measured diagnostic runs against an
+installed matching provider schema. Do not route GUI or harness reads to the
+store while that evidence or N2 is absent.
 
 Source sequence and identity values are allocation-ordered, not commit-ordered.
 The optional node source-ledger capability therefore adds the exact document
@@ -479,14 +479,35 @@ step from scanning already completed streams. The executor stops at a private
 sealed generation; it does not admit, schedule itself, serve GUI or harness reads,
 or claim equivalence.
 
-The inactive equivalence recorder accepts only a complete replacement reference
-captured between identical opening and closing provider cuts. It compares the
-sealed candidate inside one Store transaction, rechecking the full local binding
-and requiring the provider cursor to equal the sealed target. It writes an
-owner-only evidence file containing counts, digests, mismatch families and
-hashed mismatch keys; it never writes payloads, admits the candidate or changes
-product reads. Its input carrier is deliberately bounded to one validated node
-batch. Larger independent references need a resumable Store-owned reference
-manifest rather than an unbounded legacy `read_log` call. The next slice adds
-that independent current-path reference collector; N2 remains mandatory before
-read cutover.
+The independent inactive reference collector now fills that larger-history
+role. It creates a separately tagged Store-owned run, persists every continuation
+and stages at most one bounded provider page per step. A versioned metadata-only
+RPC returns document or composite `(chat_id, log_name)` stream pages as one JSON
+value with a server-computed continuation bit, so a PostgREST row cap cannot be
+mistaken for exhaustion. Document and log payloads use separate exact-key JSON
+RPCs with the same property. Metadata identity is compared with the exact payload
+observation; a row changed or removed between the two reads fails the page.
+Presence paths are excluded while an unrelated durable path such as `presence0`
+remains valid. All text keysets use the provider's C collation.
+
+Reference chat visibility is derived inside the Store from every exact
+`chats/<id>/meta.json` row admitted by current RLS, including a tombstone that
+remains visible to the schema's janitor/former-member policy. This avoids a
+second chat-ID ordering and authority scan. The otherwise mandatory chat
+manifest is closed empty because its rows were staged with the document pages.
+Stream heads come from the trigger-owned inventory; log payload paging continues
+until the captured head or an explicit empty follow-up, so a low Data API row cap
+cannot silently seal a prefix. Every provider page is followed by a fresh fence
+comparison and the final seal requires the original cut unchanged. This strict
+quiescent mode is diagnostic; active replay remains the recovery path.
+
+Reference candidates are private by Store invariant: their run tag is checked in
+the same transaction that stages derived visibility, and `admit_candidate`
+rejects the tag even after seal. The version-2 equivalence recorder compares the
+sealed recovery and reference generations row by row inside one SQLite
+transaction and streams their digests without reconstructing a full
+`NodeInputBatch`. It writes only owner-protected counts, digests, mismatch
+families and hashed mismatch keys. The comparison transaction can be long for a
+very large history; that is an explicit inactive-diagnostic limitation, not a
+product read path. No GUI, harness, scheduler or activation route uses this work,
+and N2 remains mandatory before read cutover.
