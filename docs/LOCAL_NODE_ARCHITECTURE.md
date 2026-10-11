@@ -549,6 +549,18 @@ to pruning of its superseded generation, including pruning performed by an
 already-running older writer. Product reads remain disconnected pending the
 active-change and crash validation matrix.
 
+The inactive validation matrix exercises both empty and nonempty fence sets at
+every admission boundary: permit creation, candidate application, generation
+transition, metadata/permit consumption, fence removal, receipt creation and
+post-receipt cleanup. It also covers process exit immediately before the node
+commit and immediately after that commit but before the caller receives a
+response; the first reopens the prior cut and the second resolves only through
+the committed receipt. Later mutations serialize after admission, stale SQLite
+writers cannot enter while the permit exists, coordinator replacement cannot
+publish an old claim, and competing starts/admissions converge on one durable
+recovery. These checks are release evidence for the inactive operation, not a
+membership verdict or permission to route product reads.
+
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every
