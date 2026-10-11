@@ -1077,6 +1077,63 @@ class CachingTransport(Transport):
     def supports_change_ledger(self) -> bool:  # type: ignore[override]
         return self.inner.supports_change_ledger
 
+    @property
+    def supports_source_ledger(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_source_ledger
+
+    @property
+    def supports_scoped_source_reads(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_scoped_source_reads
+
+    @property
+    def supports_recovery_source(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_recovery_source
+
+    @property
+    def supports_reference_source(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_reference_source
+
+    def source_documents(self, paths, *, max_bytes):
+        return self.inner.source_documents(paths, max_bytes=max_bytes)
+
+    def source_log_page(
+            self, chat_id, log_name, *, after_cursor, through_cursor, limit,
+            max_bytes):
+        return self.inner.source_log_page(
+            chat_id, log_name, after_cursor=after_cursor,
+            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
+        )
+
+    def source_ledger_fence(self):
+        return self.inner.source_ledger_fence()
+
+    def source_ledger_events(self, after_cursor, *, limit):
+        return self.inner.source_ledger_events(after_cursor, limit=limit)
+
+    def recovery_fence(self):
+        return self.inner.recovery_fence()
+
+    def recovery_page(self, family, after, *, limit, max_bytes):
+        return self.inner.recovery_page(
+            family, after, limit=limit, max_bytes=max_bytes,
+        )
+
+    def reference_documents(self, after, *, limit, max_bytes):
+        return self.inner.reference_documents(
+            after, limit=limit, max_bytes=max_bytes,
+        )
+
+    def reference_streams(self, after, *, limit):
+        return self.inner.reference_streams(after, limit=limit)
+
+    def reference_log_page(
+            self, chat_id, log_name, *, after_cursor, through_cursor, limit,
+            max_bytes):
+        return self.inner.reference_log_page(
+            chat_id, log_name, after_cursor=after_cursor,
+            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
+        )
+
     def change_ledger_capability(self):
         return self.inner.change_ledger_capability()
 

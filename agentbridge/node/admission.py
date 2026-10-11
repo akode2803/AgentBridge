@@ -18,7 +18,11 @@ MAX_BATCH_BYTES = 64 * 1024 * 1024
 MAX_STAGED_DOCUMENTS = 1_000_000
 MAX_STAGED_LOG_ROWS = 10_000_000
 MAX_STAGED_VISIBILITY = 200_000
-MAX_STAGED_CHUNKS = 4_096
+# A maximally fragmented bounded recovery can need one terminal receipt for
+# each captured stream, in addition to document, log and event pages. Keep the
+# receipt ceiling above the independent row-family ceilings so a history that
+# fits those limits is not rejected solely because its pages are small.
+MAX_STAGED_CHUNKS = 262_144
 MAX_RECOVERY_SCOPES = 20_000
 MAX_RECOVERY_WORK = 4_096
 MAX_RECOVERY_MANIFEST_PAGE = 256

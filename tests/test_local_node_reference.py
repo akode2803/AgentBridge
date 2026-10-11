@@ -3,19 +3,40 @@
 import os
 import sqlite3
 import stat
+from math import ceil
 
 import pytest
 
 from agentbridge.node.admission import NodeGenerationChanged, NodeInputError
+from agentbridge.node.admission import (
+    MAX_RECOVERY_EVENTS, MAX_RECOVERY_MANIFEST_PAGE, MAX_RECOVERY_STREAMS,
+    MAX_STAGED_CHUNKS, MAX_STAGED_DOCUMENTS, MAX_STAGED_LOG_ROWS,
+)
 from agentbridge.node.equivalence import RecoveryEquivalenceRecorder
 from agentbridge.node.protocol import ReplicaIdentity
 from agentbridge.node.recovery import InactiveRecoveryExecutor, _provider_cut
 from agentbridge.node.reference import InactiveReferenceExecutor
 from agentbridge.node.store import NodeStore
+from agentbridge.transport.scoped_sources import MAX_SOURCE_BATCH_PATHS
 from agentbridge.transport.supabase import SupabaseTransport
 from fake_cloud import FakeClient
 
 EPOCH = "12345678-1234-5678-9234-567812345678"
+
+
+def test_staged_receipt_budget_covers_bounded_recovery_families():
+    # One terminal page may be required for every captured stream even when
+    # its historical rows were physically deleted. Remaining live rows can
+    # still consume their own full pages.
+    required = (
+        ceil(MAX_STAGED_DOCUMENTS / MAX_SOURCE_BATCH_PATHS)
+        + ceil(MAX_RECOVERY_STREAMS / MAX_RECOVERY_MANIFEST_PAGE)
+        + MAX_RECOVERY_STREAMS
+        + ceil(MAX_STAGED_LOG_ROWS / MAX_RECOVERY_MANIFEST_PAGE)
+        + ceil(MAX_RECOVERY_EVENTS / MAX_RECOVERY_MANIFEST_PAGE)
+        + 8
+    )
+    assert required <= MAX_STAGED_CHUNKS
 
 
 def identity():
