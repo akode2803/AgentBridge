@@ -9,6 +9,7 @@ from .admission import (
     NodeCapture,
     NodeCaptureRequest,
     NodeChangePage,
+    NodeCandidateCapacityError,
     NodeDocument,
     NodeFrontier,
     NodeGenerationChanged,
@@ -23,6 +24,10 @@ from .equivalence import (
     RecoveryEquivalenceRecorder, RecoveryEquivalenceReference,
     RecoveryEquivalenceResult,
 )
+from .diagnostic_runtime import (
+    LocalNodeDiagnosticRuntime, NodeDiagnosticStepResult,
+    diagnostic_runtime_enabled,
+)
 from .recovery import InactiveRecoveryExecutor, RecoveryStepResult
 from .server import LocalNodeServer
 from .store import NodeStore
@@ -30,9 +35,11 @@ from .store import NodeStore
 __all__ = [
     "PROTOCOL_VERSION",
     "LocalNodeServer",
+    "LocalNodeDiagnosticRuntime",
     "InactiveRecoveryExecutor",
     "NodeCapture",
     "NodeCaptureRequest",
+    "NodeCandidateCapacityError",
     "NodeChangePage",
     "NodeDocument",
     "NodeFrontier",
@@ -42,6 +49,7 @@ __all__ = [
     "NodeLogRequest",
     "NodeLogRow",
     "NodeStatus",
+    "NodeDiagnosticStepResult",
     "NodeStore",
     "NodeVisibility",
     "ReplicaIdentity",
@@ -49,4 +57,5 @@ __all__ = [
     "RecoveryEquivalenceReference",
     "RecoveryEquivalenceResult",
     "RecoveryStepResult",
+    "diagnostic_runtime_enabled",
 ]

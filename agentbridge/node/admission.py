@@ -51,6 +51,10 @@ class NodeInputError(ValueError):
     """A detached provider batch or capture request is invalid."""
 
 
+class NodeCandidateCapacityError(NodeInputError):
+    """The bounded candidate pool cannot accept the requested private work."""
+
+
 class NodeGenerationChanged(RuntimeError):
     """A candidate/capture no longer refers to the admitted generation."""
 

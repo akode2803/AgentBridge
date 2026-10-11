@@ -19,7 +19,10 @@ from .admission import (
 )
 from .security import atomic_private_json
 from .store import NodeStore
-from .store import RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION
+from .store import (
+    DIAGNOSTIC_RECOVERY_PLAN_SELECTION, DIAGNOSTIC_REFERENCE_PLAN_SELECTION,
+    RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION,
+)
 
 
 @dataclass(frozen=True)
@@ -361,9 +364,15 @@ class RecoveryEquivalenceRecorder:
             recovery = self.store._bound_recovery(conn, recovery_id, current)
             reference = self.store._bound_recovery(conn, reference_id, current)
             if recovery is not None and reference is not None:
-                if (self._run_kind(conn, recovery_id) != RECOVERY_PLAN_SELECTION
-                        or self._run_kind(conn, reference_id)
-                        != REFERENCE_PLAN_SELECTION):
+                run_kinds = (
+                    self._run_kind(conn, recovery_id),
+                    self._run_kind(conn, reference_id),
+                )
+                if run_kinds not in (
+                    (RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION),
+                    (DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
+                     DIAGNOSTIC_REFERENCE_PLAN_SELECTION),
+                ):
                     raise NodeInputError("equivalence run kinds are reversed or invalid")
                 if (recovery[15] != "sealed" or reference[15] != "sealed"
                         or recovery[14] != current.cursor
