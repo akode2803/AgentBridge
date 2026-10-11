@@ -650,25 +650,31 @@ from local tests.
 The later local-node recovery stack supersedes the older transport checkpoint
 above. Its durable implementation record is
 `~/.agentbridge/dev-tasks/1092b6e37b13bbe8/LOCAL_NODE_RECOVERY_V5_PLAN_2026-10-11.md`.
-The implementation commits are PR #83 `3cd6340`, PR #84 `0ac890d`, PR #85
-`0f62763`, and PR #86 `fcf42c1`; #84--#86 are stacked in that order. The app and harness remain
+PRs #78--#84 are merged through merge commit `7840bfe`. Corrected PR #85 head
+`6b62293` is based directly on `main`; PR #86 remains stacked on #85 and its
+rebased command implementation commit is `3e96478`. The app and harness remain
 stopped. No provider schema installation, live diagnostic activation, deploy or
 restart has occurred.
 
 PR #85 composes the typed recovery, independent reference and Store-to-Store
 equivalence recorder behind an exact disabled-by-default gate. It advances at
 most one provider data page per call, resumes from SQLite, rejects incompatible
-provider cuts before scanning, never admits either diagnostic candidate and is
-not imported by GUI or harness startup. PR #86 adds the separate one-shot
-operator command. The command touches neither config nor provider while disabled,
-derives its identity-bound Store/evidence path from the authenticated provider
-account, emits only bounded progress/error categories and exits after one step.
+provider cuts before scanning and is not imported by GUI or harness startup.
+Diagnostic recovery has a distinct, inadmissible run identity; both sides are
+health-neutral. Start reserves two candidate slots, a reference-start capacity
+race cleans up the first half, and successful evidence recording abandons both
+private candidates. PR #86 adds the separate one-shot operator command. The
+command touches neither config nor provider while disabled, derives its
+identity-bound Store/evidence path from the authenticated provider account,
+emits only bounded progress/error categories and exits after one step.
 
-Local validation for the current stack is 145 focused tests plus Ruff, isolated
-compile and diff checks. GPT-Astra's corrected-tree reviews are clean. Hosted CI
-and connector review for #85/#86 are pending and must not be polled; incorporate
-the user's completion signal and any current-head findings. After the stack
-merges, provider-schema installation is a separate explicit release action.
-Only then run the one-shot diagnostic repeatedly and record step count, wall
-time, counts, digests and restart reasons. Equality is delivery evidence, never
-membership authority. Product reads remain on the existing path until N2.
+Corrected PR #85 validation is the complete local suite (3,548 passed, 20
+skipped), the 145-test focused recovery/source gate, Ruff, isolated compilation
+and diff checks. GPT-Astra's corrected-tree review is clean. The rebased #86
+command/runtime gate passes 30 tests with Ruff and diff checks clean. New hosted
+CI and connector review for #85/#86 are pending and must not be polled;
+incorporate the user's completion signal and any current-head findings. After
+the stack merges, provider-schema installation is a separate explicit release
+action. Only then run the one-shot diagnostic repeatedly and record step count,
+wall time, counts, digests and restart reasons. Equality is delivery evidence,
+never membership authority. Product reads remain on the existing path until N2.
