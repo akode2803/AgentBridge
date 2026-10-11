@@ -306,7 +306,12 @@ gate. One call advances at most one provider data page; accepted continuations
 live in the Store, so replacing the coordinator does not restart work. It first
 seals recovery, then an independent reference at the same provider cut, and
 records their Store-to-Store comparison without admitting either candidate.
-Provider movement abandons both sides and begins a fresh bounded attempt. The
+Both diagnostic run kinds are separate from the product recovery kind and never
+take source-health ownership. Starting recovery requires capacity for both
+private candidates; contention before reference creation abandons the first
+half rather than stranding it. Provider movement abandons both sides and begins
+a fresh bounded attempt. After evidence is written, both candidates are
+abandoned so they cannot consume the bounded active pool. The
 remaining N1 gate is a measured diagnostic run against an installed matching
 provider schema. Do not route GUI or harness reads to the store while that
 evidence or N2 is absent.
@@ -518,6 +523,7 @@ product read path. The disabled diagnostic coordinator composes those primitives
 without a GUI, harness or scheduler import. Its environment gate accepts only
 the explicit value `1`; absence and malformed values remain off and perform no
 provider I/O. Completion writes private equivalence evidence while the admitted
-generation remains unchanged. Repeated calls after completion may record a new
+generation and its health timestamps remain unchanged, then reclaims both
+private candidates. Repeated calls after completion may record a new
 observation; the diagnostic caller owns stopping policy. N2 remains mandatory
 before read cutover.

@@ -15,7 +15,8 @@ from .admission import (
     MAX_CHANGE_PAGE, MAX_CHANGE_ROWS, MAX_GENERATION_HISTORY,
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
-    NodeInputBatch, NodeInputError, NodeLogPage, NodeLogRow, NodeScopePosition,
+    NodeCandidateCapacityError, NodeInputBatch, NodeInputError,
+    NodeLogPage, NodeLogRow, NodeScopePosition,
     NodeVisibility,
     NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
     NodeRecoveryEvent, NodeRecoveryEventState, NodeRecoveryManifestState,
@@ -30,6 +31,7 @@ from .security import private_directory, protect_path
 SCHEMA_VERSION = 7
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
+DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
@@ -696,7 +698,8 @@ class NodeStore:
                 "SELECT count(*) FROM node_generations "
                 "WHERE state IN ('building','sealed')").fetchone()[0]
             if active >= MAX_ACTIVE_CANDIDATES:
-                raise NodeInputError("too many active node candidates")
+                raise NodeCandidateCapacityError(
+                    "too many active node candidates")
             generation = conn.execute(
                 "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
             ).fetchone()[0]
@@ -753,8 +756,18 @@ class NodeStore:
             selection=REFERENCE_PLAN_SELECTION,
         )
 
+    def root_diagnostic_recovery_plan(
+        self, current_provider_cut: NodeProviderCut,
+    ) -> NodeRecoveryPlan:
+        """Capture a health-neutral recovery side for private comparison."""
+        return self._root_recovery_plan(
+            current_provider_cut, work_id="provider-diagnostic-frontiers",
+            selection=DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
+        )
+
     def begin_recovery(self, plan: NodeRecoveryPlan, *,
-                       created_ns: int) -> NodeRecoveryState:
+                       created_ns: int,
+                       required_candidate_slots: int = 1) -> NodeRecoveryState:
         """Bind one private, resumable provider recovery to an exact local cut."""
         if type(plan) is not NodeRecoveryPlan:
             raise NodeInputError("invalid recovery plan")
@@ -765,6 +778,9 @@ class NodeStore:
             tuple(NodeRecoveryWork(**vars(w)) for w in plan.work),
         )
         created = _positive_ns(created_ns, "recovery creation time")
+        if (type(required_candidate_slots) is not int
+                or not 1 <= required_candidate_slots <= MAX_ACTIVE_CANDIDATES):
+            raise NodeInputError("invalid required candidate slots")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             meta = self._check_meta(conn)
@@ -774,15 +790,20 @@ class NodeStore:
                     or any(self._scope_generation(conn, s.scope_kind, s.scope_id)
                            != (s.generation, None) for s in plan.scopes)):
                 raise NodeGenerationChanged("recovery binding changed")
-            if conn.execute("SELECT count(*) FROM node_generations WHERE state "
-                            "IN ('building','sealed')").fetchone()[0] >= MAX_ACTIVE_CANDIDATES:
-                raise NodeInputError("too many active node candidates")
+            active = conn.execute(
+                "SELECT count(*) FROM node_generations WHERE state "
+                "IN ('building','sealed')").fetchone()[0]
+            if active + required_candidate_slots > MAX_ACTIVE_CANDIDATES:
+                raise NodeCandidateCapacityError(
+                    "too many active node candidates")
             generation = conn.execute(
                 "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
             ).fetchone()[0]
-            is_reference = (len(plan.work) == 1
-                            and plan.work[0].selection == REFERENCE_PLAN_SELECTION)
-            health_owner_token = 0 if is_reference else max(created, meta[3] + 1)
+            private_selection = (len(plan.work) == 1 and plan.work[0].selection in (
+                REFERENCE_PLAN_SELECTION, DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
+            ))
+            health_owner_token = (0 if private_selection
+                                  else max(created, meta[3] + 1))
             if health_owner_token > 2**63 - 1:
                 raise NodeInputError("recovery attempt time exhausted")
             recovery_id = secrets.token_hex(24)
@@ -819,7 +840,7 @@ class NodeStore:
             )
             if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
                 raise NodeInputError("recovery metadata exceeds budget")
-            if not is_reference:
+            if not private_selection:
                 conn.execute(
                     "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
                     "WHERE singleton=1", (health_owner_token,),
@@ -975,7 +996,10 @@ class NodeStore:
         """Discover one durable active run after process-local state is lost."""
         if type(current_provider_cut) is not NodeProviderCut:
             raise NodeInputError("invalid current provider cut")
-        if selection not in (RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION):
+        if selection not in (
+            RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION,
+            DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
+        ):
             raise NodeInputError("invalid recovery run selection")
         current = NodeProviderCut(**vars(current_provider_cut))
         result = None
@@ -2442,6 +2466,9 @@ class NodeStore:
                 ).fetchall()
                 if (REFERENCE_PLAN_SELECTION,) in selections:
                     raise NodeInputError("reference candidate cannot be admitted")
+                if (DIAGNOSTIC_RECOVERY_PLAN_SELECTION,) in selections:
+                    raise NodeInputError(
+                        "diagnostic candidate cannot be admitted")
             if recovery and recovery[1] != "sealed":
                 raise NodeGenerationChanged("recovery is not sealed")
             current = conn.execute(

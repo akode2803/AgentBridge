@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Mapping
 
 from ..transport.base import Transport
-from .admission import NodeGenerationChanged, NodeInputError
+from .admission import (
+    NodeCandidateCapacityError, NodeGenerationChanged, NodeInputError,
+)
 from .equivalence import RecoveryEquivalenceRecorder
 from .recovery import InactiveRecoveryExecutor, RecoveryStepResult, _provider_cut
 from .reference import InactiveReferenceExecutor, ReferenceStepResult
@@ -74,7 +76,8 @@ class LocalNodeDiagnosticRuntime:
         return value
 
     def _advance_recovery(self, attempted: int) -> RecoveryStepResult:
-        executor = InactiveRecoveryExecutor(self.store, self.transport)
+        executor = InactiveRecoveryExecutor(
+            self.store, self.transport, diagnostic=True)
         result = executor.step(None, attempted_ns=attempted)
         if result.action == "resumed":
             result = executor.step(result.recovery_id, attempted_ns=attempted)
@@ -100,6 +103,9 @@ class LocalNodeDiagnosticRuntime:
 
         try:
             recovery = self._advance_recovery(attempted)
+        except NodeCandidateCapacityError:
+            return NodeDiagnosticStepResult(
+                "running", "recovery", "deferred")
         except NodeGenerationChanged:
             return NodeDiagnosticStepResult(
                 "running", "recovery", "restarted")
@@ -113,6 +119,10 @@ class LocalNodeDiagnosticRuntime:
 
         try:
             reference = self._advance_reference(attempted)
+        except NodeCandidateCapacityError:
+            self._abandon(recovery.generation)
+            return NodeDiagnosticStepResult(
+                "running", "reference", "restarted")
         except NodeGenerationChanged:
             self._abandon(recovery.generation)
             return NodeDiagnosticStepResult(
@@ -143,6 +153,7 @@ class LocalNodeDiagnosticRuntime:
             self._abandon(recovery.generation, reference.generation)
             return NodeDiagnosticStepResult(
                 "running", "equivalence", "restarted")
+        self._abandon(recovery.generation, reference.generation)
         return NodeDiagnosticStepResult(
             "completed", "equivalence", "recorded",
             recovery_id=compared.recovery_id,

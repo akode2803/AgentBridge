@@ -22,7 +22,9 @@ from .admission import (
     NodeProviderCut, NodeRecoveryEvent, NodeRecoveryState,
     NodeRecoveryStreamHead,
 )
-from .store import NodeStore, RECOVERY_PLAN_SELECTION
+from .store import (
+    DIAGNOSTIC_RECOVERY_PLAN_SELECTION, NodeStore, RECOVERY_PLAN_SELECTION,
+)
 
 EXACT_LOG_PAGE_ROWS = MAX_RECOVERY_MANIFEST_PAGE
 
@@ -59,21 +61,26 @@ def _chunk(kind: str, *values: object) -> str:
 class InactiveRecoveryExecutor:
     """Advance a private recovery by one bounded provider operation."""
 
-    def __init__(self, store: NodeStore, transport: Transport) -> None:
+    def __init__(self, store: NodeStore, transport: Transport, *,
+                 diagnostic: bool = False) -> None:
         if type(store) is not NodeStore or not isinstance(transport, Transport):
             raise TypeError("expected node Store and transport")
+        if type(diagnostic) is not bool:
+            raise TypeError("expected diagnostic recovery mode")
         self.store = store
         self.transport = transport
+        self.selection = (DIAGNOSTIC_RECOVERY_PLAN_SELECTION
+                          if diagnostic else RECOVERY_PLAN_SELECTION)
+        self.diagnostic = diagnostic
 
     def _require_source(self) -> None:
         if (not self.transport.supports_recovery_source
                 or not self.transport.supports_scoped_source_reads):
             raise NotImplementedError("transport recovery source is unavailable")
 
-    @staticmethod
-    def _require_plan(state: NodeRecoveryState) -> None:
+    def _require_plan(self, state: NodeRecoveryState) -> None:
         if (len(state.plan.work) != 1
-                or state.plan.work[0].selection != RECOVERY_PLAN_SELECTION):
+                or state.plan.work[0].selection != self.selection):
             raise NodeInputError("recovery executor received a different run kind")
 
     def _restart(self, state: NodeRecoveryState, reason: str) -> None:
@@ -240,10 +247,14 @@ class InactiveRecoveryExecutor:
         discovered = recovery_id is None
         if discovered:
             recovery_id = self.store.resumable_recovery_id(
-                current, selection=RECOVERY_PLAN_SELECTION)
+                current, selection=self.selection)
         if recovery_id is None:
-            plan = self.store.root_recovery_plan(current)
-            state = self.store.begin_recovery(plan, created_ns=attempted_ns)
+            plan = (self.store.root_diagnostic_recovery_plan(current)
+                    if self.diagnostic else self.store.root_recovery_plan(current))
+            state = self.store.begin_recovery(
+                plan, created_ns=attempted_ns,
+                required_candidate_slots=2 if self.diagnostic else 1,
+            )
             return RecoveryStepResult(
                 "building", state.recovery_id, state.generation,
                 "started", state.target_cursor,
