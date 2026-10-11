@@ -2,6 +2,9 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
+import threading
 from contextlib import contextmanager
 
 import pytest
@@ -94,6 +97,23 @@ def exact_reference(*, log_payload=b"sealed"):
         documents_mode="replace", logs_mode="replace",
         visibility_mode="replace", frontiers_mode="replace",
     )
+
+
+def sealed_claimed_recovery(tmp_path, *, with_fence=False):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    if with_fence:
+        intent = root.begin((source_selectors.Selector(
+            "doc_exact", "users/earlier.json"),))
+        root.complete(intent)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+    return owner, root, claim, sealed
 
 
 def test_executor_resumes_one_bounded_step_at_a_time_and_keeps_result_private(tmp_path):
@@ -301,6 +321,580 @@ def test_coordinator_admission_failure_rolls_back_permit_and_publication(
             (sealed.generation,),
         ).fetchone() == ("sealed",)
         assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("with_fence", (False, True))
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "permit_insert", "candidate_apply", "generation_transition",
+        "permit_consume", "fence_consumption", "receipt_insert",
+        "post_receipt",
+    ),
+)
+def test_admission_failure_matrix_rolls_back_and_retries(
+        tmp_path, monkeypatch, with_fence, failure):
+    owner, root, claim, sealed = sealed_claimed_recovery(
+        tmp_path, with_fence=with_fence)
+    original_prune = NodeStore._prune_generation_history
+    original_apply = NodeStore._apply_candidate
+    original_record = NodeStore._record_changes
+    original_clear = NodeStore._clear_candidate_rows
+
+    if failure == "permit_insert":
+        def inject(conn):
+            original_prune(conn)
+            conn.execute("""CREATE TEMP TRIGGER injected_permit_insert_failure
+                BEFORE INSERT ON node_admission_permits BEGIN
+                    SELECT RAISE(ABORT,'injected permit insert failure');
+                END""")
+
+        monkeypatch.setattr(
+            NodeStore, "_prune_generation_history", staticmethod(inject))
+    elif failure == "candidate_apply":
+        def inject(*_args, **_kwargs):
+            raise OSError("injected candidate apply failure")
+
+        monkeypatch.setattr(NodeStore, "_apply_candidate", staticmethod(inject))
+    elif failure == "generation_transition":
+        def inject(conn, *args):
+            original_apply(conn, *args)
+            conn.execute("""CREATE TEMP TRIGGER injected_generation_failure
+                BEFORE UPDATE OF state ON node_generations
+                WHEN NEW.state='admitted' BEGIN
+                    SELECT RAISE(ABORT,'injected generation failure');
+                END""")
+
+        monkeypatch.setattr(NodeStore, "_apply_candidate", staticmethod(inject))
+    elif failure == "permit_consume":
+        def inject(conn, *args):
+            original_apply(conn, *args)
+            conn.execute("""CREATE TEMP TRIGGER injected_permit_consume_failure
+                BEFORE DELETE ON node_admission_permits BEGIN
+                    SELECT RAISE(ABORT,'injected permit consume failure');
+                END""")
+
+        monkeypatch.setattr(NodeStore, "_apply_candidate", staticmethod(inject))
+    elif failure == "fence_consumption":
+        def inject(*_args, **_kwargs):
+            raise OSError("injected fence consumption failure")
+
+        monkeypatch.setattr(NodeStore, "_record_changes", staticmethod(inject))
+    elif failure == "receipt_insert":
+        def inject(conn, *args):
+            original_record(conn, *args)
+            conn.execute("""CREATE TEMP TRIGGER injected_receipt_failure
+                BEFORE INSERT ON node_recovery_receipts BEGIN
+                    SELECT RAISE(ABORT,'injected receipt failure');
+                END""")
+
+        monkeypatch.setattr(NodeStore, "_record_changes", staticmethod(inject))
+    else:
+        def inject(*_args, **_kwargs):
+            raise OSError("injected post receipt failure")
+
+        monkeypatch.setattr(
+            NodeStore, "_clear_candidate_rows", staticmethod(inject))
+
+    with pytest.raises((OSError, sqlite3.IntegrityError), match="injected"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == 0
+    assert status.pending_mutations == int(with_fence)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("sealed",)
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_receipts").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_claims").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_mutation_fences").fetchone() == (
+                int(with_fence),)
+
+    monkeypatch.setattr(
+        NodeStore, "_prune_generation_history", staticmethod(original_prune))
+    monkeypatch.setattr(
+        NodeStore, "_apply_candidate", staticmethod(original_apply))
+    monkeypatch.setattr(
+        NodeStore, "_record_changes", staticmethod(original_record))
+    monkeypatch.setattr(
+        NodeStore, "_clear_candidate_rows", staticmethod(original_clear))
+    assert root.admit_node_recovery(
+        owner, claim, sealed.recovery_id) == sealed.generation
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "recovery_id='ffffffffffffffffffffffffffffffffffffffffffffffff'",
+        "database_incarnation='replacement'",
+        "base_generation=base_generation+1",
+        "destination_generation=destination_generation+1",
+        "claim_digest='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+        "root_revision=root_revision+1",
+        "old_pending_count=old_pending_count+1",
+    ),
+)
+def test_exact_permit_binding_rejects_each_mismatch(
+        tmp_path, monkeypatch, mutation):
+    owner, root, claim, sealed = sealed_claimed_recovery(
+        tmp_path, with_fence=True)
+    original_apply = NodeStore._apply_candidate
+
+    def corrupt_permit(conn, *args):
+        original_apply(conn, *args)
+        conn.execute(f"UPDATE node_admission_permits SET {mutation}")
+
+    monkeypatch.setattr(
+        NodeStore, "_apply_candidate", staticmethod(corrupt_permit))
+    with pytest.raises(
+            sqlite3.IntegrityError, match="requires coordinator admission"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("sealed",)
+        assert conn.execute(
+            "SELECT count(*) FROM node_mutation_fences").fetchone() == (1,)
+
+    monkeypatch.setattr(
+        NodeStore, "_apply_candidate", staticmethod(original_apply))
+    assert root.admit_node_recovery(
+        owner, claim, sealed.recovery_id) == sealed.generation
+
+
+def test_late_admission_failure_preserves_existing_admitted_cut(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    base = owner.begin_candidate(created_ns=1)
+    owner.seal_candidate(base, NodeInputBatch(documents=(
+        NodeDocument("users/base.json", 1, False, b"base"),
+    )), observed_ns=2)
+    owner.admit_candidate(base)
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    opening = _provider_cut(tx.recovery_fence())
+    state = root.begin_node_recovery(owner, claim, opening, created_ns=10)
+    sealed, _actions = run_to_seal(
+        InactiveRecoveryExecutor(owner, tx), state.recovery_id)
+    request = NodeCaptureRequest(
+        document_prefixes=("",), include_visibility=True,
+        visibility_limit=10, max_documents=10, max_bytes=8192,
+    )
+    before_status = owner.status(node_epoch="node", started_ns=1)
+    before_capture = owner.capture(request)
+    with sqlite3.connect(owner.path) as conn:
+        before_dump = tuple(conn.iterdump())
+    original_clear = NodeStore._clear_candidate_rows
+
+    def fail_after_receipt(*_args, **_kwargs):
+        raise OSError("injected late admission failure")
+
+    monkeypatch.setattr(
+        NodeStore, "_clear_candidate_rows", staticmethod(fail_after_receipt))
+    with pytest.raises(OSError, match="injected late admission failure"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    reopened = NodeStore(owner.path, identity())
+    assert reopened.status(node_epoch="node", started_ns=1) == before_status
+    assert reopened.capture(request) == before_capture
+    with sqlite3.connect(owner.path) as conn:
+        assert tuple(conn.iterdump()) == before_dump
+
+    monkeypatch.setattr(
+        NodeStore, "_clear_candidate_rows", staticmethod(original_clear))
+    assert root.admit_node_recovery(
+        reopened, claim, sealed.recovery_id) == sealed.generation
+
+
+def test_mutation_after_collection_before_seal_retires_private_work(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    executor = ClaimedRecoveryExecutor(owner, tx, root)
+    result = executor.step(None, attempted_ns=10)
+    for attempted in range(11, 30):
+        result = InactiveRecoveryExecutor(owner, tx).step(
+            result.recovery_id, attempted_ns=attempted)
+        if result.action == "events":
+            break
+    assert result.state == "building" and result.action == "events"
+
+    intent = root.begin((source_selectors.Selector(
+        "doc_exact", "users/later.json"),))
+    root.complete(intent)
+
+    with pytest.raises(NodeGenerationChanged):
+        InactiveRecoveryExecutor(owner, tx).step(
+            result.recovery_id, attempted_ns=31)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (result.generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries WHERE recovery_id=?",
+            (result.recovery_id,),
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+
+
+def test_mutation_after_provider_page_before_stage_rejects_stale_page(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    started = ClaimedRecoveryExecutor(owner, tx, root).step(
+        None, attempted_ns=10)
+    original = tx.recovery_page
+
+    def move_after_response(*args, **kwargs):
+        page = original(*args, **kwargs)
+        intent = root.begin((source_selectors.Selector(
+            "doc_exact", "users/later.json"),))
+        root.complete(intent)
+        return page
+
+    monkeypatch.setattr(tx, "recovery_page", move_after_response)
+    with pytest.raises(NodeGenerationChanged):
+        InactiveRecoveryExecutor(owner, tx).step(
+            started.recovery_id, attempted_ns=11)
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (started.generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM candidate_docs WHERE generation=?",
+            (started.generation,),
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+
+
+def test_mutation_after_close_token_before_seal_rejects_stale_close(
+        tmp_path, monkeypatch):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    result = ClaimedRecoveryExecutor(owner, tx, root).step(
+        None, attempted_ns=10)
+    for attempted in range(11, 30):
+        result = InactiveRecoveryExecutor(owner, tx).step(
+            result.recovery_id, attempted_ns=attempted)
+        if result.action == "events":
+            break
+    assert result.state == "building" and result.action == "events"
+    original = tx.recovery_fence
+    calls = 0
+
+    def move_after_close_token():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            intent = root.begin((source_selectors.Selector(
+                "doc_exact", "users/later.json"),))
+            root.complete(intent)
+        return original()
+
+    monkeypatch.setattr(tx, "recovery_fence", move_after_close_token)
+    with pytest.raises(NodeGenerationChanged):
+        InactiveRecoveryExecutor(owner, tx).step(
+            result.recovery_id, attempted_ns=31)
+    assert calls == 2
+
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (result.generation,),
+        ).fetchone() == ("abandoned",)
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries WHERE recovery_id=?",
+            (result.recovery_id,),
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+
+
+def test_admission_serializes_before_later_mutation_and_stale_sqlite_writer(
+        tmp_path, monkeypatch):
+    owner, root, claim, sealed = sealed_claimed_recovery(tmp_path)
+    original_apply = NodeStore._apply_candidate
+    entered = threading.Event()
+    release = threading.Event()
+    mutation_attempted = threading.Event()
+    mutation_done = threading.Event()
+    admission_result = []
+    mutation_result = []
+    failures = []
+
+    def blocked_apply(conn, *args):
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("admission test barrier timed out")
+        return original_apply(conn, *args)
+
+    def admit():
+        try:
+            admission_result.append(root.admit_node_recovery(
+                owner, claim, sealed.recovery_id))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def mutate():
+        try:
+            mutation_attempted.set()
+            intent = root.begin((source_selectors.Selector(
+                "doc_exact", "users/later.json"),))
+            root.complete(intent)
+            mutation_result.append(intent.token)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+        finally:
+            mutation_done.set()
+
+    monkeypatch.setattr(
+        NodeStore, "_apply_candidate", staticmethod(blocked_apply))
+    admission_thread = threading.Thread(target=admit)
+    admission_thread.start()
+    mutation_thread = threading.Thread(target=mutate)
+    try:
+        assert entered.wait(5)
+
+        # A stale SQLite writer cannot enter while the one-use permit exists
+        # inside the coordinator's uncommitted node transaction.
+        with sqlite3.connect(owner.path, timeout=0.05) as stale, pytest.raises(
+                sqlite3.OperationalError, match="locked"):
+            stale.execute("BEGIN IMMEDIATE")
+
+        mutation_thread.start()
+        assert mutation_attempted.wait(5)
+        assert not mutation_done.wait(0.1)
+    finally:
+        release.set()
+        admission_thread.join(5)
+        if mutation_thread.ident is not None:
+            mutation_thread.join(5)
+
+    assert not admission_thread.is_alive() and not mutation_thread.is_alive()
+    assert failures == []
+    assert admission_result == [sealed.generation]
+    assert len(mutation_result) == 1
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == sealed.generation
+    assert status.pending_mutations == 1 and status.health == "pending"
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT state FROM node_mutation_fences"
+        ).fetchall() == [("completed",)]
+        assert conn.execute(
+            "SELECT admitted_generation FROM node_recovery_receipts "
+            "WHERE recovery_id=?", (sealed.recovery_id,),
+        ).fetchone() == (sealed.generation,)
+
+
+def test_coordinator_replacement_after_seal_cannot_publish_old_claim(tmp_path):
+    owner, root, claim, sealed = sealed_claimed_recovery(
+        tmp_path, with_fence=True)
+    with sqlite3.connect(root.path) as conn:
+        conn.execute(
+            "UPDATE mutation_root SET epoch=? WHERE singleton=1",
+            ("f" * 32,),
+        )
+    replacement = MutationCoordinator(tmp_path / "home", root.identity)
+
+    with pytest.raises(SourceChanged, match="mutation_root_changed"):
+        root.admit_node_recovery(owner, claim, sealed.recovery_id)
+    with pytest.raises(SourceChanged, match="node_recovery_claim_changed"):
+        replacement.admit_node_recovery(owner, claim, sealed.recovery_id)
+
+    status = owner.status(node_epoch="node", started_ns=1)
+    assert status.admitted_generation == 0
+    assert status.pending_mutations == 1 and status.health == "pending"
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (sealed.generation,),
+        ).fetchone() == ("sealed",)
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_receipts").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_claims").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("phase", ("before_node_commit", "after_node_commit"))
+def test_process_exit_around_node_commit_is_recoverable(tmp_path, phase):
+    owner, root, claim, sealed = sealed_claimed_recovery(
+        tmp_path, with_fence=True)
+    claim_payload = vars(claim).copy()
+    claim_payload["fence_tokens"] = list(claim.fence_tokens)
+    script = r"""
+import json
+import os
+import sys
+from contextlib import contextmanager
+
+from agentbridge.node.admission import NodeRecoveryClaim
+from agentbridge.node.protocol import ReplicaIdentity
+from agentbridge.node.store import NodeStore
+from agentbridge.store.mutation_coordinator import MutationCoordinator
+
+phase, node_path, home, root_identity, claim_json, recovery_id = sys.argv[1:]
+data = json.loads(claim_json)
+data["fence_tokens"] = tuple(data["fence_tokens"])
+claim = NodeRecoveryClaim(**data)
+node = NodeStore(node_path, ReplicaIdentity(
+    claim.provider_endpoint, claim.root, "user", "mac"))
+root = MutationCoordinator(home, root_identity)
+if phase == "before_node_commit":
+    NodeStore._clear_candidate_rows = staticmethod(
+        lambda *_args, **_kwargs: os._exit(91))
+else:
+    original = root._transaction
+    @contextmanager
+    def exit_after_commit(**kwargs):
+        with original(**kwargs) as conn:
+            yield conn
+            os._exit(92)
+    root._transaction = exit_after_commit
+root.admit_node_recovery(node, claim, recovery_id)
+raise AssertionError("crash injection did not run")
+"""
+    result = subprocess.run(
+        [
+            sys.executable, "-c", script, phase, str(owner.path),
+            str(tmp_path / "home"), root.identity,
+            json.dumps(claim_payload, sort_keys=True), sealed.recovery_id,
+        ],
+        cwd=tmp_path, check=False, timeout=15,
+    )
+    assert result.returncode == (91 if phase == "before_node_commit" else 92)
+
+    reopened = NodeStore(owner.path, identity())
+    status = reopened.status(node_epoch="node", started_ns=1)
+    if phase == "before_node_commit":
+        assert status.admitted_generation == 0
+        assert status.pending_mutations == 1
+        with sqlite3.connect(owner.path) as conn:
+            assert conn.execute(
+                "SELECT state FROM node_generations WHERE generation=?",
+                (sealed.generation,),
+            ).fetchone() == ("sealed",)
+            assert conn.execute(
+                "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+            assert conn.execute(
+                "SELECT count(*) FROM node_recovery_receipts").fetchone() == (0,)
+    else:
+        assert status.admitted_generation == sealed.generation
+        assert status.pending_mutations == 0
+
+    assert root.admit_node_recovery(
+        reopened, claim, sealed.recovery_id) == sealed.generation
+
+
+@pytest.mark.parametrize("same_opening", (True, False))
+def test_competing_claimed_recovery_starts_converge_or_reject(
+        tmp_path, same_opening):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    tx, _client = transport()
+    root = MutationCoordinator(tmp_path / "home", root_identity(tx))
+    root.register_node(owner)
+    claim = root.claim_node_recovery(owner)
+    first = _provider_cut(tx.recovery_fence())
+    second = first if same_opening else type(first)(
+        first.schema_version, first.index_epoch, first.source_epoch,
+        first.account_id, first.role, first.minimum_cursor, first.cursor + 1,
+    )
+    barrier = threading.Barrier(3)
+    results = []
+    failures = []
+
+    def start(opening, created_ns):
+        try:
+            barrier.wait()
+            results.append(root.begin_node_recovery(
+                owner, claim, opening, created_ns=created_ns).recovery_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    threads = (
+        threading.Thread(target=start, args=(first, 10)),
+        threading.Thread(target=start, args=(second, 11)),
+    )
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    if same_opening:
+        assert failures == []
+        assert len(results) == 2 and len(set(results)) == 1
+    else:
+        assert len(results) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], NodeGenerationChanged)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM claimed_recoveries").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries").fetchone() == (1,)
+
+
+def test_competing_admissions_return_one_committed_generation(tmp_path):
+    owner, root, claim, sealed = sealed_claimed_recovery(
+        tmp_path, with_fence=True)
+    barrier = threading.Barrier(3)
+    results = []
+    failures = []
+
+    def admit():
+        try:
+            barrier.wait()
+            results.append(root.admit_node_recovery(
+                owner, claim, sealed.recovery_id))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    threads = (threading.Thread(target=admit), threading.Thread(target=admit))
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert failures == []
+    assert results == [sealed.generation, sealed.generation]
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM node_recovery_receipts").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_admission_permits").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM node_mutation_fences").fetchone() == (0,)
 
 
 def test_lost_admission_response_recovers_from_retained_receipt(
