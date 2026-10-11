@@ -243,6 +243,23 @@ def test_database_guard_blocks_pre_v8_writer_while_fence_is_pending(world):
         )
 
 
+@pytest.mark.parametrize("corruption", ("fence", "scope"))
+def test_mutation_fence_audit_preflights_bounded_fields(world, corruption):
+    root, _store, node, _definition, _position = world
+    root.begin((S("doc_exact", "users/later.json"),))
+    with sqlite3.connect(node.path) as conn:
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        if corruption == "fence":
+            conn.execute(
+                "UPDATE node_mutation_fences SET token=zeroblob(65)")
+        else:
+            conn.execute(
+                "UPDATE node_mutation_scopes SET scope_id=zeroblob(1025)")
+
+    with pytest.raises(sqlite3.DatabaseError, match="invalid local node mutation fence"):
+        NodeStore(node.path, _identity())
+
+
 def test_begin_fanout_failure_leaves_node_pending_and_no_root_intent(
         world, monkeypatch):
     root, _store, node, _definition, _position = world

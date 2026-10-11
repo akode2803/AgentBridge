@@ -373,7 +373,7 @@ def _node_position(value: object) -> NodeFinalizationPosition:
         value.provider_endpoint, value.root,
     ))
     if (type(value.admitted_generation) is not int
-            or not 0 <= value.admitted_generation <= 2**63 - 1
+            or not 1 <= value.admitted_generation <= 2**63 - 1
             or type(value.scope_positions) is not tuple
             or not 1 <= len(value.scope_positions) <= MAX_CAPTURE_SCOPE_POSITIONS
             or any(type(item) is not NodeScopePosition
@@ -472,6 +472,28 @@ class NodeStore:
 
     @staticmethod
     def _check_mutation_fences(conn: sqlite3.Connection) -> int:
+        if conn.execute("""
+            SELECT 1 FROM node_mutation_fences WHERE
+                typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+                OR typeof(token)!='text'
+                OR length(CAST(token AS BLOB))>64
+                OR typeof(state)!='text'
+                OR length(CAST(state AS BLOB))>9
+            LIMIT 1
+        """).fetchone() or conn.execute("""
+            SELECT 1 FROM node_mutation_scopes WHERE
+                typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+                OR typeof(token)!='text'
+                OR length(CAST(token AS BLOB))>64
+                OR typeof(scope_kind)!='text'
+                OR length(CAST(scope_kind AS BLOB))>4
+                OR typeof(scope_id)!='text'
+                OR length(CAST(scope_id AS BLOB))>1024
+            LIMIT 1
+        """).fetchone():
+            raise sqlite3.DatabaseError("invalid local node mutation fence")
         if conn.execute(
                 "SELECT 1 FROM node_mutation_fences LIMIT 1 OFFSET ?",
                 (MAX_NODE_MUTATION_FENCES,)).fetchone():
@@ -1039,6 +1061,7 @@ class NodeStore:
                 self._check_mutation_guard(conn)
                 self._check_identity(conn)
                 self._check_meta(conn)
+                self._check_mutation_fences(conn)
                 rows = conn.execute(
                     "SELECT minimum_cursor FROM local_change_state "
                     "WHERE singleton=1").fetchall()

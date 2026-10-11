@@ -43,7 +43,7 @@ def test_finalization_position_accepts_maximum_capture_scope_union():
     ) + (NodeScopePosition("root", "", 0, None),)
     value = NodeFinalizationPosition(
         str(Path("/tmp/node.sqlite").resolve()), "incarnation", "1" * 64,
-        "https://example.test", "supabase://mesh", 0, positions,
+        "https://example.test", "supabase://mesh", 1, positions,
     )
 
     assert node_store._node_position(value).scope_positions == positions
@@ -63,8 +63,18 @@ def store(tmp_path):
     return NodeStore(tmp_path / "node" / "replica.sqlite3", identity())
 
 
+def test_unadmitted_node_cannot_create_finalization_position(tmp_path):
+    owner = store(tmp_path)
+    capture = owner.capture(NodeCaptureRequest(max_bytes=1024))
+
+    assert capture.generation == 0
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        owner.finalization_position(capture)
+
+
 def test_capture_accepts_maximum_distinct_scope_union(tmp_path, monkeypatch):
     owner = store(tmp_path)
+    admit(owner, NodeInputBatch())
     documents = tuple(
         NodeDocument(f"chats/document-{index}/message.json", index, False, b"")
         for index in range(MAX_CAPTURE_DOCUMENTS)
