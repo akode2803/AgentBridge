@@ -593,6 +593,27 @@ server adds only process-local request/step methods. It does not schedule
 recovery, expose recovery over HTTP, close caller-owned transport credentials or
 route product clients to the node.
 
+An inactive, caller-driven sync scheduler now composes the incremental and
+recovery lanes without owning a thread or transport subscription. Content-free
+Realtime and ledger wakes first schedule one bounded exact-ledger collector
+attempt. Only durable pending state, an explicit recovery request or collector
+evidence that scoped/root recovery is required enters the claimed whole-root
+runtime. Each tick runs at most one provider operation, and collector/recovery
+steps share the server's owner-lifecycle and mutual-exclusion gate.
+
+Wakes are process-local latency hints: bursts coalesce, a hint arriving during
+I/O remains pending after that cut, and no payload, cursor or clock authorizes a
+read. Foreground work continues at a 250 ms cadence; background work at two
+seconds. When Realtime is unavailable, idle fallback is 500 ms in foreground
+and four seconds in background. Healthy Realtime retains one 45-second safety
+poll. Provider failure backs off from one to sixty seconds while the last
+admitted snapshot, durable source health and last-success time remain visible.
+Content-free wakes cannot shorten an active failure backoff. Exact-ledger
+continuation remains distinct from full recovery, and a wake observed after a
+recovery starts survives that recovery's admission receipt.
+These are scheduling policies rather than remote-staleness guarantees. No app
+owner constructs or drives this scheduler yet.
+
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every

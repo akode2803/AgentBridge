@@ -17,6 +17,7 @@ from ..core.lock import SingleInstance
 from .admission import (
     NodeCaptureOverflow, NodeGenerationChanged, NodeInputError,
 )
+from .collector import ShadowCollectionResult, ShadowCollector
 from .protocol import PROTOCOL_VERSION, ProtocolError, ReplicaIdentity, encode_json
 from .recovery_runtime import LocalNodeRecoveryRuntime, NodeRecoveryRuntimeResult
 from .security import atomic_private_bytes, atomic_private_json, private_directory
@@ -140,6 +141,7 @@ class LocalNodeServer:
         self._recovery_lifecycle = threading.Condition()
         self._active_recoveries = 0
         self._recovery_stopping = False
+        self._provider_step_lock = threading.Lock()
 
     @property
     def port(self) -> int:
@@ -157,19 +159,51 @@ class LocalNodeServer:
                 raise RuntimeError("local node recovery owner is not running")
             return runtime.request()
 
-    def recover_once(self, *, attempted_ns: int) -> NodeRecoveryRuntimeResult:
+    def recovery_pending(self) -> bool:
         with self._recovery_lifecycle:
             runtime = self.recovery_runtime
             if (self._recovery_stopping or self._http is None
                     or runtime is None):
                 raise RuntimeError("local node recovery owner is not running")
+            return runtime.pending()
+
+    def _begin_provider_step(self) -> LocalNodeRecoveryRuntime | None:
+        with self._recovery_lifecycle:
+            runtime = self.recovery_runtime
+            if (self._recovery_stopping or self._http is None
+                    or runtime is None):
+                raise RuntimeError("local node recovery owner is not running")
+            if not self._provider_step_lock.acquire(blocking=False):
+                return None
             self._active_recoveries += 1
+            return runtime
+
+    def _finish_provider_step(self) -> None:
+        with self._recovery_lifecycle:
+            self._active_recoveries -= 1
+            self._provider_step_lock.release()
+            self._recovery_lifecycle.notify_all()
+
+    def recover_once(self, *, attempted_ns: int) -> NodeRecoveryRuntimeResult:
+        runtime = self._begin_provider_step()
+        if runtime is None:
+            return NodeRecoveryRuntimeResult("busy", "step-in-progress")
         try:
             return runtime.step(attempted_ns=attempted_ns)
         finally:
-            with self._recovery_lifecycle:
-                self._active_recoveries -= 1
-                self._recovery_lifecycle.notify_all()
+            self._finish_provider_step()
+
+    def collect_once(self) -> ShadowCollectionResult:
+        """Advance one bounded exact-ledger attempt under the owner lease."""
+        runtime = self._begin_provider_step()
+        if runtime is None:
+            return ShadowCollectionResult("busy")
+        try:
+            return ShadowCollector(
+                runtime.transport, runtime.store, enabled=True,
+            ).run_once()
+        finally:
+            self._finish_provider_step()
 
     def start(self) -> "LocalNodeServer":
         if self._http is not None:
