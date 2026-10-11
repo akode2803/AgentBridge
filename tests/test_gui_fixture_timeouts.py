@@ -39,11 +39,12 @@ def test_timeout_preserves_identity_deadline_and_request_without_retry(monkeypat
         with _fixture_response(request) as response:
             response.read()
     assert raised.value is marker
-    assert calls == [(request, 10)]
+    assert calls == [(request, conftest._GUI_HTTP_TIMEOUT_S)]
     assert closed == ([True] if phase == 'read' else [])
     assert len(marker.__notes__) == 1
     note = marker.__notes__[0]
-    assert 'GUI fixture HTTP timeout (10s)' in note
+    assert (f'GUI fixture HTTP timeout '
+            f'({conftest._GUI_HTTP_TIMEOUT_S:g}s)') in note
     assert 'conftest.py:' in note
     assert len(note) <= 16000
     assert private not in note and request.full_url not in note
@@ -76,6 +77,7 @@ def test_diagnostic_failure_does_not_replace_http_timeout(monkeypatch, diagnosti
     assert calls == [True]
     if diagnostic_failure == 'capture':
         assert marker.__notes__ == [
-            'GUI fixture HTTP timeout (10s); code frame capture unavailable']
+            f'GUI fixture HTTP timeout ({conftest._GUI_HTTP_TIMEOUT_S:g}s); '
+            'code frame capture unavailable']
     else:
         assert not hasattr(marker, '__notes__')

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -30,6 +31,12 @@ from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
 
 
+# Hosted Windows runners periodically pause filesystem work for longer than the
+# ordinary fixture deadline.  Keep the tighter local/POSIX failure signal while
+# allowing the real HTTP rig to survive those runner stalls.
+_GUI_HTTP_TIMEOUT_S = 30.0 if os.name == 'nt' else 10.0
+
+
 def _http_timeout_frames():
     """Bounded code locations only: never request data, locals or source text."""
     rows = []
@@ -43,20 +50,23 @@ def _http_timeout_frames():
                 f'{Path(frame.f_code.co_filename).name}:{frame.f_lineno}:{frame.f_code.co_name}')
             frame = frame.f_back
         rows.append(f'thread[{number}] ' + ' <- '.join(locations))
-    return ('GUI fixture HTTP timeout (10s); code frames only\n' + '\n'.join(rows))[:16000]
+    return (f'GUI fixture HTTP timeout ({_GUI_HTTP_TIMEOUT_S:g}s); '
+            'code frames only\n' + '\n'.join(rows))[:16000]
 
 
 @contextmanager
 def _fixture_response(request):
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=_GUI_HTTP_TIMEOUT_S) as response:
             yield response
     except TimeoutError as error:
         try:
             error.add_note(_http_timeout_frames())
         except Exception:
             try:
-                error.add_note('GUI fixture HTTP timeout (10s); code frame capture unavailable')
+                error.add_note(
+                    f'GUI fixture HTTP timeout ({_GUI_HTTP_TIMEOUT_S:g}s); '
+                    'code frame capture unavailable')
             except Exception:
                 pass  # Evidence collection cannot replace the actual timeout.
         raise
