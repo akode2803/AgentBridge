@@ -1785,3 +1785,231 @@ $$;
 revoke all on function public.ab_node_recovery_ready()
   from public, anon, authenticated;
 grant execute on function public.ab_node_recovery_ready() to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Independent inactive-reference metadata source, v1. This deliberately does
+-- not reuse ab_node_recovery_page: equivalence evidence must observe the same
+-- admitted provider rows through a separately implemented path. Payloads are
+-- fetched afterward through the exact-read RPCs and every page is bracketed
+-- by recovery fences in the client. Returning one jsonb value keeps the
+-- server-computed continuation bit intact even when PostgREST has a low
+-- maximum-row setting. Current RLS is evaluated on every request.
+drop function if exists public.ab_node_reference_ready();
+
+create or replace function public.ab_node_reference_page(
+  p_root text, p_family text, p_after text, p_after_log text, p_limit integer
+) returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+  v_result jsonb;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_family is null or p_family not in ('documents','streams')
+     or p_after is null or pg_catalog.octet_length(p_after) > 4096
+     or p_after_log is null or pg_catalog.octet_length(p_after_log) > 4096
+     or p_limit is null or p_limit < 1 or p_limit > 256
+     or (p_family = 'documents' and (p_after_log <> '' or p_limit > 128))
+     or (p_family = 'streams' and
+         (pg_catalog.octet_length(p_after) > 1024
+          or (p_after = '') <> (p_after_log = ''))) then
+    raise exception 'invalid reference page request' using errcode = '22023';
+  end if;
+  if auth.uid() is null or auth.role() <> 'authenticated'
+     or not public.ab_root_ok(p_root) then
+    raise exception 'reference root is unavailable' using errcode = '42501';
+  end if;
+
+  if p_family = 'documents' then
+    with candidates as materialized (
+      select d.path, d.seq, d.deleted, d.source_bytes
+      from public.ab_docs d
+      where d.root = p_root and d.path not like 'presence/%'
+        and d.path collate "C" > p_after collate "C"
+      order by d.path collate "C"
+      limit p_limit + 1
+    ), selected as materialized (
+      select c.* from candidates c
+      order by c.path collate "C" limit p_limit
+    )
+    select pg_catalog.jsonb_build_object(
+      'rows', coalesce((select pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object(
+          'path', s.path, 'seq', s.seq, 'deleted', s.deleted,
+          'source_bytes', s.source_bytes
+        ) order by s.path collate "C") from selected s), '[]'::jsonb),
+      'has_more', (select pg_catalog.count(*) from candidates) > p_limit
+    ) into v_result;
+  else
+    with candidates as materialized (
+      select h.chat_id, h.log_name, h.head
+      from public.ab_log_stream_heads h
+      where h.root = p_root
+        and (h.chat_id collate "C", h.log_name collate "C") >
+            (p_after collate "C", p_after_log collate "C")
+        and public.ab_can_read_chat(p_root, h.chat_id)
+      order by h.chat_id collate "C", h.log_name collate "C"
+      limit p_limit + 1
+    ), selected as materialized (
+      select c.* from candidates c
+      order by c.chat_id collate "C", c.log_name collate "C" limit p_limit
+    )
+    select pg_catalog.jsonb_build_object(
+      'rows', coalesce((select pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object(
+          'chat_id', s.chat_id, 'log_name', s.log_name, 'head', s.head
+        ) order by s.chat_id collate "C", s.log_name collate "C")
+        from selected s), '[]'::jsonb),
+      'has_more', (select pg_catalog.count(*) from candidates) > p_limit
+    ) into v_result;
+  end if;
+  return v_result;
+end
+$$;
+
+create or replace function public.ab_node_reference_docs_exact(
+  p_root text, p_paths text[], p_max_bytes bigint
+) returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+  v_count integer;
+  v_result jsonb;
+begin
+  v_count := pg_catalog.cardinality(p_paths);
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or v_count is null or v_count < 1 or v_count > 128
+     or p_max_bytes is null or p_max_bytes < 1 or p_max_bytes > 8388608
+     or pg_catalog.array_ndims(p_paths) <> 1
+     or exists (
+       select 1 from pg_catalog.unnest(p_paths) requested(path)
+       where requested.path is null or requested.path = ''
+          or pg_catalog.octet_length(requested.path) > 4096
+     )
+     or (select pg_catalog.count(distinct requested.path)
+         from pg_catalog.unnest(p_paths) requested(path)) <> v_count then
+    raise exception 'invalid reference-document request' using errcode = '22023';
+  end if;
+  if auth.uid() is null or auth.role() <> 'authenticated'
+     or not public.ab_root_ok(p_root) then
+    raise exception 'reference root is unavailable' using errcode = '42501';
+  end if;
+
+  with requested(path, ord) as (
+    select value, ordinality
+    from pg_catalog.unnest(p_paths) with ordinality request(value, ordinality)
+  ), candidates as materialized (
+    select r.ord, d.path, d.seq, d.deleted, d.source_bytes,
+           (public.ab_source_text_bytes(d.path)
+            + case when d.deleted then 0 else d.source_bytes end
+            + 256)::bigint row_bytes
+    from requested r
+    join public.ab_docs d on d.root = p_root and d.path = r.path
+  ), state as materialized (
+    select coalesce(pg_catalog.sum(c.row_bytes), 0)::bigint bytes
+    from candidates c
+  ), payload as materialized (
+    select c.ord, d.path, d.seq, d.deleted, d.source_bytes,
+           case when d.deleted then null else d.data end data
+    from candidates c cross join state s
+    join public.ab_docs d on d.root = p_root and d.path = c.path
+    where s.bytes <= p_max_bytes
+  )
+  select pg_catalog.jsonb_build_object(
+    'rows', coalesce((select pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'path', p.path, 'seq', p.seq, 'deleted', p.deleted,
+        'source_bytes', p.source_bytes, 'data', p.data
+      ) order by p.ord) from payload p), '[]'::jsonb),
+    'overflow', s.bytes > p_max_bytes
+  ) into v_result from state s;
+  return v_result;
+end
+$$;
+
+create or replace function public.ab_node_reference_logs_exact(
+  p_root text, p_chat text, p_log text, p_ids bigint[], p_max_bytes bigint
+) returns jsonb
+language plpgsql stable security invoker set search_path = pg_catalog, public as $$
+declare
+  v_count integer;
+  v_result jsonb;
+begin
+  v_count := pg_catalog.cardinality(p_ids);
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_chat is null or p_chat = '' or pg_catalog.octet_length(p_chat) > 1024
+     or p_log is null or p_log = '' or pg_catalog.octet_length(p_log) > 4096
+     or v_count is null or v_count < 1 or v_count > 256
+     or p_max_bytes is null or p_max_bytes < 1 or p_max_bytes > 8388608
+     or pg_catalog.array_ndims(p_ids) <> 1
+     or exists (select 1 from pg_catalog.unnest(p_ids) requested(id)
+                where requested.id is null or requested.id < 1)
+     or (select pg_catalog.count(distinct requested.id)
+         from pg_catalog.unnest(p_ids) requested(id)) <> v_count then
+    raise exception 'invalid reference-log request' using errcode = '22023';
+  end if;
+  if auth.uid() is null or auth.role() <> 'authenticated'
+     or not public.ab_root_ok(p_root) then
+    raise exception 'reference root is unavailable' using errcode = '42501';
+  end if;
+  if not public.ab_can_read_chat(p_root, p_chat) then
+    return pg_catalog.jsonb_build_object(
+      'rows', '[]'::jsonb, 'overflow', false);
+  end if;
+
+  with requested(id, ord) as (
+    select value, ordinality
+    from pg_catalog.unnest(p_ids) with ordinality request(value, ordinality)
+  ), candidates as materialized (
+    select r.ord, l.id, l.source_bytes,
+           (l.source_bytes + 256)::bigint row_bytes
+    from requested r join public.ab_logs l on l.id = r.id
+    where l.root = p_root and l.chat_id = p_chat and l.log_name = p_log
+  ), state as materialized (
+    select coalesce(pg_catalog.sum(c.row_bytes), 0)::bigint bytes
+    from candidates c
+  ), payload as materialized (
+    select c.ord, l.id, l.line, l.source_bytes
+    from candidates c cross join state s
+    join public.ab_logs l on l.id = c.id
+    where l.root = p_root and l.chat_id = p_chat and l.log_name = p_log
+      and s.bytes <= p_max_bytes
+  )
+  select pg_catalog.jsonb_build_object(
+    'rows', coalesce((select pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'id', p.id, 'line', p.line, 'source_bytes', p.source_bytes
+      ) order by p.ord) from payload p), '[]'::jsonb),
+    'overflow', s.bytes > p_max_bytes
+  ) into v_result from state s;
+  return v_result;
+end
+$$;
+
+revoke all on function public.ab_node_reference_page(
+  text,text,text,text,integer) from public, anon, authenticated;
+revoke all on function public.ab_node_reference_docs_exact(
+  text,text[],bigint) from public, anon, authenticated;
+revoke all on function public.ab_node_reference_logs_exact(
+  text,text,text,bigint[],bigint) from public, anon, authenticated;
+grant execute on function public.ab_node_reference_page(
+  text,text,text,text,integer) to authenticated;
+grant execute on function public.ab_node_reference_docs_exact(
+  text,text[],bigint) to authenticated;
+grant execute on function public.ab_node_reference_logs_exact(
+  text,text,text,bigint[],bigint) to authenticated;
+
+-- Installed last so partial schema pastes fail closed. As with recovery, the
+-- caller must already have a bounded statement timeout.
+create or replace function public.ab_node_reference_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select case
+    when auth.role() = 'authenticated' and auth.uid() is not null
+      and pg_catalog.current_setting('statement_timeout')::interval
+          > interval '0 seconds'
+      and pg_catalog.current_setting('statement_timeout')::interval
+          <= interval '10 seconds' then 1
+    else 0
+  end
+$$;
+revoke all on function public.ab_node_reference_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_node_reference_ready() to authenticated;
