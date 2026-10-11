@@ -964,6 +964,37 @@ class NodeStore:
             raise NodeGenerationChanged("recovery binding changed")
         return opening
 
+    def resumable_recovery_id(
+        self, current_provider_cut: NodeProviderCut, *, selection: bytes,
+    ) -> str | None:
+        """Discover one durable active run after process-local state is lost."""
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        if selection not in (RECOVERY_PLAN_SELECTION, REFERENCE_PLAN_SELECTION):
+            raise NodeInputError("invalid recovery run selection")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        result = None
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            candidates = tuple(row[0] for row in conn.execute(
+                "SELECT DISTINCT r.recovery_id FROM provider_recoveries r "
+                "JOIN recovery_work w ON w.recovery_id=r.recovery_id "
+                "WHERE r.state IN ('building','sealed') AND w.selection=? "
+                "ORDER BY r.generation",
+                (selection,),
+            ))
+            for recovery_id in candidates:
+                selections = conn.execute(
+                    "SELECT selection FROM recovery_work WHERE recovery_id=? "
+                    "ORDER BY work_id", (recovery_id,),
+                ).fetchall()
+                if selections != [(selection,)]:
+                    continue
+                if self._bound_recovery(conn, recovery_id, current) is not None:
+                    result = recovery_id
+                    break
+        return result
+
     def extend_recovery_target(self, recovery_id: str,
                                current_provider_cut: NodeProviderCut) -> int:
         """Advance a closing fence after fresh same-epoch provider observation."""

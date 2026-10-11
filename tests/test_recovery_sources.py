@@ -261,6 +261,9 @@ def test_recovery_sql_lock_snapshot_bounds_and_marker_order():
     start = SCHEMA.index("create or replace function public.ab_node_recovery_page(")
     fence = SCHEMA.index("create or replace function public.ab_node_recovery_fence(")
     page = SCHEMA[start:fence]
+    authorization = page.index("if auth.uid() is null")
+    lock = page.index("pg_advisory_xact_lock(")
+    assert authorization < lock
     assert page.index("pg_advisory_xact_lock(") < page.index("with identity as materialized")
     assert page.count("with identity as materialized") == 1
     assert "current_setting('transaction_isolation') <> 'read committed'" in page
@@ -273,6 +276,10 @@ def test_recovery_sql_lock_snapshot_bounds_and_marker_order():
     assert "return v_result - 'denied' - 'unsupported' - 'invalid_source'" in page
     assert "security invoker" in page
     assert "i.role = 'authenticated'" in page
+    fence_body = SCHEMA[fence:SCHEMA.index(
+        "revoke all on function public.ab_node_recovery_fence", fence)]
+    assert fence_body.index("if auth.uid() is null") \
+        < fence_body.index("pg_advisory_xact_lock(")
     assert SCHEMA.index("drop function if exists public.ab_node_recovery_ready") < start
     assert SCHEMA.index("create or replace function public.ab_node_recovery_ready") > fence
     assert SCHEMA.index("create trigger ab_recovery_events_append_only") < SCHEMA.index(
@@ -291,9 +298,31 @@ def test_recovery_sql_guards_timeout_event_order_and_stream_head_races():
     insert_guard = SCHEMA[SCHEMA.index(
         "create or replace function private.ab_recovery_source_insert_lock"):]
     assert "current_setting('statement_timeout')::interval" in marker
+    assert "current_setting('transaction_isolation') = 'read committed'" in marker
     assert "> interval '0 seconds'" in marker
     assert "<= interval '10 seconds'" in marker
     assert "pg_trigger_depth() < 2" in insert_guard
     assert "direct source event inserts are unsupported" in insert_guard
     assert "create table if not exists public.ab_log_stream_heads" in SCHEMA
     assert SCHEMA.count("'agentbridge-log-head:'") >= 2
+
+
+def test_recovery_sql_freezes_source_identities_and_validates_document_paths():
+    assert "create trigger ab_recovery_doc_identity_fixed" in SCHEMA
+    assert "new.root is distinct from old.root" in SCHEMA
+    assert "new.path is distinct from old.path" in SCHEMA
+    assert "create trigger ab_recovery_logs_append_only" in SCHEMA
+    assert "message logs are append-only" in SCHEMA
+    constraint = SCHEMA[
+        SCHEMA.index("alter table public.ab_docs add constraint "
+                     "ab_docs_recovery_path_size"):
+        SCHEMA.index("alter table public.ab_docs validate constraint "
+                     "ab_docs_recovery_path_size")
+    ]
+    assert "pg_catalog.left(path, 1) <> '/'" in constraint
+    assert "pg_catalog.right(path, 1) <> '/'" in constraint
+    assert "pg_catalog.strpos(path, '//') = 0" in constraint
+    assert "pg_catalog.strpos(path, E'\\\\') = 0" in constraint
+    assert "pg_catalog.cardinality(pg_catalog.string_to_array(path, '/')) <= 32" \
+        in constraint
+    assert "array_position" in constraint

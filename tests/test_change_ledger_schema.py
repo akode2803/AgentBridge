@@ -36,7 +36,7 @@ def test_commit_barrier_precedes_every_event_allocation_and_page_read():
     trigger_starts = (
         "create or replace function private.ab_record_doc_change",
         "create or replace function private.ab_record_log_change",
-        "create or replace function private.ab_record_root_membership_change",
+        "create or replace function private.ab_record_membership_roots",
     )
     for start_text in trigger_starts:
         start = SCHEMA.index(start_text)
@@ -54,11 +54,18 @@ def test_commit_barrier_precedes_every_event_allocation_and_page_read():
 
 
 def test_membership_edges_emit_root_visibility_without_a_chat_identity():
-    assert "ab_members_change_ledger" in SCHEMA
-    assert "after insert or update or delete on public.ab_members" in SCHEMA
+    assert "ab_members_insert_change_ledger" in SCHEMA
+    assert "ab_members_update_change_ledger" in SCHEMA
+    assert "ab_members_delete_change_ledger" in SCHEMA
+    assert SCHEMA.count("for each statement execute function "
+                        "private.ab_record_membership_") == 3
+    assert "referencing new table as new_rows" in SCHEMA
+    assert "referencing old table as old_rows new table as new_rows" in SCHEMA
+    assert "referencing old table as old_rows" in SCHEMA
     assert "values (v_root, 'root', '', 'visibility')" in SCHEMA
-    assert "v_roots := array[old.root, new.root]" in SCHEMA
-    assert "from pg_catalog.unnest(v_roots) as roots(value)" in SCHEMA
+    assert "array_agg(roots.root order by roots.root)" in SCHEMA
+    assert "select member.root from old_rows member" in SCHEMA
+    assert "select member.root from new_rows member" in SCHEMA
     assert "old.data->'members' is distinct from new.data->'members'" in SCHEMA
     assert "values (new.root, 'root', '', 'visibility')" in SCHEMA
 

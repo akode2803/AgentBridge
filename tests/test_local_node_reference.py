@@ -198,6 +198,18 @@ def test_reference_and_recovery_executors_reject_each_others_runs(tmp_path):
         )
 
 
+def test_reference_executor_discovers_durable_run_after_restart(tmp_path):
+    path = tmp_path / "node.sqlite3"
+    source, _client = transport()
+    started = InactiveReferenceExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=10)
+    resumed = InactiveReferenceExecutor(NodeStore(path, identity()), source).step(
+        None, attempted_ns=11)
+    assert resumed.reference_id == started.reference_id
+    assert resumed.generation == started.generation
+    assert resumed.action == "resumed"
+
+
 def test_store_owned_reference_compares_without_in_memory_batch(tmp_path):
     store = NodeStore(tmp_path / "node.sqlite3", identity())
     source, _client = transport()
