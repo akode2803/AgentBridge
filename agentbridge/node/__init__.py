@@ -31,7 +31,7 @@ from .diagnostic_runtime import (
     LocalNodeDiagnosticRuntime, NodeDiagnosticStepResult,
     diagnostic_runtime_enabled,
 )
-from .recovery import InactiveRecoveryExecutor, RecoveryStepResult
+from .recovery import ClaimedRecoveryExecutor, InactiveRecoveryExecutor, RecoveryStepResult
 from .server import LocalNodeServer
 from .store import NodeStore
 
@@ -39,6 +39,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "LocalNodeServer",
     "LocalNodeDiagnosticRuntime",
+    "ClaimedRecoveryExecutor",
     "InactiveRecoveryExecutor",
     "NodeCapture",
     "NodeCaptureRequest",

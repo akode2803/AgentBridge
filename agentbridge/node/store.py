@@ -31,7 +31,7 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
@@ -40,7 +40,7 @@ DIAGNOSTIC_REFERENCE_PLAN_SELECTION = b"provider-diagnostic-reference-v1"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=9),
+    version INTEGER NOT NULL CHECK(version=10),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS node_generations(
     visibility_count INTEGER NOT NULL DEFAULT 0 CHECK(visibility_count>=0),
     frontier_count INTEGER NOT NULL DEFAULT 0 CHECK(frontier_count>=0),
     chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count>=0),
-    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes>=0)
+    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes>=0),
+    claim_id TEXT,
+    claim_digest TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_admitted_node_generation
     ON node_generations(state) WHERE state='admitted';
@@ -357,6 +359,7 @@ _V9_TABLES = _V8_TABLES | frozenset({
     "node_recovery_claim_fences", "claimed_recoveries",
     "node_admission_permits", "node_recovery_receipts",
 })
+_V10_TABLES = _V9_TABLES
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({
@@ -379,6 +382,21 @@ BEGIN
     SELECT RAISE(ABORT,'local node mutation pending');
 END"""
 _V8_PENDING_MUTATION_GUARD = _PENDING_MUTATION_GUARD
+_CLAIMED_GENERATION_GUARD = """CREATE TRIGGER node_claimed_generation_guard
+BEFORE UPDATE OF state ON node_generations
+WHEN OLD.claim_id IS NOT NULL AND OLD.state='sealed' AND NEW.state='admitted'
+BEGIN
+    SELECT RAISE(ABORT,'claimed local recovery requires coordinator admission');
+END"""
+_CLAIM_TAG_IMMUTABLE_GUARD = """CREATE TRIGGER node_claim_tag_immutable_guard
+BEFORE UPDATE OF claim_id,claim_digest ON node_generations
+WHEN NOT (OLD.claim_id IS NEW.claim_id AND OLD.claim_digest IS NEW.claim_digest)
+BEGIN
+    SELECT RAISE(ABORT,'local node recovery claim tag is immutable');
+END"""
+_NODE_GUARDS = ("\n" + _PENDING_MUTATION_GUARD + ";\n"
+                + _CLAIMED_GENERATION_GUARD + ";\n"
+                + _CLAIM_TAG_IMMUTABLE_GUARD + ";\n")
 
 
 def _positive_ns(value: object, name: str) -> int:
@@ -562,14 +580,15 @@ class NodeStore:
 
     @staticmethod
     def _check_mutation_guard(conn: sqlite3.Connection) -> None:
-        if conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' "
-                "AND name='node_pending_mutation_guard'").fetchone() != (
-                    _PENDING_MUTATION_GUARD,):
-            raise sqlite3.DatabaseError("invalid local node mutation guard")
-        if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
-                "AND name!='node_pending_mutation_guard' LIMIT 1").fetchone():
+        expected = {
+            "node_pending_mutation_guard": _PENDING_MUTATION_GUARD,
+            "node_claimed_generation_guard": _CLAIMED_GENERATION_GUARD,
+            "node_claim_tag_immutable_guard": _CLAIM_TAG_IMMUTABLE_GUARD,
+        }
+        actual = dict(conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
+        ).fetchall())
+        if actual != expected:
             raise sqlite3.DatabaseError("unexpected local node trigger")
 
     @staticmethod
@@ -657,7 +676,9 @@ class NodeStore:
         )).encode("utf-8")).hexdigest()
 
     @classmethod
-    def _check_coordinator_state(cls, conn: sqlite3.Connection) -> None:
+    def _check_coordinator_state(
+        cls, conn: sqlite3.Connection, *, require_generation_tags: bool = True,
+    ) -> None:
         # Validate storage classes and byte bounds before selecting attacker- or
         # corruption-controlled values into Python.  The later semantic audit
         # may materialize only fields that have passed these fixed-size gates.
@@ -718,6 +739,15 @@ class NodeStore:
                 OR length(CAST(coordinator_epoch AS BLOB))>32
                 OR typeof(root_revision)!='integer'
             """),
+            ("node_generations", "invalid claimed local generation", """
+                (claim_id IS NULL)!=(claim_digest IS NULL)
+                OR (claim_id IS NOT NULL AND (
+                    typeof(claim_id)!='text'
+                    OR length(CAST(claim_id AS BLOB))>48
+                    OR typeof(claim_digest)!='text'
+                    OR length(CAST(claim_digest AS BLOB))>64
+                ))
+            """),
         )
         for table, message, invalid in preflight:
             if conn.execute(
@@ -761,13 +791,30 @@ class NodeStore:
             "LIMIT 2").fetchall()
         if len(mappings) > 1:
             raise sqlite3.DatabaseError("multiple claimed local recoveries")
+        active_tags = [] if not require_generation_tags else conn.execute(
+            "SELECT generation,claim_id,claim_digest FROM node_generations "
+            "WHERE claim_id IS NOT NULL AND state IN ('building','sealed') "
+            "ORDER BY generation LIMIT 2"
+        ).fetchall()
+        if len(active_tags) > 1:
+            raise sqlite3.DatabaseError("multiple claimed local generations")
+        mapped_generation = None if not mappings else conn.execute("""
+            SELECT g.generation,g.claim_id,g.claim_digest
+            FROM provider_recoveries r
+            JOIN node_generations g ON g.generation=r.generation
+            WHERE r.recovery_id=?
+        """, (mappings[0][0],)).fetchone()
         if mappings and (not claims or mappings[0][1:] != (claims[0][1], claims[0][2])
                          or type(mappings[0][0]) is not str
                          or _CLAIM_ID.fullmatch(mappings[0][0]) is None
-                         or conn.execute(
-                             "SELECT 1 FROM provider_recoveries WHERE recovery_id=?",
-                             (mappings[0][0],)).fetchone() is None):
+                         or mapped_generation is None
+                         or (require_generation_tags
+                             and mapped_generation[1:] != mappings[0][1:])):
             raise sqlite3.DatabaseError("invalid claimed local recovery")
+        if require_generation_tags and (
+                bool(active_tags) != bool(mappings) or (
+                    active_tags and active_tags[0] != mapped_generation)):
+            raise sqlite3.DatabaseError("invalid claimed local generation")
         if claims:
             (singleton, claim_id, digest, path, identity, epoch, revision, incarnation,
              identity_digest, base, scope_generation) = claims[0]
@@ -808,6 +855,34 @@ class NodeStore:
             )
             if expected != digest:
                 raise sqlite3.DatabaseError("local node recovery claim digest mismatch")
+            if mappings:
+                recovery_id = mappings[0][0]
+                recovery = conn.execute(
+                    "SELECT r.database_incarnation,r.identity_digest,"
+                    "r.base_generation,r.state,g.state FROM provider_recoveries r "
+                    "JOIN node_generations g ON g.generation=r.generation "
+                    "WHERE r.recovery_id=?", (recovery_id,),
+                ).fetchone()
+                scopes = conn.execute(
+                    "SELECT scope_kind,scope_id,generation FROM recovery_scopes "
+                    "WHERE recovery_id=? ORDER BY scope_kind,scope_id",
+                    (recovery_id,),
+                ).fetchall()
+                work = conn.execute(
+                    "SELECT work_id,family,scope_kind,scope_id,selection "
+                    "FROM recovery_work WHERE recovery_id=? ORDER BY work_id",
+                    (recovery_id,),
+                ).fetchall()
+                if (recovery is None
+                        or recovery[:3] != (incarnation, identity_digest, base)
+                        or recovery[3] != recovery[4]
+                        or recovery[3] not in ("building", "sealed")
+                        or scopes != [("root", "", scope_generation)]
+                        or work != [(
+                            "provider-frontiers", "frontiers", "root", "",
+                            RECOVERY_PLAN_SELECTION,
+                        )]):
+                    raise sqlite3.DatabaseError("invalid claimed local recovery")
         if conn.execute("""
             SELECT 1 FROM node_recovery_claim_fences f
             LEFT JOIN node_recovery_claims c ON c.claim_id=f.claim_id
@@ -928,8 +1003,16 @@ class NodeStore:
                                     registration.database_incarnation,
                                     registration.identity_digest, meta[1],
                                     root_generation, tokens)):
-                raise NodeGenerationChanged("local node recovery claim changed")
-        else:
+                conn.execute(
+                    "DELETE FROM node_recovery_claim_fences WHERE claim_id=?",
+                    (claim_id,),
+                )
+                conn.execute(
+                    "DELETE FROM node_recovery_claims WHERE claim_id=?",
+                    (claim_id,),
+                )
+                existing = None
+        if existing is None:
             claim_id = secrets.token_hex(24)
             conn.execute(
                 "INSERT INTO node_recovery_claims VALUES(1,?,?,?,?,?,?,?,?,?,?)",
@@ -951,6 +1034,135 @@ class NodeStore:
         cls._check_coordinator_state(conn)
         return _recovery_claim(claim)
 
+    @classmethod
+    def _stored_recovery_claim(
+        cls, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+    ) -> NodeRecoveryClaim | None:
+        row = conn.execute(
+            "SELECT claim_id,claim_digest,coordinator_path,coordinator_identity,"
+            "coordinator_epoch,root_revision,database_incarnation,identity_digest,"
+            "base_generation,root_scope_generation FROM node_recovery_claims "
+            "WHERE singleton=1",
+        ).fetchone()
+        if row is None:
+            return None
+        tokens = tuple(value[0] for value in conn.execute(
+            "SELECT token FROM node_recovery_claim_fences WHERE claim_id=? "
+            "ORDER BY token", (row[0],),
+        ))
+        return _recovery_claim(NodeRecoveryClaim(
+            row[0], row[1], row[2], row[3], row[4], row[5],
+            registration.database_path, row[6], row[7],
+            registration.provider_endpoint, registration.root,
+            row[8], row[9], tokens,
+        ))
+
+    @classmethod
+    def _require_recovery_claim(
+        cls, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+        claim: NodeRecoveryClaim,
+    ) -> NodeRecoveryClaim:
+        registration = _node_registration(registration)
+        claim = _recovery_claim(claim)
+        if NodeCoordinatorRegistration(
+                claim.database_path, claim.database_incarnation,
+                claim.identity_digest, claim.provider_endpoint,
+                claim.root) != registration:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        cls._check_mutation_fences(conn)
+        cls._check_coordinator_state(conn)
+        stored = cls._stored_recovery_claim(conn, registration)
+        if stored != claim:
+            raise NodeGenerationChanged("local node recovery claim changed")
+        meta = cls._check_meta(conn)
+        root_generation, pending = cls._scope_generation(conn, "root", "")
+        fences = tuple(conn.execute(
+            "SELECT coordinator_epoch,token,state FROM node_mutation_fences "
+            "ORDER BY token",
+        ))
+        expected = tuple(
+            (claim.coordinator_epoch, token, "completed")
+            for token in claim.fence_tokens
+        )
+        if (fences != expected
+                or meta[0] != claim.database_incarnation
+                or meta[1] != claim.base_generation
+                or meta[5] != len(claim.fence_tokens)
+                or root_generation != claim.root_scope_generation
+                or pending != (_NODE_PENDING_REASON if claim.fence_tokens else None)
+                or (claim.fence_tokens and meta[2] != "pending")):
+            raise NodeGenerationChanged("local node recovery claim changed")
+        return claim
+
+    def coordinator_begin_claimed_recovery(
+        self, conn: sqlite3.Connection,
+        registration: NodeCoordinatorRegistration,
+        claim: NodeRecoveryClaim,
+        current_provider_cut: NodeProviderCut, *, created_ns: int,
+    ) -> tuple[str, NodeRecoveryState | None]:
+        """Attach one fresh provider cut to an exact coordinator claim."""
+        if not conn.in_transaction or type(current_provider_cut) is not NodeProviderCut:
+            raise ValueError("local node coordinator cut required")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        claim = self._require_recovery_claim(conn, registration, claim)
+        plan = NodeRecoveryPlan(
+            claim.database_incarnation, claim.identity_digest,
+            claim.base_generation, current.cursor, current,
+            (NodeRecoveryScope("root", "", claim.root_scope_generation),),
+            (NodeRecoveryWork(
+                "provider-frontiers", "frontiers", "root", "",
+                RECOVERY_PLAN_SELECTION,
+            ),),
+        )
+        plan, created = self._checked_recovery_start(
+            plan, created_ns=created_ns, required_candidate_slots=1)
+        existing = conn.execute(
+            "SELECT recovery_id,claim_digest FROM claimed_recoveries "
+            "WHERE claim_id=?", (claim.claim_id,),
+        ).fetchone()
+        if existing is not None:
+            recovery_id, digest = existing
+            opening = conn.execute(
+                "SELECT schema_version,index_epoch,source_epoch,account_id,role,"
+                "minimum_cursor,start_target_cursor,state FROM provider_recoveries "
+                "WHERE recovery_id=?", (recovery_id,),
+            ).fetchone()
+            if (digest != claim.claim_digest or opening is None
+                    or opening[:7] != (
+                        current.schema_version, current.index_epoch,
+                        current.source_epoch, current.account_id, current.role,
+                        current.minimum_cursor, current.cursor,
+                    )
+                    or opening[7] not in ("building", "sealed")):
+                raise NodeGenerationChanged("claimed local recovery changed")
+            return recovery_id, None
+        state = self._begin_recovery_in_transaction(
+            conn, plan, created=created, required_candidate_slots=1,
+            claim=claim,
+        )
+        self._check_coordinator_state(conn)
+        return state.recovery_id, state
+
+    @classmethod
+    def _invalidate_recovery_claim(cls, conn: sqlite3.Connection) -> None:
+        """Retire claim-owned private work before a later local mutation."""
+        mapping = conn.execute(
+            "SELECT r.generation FROM claimed_recoveries c "
+            "JOIN provider_recoveries r ON r.recovery_id=c.recovery_id"
+        ).fetchone()
+        if mapping is not None:
+            generation = mapping[0]
+            cls._clear_candidate_rows(conn, generation)
+            conn.execute(
+                "UPDATE node_generations SET state='abandoned' "
+                "WHERE generation=? AND state IN ('building','sealed')",
+                (generation,),
+            )
+        conn.execute("DELETE FROM node_recovery_claim_fences")
+        conn.execute("DELETE FROM node_recovery_claims")
+
     def coordinator_registration(self) -> NodeCoordinatorRegistration:
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
@@ -962,6 +1174,21 @@ class NodeStore:
             str(self.path), meta[0], self.identity.digest,
             self.identity.provider_endpoint, self.identity.root,
         )
+
+    def claimed_recovery_id(self) -> str | None:
+        """Return the single claim-owned private recovery, without provider I/O."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            self._check_identity(conn)
+            self._check_mutation_guard(conn)
+            self._check_mutation_fences(conn)
+            self._check_coordinator_state(conn)
+            rows = conn.execute(
+                "SELECT recovery_id FROM claimed_recoveries LIMIT 2"
+            ).fetchall()
+        if len(rows) > 1:
+            raise sqlite3.DatabaseError("multiple claimed local recoveries")
+        return None if not rows else rows[0][0]
 
     def finalization_position(self, capture: NodeCapture) -> NodeFinalizationPosition:
         if type(capture) is not NodeCapture:
@@ -1066,6 +1293,7 @@ class NodeStore:
         if count >= MAX_NODE_MUTATION_FENCES:
             raise NodeCandidateCapacityError("too many local node mutation fences")
         NodeStore.coordinator_abandon_candidates(conn)
+        NodeStore._invalidate_recovery_claim(conn)
         generation, _pending = NodeStore._scope_generation(conn, "root", "")
         if generation >= 2**63 - 1:
             raise NodeInputError("local node scope revision exhausted")
@@ -1196,7 +1424,7 @@ class NodeStore:
             DROP TABLE remote_docs;
             DROP TABLE node_generations;
             DROP TABLE node_schema;
-        """ + _SCHEMA + "\n" + _PENDING_MUTATION_GUARD + ";\n")
+        """ + _SCHEMA + _NODE_GUARDS)
         conn.execute("INSERT INTO node_schema VALUES(1,?,?)", (
             SCHEMA_VERSION, PROTOCOL_VERSION))
         conn.execute("INSERT INTO local_change_state VALUES(1,0)")
@@ -1489,6 +1717,53 @@ class NodeStore:
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
         conn.execute("INSERT INTO node_schema VALUES(1,9,?)", (PROTOCOL_VERSION,))
 
+    def _migrate_v9(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(9, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        triggers = dict(conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
+        ).fetchall())
+        if triggers != {"node_pending_mutation_guard": _PENDING_MUTATION_GUARD}:
+            raise sqlite3.DatabaseError("invalid local node mutation guard")
+        self._check_mutation_fences(conn)
+        conn.execute("ALTER TABLE node_generations ADD COLUMN claim_id TEXT")
+        conn.execute("ALTER TABLE node_generations ADD COLUMN claim_digest TEXT")
+        self._check_coordinator_state(conn, require_generation_tags=False)
+        claim_exists = conn.execute(
+            "SELECT 1 FROM node_recovery_claims LIMIT 1").fetchone() is not None
+        mapping_exists = conn.execute(
+            "SELECT 1 FROM claimed_recoveries LIMIT 1").fetchone() is not None
+        if claim_exists and not mapping_exists and conn.execute(
+                "SELECT 1 FROM node_generations "
+                "WHERE state IN ('building','sealed') LIMIT 1").fetchone():
+            # A v9 claim was created only when no private work was active.  If
+            # active work now exists without its sole mapping, mixed-version or
+            # corrupted state has made ownership unprovable.  Retire it rather
+            # than migrating it into the ordinary admission path.
+            self.coordinator_abandon_candidates(conn)
+        conn.execute("""
+            UPDATE node_generations
+            SET claim_id=(SELECT claim_id FROM claimed_recoveries),
+                claim_digest=(SELECT claim_digest FROM claimed_recoveries)
+            WHERE generation=(
+                SELECT r.generation FROM claimed_recoveries c
+                JOIN provider_recoveries r ON r.recovery_id=c.recovery_id
+            )
+        """)
+        conn.execute(_CLAIMED_GENERATION_GUARD)
+        conn.execute(_CLAIM_TAG_IMMUTABLE_GUARD)
+        self._check_coordinator_state(conn)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=10),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,10,?)", (PROTOCOL_VERSION,))
+
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
             with conn:
@@ -1499,8 +1774,7 @@ class NodeStore:
                 fresh = not tables
                 if fresh:
                     conn.executescript(
-                        "BEGIN IMMEDIATE;\n" + _SCHEMA + "\n" +
-                        _PENDING_MUTATION_GUARD + ";\n"
+                        "BEGIN IMMEDIATE;\n" + _SCHEMA + _NODE_GUARDS
                     )
                     conn.execute("INSERT INTO node_schema VALUES(1,?,?)", (
                         SCHEMA_VERSION, PROTOCOL_VERSION))
@@ -1543,10 +1817,13 @@ class NodeStore:
                     version = [(8, PROTOCOL_VERSION)]
                 if version == [(8, PROTOCOL_VERSION)]:
                     self._migrate_v8(conn)
+                    version = [(9, PROTOCOL_VERSION)]
+                if version == [(9, PROTOCOL_VERSION)]:
+                    self._migrate_v9(conn)
                 tables = frozenset(row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name NOT LIKE 'sqlite_%'"))
-                if tables != _V9_TABLES:
+                if tables != _V10_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -1736,6 +2013,26 @@ class NodeStore:
                        created_ns: int,
                        required_candidate_slots: int = 1) -> NodeRecoveryState:
         """Bind one private, resumable provider recovery to an exact local cut."""
+        plan, created = self._checked_recovery_start(
+            plan, created_ns=created_ns,
+            required_candidate_slots=required_candidate_slots,
+        )
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT 1 FROM node_recovery_claims LIMIT 1").fetchone():
+                raise NodeGenerationChanged("local node recovery claim is active")
+            return self._begin_recovery_in_transaction(
+                conn, plan, created=created,
+                required_candidate_slots=required_candidate_slots,
+                claim=None,
+            )
+
+    @staticmethod
+    def _checked_recovery_start(
+        plan: NodeRecoveryPlan, *, created_ns: int,
+        required_candidate_slots: int,
+    ) -> tuple[NodeRecoveryPlan, int]:
         if type(plan) is not NodeRecoveryPlan:
             raise NodeInputError("invalid recovery plan")
         plan = NodeRecoveryPlan(
@@ -1748,71 +2045,90 @@ class NodeStore:
         if (type(required_candidate_slots) is not int
                 or not 1 <= required_candidate_slots <= MAX_ACTIVE_CANDIDATES):
             raise NodeInputError("invalid required candidate slots")
-        with closing(self._connect()) as conn, conn:
-            conn.execute("BEGIN IMMEDIATE")
-            meta = self._check_meta(conn)
-            if (meta[0] != plan.database_incarnation
-                    or self.identity.digest != plan.identity_digest
-                    or meta[1] != plan.base_generation or meta[5]
-                    or any(self._scope_generation(conn, s.scope_kind, s.scope_id)
-                           != (s.generation, None) for s in plan.scopes)):
-                raise NodeGenerationChanged("recovery binding changed")
-            active = conn.execute(
-                "SELECT count(*) FROM node_generations WHERE state "
-                "IN ('building','sealed')").fetchone()[0]
-            if active + required_candidate_slots > MAX_ACTIVE_CANDIDATES:
-                raise NodeCandidateCapacityError(
-                    "too many active node candidates")
-            generation = conn.execute(
-                "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
-            ).fetchone()[0]
-            private_selection = (len(plan.work) == 1 and plan.work[0].selection in (
-                REFERENCE_PLAN_SELECTION, DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
-                DIAGNOSTIC_REFERENCE_PLAN_SELECTION,
-            ))
-            health_owner_token = (0 if private_selection
-                                  else max(created, meta[3] + 1))
-            if health_owner_token > 2**63 - 1:
-                raise NodeInputError("recovery attempt time exhausted")
-            recovery_id = secrets.token_hex(24)
-            cut = plan.provider_cut
-            conn.execute("INSERT INTO node_generations(generation,base_generation,"
-                         "state,created_ns) VALUES(?,?,'building',?)",
-                         (generation, plan.base_generation, created))
-            conn.execute("""INSERT INTO provider_recoveries(
-                recovery_id,generation,database_incarnation,identity_digest,
-                base_generation,health_owner_token,start_cursor,replay_cursor,
-                schema_version,index_epoch,source_epoch,account_id,role,
-                minimum_cursor,start_target_cursor,target_cursor,state,
-                proof_version,proof_revision,event_examined_cursor,
-                event_terminal_cursor,close_token,close_revision)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,NULL,NULL,NULL)
-            """, (recovery_id, generation, plan.database_incarnation,
-                   plan.identity_digest, plan.base_generation, health_owner_token,
-                   plan.replay_cursor, plan.replay_cursor, cut.schema_version,
-                   cut.index_epoch, cut.source_epoch, cut.account_id, cut.role,
-                   cut.minimum_cursor, cut.cursor, cut.cursor, "building",
-                   plan.replay_cursor))
-            conn.executemany("INSERT INTO recovery_scopes VALUES(?,?,?,?)",
-                             ((recovery_id, s.scope_kind, s.scope_id, s.generation)
-                              for s in plan.scopes))
-            conn.executemany("INSERT INTO recovery_work VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                             ((recovery_id, w.work_id, w.family, w.scope_kind,
-                               w.scope_id, w.selection, w.checkpoint, w.checkpoint,
-                               "pending", 0, 0)
-                              for w in plan.work))
-            conn.executemany(
-                "INSERT INTO recovery_manifests VALUES(?,?,X'',X'','pending',0,0)",
-                ((recovery_id, family)
-                 for family in ("documents", "chats", "streams")),
+        return plan, created
+
+    def _begin_recovery_in_transaction(
+        self, conn: sqlite3.Connection, plan: NodeRecoveryPlan, *, created: int,
+        required_candidate_slots: int, claim: NodeRecoveryClaim | None,
+    ) -> NodeRecoveryState:
+        if not conn.in_transaction:
+            raise ValueError("local node coordinator cut required")
+        meta = self._check_meta(conn)
+        claimed = claim is not None
+        expected_pending = (len(claim.fence_tokens) if claim is not None else 0)
+        expected_reason = (_NODE_PENDING_REASON
+                           if claim is not None and claim.fence_tokens else None)
+        if (meta[0] != plan.database_incarnation
+                or self.identity.digest != plan.identity_digest
+                or meta[1] != plan.base_generation
+                or meta[5] != expected_pending
+                or any(self._scope_generation(conn, s.scope_kind, s.scope_id)
+                       != (s.generation, expected_reason)
+                       for s in plan.scopes)):
+            raise NodeGenerationChanged("recovery binding changed")
+        active = conn.execute(
+            "SELECT count(*) FROM node_generations WHERE state "
+            "IN ('building','sealed')").fetchone()[0]
+        if active + required_candidate_slots > MAX_ACTIVE_CANDIDATES:
+            raise NodeCandidateCapacityError("too many active node candidates")
+        generation = conn.execute(
+            "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
+        ).fetchone()[0]
+        private_selection = (len(plan.work) == 1 and plan.work[0].selection in (
+            REFERENCE_PLAN_SELECTION, DIAGNOSTIC_RECOVERY_PLAN_SELECTION,
+            DIAGNOSTIC_REFERENCE_PLAN_SELECTION,
+        ))
+        health_owner_token = (0 if private_selection or claimed
+                              else max(created, meta[3] + 1))
+        if health_owner_token > 2**63 - 1:
+            raise NodeInputError("recovery attempt time exhausted")
+        recovery_id = secrets.token_hex(24)
+        cut = plan.provider_cut
+        conn.execute("INSERT INTO node_generations(generation,base_generation,"
+                     "state,created_ns,claim_id,claim_digest) "
+                     "VALUES(?,?,'building',?,?,?)",
+                     (generation, plan.base_generation, created,
+                      None if claim is None else claim.claim_id,
+                      None if claim is None else claim.claim_digest))
+        conn.execute("""INSERT INTO provider_recoveries(
+            recovery_id,generation,database_incarnation,identity_digest,
+            base_generation,health_owner_token,start_cursor,replay_cursor,
+            schema_version,index_epoch,source_epoch,account_id,role,
+            minimum_cursor,start_target_cursor,target_cursor,state,
+            proof_version,proof_revision,event_examined_cursor,
+            event_terminal_cursor,close_token,close_revision)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,NULL,NULL,NULL)
+        """, (recovery_id, generation, plan.database_incarnation,
+               plan.identity_digest, plan.base_generation, health_owner_token,
+               plan.replay_cursor, plan.replay_cursor, cut.schema_version,
+               cut.index_epoch, cut.source_epoch, cut.account_id, cut.role,
+               cut.minimum_cursor, cut.cursor, cut.cursor, "building",
+               plan.replay_cursor))
+        conn.executemany("INSERT INTO recovery_scopes VALUES(?,?,?,?)",
+                         ((recovery_id, s.scope_kind, s.scope_id, s.generation)
+                          for s in plan.scopes))
+        conn.executemany("INSERT INTO recovery_work VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                         ((recovery_id, w.work_id, w.family, w.scope_kind,
+                           w.scope_id, w.selection, w.checkpoint, w.checkpoint,
+                           "pending", 0, 0)
+                          for w in plan.work))
+        conn.executemany(
+            "INSERT INTO recovery_manifests VALUES(?,?,X'',X'','pending',0,0)",
+            ((recovery_id, family)
+             for family in ("documents", "chats", "streams")),
+        )
+        if claim is not None:
+            conn.execute(
+                "INSERT INTO claimed_recoveries VALUES(?,?,?)",
+                (recovery_id, claim.claim_id, claim.claim_digest),
             )
-            if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
-                raise NodeInputError("recovery metadata exceeds budget")
-            if not private_selection:
-                conn.execute(
-                    "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
-                    "WHERE singleton=1", (health_owner_token,),
-                )
+        if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
+            raise NodeInputError("recovery metadata exceeds budget")
+        if not private_selection and not claimed:
+            conn.execute(
+                "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
+                "WHERE singleton=1", (health_owner_token,),
+            )
         manifests = tuple(NodeRecoveryManifestState(family, b"", "pending", 0, 0)
                           for family in ("chats", "documents", "streams"))
         return NodeRecoveryState(recovery_id, generation, plan,
@@ -1842,8 +2158,54 @@ class NodeStore:
          proof_version, _proof_revision, examined, _terminal, _close_token,
          _close_revision) = row
         meta = self._check_meta(conn)
+        if conn.execute("""
+                SELECT 1 FROM node_generations WHERE generation=? AND (
+                    (claim_id IS NULL)!=(claim_digest IS NULL)
+                    OR (claim_id IS NOT NULL AND (
+                        typeof(claim_id)!='text'
+                        OR length(CAST(claim_id AS BLOB))>48
+                        OR typeof(claim_digest)!='text'
+                        OR length(CAST(claim_digest AS BLOB))>64)))
+                LIMIT 1
+        """, (generation,)).fetchone() or conn.execute("""
+                SELECT 1 FROM claimed_recoveries WHERE recovery_id=? AND (
+                    typeof(claim_id)!='text'
+                    OR length(CAST(claim_id AS BLOB))>48
+                    OR typeof(claim_digest)!='text'
+                    OR length(CAST(claim_digest AS BLOB))>64)
+                LIMIT 1
+        """, (recovery_id,)).fetchone():
+            raise sqlite3.DatabaseError("invalid claimed local recovery")
+        generation_tag = conn.execute(
+            "SELECT claim_id,claim_digest FROM node_generations WHERE generation=?",
+            (generation,),
+        ).fetchone()
+        mapping = conn.execute(
+            "SELECT claim_id,claim_digest FROM claimed_recoveries "
+            "WHERE recovery_id=?", (recovery_id,),
+        ).fetchone()
+        if (generation_tag is None
+                or (mapping is None) != (generation_tag == (None, None))
+                or (mapping is not None and mapping != generation_tag)):
+            raise sqlite3.DatabaseError("invalid claimed local recovery")
+        claim = None
+        claim_stale = False
+        if mapping is not None:
+            registration = NodeCoordinatorRegistration(
+                str(self.path), incarnation, digest,
+                self.identity.provider_endpoint, self.identity.root,
+            )
+            claim = self._stored_recovery_claim(conn, registration)
+            if (claim is None
+                    or mapping != (claim.claim_id, claim.claim_digest)):
+                raise sqlite3.DatabaseError("invalid claimed local recovery")
+            try:
+                self._require_recovery_claim(conn, registration, claim)
+            except NodeGenerationChanged:
+                claim_stale = True
         stale = (meta[0] != incarnation or self.identity.digest != digest
-                 or meta[1] != base or bool(meta[5])
+                 or meta[1] != base or claim_stale
+                 or (claim is None and bool(meta[5]))
                  or current.schema_version != schema or current.index_epoch != index
                  or current.source_epoch != source or current.minimum_cursor > replay
                  or current.account_id != account or current.role != role
@@ -1851,7 +2213,10 @@ class NodeStore:
         for kind, ident, scope_generation in conn.execute(
                 "SELECT scope_kind,scope_id,generation FROM recovery_scopes "
                 "WHERE recovery_id=?", (recovery_id,)):
-            if self._scope_generation(conn, kind, ident) != (scope_generation, None):
+            expected_pending = (_NODE_PENDING_REASON
+                                if claim is not None and claim.fence_tokens else None)
+            if self._scope_generation(conn, kind, ident) != (
+                    scope_generation, expected_pending):
                 stale = True
         if stale:
             conn.execute("UPDATE node_generations SET state='abandoned' "
@@ -3501,6 +3866,11 @@ class NodeStore:
                 "WHERE generation=?",
                 (generation,)).fetchone()
             if recovery:
+                if conn.execute(
+                        "SELECT 1 FROM claimed_recoveries WHERE recovery_id=?",
+                        (recovery[0],)).fetchone():
+                    raise NodeInputError(
+                        "claimed recovery requires coordinator admission")
                 selections = conn.execute(
                     "SELECT selection FROM recovery_work WHERE recovery_id=?",
                     (recovery[0],),
