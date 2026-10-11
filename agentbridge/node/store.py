@@ -780,7 +780,9 @@ class NodeStore:
             generation = conn.execute(
                 "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
             ).fetchone()[0]
-            health_owner_token = max(created, meta[3] + 1)
+            is_reference = (len(plan.work) == 1
+                            and plan.work[0].selection == REFERENCE_PLAN_SELECTION)
+            health_owner_token = 0 if is_reference else max(created, meta[3] + 1)
             if health_owner_token > 2**63 - 1:
                 raise NodeInputError("recovery attempt time exhausted")
             recovery_id = secrets.token_hex(24)
@@ -817,8 +819,11 @@ class NodeStore:
             )
             if self._proof_metadata_size(conn, recovery_id) > MAX_RECOVERY_METADATA_BYTES:
                 raise NodeInputError("recovery metadata exceeds budget")
-            conn.execute("UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
-                         "WHERE singleton=1", (health_owner_token,))
+            if not is_reference:
+                conn.execute(
+                    "UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
+                    "WHERE singleton=1", (health_owner_token,),
+                )
         manifests = tuple(NodeRecoveryManifestState(family, b"", "pending", 0, 0)
                           for family in ("chats", "documents", "streams"))
         return NodeRecoveryState(recovery_id, generation, plan,
@@ -2559,7 +2564,8 @@ class NodeStore:
                 self._clear_candidate_rows(conn, generation)
                 if recovery_owner is not None:
                     owned_generation, owned_attempt = recovery_owner
-                    if ((expected_generation is None
+                    if (owned_attempt > 0
+                            and (expected_generation is None
                          or expected_generation == owned_generation)
                             and (expected_attempt_ns is None
                                  or expected_attempt_ns == owned_attempt)):
