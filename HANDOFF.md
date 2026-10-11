@@ -644,3 +644,31 @@ CPU was 0.39%. Merge only after exact-head Windows CI passes, then deliberately
 apply the merged schema and measure provider CPU plus harness request rates as
 the GUI and harnesses are restarted in stages. Do not infer the live CPU fix
 from local tests.
+
+## Current local-node checkpoint — 2026-10-11
+
+The later local-node recovery stack supersedes the older transport checkpoint
+above. Its durable implementation record is
+`~/.agentbridge/dev-tasks/1092b6e37b13bbe8/LOCAL_NODE_RECOVERY_V5_PLAN_2026-10-11.md`.
+The implementation commits are PR #83 `3cd6340`, PR #84 `0ac890d`, PR #85
+`0f62763`, and PR #86 `fcf42c1`; #84--#86 are stacked in that order. The app and harness remain
+stopped. No provider schema installation, live diagnostic activation, deploy or
+restart has occurred.
+
+PR #85 composes the typed recovery, independent reference and Store-to-Store
+equivalence recorder behind an exact disabled-by-default gate. It advances at
+most one provider data page per call, resumes from SQLite, rejects incompatible
+provider cuts before scanning, never admits either diagnostic candidate and is
+not imported by GUI or harness startup. PR #86 adds the separate one-shot
+operator command. The command touches neither config nor provider while disabled,
+derives its identity-bound Store/evidence path from the authenticated provider
+account, emits only bounded progress/error categories and exits after one step.
+
+Local validation for the current stack is 145 focused tests plus Ruff, isolated
+compile and diff checks. GPT-Astra's corrected-tree reviews are clean. Hosted CI
+and connector review for #85/#86 are pending and must not be polled; incorporate
+the user's completion signal and any current-head findings. After the stack
+merges, provider-schema installation is a separate explicit release action.
+Only then run the one-shot diagnostic repeatedly and record step count, wall
+time, counts, digests and restart reasons. Equality is delivery evidence, never
+membership authority. Product reads remain on the existing path until N2.
