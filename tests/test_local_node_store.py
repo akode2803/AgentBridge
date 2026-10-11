@@ -25,7 +25,7 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (2, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (3, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
 
 
@@ -34,6 +34,43 @@ def test_store_rejects_rebinding_existing_database(tmp_path):
     NodeStore(path, identity())
     with pytest.raises(sqlite3.DatabaseError, match="identity mismatch"):
         NodeStore(path, identity(principal="someone-else"))
+
+
+def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO node_generations(generation,base_generation,state,created_ns) "
+            "VALUES(1,0,'building',1)"
+        )
+        conn.execute(
+            "INSERT INTO candidate_docs VALUES(1,'users/a.json',1,0,?)",
+            (b"{}",),
+        )
+        conn.execute("DROP TABLE candidate_chunks")
+        conn.execute("ALTER TABLE node_generations DROP COLUMN chunk_count")
+        conn.execute("ALTER TABLE node_generations DROP COLUMN logs_mode")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""
+            CREATE TABLE node_schema(
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                version INTEGER NOT NULL CHECK(version=2),
+                protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
+            )
+        """)
+        conn.execute("INSERT INTO node_schema VALUES(1,2,1)")
+
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT version,protocol_version FROM node_schema"
+        ).fetchone() == (3, 1)
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=1"
+        ).fetchone() == ("abandoned",)
+        assert conn.execute("SELECT count(*) FROM candidate_docs").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM candidate_chunks").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("table", ["node_identity", "node_meta"])
