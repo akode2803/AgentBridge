@@ -19,7 +19,9 @@ from .admission import (
     NodeRecoveryStreamHead,
 )
 from .recovery import _provider_cut
-from .store import NodeStore, REFERENCE_PLAN_SELECTION
+from .store import (
+    DIAGNOSTIC_REFERENCE_PLAN_SELECTION, NodeStore, REFERENCE_PLAN_SELECTION,
+)
 
 
 def _chunk(kind: str, *values: object) -> str:
@@ -43,20 +45,25 @@ class ReferenceStepResult:
 class InactiveReferenceExecutor:
     """Advance one private exact reference by one bounded source page."""
 
-    def __init__(self, store: NodeStore, transport: Transport) -> None:
+    def __init__(self, store: NodeStore, transport: Transport, *,
+                 diagnostic: bool = False) -> None:
         if type(store) is not NodeStore or not isinstance(transport, Transport):
             raise TypeError("expected node Store and transport")
+        if type(diagnostic) is not bool:
+            raise TypeError("expected diagnostic reference mode")
         self.store = store
         self.transport = transport
+        self.selection = (DIAGNOSTIC_REFERENCE_PLAN_SELECTION
+                          if diagnostic else REFERENCE_PLAN_SELECTION)
+        self.diagnostic = diagnostic
 
     def _require_source(self) -> None:
         if not self.transport.supports_reference_source:
             raise NotImplementedError("transport reference source is unavailable")
 
-    @staticmethod
-    def _require_plan(state: NodeRecoveryState) -> None:
+    def _require_plan(self, state: NodeRecoveryState) -> None:
         if (len(state.plan.work) != 1
-                or state.plan.work[0].selection != REFERENCE_PLAN_SELECTION):
+                or state.plan.work[0].selection != self.selection):
             raise NodeInputError("reference executor received a different run kind")
 
     def _restart(self, state: NodeRecoveryState, reason: str) -> None:
@@ -101,6 +108,7 @@ class InactiveReferenceExecutor:
                 self.store.stage_reference_documents(
                     state.recovery_id, opening, chunk, manifest.page_count,
                     manifest.checkpoint, rows, has_more=page.has_more,
+                    diagnostic=self.diagnostic,
                 )
             elif family == "chats":
                 self.store.stage_recovery_chats(
@@ -160,9 +168,10 @@ class InactiveReferenceExecutor:
         discovered = reference_id is None
         if discovered:
             reference_id = self.store.resumable_recovery_id(
-                current, selection=REFERENCE_PLAN_SELECTION)
+                current, selection=self.selection)
         if reference_id is None:
-            plan = self.store.root_reference_plan(current)
+            plan = (self.store.root_diagnostic_reference_plan(current)
+                    if self.diagnostic else self.store.root_reference_plan(current))
             state = self.store.begin_recovery(plan, created_ns=attempted_ns)
             return ReferenceStepResult(
                 "building", state.recovery_id, state.generation,

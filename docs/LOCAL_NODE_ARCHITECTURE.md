@@ -306,11 +306,16 @@ gate. One call advances at most one provider data page; accepted continuations
 live in the Store, so replacing the coordinator does not restart work. It first
 seals recovery, then an independent reference at the same provider cut, and
 records their Store-to-Store comparison without admitting either candidate.
-Both diagnostic run kinds are separate from the product recovery kind and never
-take source-health ownership. Starting recovery requires capacity for both
-private candidates; contention before reference creation abandons the first
-half rather than stranding it. Provider movement abandons both sides and begins
-a fresh bounded attempt. After evidence is written, both candidates are
+Recovery, scoped-read and independent-reference capabilities are all checked
+before the first candidate is created.
+Both diagnostic run kinds are separate from product recovery and ordinary
+independent-reference runs, and never take source-health ownership. Starting
+recovery requires capacity for both private candidates; contention before
+reference creation abandons the first half rather than stranding it. A capacity
+retry atomically retires stale and orphaned diagnostic references when no bound
+diagnostic recovery remains, without touching ordinary reference work. Provider
+movement abandons both sides and begins a fresh bounded attempt. After evidence
+is written, both candidates are
 abandoned so they cannot consume the bounded active pool. The
 remaining N1 gate is a measured diagnostic run against an installed matching
 provider schema. Do not route GUI or harness reads to the store while that

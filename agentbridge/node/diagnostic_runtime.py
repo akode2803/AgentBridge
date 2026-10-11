@@ -84,7 +84,8 @@ class LocalNodeDiagnosticRuntime:
         return result
 
     def _advance_reference(self, attempted: int) -> ReferenceStepResult:
-        executor = InactiveReferenceExecutor(self.store, self.transport)
+        executor = InactiveReferenceExecutor(
+            self.store, self.transport, diagnostic=True)
         result = executor.step(None, attempted_ns=attempted)
         if result.action == "resumed":
             result = executor.step(result.reference_id, attempted_ns=attempted)
@@ -95,17 +96,32 @@ class LocalNodeDiagnosticRuntime:
             if generation is not None:
                 self.store.abandon_candidate(generation)
 
+    def _require_sources(self) -> None:
+        if (not self.transport.supports_recovery_source
+                or not self.transport.supports_scoped_source_reads
+                or not self.transport.supports_reference_source):
+            raise NotImplementedError(
+                "transport diagnostic sources are unavailable")
+
+    def _reclaim_orphaned_reference(self) -> bool:
+        """Retire a reference that has no recovery at the current binding."""
+        current = _provider_cut(self.transport.recovery_fence())
+        return self.store.reclaim_orphaned_diagnostic_references(current)
+
     def step(self, *, attempted_ns: int) -> NodeDiagnosticStepResult:
         """Advance bounded private work; completed evidence never affects reads."""
         attempted = self._attempted_ns(attempted_ns)
         if not self.enabled:
             return NodeDiagnosticStepResult("disabled", "disabled", "disabled")
+        self._require_sources()
 
         try:
             recovery = self._advance_recovery(attempted)
         except NodeCandidateCapacityError:
+            reclaimed = self._reclaim_orphaned_reference()
             return NodeDiagnosticStepResult(
-                "running", "recovery", "deferred")
+                "running", "recovery",
+                "restarted" if reclaimed else "deferred")
         except NodeGenerationChanged:
             return NodeDiagnosticStepResult(
                 "running", "recovery", "restarted")

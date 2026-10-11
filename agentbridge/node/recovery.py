@@ -87,7 +87,7 @@ class InactiveRecoveryExecutor:
         self.store.abandon_candidate(
             state.generation,
             expected_generation=state.plan.base_generation,
-            expected_attempt_ns=state.health_owner_token,
+            expected_attempt_ns=state.health_owner_token or None,
         )
         raise NodeGenerationChanged(reason)
 
