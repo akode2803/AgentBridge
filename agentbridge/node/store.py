@@ -16,17 +16,20 @@ from .admission import (
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeInputBatch, NodeInputError, NodeLogPage, NodeLogRow, NodeScopePosition,
+    NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
+    NodeRecoveryState, NodeRecoveryWorkState, MAX_RECOVERY_METADATA_BYTES,
+    MAX_RECOVERY_OPAQUE_BYTES,
     detached_batch, detached_capture_request,
 )
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=3),
+    version INTEGER NOT NULL CHECK(version=4),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -98,6 +101,55 @@ CREATE TABLE IF NOT EXISTS candidate_chunks(
     total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
     PRIMARY KEY(generation,chunk_id)
 );
+CREATE TABLE IF NOT EXISTS provider_recoveries(
+    recovery_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL UNIQUE REFERENCES node_generations(generation),
+    database_incarnation TEXT NOT NULL, identity_digest TEXT NOT NULL,
+    base_generation INTEGER NOT NULL CHECK(base_generation>=0),
+    health_owner_token INTEGER NOT NULL CHECK(health_owner_token>=0),
+    start_cursor INTEGER NOT NULL CHECK(start_cursor>=0),
+    replay_cursor INTEGER NOT NULL CHECK(replay_cursor>=0),
+    schema_version INTEGER NOT NULL CHECK(schema_version>=1), index_epoch TEXT NOT NULL,
+    source_epoch TEXT NOT NULL, account_id TEXT NOT NULL, role TEXT NOT NULL,
+    minimum_cursor INTEGER NOT NULL CHECK(minimum_cursor>=0),
+    start_target_cursor INTEGER NOT NULL CHECK(start_target_cursor>=0),
+    target_cursor INTEGER NOT NULL CHECK(target_cursor>=0), state TEXT NOT NULL
+        CHECK(state IN ('building','sealed')),
+    CHECK(minimum_cursor<=start_cursor AND start_cursor<=replay_cursor),
+    CHECK(replay_cursor<=target_cursor AND start_target_cursor<=target_cursor)
+);
+CREATE TABLE IF NOT EXISTS recovery_scopes(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('root','chat')),
+    scope_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation>=0),
+    CHECK((scope_kind='root' AND scope_id='') OR
+          (scope_kind='chat' AND length(scope_id)>0)),
+    PRIMARY KEY(recovery_id,scope_kind,scope_id)
+);
+CREATE TABLE IF NOT EXISTS recovery_work(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    work_id TEXT NOT NULL,
+    family TEXT NOT NULL CHECK(family IN ('docs','logs','visibility','frontiers')),
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('root','chat')),
+    scope_id TEXT NOT NULL,
+    selection BLOB NOT NULL, initial_checkpoint BLOB NOT NULL,
+    checkpoint BLOB NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN
+        ('pending','complete','complete_empty','denied','failed','truncated')),
+    page_count INTEGER NOT NULL CHECK(page_count>=0),
+    row_count INTEGER NOT NULL CHECK(row_count>=0),
+    CHECK((scope_kind='root' AND scope_id='') OR
+          (scope_kind='chat' AND length(scope_id)>0)),
+    PRIMARY KEY(recovery_id,work_id)
+);
+CREATE TABLE IF NOT EXISTS recovery_pages(
+    recovery_id TEXT NOT NULL REFERENCES provider_recoveries(recovery_id),
+    chunk_id TEXT NOT NULL, work_id TEXT NOT NULL, digest TEXT NOT NULL,
+    PRIMARY KEY(recovery_id,chunk_id),
+    FOREIGN KEY(recovery_id,work_id)
+        REFERENCES recovery_work(recovery_id,work_id)
+);
 CREATE TABLE IF NOT EXISTS remote_docs(
     path TEXT PRIMARY KEY, seq INTEGER NOT NULL, deleted INTEGER NOT NULL
         CHECK(deleted IN (0,1)), payload BLOB,
@@ -153,6 +205,12 @@ _V3_TABLES = frozenset({
     "remote_log_rows", "remote_chat_visibility", "remote_frontiers",
     "scope_versions", "local_changes", "local_change_state",
 })
+_RECOVERY_TABLES = frozenset({
+    "provider_recoveries", "recovery_scopes", "recovery_work", "recovery_pages",
+})
+_V4_TABLES = _V3_TABLES | _RECOVERY_TABLES
+_RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
+                           _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({"one_admitted_node_generation", "remote_log_chat"})
 
 
@@ -312,8 +370,27 @@ class NodeStore:
         """)
         conn.execute(
             "INSERT INTO node_schema VALUES(1,?,?)",
-            (SCHEMA_VERSION, PROTOCOL_VERSION),
+            (3, PROTOCOL_VERSION),
         )
+
+    def _migrate_v3(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(3, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        # Execute statements in the caller's IMMEDIATE transaction; executescript
+        # would commit that transaction and expose a partially migrated schema.
+        for statement in _RECOVERY_SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=4),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,4,?)", (PROTOCOL_VERSION,))
 
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
@@ -338,7 +415,10 @@ class NodeStore:
                     self._migrate_v1(conn)
                 elif tables == _V2_TABLES:
                     self._migrate_v2(conn)
-                elif tables != _V3_TABLES:
+                    self._migrate_v3(conn)
+                elif tables == _V3_TABLES:
+                    self._migrate_v3(conn)
+                elif tables != _V4_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -451,6 +531,285 @@ class NodeStore:
                 "UPDATE node_meta SET health='catching_up',last_attempt_ns="
                 "MAX(last_attempt_ns,?) WHERE singleton=1", (created,))
         return generation
+
+    @staticmethod
+    def _scope_generation(conn: sqlite3.Connection, kind: str,
+                          ident: str) -> tuple[int, str | None]:
+        return conn.execute(
+            "SELECT generation,pending_reason FROM scope_versions "
+            "WHERE scope_kind=? AND scope_id=?", (kind, ident),
+        ).fetchone() or (0, None)
+
+    def begin_recovery(self, plan: NodeRecoveryPlan, *,
+                       created_ns: int) -> NodeRecoveryState:
+        """Bind one private, resumable provider recovery to an exact local cut."""
+        if type(plan) is not NodeRecoveryPlan:
+            raise NodeInputError("invalid recovery plan")
+        plan = NodeRecoveryPlan(
+            plan.database_incarnation, plan.identity_digest, plan.base_generation,
+            plan.replay_cursor, NodeProviderCut(**vars(plan.provider_cut)),
+            tuple(NodeRecoveryScope(**vars(s)) for s in plan.scopes),
+            tuple(NodeRecoveryWork(**vars(w)) for w in plan.work),
+        )
+        created = _positive_ns(created_ns, "recovery creation time")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            meta = self._check_meta(conn)
+            if (meta[0] != plan.database_incarnation
+                    or self.identity.digest != plan.identity_digest
+                    or meta[1] != plan.base_generation or meta[5]
+                    or any(self._scope_generation(conn, s.scope_kind, s.scope_id)
+                           != (s.generation, None) for s in plan.scopes)):
+                raise NodeGenerationChanged("recovery binding changed")
+            if conn.execute("SELECT count(*) FROM node_generations WHERE state "
+                            "IN ('building','sealed')").fetchone()[0] >= MAX_ACTIVE_CANDIDATES:
+                raise NodeInputError("too many active node candidates")
+            generation = conn.execute(
+                "SELECT COALESCE(MAX(generation),0)+1 FROM node_generations"
+            ).fetchone()[0]
+            health_owner_token = max(created, meta[3] + 1)
+            if health_owner_token > 2**63 - 1:
+                raise NodeInputError("recovery attempt time exhausted")
+            recovery_id = secrets.token_hex(24)
+            cut = plan.provider_cut
+            conn.execute("INSERT INTO node_generations(generation,base_generation,"
+                         "state,created_ns) VALUES(?,?,'building',?)",
+                         (generation, plan.base_generation, created))
+            conn.execute("INSERT INTO provider_recoveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (recovery_id, generation, plan.database_incarnation,
+                          plan.identity_digest, plan.base_generation, health_owner_token,
+                          plan.replay_cursor, plan.replay_cursor, cut.schema_version, cut.index_epoch,
+                          cut.source_epoch, cut.account_id, cut.role,
+                          cut.minimum_cursor, cut.cursor, cut.cursor,
+                          "building"))
+            conn.executemany("INSERT INTO recovery_scopes VALUES(?,?,?,?)",
+                             ((recovery_id, s.scope_kind, s.scope_id, s.generation)
+                              for s in plan.scopes))
+            conn.executemany("INSERT INTO recovery_work VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                             ((recovery_id, w.work_id, w.family, w.scope_kind,
+                               w.scope_id, w.selection, w.checkpoint, w.checkpoint,
+                               "pending", 0, 0)
+                              for w in plan.work))
+            conn.execute("UPDATE node_meta SET health='catching_up',last_attempt_ns=? "
+                         "WHERE singleton=1", (health_owner_token,))
+        return NodeRecoveryState(recovery_id, generation, plan,
+                                 health_owner_token, plan.replay_cursor,
+                                 plan.provider_cut.cursor,
+                                 "building", tuple(
+            NodeRecoveryWorkState(w.work_id, w.family, w.scope_kind, w.scope_id,
+                                  w.selection, w.checkpoint, "pending", 0, 0)
+            for w in plan.work))
+
+    def _bound_recovery(self, conn: sqlite3.Connection, recovery_id: str,
+                        current: NodeProviderCut) -> tuple | None:
+        row = conn.execute("SELECT generation,database_incarnation,identity_digest,"
+                           "base_generation,health_owner_token,start_cursor,replay_cursor,"
+                           "schema_version,index_epoch,"
+                           "source_epoch,account_id,role,minimum_cursor,"
+                           "start_target_cursor,target_cursor,state "
+                           "FROM provider_recoveries WHERE recovery_id=?",
+                           (recovery_id,)).fetchone()
+        if row is None:
+            raise NodeGenerationChanged("unknown recovery")
+        (generation, incarnation, digest, base, health_owner, start, replay, schema, index, source,
+         account, role, _minimum, _start_target, target, state) = row
+        meta = self._check_meta(conn)
+        stale = (meta[0] != incarnation or self.identity.digest != digest
+                 or meta[1] != base or bool(meta[5])
+                 or current.schema_version != schema or current.index_epoch != index
+                 or current.source_epoch != source or current.minimum_cursor > replay
+                 or current.account_id != account or current.role != role)
+        for kind, ident, scope_generation in conn.execute(
+                "SELECT scope_kind,scope_id,generation FROM recovery_scopes "
+                "WHERE recovery_id=?", (recovery_id,)):
+            if self._scope_generation(conn, kind, ident) != (scope_generation, None):
+                stale = True
+        if stale:
+            conn.execute("UPDATE node_generations SET state='abandoned' "
+                         "WHERE generation=? AND state IN ('building','sealed')",
+                         (generation,))
+            self._clear_candidate_rows(conn, generation)
+            self._prune_generation_history(conn)
+            return None
+        # A delayed page may carry an older, otherwise valid cut after another
+        # request advanced the target. Reject that response without destroying
+        # the newer durable recovery.
+        if current.cursor < target:
+            raise NodeGenerationChanged("provider cut precedes recovery target")
+        return row
+
+    def recovery_state(self, recovery_id: str,
+                       current_provider_cut: NodeProviderCut) -> NodeRecoveryState:
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._bound_recovery(conn, recovery_id, current)
+            if row is not None:
+                (generation, incarnation, digest, base, health_owner, start, replay, schema, index,
+                 source, account, role, minimum, start_target, target, state) = row
+                scopes = tuple(NodeRecoveryScope(kind, ident, value) for kind, ident, value
+                               in conn.execute("SELECT scope_kind,scope_id,generation "
+                                               "FROM recovery_scopes WHERE recovery_id=? "
+                                               "ORDER BY scope_kind,scope_id", (recovery_id,)))
+                work = tuple(NodeRecoveryWorkState(*values) for values in conn.execute(
+                    "SELECT work_id,family,scope_kind,scope_id,selection,checkpoint,"
+                    "outcome,page_count,row_count FROM recovery_work "
+                    "WHERE recovery_id=? ORDER BY work_id", (recovery_id,)))
+                initial = dict(conn.execute(
+                    "SELECT work_id,initial_checkpoint FROM recovery_work "
+                    "WHERE recovery_id=?", (recovery_id,)))
+                plan = NodeRecoveryPlan(incarnation, digest, base, start,
+                                        NodeProviderCut(schema, index, source, account,
+                                                        role, minimum, start_target), scopes,
+                                        tuple(NodeRecoveryWork(w.work_id, w.family,
+                                                              w.scope_kind, w.scope_id,
+                                                              w.selection, initial[w.work_id])
+                                              for w in work))
+                result = NodeRecoveryState(recovery_id, generation, plan,
+                                           health_owner, replay, target, state, work)
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return result
+
+    def extend_recovery_target(self, recovery_id: str,
+                               current_provider_cut: NodeProviderCut) -> int:
+        """Advance a closing fence after fresh same-epoch provider observation."""
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._bound_recovery(conn, recovery_id, current)
+            if row is not None:
+                if row[-1] != "building":
+                    raise NodeGenerationChanged("recovery is not building")
+                target = max(row[-2], current.cursor)
+                conn.execute("UPDATE provider_recoveries SET target_cursor=? "
+                             "WHERE recovery_id=?", (target, recovery_id))
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return target
+
+    def stage_recovery_page(self, recovery_id: str,
+                            current_provider_cut: NodeProviderCut, chunk_id: str,
+                            work_id: str, expected_revision: int,
+                            expected_checkpoint: bytes,
+                            next_checkpoint: bytes, outcome: str,
+                            expected_replay_cursor: int,
+                            batch: NodeInputBatch) -> bool:
+        recovery_id = self._candidate_chunk_id(recovery_id)
+        chunk = self._candidate_chunk_id(chunk_id)
+        work_id = self._candidate_chunk_id(work_id)
+        if type(current_provider_cut) is not NodeProviderCut:
+            raise NodeInputError("invalid current provider cut")
+        current = NodeProviderCut(**vars(current_provider_cut))
+        if (type(expected_revision) is not int
+                or not 0 <= expected_revision <= MAX_STAGED_CHUNKS):
+            raise NodeInputError("invalid recovery work revision")
+        for checkpoint in (expected_checkpoint, next_checkpoint):
+            if type(checkpoint) is not bytes or len(checkpoint) > MAX_RECOVERY_OPAQUE_BYTES:
+                raise NodeInputError("invalid recovery checkpoint")
+        if type(outcome) is not str or outcome not in (
+                "pending", "complete", "denied", "failed", "truncated"):
+            raise NodeInputError("invalid recovery outcome")
+        if (type(expected_replay_cursor) is not int
+                or not 0 <= expected_replay_cursor <= 2**63 - 1):
+            raise NodeInputError("invalid recovery replay cursor")
+        batch = detached_batch(batch)
+        if any(mode != "replace" for mode in (
+                batch.documents_mode, batch.logs_mode, batch.visibility_mode,
+                batch.frontiers_mode)):
+            raise NodeInputError("whole-root recovery requires replace batches")
+        cut_digest = (current.schema_version, current.index_epoch,
+                      current.source_epoch, current.account_id, current.role,
+                      current.minimum_cursor, current.cursor)
+        digest = hashlib.sha256(repr((work_id, expected_revision, cut_digest,
+                                      expected_checkpoint,
+                                      next_checkpoint, outcome,
+                                      expected_replay_cursor,
+                                      self._batch_digest(batch))).encode("utf-8")).hexdigest()
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            prior = conn.execute("SELECT work_id,digest FROM recovery_pages "
+                                 "WHERE recovery_id=? AND chunk_id=?",
+                                 (recovery_id, chunk)).fetchone()
+            if prior is not None:
+                if prior != (work_id, digest):
+                    raise NodeInputError("recovery page id was reused")
+                return False
+            row = self._bound_recovery(conn, recovery_id, current)
+            if row is not None:
+                (generation, _, _, _, _, _, stored_replay, _, _, _, _, _, _, _,
+                 target, state) = row
+                if state != "building":
+                    raise NodeGenerationChanged("recovery is not building")
+                work = conn.execute("SELECT family,checkpoint,outcome,page_count,row_count "
+                                    "FROM recovery_work WHERE recovery_id=? AND work_id=?",
+                                    (recovery_id, work_id)).fetchone()
+                if work is None:
+                    raise NodeInputError("unknown recovery work")
+                family, checkpoint, status, page_count, row_count = work
+                actual = ("docs" if batch.documents else "logs" if batch.log_rows
+                          else "visibility" if batch.visibility else "frontiers"
+                          if batch.frontiers else None)
+                nonempty = sum(bool(rows) for rows in (
+                    batch.documents, batch.log_rows, batch.visibility, batch.frontiers))
+                if nonempty > 1 or (actual is not None and actual != family):
+                    raise NodeInputError("recovery page crosses work family")
+                if (status != "pending" or page_count != expected_revision
+                        or checkpoint != expected_checkpoint
+                        or (outcome == "pending" and next_checkpoint == checkpoint)
+                        or expected_replay_cursor != stored_replay):
+                    raise NodeInputError("recovery page checkpoint changed")
+                count = len(batch.documents) + len(batch.log_rows) + len(
+                    batch.visibility) + len(batch.frontiers)
+                if outcome in ("denied", "failed", "truncated") and count:
+                    raise NodeInputError("failed recovery page contains rows")
+                metadata = conn.execute("SELECT COALESCE(SUM(length(selection)+"
+                    "length(initial_checkpoint)+length(checkpoint)+"
+                    "length(CAST(work_id AS BLOB))+length(CAST(scope_id AS BLOB))+128),0) "
+                    "FROM recovery_work WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+                metadata += conn.execute("SELECT COALESCE(SUM("
+                    "length(CAST(scope_id AS BLOB))+64),0) "
+                    "FROM recovery_scopes WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+                metadata += conn.execute("SELECT COALESCE(SUM("
+                    "length(CAST(chunk_id AS BLOB))+length(CAST(work_id AS BLOB))+"
+                    "length(CAST(digest AS BLOB))+64),0) FROM recovery_pages "
+                    "WHERE recovery_id=?", (recovery_id,)).fetchone()[0]
+                if (metadata + len(next_checkpoint) - len(checkpoint)
+                        + len(chunk.encode("utf-8")) + len(work_id.encode("utf-8"))
+                        + len(digest.encode("ascii")) + 64
+                        > MAX_RECOVERY_METADATA_BYTES):
+                    raise NodeInputError("recovery metadata exceeds budget")
+                self._stage_batch(conn, generation, chunk, batch,
+                                  self._batch_digest(batch))
+                conn.execute("INSERT INTO recovery_pages VALUES(?,?,?,?)",
+                             (recovery_id, chunk, work_id, digest))
+                final = ("complete_empty" if outcome == "complete"
+                         and row_count + count == 0 else outcome)
+                conn.execute("UPDATE recovery_work SET checkpoint=?,outcome=?,"
+                             "page_count=?,row_count=? WHERE recovery_id=? AND work_id=?",
+                             (next_checkpoint, final, page_count + 1,
+                              row_count + count, recovery_id, work_id))
+                conn.execute("UPDATE provider_recoveries SET target_cursor=? "
+                             "WHERE recovery_id=?",
+                             (max(target, current.cursor), recovery_id))
+                result = True
+        if row is None:
+            raise NodeGenerationChanged("recovery binding changed")
+        return result
+
+    def seal_recovery(self, recovery_id: str,
+                      current_provider_cut: NodeProviderCut, *,
+                      observed_ns: int) -> None:
+        # Provider pages and checkpoint tokens cannot establish replay or an
+        # authoritative closed work inventory. Keep the API fail-closed until
+        # the provider-event proof contract is implemented.
+        raise NodeInputError("provider replay proof is not implemented")
 
     def note_refresh_state(self, health: str, *, attempted_ns: int,
                            expected_generation: int | None = None,
@@ -569,6 +928,15 @@ class NodeStore:
         digest = self._batch_digest(batch)
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT 1 FROM provider_recoveries WHERE generation=?",
+                    (generation,)).fetchone():
+                raise NodeInputError("recovery candidate requires recovery pages")
+            return self._stage_batch(conn, generation, chunk, batch, digest)
+
+    @staticmethod
+    def _stage_batch(conn: sqlite3.Connection, generation: int, chunk: str,
+                     batch: NodeInputBatch, digest: str) -> bool:
             row = conn.execute(
                 "SELECT state,documents_mode,logs_mode,visibility_mode,"
                 "frontiers_mode,document_count,log_count,visibility_count,"
@@ -650,7 +1018,7 @@ class NodeStore:
                 "visibility_count=?,frontier_count=?,chunk_count=?,total_bytes=? "
                 "WHERE generation=?", (*counts, generation),
             )
-        return True
+            return True
 
     def seal_staged_candidate(self, generation: int, *, observed_ns: int) -> None:
         if type(generation) is not int or generation <= 0:
@@ -658,6 +1026,15 @@ class NodeStore:
         observed = _positive_ns(observed_ns, "candidate observation time")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT 1 FROM provider_recoveries WHERE generation=?",
+                    (generation,)).fetchone():
+                raise NodeInputError("recovery candidate requires recovery seal")
+            self._seal_staged(conn, generation, observed)
+
+    @staticmethod
+    def _seal_staged(conn: sqlite3.Connection, generation: int,
+                     observed: int) -> None:
             row = conn.execute(
                 "SELECT state,documents_mode,logs_mode,visibility_mode,"
                 "frontiers_mode FROM node_generations WHERE generation=?",
@@ -894,6 +1271,13 @@ class NodeStore:
 
     @staticmethod
     def _clear_candidate_rows(conn: sqlite3.Connection, generation: int) -> None:
+        recovery = conn.execute(
+            "SELECT recovery_id FROM provider_recoveries WHERE generation=?",
+            (generation,)).fetchone()
+        if recovery:
+            for table in ("recovery_pages", "recovery_work", "recovery_scopes"):
+                conn.execute(f"DELETE FROM {table} WHERE recovery_id=?", recovery)
+            conn.execute("DELETE FROM provider_recoveries WHERE recovery_id=?", recovery)
         for table in ("candidate_docs", "candidate_log_rows",
                       "candidate_visibility", "candidate_frontiers",
                       "candidate_chunks"):
@@ -926,6 +1310,11 @@ class NodeStore:
              frontiers_mode) = self._candidate_row(conn, generation)
             if state != "sealed" or observed is None:
                 raise NodeGenerationChanged("candidate is not sealed")
+            recovery = conn.execute(
+                "SELECT state FROM provider_recoveries WHERE generation=?",
+                (generation,)).fetchone()
+            if recovery and recovery[0] != "sealed":
+                raise NodeGenerationChanged("recovery is not sealed")
             current = conn.execute(
                 "SELECT admitted_generation,last_attempt_ns FROM node_meta "
                 "WHERE singleton=1"
@@ -1018,13 +1407,28 @@ class NodeStore:
             _positive_ns(expected_attempt_ns, "expected refresh attempt")
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            recovery_owner = conn.execute(
+                "SELECT base_generation,health_owner_token "
+                "FROM provider_recoveries WHERE generation=?", (generation,),
+            ).fetchone()
             changed = conn.execute("""
                 UPDATE node_generations SET state='abandoned'
                 WHERE generation=? AND state IN ('building','sealed')
             """, (generation,)).rowcount
             if changed:
                 self._clear_candidate_rows(conn, generation)
-                if expected_generation is None and expected_attempt_ns is None:
+                if recovery_owner is not None:
+                    owned_generation, owned_attempt = recovery_owner
+                    if ((expected_generation is None
+                         or expected_generation == owned_generation)
+                            and (expected_attempt_ns is None
+                                 or expected_attempt_ns == owned_attempt)):
+                        conn.execute(
+                            "UPDATE node_meta SET health=? WHERE singleton=1 "
+                            "AND admitted_generation=? AND last_attempt_ns=?",
+                            (health, owned_generation, owned_attempt),
+                        )
+                elif expected_generation is None and expected_attempt_ns is None:
                     conn.execute(
                         "UPDATE node_meta SET health=? WHERE singleton=1", (health,))
                 else:

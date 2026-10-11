@@ -420,5 +420,19 @@ multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
 bounded root recovery evidence for physical deletes and member-row changes, but
 does not turn an event into absence, completeness or authority proof. Next, add
 the durable provider recovery identity, checkpoints and completion proofs before
-private current-authority discovery and equivalence recording.
+private current-authority discovery and equivalence recording. Store schema v4
+now preserves existing admitted inputs and generic private candidates while
+binding a whole-root recovery to the database, identity, scope positions and
+provider epoch and authenticated account/role. Each private page receipt binds
+the observed cut, monotonic work revision, checkpoint transition, outcome and
+staged bytes in one transaction; its closing target advances with that commit.
+An older delayed response cannot discard newer work, and failure cleanup cannot
+overwrite health published by a newer refresh. The store deliberately does not
+seal these recovery candidates: checkpoint tokens and page results do not prove
+a closed work inventory or replay of every provider event. Existing v4 recovery
+work must be restarted or explicitly upgraded by a later proof-version migration;
+it cannot silently acquire a future completion proof. A durable provider
+event/replay evidence contract, including ambiguous-event restart,
+current-authority manifest and recovery execution is the next implementation
+step. Neither these checkpoints nor the local node assert authority/completeness.
 No GUI or harness read cutover occurs before that work and N2.
