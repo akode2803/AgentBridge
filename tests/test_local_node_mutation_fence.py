@@ -10,6 +10,7 @@ from agentbridge.node import (
     NodeCaptureRequest, NodeDocument, NodeGenerationChanged, NodeInputBatch,
     NodeStore, ReplicaIdentity,
 )
+from agentbridge.node.admission import NodeProviderCut
 from agentbridge.store import local_source, source_selectors
 from agentbridge.store.local_source import SourceChanged
 from agentbridge.store.db import Store
@@ -43,6 +44,11 @@ def _admit(node: NodeStore, value: bytes = b"one") -> int:
     )), observed_ns=2)
     node.admit_candidate(generation)
     return generation
+
+
+def _cut(cursor: int = 5) -> NodeProviderCut:
+    return NodeProviderCut(
+        1, "index:source-v1", "source-epoch", "alice", "member", 0, cursor)
 
 
 @pytest.fixture
@@ -205,6 +211,77 @@ def test_completed_fence_set_is_claimed_once_under_root_node_cut(world):
         ).fetchone() == (claim.claim_id, claim.claim_digest, claim.root_revision)
 
 
+def test_claimed_recovery_begins_idempotently_and_pages_while_pending(world):
+    root, _store, node, _definition, _position = world
+    intent = root.begin((S("doc_exact", "users/a.json"),))
+    root.complete(intent)
+    claim = root.claim_node_recovery(node)
+    current = _cut()
+
+    state = root.begin_node_recovery(node, claim, current, created_ns=10)
+    repeated = root.begin_node_recovery(node, claim, current, created_ns=11)
+
+    assert repeated.recovery_id == state.recovery_id
+    assert repeated.generation == state.generation
+    assert state.health_owner_token == 0
+    assert node.status(node_epoch="node", started_ns=1).health == "pending"
+    with pytest.raises(NodeGenerationChanged, match="claimed local recovery changed"):
+        root.begin_node_recovery(node, claim, _cut(6), created_ns=12)
+    node.stage_recovery_documents(
+        state.recovery_id, current, "documents-empty", 0, b"", (),
+        has_more=False,
+    )
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT recovery_id,claim_id,claim_digest FROM claimed_recoveries"
+        ).fetchone() == (state.recovery_id, claim.claim_id, claim.claim_digest)
+
+
+def test_root_revision_movement_rejects_claimed_recovery_start(world, tmp_path):
+    root, _store, node, _definition, _position = world
+    claim = root.claim_node_recovery(node)
+    other = NodeStore(
+        tmp_path / "other-node" / "replica.sqlite",
+        ReplicaIdentity(
+            "https://example.supabase.co", "supabase://mesh", "alice", "other",
+        ),
+    )
+    root.register_node(other)
+
+    with pytest.raises(SourceChanged, match="node_recovery_claim_changed"):
+        root.begin_node_recovery(node, claim, _cut(), created_ns=10)
+    replacement = root.claim_node_recovery(node)
+    assert replacement.root_revision > claim.root_revision
+    assert replacement.claim_id != claim.claim_id
+
+
+def test_later_mutation_invalidates_claimed_recovery_before_provider_page(world):
+    root, _store, node, _definition, _position = world
+    claim = root.claim_node_recovery(node)
+    state = root.begin_node_recovery(node, claim, _cut(), created_ns=10)
+
+    root.begin((S("doc_exact", "users/later.json"),))
+
+    with pytest.raises(NodeGenerationChanged, match="unknown recovery"):
+        node.recovery_state(state.recovery_id, _cut())
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM claimed_recoveries").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (state.generation,),
+        ).fetchone() == ("abandoned",)
+
+
+def test_ordinary_recovery_cannot_start_behind_unconsumed_claim(world):
+    root, _store, node, _definition, _position = world
+    root.claim_node_recovery(node)
+    plan = node.root_recovery_plan(_cut())
+
+    with pytest.raises(NodeGenerationChanged, match="recovery claim is active"):
+        node.begin_recovery(plan, created_ns=10)
+
+
 def test_active_or_later_mutation_cannot_join_recovery_claim(world):
     root, _store, node, _definition, _position = world
     first = root.begin((S("doc_exact", "users/a.json"),))
@@ -218,9 +295,10 @@ def test_active_or_later_mutation_cannot_join_recovery_claim(world):
         root.claim_node_recovery(node)
     root.complete(second)
     with sqlite3.connect(node.path) as conn:
-        assert conn.execute(
-            "SELECT claim_id FROM node_recovery_claims"
-        ).fetchone() == (claim.claim_id,)
+        assert conn.execute("SELECT claim_id FROM node_recovery_claims").fetchone() is None
+    replacement = root.claim_node_recovery(node)
+    assert replacement.claim_id != claim.claim_id
+    assert replacement.fence_tokens == tuple(sorted((first.token, second.token)))
 
 
 def test_foreign_coordinator_cannot_replace_bound_node_owner(tmp_path):

@@ -430,6 +430,36 @@ class MutationCoordinator:
                     root_revision=revision,
                 )
 
+    def begin_node_recovery(self, node, claim, current_provider_cut, *, created_ns):
+        """Persist one fresh provider cut only while the claimed root is unchanged."""
+        from ..node.admission import NodeRecoveryClaim
+        from ..node.store import NodeStore
+
+        if type(node) is not NodeStore or type(claim) is not NodeRecoveryClaim:
+            raise ValueError('invalid claimed local node recovery')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            if (root.execute('SELECT 1 FROM mutation_intents LIMIT 1').fetchone()
+                    or root.execute('SELECT 1 FROM quarantine_intents LIMIT 1').fetchone()):
+                raise owner.SourceChanged('root_mutation_pending')
+            if (claim.coordinator_path != str(self.path)
+                    or claim.coordinator_identity != self.identity
+                    or claim.coordinator_epoch != self.epoch
+                    or claim.root_revision != self._root_revision(root)):
+                raise owner.SourceChanged('node_recovery_claim_changed')
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                recovery_id, state = node.coordinator_begin_claimed_recovery(
+                    node_conn, registration, claim, current_provider_cut,
+                    created_ns=created_ns,
+                )
+        if state is not None:
+            return state
+        return node.recovery_state(
+            recovery_id, current_provider_cut, include_counts=False)
+
     def _retire_nodes(self, root, token, *, state='active', skip_path=None):
         from ..node.store import NodeStore
 

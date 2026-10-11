@@ -517,6 +517,23 @@ the pending-mutation trigger remains unconditional until exact permit validation
 and self-consumption land in the same atomic admission change. Product reads
 remain disconnected.
 
+The inactive claimed-recovery executor makes the provider cut causal without
+holding a database writer during network I/O. It first commits the immutable
+claim, then fetches a fresh authenticated provider fence, then reacquires root
+and node writers and persists one exact full-replacement recovery only if the
+coordinator revision and complete node claim are unchanged. Exact retry at the
+same opening cut is inert. A different cut, intervening root intent, later node
+fence, scope or identity movement, foreign owner, or corrupt mapping rejects or
+retires the private recovery. Every existing manifest, stream, event, repair,
+close and seal operation passes through the same claim-aware binding check, so
+claimed work may progress while its completed fences keep the node pending.
+An immutable generation tag plus a database trigger prevents older in-memory
+writers from admitting claim-owned work; the v9 migration backfills a validated
+mapping and retires active private work when legacy claim ownership is unprovable.
+Ordinary recovery creation is blocked while an unconsumed claim exists and
+ordinary candidate admission explicitly rejects claim-owned generations.
+Atomic fence consumption and product routing remain separate and inactive.
+
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every

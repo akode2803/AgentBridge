@@ -305,3 +305,36 @@ class InactiveRecoveryExecutor:
             "sealed", state.recovery_id, state.generation,
             "sealed", state.target_cursor,
         )
+
+
+class ClaimedRecoveryExecutor(InactiveRecoveryExecutor):
+    """Inactive product recovery whose first provider fence follows a claim."""
+
+    def __init__(self, store: NodeStore, transport: Transport, coordinator) -> None:
+        from ..store.mutation_coordinator import MutationCoordinator
+
+        super().__init__(store, transport)
+        if type(coordinator) is not MutationCoordinator:
+            raise TypeError("expected mutation coordinator")
+        self.coordinator = coordinator
+
+    def step(self, recovery_id: str | None, *, attempted_ns: int) -> RecoveryStepResult:
+        self._require_source()
+        if recovery_id is not None:
+            return super().step(recovery_id, attempted_ns=attempted_ns)
+        existing = self.store.claimed_recovery_id()
+        if existing is not None:
+            return super().step(existing, attempted_ns=attempted_ns)
+        claim = self.coordinator.claim_node_recovery(self.store)
+        current = _provider_cut(self.transport.recovery_fence())
+        state = self.coordinator.begin_node_recovery(
+            self.store, claim, current, created_ns=attempted_ns)
+        return RecoveryStepResult(
+            "building", state.recovery_id, state.generation,
+            "started", state.target_cursor,
+        )
+
+
+__all__ = [
+    "ClaimedRecoveryExecutor", "InactiveRecoveryExecutor", "RecoveryStepResult",
+]
