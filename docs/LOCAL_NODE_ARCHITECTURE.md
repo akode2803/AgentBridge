@@ -254,11 +254,13 @@ page must enter SQLite together. Resume rechecks every binding before continuing
 otherwise it abandons the private candidate.
 
 Candidate discovery is private work evidence only. The provider principal comes
-from the authenticated connection, never a caller field, and current provider
-RLS plus current canonical membership/history-on-join/trust/key/lifecycle rules
-are re-evaluated for every product request. Continuations must bind endpoint,
-root, principal, index epoch, scope and selection without exposing rejected room
-identities or a hidden global position.
+from the authenticated connection, never a caller field. Every newly planned,
+claimed or resumed recovery requires that authenticated account to equal the
+replica identity principal; a mismatch cannot create or preserve a private
+candidate. Current provider RLS plus current canonical membership/history-on-
+join/trust/key/lifecycle rules are re-evaluated for every product request.
+Continuations must bind endpoint, root, principal, index epoch, scope and
+selection without exposing rejected room identities or a hidden global position.
 
 Source-ledger version 2 adds conservative mutation evidence for physical
 document/log deletion and member-row insert, update, remap and deletion. A bulk

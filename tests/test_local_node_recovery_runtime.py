@@ -17,15 +17,16 @@ from agentbridge.transport.supabase import SupabaseTransport
 from fake_cloud import FakeClient
 
 EPOCH = "12345678-1234-5678-9234-567812345678"
+ACCOUNT = "12345678-1234-5678-9234-567812345679"
 
 
 def _identity():
-    return ReplicaIdentity("https://x.test", "supabase://team", "user", "mac")
+    return ReplicaIdentity("https://x.test", "supabase://team", ACCOUNT, "mac")
 
 
 def _other_identity():
     return ReplicaIdentity(
-        "https://x.test", "supabase://team", "user", "other-machine")
+        "https://x.test", "supabase://team", ACCOUNT, "other-machine")
 
 
 def _owned(tmp_path):

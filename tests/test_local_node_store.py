@@ -16,7 +16,7 @@ from agentbridge.node.admission import (
 
 def identity(**changes):
     values = dict(provider_endpoint="https://example.test",
-                  root="supabase://mesh", principal="user", machine="mac")
+                  root="supabase://mesh", principal="account-1", machine="mac")
     values.update(changes)
     return ReplicaIdentity(**values)
 
@@ -48,6 +48,29 @@ def recovery_plan(owner):
          NodeRecoveryWork("source-frontier", "frontiers", "root", "", b"ledger")),
     )
     return plan, cut
+
+
+def test_recovery_start_binds_provider_account_to_replica_principal(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    status = owner.status(node_epoch="node", started_ns=1)
+    wrong = NodeProviderCut(
+        1, "index-1", "source-1", "account-2", "member", 0, 5)
+
+    with pytest.raises(NodeGenerationChanged, match="provider principal changed"):
+        owner.root_recovery_plan(wrong)
+
+    forged = NodeRecoveryPlan(
+        status.database_incarnation, owner.identity.digest,
+        status.admitted_generation, 0, wrong,
+        (NodeRecoveryScope("root", "", 0),),
+        (NodeRecoveryWork(
+            "provider-frontiers", "frontiers", "root", "", b"all"),),
+    )
+    with pytest.raises(NodeGenerationChanged, match="provider principal changed"):
+        owner.begin_recovery(forged, created_ns=1)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
 
 
 def complete_recovery_proof(owner, state, cut):
@@ -115,7 +138,7 @@ def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
             "SELECT generation FROM scope_versions WHERE scope_kind='root' "
             "AND scope_id=''"
         ).fetchone()[0]
-    cut = NodeProviderCut(1, "index", "source", "account", "member", 0, 5)
+    cut = NodeProviderCut(1, "index", "source", "account-1", "member", 0, 5)
     plan = NodeRecoveryPlan(
         status.database_incarnation, owner.identity.digest,
         status.admitted_generation, 0, cut,
@@ -817,6 +840,51 @@ def test_recovery_stale_binding_abandons_without_touching_admitted(tmp_path, cha
         assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
 
 
+def test_recovery_state_rejects_stored_account_rebound_from_identity(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    plan, cut = recovery_plan(owner)
+    state = owner.begin_recovery(plan, created_ns=10)
+    rebound = NodeProviderCut(
+        cut.schema_version, cut.index_epoch, cut.source_epoch,
+        "account-2", cut.role, cut.minimum_cursor, cut.cursor,
+    )
+    with sqlite3.connect(owner.path) as conn:
+        conn.execute(
+            "UPDATE provider_recoveries SET account_id=? WHERE recovery_id=?",
+            (rebound.account_id, state.recovery_id),
+        )
+    with pytest.raises(NodeGenerationChanged, match="recovery binding changed"):
+        owner.recovery_state(state.recovery_id, rebound)
+    with sqlite3.connect(owner.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_generations WHERE generation=?",
+            (state.generation,),
+        ).fetchone() == ("abandoned",)
+
+
+def test_recovery_admission_rejects_sealed_principal_rebind(tmp_path):
+    owner = NodeStore(tmp_path / "node.sqlite3", identity())
+    base = owner.begin_candidate(created_ns=1)
+    owner.seal_candidate(base, NodeInputBatch(), observed_ns=2)
+    owner.admit_candidate(base)
+    plan, cut = recovery_plan(owner)
+    state = owner.begin_recovery(plan, created_ns=10)
+    complete_recovery_proof(owner, state, cut)
+    close_token = owner.prepare_recovery_close(state.recovery_id, cut)
+    owner.seal_recovery(
+        state.recovery_id, cut, observed_ns=20, close_token=close_token)
+    with sqlite3.connect(owner.path) as conn:
+        conn.execute(
+            "UPDATE provider_recoveries SET account_id=? WHERE recovery_id=?",
+            ("account-2", state.recovery_id),
+        )
+
+    with pytest.raises(NodeGenerationChanged, match="recovery binding changed"):
+        owner.admit_candidate(state.generation)
+    assert owner.status(
+        node_epoch="node", started_ns=1).admitted_generation == base
+
+
 def test_delayed_older_provider_cut_does_not_abandon_newer_recovery(tmp_path):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     plan, cut = recovery_plan(owner)
@@ -975,7 +1043,7 @@ def test_recovery_admission_preserves_newer_refresh_health(tmp_path):
 def test_recovery_metadata_budget_counts_utf8_bytes(tmp_path, monkeypatch):
     owner = NodeStore(tmp_path / "node.sqlite3", identity())
     status = owner.status(node_epoch="node", started_ns=1)
-    cut = NodeProviderCut(1, "index", "source", "account", "member", 0, 5)
+    cut = NodeProviderCut(1, "index", "source", "account-1", "member", 0, 5)
     chat = "é" * 400  # 400 code points, 800 encoded bytes.
     checkpoint = b"x" * 1_500
     plan = NodeRecoveryPlan(
