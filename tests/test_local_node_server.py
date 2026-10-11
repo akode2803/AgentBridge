@@ -3,7 +3,9 @@ import http.client
 import json
 import os
 import socket
+import sqlite3
 import stat
+import threading
 import time
 
 import pytest
@@ -15,6 +17,15 @@ from agentbridge.node.admission import (
 from agentbridge.node.server import (
     MAX_ACTIVE_REQUESTS, MAX_REQUEST_BODY, REQUEST_DEADLINE_S, LocalNodeServer,
 )
+from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.transport.local_mutations import (
+    LocalMutationTransport, root_identity,
+)
+from agentbridge.transport.supabase import SupabaseTransport
+from fake_cloud import FakeClient
+
+RECOVERY_EPOCH = "12345678-1234-5678-9234-567812345678"
+RECOVERY_ACCOUNT = "12345678-1234-5678-9234-567812345679"
 
 
 def identity():
@@ -22,6 +33,35 @@ def identity():
         provider_endpoint="https://example.test", root="supabase://mesh",
         principal="user", machine="desktop",
     )
+
+
+def recovery_identity():
+    return ReplicaIdentity(
+        provider_endpoint="https://x.test", root="supabase://team",
+        principal=RECOVERY_ACCOUNT, machine="desktop",
+    )
+
+
+def recovery_transport(tmp_path):
+    client = FakeClient()
+    client.db.update({
+        "_recovery_version": 1,
+        "_scoped_source_version": 1,
+        "ab_change_epochs": [{
+            "root": "team", "epoch": RECOVERY_EPOCH, "minimum_cursor": 0,
+            "source_schema_version": 2,
+        }],
+        "ab_change_events": [],
+        "ab_docs": [],
+        "ab_logs": [],
+    })
+    provider = SupabaseTransport(
+        "team", env={"SUPABASE_URL": "https://x.test",
+                     "SUPABASE_SECRET_KEY": "sb_secret_x"},
+        client=client,
+    )
+    coordinator = MutationCoordinator(tmp_path / "coordinator", root_identity(provider))
+    return LocalMutationTransport(provider, coordinator), coordinator
 
 
 def request(server, *, token=None, origin=None, host=None, path="/v1/status"):
@@ -129,6 +169,279 @@ def test_authenticated_status_and_private_publication(tmp_path):
             assert stat.S_IMODE(server.database_path.stat().st_mode) == 0o600
     assert not server.state_path.exists()
     assert not server.token_path.exists()
+
+
+def test_recovery_owner_registers_before_listen_without_provider_io(
+        tmp_path, monkeypatch):
+    from agentbridge.node import server as server_module
+
+    transport, coordinator = recovery_transport(tmp_path)
+    server = LocalNodeServer(
+        tmp_path / "node", recovery_identity(),
+        recovery_transport=transport,
+    )
+    provider = transport._transport
+    calls = 0
+    original_fence = provider.recovery_fence
+
+    def counted_fence():
+        nonlocal calls
+        calls += 1
+        return original_fence()
+
+    monkeypatch.setattr(provider, "recovery_fence", counted_fence)
+    original_server = server_module._Server
+
+    def checked_server(*args, **kwargs):
+        assert server.recovery_runtime is not None
+        assert server.store is not None
+        registration = server.store.coordinator_registration()
+        with sqlite3.connect(coordinator.path) as conn:
+            assert conn.execute(
+                "SELECT path FROM mutation_nodes WHERE path=?",
+                (registration.database_path,),
+            ).fetchone() == (registration.database_path,)
+        return original_server(*args, **kwargs)
+
+    monkeypatch.setattr(server_module, "_Server", checked_server)
+    with server:
+        assert calls == 0
+        assert server.recovery_runtime is not None
+        assert server.recover_once(attempted_ns=10).action == "started"
+        assert calls == 1
+        server.request_recovery()
+        assert server.recovery_runtime.pending()
+    assert server.recovery_runtime is None
+    with pytest.raises(RuntimeError, match="not running"):
+        server.recover_once(attempted_ns=11)
+
+
+def test_recovery_registration_failure_never_publishes_loopback_owner(
+        tmp_path, monkeypatch):
+    from agentbridge.node import server as server_module
+
+    transport, _coordinator = recovery_transport(tmp_path)
+    server = LocalNodeServer(
+        tmp_path / "node", identity(), recovery_transport=transport)
+    listens = 0
+
+    def unexpected_listen(*_args, **_kwargs):
+        nonlocal listens
+        listens += 1
+        raise AssertionError("loopback server started before registration")
+
+    monkeypatch.setattr(server_module, "_Server", unexpected_listen)
+    with pytest.raises(ValueError, match="another transport root"):
+        server.start()
+    assert listens == 0 and server.port == 0
+    assert server.recovery_runtime is None
+    assert not server.state_path.exists() and not server.token_path.exists()
+
+
+def test_post_registration_listen_failure_is_restartable_without_provider_io(
+        tmp_path, monkeypatch):
+    from agentbridge.node import server as server_module
+
+    transport, _coordinator = recovery_transport(tmp_path)
+    home = tmp_path / "node"
+    failed = LocalNodeServer(
+        home, recovery_identity(), recovery_transport=transport)
+    original_server = server_module._Server
+    monkeypatch.setattr(
+        server_module, "_Server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("bind failed")),
+    )
+    with pytest.raises(OSError, match="bind failed"):
+        failed.start()
+    assert failed.recovery_runtime is None and failed.port == 0
+    assert not failed.state_path.exists() and not failed.token_path.exists()
+
+    monkeypatch.setattr(server_module, "_Server", original_server)
+    with LocalNodeServer(
+            home, recovery_identity(), recovery_transport=transport) as restarted:
+        assert restarted.recovery_runtime is not None
+        assert restarted.recovery_runtime.pending()
+
+
+def test_plain_read_server_has_no_recovery_control_surface(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        assert server.recovery_runtime is None
+        with pytest.raises(RuntimeError, match="not running"):
+            server.request_recovery()
+        with pytest.raises(RuntimeError, match="not running"):
+            server.recover_once(attempted_ns=10)
+
+
+def test_shutdown_holds_owner_until_final_recovery_step_quiesces(
+        tmp_path, monkeypatch):
+    transport, _coordinator = recovery_transport(tmp_path)
+    home = tmp_path / "node"
+    server = LocalNodeServer(
+        home, recovery_identity(), recovery_transport=transport).start()
+    provider = transport._transport
+    original_fence = provider.recovery_fence
+    entered = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+    results = []
+    failures = []
+
+    try:
+        for attempted in range(10, 30):
+            result = server.recover_once(attempted_ns=attempted)
+            if result.action == "events":
+                break
+        assert result.action == "events" and result.state == "running"
+
+        def blocked_fence():
+            entered.set()
+            assert release.wait(5)
+            return original_fence()
+
+        monkeypatch.setattr(provider, "recovery_fence", blocked_fence)
+
+        def recover():
+            try:
+                results.append(server.recover_once(attempted_ns=30))
+            except BaseException as exc:  # pragma: no cover - assertion payload
+                failures.append(exc)
+
+        worker = threading.Thread(target=recover)
+        worker.start()
+        assert entered.wait(2)
+
+        def stop():
+            try:
+                server.stop()
+            except BaseException as exc:  # pragma: no cover - assertion payload
+                failures.append(exc)
+            finally:
+                stopped.set()
+
+        stopper = threading.Thread(target=stop)
+        stopper.start()
+        assert not stopped.wait(0.05)
+        with pytest.raises(RuntimeError, match="already running"):
+            LocalNodeServer(
+                home, recovery_identity(),
+                recovery_transport=transport,
+            ).start()
+
+        release.set()
+        worker.join(5)
+        stopper.join(5)
+        assert not worker.is_alive() and not stopper.is_alive()
+        assert not failures
+        assert len(results) == 1 and results[0].state == "ready"
+
+        with LocalNodeServer(
+                home, recovery_identity(),
+                recovery_transport=transport) as successor:
+            assert successor.store is not None
+            assert successor.store.status(
+                node_epoch="n", started_ns=1).admitted_generation == 1
+    finally:
+        release.set()
+        server.stop()
+
+
+def test_shutdown_timeout_retains_live_owner_and_publication(
+        tmp_path, monkeypatch):
+    from agentbridge.node import server as server_module
+
+    transport, _coordinator = recovery_transport(tmp_path)
+    home = tmp_path / "node"
+    server = LocalNodeServer(
+        home, recovery_identity(), recovery_transport=transport).start()
+    provider = transport._transport
+    original_fence = provider.recovery_fence
+    entered = threading.Event()
+    release = threading.Event()
+    failures = []
+
+    def blocked_fence():
+        entered.set()
+        assert release.wait(5)
+        return original_fence()
+
+    monkeypatch.setattr(provider, "recovery_fence", blocked_fence)
+    monkeypatch.setattr(server_module, "RECOVERY_SHUTDOWN_TIMEOUT_S", 0.05)
+
+    def recover():
+        try:
+            server.recover_once(attempted_ns=10)
+        except BaseException as exc:  # pragma: no cover - assertion payload
+            failures.append(exc)
+
+    worker = threading.Thread(target=recover)
+    worker.start()
+    assert entered.wait(2)
+    try:
+        with pytest.raises(RuntimeError, match="did not quiesce"):
+            server.stop()
+        assert server.state_path.exists() and server.token_path.exists()
+        assert request(server)[0] == 200
+        with pytest.raises(RuntimeError, match="already running"):
+            LocalNodeServer(
+                home, recovery_identity(),
+                recovery_transport=transport,
+            ).start()
+    finally:
+        release.set()
+        worker.join(5)
+        server.stop()
+    assert not worker.is_alive() and not failures
+
+
+def test_interrupted_shutdown_reopens_gate_but_retains_owner(
+        tmp_path, monkeypatch):
+    transport, _coordinator = recovery_transport(tmp_path)
+    home = tmp_path / "node"
+    server = LocalNodeServer(
+        home, recovery_identity(), recovery_transport=transport).start()
+    provider = transport._transport
+    original_fence = provider.recovery_fence
+    entered = threading.Event()
+    release = threading.Event()
+    failures = []
+
+    def blocked_fence():
+        entered.set()
+        assert release.wait(5)
+        return original_fence()
+
+    monkeypatch.setattr(provider, "recovery_fence", blocked_fence)
+
+    def recover():
+        try:
+            server.recover_once(attempted_ns=10)
+        except BaseException as exc:  # pragma: no cover - assertion payload
+            failures.append(exc)
+
+    worker = threading.Thread(target=recover)
+    worker.start()
+    assert entered.wait(2)
+    original_wait = server._recovery_lifecycle.wait
+    monkeypatch.setattr(
+        server._recovery_lifecycle, "wait",
+        lambda _timeout: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            server.stop()
+        assert server.request_recovery() > 0
+        assert server.state_path.exists() and request(server)[0] == 200
+        with pytest.raises(RuntimeError, match="already running"):
+            LocalNodeServer(
+                home, recovery_identity(),
+                recovery_transport=transport,
+            ).start()
+    finally:
+        monkeypatch.setattr(server._recovery_lifecycle, "wait", original_wait)
+        release.set()
+        worker.join(5)
+        server.stop()
+    assert not worker.is_alive() and not failures
 
 
 def test_status_rejects_wrong_token_browser_origin_host_and_route(tmp_path):

@@ -18,6 +18,7 @@ from .admission import (
     NodeCaptureOverflow, NodeGenerationChanged, NodeInputError,
 )
 from .protocol import PROTOCOL_VERSION, ProtocolError, ReplicaIdentity, encode_json
+from .recovery_runtime import LocalNodeRecoveryRuntime, NodeRecoveryRuntimeResult
 from .security import atomic_private_bytes, atomic_private_json, private_directory
 from .store import NodeStore
 from .wire import (
@@ -30,6 +31,7 @@ MAX_REQUEST_BODY = MAX_WIRE_REQUEST_BYTES
 MAX_ACTIVE_REQUESTS = 16
 SOCKET_TIMEOUT_S = 2.0
 REQUEST_DEADLINE_S = 2.0
+RECOVERY_SHUTDOWN_TIMEOUT_S = 5.0
 
 
 class _Server(ThreadingHTTPServer):
@@ -111,11 +113,17 @@ class _Server(ThreadingHTTPServer):
 class LocalNodeServer:
     """Inactive, single-owner local node. Use as a context manager."""
 
-    def __init__(self, home: Path | str, identity: ReplicaIdentity) -> None:
+    def __init__(self, home: Path | str, identity: ReplicaIdentity, *,
+                 recovery_transport=None) -> None:
         if type(identity) is not ReplicaIdentity:
             raise ValueError("invalid replica identity")
+        if recovery_transport is not None:
+            from ..transport.local_mutations import LocalMutationTransport
+            if type(recovery_transport) is not LocalMutationTransport:
+                raise TypeError("expected mutation-owned recovery transport")
         self.home = Path(home).resolve()
         self.identity = identity
+        self._recovery_transport = recovery_transport
         self.directory = self.home / "nodes" / identity.digest
         self.database_path = self.directory / "replica.sqlite3"
         self.state_path = self.directory / "state.json"
@@ -128,6 +136,10 @@ class LocalNodeServer:
         self._node_epoch = ""
         self._started_ns = 0
         self.store: NodeStore | None = None
+        self.recovery_runtime: LocalNodeRecoveryRuntime | None = None
+        self._recovery_lifecycle = threading.Condition()
+        self._active_recoveries = 0
+        self._recovery_stopping = False
 
     @property
     def port(self) -> int:
@@ -136,6 +148,28 @@ class LocalNodeServer:
     @property
     def token(self) -> str:
         return self._token
+
+    def request_recovery(self) -> int:
+        with self._recovery_lifecycle:
+            runtime = self.recovery_runtime
+            if (self._recovery_stopping or self._http is None
+                    or runtime is None):
+                raise RuntimeError("local node recovery owner is not running")
+            return runtime.request()
+
+    def recover_once(self, *, attempted_ns: int) -> NodeRecoveryRuntimeResult:
+        with self._recovery_lifecycle:
+            runtime = self.recovery_runtime
+            if (self._recovery_stopping or self._http is None
+                    or runtime is None):
+                raise RuntimeError("local node recovery owner is not running")
+            self._active_recoveries += 1
+        try:
+            return runtime.step(attempted_ns=attempted_ns)
+        finally:
+            with self._recovery_lifecycle:
+                self._active_recoveries -= 1
+                self._recovery_lifecycle.notify_all()
 
     def start(self) -> "LocalNodeServer":
         if self._http is not None:
@@ -156,6 +190,9 @@ class LocalNodeServer:
             # Once we own the lease, withdraw it before rotating credentials.
             self.state_path.unlink(missing_ok=True)
             self.store = NodeStore(self.database_path, self.identity)
+            if self._recovery_transport is not None:
+                self.recovery_runtime = LocalNodeRecoveryRuntime(
+                    self.store, self._recovery_transport)
             self._token = secrets.token_urlsafe(32)
             self._node_epoch = secrets.token_hex(16)
             self._started_ns = time.time_ns()
@@ -349,12 +386,38 @@ class LocalNodeServer:
     def stop(self) -> None:
         # Cleanup is authorized by the live owner lease, not object identity.
         # A stopped or failed duplicate object must never withdraw its successor.
-        owner, self._owner = self._owner, None
+        owner = self._owner
         if owner is None:
             return
-        http, thread = self._http, self._thread
-        self._http = None
-        self._thread = None
+        with self._recovery_lifecycle:
+            if self._recovery_stopping:
+                raise RuntimeError("local node is already stopping")
+            self._recovery_stopping = True
+            try:
+                deadline = time.monotonic() + RECOVERY_SHUTDOWN_TIMEOUT_S
+                while self._active_recoveries:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "local node recovery did not quiesce")
+                    self._recovery_lifecycle.wait(remaining)
+            except BaseException:
+                # An interrupted or timed-out stop has not withdrawn anything.
+                # Reopen the transient process gate while retaining the live
+                # publication and owner lease for an explicit retry.
+                self._recovery_stopping = False
+                self._recovery_lifecycle.notify_all()
+                raise
+            # Keep the gate closed until endpoint withdrawal and lease release.
+            if self._owner is not owner:
+                self._recovery_stopping = False
+                self._recovery_lifecycle.notify_all()
+                return
+            self._owner = None
+            http, thread = self._http, self._thread
+            self._http = None
+            self._thread = None
+            self.recovery_runtime = None
         try:
             if http is not None:
                 try:
@@ -371,7 +434,12 @@ class LocalNodeServer:
                 except OSError:
                     pass
             self._token = ""
-            owner.release()
+            try:
+                owner.release()
+            finally:
+                with self._recovery_lifecycle:
+                    self._recovery_stopping = False
+                    self._recovery_lifecycle.notify_all()
 
     def __enter__(self) -> "LocalNodeServer":
         return self.start()

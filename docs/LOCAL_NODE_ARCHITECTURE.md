@@ -580,6 +580,19 @@ thread, timer, GUI/harness import, server route or product-read fallback.
 Loopback-owner composition, Realtime/ledger scheduling and product input
 conversion remain separate activation work.
 
+The inactive loopback server can now receive that exact mutation-owned
+transport as an optional process-local composition. It acquires the strict node
+owner lease, opens the durable Store and completes coordinator registration
+before creating the loopback listener or publishing discoverable state. A
+registration or identity failure therefore exposes no endpoint. Later listener
+or state-publication failure withdraws the token/state and releases the owner
+lease; the durable registration and private work remain restartable. Recovery
+steps hold an owner-lifecycle reference through their last durable write, and
+shutdown retains the lease if a step cannot quiesce within its deadline. The
+server adds only process-local request/step methods. It does not schedule
+recovery, expose recovery over HTTP, close caller-owned transport credentials or
+route product clients to the node.
+
 The underlying typed recovery implementation preserves admitted inputs and
 ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every
