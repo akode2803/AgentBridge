@@ -658,6 +658,71 @@ class NodeStore:
 
     @classmethod
     def _check_coordinator_state(cls, conn: sqlite3.Connection) -> None:
+        # Validate storage classes and byte bounds before selecting attacker- or
+        # corruption-controlled values into Python.  The later semantic audit
+        # may materialize only fields that have passed these fixed-size gates.
+        preflight = (
+            ("node_coordinator_owner", "invalid local node coordinator owner", """
+                typeof(singleton)!='integer'
+                OR typeof(coordinator_path)!='text'
+                OR length(CAST(coordinator_path AS BLOB))>16384
+                OR typeof(coordinator_identity)!='text'
+                OR length(CAST(coordinator_identity AS BLOB))>4096
+                OR typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+            """),
+            ("node_recovery_claims", "invalid local node recovery claim", """
+                typeof(singleton)!='integer'
+                OR typeof(claim_id)!='text' OR length(CAST(claim_id AS BLOB))>48
+                OR typeof(claim_digest)!='text'
+                OR length(CAST(claim_digest AS BLOB))>64
+                OR typeof(coordinator_path)!='text'
+                OR length(CAST(coordinator_path AS BLOB))>16384
+                OR typeof(coordinator_identity)!='text'
+                OR length(CAST(coordinator_identity AS BLOB))>4096
+                OR typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+                OR typeof(root_revision)!='integer'
+                OR typeof(database_incarnation)!='text'
+                OR length(CAST(database_incarnation AS BLOB))>4096
+                OR typeof(identity_digest)!='text'
+                OR length(CAST(identity_digest AS BLOB))>64
+                OR typeof(base_generation)!='integer'
+                OR typeof(root_scope_generation)!='integer'
+            """),
+            ("node_recovery_claim_fences",
+             "invalid local node recovery claim fence", """
+                typeof(claim_id)!='text' OR length(CAST(claim_id AS BLOB))>48
+                OR typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+                OR typeof(token)!='text' OR length(CAST(token AS BLOB))>64
+            """),
+            ("claimed_recoveries", "invalid claimed local recovery", """
+                typeof(recovery_id)!='text'
+                OR length(CAST(recovery_id AS BLOB))>48
+                OR typeof(claim_id)!='text' OR length(CAST(claim_id AS BLOB))>48
+                OR typeof(claim_digest)!='text'
+                OR length(CAST(claim_digest AS BLOB))>64
+            """),
+            ("node_recovery_receipts", "invalid local node recovery receipt", """
+                typeof(recovery_id)!='text'
+                OR length(CAST(recovery_id AS BLOB))>48
+                OR typeof(admitted_generation)!='integer'
+                OR typeof(claim_digest)!='text'
+                OR length(CAST(claim_digest AS BLOB))>64
+                OR typeof(coordinator_path)!='text'
+                OR length(CAST(coordinator_path AS BLOB))>16384
+                OR typeof(coordinator_identity)!='text'
+                OR length(CAST(coordinator_identity AS BLOB))>4096
+                OR typeof(coordinator_epoch)!='text'
+                OR length(CAST(coordinator_epoch AS BLOB))>32
+                OR typeof(root_revision)!='integer'
+            """),
+        )
+        for table, message, invalid in preflight:
+            if conn.execute(
+                    f"SELECT 1 FROM {table} WHERE {invalid} LIMIT 1").fetchone():
+                raise sqlite3.DatabaseError(message)
         if conn.execute(
                 "SELECT 1 FROM node_recovery_claim_fences LIMIT 1 OFFSET ?",
                 (MAX_NODE_MUTATION_FENCES,)).fetchone():

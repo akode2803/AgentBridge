@@ -338,6 +338,33 @@ def test_v9_reopen_rejects_invalid_retained_receipt(tmp_path):
         NodeStore(path, identity())
 
 
+@pytest.mark.parametrize(
+    ("insert", "message"),
+    (
+        (
+            "INSERT INTO node_coordinator_owner "
+            "VALUES(1,zeroblob(16385),'root',?)",
+            "invalid local node coordinator owner",
+        ),
+        (
+            "INSERT INTO node_recovery_receipts "
+            "VALUES('" + "1" * 48 + "',1,'" + "2" * 64
+            + "',? ,zeroblob(4097),'" + "3" * 32 + "',0)",
+            "invalid local node recovery receipt",
+        ),
+    ),
+)
+def test_v9_reopen_preflights_bounded_coordinator_fields(
+        tmp_path, insert, message):
+    path = tmp_path / "private" / "node.sqlite3"
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        conn.execute(insert, (str((tmp_path / "root.sqlite").resolve()),))
+
+    with pytest.raises(sqlite3.DatabaseError, match=message):
+        NodeStore(path, identity())
+
+
 def test_recovery_reopens_retries_and_rejects_generic_bypass(tmp_path):
     path = tmp_path / "private" / "node.sqlite3"
     owner = NodeStore(path, identity())
