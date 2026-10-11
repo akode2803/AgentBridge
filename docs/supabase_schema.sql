@@ -439,6 +439,7 @@ begin
   end;
 end
 $$;
+
 revoke all on function public.ab_effect_transition(text, text, jsonb, jsonb, jsonb)
   from public, anon;
 grant execute on function public.ab_effect_transition(text, text, jsonb, jsonb, jsonb)
@@ -1177,3 +1178,610 @@ begin
   end if;
 end
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Inactive whole-root recovery source, v1. The root lock is acquired in a
+-- separate statement; the ONE subsequent SELECT below evaluates current RLS,
+-- the bounded keyset/payload, and the source cut in one fresh statement
+-- snapshot. This avoids using a lock CTE whose snapshot could precede a writer
+-- waiting on the lock. Cut positions are delivery evidence, never authority.
+-- Service-role callers are excluded: the v1 visible-chat manifest relies on
+-- current member RLS and cannot enumerate service-role orphan data completely.
+-- LIMIT bounds the response, while RLS filtering can still examine more
+-- provider rows. Recovery is advertised only when the calling database role
+-- already has a bounded statement_timeout; timeout is failure, never a
+-- complete page. A function-local statement_timeout cannot arm the statement
+-- that is already executing, so these RPCs deliberately do not claim it can.
+-- Remove an older marker before replacing any prerequisite. If an idempotent
+-- upgrade stops partway through, callers must reprobe and remain disabled.
+drop function if exists public.ab_node_recovery_ready();
+
+-- One row per append-only stream keeps manifest work independent of message
+-- history length. It is raw provider index state, not a visibility cache: RLS
+-- and ab_can_read_chat are still evaluated on every recovery request.
+create table if not exists public.ab_log_stream_heads (
+  root     text not null,
+  chat_id  text not null check (
+    pg_catalog.octet_length(chat_id) between 1 and 1024
+  ),
+  log_name text not null check (
+    pg_catalog.octet_length(log_name) between 1 and 4096
+  ),
+  head     bigint not null check (head > 0),
+  primary key (root, chat_id, log_name)
+);
+alter table public.ab_log_stream_heads enable row level security;
+revoke all on table public.ab_log_stream_heads
+  from public, anon, authenticated;
+grant select on table public.ab_log_stream_heads to authenticated;
+drop policy if exists ab_log_stream_heads_member_select
+  on public.ab_log_stream_heads;
+create policy ab_log_stream_heads_member_select on public.ab_log_stream_heads
+for select to authenticated using (
+  public.ab_root_ok(root) and public.ab_can_read_chat(root, chat_id)
+);
+
+create or replace function private.ab_recovery_record_log_heads()
+returns trigger language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_stream record;
+begin
+  for v_stream in
+    select distinct l.root, l.chat_id, l.log_name
+    from new_rows l order by l.root, l.chat_id, l.log_name
+  loop
+    perform pg_catalog.pg_advisory_xact_lock(
+      pg_catalog.hashtextextended(
+        'agentbridge-log-head:' ||
+        pg_catalog.jsonb_build_array(
+          v_stream.root, v_stream.chat_id, v_stream.log_name
+        )::text,
+        0
+      )
+    );
+  end loop;
+  insert into public.ab_log_stream_heads(root, chat_id, log_name, head)
+  select l.root, l.chat_id, l.log_name, pg_catalog.max(l.id)
+  from new_rows l group by l.root, l.chat_id, l.log_name
+  on conflict (root, chat_id, log_name) do update
+    set head = greatest(
+      public.ab_log_stream_heads.head, excluded.head
+    );
+  return null;
+end
+$$;
+revoke all on function private.ab_recovery_record_log_heads()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_log_stream_head on public.ab_logs;
+create trigger ab_recovery_log_stream_head
+after insert on public.ab_logs
+referencing new table as new_rows
+for each statement execute function private.ab_recovery_record_log_heads();
+
+-- Replace the existing physical-delete evidence writer so stream heads and
+-- its root recovery event commit together. Locks are acquired in root order;
+-- the per-stream MAX uses the existing (root,chat_id,log_name,id) index.
+create or replace function private.ab_record_log_delete_scope() returns trigger
+language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_root text;
+  v_stream record;
+  v_head bigint;
+begin
+  for v_root in
+    select distinct l.root from old_rows l order by l.root
+  loop
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-change-ledger:' || v_root, 0)
+    );
+    insert into public.ab_change_epochs(root) values (v_root)
+    on conflict (root) do nothing;
+    insert into public.ab_change_events(
+      root, stream_kind, stream_id, domain
+    ) values (v_root, 'root', '', 'visibility');
+  end loop;
+  for v_stream in
+    select distinct l.root, l.chat_id, l.log_name
+    from old_rows l order by l.root, l.chat_id, l.log_name
+  loop
+    perform pg_catalog.pg_advisory_xact_lock(
+      pg_catalog.hashtextextended(
+        'agentbridge-log-head:' ||
+        pg_catalog.jsonb_build_array(
+          v_stream.root, v_stream.chat_id, v_stream.log_name
+        )::text,
+        0
+      )
+    );
+    select pg_catalog.max(l.id) into v_head
+    from public.ab_logs l
+    where l.root = v_stream.root and l.chat_id = v_stream.chat_id
+      and l.log_name = v_stream.log_name;
+    if v_head is null then
+      delete from public.ab_log_stream_heads h
+      where h.root = v_stream.root and h.chat_id = v_stream.chat_id
+        and h.log_name = v_stream.log_name;
+    else
+      insert into public.ab_log_stream_heads(root, chat_id, log_name, head)
+      values (v_stream.root, v_stream.chat_id, v_stream.log_name, v_head)
+      on conflict (root, chat_id, log_name) do update set head = excluded.head;
+    end if;
+  end loop;
+  return null;
+end
+$$;
+revoke all on function private.ab_record_log_delete_scope()
+  from public, anon, authenticated;
+
+-- Backfill/reconcile under one table lock in the same statement transaction.
+-- Concurrent log mutations wait, then their triggers advance the completed
+-- inventory. A failed backfill leaves the readiness marker absent.
+do $$
+begin
+  lock table public.ab_logs in share row exclusive mode;
+  insert into public.ab_log_stream_heads(root, chat_id, log_name, head)
+  select l.root, l.chat_id, l.log_name, pg_catalog.max(l.id)
+  from public.ab_logs l
+  group by l.root, l.chat_id, l.log_name
+  on conflict (root, chat_id, log_name) do update set head = excluded.head;
+  delete from public.ab_log_stream_heads h
+  where not exists (
+    select 1 from public.ab_logs l
+    where l.root = h.root and l.chat_id = h.chat_id
+      and l.log_name = h.log_name
+  );
+end
+$$;
+
+create or replace function public.ab_node_recovery_page(
+  p_root text, p_family text, p_after text, p_after_log text,
+  p_after_id bigint, p_limit integer, p_max_bytes bigint
+) returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+  v_result jsonb;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_family is null or p_family not in ('documents','chats','streams','events')
+     or p_after is null or pg_catalog.octet_length(p_after) > 4096
+     or p_after_log is null or pg_catalog.octet_length(p_after_log) > 4096
+     or p_after_id is null or p_after_id < 0
+     or p_limit is null or p_limit < 1 or p_limit > 256
+     or p_max_bytes is null or p_max_bytes < 1024 or p_max_bytes > 8388608
+     or (p_family = 'streams' and
+         (pg_catalog.octet_length(p_after) > 1024
+          or (p_after = '') <> (p_after_log = '')))
+     or (p_family = 'chats' and pg_catalog.octet_length(p_after) > 1024)
+     or (p_family <> 'streams' and p_after_log <> '')
+     or (p_family <> 'events' and p_after_id <> 0)
+     or (p_family = 'events' and p_after <> '')
+     or p_max_bytes < 1024 + (case p_family
+       when 'streams' then pg_catalog.octet_length(pg_catalog.convert_to(
+         pg_catalog.jsonb_build_array(p_after, p_after_log)::text, 'UTF8'))
+       when 'events' then pg_catalog.octet_length(pg_catalog.convert_to(
+         pg_catalog.to_jsonb(p_after_id)::text, 'UTF8'))
+       else public.ab_source_text_bytes(p_after) end) then
+    raise exception 'invalid recovery page request' using errcode = '22023';
+  end if;
+  if pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'recovery requires read committed isolation' using errcode = '22023';
+  end if;
+  perform pg_catalog.set_config('lock_timeout', case
+    when pg_catalog.current_setting('lock_timeout') = '0'
+      or pg_catalog.current_setting('lock_timeout')::interval
+         > interval '2 seconds' then '2000ms'
+    else pg_catalog.current_setting('lock_timeout') end, true);
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  with identity as materialized (
+    select auth.uid() account_id, auth.role() role,
+           public.ab_root_ok(p_root) root_ok
+  ), state as materialized (
+    select i.account_id, i.role,
+           public.ab_node_recovery_ready() = 1 capability_ok,
+           (i.account_id is not null and i.role = 'authenticated'
+            and i.root_ok) authorized,
+           ep.epoch source_epoch, ep.minimum_cursor,
+           ep.source_schema_version,
+           greatest(ep.minimum_cursor,
+             coalesce(tail.id, 0)) cursor
+    from identity i
+    left join public.ab_change_epochs ep on ep.root = p_root
+    left join lateral (
+      select e.id from public.ab_change_events e
+      where e.root = p_root order by e.id desc limit 1
+    ) tail on true
+  ), candidate_source as (
+    select d.path key1, ''::text key2, 0::bigint event_id,
+           d.seq doc_seq, d.deleted doc_deleted,
+           null::bigint log_head, null::text stream_kind,
+           null::text stream_id, null::text domain,
+           null::text source_key,
+           (case when pg_catalog.octet_length(d.path) > 4096
+              then p_max_bytes + 1
+              else public.ab_source_text_bytes(d.path)
+                 + case when d.deleted then 0 else d.source_bytes end + 256
+            end)::bigint row_bytes
+    from public.ab_docs d cross join state s
+    where p_family = 'documents' and s.capability_ok and s.authorized
+      and s.source_schema_version = 2
+      and d.root = p_root and d.path not like 'presence/%'
+      and d.path collate "C" > p_after collate "C"
+    union all
+    select pg_catalog.split_part(d.path, '/', 2), ''::text, 0::bigint,
+           null::bigint, null::boolean, null::bigint, null::text,
+           null::text, null::text, null::text,
+           (public.ab_source_text_bytes(pg_catalog.split_part(d.path, '/', 2))
+            + 256)::bigint
+    from public.ab_docs d cross join state s
+    where p_family = 'chats' and s.capability_ok and s.authorized
+      and s.source_schema_version = 2 and d.root = p_root
+      and d.path like 'chats/%/meta.json'
+      and d.path = 'chats/' || pg_catalog.split_part(d.path, '/', 2)
+                   || '/meta.json'
+      and pg_catalog.split_part(d.path, '/', 2) collate "C" > p_after collate "C"
+      and public.ab_can_read_chat(p_root, pg_catalog.split_part(d.path, '/', 2))
+    union all
+    select h.chat_id, h.log_name, 0::bigint,
+           null::bigint, null::boolean, h.head,
+           null::text, null::text, null::text, null::text,
+           (public.ab_source_text_bytes(h.chat_id)
+            + public.ab_source_text_bytes(h.log_name) + 256)::bigint
+    from public.ab_log_stream_heads h cross join state s
+    where p_family = 'streams' and s.capability_ok and s.authorized
+      and s.source_schema_version = 2 and h.root = p_root
+      and (h.chat_id collate "C", h.log_name collate "C") >
+          (p_after collate "C", p_after_log collate "C")
+      and public.ab_can_read_chat(p_root, h.chat_id)
+    union all
+    select ''::text, ''::text, e.id,
+           e.doc_head, null::boolean, e.log_head,
+           e.stream_kind, e.stream_id, e.domain, e.source_key,
+           (public.ab_source_text_bytes(e.stream_id)
+            + coalesce(public.ab_source_text_bytes(e.source_key), 0)
+            + 256)::bigint
+    from public.ab_change_events e cross join state s
+    where p_family = 'events' and s.capability_ok and s.authorized
+      and s.source_schema_version = 2 and e.root = p_root
+      and p_after_id >= s.minimum_cursor and p_after_id <= s.cursor
+      and e.id > p_after_id and e.id <= s.cursor
+  ), candidates as materialized (
+    select c.* from candidate_source c
+    order by c.key1 collate "C", c.key2 collate "C", c.event_id
+    limit p_limit + 1
+  ), ranked as materialized (
+    select c.*,
+      pg_catalog.row_number() over
+        (order by c.key1 collate "C", c.key2 collate "C", c.event_id) rn,
+      pg_catalog.sum(c.row_bytes) over
+        (order by c.key1 collate "C", c.key2 collate "C", c.event_id
+         rows unbounded preceding) total_bytes,
+      case p_family
+        when 'streams' then pg_catalog.octet_length(pg_catalog.convert_to(
+          pg_catalog.jsonb_build_array(c.key1, c.key2)::text, 'UTF8'))
+        when 'events' then pg_catalog.octet_length(pg_catalog.convert_to(
+          pg_catalog.to_jsonb(c.event_id)::text, 'UTF8'))
+        else public.ab_source_text_bytes(c.key1)
+      end continuation_bytes
+    from candidates c
+  ), prefix_checked as materialized (
+    select r.*, pg_catalog.bool_and(
+      r.rn <= p_limit
+      and r.total_bytes + r.continuation_bytes <= p_max_bytes - 1024
+      and (p_family not in ('chats','streams')
+           or pg_catalog.octet_length(r.key1) between 1 and 1024)
+      and (p_family <> 'streams'
+           or pg_catalog.octet_length(r.key2) between 1 and 4096)
+      and (p_family <> 'documents'
+           or pg_catalog.octet_length(r.key1) between 1 and 4096)
+      and (p_family <> 'events'
+           or (pg_catalog.octet_length(r.stream_id) <= 1024
+               and (r.source_key is null
+                    or pg_catalog.octet_length(r.source_key) <= 4096)))
+    ) over (
+      order by r.key1 collate "C", r.key2 collate "C", r.event_id
+      rows unbounded preceding
+    ) prefix_ok
+    from ranked r
+  ), selected as materialized (
+    select r.* from prefix_checked r where r.prefix_ok
+  ), payload as materialized (
+    select s.key1, s.key2, s.event_id,
+      case p_family
+        when 'documents' then pg_catalog.jsonb_build_object(
+          'path', d.path, 'seq', s.doc_seq, 'deleted', s.doc_deleted,
+          'data', case when s.doc_deleted then null else d.data end)
+        when 'chats' then pg_catalog.to_jsonb(s.key1)
+        when 'streams' then pg_catalog.jsonb_build_object(
+          'chat_id', s.key1, 'log_name', s.key2, 'head', s.log_head)
+        else pg_catalog.jsonb_build_object(
+          'id', s.event_id, 'stream_kind', s.stream_kind,
+          'stream_id', s.stream_id, 'domain', s.domain,
+          'source_key', s.source_key, 'doc_head', s.doc_seq,
+          'log_head', s.log_head)
+      end item
+    from selected s
+    left join public.ab_docs d on p_family = 'documents'
+      and d.root = p_root and d.path = s.key1
+  )
+  select pg_catalog.jsonb_build_object(
+      'cut', case when st.capability_ok and st.authorized
+                        and st.source_schema_version = 2 then
+        pg_catalog.jsonb_build_object(
+          'schema_version', 1, 'index_contract', 'root-manifest-v1',
+          'source_schema_version', st.source_schema_version,
+          'source_epoch', st.source_epoch, 'account_id', st.account_id,
+          'role', st.role, 'minimum_cursor', st.minimum_cursor,
+          'cursor', st.cursor) else null end,
+      'rows', (select coalesce(pg_catalog.jsonb_agg(p.item
+        order by p.key1 collate "C", p.key2 collate "C", p.event_id), '[]'::jsonb)
+        from payload p),
+      'has_more', (select pg_catalog.count(*) from candidates)
+                    > (select pg_catalog.count(*) from selected),
+      'empty_terminal', (select pg_catalog.count(*) from candidates) = 0,
+      'overflow', (select pg_catalog.count(*) from candidates) > 0
+                  and (select pg_catalog.count(*) from selected) = 0,
+      'outcome', case
+        when (select pg_catalog.count(*) from candidates) = 0 then 'empty_terminal'
+        when (select pg_catalog.count(*) from selected) = 0 then 'overflow'
+        else 'page' end,
+      'continuation', coalesce((
+        select case p_family
+          when 'streams' then pg_catalog.jsonb_build_array(s.key1, s.key2)
+          when 'events' then pg_catalog.to_jsonb(s.event_id)
+          else pg_catalog.to_jsonb(s.key1) end
+        from selected s
+        order by s.key1 collate "C" desc, s.key2 collate "C" desc,
+                 s.event_id desc limit 1),
+        case p_family
+          when 'streams' then pg_catalog.jsonb_build_array(p_after, p_after_log)
+          when 'events' then pg_catalog.to_jsonb(p_after_id)
+          else pg_catalog.to_jsonb(p_after) end),
+      'denied', not st.authorized,
+      'unsupported', not st.capability_ok,
+      'invalid_source', st.source_schema_version is distinct from 2,
+      'compacted', p_family = 'events' and
+                   (p_after_id < st.minimum_cursor or p_after_id > st.cursor)
+    ) into v_result from state st;
+  if v_result->>'denied' = 'true' then
+    raise exception 'recovery root is unavailable' using errcode = '42501';
+  end if;
+  if v_result->>'unsupported' = 'true'
+     or v_result->>'invalid_source' = 'true'
+     or v_result->>'compacted' = 'true' then
+    raise exception 'recovery source cursor/schema is unavailable'
+      using errcode = '22023';
+  end if;
+  return v_result - 'denied' - 'unsupported' - 'invalid_source' - 'compacted';
+end
+$$;
+
+-- The fence shares the same lock and one post-lock statement. A standalone
+-- fence is useful before enumeration and after replay to close a recovery.
+create or replace function public.ab_node_recovery_fence(p_root text)
+returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog, public as $$
+declare
+  v_result jsonb;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024 then
+    raise exception 'invalid recovery root' using errcode = '22023';
+  end if;
+  if pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'recovery requires read committed isolation' using errcode = '22023';
+  end if;
+  perform pg_catalog.set_config('lock_timeout', case
+    when pg_catalog.current_setting('lock_timeout') = '0'
+      or pg_catalog.current_setting('lock_timeout')::interval
+         > interval '2 seconds' then '2000ms'
+    else pg_catalog.current_setting('lock_timeout') end, true);
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  with identity as materialized (
+    select auth.uid() account_id, auth.role() role,
+           public.ab_root_ok(p_root) root_ok
+  ), state as materialized (
+    select i.account_id, i.role,
+           public.ab_node_recovery_ready() = 1 capability_ok,
+           (i.account_id is not null and i.role = 'authenticated'
+            and i.root_ok) authorized,
+           ep.epoch source_epoch, ep.minimum_cursor,
+           ep.source_schema_version,
+           greatest(ep.minimum_cursor,
+             coalesce(tail.id, 0)) cursor
+    from identity i
+    left join public.ab_change_epochs ep on ep.root = p_root
+    left join lateral (
+      select e.id from public.ab_change_events e
+      where e.root = p_root order by e.id desc limit 1
+    ) tail on true
+  )
+  select pg_catalog.jsonb_build_object(
+    'schema_version', 1, 'index_contract', 'root-manifest-v1',
+    'source_schema_version', s.source_schema_version,
+    'source_epoch', s.source_epoch, 'account_id', s.account_id,
+    'role', s.role, 'minimum_cursor', s.minimum_cursor,
+    'cursor', s.cursor, 'denied', not s.authorized,
+    'unsupported', not s.capability_ok)
+  into v_result from state s;
+  if v_result->>'denied' = 'true' then
+    raise exception 'recovery root is unavailable' using errcode = '42501';
+  end if;
+  if v_result->>'unsupported' = 'true'
+     or (v_result->>'source_schema_version')::integer is distinct from 2 then
+    raise exception 'recovery source schema is unavailable' using errcode = '22023';
+  end if;
+  return v_result - 'denied' - 'unsupported';
+end
+$$;
+
+-- Existing mutation lanes lack log UPDATE/TRUNCATE evidence and old-root
+-- evidence on a document identity remap. Reject these operations so a source
+-- cut cannot silently miss them. Normal log deletes still emit root recovery.
+create or replace function private.ab_recovery_immutable_identity()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  if tg_table_name = 'ab_logs' then
+    raise exception 'source log rows are immutable' using errcode = '22023';
+  end if;
+  if new.root is distinct from old.root or new.path is distinct from old.path then
+    raise exception 'source document identity is immutable' using errcode = '22023';
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists ab_recovery_doc_identity on public.ab_docs;
+create trigger ab_recovery_doc_identity
+before update on public.ab_docs for each row
+execute function private.ab_recovery_immutable_identity();
+drop trigger if exists ab_recovery_log_immutable on public.ab_logs;
+create trigger ab_recovery_log_immutable
+before update on public.ab_logs for each row
+execute function private.ab_recovery_immutable_identity();
+create or replace function private.ab_recovery_no_truncate()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  raise exception 'source tables cannot be truncated during recovery'
+    using errcode = '22023';
+end
+$$;
+revoke all on function private.ab_recovery_immutable_identity()
+  from public, anon, authenticated;
+revoke all on function private.ab_recovery_no_truncate()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_docs_no_truncate on public.ab_docs;
+create trigger ab_recovery_docs_no_truncate before truncate on public.ab_docs
+for each statement execute function private.ab_recovery_no_truncate();
+drop trigger if exists ab_recovery_logs_no_truncate on public.ab_logs;
+create trigger ab_recovery_logs_no_truncate before truncate on public.ab_logs
+for each statement execute function private.ab_recovery_no_truncate();
+drop trigger if exists ab_recovery_members_no_truncate on public.ab_members;
+create trigger ab_recovery_members_no_truncate before truncate on public.ab_members
+for each statement execute function private.ab_recovery_no_truncate();
+drop trigger if exists ab_recovery_events_no_truncate on public.ab_change_events;
+create trigger ab_recovery_events_no_truncate
+before truncate on public.ab_change_events for each statement
+execute function private.ab_recovery_no_truncate();
+
+create or replace function private.ab_recovery_no_event_rewrite()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  raise exception 'source events are append-only' using errcode = '22023';
+end
+$$;
+revoke all on function private.ab_recovery_no_event_rewrite()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_events_append_only on public.ab_change_events;
+create trigger ab_recovery_events_append_only
+before update or delete on public.ab_change_events for each row
+execute function private.ab_recovery_no_event_rewrite();
+
+create or replace function private.ab_recovery_member_root_fixed()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  if new.root is distinct from old.root then
+    raise exception 'member root is immutable' using errcode = '22023';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_recovery_member_root_fixed()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_member_root_fixed on public.ab_members;
+create trigger ab_recovery_member_root_fixed
+before update on public.ab_members for each row
+execute function private.ab_recovery_member_root_fixed();
+
+-- Validate the identities a page must copy before it can advertise v1. A
+-- legacy oversized row makes installation fail before the marker rather than
+-- turning a bounded continuation into an unbounded allocation.
+alter table public.ab_docs
+  drop constraint if exists ab_docs_recovery_path_size;
+alter table public.ab_docs add constraint ab_docs_recovery_path_size check (
+  pg_catalog.octet_length(path) between 1 and 4096
+) not valid;
+alter table public.ab_docs validate constraint ab_docs_recovery_path_size;
+alter table public.ab_logs
+  drop constraint if exists ab_logs_recovery_identity_size;
+alter table public.ab_logs add constraint ab_logs_recovery_identity_size check (
+  pg_catalog.octet_length(chat_id) between 1 and 1024
+  and pg_catalog.octet_length(log_name) between 1 and 4096
+) not valid;
+alter table public.ab_logs validate constraint ab_logs_recovery_identity_size;
+
+-- Epoch creation must join the same lock protocol as the ordinary
+-- document/log/member triggers. Change events are accepted only as nested
+-- writes from those already-locked triggers: a direct INSERT allocates its
+-- identity before a row trigger can acquire the lock and therefore cannot be
+-- safely fenced. Epoch/event rewrite remains disabled until a future retention
+-- RPC can rotate the epoch under the exclusive lock and publish its new
+-- minimum atomically.
+create or replace function private.ab_recovery_source_insert_lock()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  if tg_table_name = 'ab_change_events' and pg_catalog.pg_trigger_depth() < 2 then
+    raise exception 'direct source event inserts are unsupported'
+      using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || new.root, 0)
+  );
+  return new;
+end
+$$;
+revoke all on function private.ab_recovery_source_insert_lock()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_event_insert_lock on public.ab_change_events;
+create trigger ab_recovery_event_insert_lock
+before insert on public.ab_change_events for each row
+execute function private.ab_recovery_source_insert_lock();
+drop trigger if exists ab_recovery_epoch_insert_lock on public.ab_change_epochs;
+create trigger ab_recovery_epoch_insert_lock
+before insert on public.ab_change_epochs for each row
+execute function private.ab_recovery_source_insert_lock();
+
+create or replace function private.ab_recovery_no_epoch_rewrite()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  raise exception 'source epochs require the versioned retention protocol'
+    using errcode = '22023';
+end
+$$;
+revoke all on function private.ab_recovery_no_epoch_rewrite()
+  from public, anon, authenticated;
+drop trigger if exists ab_recovery_epochs_immutable on public.ab_change_epochs;
+create trigger ab_recovery_epochs_immutable
+before update or delete on public.ab_change_epochs for each row
+execute function private.ab_recovery_no_epoch_rewrite();
+drop trigger if exists ab_recovery_epochs_no_truncate on public.ab_change_epochs;
+create trigger ab_recovery_epochs_no_truncate
+before truncate on public.ab_change_epochs for each statement
+execute function private.ab_recovery_no_truncate();
+
+revoke all on function public.ab_node_recovery_page(
+  text,text,text,text,bigint,integer,bigint) from public, anon, authenticated;
+revoke all on function public.ab_node_recovery_fence(text)
+  from public, anon, authenticated;
+grant execute on function public.ab_node_recovery_page(
+  text,text,text,text,bigint,integer,bigint) to authenticated;
+grant execute on function public.ab_node_recovery_fence(text) to authenticated;
+
+-- Marker is installed only after guards, functions and grants succeed. The
+-- caller/session timeout must already be armed because setting it inside a
+-- function cannot limit the top-level statement currently executing.
+create or replace function public.ab_node_recovery_ready() returns integer
+language sql stable security invoker set search_path = pg_catalog as $$
+  select case
+    when auth.role() = 'authenticated' and auth.uid() is not null
+      and pg_catalog.current_setting('statement_timeout')::interval
+          > interval '0 seconds'
+      and pg_catalog.current_setting('statement_timeout')::interval
+          <= interval '10 seconds' then 1
+    else 0
+  end
+$$;
+revoke all on function public.ab_node_recovery_ready()
+  from public, anon, authenticated;
+grant execute on function public.ab_node_recovery_ready() to authenticated;

@@ -479,6 +479,35 @@ def test_scoped_source_reads_delegate_without_creating_mutation_intents(
     assert _pending(coordinator) == 0
 
 
+def test_recovery_source_reads_delegate_without_creating_mutation_intents(
+        rig, monkeypatch):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    fence = object()
+    page = object()
+    monkeypatch.setattr(
+        SupabaseTransport, "supports_recovery_source",
+        property(lambda _self: True),
+    )
+    inner.recovery_fence = lambda: calls.append(("fence",)) or fence
+    inner.recovery_page = lambda family, after, **kwargs: calls.append(
+        ("page", family, after, kwargs),
+    ) or page
+
+    assert proxy.supports_recovery_source is True
+    assert proxy.recovery_fence() is fence
+    assert proxy.recovery_page(
+        "streams", ("room", "a.jsonl"), limit=7, max_bytes=8192,
+    ) is page
+    assert calls == [
+        ("fence",),
+        ("page", "streams", ("room", "a.jsonl"), {
+            "limit": 7, "max_bytes": 8192,
+        }),
+    ]
+    assert _pending(coordinator) == 0
+
+
 def test_proxy_explicitly_owns_every_public_base_transport_api():
     from agentbridge.transport.base import Transport
 

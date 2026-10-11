@@ -436,3 +436,24 @@ event/replay evidence contract, including ambiguous-event restart,
 current-authority manifest and recovery execution is the next implementation
 step. Neither these checkpoints nor the local node assert authority/completeness.
 No GUI or harness read cutover occurs before that work and N2.
+
+The inactive Supabase recovery source now supplies the provider half of that
+next step. An authenticated member can capture one coherent current-authority
+cut with bounded, keyset-paged document, visible-chat, visible-log-stream and
+event families. Every call re-evaluates current RLS and chat membership; the cut,
+provider cursor and page continuation remain delivery evidence rather than an
+authority verdict. Presence is excluded. Stream discovery reads a trigger-owned
+head table so its work does not grow with message history, and every response is
+bounded by row and encoded-byte limits. Document/chat RLS may still examine more
+hidden provider rows than the response exposes, so the capability fails closed
+unless the database session already has a nonzero statement timeout of at most
+ten seconds. A timeout is an unavailable recovery attempt, never a complete
+empty page.
+
+This source is not yet composed with the v4 recovery candidate. It does not
+persist a closed inventory, replay ambiguous events, seal or admit recovery
+work, run a background executor, or affect product reads. The next store slice
+must version a closed per-family inventory and replay proof, then an inactive
+executor can join each fetched page and its successor checkpoint in one local
+transaction. A fresh closing fence must match the replay target before sealing;
+N2 and equivalence recording remain mandatory before read cutover.

@@ -51,6 +51,16 @@ from .change_ledger import (
     MAX_LEDGER_PAGE_SIZE,
 )
 from .health import classify_transport_error, retry_inline
+from .recovery_sources import (
+    MAX_RECOVERY_PAGE_ROWS,
+    RECOVERY_RESPONSE_OVERHEAD,
+    RECOVERY_SCHEMA_VERSION,
+    RecoveryChat,
+    RecoveryCut,
+    RecoveryPage,
+    RecoveryStream,
+    validate_recovery_after,
+)
 from .scoped_sources import (
     MAX_SOURCE_BYTES,
     ScopedDocumentBatch,
@@ -101,6 +111,7 @@ _SOURCE_LEDGER_SCHEMA_VERSION = 2
 _SOURCE_LEDGER_REPROBE_S = 60.0
 _SCOPED_SOURCE_SCHEMA_VERSION = 1
 _SCOPED_SOURCE_REPROBE_S = 60.0
+_RECOVERY_SOURCE_REPROBE_S = 60.0
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -213,6 +224,8 @@ class SupabaseTransport(Transport):
         self._source_ledger_reprobe = 0.0
         self._scoped_source_ready: bool | None = None
         self._scoped_source_reprobe = 0.0
+        self._recovery_source_ready: bool | None = None
+        self._recovery_source_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -612,6 +625,154 @@ class SupabaseTransport(Transport):
             return SourceLedgerPage(after_cursor, events, len(raw) == limit)
         except (AttributeError, TypeError, ValueError) as exc:
             raise TransportError("Supabase returned an invalid source ledger page") from exc
+
+    # -------------------------------------- local-node scoped source reads
+    @property
+    def supports_recovery_source(self) -> bool:  # type: ignore[override]
+        return self._recovery_source_capability()
+
+    def _recovery_source_capability(self) -> bool:
+        now = time.monotonic()
+        if (self._recovery_source_ready is not None
+                and now < self._recovery_source_reprobe):
+            return self._recovery_source_ready
+        try:
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_node_recovery_ready").execute(),
+            ).data
+            self._count(ready)
+            self._recovery_source_ready = (
+                type(ready) is int and ready == RECOVERY_SCHEMA_VERSION)
+        except Exception as exc:  # noqa: BLE001 - optional capability
+            if _is_missing_column(exc):
+                self._recovery_source_ready = False
+            elif self._recovery_source_ready is None:
+                return False
+        self._recovery_source_reprobe = now + _RECOVERY_SOURCE_REPROBE_S
+        return bool(self._recovery_source_ready)
+
+    def _require_recovery_source(self) -> None:
+        if not self._recovery_source_capability():
+            raise NotImplementedError("Supabase recovery source is unavailable")
+
+    @staticmethod
+    def _recovery_cut(raw: object) -> RecoveryCut:
+        if type(raw) is not dict:
+            raise ValueError("invalid recovery cut")
+        required = {"schema_version", "index_contract", "source_schema_version",
+                    "source_epoch", "account_id", "role", "minimum_cursor", "cursor"}
+        if set(raw) != required:
+            raise ValueError("incomplete recovery cut")
+        return RecoveryCut(**{key: raw[key] for key in required})
+
+    def recovery_fence(self) -> RecoveryCut:
+        self._require_recovery_source()
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_recovery_fence", {"p_root": self.root},
+        ).execute()).data
+        self._count(raw)
+        try:
+            return self._recovery_cut(raw)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TransportError("Supabase returned an invalid recovery fence") from exc
+
+    def recovery_page(self, family: str, after: str | tuple[str, str] | int,
+                      *, limit: int, max_bytes: int = MAX_SOURCE_BYTES) -> RecoveryPage:
+        self._require_recovery_source()
+        after = validate_recovery_after(after, family)
+        if type(limit) is not int or not 1 <= limit <= MAX_RECOVERY_PAGE_ROWS:
+            raise ValueError("invalid recovery page limit")
+        budget = validate_source_budget(max_bytes)
+        request_continuation = (list(after) if family == "streams" else after)
+        continuation_bytes = len(json.dumps(
+            request_continuation, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        if budget < RECOVERY_RESPONSE_OVERHEAD + continuation_bytes:
+            raise ValueError("recovery byte budget is too small")
+        params = {"p_root": self.root, "p_family": family,
+                  "p_after": after if type(after) is str else
+                  after[0] if type(after) is tuple else "",
+                  "p_after_log": after[1] if type(after) is tuple else "",
+                  "p_after_id": after if type(after) is int else 0,
+                  "p_limit": limit, "p_max_bytes": budget}
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_node_recovery_page", params,
+        ).execute()).data
+        self._count(raw)
+        try:
+            response_keys = {
+                    "cut", "rows", "has_more", "empty_terminal", "overflow",
+                    "outcome", "continuation",
+            }
+            if type(raw) is not dict or set(raw) != response_keys:
+                raise ValueError("invalid recovery page response")
+            cut = self._recovery_cut(raw["cut"])
+            rows = raw["rows"]
+            more = raw["has_more"]
+            empty = raw["empty_terminal"]
+            overflow = raw["overflow"]
+            if (type(rows) is not list or len(rows) > limit
+                    or any(type(value) is not bool for value in
+                           (more, empty, overflow))
+                    or empty != (not rows and not more and not overflow)):
+                raise ValueError("invalid recovery page metadata")
+            outcome = ("overflow" if overflow else "empty_terminal" if empty
+                       else "page")
+            if type(raw["outcome"]) is not str or raw["outcome"] != outcome:
+                raise ValueError("invalid recovery outcome")
+            if overflow:
+                overflow_cursor = list(after) if family == "streams" else after
+                if (rows or not more or
+                        type(raw["continuation"]) is not type(overflow_cursor)
+                        or raw["continuation"] != overflow_cursor):
+                    raise ValueError("invalid recovery overflow")
+                raise ScopedSourceOverflow("Supabase recovery page exceeds byte budget")
+            if family == "documents":
+                converted = []
+                for row in rows:
+                    if type(row) is not dict or set(row) != {
+                            "path", "seq", "deleted", "data"}:
+                        raise ValueError("invalid recovery document")
+                    if type(row["deleted"]) is not bool or (
+                            row["deleted"] and row["data"] is not None):
+                        raise ValueError("invalid recovery tombstone")
+                    payload = None if row["deleted"] else json.dumps(
+                        row["data"], ensure_ascii=False, allow_nan=False,
+                        sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")
+                    converted.append(ScopedDocumentRow(
+                        row["path"], row["seq"], row["deleted"], payload))
+            elif family == "chats":
+                converted = [RecoveryChat(row) for row in rows]
+            elif family == "streams":
+                if any(type(row) is not dict or set(row) != {
+                        "chat_id", "log_name", "head"} for row in rows):
+                    raise ValueError("invalid recovery stream")
+                converted = [RecoveryStream(**row) for row in rows]
+            else:
+                required = {"id", "stream_kind", "stream_id", "domain",
+                            "source_key", "doc_head", "log_head"}
+                if any(type(row) is not dict or set(row) != required for row in rows):
+                    raise ValueError("invalid recovery event")
+                converted = [SourceLedgerEvent(
+                    row["id"], row["stream_kind"], row["stream_id"],
+                    row["domain"], row["source_key"], row["doc_head"],
+                    row["log_head"],
+                ) for row in rows]
+            page = RecoveryPage(family, after, cut, tuple(converted), more)
+            continuation = (list(page.cursor) if family == "streams"
+                            else page.cursor)
+            if (type(raw["continuation"]) is not type(continuation)
+                    or raw["continuation"] != continuation):
+                raise ValueError("invalid recovery continuation")
+            if len(json.dumps(raw, ensure_ascii=False, allow_nan=False,
+                              separators=(",", ":")).encode("utf-8")) > budget:
+                raise ValueError("recovery wire response exceeded byte budget")
+            return page
+        except (AttributeError, TypeError, ValueError, UnicodeError,
+                RecursionError) as exc:
+            raise TransportError("Supabase returned an invalid recovery page") from exc
 
     # -------------------------------------- local-node scoped source reads
     @property
