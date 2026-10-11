@@ -127,6 +127,35 @@ def test_pending_intent_survives_coordinator_reopen(tmp_path):
         store.close()
 
 
+def test_v2_format_migration_rotates_epoch_and_rejects_old_writer(tmp_path):
+    home = tmp_path / "home"
+    old = MutationCoordinator(home, "mesh-root")
+    intent = old.begin((S("doc_exact", "accounts/alice.json"),))
+    old_epoch = old.epoch
+    with sqlite3.connect(old.path) as conn:
+        conn.execute("DROP TABLE mutation_nodes")
+        conn.execute("ALTER TABLE mutation_root RENAME TO mutation_root_v2")
+        conn.execute("CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY "
+                     "CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)")
+        conn.execute("INSERT INTO mutation_root SELECT singleton,identity,epoch "
+                     "FROM mutation_root_v2")
+        conn.execute("DROP TABLE mutation_root_v2")
+
+    upgraded = MutationCoordinator(home, "mesh-root")
+    assert upgraded.epoch != old_epoch
+    with upgraded._transaction() as conn:
+        assert conn.execute(
+            "SELECT format FROM mutation_root WHERE singleton=1"
+        ).fetchone() == (2,)
+        assert conn.execute(
+            "SELECT token FROM mutation_intents"
+        ).fetchone() == (intent.token,)
+    with old._transaction() as conn:
+        with pytest.raises(local_source.SourceChanged,
+                           match="mutation_(schema|root)_changed"):
+            old._schema(conn)
+
+
 @pytest.mark.parametrize("failure", ["wrong_incarnation", "missing_store"])
 def test_later_broken_registration_blocks_begin_after_earlier_store_retired(
         tmp_path, failure):

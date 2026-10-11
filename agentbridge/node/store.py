@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .admission import (
@@ -17,6 +18,7 @@ from .admission import (
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeCandidateCapacityError, NodeInputBatch, NodeInputError,
     NodeLogPage, NodeLogRow, NodeScopePosition,
+    NodeCoordinatorRegistration, NodeFinalizationPosition,
     NodeVisibility,
     NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
     NodeRecoveryEvent, NodeRecoveryEventState, NodeRecoveryManifestState,
@@ -28,7 +30,7 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
@@ -37,7 +39,7 @@ DIAGNOSTIC_REFERENCE_PLAN_SELECTION = b"provider-diagnostic-reference-v1"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=7),
+    version INTEGER NOT NULL CHECK(version=8),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -239,6 +241,23 @@ CREATE TABLE IF NOT EXISTS scope_versions(
     generation INTEGER NOT NULL CHECK(generation>=0), pending_reason TEXT,
     PRIMARY KEY(scope_kind,scope_id)
 );
+CREATE TABLE IF NOT EXISTS node_mutation_fences(
+    coordinator_epoch TEXT NOT NULL,
+    token TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','completed')),
+    PRIMARY KEY(coordinator_epoch,token)
+);
+CREATE TABLE IF NOT EXISTS node_mutation_scopes(
+    coordinator_epoch TEXT NOT NULL,
+    token TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('root','chat')),
+    scope_id TEXT NOT NULL,
+    CHECK((scope_kind='root' AND scope_id='') OR
+          (scope_kind='chat' AND length(scope_id)>0)),
+    PRIMARY KEY(coordinator_epoch,token,scope_kind,scope_id),
+    FOREIGN KEY(coordinator_epoch,token)
+        REFERENCES node_mutation_fences(coordinator_epoch,token)
+);
 CREATE TABLE IF NOT EXISTS local_changes(
     seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL,
     scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL, kind TEXT NOT NULL
@@ -279,11 +298,28 @@ _V4_TABLES = _V3_TABLES | _V4_RECOVERY_TABLES
 _V5_TABLES = _V3_TABLES | _V5_RECOVERY_TABLES
 _V6_TABLES = _V3_TABLES | _RECOVERY_TABLES
 _V7_TABLES = _V6_TABLES
+_V8_TABLES = _V7_TABLES | frozenset({
+    "node_mutation_fences", "node_mutation_scopes",
+})
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({
     "one_admitted_node_generation", "recovery_stream_pending", "remote_log_chat",
 })
+MAX_NODE_MUTATION_FENCES = 512
+MAX_NODE_MUTATION_SCOPES = MAX_NODE_MUTATION_FENCES * 8
+_NODE_PENDING_REASON = "local_mutation"
+_COORDINATOR_EPOCH = re.compile(r"[0-9a-f]{32}\Z")
+_COORDINATOR_TOKEN = re.compile(r"(?:[0-9a-f]{64}|q[0-9a-f]{63})\Z")
+_PENDING_MUTATION_GUARD = """CREATE TRIGGER node_pending_mutation_guard
+BEFORE UPDATE ON node_meta
+WHEN (OLD.pending_mutations>0 OR NEW.pending_mutations>0) AND (
+    NEW.pending_mutations<OLD.pending_mutations OR
+    NEW.admitted_generation!=OLD.admitted_generation OR
+    NEW.health!='pending')
+BEGIN
+    SELECT RAISE(ABORT,'local node mutation pending');
+END"""
 
 
 def _positive_ns(value: object, name: str) -> int:
@@ -306,6 +342,63 @@ def _capture_size(value: str | bytes | None) -> int:
     if value is None:
         return 0
     return len(value if type(value) is bytes else value.encode("utf-8"))
+
+
+def _node_registration(value: object) -> NodeCoordinatorRegistration:
+    if type(value) is not NodeCoordinatorRegistration:
+        raise ValueError("invalid node coordinator registration")
+    path = Path(value.database_path)
+    if (not path.is_absolute() or str(path.resolve()) != value.database_path
+            or len(value.database_path.encode("utf-8")) > 16_384
+            or type(value.database_incarnation) is not str
+            or not value.database_incarnation
+            or len(value.database_incarnation.encode("utf-8")) > 4_096
+            or type(value.identity_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value.identity_digest) is None
+            or type(value.provider_endpoint) is not str
+            or not value.provider_endpoint
+            or len(value.provider_endpoint.encode("utf-8")) > 2_048
+            or type(value.root) is not str or not value.root
+            or len(value.root.encode("utf-8")) > 1_024):
+        raise ValueError("invalid node coordinator registration")
+    return value
+
+
+def _node_position(value: object) -> NodeFinalizationPosition:
+    if type(value) is not NodeFinalizationPosition:
+        raise ValueError("invalid node finalization position")
+    registration = _node_registration(NodeCoordinatorRegistration(
+        value.database_path, value.database_incarnation, value.identity_digest,
+        value.provider_endpoint, value.root,
+    ))
+    if (type(value.admitted_generation) is not int
+            or not 0 <= value.admitted_generation <= 2**63 - 1
+            or type(value.scope_positions) is not tuple
+            or not 1 <= len(value.scope_positions) <= 20_001
+            or any(type(item) is not NodeScopePosition
+                   for item in value.scope_positions)):
+        raise ValueError("invalid node finalization position")
+    positions = tuple(sorted(value.scope_positions,
+                             key=lambda item: (item.scope_kind, item.scope_id)))
+    if positions != value.scope_positions or len({
+            (item.scope_kind, item.scope_id) for item in positions}) != len(positions):
+        raise ValueError("invalid node finalization position")
+    root = tuple(item for item in positions
+                 if (item.scope_kind, item.scope_id) == ("root", ""))
+    if len(root) != 1 or any(
+            item.scope_kind not in ("root", "chat")
+            or type(item.scope_id) is not str
+            or (item.scope_kind == "root") != (item.scope_id == "")
+            or type(item.generation) is not int
+            or not 0 <= item.generation <= 2**63 - 1
+            or item.pending_reason is not None
+            for item in positions):
+        raise ValueError("invalid node finalization position")
+    return NodeFinalizationPosition(
+        registration.database_path, registration.database_incarnation,
+        registration.identity_digest, registration.provider_endpoint,
+        registration.root, value.admitted_generation, positions,
+    )
 
 
 class _CaptureBudget:
@@ -364,6 +457,284 @@ class NodeStore:
             raise sqlite3.DatabaseError("invalid local node metadata")
         return rows[0]
 
+    @staticmethod
+    def _check_mutation_guard(conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='node_pending_mutation_guard'").fetchone() != (
+                    _PENDING_MUTATION_GUARD,):
+            raise sqlite3.DatabaseError("invalid local node mutation guard")
+        if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND name!='node_pending_mutation_guard' LIMIT 1").fetchone():
+            raise sqlite3.DatabaseError("unexpected local node trigger")
+
+    @staticmethod
+    def _check_mutation_fences(conn: sqlite3.Connection) -> int:
+        if conn.execute(
+                "SELECT 1 FROM node_mutation_fences LIMIT 1 OFFSET ?",
+                (MAX_NODE_MUTATION_FENCES,)).fetchone():
+            raise sqlite3.DatabaseError("local node mutation fence budget exceeded")
+        if conn.execute(
+                "SELECT 1 FROM node_mutation_scopes LIMIT 1 OFFSET ?",
+                (MAX_NODE_MUTATION_SCOPES,)).fetchone():
+            raise sqlite3.DatabaseError("local node mutation scope budget exceeded")
+        fences = conn.execute(
+            "SELECT coordinator_epoch,token,state FROM node_mutation_fences "
+            "ORDER BY coordinator_epoch,token LIMIT ?",
+            (MAX_NODE_MUTATION_FENCES + 1,),
+        ).fetchall()
+        scopes = conn.execute(
+            "SELECT coordinator_epoch,token,scope_kind,scope_id "
+            "FROM node_mutation_scopes ORDER BY coordinator_epoch,token "
+            "LIMIT ?", (MAX_NODE_MUTATION_SCOPES + 1,),
+        ).fetchall()
+        expected = {(epoch, token, "root", "")
+                    for epoch, token, _state in fences}
+        bad = (any(type(epoch) is not str
+                   or _COORDINATOR_EPOCH.fullmatch(epoch) is None
+                   or type(token) is not str
+                   or _COORDINATOR_TOKEN.fullmatch(token) is None
+                   or state not in ("active", "completed")
+                   for epoch, token, state in fences)
+               or set(scopes) != expected or len(scopes) != len(expected))
+        if bad or conn.execute("""
+            SELECT 1 FROM node_mutation_scopes s
+            LEFT JOIN node_mutation_fences f
+              ON f.coordinator_epoch=s.coordinator_epoch AND f.token=s.token
+            WHERE f.token IS NULL LIMIT 1
+        """).fetchone():
+            raise sqlite3.DatabaseError("invalid local node mutation fence")
+        count = len(fences)
+        meta = NodeStore._check_meta(conn)
+        if meta[5] != count:
+            raise sqlite3.DatabaseError("local node mutation count mismatch")
+        root = NodeStore._scope_generation(conn, "root", "")
+        if count and (root[1] != _NODE_PENDING_REASON or meta[2] != "pending"):
+            raise sqlite3.DatabaseError("local node mutation pending state missing")
+        if not count and root[1] == _NODE_PENDING_REASON:
+            raise sqlite3.DatabaseError("orphan local node pending state")
+        return count
+
+    def coordinator_registration(self) -> NodeCoordinatorRegistration:
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            self._check_identity(conn)
+            meta = self._check_meta(conn)
+            self._check_mutation_guard(conn)
+            self._check_mutation_fences(conn)
+        return NodeCoordinatorRegistration(
+            str(self.path), meta[0], self.identity.digest,
+            self.identity.provider_endpoint, self.identity.root,
+        )
+
+    def finalization_position(self, capture: NodeCapture) -> NodeFinalizationPosition:
+        if type(capture) is not NodeCapture:
+            raise ValueError("invalid node capture")
+        registration = self.coordinator_registration()
+        if capture.database_incarnation != registration.database_incarnation:
+            raise NodeGenerationChanged("node database incarnation changed")
+        return _node_position(NodeFinalizationPosition(
+            registration.database_path, registration.database_incarnation,
+            registration.identity_digest, registration.provider_endpoint,
+            registration.root, capture.generation,
+            tuple(capture.scope_positions),
+        ))
+
+    @classmethod
+    @contextmanager
+    def coordinator_cut(
+        cls, registration: NodeCoordinatorRegistration,
+        position: NodeFinalizationPosition | None = None,
+    ):
+        """Open the node writer after the root coordinator writer is held."""
+        registration = _node_registration(registration)
+        checked = None if position is None else _node_position(position)
+        if checked is not None and NodeCoordinatorRegistration(
+                checked.database_path, checked.database_incarnation,
+                checked.identity_digest, checked.provider_endpoint,
+                checked.root) != registration:
+            raise ValueError("node position belongs to another registration")
+        conn = sqlite3.connect(Path(registration.database_path), timeout=5.0)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT version,protocol_version FROM node_schema "
+                    "WHERE singleton=1").fetchall() != [(
+                        SCHEMA_VERSION, PROTOCOL_VERSION)]:
+                raise sqlite3.DatabaseError("unsupported local node schema")
+            identity = conn.execute(
+                "SELECT identity_digest,provider_endpoint,root FROM node_identity "
+                "WHERE singleton=1"
+            ).fetchall()
+            meta = cls._check_meta(conn)
+            if (identity != [(registration.identity_digest,
+                              registration.provider_endpoint,
+                              registration.root)]
+                    or meta[0] != registration.database_incarnation):
+                raise NodeGenerationChanged("registered local node replaced")
+            cls._check_mutation_guard(conn)
+            cls._check_mutation_fences(conn)
+            if checked is not None:
+                if meta[1] != checked.admitted_generation:
+                    raise NodeGenerationChanged("admitted node generation changed")
+                if meta[5]:
+                    raise NodeGenerationChanged("local node mutation pending")
+                actual = []
+                for item in checked.scope_positions:
+                    generation, pending = cls._scope_generation(
+                        conn, item.scope_kind, item.scope_id)
+                    actual.append(NodeScopePosition(
+                        item.scope_kind, item.scope_id, generation, pending,
+                    ))
+                if tuple(actual) != checked.scope_positions:
+                    raise NodeGenerationChanged("local node scope changed")
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def coordinator_add_fence(
+        conn: sqlite3.Connection, *, coordinator_epoch: str, token: str,
+        state: str = "active",
+    ) -> None:
+        """Durably retire the whole node root in an already-open coordinator cut."""
+        if (not conn.in_transaction
+                or type(coordinator_epoch) is not str
+                or _COORDINATOR_EPOCH.fullmatch(coordinator_epoch) is None
+                or type(token) is not str
+                or _COORDINATOR_TOKEN.fullmatch(token) is None
+                or state not in ("active", "completed")):
+            raise ValueError("invalid local node mutation fence")
+        NodeStore._check_mutation_fences(conn)
+        existing = conn.execute(
+            "SELECT state FROM node_mutation_fences "
+            "WHERE coordinator_epoch=? AND token=?",
+            (coordinator_epoch, token),
+        ).fetchone()
+        if existing is not None:
+            if existing != (state,) or conn.execute(
+                    "SELECT scope_kind,scope_id FROM node_mutation_scopes "
+                    "WHERE coordinator_epoch=? AND token=?",
+                    (coordinator_epoch, token)).fetchall() != [("root", "")]:
+                raise NodeGenerationChanged("local node mutation fence changed")
+            return
+        count = conn.execute(
+            "SELECT count(*) FROM node_mutation_fences").fetchone()[0]
+        if count >= MAX_NODE_MUTATION_FENCES:
+            raise NodeCandidateCapacityError("too many local node mutation fences")
+        generation, _pending = NodeStore._scope_generation(conn, "root", "")
+        if generation >= 2**63 - 1:
+            raise NodeInputError("local node scope revision exhausted")
+        conn.execute("INSERT INTO node_mutation_fences VALUES(?,?,?)",
+                     (coordinator_epoch, token, state))
+        conn.execute("INSERT INTO node_mutation_scopes VALUES(?,?,?,?)",
+                     (coordinator_epoch, token, "root", ""))
+        conn.execute("""
+            INSERT INTO scope_versions(scope_kind,scope_id,generation,pending_reason)
+            VALUES('root','',?,'local_mutation')
+            ON CONFLICT(scope_kind,scope_id) DO UPDATE SET
+                generation=excluded.generation,pending_reason=excluded.pending_reason
+        """, (generation + 1,))
+        conn.execute(
+            "UPDATE node_generations SET state='abandoned' "
+            "WHERE state IN ('building','sealed')")
+        conn.execute(
+            "UPDATE node_meta SET pending_mutations=?,health='pending' "
+            "WHERE singleton=1", (count + 1,))
+        NodeStore._check_mutation_fences(conn)
+
+    @staticmethod
+    def coordinator_abandon_candidates(conn: sqlite3.Connection) -> None:
+        """Discard private work collected before this coordinator owned the node."""
+        if not conn.in_transaction:
+            raise ValueError("local node coordinator cut required")
+        NodeStore._check_mutation_fences(conn)
+        generations = tuple(row[0] for row in conn.execute(
+            "SELECT generation FROM node_generations "
+            "WHERE state IN ('building','sealed') ORDER BY generation "
+            "LIMIT ?", (MAX_ACTIVE_CANDIDATES + 1,),
+        ))
+        if len(generations) > MAX_ACTIVE_CANDIDATES:
+            raise sqlite3.DatabaseError("active node candidate budget exceeded")
+        for generation in generations:
+            NodeStore._clear_candidate_rows(conn, generation)
+        if generations:
+            conn.executemany(
+                "UPDATE node_generations SET state='abandoned' WHERE generation=?",
+                ((generation,) for generation in generations),
+            )
+
+    @staticmethod
+    def coordinator_complete_fence(
+        conn: sqlite3.Connection, *, coordinator_epoch: str, token: str,
+    ) -> None:
+        """Mark a definite or proven-unstarted outcome; readiness stays retired."""
+        if (not conn.in_transaction
+                or type(coordinator_epoch) is not str
+                or _COORDINATOR_EPOCH.fullmatch(coordinator_epoch) is None
+                or type(token) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", token) is None):
+            raise ValueError("invalid local node mutation fence")
+        NodeStore._check_mutation_fences(conn)
+        state = conn.execute(
+            "SELECT state FROM node_mutation_fences "
+            "WHERE coordinator_epoch=? AND token=?",
+            (coordinator_epoch, token),
+        ).fetchone()
+        if state is None:
+            raise NodeGenerationChanged("local node mutation fence missing")
+        if state == ("completed",):
+            return
+        if state != ("active",):
+            raise sqlite3.DatabaseError("invalid local node mutation fence")
+        generation, pending = NodeStore._scope_generation(conn, "root", "")
+        if pending != _NODE_PENDING_REASON or generation >= 2**63 - 1:
+            raise sqlite3.DatabaseError("invalid local node pending scope")
+        conn.execute(
+            "UPDATE node_mutation_fences SET state='completed' "
+            "WHERE coordinator_epoch=? AND token=? AND state='active'",
+            (coordinator_epoch, token),
+        )
+        conn.execute(
+            "UPDATE scope_versions SET generation=generation+1 "
+            "WHERE scope_kind='root' AND scope_id=''",
+        )
+        NodeStore._check_mutation_fences(conn)
+
+    @staticmethod
+    def coordinator_require_fences(
+        conn: sqlite3.Connection, *, coordinator_epoch: str,
+        tokens: tuple[str, ...],
+    ) -> None:
+        """Prove every root-owned pending token still has a node-side fence."""
+        if (not conn.in_transaction
+                or type(coordinator_epoch) is not str
+                or _COORDINATOR_EPOCH.fullmatch(coordinator_epoch) is None
+                or type(tokens) is not tuple or len(tokens) > 64
+                or len(set(tokens)) != len(tokens)
+                or any(type(token) is not str
+                       or _COORDINATOR_TOKEN.fullmatch(token) is None
+                       for token in tokens)):
+            raise ValueError("invalid local node mutation fence set")
+        NodeStore._check_mutation_fences(conn)
+        if not tokens:
+            return
+        marks = ",".join("?" for _ in tokens)
+        found = conn.execute(
+            "SELECT token FROM node_mutation_fences "
+            "WHERE coordinator_epoch=? AND token IN (" + marks + ")",
+            (coordinator_epoch, *tokens),
+        ).fetchall()
+        if {token for (token,) in found} != set(tokens):
+            raise NodeGenerationChanged("local node root fence missing")
+
     def _migrate_v1(self, conn: sqlite3.Connection) -> None:
         if conn.execute(
                 "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
@@ -391,7 +762,7 @@ class NodeStore:
             DROP TABLE remote_docs;
             DROP TABLE node_generations;
             DROP TABLE node_schema;
-        """ + _SCHEMA)
+        """ + _SCHEMA + "\n" + _PENDING_MUTATION_GUARD + ";\n")
         conn.execute("INSERT INTO node_schema VALUES(1,?,?)", (
             SCHEMA_VERSION, PROTOCOL_VERSION))
         conn.execute("INSERT INTO local_change_state VALUES(1,0)")
@@ -559,6 +930,52 @@ class NodeStore:
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
         conn.execute("INSERT INTO node_schema VALUES(1,7,?)", (PROTOCOL_VERSION,))
 
+    def _migrate_v7(self, conn: sqlite3.Connection) -> None:
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(7, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        # A test/operator-created downgrade may retain the v8 guard. Replace it
+        # from the exact v8 definition after all legacy migration work.
+        conn.execute("DROP TRIGGER IF EXISTS node_pending_mutation_guard")
+        # Pre-N2 candidates have no durable binding to the shared root fence.
+        # They remain private work and cannot safely survive this migration.
+        generations = tuple(row[0] for row in conn.execute(
+            "SELECT generation FROM node_generations "
+            "WHERE state IN ('building','sealed') ORDER BY generation"
+        ))
+        for generation in generations:
+            self._clear_candidate_rows(conn, generation)
+        if generations:
+            conn.executemany(
+                "UPDATE node_generations SET state='abandoned' WHERE generation=?",
+                ((generation,) for generation in generations),
+            )
+        conn.execute("""CREATE TABLE node_mutation_fences(
+            coordinator_epoch TEXT NOT NULL,
+            token TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('active','completed')),
+            PRIMARY KEY(coordinator_epoch,token))""")
+        conn.execute("""CREATE TABLE node_mutation_scopes(
+            coordinator_epoch TEXT NOT NULL,
+            token TEXT NOT NULL,
+            scope_kind TEXT NOT NULL CHECK(scope_kind IN ('root','chat')),
+            scope_id TEXT NOT NULL,
+            CHECK((scope_kind='root' AND scope_id='') OR
+                  (scope_kind='chat' AND length(scope_id)>0)),
+            PRIMARY KEY(coordinator_epoch,token,scope_kind,scope_id),
+            FOREIGN KEY(coordinator_epoch,token)
+                REFERENCES node_mutation_fences(coordinator_epoch,token))""")
+        conn.execute(_PENDING_MUTATION_GUARD)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=8),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,8,?)", (PROTOCOL_VERSION,))
+
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
             with conn:
@@ -568,7 +985,10 @@ class NodeStore:
                     "AND name NOT LIKE 'sqlite_%'"))
                 fresh = not tables
                 if fresh:
-                    conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
+                    conn.executescript(
+                        "BEGIN IMMEDIATE;\n" + _SCHEMA + "\n" +
+                        _PENDING_MUTATION_GUARD + ";\n"
+                    )
                     conn.execute("INSERT INTO node_schema VALUES(1,?,?)", (
                         SCHEMA_VERSION, PROTOCOL_VERSION))
                     conn.execute("INSERT INTO node_identity VALUES(1,?,?,?,?,?)",
@@ -595,15 +1015,29 @@ class NodeStore:
                         "WHERE singleton=1").fetchall()
                     if version == [(6, PROTOCOL_VERSION)]:
                         self._migrate_v6(conn)
-                    elif version != [(SCHEMA_VERSION, PROTOCOL_VERSION)]:
+                    elif version not in (
+                            [(7, PROTOCOL_VERSION)],
+                            [(SCHEMA_VERSION, PROTOCOL_VERSION)],
+                    ):
                         raise sqlite3.DatabaseError("unsupported local node schema")
-                elif tables != _V7_TABLES:
+                elif tables not in (_V7_TABLES, _V8_TABLES):
+                    raise sqlite3.DatabaseError("incomplete local node schema")
+                version = conn.execute(
+                    "SELECT version,protocol_version FROM node_schema "
+                    "WHERE singleton=1").fetchall()
+                if version == [(7, PROTOCOL_VERSION)]:
+                    self._migrate_v7(conn)
+                tables = frozenset(row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%'"))
+                if tables != _V8_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
                         "WHERE singleton=1").fetchall() != [(
                             SCHEMA_VERSION, PROTOCOL_VERSION)]:
                     raise sqlite3.DatabaseError("unsupported local node schema")
+                self._check_mutation_guard(conn)
                 self._check_identity(conn)
                 self._check_meta(conn)
                 rows = conn.execute(
@@ -660,6 +1094,8 @@ class NodeStore:
                 raise sqlite3.DatabaseError("invalid local node metadata")
             if row[0] != expected_generation:
                 raise NodeGenerationChanged("admitted generation changed")
+            if row[2]:
+                raise NodeGenerationChanged("local node mutation pending")
             token = max(attempted, row[1] + 1)
             if token > 2**63 - 1:
                 raise NodeInputError("refresh attempt time exhausted")
@@ -684,7 +1120,7 @@ class NodeStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             base = conn.execute(
-                "SELECT admitted_generation,last_attempt_ns FROM node_meta "
+                "SELECT admitted_generation,last_attempt_ns,pending_mutations FROM node_meta "
                 "WHERE singleton=1"
             ).fetchone()
             if base is None:
@@ -695,6 +1131,8 @@ class NodeStore:
             if (expected_attempt_ns is not None
                     and base[1] != expected_attempt_ns):
                 raise NodeGenerationChanged("node refresh changed")
+            if base[2]:
+                raise NodeGenerationChanged("local node mutation pending")
             active = conn.execute(
                 "SELECT count(*) FROM node_generations "
                 "WHERE state IN ('building','sealed')").fetchone()[0]
@@ -2459,16 +2897,24 @@ class NodeStore:
         # The root position is the conservative whole-replica fence even when
         # the replay journal can retain a narrower chat-only wake.
         if scopes:
+            current = NodeStore._scope_generation(conn, "root", "")[0]
+            if current >= 2**63 - 1:
+                raise NodeInputError("local node scope revision exhausted")
             conn.execute("""
                 INSERT INTO scope_versions(scope_kind,scope_id,generation,pending_reason)
                 VALUES('root','',?,NULL) ON CONFLICT(scope_kind,scope_id) DO UPDATE SET
-                    generation=excluded.generation,pending_reason=NULL
+                    generation=MAX(scope_versions.generation+1,excluded.generation),
+                    pending_reason=NULL
             """, (generation,))
         for kind, ident in sorted(scopes):
+            current = NodeStore._scope_generation(conn, kind, ident)[0]
+            if current >= 2**63 - 1:
+                raise NodeInputError("local node scope revision exhausted")
             conn.execute("""
                 INSERT INTO scope_versions(scope_kind,scope_id,generation,pending_reason)
                 VALUES(?,?,?,NULL) ON CONFLICT(scope_kind,scope_id) DO UPDATE SET
-                    generation=excluded.generation,pending_reason=NULL
+                    generation=MAX(scope_versions.generation+1,excluded.generation),
+                    pending_reason=NULL
             """, (kind, ident, generation))
             conn.execute(
                 "INSERT INTO local_changes(generation,scope_kind,scope_id,kind) "
@@ -2565,12 +3011,13 @@ class NodeStore:
                     if self._scope_generation(conn, kind, ident) != (
                             scope_generation, None):
                         recovery_stale = True
-            if current[0] != base or recovery_stale:
+            if current[0] != base or current[3] or recovery_stale:
                 conn.execute(
                     "UPDATE node_generations SET state='abandoned' "
                     "WHERE generation=?", (generation,))
                 self._clear_candidate_rows(conn, generation)
-                stale = ("recovery binding changed" if recovery_stale
+                stale = ("local node mutation pending" if current[3]
+                         else "recovery binding changed" if recovery_stale
                          else "candidate base generation changed")
             elif (expected_attempt_ns is not None
                   and current[1] != expected_attempt_ns):
@@ -2673,17 +3120,20 @@ class NodeStore:
                                  or expected_attempt_ns == owned_attempt)):
                         conn.execute(
                             "UPDATE node_meta SET health=? WHERE singleton=1 "
-                            "AND admitted_generation=? AND last_attempt_ns=?",
+                            "AND admitted_generation=? AND last_attempt_ns=? "
+                            "AND pending_mutations=0",
                             (health, owned_generation, owned_attempt),
                         )
                 elif expected_generation is None and expected_attempt_ns is None:
                     conn.execute(
-                        "UPDATE node_meta SET health=? WHERE singleton=1", (health,))
+                        "UPDATE node_meta SET health=? WHERE singleton=1 "
+                        "AND pending_mutations=0", (health,))
                 else:
                     conn.execute(
                         "UPDATE node_meta SET health=? WHERE singleton=1 "
                         "AND (? IS NULL OR admitted_generation=?) "
-                        "AND (? IS NULL OR last_attempt_ns=?)",
+                        "AND (? IS NULL OR last_attempt_ns=?) "
+                        "AND pending_mutations=0",
                         (health, expected_generation, expected_generation,
                          expected_attempt_ns, expected_attempt_ns),
                     )

@@ -363,6 +363,59 @@ claims completeness from exact pages alone.
 - Keep product reads on the old path while crash-before-notify, failed/ambiguous
   publication, node outage and rollback behavior are tested.
 
+The first inactive N2 foundation is implemented at schema version 8 and root
+coordinator format 2. Registering a node binds its database incarnation, replica
+identity, provider endpoint and transport root to the existing root-wide mutation
+owner. The format change alters an existing coordinator table and rotates its
+epoch, so an older coordinator fails its exact schema or epoch check instead of
+silently bypassing node fanout. The node migration installs an exact SQLite
+pending-mutation guard as well: a v7 node object that was already in memory
+cannot admit a generation, lower the pending count or restore non-pending health
+after a v8 fence commits. Existing pending and quarantined intents remain durable.
+
+This foundation intentionally uses a whole-root node fence. Mutation begin first
+commits an active node fence, then retires every registered client Store, before
+provider I/O can start. Definite completion and the existing proven-unstarted
+abort only move that exact node fence to `completed`; neither restores node
+readiness. The root scope revision advances monotonically on begin and terminal
+transition. All ordinary refresh, generic candidate and admission paths reject
+while any node fence remains. Registering an already admitted node also creates a
+completed whole-root fence. First registration discards any private candidate
+collected before coordinator ownership, and the v7-to-v8 migration similarly
+abandons pre-N2 private candidates.
+
+A payload-free node position can now join the existing root-to-Store finalization
+cut. The coordinator acquires root, then the registered node writer, then the
+client Store writer; it rechecks database/identity/incarnation, admitted
+generation and the complete root position while holding node exclusion through
+the Store commit. A mutation reservation fans out to every registered node and
+Store before becoming executable. Partial commits retain conservative node or
+Store invalidation.
+
+This is not yet a completed N2 claim protocol. Completed node fences are retained
+and bounded; no code can consume them. The next slice must capture eligible
+completed claims under root-to-node exclusion, fetch a later provider cut outside
+those locks, bind the exact claim/revision set into a resumable complete provider
+recovery, and consume it only during admission while the same root has no active
+or quarantined intent that could still cover it. Product reads and node-owned
+mutations remain disconnected until that protocol and its crash matrix pass.
+
+That claim must bind one registered coordinator path, canonical root identity and
+epoch to one exact set of completed whole-root fences. Unknown, active, orphaned
+or foreign-epoch fences remain unconsumable. The authenticated provider fence is
+captured only after the claim and is persisted only after rechecking the same
+claim; clocks and previously fetched cuts provide no causal evidence. Pending
+recovery is a separate complete-replacement path whose continuations retain that
+immutable binding and keep node health pending.
+
+Consumption requires a private coordinator entry point holding root-to-node
+exclusion. Candidate publication, exact-fence deletion, scope advancement,
+metadata transition and its database permit form one node transaction. The permit
+matches the database incarnation, base/destination generations and claim digest,
+and is consumed by that exact transition; a durable leftover row cannot become a
+general bypass for older writers. A lost response must identify the exact already
+admitted recovery rather than recreate a permit or consume later fences.
+
 ### N3 — GUI read cutover
 
 - GUI server uses the node for provider inputs and keeps its existing local

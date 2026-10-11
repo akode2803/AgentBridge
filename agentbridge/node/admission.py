@@ -325,6 +325,30 @@ class NodeScopePosition:
 
 
 @dataclass(frozen=True)
+class NodeCoordinatorRegistration:
+    """Stable database binding used by the root mutation coordinator."""
+
+    database_path: str
+    database_incarnation: str
+    identity_digest: str
+    provider_endpoint: str
+    root: str
+
+
+@dataclass(frozen=True)
+class NodeFinalizationPosition:
+    """Payload-free node receipt rechecked inside a root finalization cut."""
+
+    database_path: str
+    database_incarnation: str
+    identity_digest: str
+    provider_endpoint: str
+    root: str
+    admitted_generation: int
+    scope_positions: tuple[NodeScopePosition, ...]
+
+
+@dataclass(frozen=True)
 class NodeProviderCut:
     schema_version: int
     index_epoch: str
