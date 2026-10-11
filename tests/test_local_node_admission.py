@@ -1,9 +1,15 @@
 import sqlite3
 import threading
+from pathlib import Path
 
 import pytest
 
 from agentbridge.node.admission import (
+    MAX_CAPTURE_CHAT_IDS,
+    MAX_CAPTURE_DOCUMENTS,
+    MAX_CAPTURE_EXACT_DOCUMENTS,
+    MAX_CAPTURE_LOG_REQUESTS,
+    MAX_CAPTURE_SCOPE_POSITIONS,
     NodeCaptureOverflow,
     NodeCaptureRequest,
     NodeDocument,
@@ -11,10 +17,13 @@ from agentbridge.node.admission import (
     NodeGenerationChanged,
     NodeInputBatch,
     NodeInputError,
+    NodeFinalizationPosition,
     NodeLogRequest,
     NodeLogRow,
+    NodeScopePosition,
     NodeVisibility,
 )
+from agentbridge.node import store as node_store
 from agentbridge.node.protocol import ProtocolError, ReplicaIdentity
 from agentbridge.node.store import NodeStore
 from agentbridge.node.wire import capture_response, parse_capture_request
@@ -27,8 +36,95 @@ def identity():
     )
 
 
+def test_finalization_position_accepts_maximum_capture_scope_union():
+    positions = tuple(
+        NodeScopePosition("chat", f"chat-{index:05d}", 0, None)
+        for index in range(MAX_CAPTURE_SCOPE_POSITIONS - 1)
+    ) + (NodeScopePosition("root", "", 0, None),)
+    value = NodeFinalizationPosition(
+        str(Path("/tmp/node.sqlite").resolve()), "incarnation", "1" * 64,
+        "https://example.test", "supabase://mesh", 1, positions,
+    )
+
+    assert node_store._node_position(value).scope_positions == positions
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        node_store._node_position(NodeFinalizationPosition(
+            value.database_path, value.database_incarnation,
+            value.identity_digest, value.provider_endpoint, value.root,
+            value.admitted_generation,
+            positions[:-1] + (
+                NodeScopePosition("chat", "chat-over-limit", 0, None),
+                positions[-1],
+            ),
+        ))
+
+
 def store(tmp_path):
     return NodeStore(tmp_path / "node" / "replica.sqlite3", identity())
+
+
+def test_unadmitted_node_cannot_create_finalization_position(tmp_path):
+    owner = store(tmp_path)
+    capture = owner.capture(NodeCaptureRequest(max_bytes=1024))
+
+    assert capture.generation == 0
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        owner.finalization_position(capture)
+
+
+def test_capture_accepts_maximum_distinct_scope_union(tmp_path, monkeypatch):
+    owner = store(tmp_path)
+    admit(owner, NodeInputBatch())
+    documents = tuple(
+        NodeDocument(f"chats/document-{index}/message.json", index, False, b"")
+        for index in range(MAX_CAPTURE_DOCUMENTS)
+    )
+    visible = tuple(f"visible-{index}" for index in range(MAX_CAPTURE_CHAT_IDS))
+    exact = tuple(
+        f"chats/exact-{index}/missing.json"
+        for index in range(MAX_CAPTURE_EXACT_DOCUMENTS)
+    )
+    logs = tuple(
+        NodeLogRequest(f"log-{index}", "main", 0, 1)
+        for index in range(MAX_CAPTURE_LOG_REQUESTS)
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_documents",
+        staticmethod(lambda _conn, _request, _budget: documents),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_log_pages",
+        staticmethod(lambda _conn, _request, _budget: ()),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_visibility",
+        staticmethod(lambda _conn, _request, _budget: (visible, False)),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_frontiers",
+        staticmethod(lambda _conn, _request, _budget: ()),
+    )
+    monkeypatch.setattr(
+        NodeStore, "_capture_scope_positions",
+        staticmethod(lambda _conn, keys, _budget: tuple(
+            NodeScopePosition(kind, ident, 0, None)
+            for kind, ident in sorted(keys)
+        )),
+    )
+
+    capture = owner.capture(NodeCaptureRequest(
+        exact_document_paths=exact,
+        document_prefixes=("",),
+        log_requests=logs,
+        include_visibility=True,
+        visibility_limit=MAX_CAPTURE_CHAT_IDS,
+        max_documents=MAX_CAPTURE_DOCUMENTS,
+        max_log_rows=MAX_CAPTURE_LOG_REQUESTS,
+        max_bytes=32 * 1024 * 1024,
+    ))
+
+    assert len(capture.scope_positions) == MAX_CAPTURE_SCOPE_POSITIONS
+    assert owner.finalization_position(capture).scope_positions == capture.scope_positions
 
 
 def admit(owner, batch, *, created=1, observed=2):
@@ -856,7 +952,7 @@ def test_empty_inactive_v1_database_migrates_without_rebinding(tmp_path):
     assert status.database_incarnation == "incarnation-v1"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (7, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (8, 1)
         assert conn.execute(
             "SELECT minimum_cursor FROM local_change_state").fetchone() == (0,)
 

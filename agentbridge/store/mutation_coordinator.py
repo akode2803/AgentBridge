@@ -14,7 +14,7 @@ import json
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,17 +22,22 @@ from types import SimpleNamespace
 from . import local_source as owner, source_selectors as scopes
 
 MAX_STORES = 64
+MAX_NODES = 16
 MAX_PENDING = 64
 MAX_QUARANTINED = 256
 ROOT_LOCK_TIMEOUT_S = 5.0
 _NORMAL_TOKEN = re.compile(r'[0-9a-f]{64}\Z')
 _SENTINEL_TOKEN = re.compile(r'q[0-9a-f]{63}\Z')
+_COORDINATOR_EPOCH = re.compile(r'[0-9a-f]{32}\Z')
 _SCHEMA = {
-    'mutation_root': 'CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)',
+    'mutation_root': 'CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL,format INTEGER NOT NULL CHECK(format=2))',
     'mutation_stores': 'CREATE TABLE mutation_stores(path TEXT PRIMARY KEY,incarnation TEXT NOT NULL,source_epoch TEXT NOT NULL)',
+    'mutation_nodes': 'CREATE TABLE mutation_nodes(path TEXT PRIMARY KEY,database_incarnation TEXT NOT NULL,identity_digest TEXT NOT NULL,provider_endpoint TEXT NOT NULL,root TEXT NOT NULL)',
     'mutation_intents': 'CREATE TABLE mutation_intents(token TEXT PRIMARY KEY)',
     'mutation_scopes': 'CREATE TABLE mutation_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
 }
+_V1_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
+                   'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)')
 _QUARANTINE_SCHEMA = {
     'quarantine_intents': 'CREATE TABLE quarantine_intents(token TEXT PRIMARY KEY,sentinel TEXT NOT NULL)',
     'quarantine_scopes': 'CREATE TABLE quarantine_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
@@ -71,7 +76,32 @@ class MutationCoordinator:
             if not found:
                 for statement in _SCHEMA.values():
                     conn.execute(statement)
-                conn.execute('INSERT INTO mutation_root VALUES(1,?,?)', (self.identity, secrets.token_hex(16)))
+                conn.execute('INSERT INTO mutation_root VALUES(1,?,?,2)',
+                             (self.identity, secrets.token_hex(16)))
+            else:
+                root_sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='mutation_root'"
+                ).fetchone()
+                if root_sql == (_V1_ROOT_SCHEMA,):
+                    row = conn.execute(
+                        'SELECT identity,epoch FROM mutation_root WHERE singleton=1'
+                    ).fetchone()
+                    if (row is None or row[0] != self.identity
+                            or type(row[1]) is not str
+                            or _COORDINATOR_EPOCH.fullmatch(row[1]) is None):
+                        raise owner.SourceChanged('mutation_root_changed')
+                    # Changing a table known to V1 makes every old binary fail
+                    # its exact schema check, even if it starts after migration.
+                    conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_v1')
+                    conn.execute(_SCHEMA['mutation_root'])
+                    conn.execute('INSERT INTO mutation_root VALUES(1,?,?,2)',
+                                 (self.identity, secrets.token_hex(16)))
+                    conn.execute('DROP TABLE mutation_root_v1')
+                node_schema = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='mutation_nodes'"
+                ).fetchone()
+                if node_schema is None:
+                    conn.execute(_SCHEMA['mutation_nodes'])
             quarantine = [conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
                           for name in _QUARANTINE_SCHEMA]
             if all(value is None for value in quarantine):
@@ -119,9 +149,10 @@ class MutationCoordinator:
         for name, sql in {**_SCHEMA, **_QUARANTINE_SCHEMA}.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
-        row = conn.execute('SELECT identity,epoch FROM mutation_root WHERE singleton=1').fetchone()
+        row = conn.execute('SELECT identity,epoch,format FROM mutation_root WHERE singleton=1').fetchone()
         if (row is None or row[0] != self.identity or type(row[1]) is not str or len(row[1]) != 32
                 or any(c not in '0123456789abcdef' for c in row[1])
+                or row[2] != 2
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
         tokens = conn.execute('SELECT token FROM mutation_intents LIMIT ?', (MAX_PENDING + 1,)).fetchall()
@@ -205,6 +236,156 @@ class MutationCoordinator:
                 raise owner.SourceChanged('invalid_store_registration')
         return rows
 
+    def _nodes(self, conn):
+        from ..node.admission import NodeCoordinatorRegistration
+
+        if conn.execute("SELECT 1 FROM mutation_nodes WHERE typeof(path)!='text' OR length(CAST(path AS BLOB))>16384 OR typeof(database_incarnation)!='text' OR length(CAST(database_incarnation AS BLOB))>4096 OR typeof(identity_digest)!='text' OR length(identity_digest)!=64 OR typeof(provider_endpoint)!='text' OR length(CAST(provider_endpoint AS BLOB))>2048 OR typeof(root)!='text' OR length(CAST(root AS BLOB))>1024 LIMIT 1").fetchone():
+            raise owner.SourceChanged('invalid_node_registration')
+        rows = conn.execute(
+            'SELECT path,database_incarnation,identity_digest,provider_endpoint,root '
+            'FROM mutation_nodes ORDER BY path LIMIT ?', (MAX_NODES + 1,),
+        ).fetchall()
+        if len(rows) > MAX_NODES:
+            raise owner.SourceChanged('mutation_node_budget')
+        values = []
+        for path, incarnation, digest, endpoint, root in rows:
+            if (type(path) is not str or not Path(path).is_absolute()
+                    or str(Path(path).resolve()) != path
+                    or type(incarnation) is not str or not incarnation
+                    or type(digest) is not str
+                    or re.fullmatch(r'[0-9a-f]{64}', digest) is None
+                    or type(endpoint) is not str or not endpoint
+                    or type(root) is not str or not root):
+                raise owner.SourceChanged('invalid_node_registration')
+            values.append(NodeCoordinatorRegistration(
+                path, incarnation, digest, endpoint, root,
+            ))
+        return tuple(values)
+
+    @staticmethod
+    def _registered_node(root, path):
+        if root.execute(
+                "SELECT 1 FROM mutation_nodes WHERE path=? AND ("
+                "typeof(path)!='text' OR length(CAST(path AS BLOB))>16384 OR "
+                "typeof(database_incarnation)!='text' OR "
+                "length(CAST(database_incarnation AS BLOB))>4096 OR "
+                "typeof(identity_digest)!='text' OR length(identity_digest)!=64 OR "
+                "typeof(provider_endpoint)!='text' OR "
+                "length(CAST(provider_endpoint AS BLOB))>2048 OR "
+                "typeof(root)!='text' OR length(CAST(root AS BLOB))>1024) LIMIT 1",
+                (path,),
+        ).fetchone():
+            raise owner.SourceChanged('invalid_node_registration')
+        row = root.execute(
+            'SELECT database_incarnation,identity_digest,provider_endpoint,root '
+            'FROM mutation_nodes WHERE path=?', (path,),
+        ).fetchone()
+        if row is None:
+            raise owner.SourceChanged('node_not_registered')
+        from ..node.admission import NodeCoordinatorRegistration
+        return NodeCoordinatorRegistration(path, *row)
+
+    @staticmethod
+    def _pending_tokens(root):
+        rows = root.execute(
+            'SELECT token FROM mutation_intents ORDER BY token LIMIT ?',
+            (MAX_PENDING + 1,),
+        ).fetchall()
+        if len(rows) > MAX_PENDING:
+            raise owner.SourceChanged('pending_mutation_budget')
+        return tuple(token for (token,) in rows)
+
+    def register_node(self, node):
+        """Join one node before activation and conservatively retire old readiness."""
+        from ..node.store import NodeStore
+
+        if type(node) is not NodeStore:
+            raise ValueError('invalid local node')
+        registration = node.coordinator_registration()
+        try:
+            expected = json.loads(self.identity)
+        except (TypeError, ValueError):
+            raise ValueError('invalid mutation root identity') from None
+        if (type(expected) is not list or len(expected) != 4
+                or expected[:2] != ['local-root-v1', 'supabase']
+                or type(expected[2]) is not str
+                or type(expected[3]) is not str
+                or registration.provider_endpoint != expected[2]
+                or registration.root != 'supabase://' + expected[3]):
+            raise ValueError('local node belongs to another transport root')
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            nodes = self._nodes(root)
+            existing = next((item for item in nodes
+                             if item.database_path == registration.database_path), None)
+            if existing is not None:
+                if existing != registration:
+                    raise owner.SourceChanged('registered_node_replaced')
+                with NodeStore.coordinator_cut(registration) as node_conn:
+                    NodeStore.coordinator_require_fences(
+                        node_conn, coordinator_epoch=self.epoch,
+                        tokens=self._pending_tokens(root),
+                    )
+                return registration
+            if len(nodes) >= MAX_NODES:
+                raise owner.SourceChanged('mutation_node_budget')
+            pending = self._pending_tokens(root)
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                # Private work collected before coordinator ownership cannot
+                # prove it observed mutations that already completed.
+                NodeStore.coordinator_abandon_candidates(node_conn)
+                for token in pending:
+                    NodeStore.coordinator_add_fence(
+                        node_conn, coordinator_epoch=self.epoch, token=token,
+                    )
+                admitted = node_conn.execute(
+                    'SELECT admitted_generation FROM node_meta WHERE singleton=1'
+                ).fetchone()
+                if admitted is None:
+                    raise owner.SourceChanged('invalid_node_registration')
+                if admitted[0] > 0:
+                    NodeStore.coordinator_add_fence(
+                        node_conn, coordinator_epoch=self.epoch,
+                        token=secrets.token_hex(32), state='completed',
+                    )
+                NodeStore.coordinator_require_fences(
+                    node_conn, coordinator_epoch=self.epoch, tokens=pending,
+                )
+            root.execute('INSERT INTO mutation_nodes VALUES(?,?,?,?,?)', (
+                registration.database_path, registration.database_incarnation,
+                registration.identity_digest, registration.provider_endpoint,
+                registration.root,
+            ))
+        return registration
+
+    def _retire_nodes(self, root, token, *, state='active', skip_path=None):
+        from ..node.store import NodeStore
+
+        for registration in self._nodes(root):
+            if registration.database_path == skip_path:
+                continue
+            with NodeStore.coordinator_cut(registration) as conn:
+                NodeStore.coordinator_add_fence(
+                    conn, coordinator_epoch=self.epoch, token=token, state=state,
+                )
+                NodeStore.coordinator_require_fences(
+                    conn, coordinator_epoch=self.epoch,
+                    tokens=self._pending_tokens(root),
+                )
+
+    def _complete_nodes(self, root, token):
+        from ..node.store import NodeStore
+
+        for registration in self._nodes(root):
+            with NodeStore.coordinator_cut(registration) as conn:
+                NodeStore.coordinator_require_fences(
+                    conn, coordinator_epoch=self.epoch,
+                    tokens=self._pending_tokens(root),
+                )
+                NodeStore.coordinator_complete_fence(
+                    conn, coordinator_epoch=self.epoch, token=token,
+                )
+
     @staticmethod
     def _registered_store(root, path):
         # These unconstrained registry fields must be preflighted before fetching
@@ -276,6 +457,7 @@ class MutationCoordinator:
         with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
             self._schema(conn)
             token = self._insert_intent(conn, changes)
+            self._retire_nodes(conn, token)
             self._retire(conn, changes)
             result = MutationIntent(str(self.path), self.epoch, token, changes)
         return result
@@ -339,6 +521,7 @@ class MutationCoordinator:
                 conn.execute('INSERT INTO mutation_intents VALUES(?)', (sentinel,))
                 conn.executemany('INSERT INTO mutation_scopes VALUES(?,?,?)',
                                  ((sentinel, kind, value) for kind, value in rows))
+                self._retire_nodes(conn, sentinel)
                 issued.append((sentinel, rows, len(members)))
             self._schema(conn)  # Validate the replacement fence before commit.
             return tuple(issued)
@@ -378,6 +561,7 @@ class MutationCoordinator:
             pending = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9', (token,)).fetchall()
             if tuple(scopes.Selector(*row) for row in pending) != changes:
                 raise owner.SourceChanged('mutation_intent_changed')
+            self._complete_nodes(conn, token)
             self._retire(conn, changes)
             if conn.execute('DELETE FROM mutation_intents WHERE token=?', (token,)).rowcount != 1:
                 raise owner.SourceChanged('mutation_intent_missing')
@@ -415,7 +599,8 @@ class MutationCoordinator:
                 raise owner.SourceChanged('source_mutation_pending')
 
     @contextmanager
-    def finalization_cut(self, store, value, *, companions=(), mutation=None):
+    def finalization_cut(self, store, value, *, companions=(), mutation=None,
+                         node_position=None):
         """Internal root -> Store cut for bounded canonical final comparisons.
 
         Requires existing coverage and ready inputs; never registers, repairs or
@@ -426,11 +611,15 @@ class MutationCoordinator:
         Root exclusion lasts through the Store commit, including exception paths.
         """
         from .mutation_reservation import FinalizationMutation
+        from ..node.admission import NodeFinalizationPosition
+        from ..node.store import NodeStore
 
         if mutation is not None:
             if type(mutation) is not FinalizationMutation:
                 raise ValueError('invalid finalization mutation')
             mutation._enter(self)
+        if node_position is not None and type(node_position) is not NodeFinalizationPosition:
+            raise ValueError('invalid node finalization position')
         intent = None
         store = SimpleNamespace(path=Path(store.path).resolve())
         value = scopes._definition(value)
@@ -447,27 +636,46 @@ class MutationCoordinator:
                 row = self._registered_store(root, str(store.path))
                 for definition in definitions:
                     self._require_no_pending(root, definition)
-            with owner._writer(store) as conn:
-                with span('source_checks'):
-                    self._check_store(conn, store, *row)
-                    positions = tuple(scopes.require_registered_in_transaction(conn, store, item)
-                                      for item in definitions)
-                    if any(not item.ready or item.writes_pending for item in positions):
-                        raise owner.SourceChanged('source_not_ready')
-                yield conn, positions[0]
-                with span('source_rechecks'):
-                    self._check_store(conn, store, *row)
-                    if tuple(scopes.require_registered_in_transaction(conn, store, item)
-                             for item in definitions) != positions:
-                        raise owner.SourceChanged('source_changed_during_finalization')
-                if mutation is not None and mutation.accepted:
-                    changes = scopes.selectors(mutation.changes, limit=8)
-                    token = self._insert_intent(root, changes)
-                    scopes.retire_in_transaction(conn, store, changes)
-                    intent = MutationIntent(str(self.path), self.epoch, token, changes)
+            with ExitStack() as stack:
+                node_conn = None
+                node_path = None
+                if node_position is not None:
+                    node_path = node_position.database_path
+                    registration = self._registered_node(root, node_path)
+                    node_conn = stack.enter_context(NodeStore.coordinator_cut(
+                        registration, node_position,
+                    ))
+                    NodeStore.coordinator_require_fences(
+                        node_conn, coordinator_epoch=self.epoch,
+                        tokens=self._pending_tokens(root),
+                    )
+                with owner._writer(store) as conn:
+                    with span('source_checks'):
+                        self._check_store(conn, store, *row)
+                        positions = tuple(scopes.require_registered_in_transaction(conn, store, item)
+                                          for item in definitions)
+                        if any(not item.ready or item.writes_pending for item in positions):
+                            raise owner.SourceChanged('source_not_ready')
+                    yield conn, positions[0]
+                    with span('source_rechecks'):
+                        self._check_store(conn, store, *row)
+                        if tuple(scopes.require_registered_in_transaction(conn, store, item)
+                                 for item in definitions) != positions:
+                            raise owner.SourceChanged('source_changed_during_finalization')
+                    if mutation is not None and mutation.accepted:
+                        changes = scopes.selectors(mutation.changes, limit=8)
+                        token = self._insert_intent(root, changes)
+                        scopes.retire_in_transaction(conn, store, changes)
+                        if node_conn is not None:
+                            NodeStore.coordinator_add_fence(
+                                node_conn, coordinator_epoch=self.epoch,
+                                token=token,
+                            )
+                        intent = MutationIntent(str(self.path), self.epoch, token, changes)
             if intent is not None:
                 # The current writer committed before opening other Store writers.
                 # Root exclusion persists throughout fanout and the root commit.
+                self._retire_nodes(root, intent.token, skip_path=node_path)
                 self._retire(root, intent.selectors, skip_path=str(store.path))
         if intent is not None:
             mutation._committed(intent)
