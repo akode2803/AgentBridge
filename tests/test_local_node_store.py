@@ -21,6 +21,16 @@ def identity(**changes):
     return ReplicaIdentity(**values)
 
 
+def drop_v9_tables(conn):
+    conn.execute("DROP TRIGGER node_pending_mutation_guard")
+    for table in (
+        "node_recovery_receipts", "node_admission_permits", "claimed_recoveries",
+        "node_recovery_claim_fences", "node_recovery_claims",
+        "node_coordinator_owner",
+    ):
+        conn.execute(f"DROP TABLE {table}")
+
+
 def recovery_plan(owner):
     status = owner.status(node_epoch="node", started_ns=1)
     cut = NodeProviderCut(1, "index-1", "source-1", "account-1", "member", 0, 5)
@@ -58,6 +68,7 @@ def test_v3_migration_preserves_admitted_and_retires_unbound_candidates(tmp_path
     sealed = owner.begin_candidate(created_ns=4)
     owner.seal_candidate(sealed, NodeInputBatch(), observed_ns=5)
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         for table in ("recovery_proof_pages", "recovery_events", "recovery_streams",
@@ -77,7 +88,7 @@ def test_v3_migration_preserves_admitted_and_retires_unbound_candidates(tmp_path
             .fetchone() == (b"a",)
         assert conn.execute("SELECT state FROM node_generations WHERE generation=?",
                             (sealed,)).fetchone() == ("abandoned",)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (8,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (9,)
 
 
 def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
@@ -111,6 +122,7 @@ def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
         (NodeDocument("users/recovery.json", 3, False, b"private"),),
         has_more=False)
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         for table in ("recovery_proof_pages", "recovery_events", "recovery_streams",
@@ -137,7 +149,7 @@ def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
             (recovery.generation,),
         ).fetchone() == (0,)
         assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (8,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (9,)
 
 
 def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
@@ -149,6 +161,7 @@ def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
     assert owner.stage_recovery_documents(
         state.recovery_id, cut, "page-1", 0, b"", page, has_more=True)
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         conn.execute("DROP INDEX recovery_stream_pending")
@@ -171,7 +184,7 @@ def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
     with pytest.raises(NodeGenerationChanged):
         reopened.recovery_state(state.recovery_id, cut)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (8,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (9,)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
@@ -185,6 +198,7 @@ def test_v6_migration_adds_bounded_pending_stream_index(tmp_path):
         state.recovery_id, cut, "streams", 0, b"",
         (NodeRecoveryStreamHead("a", "main", 1),), has_more=False)
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         conn.execute("DROP INDEX recovery_stream_pending")
@@ -197,7 +211,7 @@ def test_v6_migration_adds_bounded_pending_stream_index(tmp_path):
     with pytest.raises(NodeGenerationChanged):
         reopened.next_recovery_stream(state.recovery_id, cut)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (8,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (9,)
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' "
             "AND name='recovery_stream_pending'"
@@ -223,6 +237,7 @@ def test_v7_migration_retires_candidates_without_shared_fence_binding(tmp_path):
         NodeDocument("users/b.json", 2, False, b"private"),
     )))
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         conn.execute("DROP TABLE node_schema")
@@ -242,7 +257,112 @@ def test_v7_migration_retires_candidates_without_shared_fence_binding(tmp_path):
         ).fetchone() == (b"admitted",)
         assert conn.execute(
             "SELECT version FROM node_schema"
-        ).fetchone() == (8,)
+        ).fetchone() == (9,)
+
+
+def test_v8_migration_preserves_unowned_fence_and_manufactures_no_claim(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    registration = owner.coordinator_registration()
+    epoch = "1" * 32
+    token = "2" * 64
+    with NodeStore.coordinator_cut(registration) as conn:
+        NodeStore.coordinator_add_fence(
+            conn, coordinator_epoch=epoch, token=token, state="completed")
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER node_pending_mutation_guard")
+        for table in (
+            "node_recovery_receipts", "node_admission_permits", "claimed_recoveries",
+            "node_recovery_claim_fences", "node_recovery_claims",
+            "node_coordinator_owner",
+        ):
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute(node_store._V8_PENDING_MUTATION_GUARD)
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=8),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,8,1)")
+
+    reopened = NodeStore(path, identity())
+    assert reopened.status(node_epoch="node", started_ns=1).pending_mutations == 1
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT coordinator_epoch,token,state FROM node_mutation_fences"
+        ).fetchall() == [(epoch, token, "completed")]
+        assert conn.execute("SELECT count(*) FROM node_coordinator_owner").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM node_recovery_claims").fetchone() == (0,)
+
+
+def test_v9_reopen_rejects_corrupt_claim_fence_epoch(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    registration = owner.coordinator_registration()
+    epoch = "1" * 32
+    token = "2" * 64
+    with NodeStore.coordinator_cut(registration) as conn:
+        NodeStore.coordinator_bind_owner(
+            conn, coordinator_path=str(tmp_path.resolve() / "root.sqlite"),
+            coordinator_identity="root", coordinator_epoch=epoch,
+        )
+        NodeStore.coordinator_add_fence(
+            conn, coordinator_epoch=epoch, token=token, state="completed")
+        NodeStore.coordinator_claim_recovery(
+            conn, registration,
+            coordinator_path=str(tmp_path.resolve() / "root.sqlite"),
+            coordinator_identity="root", coordinator_epoch=epoch,
+            root_revision=1,
+        )
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE node_recovery_claim_fences SET coordinator_epoch=?",
+            ("3" * 32,),
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="local node recovery claim"):
+        NodeStore(path, identity())
+
+
+def test_v9_reopen_rejects_invalid_retained_receipt(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO node_recovery_receipts VALUES(?,?,?,?,?,?,?)",
+            ("not-a-recovery", 1, "1" * 64,
+             str((tmp_path / "root.sqlite").resolve()), "root", "2" * 32, 0),
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="invalid local node recovery receipt"):
+        NodeStore(path, identity())
+
+
+@pytest.mark.parametrize(
+    ("insert", "message"),
+    (
+        (
+            "INSERT INTO node_coordinator_owner "
+            "VALUES(1,zeroblob(16385),'root',?)",
+            "invalid local node coordinator owner",
+        ),
+        (
+            "INSERT INTO node_recovery_receipts "
+            "VALUES('" + "1" * 48 + "',1,'" + "2" * 64
+            + "',? ,zeroblob(4097),'" + "3" * 32 + "',0)",
+            "invalid local node recovery receipt",
+        ),
+    ),
+)
+def test_v9_reopen_preflights_bounded_coordinator_fields(
+        tmp_path, insert, message):
+    path = tmp_path / "private" / "node.sqlite3"
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        conn.execute(insert, (str((tmp_path / "root.sqlite").resolve()),))
+
+    with pytest.raises(sqlite3.DatabaseError, match=message):
+        NodeStore(path, identity())
 
 
 def test_recovery_reopens_retries_and_rejects_generic_bypass(tmp_path):
@@ -919,7 +1039,7 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (8, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (9, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
 
 
@@ -934,6 +1054,7 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
     path = tmp_path / "private" / "node.sqlite3"
     NodeStore(path, identity())
     with sqlite3.connect(path) as conn:
+        drop_v9_tables(conn)
         conn.execute("DROP TABLE node_mutation_scopes")
         conn.execute("DROP TABLE node_mutation_fences")
         conn.execute(
@@ -965,7 +1086,7 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version,protocol_version FROM node_schema"
-        ).fetchone() == (8, 1)
+        ).fetchone() == (9, 1)
         assert conn.execute(
             "SELECT state FROM node_generations WHERE generation=1"
         ).fetchone() == ("abandoned",)

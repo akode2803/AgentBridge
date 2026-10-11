@@ -492,8 +492,33 @@ multiple idempotent chunks and publish it atomically. Source-ledger v2 supplies
 bounded root recovery evidence for physical deletes and member-row changes, but
 does not turn an event into absence, completeness or authority proof.
 
-Store schema v7 preserves admitted inputs, ordinary resumable candidates and
-schema-v5 typed recoveries. The v4 migration retires only v4 provider recoveries
+Store schema v9 preserves admitted inputs and every schema-v8 mutation fence,
+while retiring private recovery work that predates an immutable coordinator
+claim. It adds one exact coordinator owner, one bounded recovery claim and the
+reserved mapping, permit and retained-receipt tables needed for a later atomic
+admission. Migration does not infer ownership for an existing fence or
+manufacture a claim. A node with unowned migrated fences therefore remains
+pending until an explicit operator recovery rather than accepting a different
+coordinator. The coordinator root now carries a monotonic revision; format-2
+migration preserves its epoch so an already-bound node cannot silently change
+owner.
+
+Claim capture holds the root writer before the node writer and performs no
+provider I/O. It requires no active or quarantined root intent, one exact
+registered node, only completed whole-root fences from the bound coordinator,
+no other private candidate, and matching pending metadata. The claim digest
+binds canonical coordinator path, identity, epoch and revision; node path,
+incarnation and replica identity; admitted/root-scope generations; and the exact
+sorted fence set. A repeat at the same cut is inert. Root movement, later
+mutation, coordinator replacement, active/orphan/foreign fences or private work
+rejects capture. Claims are not yet attached to recoveries and cannot consume a
+fence or authorize admission. The schema reserves a private permit table, but
+the pending-mutation trigger remains unconditional until exact permit validation
+and self-consumption land in the same atomic admission change. Product reads
+remain disconnected.
+
+The underlying typed recovery implementation preserves admitted inputs and
+ordinary resumable candidates. The v4 migration retires only v4 provider recoveries
 because their caller-described work lists cannot be upgraded into proof. Every
 new whole-root recovery now owns
 exactly three mandatory, typed inventories: documents, currently visible chats,

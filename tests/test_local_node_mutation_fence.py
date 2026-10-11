@@ -11,6 +11,7 @@ from agentbridge.node import (
     NodeStore, ReplicaIdentity,
 )
 from agentbridge.store import local_source, source_selectors
+from agentbridge.store.local_source import SourceChanged
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.mutation_reservation import FinalizationMutation
@@ -181,6 +182,86 @@ def test_pending_root_intent_is_imported_when_node_registers(tmp_path):
         ).fetchone() == ("completed",)
 
 
+def test_completed_fence_set_is_claimed_once_under_root_node_cut(world):
+    root, _store, node, _definition, _position = world
+    intent = root.begin((S("doc_exact", "chats/room/meta.json"),))
+    root.complete(intent)
+
+    claim = root.claim_node_recovery(node)
+    repeated = root.claim_node_recovery(node)
+
+    assert repeated == claim
+    assert claim.coordinator_path == str(root.path)
+    assert claim.coordinator_identity == root.identity
+    assert claim.coordinator_epoch == root.epoch
+    assert claim.fence_tokens == (intent.token,)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT coordinator_path,coordinator_identity,coordinator_epoch "
+            "FROM node_coordinator_owner"
+        ).fetchone() == (str(root.path), root.identity, root.epoch)
+        assert conn.execute(
+            "SELECT claim_id,claim_digest,root_revision FROM node_recovery_claims"
+        ).fetchone() == (claim.claim_id, claim.claim_digest, claim.root_revision)
+
+
+def test_active_or_later_mutation_cannot_join_recovery_claim(world):
+    root, _store, node, _definition, _position = world
+    first = root.begin((S("doc_exact", "users/a.json"),))
+    with pytest.raises(SourceChanged, match="root_mutation_pending"):
+        root.claim_node_recovery(node)
+    root.complete(first)
+    claim = root.claim_node_recovery(node)
+
+    second = root.begin((S("doc_exact", "users/b.json"),))
+    with pytest.raises(SourceChanged, match="root_mutation_pending"):
+        root.claim_node_recovery(node)
+    root.complete(second)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT claim_id FROM node_recovery_claims"
+        ).fetchone() == (claim.claim_id,)
+
+
+def test_foreign_coordinator_cannot_replace_bound_node_owner(tmp_path):
+    node = NodeStore(tmp_path / "node" / "replica.sqlite", _identity())
+    first = MutationCoordinator(tmp_path / "first", _root_identity())
+    first.register_node(node)
+    second = MutationCoordinator(tmp_path / "second", _root_identity())
+
+    with pytest.raises(NodeGenerationChanged, match="coordinator owner changed"):
+        second.register_node(node)
+
+
+def test_corrupt_owner_singleton_cannot_be_rebound(tmp_path):
+    node = NodeStore(tmp_path / "node" / "replica.sqlite", _identity())
+    first = MutationCoordinator(tmp_path / "first", _root_identity())
+    first.register_node(node)
+    with sqlite3.connect(node.path) as conn:
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("UPDATE node_coordinator_owner SET singleton=2")
+
+    with pytest.raises(sqlite3.DatabaseError, match="invalid local node coordinator owner"):
+        NodeStore(node.path, _identity())
+    second = MutationCoordinator(tmp_path / "second", _root_identity())
+    with pytest.raises(sqlite3.DatabaseError, match="invalid local node coordinator owner"):
+        second.register_node(node)
+
+
+def test_migrated_unowned_fence_refuses_coordinator_binding(tmp_path):
+    node = NodeStore(tmp_path / "node" / "replica.sqlite", _identity())
+    registration = node.coordinator_registration()
+    with NodeStore.coordinator_cut(registration) as conn:
+        NodeStore.coordinator_add_fence(
+            conn, coordinator_epoch="1" * 32, token="2" * 64,
+            state="completed",
+        )
+    root = MutationCoordinator(tmp_path / "home", _root_identity())
+
+    with pytest.raises(NodeGenerationChanged, match="unowned local node mutation fences"):
+        root.register_node(node)
+
+
 def test_registration_discards_candidate_that_missed_completed_mutation(tmp_path):
     root = MutationCoordinator(tmp_path / "home", _root_identity())
     node = NodeStore(tmp_path / "node" / "replica.sqlite", _identity())
@@ -260,6 +341,25 @@ def test_mutation_fence_audit_preflights_bounded_fields(world, corruption):
         NodeStore(node.path, _identity())
 
 
+def test_reserved_permit_row_cannot_weaken_foundation_guard(world):
+    root, _store, node, _definition, _position = world
+    root.begin((S("doc_exact", "chats/room/meta.json"),))
+    with sqlite3.connect(node.path) as conn:
+        incarnation, base, pending = conn.execute(
+            "SELECT database_incarnation,admitted_generation,pending_mutations "
+            "FROM node_meta WHERE singleton=1"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO node_admission_permits VALUES(1,?,?,?,?,?,?,?,0)",
+            ("1" * 48, incarnation, base, base + 1, "2" * 64, 0, pending),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="local node mutation pending"):
+            conn.execute(
+                "UPDATE node_meta SET admitted_generation=?,pending_mutations=0,"
+                "health='ready' WHERE singleton=1", (base + 1,),
+            )
+
+
 def test_begin_fanout_failure_leaves_node_pending_and_no_root_intent(
         world, monkeypatch):
     root, _store, node, _definition, _position = world
@@ -277,6 +377,32 @@ def test_begin_fanout_failure_leaves_node_pending_and_no_root_intent(
         assert conn.execute(
             "SELECT state FROM node_mutation_fences"
         ).fetchone() == ("active",)
+    with pytest.raises(NodeGenerationChanged, match="fences are not claimable"):
+        root.claim_node_recovery(node)
+
+
+def test_completion_node_commit_then_root_rollback_cannot_be_claimed(
+        world, monkeypatch):
+    root, _store, node, _definition, _position = world
+    intent = root.begin((S("doc_exact", "chats/room/meta.json"),))
+    original = root._transaction
+
+    @contextmanager
+    def fail_root_commit(**kwargs):
+        with original(**kwargs) as conn:
+            yield conn
+            raise OSError("root commit unavailable")
+
+    monkeypatch.setattr(root, "_transaction", fail_root_commit)
+    with pytest.raises(OSError, match="root commit unavailable"):
+        root.complete(intent)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute(
+            "SELECT state FROM node_mutation_fences"
+        ).fetchone() == ("completed",)
+    monkeypatch.setattr(root, "_transaction", original)
+    with pytest.raises(SourceChanged, match="root_mutation_pending"):
+        root.claim_node_recovery(node)
 
 
 def test_root_commit_failure_withholds_ticket_but_keeps_node_retired(

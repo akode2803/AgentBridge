@@ -146,7 +146,7 @@ def test_v2_format_migration_rotates_epoch_and_rejects_old_writer(tmp_path):
     with upgraded._transaction() as conn:
         assert conn.execute(
             "SELECT format FROM mutation_root WHERE singleton=1"
-        ).fetchone() == (2,)
+            ).fetchone() == (3,)
         assert conn.execute(
             "SELECT token FROM mutation_intents"
         ).fetchone() == (intent.token,)
@@ -154,6 +154,27 @@ def test_v2_format_migration_rotates_epoch_and_rejects_old_writer(tmp_path):
         with pytest.raises(local_source.SourceChanged,
                            match="mutation_(schema|root)_changed"):
             old._schema(conn)
+
+
+def test_format_two_to_three_migration_preserves_coordinator_epoch(tmp_path):
+    home = tmp_path / "home"
+    current = MutationCoordinator(home, "mesh-root")
+    epoch = current.epoch
+    with sqlite3.connect(current.path) as conn:
+        conn.execute("ALTER TABLE mutation_root RENAME TO mutation_root_v3")
+        conn.execute("CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY "
+                     "CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL,"
+                     "format INTEGER NOT NULL CHECK(format=2))")
+        conn.execute("INSERT INTO mutation_root SELECT singleton,identity,epoch,2 "
+                     "FROM mutation_root_v3")
+        conn.execute("DROP TABLE mutation_root_v3")
+
+    upgraded = MutationCoordinator(home, "mesh-root")
+    assert upgraded.epoch == epoch
+    with upgraded._transaction() as conn:
+        assert conn.execute(
+            "SELECT format,revision FROM mutation_root WHERE singleton=1"
+        ).fetchone() == (3, 0)
 
 
 @pytest.mark.parametrize("failure", ["wrong_incarnation", "missing_store"])
