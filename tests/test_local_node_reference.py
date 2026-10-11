@@ -1,5 +1,6 @@
 """Resumable, private current-path reference collection."""
 
+import os
 import sqlite3
 import stat
 
@@ -191,8 +192,9 @@ def test_store_owned_reference_compares_without_in_memory_batch(tmp_path):
     assert result.outcome == "equal"
     assert result.candidate_counts == result.reference_counts == (2, 1, 1, 2)
     assert result.candidate_digest == result.reference_digest
-    mode = stat.S_IMODE((tmp_path / "evidence").stat().st_mode)
-    assert mode & 0o077 == 0
+    if os.name != "nt":
+        mode = stat.S_IMODE((tmp_path / "evidence").stat().st_mode)
+        assert mode & 0o077 == 0
 
 
 def test_store_owned_reference_reports_first_raw_family_mismatch(tmp_path):
