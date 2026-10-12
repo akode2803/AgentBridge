@@ -8,7 +8,7 @@ import pytest
 
 from agentbridge import crypto
 from agentbridge.core.models import BodyRecord, ChatKind, ChatSnapshot, Envelope, Member, MsgKind, Role
-from agentbridge.mesh.events import reaction_signing_bytes, state_signing_bytes
+from agentbridge.mesh.events import reaction_signing_bytes, reaction_v2_signing_bytes, state_signing_bytes
 from agentbridge.mesh.messaging import MessagingService
 from agentbridge.mesh.overlay_index import prepare_overlay_index
 from agentbridge.mesh.overlays import UserState
@@ -67,6 +67,16 @@ def _reaction(actor, bundle, mapping, ns=11):
     }
 
 
+def _reaction_v2(actor, bundle, mapping, ns=11):
+    target, emoji = next(iter(mapping.items()))
+    doc = {'schema': 2, 'ops_origin': 'native', 'v': mapping, 'ops': {
+        target: {'id': f'rx-{ns}-00000000', 'ns': ns,
+                 'emoji': emoji, 'previous': None},
+    }, 'ns': ns, 'sig': ''}
+    doc['sig'] = crypto.sign(bundle, reaction_v2_signing_bytes(CHAT, actor, doc))
+    return doc
+
+
 def _state(bundle, fields, ns=12):
     return {
         **fields, "ns": ns,
@@ -119,7 +129,7 @@ def test_crypto_reactions_and_state_request_exact_proofs_then_match_legacy_rules
         "outsider": crypto.identity_pubs(outsider)[0],
     }
     docs = {
-        P.reactions(CHAT, "alice"): _reaction("alice", alice, {"m1": "👍"}),
+        P.reactions(CHAT, "alice"): _reaction_v2("alice", alice, {"m1": "👍"}),
         P.reactions(CHAT, "departed"): _reaction("departed", departed, {"m1": "👀"}),
         P.reactions(CHAT, "outsider"): _reaction("outsider", outsider, {"m1": "❌"}),
         P.state(CHAT, VIEWER): _state(viewer, {

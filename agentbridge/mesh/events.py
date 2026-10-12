@@ -43,7 +43,7 @@ __all__ = [
     "EV_REACTION",
     "Resolver", "fold", "advance", "signing_bytes", "redaction_signing_bytes",
     "unredaction_signing_bytes",
-    "reaction_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
+    "reaction_signing_bytes", "reaction_v2_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
     "genesis_gid", "GID_LEN", "is_legacy_chat_id",
     "InfoEventIdentity", "InfoEventOutcome", "InfoSuffixEvaluation", "advance_with_outcomes",
 ]
@@ -114,6 +114,13 @@ def reaction_signing_bytes(chat_id: str, user: str, ns: int, mapping: dict) -> b
     someone else (readers ignore files whose signature doesn't verify)."""
     body = json.dumps(mapping, sort_keys=True, separators=(",", ":"))
     return f"{chat_id}|react|{user}|{ns}|{body}".encode()
+
+
+def reaction_v2_signing_bytes(chat_id: str, user: str, doc: dict) -> bytes:
+    """Bind the complete bounded v2 mapping and latest-operation records."""
+    from .reaction_documents import signing_bytes
+
+    return signing_bytes(chat_id, user, doc)
 
 
 def pin_signing_bytes(

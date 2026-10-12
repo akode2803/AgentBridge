@@ -341,6 +341,49 @@ def test_harden_startup_resigns_legacy_reactions_and_pins(world):
     assert env.id in fable.pins(chat.id)
 
 
+def test_v2_reaction_signature_tampering_and_unsigned_reseal(world):
+    meshes, _ = world
+    aryan, fable = meshes['aryan'], meshes['fable']
+    chat = aryan.create_chat('Signed reactions', members=['fable'])
+    env = aryan.post(chat.id, 'message')
+    ripple(aryan, chat.id, fable)
+    fable.react(chat.id, env.id, '👍')
+    ripple(fable, chat.id, aryan)
+    path = P.reactions(chat.id, 'fable')
+    signed = fable.tx.get_doc(path)
+    assert signed['schema'] == 2 and signed['ops_origin'] == 'native'
+
+    def visible():
+        return next(m for m in aryan.messages_for(chat.id) if m.id == env.id).reactions
+
+    assert visible() == {'👍': ['fable']}
+
+    fable.tx.put_doc(path, {**signed, 'ops': {
+        env.id: {**signed['ops'][env.id], 'id': 'forged'},
+    }})
+    assert visible() == {}
+
+    fable.tx.put_doc(path, {**signed, 'ops_origin': 'resealed'})
+    assert visible() == {}
+
+    unsigned = {**signed, 'sig': '', 'ops_origin': 'native'}
+    fable.tx.put_doc(path, unsigned)
+    assert visible() == {}
+    fable.harden_startup()
+    resealed = fable.tx.get_doc(path)
+    assert resealed['schema'] == 2 and resealed['ops_origin'] == 'resealed'
+    assert resealed['v'] == signed['v'] and resealed['ops'] == signed['ops']
+    assert resealed['ns'] == signed['ns'] and resealed['sig']
+    assert visible() == {'👍': ['fable']}
+    from agentbridge.mesh.reaction_documents import parse_native_v2
+    with pytest.raises(ValueError, match='not native'):
+        parse_native_v2(resealed)
+    fable.react(chat.id, env.id, '🎉')
+    fresh = fable.tx.get_doc(path)
+    assert fresh['ops_origin'] == 'native'
+    assert fresh['ops'][env.id]['previous'] is None
+
+
 # ==================== R31.5: per-user state authentication ===================
 
 def test_forged_state_cannot_blank_a_victims_view(world):

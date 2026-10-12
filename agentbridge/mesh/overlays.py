@@ -13,9 +13,12 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from ..core.timekit import next_ns, utcnow_iso
+from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..transport.base import Transport
 from .paths import P
+from .reaction_documents import (
+    MAX_LATEST_OPERATIONS, MAX_NS, ReactionOperation, is_v2_candidate, parse_v2,
+)
 
 __all__ = ["ChatOverlays", "UserState", "reaction_map", "fold_reactions"]
 
@@ -26,10 +29,15 @@ def _doc_id(path: str) -> str:
 
 
 def reaction_map(doc: Any) -> dict[str, str]:
-    """The {msg_id: emoji} mapping out of a reaction doc — signed shape
-    ({"v": mapping, "ns", "sig"}) or the legacy bare mapping."""
+    """The {msg_id: emoji} mapping from v2, signed v1, or legacy bare docs."""
     if not isinstance(doc, dict):
         return {}
+    if is_v2_candidate(doc):
+        try:
+            mapping, _operations = parse_v2(doc)
+        except ValueError:
+            return {}
+        return mapping
     mapping = doc.get("v") if "v" in doc else doc
     if not isinstance(mapping, dict):
         return {}
@@ -126,25 +134,58 @@ class ChatOverlays:
     # -------------------------------------------------------------- reactions
     def set_reaction(
         self, user: str, msg_id: str, emoji: str | None, signer=None,
-    ) -> None:
+    ) -> ReactionOperation:
         """One reaction per user per message (WhatsApp); None removes it.
         The per-USER file is single-writer, so this is a safe read-modify-write.
-        The whole mapping is signed on every write (R31) — ``signer`` is the
+        The v2 mapping and latest operation records are signed on every write.
+        ``signer`` is the
         identity's ``(bytes) -> sig`` callable; readers on an E2EE mesh ignore
         files whose signature doesn't verify."""
-        from .events import reaction_signing_bytes
+        from .events import reaction_v2_signing_bytes
 
         path = P.reactions(self.chat_id, user)
-        mapping = reaction_map(self.tx.get_doc(path, default={}))
+        old = self.tx.get_doc(path, default={})
+        if is_v2_candidate(old):
+            mapping, operations = parse_v2(old)
+            if signer is not None:
+                expected = signer(reaction_v2_signing_bytes(
+                    self.chat_id, user, old))
+                if old['sig'] and old['sig'] != expected:
+                    raise ValueError('reaction v2 signature changed')
+                if not old['sig']:
+                    # The signer may obtain a key between this check and the
+                    # new write.  Never let that transition promote unsigned
+                    # operation IDs into freshly signed native evidence.
+                    operations = {}
+            if old['ops_origin'] == 'resealed':
+                # A fresh local action must not promote unproven historical
+                # operation IDs into a native document.
+                operations = {}
+        else:
+            mapping, operations = reaction_map(old), {}
+        previous = operations.get(msg_id)
+        ns = next_ns()
+        if type(old) is dict and type(old.get('ns')) is int:
+            ns = max(ns, old['ns'] + 1)
+        if ns > MAX_NS:
+            raise OverflowError('reaction operation namespace exhausted')
+        operation = ReactionOperation(new_id('rx', ns), ns, emoji or '',
+                                      previous.id if previous is not None else None)
         if emoji:
             mapping[msg_id] = emoji
         else:
             mapping.pop(msg_id, None)
-        ns = next_ns()
-        sig = signer(reaction_signing_bytes(self.chat_id, user, ns, mapping)) \
-            if signer else ""
-        self.tx.put_doc(path, {"v": mapping, "ns": ns, "at": utcnow_iso(),
-                               "sig": sig})
+        operations[msg_id] = operation
+        while len(operations) > MAX_LATEST_OPERATIONS:
+            oldest = min(operations, key=lambda target: (operations[target].ns, target))
+            del operations[oldest]
+        doc = {'schema': 2, 'v': mapping, 'ops_origin': 'native', 'ops': {
+            target: value.to_dict() for target, value in operations.items()
+        }, 'ns': ns, 'sig': ''}
+        data = reaction_v2_signing_bytes(self.chat_id, user, doc)
+        doc['sig'] = signer(data) if signer else ''
+        self.tx.put_doc(path, doc)
+        return operation
 
     def reaction_docs(self) -> dict[str, dict]:
         """Raw per-user reaction docs — {user: doc}. Verification policy

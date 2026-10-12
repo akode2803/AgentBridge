@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from .. import crypto
 from . import document_observation as source
 
-SCHEMA = 2
+# Increment whenever preparation changes the normalized signing bytes or
+# candidate interpretation.  Ready rows are durable across app upgrades, so a
+# recipe change must make every older build unavailable until it is rebuilt.
+SCHEMA = 3
 MAX_DOCUMENTS = 20_000
 MAX_CANDIDATES = 500_000
 MAX_BUILD_BYTES = 64 * 1024 * 1024
@@ -165,6 +168,16 @@ def initialize(conn):
                     conn.execute(sql)
             conn.execute('DELETE FROM overlay_index_ready')
         _schema(conn)
+        # Normalized signing bytes and candidate interpretation are durable.
+        # An app upgrade may change that recipe without changing the table
+        # layout, so old-schema readiness must not survive reopening the Store.
+        # Raw observations remain intact and the ordinary staged owner rebuilds
+        # the index before publishing readiness again.
+        conn.execute(
+            "DELETE FROM overlay_index_ready "
+            "WHERE typeof(schema)!='integer' OR schema!=?",
+            (SCHEMA,),
+        )
 
 
 def _text(value, label, limit=4096, *, empty=False):

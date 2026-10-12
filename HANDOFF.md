@@ -918,3 +918,37 @@ Astra found and root fixed one P2 where same-chat info work cleared an ordinary
 retained retry job, then independently verified the preserved operation/cooldown
 state and found no remaining P1/P2. Full node event-owner startup remains
 inactive; no app restart, deployment or merge.
+
+## Signed reaction operation evidence — v0.24.375
+
+Reaction documents now have a strict signed v2 form containing the current
+mapping plus one bounded latest operation per retained target. Every local add,
+remove and re-add creates a distinct immutable operation ID and namespace; an
+empty-emoji operation is the removal tombstone and `previous` links the replaced
+incarnation when that evidence is still retained. At most 128 latest operations
+and 4,096 mapping entries are accepted under a one-MiB normalization budget.
+Evicted operation evidence never changes display state, but it cannot support a
+later semantic notification.
+
+The signed `ops_origin` field distinguishes locally generated `native` evidence
+from startup-`resealed` legacy input. Resealed and v1 documents remain valid for
+reaction display after their existing signature and membership checks, but they
+are not operation evidence. Startup always marks an unsigned v2 candidate
+`resealed`, even if the input claims `native`; a later local action discards its
+unproven operation history. A key appearing midway through a write also cannot
+promote unsigned historical IDs into a newly signed native document.
+
+The normalized overlay-index recipe advances to schema 3. Store initialization
+removes only stale ready rows, preserving raw observations so unchanged input is
+rebuilt through the ordinary staged owner before it can be read again. Existing
+proofs are build-bound and cannot transfer to the replacement index.
+
+New reaction breadcrumbs carry only the matching operation ID and namespace in
+addition to their legacy hints. They still are not authority: a future semantic
+consumer must freshly verify the exact signed native v2 document, breadcrumb,
+actor tenure, canonical target author/visibility and final source/session/journal
+CAS. Legacy, resealed, evicted, removed or superseded operations must degrade to
+content-free invalidation. The focused corrected gate passes 146 tests; Ruff and
+diff checks pass. Astra independently reproduced both upgrade-boundary failures,
+verified their repairs end to end and found no remaining P1/P2. Full node event
+startup remains inactive; no restart, deployment or merge.
