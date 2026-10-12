@@ -127,7 +127,8 @@ class NodeEventPump:
                 result = None if gap else self._preparation.run_one()
             except (sqlite3.Error, OSError, node_event_journal.NodeEventJournalChanged):
                 gap, result = False, None
-            if result is None and not gap or result is not None and result.status == 'unavailable':
+            if ((result is None and not gap)
+                    or (result is not None and result.status == 'unavailable')):
                 # Journal storage failure must not terminate the app-owned
                 # ingestion loop or masquerade as successful idle consumption.
                 self._next_due = now + IDLE_RECHECK_S

@@ -136,6 +136,33 @@ def _metadata(row):
     return key, kind, size
 
 
+def minimum_exact_capture_bytes(chat, row, *, state_paths=()):
+    """Irreducible one-row floor under the actual exact-capture accounting.
+
+    Includes record fields, exact selector, mandatory edit/redaction selectors
+    and state paths. Current overlay payloads, reactions, proofs and reply
+    parents may shrink/change, so are deliberately not terminal-size evidence.
+    """
+    key, kind, size = _metadata(row)
+    used = _message_capture_bytes(((key, kind, size),), (key.id,))
+    used += sum(len(name.encode()) for name in _exact_overlay_paths(chat, (key.id,)))
+    for name in state_paths:
+        source._validate_document_path(name)
+        used += len(name.encode())
+    return used
+
+
+def _message_capture_bytes(rows, exact_ids):
+    return (sum(size + len(key.sender.encode()) + len(key.id.encode()) + len(kind.encode())
+                for key, kind, size in rows)
+            + sum(len(ident.encode()) for ident in exact_ids))
+
+
+def _exact_overlay_paths(chat, targets):
+    return tuple(f'chats/{chat}/overlays/{kind}/{ident}.json'
+                 for ident in targets for kind in ('edits', 'redactions'))
+
+
 def capture(
     path: Path, index: overlays.OverlayIndexPosition, *,
     expected: PageInputPosition | None = None,
@@ -219,9 +246,7 @@ def capture(
         unique = {key.id: (key, kind, size) for key, kind, size in selected + exact_meta}
         if len(unique) > overlays.MAX_TARGETS:
             raise OverflowError('page target budget exceeded')
-        used = sum(size + len(key.sender.encode()) + len(key.id.encode()) + len(kind.encode())
-                   for key, kind, size in unique.values())
-        used += sum(len(i.encode()) for i in exact_ids)
+        used = _message_capture_bytes(unique.values(), exact_ids)
         if lookahead is not None:
             used += len(lookahead.sender.encode()) + len(lookahead.id.encode())
         if used > max_bytes:
@@ -237,8 +262,7 @@ def capture(
         used += sum(sum(len(v.encode()) for v in (c.path, c.kind, c.target, c.value))
                     for c in indexed.candidates)
         used += sum(len(v.encode()) for v in indexed.absent_states)
-        doc_paths = tuple(f'chats/{index.chat_id}/overlays/{kind}/{ident}.json'
-                          for ident in targets for kind in ('edits', 'redactions'))
+        doc_paths = _exact_overlay_paths(index.chat_id, targets)
         # Message IDs used as document basenames must obey the existing path
         # validator. Unsupported IDs fail explicitly, never broaden a prefix.
         for name in doc_paths:

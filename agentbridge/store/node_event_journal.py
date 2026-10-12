@@ -354,10 +354,11 @@ def peek_event_identities(
         raise ValueError("invalid node event projection limit")
     if after_chat is not None and not _bounded_text(after_chat, 4096, empty=True):
         raise ValueError('invalid node event rotation cursor')
-    if kind is not None and kind not in ("message", "info"):
+    if kind is not None and (type(kind) is not str or kind not in ("message", "info", "unknown")):
         raise ValueError("invalid node event projection kind")
-    kind_filter = "" if kind is None else " AND kind=?"
-    kind_args = () if kind is None else (kind,)
+    kind_filter = ("" if kind is None else " AND kind NOT IN (?,?)"
+                   if kind == 'unknown' else " AND kind=?")
+    kind_args = () if kind is None else ('message', 'info') if kind == 'unknown' else (kind,)
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError(
@@ -389,7 +390,7 @@ def peek_event_identities(
         "m.ns,m.sender,m.kind,length(CAST(m.payload AS BLOB)) "
         "FROM node_event_journal_items j LEFT JOIN messages m "
         "ON m.chat_id=j.chat AND m.id=j.message_id "
-        "WHERE j.chat=?" + ("" if kind is None else " AND j.kind=?")
+        "WHERE j.chat=?" + kind_filter.replace('kind', 'j.kind')
         + " ORDER BY j.sequence LIMIT ?",
         (first[0], *kind_args, limit),
     ).fetchall()
@@ -497,16 +498,20 @@ def consume_event_identities_in_transaction(
 def retire_event_identities_as_gap(
     store, expected: tuple[NodeEventIdentity, ...],
     *, require_oversize: bool = False,
+    state_paths: tuple[str, ...] = (), require_unknown: bool = False,
 ) -> bool:
     """CAS-retire one terminally unprojectable event and request resync.
 
     Runtime callers must first adaptively split a budget failure down to one
     identity, or establish another terminal malformed-input result. Transient
     source, proof, key and authority work must retain the journal rows instead.
-    require_oversize proves a matching current individual row exceeds the exact
-    capture ceiling in this same transaction, without reading its payload.
+    require_oversize proves the matching row's irreducible exact-capture floor
+    exceeds the ceiling in this transaction, without fetching its payload.
+    require_unknown independently checks the unsupported journal kind.
     """
-    if type(expected) is not tuple or len(expected) != 1 or type(require_oversize) is not bool:
+    if (type(expected) is not tuple or len(expected) != 1
+            or type(require_oversize) is not bool or type(require_unknown) is not bool
+            or type(state_paths) is not tuple or len(state_paths) > 1):
         raise ValueError("terminal node event retirement requires one identity")
     sequences, wanted, placeholders = _event_batch(expected)
     conn = store._conn()
@@ -524,6 +529,9 @@ def retire_event_identities_as_gap(
         if tuple(rows) != wanted:
             conn.commit()
             return False
+        if require_unknown and expected[0].kind in ('message', 'info'):
+            conn.commit()
+            return False
         if require_oversize:
             item = expected[0]
             page_inputs._message_schema(conn)
@@ -532,7 +540,10 @@ def retire_event_identities_as_gap(
                 'WHERE chat_id=? AND id=?', (item.chat_id, item.message_id),
             ).fetchone()
             if (current is None or current[:3] != (item.ns, item.sender, item.kind)
-                    or type(current[3]) is not int or current[3] <= page_inputs.MAX_BYTES):
+                    or type(current[3]) is not int
+                    or page_inputs.minimum_exact_capture_bytes(item.chat_id,
+                        (item.ns, item.sender, item.message_id, item.kind, current[3]),
+                        state_paths=state_paths) <= page_inputs.MAX_BYTES):
                 conn.commit()
                 return False
         deleted = conn.execute(

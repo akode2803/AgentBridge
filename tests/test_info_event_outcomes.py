@@ -142,3 +142,15 @@ def test_normalized_numeric_id_collision_is_rejected_and_mixed_ids_have_canonica
                                          (identity(numeric), identity(later)))
     assert result.snapshot.name == 'Later'
     assert all(o.status == 'applied' for o in result.outcomes)
+
+
+@pytest.mark.parametrize('malformed_type', [None, 7, ['future'], {'type': 'future'}, 'x' * 257])
+def test_unknown_type_gets_bounded_ignored_outcome_without_blocking_later_valid_event(world, malformed_type):
+    _chat, directory, _genesis, snapshot = world
+    malformed = signed(world, 'unknown', 2, 'alice', {'type': malformed_type})
+    valid = signed(world, 'valid', 3, 'alice', {'type': 'renamed', 'name': 'Valid'})
+    result = events.advance_with_outcomes(snapshot, [valid, malformed], directory,
+                                         (identity(malformed), identity(valid)))
+    assert [o.status for o in result.outcomes] == ['ignored', 'applied']
+    assert result.outcomes[0].event_type == '' and result.outcomes[0].actor == ''
+    assert result.snapshot.name == 'Valid'
