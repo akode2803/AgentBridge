@@ -443,7 +443,7 @@ def publish(store, expected, documents, *, observed_ns, max_documents=20_000,
     proves namespace completeness. Source selectors are fixed by that owner.
     """
     expected = _expected(store, expected)
-    if expected.raw.source_id.startswith('stage:'):
+    if expected.raw.source_id.startswith(('stage:', 'coupled:')):
         raise SourceChanged('staged_source_requires_staged_publication')
     retired = retire_for_publication(store, expected)
     published = store.publish_document_batch(retired.raw, documents,

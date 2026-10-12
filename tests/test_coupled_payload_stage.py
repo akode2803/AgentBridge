@@ -284,15 +284,57 @@ def test_numeric_legacy_message_id_keeps_original_payload(store):
     ).fetchone() == ("123", raw.decode())
 
 
-@pytest.mark.parametrize("raw,ident", [
-    (b'{"id":true,"ns":1,"from":"alice"}', "True"),
-    (b'{"id":"m1","ns":true,"from":"alice"}', "m1"),
-])
-def test_boolean_identity_fields_are_not_integer_legacy_values(store, raw, ident):
+def test_boolean_message_id_is_not_an_integer_legacy_value(store):
     _source, _owner, payload = _owners(store)
-    value = payload_stage.RawInput(1, True, ident, 1, "alice", "message", raw)
+    raw = b'{"id":true,"ns":1,"from":"alice"}'
+    value = payload_stage.RawInput(
+        1, True, "True", 1, "alice", "message", raw,
+    )
     with pytest.raises(ValueError, match="identity mismatch"):
         payload_stage.append_stream(store, payload, "alice@box", 1, (value,))
+
+
+def test_true_namespace_preserves_legacy_sqlite_integer_semantics(store):
+    _source, owner, payload = _owners(store)
+    raw = b'{"id":"m1","ns":true,"from":"alice"}'
+    value = payload_stage.RawInput(
+        1, True, "m1", True, "alice", "message", raw,
+    )
+    payload_stage.append_stream(store, payload, "alice@box", 1, (value,))
+    assert store._conn().execute(
+        "SELECT ns FROM coupled_payload_messages WHERE stage=?",
+        (owner.document_stage.source_id,),
+    ).fetchone() == (1,)
+
+
+def test_empty_writer_owner_matches_legacy_stream_semantics(store):
+    _source, owner, payload = _owners(store)
+    raw = b'{"id":"m1","ns":1,"from":""}'
+    value = payload_stage.RawInput(
+        1, True, "m1", 1, "", "message", raw,
+    )
+    payload_stage.append_stream(store, payload, "@box", 1, (value,))
+    assert store._conn().execute(
+        "SELECT sender FROM coupled_payload_messages WHERE stage=?",
+        (owner.document_stage.source_id,),
+    ).fetchone() == ("",)
+
+
+def test_numeric_zero_message_id_is_rejected_defensively(store):
+    _source, _owner, payload = _owners(store)
+    value = payload_stage.RawInput(
+        1, True, "0", 1, "alice", "message",
+        b'{"id":0,"ns":1,"from":"alice"}',
+    )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        payload_stage.append_stream(
+            store, payload, "alice@box", 1, (value,),
+        )
+
+
+def test_stage_budgets_cover_maximum_detached_capture_representation():
+    assert payload_stage.MAX_PAYLOAD_BYTES >= 8 * 1024 * 1024
+    assert payload_stage.MAX_BYTES >= 3 * 64 * 1024 * 1024
 
 
 def test_missing_provider_uniqueness_index_blocks_append(store):

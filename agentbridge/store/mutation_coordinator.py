@@ -735,11 +735,10 @@ class MutationCoordinator:
         When supplied, ``node_position`` holds the exact admitted node cut under
         root -> node ordering through the caller's later Store admission.
         """
-        from ..node.admission import NodeFinalizationPosition
-        from ..node.store import NodeStore
+        from ..node.store import NodeStore, _node_position
 
-        if node_position is not None and type(node_position) is not NodeFinalizationPosition:
-            raise ValueError('invalid node finalization position')
+        if node_position is not None:
+            node_position = _node_position(node_position)
         store = SimpleNamespace(path=Path(store.path).resolve())
         value = scopes._definition(value)
         if node_position is not None:

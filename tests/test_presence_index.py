@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from agentbridge.store import (document_observation as docs, local_source,
+from agentbridge.store import (coupled_payload_stage, coupled_stage,
+                               document_observation as docs, local_source,
                                presence_index, presence_publication,
                                source_selectors, staged_source)
 from agentbridge.store.db import Store
@@ -147,6 +148,42 @@ def test_derived_floor_exhausts_stage_budget_before_readiness(rig):
     with pytest.raises(presence_index.PresenceIndexUnavailable):
         _admit(rig, retired, stage)
     assert not local_source.capture(rig[0], rig[2].source).ready
+
+
+def test_presence_build_counts_private_coupled_payload_capacity(
+        rig, monkeypatch):
+    retired, stage, _raw = _stage(rig, [{
+        'presence/one.json': {'user': 'alice', 'last_seen_ns': 7},
+    }])
+    store = rig[0]
+    coupled_payload_stage.initialize(store)
+    source = local_source.claim_collection(
+        store, local_source.capture(store, 'payload-source'),
+    )
+    owner = coupled_stage.begin(store, source, 'room')
+    payload = coupled_payload_stage.begin(store, owner)
+    body = 'x' * 2_000
+    encoded = (
+        '{"id":"m","ns":1,"from":"alice","body":"%s"}' % body
+    ).encode()
+    coupled_payload_stage.append_stream(
+        store, payload, 'alice@box', 1,
+        (coupled_payload_stage.RawInput(
+            1, True, 'm', 1, 'alice', 'message', encoded,
+        ),),
+    )
+    conn = store._conn()
+    document_bytes = conn.execute(
+        'SELECT coalesce(sum(total_bytes),0) FROM staged_sources',
+    ).fetchone()[0]
+    payload_bytes = coupled_payload_stage.staged_bytes(conn)
+    monkeypatch.setattr(
+        staged_source, 'MAX_GLOBAL_BYTES', document_bytes + payload_bytes,
+    )
+
+    with pytest.raises(
+            OverflowError, match='presence index stage byte budget'):
+        presence_index.build(store, stage, expected=retired)
 
 
 def test_raw_or_index_mutation_after_build_invalidates_position(rig):

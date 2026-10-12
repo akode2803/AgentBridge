@@ -12,10 +12,14 @@ from .document_observation import MAX_SQLITE_INTEGER
 MAX_MESSAGES = 100_000
 MAX_RAW_ROWS = 100_000
 MAX_STREAMS = 10_000
-MAX_BYTES = 64 * 1024 * 1024
+# Detached capture admits at most 64 MiB. A staged accepted row stores its raw
+# JSON once plus normalized identity fields already represented inside that JSON;
+# three times the detached bound safely covers that normalized representation.
+MAX_BYTES = 3 * 64 * 1024 * 1024
 MAX_TEXT_BYTES = 4096
 MAX_KIND_BYTES = 256
-MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
+# One replay response is capped at 8 MiB of raw capture work.
+MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 _STATE = (
     "CREATE TABLE coupled_payload_stages("
@@ -452,11 +456,11 @@ def _raw(value, head, log_name):
         raise ValueError("invalid provider row classification")
     if value.accepted:
         message_id = _text(value.message_id, "message id")
-        sender = _text(value.sender, "sender")
+        sender = _text(value.sender, "sender", allow_empty=True)
         if sender != log_name.split("@", 1)[0]:
             raise ValueError("message sender differs from log owner")
         kind = _text(value.kind, "message kind", MAX_KIND_BYTES)
-        if (type(value.ns) is not int
+        if (not isinstance(value.ns, int)
                 or not 1 <= value.ns <= MAX_SQLITE_INTEGER):
             raise ValueError("invalid message namespace")
         if (type(value.payload) is not bytes
@@ -466,10 +470,16 @@ def _raw(value, head, log_name):
             decoded = json.loads(value.payload.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise ValueError("invalid message payload JSON") from exc
+        decoded_id = decoded.get("id") if type(decoded) is dict else None
         if (type(decoded) is not dict
-                or type(decoded.get("id")) not in (str, int)
+                or type(decoded_id) not in (str, int)
+                or isinstance(decoded_id, bool)
+                or (type(decoded_id) is int and (
+                    decoded_id == 0
+                    or not -(2**63) <= decoded_id <= 2**63 - 1))
                 or str(decoded["id"]) != message_id
-                or type(decoded.get("ns")) is not int
+                or not isinstance(decoded.get("ns"), int)
+                or not 1 <= decoded["ns"] <= MAX_SQLITE_INTEGER
                 or decoded["ns"] != value.ns
                 or decoded.get("from") != sender
                 or decoded.get("kind", "message") != kind):
@@ -552,8 +562,9 @@ def _present(conn):
     ).fetchone() is not None
 
 
-def _text(value, label, limit=MAX_TEXT_BYTES):
-    if type(value) is not str or not value or "\x00" in value:
+def _text(value, label, limit=MAX_TEXT_BYTES, *, allow_empty=False):
+    if (type(value) is not str or (not value and not allow_empty)
+            or "\x00" in value):
         raise ValueError(f"invalid {label}")
     try:
         size = len(value.encode("utf-8"))

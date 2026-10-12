@@ -142,6 +142,20 @@ def test_abort_validates_owner_before_mutating_document_stage(store):
     ).fetchone() == ("building",)
 
 
+def test_owner_row_shape_is_bounded_before_values_are_materialized(store):
+    expected = _claim(store)
+    handle = coupled_stage.begin(store, expected, CHAT)
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE coupled_stage_owners SET logical_source=zeroblob(1048576) "
+            "WHERE stage=?", (handle.document_stage.source_id,),
+        )
+    with pytest.raises(
+            coupled_stage.CoupledStageChanged,
+            match="malformed coupled stage owner"):
+        coupled_stage.abort(store, handle)
+
+
 def test_abort_never_rolls_back_callers_transaction(store):
     expected = _claim(store)
     handle = coupled_stage.begin(store, expected, CHAT)

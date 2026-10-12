@@ -203,8 +203,11 @@ def build(store, stage, *, expected, check_open=None):
             used = conn.execute('SELECT coalesce(sum(total_bytes),0) FROM '
                 '(SELECT total_bytes FROM staged_sources LIMIT ?)',
                 (staged_source.MAX_STAGES + 1,)).fetchone()[0]
+            from . import coupled_payload_stage
+            payload_used = coupled_payload_stage.staged_bytes(conn)
             if (stage_row[7] + added > stage_row[8]
-                    or used + added > staged_source.MAX_GLOBAL_BYTES):
+                    or used + payload_used + added
+                    > staged_source.MAX_GLOBAL_BYTES):
                 raise OverflowError('presence index stage byte budget')
             conn.execute('UPDATE staged_sources SET total_bytes=total_bytes+? WHERE source=?',
                          (added, raw.source_id))

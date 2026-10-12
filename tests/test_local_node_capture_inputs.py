@@ -291,6 +291,19 @@ def test_envelope_store_key_compatibility_and_namespace_bounds(tmp_path):
             4, "chat-a", "alice",
             ('{"id":"%s","ns":4,"from":"alice"}' % ("x" * 4097)).encode(),
         ),
+        NodeLogRow(5, "chat-a", "alice", b'{"id":0,"ns":5,"from":"alice"}'),
+        NodeLogRow(
+            6, "chat-a", "alice",
+            b'{"id":9223372036854775808,"ns":6,"from":"alice"}',
+        ),
+        NodeLogRow(
+            7, "chat-a", "alice",
+            b'{"id":-9223372036854775809,"ns":7,"from":"alice"}',
+        ),
+        NodeLogRow(
+            8, "chat-a", "alice",
+            b'{"id":"true-ns","ns":true,"from":"alice"}',
+        ),
     )
     with LocalNodeServer(tmp_path, identity()) as server:
         admit(server, NodeInputBatch(log_rows=rows, logs_mode="replace"))
@@ -299,9 +312,44 @@ def test_envelope_store_key_compatibility_and_namespace_bounds(tmp_path):
         )
     captured = result.streams[0].rows
     assert captured[0].accepted and captured[0].message_id == "7"
-    assert [row.rejection_reason for row in captured[1:]] == [
+    assert [row.rejection_reason for row in captured[1:7]] == [
         "invalid_namespace", "invalid_namespace", "invalid_message_id",
+        "invalid_message_id", "invalid_message_id", "invalid_message_id",
     ]
+    assert captured[7].accepted and captured[7].ns is True
+
+
+def test_input_byte_accounting_includes_chat_id_per_log_row(tmp_path):
+    chat = "c" * 200
+    payload = b'{"id":"one","ns":1,"from":"alice"}'
+    with LocalNodeServer(tmp_path, identity()) as server:
+        admit(server, NodeInputBatch(log_rows=(
+            NodeLogRow(1, chat, "alice", payload),
+        ), logs_mode="replace"))
+        result = capture_detached_inputs(
+            LocalNodeClient(tmp_path, identity()), canonical(chat),
+        )
+    assert result.input_bytes == (
+        2 * len("alice") + 64 + len(chat.encode("utf-8")) + len(payload)
+    )
+
+
+def test_replay_chunks_long_stream_names_to_fit_wire_request(tmp_path):
+    rows = tuple(
+        NodeLogRow(
+            index, "chat-a", f"writer-{index:02d}-" + "x" * 1_010,
+            ('{"id":"m%d","ns":%d,"from":"writer-%02d-%s"}'
+             % (index, index, index, "x" * 1_010)).encode(),
+        )
+        for index in range(1, 65)
+    )
+    with LocalNodeServer(tmp_path, identity()) as server:
+        admit(server, NodeInputBatch(log_rows=rows, logs_mode="replace"))
+        result = capture_detached_inputs(
+            LocalNodeClient(tmp_path, identity()), canonical(),
+        )
+    assert result.raw_log_rows == result.accepted_log_rows == 64
+    assert len(result.streams) == 64
 
 
 def test_stream_inventory_retries_with_smaller_wire_page(tmp_path, monkeypatch):

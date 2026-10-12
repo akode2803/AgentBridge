@@ -162,6 +162,32 @@ def test_publication_node_position_must_cover_log_scope(world):
             pytest.fail("incomplete node scope reached publisher")
 
 
+def test_publication_validates_node_position_before_scope_enumeration(world):
+    root, store, _node, definition, position = world
+    malformed = replace(
+        position,
+        scope_positions=(item for item in position.scope_positions),
+    )
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        with root.publication_gate(
+                store, definition, node_position=malformed):
+            pytest.fail("malformed node position reached publisher")
+
+
+@pytest.mark.parametrize("scope_id", ([], "x" * 1_025))
+def test_publication_preflights_nested_node_scope_fields(world, scope_id):
+    root, store, _node, definition, position = world
+    malformed = replace(position, scope_positions=tuple(
+        replace(item, scope_id=scope_id)
+        if item.scope_kind == "chat" else item
+        for item in position.scope_positions
+    ))
+    with pytest.raises(ValueError, match="invalid node finalization position"):
+        with root.publication_gate(
+                store, definition, node_position=malformed):
+            pytest.fail("malformed nested node scope reached publisher")
+
+
 def test_finalization_preflights_keyed_node_registration(world):
     root, store, _node, definition, position = world
     with sqlite3.connect(root.path) as conn:
