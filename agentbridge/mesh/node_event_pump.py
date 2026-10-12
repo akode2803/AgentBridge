@@ -1,7 +1,8 @@
 """Bounded consumption of node-admitted Store work.
 
 The durable journal contains identities and delivery high-waters, never an
-authority result. Claims therefore emit only content-free canonical-refetch
+authority result. Canonically verified native reactions may emit identity-only
+semantic wakes; all other info claims remain content-free canonical-refetch
 invalidations. They are at-most-once like the process-local EventBus; an
 explicit global read-model invalidation heals every known gap.
 """
@@ -153,6 +154,8 @@ class NodeEventPump:
                             event = message_event(message)
                             if event is not None:
                                 self.bus.publish(event)
+                        for event in result.reactions:
+                            self.bus.publish(event)
                         self.bus.publish(Event(eventbus.READ_MODEL, result.chat_id,
                                                {'scope': 'chat'}, ns=time.time_ns()))
                     except Exception:

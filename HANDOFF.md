@@ -963,3 +963,92 @@ shared-transport overwrite cannot permanently lock out reactions. Oversized v1
 maps migrate through a deterministic 4,096-entry cut that always preserves the
 new action. The 85-test reaction/security/index/page gate and Ruff/diff checks
 pass locally; replacement review and cross-platform CI remain pending.
+
+## Fresh retained reaction mapping and notifications — v0.24.376
+
+The retained info lane now semantically maps only future exact human reaction
+breadcrumbs that match a currently signed native v2 operation. The operation
+freshly verifies the strict breadcrumb envelope and signature, explicit actor
+tenure at both namespaces, current reaction document signature and operation,
+and the canonical target author/visibility under the same final local source
+and journal CAS. The breadcrumb's `to` field is ignored. Target selection reads
+only exact actor documents and exact target messages; it does not require the
+complete room reaction manifest.
+
+Missing admitted documents or target rows remain pending. Malformed, forged,
+legacy, resealed, removed, evicted and superseded evidence is terminally
+nonsemantic and still produces the generic `READ_MODEL` invalidation. Agent
+reaction breadcrumbs also remain generic until projection captures a historical
+responsible-owner witness. A verified semantic event carries only breadcrumb ID
+and actor. GUI and background notification drains repeat the projection and
+fresh read/mute, route/session, source and shutdown gates before deriving emoji
+or preview text.
+
+Info scheduling now uses one bounded identity quantum and a finite per-chat
+sequence sweep. This fixed an independently reproduced starvation case where
+two unresolved reactions could block later same-chat info. New tail admissions
+cannot extend the active sweep indefinitely; unresolved identities are revisited
+after the sweep wraps. The focused page/journal/pump/notification/SSE gate passes
+174 tests. Ruff and diff checks pass. Astra reproduced the old starvation,
+verified the finite-sweep repair under a continuously growing tail and found no
+remaining P1/P2.
+
+The PR review correction carries the signed operation namespace through final
+target mapping and suppresses a target whose canonical message is newer than
+the reaction. A future message can no longer inherit a precreated operation for
+the same chosen ID. Event and operation must also fall in one actor tenure; when
+history sharing is disabled, the canonical target must be at or after that
+tenure's join cut. A newly joined member can no longer trigger semantic wakes or
+notifications for history they could not see. Breadcrumb decoding catches only
+malformed admitted input; `MemoryError` reaches the page-operation resource
+boundary and leaves the journal item retryable. Current mapping verifies the
+new `ops_sig` proof while `sig` remains a legacy display signature. The combined
+retained-event/journal/page/reaction/security gate passes 125 tests; Ruff and
+diff checks pass locally.
+
+The PR 132 Windows full suite exposed a test-isolation race, not an escaped
+read-ack fence: the acknowledgment reservation had reached `aborted`, while an
+unrelated writer owned the one remaining root intent. Read-ack tests now assert
+that their exact durable intent and scopes are gone instead of requiring the
+shared coordinator to be globally idle. All four affected cases pass in five
+consecutive focused runs; Ruff and whitespace checks pass.
+
+Two later PR 132 review findings tighten retained reaction proof. A new signed
+reaction first publishes an unchanged actor-state checkpoint at the operation's
+exact namespace, and its opaque operation ID binds that checkpoint signature.
+Semantic mapping requires the current authenticated state to match that exact
+checkpoint; an older restored state, a later state or a pre-checkpoint client
+therefore degrades to generic invalidation. Reaction and state documents are
+captured separately inside one SQLite read transaction with independent 4 MiB
+ceilings, then charged together to the request ledger, so two individually
+bounded documents no longer fail the old combined ceiling forever. Rollback,
+near-ceiling capture and the broader reaction, messaging, notification and
+security gate pass 145 tests; Ruff and whitespace checks pass. Astra found no
+P1/P2, verified preserved state fields and later-state rejection with independent
+probes, and identified a coverage gap for matching hidden/cleared checkpoints;
+the added durable parametrized regression passes.
+
+The next current-head review found two remaining historical-policy gaps. Current
+mutable account documents cannot prove whether either participant blocked a DM
+at the reaction cut after an unblock or rollback, so DM reactions now remain
+generic read-model invalidations until the protocol carries bounded authenticated
+block history. A real-signature independent probe then showed the same boundary
+for group target visibility: a complete signed delete/void cycle or absent
+redaction document can be restored after a newer deletion, so the current
+mutable document cannot prove visibility at the reaction cut. Active tombstones
+remain suppressing, while absence and signed voids now stay generic until the
+protocol carries bounded authenticated target-visibility history. Consequently
+retained semantic reaction notifications remain safely disabled for both DMs
+and groups; signed reaction operations and the bounded projection path are
+future protocol groundwork rather than release evidence. The final broader
+reaction, messaging, notification and security gate passes 146 tests; Ruff and
+whitespace checks pass.
+
+This stack remains inactive in product startup. No app restart, deployment or
+merge has occurred. The next major slice is app-owned startup/close binding for
+the reviewed local-node recovery, publication, retained-event and notification
+owners, followed by real-app observability and rollback validation.
+
+The completed #128 Defender experiment did not improve Windows CI: the full
+test step took 60m27s versus the 59m44s baseline, and its attempted restore step
+failed. PR #128 was closed without merging; keep the GitHub runner defaults.

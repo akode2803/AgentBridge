@@ -180,7 +180,8 @@ class Notifier:
                 self._delivery_scope.depth = depth
 
     def _queue_node(self, event: Event, *, only_with_sinks=False) -> bool:
-        if (event.type != eventbus.MESSAGE or type(event.data) is not dict
+        if (event.type not in {eventbus.MESSAGE, eventbus.REACTION}
+                or type(event.data) is not dict
                 or set(event.data) != {'id', 'from'}):
             return False
         # Identity-only wakes never enter legacy snapshot/full-fold paths,

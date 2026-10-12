@@ -1159,3 +1159,44 @@ canonical visible target author, then finalize against current source, session
 and journal identity. Superseded, removed, evicted, legacy and resealed evidence
 falls back to the content-free invalidation lane. This version does not activate
 the local node event owner.
+
+Version 0.24.376 builds a bounded projection for an exact signed native v2 human
+reaction breadcrumb. The request verifies the breadcrumb signature, explicit
+actor tenure at both operation and event namespaces, the current actor reaction
+document and its matching operation, then canonically projects the exact target
+under one final source/journal cut. It does not capture the room-wide reaction
+manifest. Missing admitted reaction documents or targets remain retryable;
+malformed, legacy, resealed, removed, evicted or superseded evidence becomes
+only the generic per-chat read-model invalidation.
+
+That machinery does not currently publish semantic reaction wakes. Current
+mutable account documents cannot prove that neither DM participant blocked the
+other at the reaction cut after an unblock or rollback. Current redaction
+documents likewise cannot prove group target visibility: a complete signed
+delete/void cycle, or document absence, can be restored after a newer tombstone
+that was active when the reaction occurred. An active authenticated tombstone
+can suppress, but absence or a void cannot authorize. All retained reactions
+therefore remain generic invalidations until the protocol carries bounded
+authenticated block history and target-visibility history. Local generations,
+transport cursors and current cached documents must not fill that authority gap.
+
+The EventBus receives only breadcrumb ID and actor. GUI and background
+notification consumers recapture the breadcrumb, operation, target, viewer
+read/mute state and current session/source gates before deriving emoji or
+preview text. Breadcrumb `to` is never notification authority. Agent-authored
+reaction breadcrumbs remain generic invalidations until a captured historical
+responsible-owner witness exists.
+
+The signed operation namespace is retained through presentation and must be at
+least the canonical target message namespace. This prevents an actor from
+precreating evidence for a nonexistent chosen ID and later attaching it to a
+newer message. Malformed admitted breadcrumb JSON is terminally nonsemantic,
+while resource exhaustion during decode propagates to the bounded operation
+failure mapper and leaves the journal identity pending.
+
+Info scheduling processes one identity per quantum. Each chat has a finite
+admitted sequence high-water: unresolved reactions rotate behind later generic
+info, and a continuously growing tail waits for the next sweep rather than
+postponing retained earlier work forever. Schedulers retain only bounded
+identity, cursor and operation-ledger state; final exact-CAS remains the sole
+consumption decision. The local node owner is still inactive in app startup.

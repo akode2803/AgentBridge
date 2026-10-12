@@ -38,10 +38,12 @@ class TranscriptOverlays:
     viewer_state: dict
 
 
-def _detached(inputs):
+def _detached(inputs, *, require_reactions=True):
     inputs = _snapshot(inputs)
     selected = inputs.indexed
-    if type(selected) is not index.IndexedOverlayInputs or selected.reactions_complete is not True:
+    if (type(require_reactions) is not bool
+            or type(selected) is not index.IndexedOverlayInputs
+            or require_reactions and selected.reactions_complete is not True):
         raise PageOverlaysUnavailable('complete_reaction_manifest_required')
     position = index._wanted(selected.position, Path(inputs.position.messages.database_path))
     if position != inputs.position.overlays:
@@ -111,14 +113,17 @@ def _detached(inputs):
 
 
 def assemble_page_overlays(inputs: RawPageInputs, viewer: str, snapshot: ChatSnapshot,
-                           *, directory=None, crypto_boundary=True) -> TranscriptOverlays:
+                           *, directory=None, crypto_boundary=True,
+                           require_reactions=True) -> TranscriptOverlays:
     """Assemble only transcript-target reactions, hidden/starred IDs and cuts.
 
     Missing evidence requests background verification; no whole-map foreground
     fallback. Rerun this function after recapture, so keys are freshly resolved.
     The supplied membership snapshot is a request input, not continuing authority.
     """
-    position, docs, maps, absent, proofs = _detached(inputs)
+    position, docs, maps, absent, proofs = _detached(
+        inputs, require_reactions=require_reactions,
+    )
     index._text(viewer, 'viewer', 256)
     if type(snapshot) is not ChatSnapshot:
         raise PageOverlaysUnavailable('inconsistent_membership_input')

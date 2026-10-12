@@ -370,8 +370,10 @@ class MessagingService:
 
     def react(self, chat_id: str, msg_id: str, emoji: str | None) -> None:
         self._require_member(chat_id)
+        state = self._state(chat_id)
         operation = ChatOverlays(self.tx, chat_id).set_reaction(
-            self.user, msg_id, emoji, signer=self._sign_event)
+            self.user, msg_id, emoji, signer=self._sign_event,
+            state_checkpoint=state.checkpoint if emoji else None)
         # V50: a notification breadcrumb — the overlay doc above stays the
         # authoritative store, but overlay docs never ride the log, so
         # nothing downstream (sync bus → notifier → SSE/CLI hook) could see

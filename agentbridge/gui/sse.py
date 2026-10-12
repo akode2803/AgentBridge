@@ -38,6 +38,10 @@ def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
     if ev.type == eventbus.MESSAGE:
         out["id"] = ev.data.get("id", "")
         out["from"] = ev.data.get("from", "")
+    elif ev.type == eventbus.REACTION and type(ev.data) is dict \
+            and set(ev.data) == {'id', 'from'}:
+        out["id"] = ev.data.get("id", "")
+        out["from"] = ev.data.get("from", "")
     elif ev.type == eventbus.CHAT_UPDATE:
         out["event"] = (ev.data.get("event") or {}).get("type", "")
     elif ev.type == eventbus.ADDED_TO_CHAT:
@@ -47,7 +51,9 @@ def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
         scope = ev.data.get('scope')
         out['scope'] = scope if type(scope) is str and scope in SCOPES else 'global'
     out["trace_ref"] = str(out.get("id") or f"{ev.type}-{ev.ns}")
-    if notifier is not None and ev.type in (
+    identity_reaction = (ev.type == eventbus.REACTION and type(ev.data) is dict
+                         and set(ev.data) == {'id', 'from'})
+    if notifier is not None and not identity_reaction and ev.type in (
         eventbus.MESSAGE, eventbus.ADDED_TO_CHAT, eventbus.REACTION,
     ):
         try:
@@ -134,7 +140,8 @@ def stream(app: GuiApp, sub: Subscription, ping_s: float, *, token=None) -> Iter
                 yield _control(reason)
                 return
             if ev is not None:
-                if (notifications is not None and ev.type == eventbus.MESSAGE
+                if (notifications is not None
+                        and ev.type in (eventbus.MESSAGE, eventbus.REACTION)
                         and type(ev.data) is dict and set(ev.data) == {'id', 'from'}):
                     try:
                         notifications.enqueue(ev)
@@ -151,9 +158,11 @@ def stream(app: GuiApp, sub: Subscription, ping_s: float, *, token=None) -> Iter
                 step = notifications.run_one()
                 if step.notification is not None:
                     note = step.notification
+                    ident = getattr(step.wake, 'message_id',
+                                    getattr(step.wake, 'event_id', ''))
                     payload = {"type": "notification", "chat_id": note.chat_id,
-                        "id": step.wake.message_id, "ns": note.ns,
-                        "server_ns": time.time_ns(), "trace_ref": step.wake.message_id,
+                        "id": ident, "ns": note.ns,
+                        "server_ns": time.time_ns(), "trace_ref": ident,
                         "notify": _notify_lane(note)}
                     encoded = f"data: {json.dumps(payload)}\n\n".encode()
                     reason = _reason(app, sub, token)

@@ -169,7 +169,7 @@ def capture(
     before: MessageKey | None = None, before_inclusive: bool = False, raw_limit: int = 128,
     exact_ids: tuple[str, ...] = (), state_paths: tuple[str, ...] = (),
     proof_keys: tuple[tuple[str, str], ...] = (), max_bytes: int = MAX_BYTES,
-    include_reactions: bool = False,
+    include_reactions: bool = False, include_reaction_candidates: bool = True,
 ) -> RawPageInputs:
     """One SQLite read snapshot for bounded raw rows and their dependencies.
 
@@ -254,7 +254,8 @@ def capture(
         targets = tuple(sorted(unique))
         indexed = overlays._capture(conn, path, index, targets, state_paths,
                                     max_bytes=min(overlays.MAX_SELECT_BYTES, max_bytes - used),
-                                    include_reactions=include_reactions)
+                                    include_reactions=include_reactions,
+                                    include_reaction_candidates=include_reaction_candidates)
         # R204 budgets count UTF-8 field content, not Python/JSON framing. Charge
         # returned fields here too so combined capture cannot multiply the cap.
         used += sum(5 + sum(len(v.encode()) for v in (d.path, d.kind, d.actor, d.shape_error, d.scalars_json))
