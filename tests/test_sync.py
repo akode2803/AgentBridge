@@ -266,6 +266,46 @@ def test_retirement_timeout_stays_retired_and_receipt_is_exact(
     store.close()
 
 
+def test_retirement_wakes_and_joins_a_waiting_hint_loop(tmp_path):
+    import threading
+
+    class WakeWatcher(Watcher):
+        def __init__(self):
+            self.entered = threading.Event()
+            self.wake = threading.Event()
+
+        def wait(self, timeout):
+            self.entered.set()
+            return self.wake.wait(timeout)
+
+        def poke(self):
+            self.wake.set()
+
+    class WakeTransport(FeedTransport):
+        def __init__(self):
+            super().__init__()
+            self.watcher = WakeWatcher()
+
+        def watch(self):
+            return self.watcher
+
+    tx = WakeTransport()
+    store = Store(tmp_path / 'cache.sqlite')
+    engine = SyncEngine(tx, store)
+    thread = threading.Thread(
+        target=engine.run, kwargs={'poll_s': 60.0}, daemon=True,
+    )
+    thread.start()
+    assert tx.watcher.entered.wait(2.0)
+
+    proof = engine.retire(timeout_s=1.0)
+    thread.join(2.0)
+
+    assert not thread.is_alive()
+    engine.validate_retirement(proof, tx, store)
+    store.close()
+
+
 def test_ingestion_drops_records_claiming_another_identity(tmp_path, clouds):
     """R13.5: a per-device log is single-writer, so sync drops any record whose
     `from` isn't the log's owner — a client can't smuggle records attributed

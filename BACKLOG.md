@@ -247,6 +247,16 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   app-owned node startup/close binding may activate only the generic reaction
   behavior until that protocol prerequisite is designed and reviewed.
 
+  v0.24.377 activates the complete reviewed owner in GUI startup after cached
+  session readiness. Pre-retirement open failure preserves the legacy session;
+  post-retirement failure is fail-closed and cannot revive that writer. Close
+  drains active sync write leases before Store closure, retains failed teardown
+  for retry and blocks replacement construction until it finishes. Restore
+  final-fences its captured generation, empty current session, unchanged session
+  file and teardown state before unlink or `_build`. Harness consolidation is
+  still separate. Next: CI, real-app activation/rollback observability and live
+  Supabase acceptance before calling the local node operationally stable.
+
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
 - [x] **V202 — pure key-pin evaluation** (R177,2026-09-15): source969044d/

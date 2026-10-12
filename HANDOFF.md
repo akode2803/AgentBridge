@@ -1052,3 +1052,29 @@ owners, followed by real-app observability and rollback validation.
 The completed #128 Defender experiment did not improve Windows CI: the full
 test step took 60m27s versus the 59m44s baseline, and its attempted restore step
 failed. PR #128 was closed without merging; keep the GitHub runner defaults.
+
+## GUI-owned local-node activation — v0.24.377
+
+GUI session adoption now starts the existing owners and exposes cached session
+reads before a background thread opens and authenticates the local node. A
+pre-retirement node-open failure leaves legacy sync available for that session.
+Successful opening binds the exact event owner, permanently retires the matching
+legacy Store writer and installs the node source. A failure after retirement
+detaches the broken session; the old writer is never recreated.
+
+Shutdown now treats `SyncEngine.retire()` as the Store-write barrier. The watcher
+poke only wakes the run loop; it is not completion evidence. If an active write
+lease does not drain, Store closure is withheld and `GuiApp` retains the exact
+detached Mesh for a later cleanup attempt. Restore and login cannot construct a
+replacement while that owner remains. Restore also final-fences the captured
+generation, empty current Mesh, unchanged session file, closed state and
+teardown completion after directory I/O, preventing stale restore from replacing
+a concurrent login or unlinking its new session.
+
+Focused lifecycle/session/sync validation passes 57 tests. The final broader
+page-runtime/event/notification/GUI gate passes 150 tests. Ruff and diff checks
+pass. Astra independently reproduced the active-write Store-close
+race and stale-restore overwrite, verified both repairs with controlled probes,
+and found no remaining P1/P2. No app restart, deployment, merge or live-provider
+acceptance has occurred. See
+[docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md](docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md).

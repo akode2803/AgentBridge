@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from agentbridge.applink import AppLink
+from agentbridge.core.config import read_json
 from agentbridge.gui import api_chats, api_pages
 from agentbridge.gui.context import GuiApp, SessionReadToken
 from agentbridge.gui.routing import Request, authed, authed_read
@@ -239,8 +240,71 @@ def test_generation_exhaustion_and_detach_failure_still_clear_session(rig, monke
     with pytest.raises(RuntimeError, match="close interrupted"):
         rig.app.logout("hexagon")
     assert rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
     assert not rig.app.validate_session_read(old)
     assert rig.app.capture_session_read() is None
+    monkeypatch.setattr(mesh, "close", original_close)
+    assert rig.app._finish_teardown()
+    assert rig.app._teardown_mesh is None
+
+
+def test_stale_restore_cannot_replace_a_concurrent_login(rig, monkeypatch):
+    rig.signup()
+    with rig.app._lock:
+        rig.app._detach()
+    entered = threading.Event()
+    release = threading.Event()
+    original_names = rig.app.directory0.names
+
+    def blocked_names():
+        entered.set()
+        assert release.wait(10)
+        return original_names()
+
+    monkeypatch.setattr(rig.app.directory0, "names", blocked_names)
+    restoring = threading.Thread(target=rig.app.restore, daemon=True)
+    restoring.start()
+    assert entered.wait(10)
+
+    assert rig.app.login("aryan", "hexagon")["ok"] is True
+    current = rig.app.mesh
+    stale_builds = []
+    monkeypatch.setattr(
+        rig.app, "_build",
+        lambda name: stale_builds.append(name) or pytest.fail("stale restore built a Mesh"),
+    )
+    release.set()
+    _join(restoring)
+
+    assert rig.app.mesh is current
+    assert not stale_builds
+
+
+def test_stale_authoritative_restore_cannot_unlink_a_new_session(rig, monkeypatch):
+    rig.signup()
+    with rig.app._lock:
+        rig.app._detach()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_names():
+        entered.set()
+        assert release.wait(10)
+        return ["aryan"]
+
+    monkeypatch.setattr(rig.app.directory0, "names", blocked_names)
+    monkeypatch.setattr(rig.app.directory0, "get", lambda _name: None)
+    restoring = threading.Thread(target=rig.app.restore, daemon=True)
+    restoring.start()
+    assert entered.wait(10)
+
+    assert rig.app.signup("fable", "", "fablepass")["ok"] is True
+    release.set()
+    _join(restoring)
+
+    assert rig.app.user == "fable"
+    assert rig.app._session_path.exists()
+    assert read_json(rig.app._session_path)["user"] == "fable"
 
 
 def test_failed_adopt_is_transient_then_cleanup_and_re_adopt_recovers(rig, monkeypatch):

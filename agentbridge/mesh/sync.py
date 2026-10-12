@@ -75,6 +75,7 @@ class SyncEngine:
         self._retired = False
         self._retirement_token = object()
         self._transfer_owner = None
+        self._watcher = None
         # membership as of the last feed tick — a chat that APPEARS here gets
         # one full scan (its history may predate the cursor). Deliberately
         # in-memory: a fresh process full-scans once, which also heals any
@@ -119,6 +120,7 @@ class SyncEngine:
             raise RuntimeError("cannot retire sync owner from its write cycle")
         deadline = time.monotonic() + float(timeout_s)
         self._stop.set()
+        self._wake_run_loop()
         with self._ownership:
             self._retired = True
             while self._active_cycles:
@@ -301,6 +303,8 @@ class SyncEngine:
         one answers ``suggest_poll_s`` with its profile's slow safety poll
         (R76) — pokes keep message latency instant either way."""
         watcher = self.tx.watch()
+        with self._ownership:
+            self._watcher = watcher
         last_hinted: bool | None = None
         try:
             while not self._stop.is_set():
@@ -320,7 +324,21 @@ class SyncEngine:
                     break
                 last_hinted = watcher.wait(self.tx.suggest_poll_s(poll_s))
         finally:
+            with self._ownership:
+                if self._watcher is watcher:
+                    self._watcher = None
             watcher.close()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake_run_loop()
+
+    def _wake_run_loop(self) -> None:
+        with self._ownership:
+            watcher = self._watcher
+        poke = getattr(watcher, 'poke', None)
+        if callable(poke):
+            try:
+                poke()
+            except Exception:
+                pass
