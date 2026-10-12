@@ -55,6 +55,27 @@ class MutationIntent:
     selectors: tuple[scopes.Selector, ...]
 
 
+@dataclass(frozen=True)
+class MutationRecoveryInventory:
+    """Content-free summary bound to one exact legacy mutation/node cut."""
+
+    schema_version: int
+    plan_digest: str
+    coordinator_identity_digest: str
+    coordinator_epoch: str
+    root_revision: int
+    normal_intents: int
+    sentinel_intents: int
+    quarantined_intents: int
+    pending_scope_counts: tuple[tuple[str, int], ...]
+    quarantine_scope_counts: tuple[tuple[str, int], ...]
+    registered_stores: int
+    registered_nodes: int
+    admitted_generation: int
+    node_health: str
+    node_fence_counts: tuple[tuple[str, int], ...]
+
+
 def _overlap(left, right):
     if left.kind == 'log_chat' or right.kind == 'log_chat':
         return left.kind == right.kind and left.value == right.value
@@ -183,7 +204,7 @@ class MutationCoordinator:
         if conn.execute('SELECT 1 FROM mutation_scopes LIMIT 1 OFFSET ?',
                         (MAX_PENDING * 8,)).fetchone():
             raise owner.SourceChanged('pending_selector_budget')
-        if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+        if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
             raise owner.SourceChanged('invalid_pending_selector')
         # Preflight above bounds every field before fetching values. Audit
         # the same fresh cut in one bounded query rather than one per intent.
@@ -236,7 +257,7 @@ class MutationCoordinator:
             raise owner.SourceChanged('quarantine_scope_budget')
         if conn.execute("SELECT 1 FROM quarantine_intents WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(sentinel)!='text' OR length(CAST(sentinel AS BLOB))>64 LIMIT 1").fetchone():
             raise owner.SourceChanged('invalid_quarantine_intent')
-        if conn.execute("SELECT 1 FROM quarantine_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+        if conn.execute("SELECT 1 FROM quarantine_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
             raise owner.SourceChanged('invalid_quarantine_scope')
         archived = conn.execute('SELECT token,sentinel FROM quarantine_intents LIMIT ?',
                                 (MAX_QUARANTINED + 1,)).fetchall()
@@ -438,6 +459,88 @@ class MutationCoordinator:
                     yield False
                     return
                 yield True
+
+    def capture_legacy_recovery_inventory(self, node) -> MutationRecoveryInventory:
+        """Bind an operator-safe summary to the complete root/node evidence.
+
+        This is inspection only.  It does not complete, quarantine, archive or
+        consume an intent, and the digest is not provider terminality evidence.
+        A future provider seal and full recovery may bind this exact digest;
+        admission must recompute it under the same root-to-node order.
+        """
+        from ..node.store import NodeStore
+
+        if type(node) is not NodeStore:
+            raise ValueError('invalid local node')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            revision = self._root_revision(root)
+            stores = tuple(self._stores(root))
+            nodes = tuple(self._nodes(root))
+            if len(nodes) != 1 or nodes[0] != registration:
+                raise owner.SourceChanged(
+                    'legacy_recovery_requires_one_node')
+            tokens = self._pending_tokens(root)
+            pending_scopes = tuple(root.execute(
+                'SELECT token,kind,value FROM mutation_scopes '
+                'ORDER BY token,kind,value LIMIT ?',
+                (MAX_PENDING * 8 + 1,),
+            ).fetchall())
+            quarantined = tuple(root.execute(
+                'SELECT token,sentinel FROM quarantine_intents '
+                'ORDER BY token LIMIT ?',
+                (MAX_QUARANTINED + 1,),
+            ).fetchall())
+            quarantine_scopes = tuple(root.execute(
+                'SELECT token,kind,value FROM quarantine_scopes '
+                'ORDER BY token,kind,value LIMIT ?',
+                (MAX_QUARANTINED * 8 + 1,),
+            ).fetchall())
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                NodeStore.coordinator_require_fences(
+                    node_conn, coordinator_epoch=self.epoch, tokens=tokens,
+                )
+                node_inventory = NodeStore.coordinator_legacy_recovery_inventory(
+                    node_conn)
+                if node_inventory[5] != (
+                        str(self.path), self.identity, self.epoch):
+                    raise owner.SourceChanged(
+                        'node_coordinator_owner_changed')
+
+            registration_rows = tuple((
+                value.database_path, value.database_incarnation,
+                value.identity_digest, value.provider_endpoint, value.root,
+            ) for value in nodes)
+            payload = (
+                'agentbridge-legacy-mutation-recovery-plan-v1',
+                str(self.path), self.identity, self.epoch, revision,
+                stores, registration_rows, tokens, pending_scopes,
+                quarantined, quarantine_scopes, node_inventory,
+            )
+            digest = hashlib.sha256(json.dumps(
+                payload, ensure_ascii=False, separators=(',', ':'),
+            ).encode('utf-8')).hexdigest()
+
+        def count_kinds(rows, index):
+            values = {}
+            for row in rows:
+                values[row[index]] = values.get(row[index], 0) + 1
+            return tuple(sorted(values.items()))
+
+        normal = sum(_NORMAL_TOKEN.fullmatch(token) is not None for token in tokens)
+        sentinels = len(tokens) - normal
+        fence_counts = count_kinds(node_inventory[6], 2)
+        return MutationRecoveryInventory(
+            1, digest, hashlib.sha256(self.identity.encode('utf-8')).hexdigest(),
+            self.epoch, revision, normal, sentinels, len(quarantined),
+            count_kinds(pending_scopes, 1),
+            count_kinds(quarantine_scopes, 1),
+            len(stores), len(nodes), node_inventory[1], node_inventory[2],
+            fence_counts,
+        )
 
     def claim_node_recovery(self, node):
         """Capture one immutable root/node cut without reading the provider."""

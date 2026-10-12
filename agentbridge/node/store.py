@@ -698,6 +698,27 @@ class NodeStore:
 
     @staticmethod
     def _check_meta(conn: sqlite3.Connection) -> tuple:
+        if conn.execute("""
+            SELECT 1 FROM node_meta WHERE
+                typeof(singleton)!='integer' OR singleton!=1
+                OR typeof(database_incarnation)!='text'
+                OR length(CAST(database_incarnation AS BLOB)) NOT BETWEEN 1 AND 4096
+                OR typeof(admitted_generation)!='integer'
+                OR admitted_generation NOT BETWEEN 0 AND 9223372036854775807
+                OR typeof(health)!='text'
+                OR health NOT IN (
+                    'inactive','starting','catching_up','ready','degraded',
+                    'pending','unavailable'
+                )
+                OR typeof(last_attempt_ns)!='integer'
+                OR last_attempt_ns NOT BETWEEN 0 AND 9223372036854775807
+                OR typeof(last_success_ns)!='integer'
+                OR last_success_ns NOT BETWEEN 0 AND 9223372036854775807
+                OR typeof(pending_mutations)!='integer'
+                OR pending_mutations NOT BETWEEN 0 AND 9223372036854775807
+            LIMIT 1
+        """).fetchone():
+            raise sqlite3.DatabaseError("invalid local node metadata")
         rows = conn.execute(
             "SELECT database_incarnation,admitted_generation,health,"
             "last_attempt_ns,last_success_ns,pending_mutations "
@@ -1842,6 +1863,55 @@ class NodeStore:
             "SELECT 1 FROM node_mutation_fences WHERE state='active' LIMIT 1"
         ).fetchone() is not None
 
+    @staticmethod
+    def coordinator_legacy_recovery_inventory(
+        conn: sqlite3.Connection,
+    ) -> tuple:
+        """Capture exact node-side mutation evidence for an operator plan.
+
+        The caller already holds the root coordinator writer followed by this
+        node writer.  Return only bounded, validated storage values; the root
+        coordinator hashes them with its own complete intent inventory and
+        exposes a content-free summary.  Private candidate/claim work must be
+        retired by a later explicit protocol rather than silently folded into
+        a legacy migration plan.
+        """
+        if not conn.in_transaction:
+            raise ValueError("local node coordinator cut required")
+        NodeStore._check_mutation_guard(conn)
+        NodeStore._check_mutation_fences(conn)
+        NodeStore._check_coordinator_state(conn)
+        if (conn.execute(
+                "SELECT 1 FROM node_generations "
+                "WHERE state IN ('building','sealed') LIMIT 1").fetchone()
+                or conn.execute(
+                    "SELECT 1 FROM node_recovery_claims LIMIT 1").fetchone()
+                or conn.execute(
+                    "SELECT 1 FROM claimed_recoveries LIMIT 1").fetchone()):
+            raise NodeGenerationChanged(
+                "local node recovery work already exists")
+        meta = NodeStore._check_meta(conn)
+        root_scope = NodeStore._scope_generation(conn, "root", "")
+        owner_rows = conn.execute(
+            "SELECT coordinator_path,coordinator_identity,coordinator_epoch "
+            "FROM node_coordinator_owner WHERE singleton=1"
+        ).fetchall()
+        if len(owner_rows) != 1:
+            raise sqlite3.DatabaseError("invalid local node coordinator owner")
+        fences = tuple(conn.execute(
+            "SELECT coordinator_epoch,token,state "
+            "FROM node_mutation_fences ORDER BY coordinator_epoch,token"
+        ).fetchall())
+        scopes = tuple(conn.execute(
+            "SELECT coordinator_epoch,token,scope_kind,scope_id "
+            "FROM node_mutation_scopes "
+            "ORDER BY coordinator_epoch,token,scope_kind,scope_id"
+        ).fetchall())
+        return (
+            meta[0], meta[1], meta[2], meta[5],
+            root_scope, owner_rows[0], fences, scopes,
+        )
+
     def _migrate_v1(self, conn: sqlite3.Connection) -> None:
         if conn.execute(
                 "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
@@ -2464,10 +2534,22 @@ class NodeStore:
     @staticmethod
     def _scope_generation(conn: sqlite3.Connection, kind: str,
                           ident: str) -> tuple[int, str | None]:
-        return conn.execute(
-            "SELECT generation,pending_reason FROM scope_versions "
-            "WHERE scope_kind=? AND scope_id=?", (kind, ident),
-        ).fetchone() or (0, None)
+        row = conn.execute(
+            "SELECT CASE WHEN typeof(generation)='integer' "
+            "AND generation BETWEEN 0 AND 9223372036854775807 "
+            "THEN generation END,"
+            "CASE WHEN pending_reason IS NULL THEN 0 "
+            "WHEN typeof(pending_reason)='text' "
+            "AND pending_reason=? THEN 1 ELSE 2 END "
+            "FROM scope_versions WHERE scope_kind=? AND scope_id=?",
+            (_NODE_PENDING_REASON, kind, ident),
+        ).fetchone()
+        if row is None:
+            return 0, None
+        generation, pending = row
+        if type(generation) is not int or pending not in (0, 1):
+            raise sqlite3.DatabaseError("invalid local node scope")
+        return generation, (_NODE_PENDING_REASON if pending else None)
 
     def _root_recovery_plan(
         self, current_provider_cut: NodeProviderCut, *, work_id: str,
