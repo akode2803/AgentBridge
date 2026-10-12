@@ -371,7 +371,7 @@ class _Round:
         if event_identities and (
                 page is None and not suppress_events or proposal is not None or mutation is not None
                 or self.source_reader is None
-                or any(item.chat_id != self.chat or item.kind != 'message'
+                or any(item.chat_id != self.chat or item.kind not in {'message', 'info'}
                        for item in event_identities)):
             raise ValueError('node event consumption requires an exact local page')
         prepared_page = None if page is None else page_fence.prepare(

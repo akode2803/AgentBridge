@@ -1159,3 +1159,29 @@ canonical visible target author, then finalize against current source, session
 and journal identity. Superseded, removed, evicted, legacy and resealed evidence
 falls back to the content-free invalidation lane. This version does not activate
 the local node event owner.
+
+Version 0.24.376 maps only an exact signed native v2 human reaction breadcrumb
+to an identity-only reaction wake. The request freshly verifies the breadcrumb
+signature, explicit actor tenure at both operation and event namespaces, the
+current actor reaction document and its matching operation, then canonically
+projects the exact target with current membership, history-on-join, keys,
+trust, edits, redactions and viewer hidden/clear state. It does not capture the
+room-wide reaction manifest. The final transaction repeats the source,
+authority, message/overlay and exact journal identity fences before consuming
+the breadcrumb. Missing admitted reaction documents or targets remain retryable;
+malformed, legacy, resealed, removed, evicted or superseded evidence becomes
+only the generic per-chat read-model invalidation.
+
+The EventBus receives only breadcrumb ID and actor. GUI and background
+notification consumers recapture the breadcrumb, operation, target, viewer
+read/mute state and current session/source gates before deriving emoji or
+preview text. Breadcrumb `to` is never notification authority. Agent-authored
+reaction breadcrumbs remain generic invalidations until a captured historical
+responsible-owner witness exists.
+
+Info scheduling processes one identity per quantum. Each chat has a finite
+admitted sequence high-water: unresolved reactions rotate behind later generic
+info, and a continuously growing tail waits for the next sweep rather than
+postponing retained earlier work forever. Schedulers retain only bounded
+identity, cursor and operation-ledger state; final exact-CAS remains the sole
+consumption decision. The local node owner is still inactive in app startup.

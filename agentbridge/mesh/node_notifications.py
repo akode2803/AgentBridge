@@ -67,7 +67,7 @@ class MessageNotificationOperation(ExactMessageProjectionOperation):
         return (super()._bound() and self.mesh.local_inputs is self.__owner
                 and not self.__owner._closed)
 
-    def _exact_presentation(self, snapshot, viewer_state):
+    def _exact_presentation(self, snapshot, viewer_state, context=None):
         mute = viewer_state.get('mute', False)
         state = {
             'read_ns': int(viewer_state.get('read_ns') or 0),

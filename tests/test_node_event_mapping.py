@@ -44,6 +44,23 @@ def test_identity_wake_cannot_notify_without_current_canonical_read():
     assert "notify" not in frame(event, notifier=notifier)
 
 
+def test_reaction_identity_wake_exposes_no_hint_and_skips_legacy_reader():
+    class Forbidden:
+        def __getattr__(self, _name):
+            raise AssertionError('reaction identity used a legacy read')
+
+    event = eventbus.Event(
+        eventbus.REACTION, 'room', {'id': 'info-1', 'from': 'alice'}, 9,
+    )
+    notifier = Notifier(EventBus(), Forbidden(), Forbidden(), 'bob')
+
+    encoded = frame(event, notifier=notifier)
+
+    assert encoded['id'] == 'info-1' and encoded['from'] == 'alice'
+    assert 'emoji' not in encoded and 'to' not in encoded
+    assert 'notify' not in encoded
+
+
 @pytest.mark.parametrize("changes", [
     {"deleted": True}, {"undecrypted": True}, {"kind": MsgKind.INFO},
 ])

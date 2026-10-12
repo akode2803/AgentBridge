@@ -154,6 +154,50 @@ def test_projection_rotation_skips_retained_failed_head_chat(store):
     assert conn.execute('SELECT count(*) FROM node_event_journal_items').fetchone() == (2,)
 
 
+def test_chat_projection_sweep_excludes_later_admissions_until_next_high_water(store):
+    conn = store._conn()
+    conn.executemany(
+        'INSERT INTO node_event_journal_items(chat,message_id,ns,sender,kind) '
+        'VALUES(?,?,?,?,?)',
+        [(CHAT, 'i1', 1, 'alice', 'info'),
+         (CHAT, 'm1', 2, 'alice', 'message'),
+         (CHAT, 'i2', 3, 'alice', 'info')],
+    )
+    conn.commit()
+    high_water = node_event_journal.event_identity_high_water(
+        store, CHAT, kind='info',
+    )
+    assert high_water is not None
+
+    first = node_event_journal.peek_chat_event_identities(
+        store, CHAT, through_sequence=high_water, kind='info', limit=1,
+    )
+    second = node_event_journal.peek_chat_event_identities(
+        store, CHAT, after_sequence=first[0].sequence,
+        through_sequence=high_water, kind='info', limit=1,
+    )
+    conn.execute(
+        'INSERT INTO node_event_journal_items(chat,message_id,ns,sender,kind) '
+        'VALUES(?,?,?,?,?)',
+        (CHAT, 'i3', 4, 'alice', 'info'),
+    )
+    conn.commit()
+
+    assert [item.message_id for item in first + second] == ['i1', 'i2']
+    assert node_event_journal.peek_chat_event_identities(
+        store, CHAT, after_sequence=second[0].sequence,
+        through_sequence=high_water, kind='info', limit=1,
+    ) == ()
+    next_high_water = node_event_journal.event_identity_high_water(
+        store, CHAT, kind='info',
+    )
+    assert next_high_water is not None and next_high_water > high_water
+    assert [item.message_id for item in node_event_journal.peek_chat_event_identities(
+        store, CHAT, after_sequence=second[0].sequence,
+        through_sequence=next_high_water, kind='info', limit=1,
+    )] == ['i3']
+
+
 def test_claim_preflights_aggregate_payload_bytes_before_loading(store):
     size = node_event_journal.MAX_CLAIM_BYTES // 2 + 1024
     records = [

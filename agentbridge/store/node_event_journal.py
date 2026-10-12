@@ -419,6 +419,111 @@ def peek_event_identities(
     return tuple(result)
 
 
+def event_identity_high_water(
+    store, chat_id: str, *, kind: str | None = None,
+) -> int | None:
+    """Return the current admitted journal sequence high-water for one chat.
+
+    This is scheduling evidence only. It is never an authority, freshness or
+    consumption verdict; final projection still exact-CAS consumes identities.
+    """
+    if not _bounded_text(chat_id, 4096):
+        raise ValueError('invalid node event chat')
+    if kind is not None and (type(kind) is not str or kind not in (
+            'message', 'info', 'unknown')):
+        raise ValueError('invalid node event projection kind')
+    kind_filter = ("" if kind is None else " AND kind NOT IN (?,?)"
+                   if kind == 'unknown' else " AND kind=?")
+    kind_args = () if kind is None else ('message', 'info') if kind == 'unknown' else (kind,)
+    conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            'node event projection read needs no transaction',
+        )
+    _schema(conn)
+    row = conn.execute(
+        'SELECT max(sequence) FROM node_event_journal_items '
+        'WHERE chat=?' + kind_filter,
+        (chat_id, *kind_args),
+    ).fetchone()
+    if row is None or len(row) != 1 or row[0] is not None and (
+            type(row[0]) is not int or row[0] < 1):
+        raise NodeEventJournalChanged('malformed node event high-water')
+    return row[0]
+
+
+def peek_chat_event_identities(
+    store, chat_id: str, *, after_sequence: int = 0,
+    through_sequence: int, limit: int = MAX_PROJECT_EVENTS,
+    kind: str | None = None,
+) -> tuple[NodeEventIdentity, ...]:
+    """Read a bounded identity page inside one finite scheduling sweep.
+
+    Rows admitted after ``through_sequence`` wait for the next sweep. This
+    prevents a continuous tail from indefinitely postponing retained earlier
+    identities. The result remains payload-free and is only a scheduling
+    hint; callers must use the normal final exact-CAS consumption fence.
+    """
+    if not _bounded_text(chat_id, 4096):
+        raise ValueError('invalid node event chat')
+    if (type(after_sequence) is not int or isinstance(after_sequence, bool)
+            or after_sequence < 0):
+        raise ValueError('invalid node event sequence cursor')
+    if (type(through_sequence) is not int or isinstance(through_sequence, bool)
+            or through_sequence < 1):
+        raise ValueError('invalid node event sequence high-water')
+    if after_sequence > through_sequence:
+        raise ValueError('node event cursor exceeds high-water')
+    if (type(limit) is not int or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_PROJECT_EVENTS):
+        raise ValueError('invalid node event projection limit')
+    if kind is not None and (type(kind) is not str or kind not in (
+            'message', 'info', 'unknown')):
+        raise ValueError('invalid node event projection kind')
+    kind_filter = ("" if kind is None else " AND j.kind NOT IN (?,?)"
+                   if kind == 'unknown' else " AND j.kind=?")
+    kind_args = () if kind is None else ('message', 'info') if kind == 'unknown' else (kind,)
+    conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            'node event projection read needs no transaction',
+        )
+    _schema(conn)
+    page_inputs._message_schema(conn)
+    rows = conn.execute(
+        "SELECT j.sequence,j.chat,j.message_id,j.ns,j.sender,j.kind,"
+        "m.ns,m.sender,m.kind,length(CAST(m.payload AS BLOB)) "
+        "FROM node_event_journal_items j LEFT JOIN messages m "
+        "ON m.chat_id=j.chat AND m.id=j.message_id "
+        "WHERE j.chat=? AND j.sequence>? AND j.sequence<=?" + kind_filter
+        + " ORDER BY j.sequence LIMIT ?",
+        (chat_id, after_sequence, through_sequence, *kind_args, limit),
+    ).fetchall()
+    result = []
+    payload_bytes = 0
+    for row in rows:
+        try:
+            identity = NodeEventIdentity(*row[:6])
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise NodeEventJournalChanged(
+                'malformed node event identity',
+            ) from exc
+        current_size = row[9]
+        current_matches = (
+            row[6:9] == (identity.ns, identity.sender, identity.kind)
+            and type(current_size) is int and current_size > 0
+        )
+        if current_matches and result \
+                and payload_bytes + current_size > page_inputs.MAX_BYTES:
+            break
+        result.append(identity)
+        if current_matches:
+            payload_bytes += current_size
+        if payload_bytes > page_inputs.MAX_BYTES:
+            break
+    return tuple(result)
+
+
 def claim_gap(store) -> bool:
     """Atomically consume only the durable global resync bit."""
     conn = store._conn()
@@ -750,6 +855,7 @@ __all__ = [
     "NodeEventJournalChanged", "NodeEventRecord", "claim_events", "claim_gap",
     "complete_delivery", "consume_event_identities_in_transaction",
     "consume_info_invalidations", "initialize",
+    "event_identity_high_water", "peek_chat_event_identities",
     "peek_event_identities", "pending_deliveries", "publish_in_transaction",
     "retire_event_identities_as_gap",
 ]

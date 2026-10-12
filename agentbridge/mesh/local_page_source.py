@@ -198,6 +198,28 @@ class LocalPageSource:
                 (path,), max_documents=1, max_bytes=max_bytes)
         return captured.records[0]
 
+    def capture_reaction_documents(
+            self, receipt, actors, *, max_bytes=4 * 1024 * 1024):
+        """Capture bounded exact actor reaction inputs from the admitted source.
+
+        The returned rows are raw inputs only. Callers still verify signatures,
+        authority and the receipt again during their final handout.
+        """
+        from .paths import P
+
+        _limit(max_bytes, 4 * 1024 * 1024)
+        if (type(actors) is not tuple or not actors or len(actors) > 32
+                or len(set(actors)) != len(actors)):
+            raise ValueError('invalid exact reaction actor selection')
+        paths = tuple(P.reactions(self.chat, _part(actor)) for actor in actors)
+        if sum(len(path.encode()) for path in paths) > 64 * 1024:
+            raise ValueError('exact reaction actor selection exceeds budget')
+        with self._read(receipt) as (conn, receipt):
+            return docs._capture_selected(
+                conn, self.store.path, receipt.source.raw, paths,
+                max_documents=32, max_bytes=max_bytes,
+            )
+
     def capture_page(self, receipt, index, **selection):
         receipt = self._receipt(receipt)
         index = overlay_index._wanted(index, self.store.path)

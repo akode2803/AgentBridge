@@ -356,8 +356,21 @@ class PageOperation:
     def _exact_projection_request(self):
         return None
 
-    def _exact_presentation(self, snapshot, viewer_state):
+    def _exact_presentation(self, snapshot, viewer_state, context=None):
         return None
+
+    def _resolve_exact_projection(
+            self, round_, snapshot, source_binding, inputs, requested_targets):
+        """Return canonical message targets and request-only context.
+
+        Subclasses may use the initially captured exact rows to derive another
+        bounded identity set. Every derived target is recaptured below at the
+        same message position before canonical selection.
+        """
+        return requested_targets, None
+
+    def _exact_include_reactions(self):
+        return True
 
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
         return None, (), None
@@ -562,7 +575,7 @@ class PageOperation:
             inputs = self.source_reader.capture_page(
                 source_binding, index, raw_limit=0, expected=expected,
                 exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
-                proof_keys=proof_keys, include_reactions=True,
+                proof_keys=proof_keys, include_reactions=self._exact_include_reactions(),
                 max_bytes=self.ledger.remaining(),
             )
             self.ledger.charge(inputs.captured_bytes)
@@ -576,10 +589,34 @@ class PageOperation:
                 proofs[(path, key)] = valid
             if len(proofs) > overlay_index.MAX_DEPENDENCIES:
                 raise membership._Stop('unavailable', 'operation_proof_budget')
+            message_targets, context = self._resolve_exact_projection(
+                round_, snapshot, source_binding, inputs, targets,
+            )
+            if (type(message_targets) is not tuple
+                    or len(message_targets) > raw_pages.MAX_EXACT_IDS
+                    or len(set(message_targets)) != len(message_targets)):
+                raise ValueError('invalid derived exact message targets')
+            for ident in message_targets:
+                overlay_index._text(ident, 'message id')
+                try:
+                    document_observation._validate_document_path(P.edit(self.chat, ident))
+                    if len(P.edit(self.chat, ident).split('/')) != 5:
+                        raise ValueError('derived target is not an overlay basename')
+                except ValueError:
+                    raise membership._Stop(
+                        'unavailable', 'event_id_not_projectable',
+                    ) from None
+            wanted_exact = tuple(dict.fromkeys((*targets, *message_targets)))
+            if len(wanted_exact) > raw_pages.MAX_EXACT_IDS:
+                raise membership._Stop('unavailable', 'operation_parent_budget')
+            if any(ident not in exact for ident in wanted_exact):
+                exact = tuple(dict.fromkeys((*wanted_exact, *exact)))
+                continue
             try:
                 overlays = page_overlays.assemble_page_overlays(
                     inputs, self.viewer, snapshot, directory=round_,
                     crypto_boundary=type(self.mesh.sealer) is E2EESealer,
+                    require_reactions=self._exact_include_reactions(),
                 )
             except page_overlays.PageOverlayProofsPending as pending:
                 requested = tuple(dict.fromkeys(proof_keys + pending.keys))
@@ -591,7 +628,7 @@ class PageOperation:
             try:
                 ordinary_targets = tuple(
                     row.key.id for row in inputs.exact_rows
-                    if row.key.id in targets and row.kind == 'message'
+                    if row.key.id in message_targets and row.kind == 'message'
                 )
                 messages = select_exact_messages(
                     inputs, ordinary_targets, self.viewer, sealer,
@@ -611,10 +648,10 @@ class PageOperation:
                         'unavailable', 'operation_parent_budget',
                     ) from parents
                 continue
-            parent_ids = frozenset(set(exact).difference(targets))
+            parent_ids = frozenset(set(exact).difference(wanted_exact))
             available = {row.key.id for row in inputs.exact_rows}
             selection = PageSelection(
-                expected, messages, None, len(targets),
+                expected, messages, None, len(wanted_exact),
                 len(parent_ids.intersection(available)), len(parent_ids),
                 False, False, False, False, parent_ids, None,
             )
@@ -622,7 +659,7 @@ class PageOperation:
                 expected, source_binding,
                 tuple((p, k, v) for (p, k), v in sorted(proofs.items())),
                 tuple(epochs.values()), selection,
-                self._exact_presentation(snapshot, overlays.viewer_state),
+                self._exact_presentation(snapshot, overlays.viewer_state, context),
                 exact_targets=targets,
             )
             return PageWorkResult(

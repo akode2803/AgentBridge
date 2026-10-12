@@ -16,6 +16,9 @@ from typing import Callable
 from . import eventbus, page_operation
 from .eventbus import Event
 from .node_notifications import MessageNotificationOperation, MessageNotificationWake
+from .node_reactions import (
+    ReactionNotificationOperation, ReactionNotificationWake,
+)
 from .notify import Notification
 
 MAX_JOBS = 64
@@ -32,15 +35,15 @@ _EXHAUSTED = frozenset({
 @dataclass(frozen=True)
 class NotificationPreparationStep:
     status: str
-    wake: MessageNotificationWake | None = None
+    wake: MessageNotificationWake | ReactionNotificationWake | None = None
     notification: Notification | None = field(default=None, repr=False)
     reason: str = ''
 
 
 @dataclass
 class _Job:
-    wake: MessageNotificationWake
-    operation: MessageNotificationOperation | None = None
+    wake: MessageNotificationWake | ReactionNotificationWake
+    operation: MessageNotificationOperation | ReactionNotificationOperation | None = None
     next_due: float = 0.0
     exhausted_attempts: int = 0
 
@@ -73,7 +76,7 @@ class NodeNotificationPreparation:
         self._viewer, self._machine = mesh.user, mesh.machine
         self._app, self._session = app, session
         self._jobs: OrderedDict[tuple[str, str], _Job] = OrderedDict()
-        self._completed: OrderedDict[tuple[str, str], MessageNotificationWake] = OrderedDict()
+        self._completed: OrderedDict[tuple, MessageNotificationWake | ReactionNotificationWake] = OrderedDict()
         self._gap = False
         self._closed = False
         self._closing = threading.Event()
@@ -112,11 +115,15 @@ class NodeNotificationPreparation:
                 self._lock.release()
 
     def enqueue(self, event: Event) -> bool:
-        """Admit a strict content-free message wake; duplicates keep their ledger."""
-        if type(event) is not Event or event.type != eventbus.MESSAGE:
+        """Admit a strict identity-only wake; duplicates keep their ledger."""
+        if type(event) is not Event or event.type not in {eventbus.MESSAGE, eventbus.REACTION}:
             return False
-        wake = MessageNotificationWake.capture(event)
-        key = (wake.chat_id, wake.message_id)
+        if event.type == eventbus.MESSAGE:
+            wake = MessageNotificationWake.capture(event)
+            key = (wake.chat_id, wake.message_id)
+        else:
+            wake = ReactionNotificationWake.capture(event)
+            key = ('reaction', wake.chat_id, wake.event_id)
         with self._lock:
             if self._closed or not self._bound():
                 self._close_locked()
@@ -178,8 +185,10 @@ class NodeNotificationPreparation:
             try:
                 reader, receipt, index = self.owner.inputs(wake.chat_id)
                 if job.operation is None:
-                    job.operation = MessageNotificationOperation(
-                        self.mesh, wake, source_reader=reader)
+                    operation = (MessageNotificationOperation
+                                 if type(wake) is MessageNotificationWake
+                                 else ReactionNotificationOperation)
+                    job.operation = operation(self.mesh, wake, source_reader=reader)
                 work = job.operation.prepare(receipt, receipt, index)
                 if work.status == 'prepared':
                     kwargs = {'app': self._app, 'session': self._session}

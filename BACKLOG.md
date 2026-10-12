@@ -229,6 +229,17 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   semantic delivery still requires fresh signature, membership, target/visibility
   and final source/session/journal checks. Node runtime startup remains inactive.
 
+  v0.24.376 completes fresh semantic mapping and notification reads for exact
+  signed native-v2 human reaction breadcrumbs. It verifies actor tenure at the
+  operation and event namespaces, current operation identity, canonical target
+  author/visibility and the final source/session/journal cut. EventBus wakes
+  contain only breadcrumb ID and actor; emoji, preview and viewer read/mute
+  policy are derived again at notification drain. Missing documents/targets
+  retry, while legacy/resealed/superseded/removed evidence and agent reactions
+  remain generic read-model invalidations. Finite per-chat journal sweeps prevent
+  multiple blocked reactions or a growing tail from starving later info. Full
+  app-owned node startup/close binding remains the next activation slice.
+
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
 - [x] **V202 — pure key-pin evaluation** (R177,2026-09-15): source969044d/

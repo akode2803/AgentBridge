@@ -963,3 +963,37 @@ shared-transport overwrite cannot permanently lock out reactions. Oversized v1
 maps migrate through a deterministic 4,096-entry cut that always preserves the
 new action. The 85-test reaction/security/index/page gate and Ruff/diff checks
 pass locally; replacement review and cross-platform CI remain pending.
+
+## Fresh retained reaction mapping and notifications — v0.24.376
+
+The retained info lane now semantically maps only future exact human reaction
+breadcrumbs that match a currently signed native v2 operation. The operation
+freshly verifies the strict breadcrumb envelope and signature, explicit actor
+tenure at both namespaces, current reaction document signature and operation,
+and the canonical target author/visibility under the same final local source
+and journal CAS. The breadcrumb's `to` field is ignored. Target selection reads
+only exact actor documents and exact target messages; it does not require the
+complete room reaction manifest.
+
+Missing admitted documents or target rows remain pending. Malformed, forged,
+legacy, resealed, removed, evicted and superseded evidence is terminally
+nonsemantic and still produces the generic `READ_MODEL` invalidation. Agent
+reaction breadcrumbs also remain generic until projection captures a historical
+responsible-owner witness. A verified semantic event carries only breadcrumb ID
+and actor. GUI and background notification drains repeat the projection and
+fresh read/mute, route/session, source and shutdown gates before deriving emoji
+or preview text.
+
+Info scheduling now uses one bounded identity quantum and a finite per-chat
+sequence sweep. This fixed an independently reproduced starvation case where
+two unresolved reactions could block later same-chat info. New tail admissions
+cannot extend the active sweep indefinitely; unresolved identities are revisited
+after the sweep wraps. The focused page/journal/pump/notification/SSE gate passes
+174 tests. Ruff and diff checks pass. Astra reproduced the old starvation,
+verified the finite-sweep repair under a continuously growing tail and found no
+remaining P1/P2.
+
+This stack remains inactive in product startup. No app restart, deployment or
+merge has occurred. The next major slice is app-owned startup/close binding for
+the reviewed local-node recovery, publication, retained-event and notification
+owners, followed by real-app observability and rollback validation.
