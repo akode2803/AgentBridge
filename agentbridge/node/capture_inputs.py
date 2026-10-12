@@ -13,7 +13,9 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from ..mesh import local_page_source
 from ..store import source_selectors
+from ..store import document_observation, overlay_index
 from .admission import MAX_CAPTURE_LOG_REQUESTS, NodeScopePosition
 from .client import (
     ClientCapture, ClientCaptureRequest, ClientLogRequest, ClientLogStreamPage,
@@ -177,6 +179,59 @@ class _JSONBudget:
             ))
         raise DetachedInputError("invalid JSON value")
 
+    def preflight(self, payload: bytes) -> None:
+        """Bound JSON structure before ``json.loads`` allocates its object graph."""
+        nodes = 0
+        depth = 0
+        index = 0
+        size = len(payload)
+
+        def node() -> None:
+            nonlocal nodes
+            if depth > self.limits.max_json_depth:
+                raise DetachedInputOverflow("JSON depth exceeds capture budget")
+            nodes += 1
+            if self.nodes + nodes > self.limits.max_json_nodes:
+                raise DetachedInputOverflow("JSON nodes exceed capture budget")
+
+        while index < size:
+            byte = payload[index]
+            if byte in b" \t\r\n,:":
+                index += 1
+                continue
+            if byte == 34:  # String. Object keys are not frozen JSON nodes.
+                index += 1
+                while index < size:
+                    if payload[index] == 92:
+                        index += 2
+                        continue
+                    if payload[index] == 34:
+                        index += 1
+                        break
+                    index += 1
+                lookahead = index
+                while lookahead < size and payload[lookahead] in b" \t\r\n":
+                    lookahead += 1
+                if lookahead >= size or payload[lookahead] != 58:
+                    node()
+                continue
+            if byte in (123, 91):  # { or [
+                node()
+                depth += 1
+                index += 1
+                continue
+            if byte in (125, 93):  # } or ]
+                depth = max(0, depth - 1)
+                index += 1
+                continue
+            # A valid remaining token is one primitive JSON value. Full syntax
+            # validation remains json.loads' job after this allocation guard.
+            node()
+            index += 1
+            while (index < size and payload[index] not in
+                   b" \t\r\n,]}{[:"):
+                index += 1
+
 
 def thaw_json(value: FrozenJSON) -> Any:
     """Return a new mutable JSON value; never expose captured mutable state."""
@@ -189,6 +244,7 @@ def thaw_json(value: FrozenJSON) -> Any:
 
 def _decode(payload: bytes, budget: _JSONBudget) -> FrozenJSON:
     try:
+        budget.preflight(payload)
         text = payload.decode("utf-8")
         value = json.loads(
             text,
@@ -230,16 +286,12 @@ def _definition(value: source_selectors.Definition, client: LocalNodeClient) -> 
                    for row in definition.selectors)):
         raise DetachedInputError("source is not one canonical page selection")
     chat = logs[0]
-    expected = source_selectors.definition(root_identity, (
-        source_selectors.Selector("doc_prefix", "users"),
-        source_selectors.Selector("doc_prefix", "lifecycle"),
-        source_selectors.Selector("doc_exact", f"chats/{chat}/meta.json"),
-        *(source_selectors.Selector(
-            "doc_prefix", f"chats/{chat}/overlays/{kind}")
-          for kind in ("edits", "redactions", "reactions", "pins", "state")),
-        source_selectors.Selector("doc_prefix", f"chats/{chat}/keys"),
-        source_selectors.Selector("log_chat", chat),
-    ), build="local-canonical-page-v1")
+    try:
+        expected = local_page_source.definition(root_identity, chat)
+    except (TypeError, ValueError):
+        raise DetachedInputError(
+            "source selection differs from canonical page inputs"
+        ) from None
     if definition != expected:
         raise DetachedInputError("source selection differs from canonical page inputs")
     return definition, chat, exact, prefixes
@@ -287,15 +339,31 @@ def _envelope(row, budget: _JSONBudget) -> DetachedLogRow:
         owner = row.log_name.split("@", 1)[0]
         message_id, ns, sender = plain.get("id"), plain.get("ns"), plain.get("from")
         kind = plain.get("kind", "message")
-        if type(message_id) is not str or not message_id:
+        if (type(message_id) not in (str, int) or isinstance(message_id, bool)
+                or not str(message_id)):
             reason = "invalid_message_id"
-        elif type(ns) is not int:
-            reason = "invalid_namespace"
-        elif type(sender) is not str or sender != owner:
-            reason = "wrong_log_owner"
-        elif type(kind) is not str or not kind:
-            reason = "invalid_message_kind"
         else:
+            message_id = str(message_id)
+            try:
+                overlay_index._text(message_id, "message id")
+            except (TypeError, ValueError, UnicodeEncodeError):
+                reason = "invalid_message_id"
+            else:
+                reason = None
+        if reason is None and (type(ns) is not int
+                               or not 1 <= ns <= document_observation.MAX_SQLITE_INTEGER):
+            reason = "invalid_namespace"
+        elif reason is None and (type(sender) is not str or sender != owner):
+            reason = "wrong_log_owner"
+        elif reason is None and (type(kind) is not str or not kind):
+            reason = "invalid_message_kind"
+        if reason is None:
+            try:
+                overlay_index._text(sender, "sender", empty=True)
+                overlay_index._text(kind, "message kind", 256)
+            except (TypeError, ValueError, UnicodeEncodeError):
+                reason = "invalid_message_shape"
+        if reason is None:
             return DetachedLogRow(
                 row.id, row.chat_id, row.log_name, raw, value, True, None,
                 message_id, ns, sender, kind,
@@ -371,18 +439,32 @@ def capture_detached_inputs(
 
     inventory = []
     inventory_cursor = None
+    inventory_page_limit = LOG_STREAM_PAGE_ROWS
     while True:
         if requests >= limits.max_pages:
             raise DetachedInputOverflow("node page count exceeds capture budget")
         remaining = limits.max_streams - len(inventory)
         if remaining < 1:
             raise DetachedInputOverflow("log stream count exceeds capture budget")
-        requests += 1
-        page = client.log_streams(
-            chat_id, expected_capture=cut.capture, cursor=inventory_cursor,
-            limit=min(LOG_STREAM_PAGE_ROWS, remaining),
-            max_bytes=LOG_STREAM_PAGE_BYTES,
-        )
+        page_limit = min(inventory_page_limit, remaining)
+        while True:
+            if requests >= limits.max_pages:
+                raise DetachedInputOverflow("node page count exceeds capture budget")
+            requests += 1
+            try:
+                page = client.log_streams(
+                    chat_id, expected_capture=cut.capture,
+                    cursor=inventory_cursor, limit=page_limit,
+                    max_bytes=LOG_STREAM_PAGE_BYTES,
+                )
+                break
+            except OverflowError:
+                if page_limit <= 1:
+                    raise DetachedInputOverflow(
+                        "one log stream exceeds inventory wire budget"
+                    ) from None
+                page_limit = max(1, page_limit // 2)
+                inventory_page_limit = page_limit
         _same_cut(page, cut, chat_id)
         input_bytes += sum(
             len(row.log_name.encode("utf-8")) + 32 for row in page.streams

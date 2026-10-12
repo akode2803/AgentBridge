@@ -11,6 +11,7 @@ from agentbridge.node.capture_inputs import (
     CaptureLimits, DetachedInputError, DetachedInputOverflow,
     FrozenJSONObject, capture_detached_inputs, thaw_json,
 )
+from agentbridge.node import capture_inputs
 from agentbridge.node.client import LocalNodeClient, NodeClientGenerationChanged
 from agentbridge.node.protocol import ProtocolError, ReplicaIdentity
 from agentbridge.node.server import LocalNodeServer
@@ -149,6 +150,26 @@ def test_definition_must_be_exact_canonical_page_scope(tmp_path):
             capture_detached_inputs(client, extra)
 
 
+def test_definition_reuses_canonical_chat_identity_validation(tmp_path):
+    chat = "x" * 257
+    root = json.loads(canonical().serialized)[0]
+    forged = source_selectors.definition(root, (
+        source_selectors.Selector("doc_prefix", "users"),
+        source_selectors.Selector("doc_prefix", "lifecycle"),
+        source_selectors.Selector("doc_exact", f"chats/{chat}/meta.json"),
+        *(source_selectors.Selector(
+            "doc_prefix", f"chats/{chat}/overlays/{kind}")
+          for kind in ("edits", "redactions", "reactions", "pins", "state")),
+        source_selectors.Selector("doc_prefix", f"chats/{chat}/keys"),
+        source_selectors.Selector("log_chat", chat),
+    ), build="local-canonical-page-v1")
+    with LocalNodeServer(tmp_path, identity()):
+        with pytest.raises(DetachedInputError, match="differs"):
+            capture_detached_inputs(
+                LocalNodeClient(tmp_path, identity()), forged,
+            )
+
+
 def test_definition_root_must_match_authenticated_node_identity(tmp_path):
     foreign_root = json.dumps([
         "local-root-v1", "supabase", "https://other.example.test", "other",
@@ -235,6 +256,69 @@ def test_raw_row_and_json_node_budgets_are_explicit(tmp_path):
             capture_detached_inputs(
                 client, canonical(), limits=CaptureLimits(max_json_nodes=2),
             )
+
+
+def test_json_node_budget_preflights_before_materializing(monkeypatch):
+    budget = capture_inputs._JSONBudget(CaptureLimits(max_json_nodes=2))
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("json.loads allocated before budget rejection")
+
+    monkeypatch.setattr(capture_inputs.json, "loads", forbidden)
+    with pytest.raises(DetachedInputOverflow, match="JSON nodes"):
+        capture_inputs._decode(b"[[],[]]", budget)
+    assert not called
+
+
+def test_envelope_store_key_compatibility_and_namespace_bounds(tmp_path):
+    rows = (
+        NodeLogRow(1, "chat-a", "alice", b'{"id":7,"ns":1,"from":"alice"}'),
+        NodeLogRow(2, "chat-a", "alice", b'{"id":"zero","ns":0,"from":"alice"}'),
+        NodeLogRow(
+            3, "chat-a", "alice",
+            b'{"id":"huge","ns":9223372036854775808,"from":"alice"}',
+        ),
+        NodeLogRow(
+            4, "chat-a", "alice",
+            ('{"id":"%s","ns":4,"from":"alice"}' % ("x" * 4097)).encode(),
+        ),
+    )
+    with LocalNodeServer(tmp_path, identity()) as server:
+        admit(server, NodeInputBatch(log_rows=rows, logs_mode="replace"))
+        result = capture_detached_inputs(
+            LocalNodeClient(tmp_path, identity()), canonical(),
+        )
+    captured = result.streams[0].rows
+    assert captured[0].accepted and captured[0].message_id == "7"
+    assert [row.rejection_reason for row in captured[1:]] == [
+        "invalid_namespace", "invalid_namespace", "invalid_message_id",
+    ]
+
+
+def test_stream_inventory_retries_with_smaller_wire_page(tmp_path, monkeypatch):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        admit(server, NodeInputBatch(log_rows=(
+            NodeLogRow(1, "chat-a", "alice", b'{"id":"a","ns":1,"from":"alice"}'),
+            NodeLogRow(2, "chat-a", "bob", b'{"id":"b","ns":2,"from":"bob"}'),
+        ), logs_mode="replace"))
+        client = LocalNodeClient(tmp_path, identity())
+        original = client.log_streams
+        limits = []
+
+        def bounded(*args, **kwargs):
+            limits.append(kwargs["limit"])
+            if kwargs["limit"] > 1:
+                raise OverflowError("simulated inventory response overflow")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(client, "log_streams", bounded)
+        result = capture_detached_inputs(client, canonical())
+    assert [row.log_name for row in result.streams] == ["alice", "bob"]
+    assert limits[:2] == [1000, 500]
+    assert limits[-1] == 1
 
 
 def test_large_stream_is_replayed_across_pages_through_exact_head(tmp_path):
