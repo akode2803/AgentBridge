@@ -966,3 +966,36 @@ postchecks. Every data-bearing source call brackets provider I/O with an
 account-bearing recovery fence; account or session drift discards the result.
 This process-local fencing is admission provenance only. It does not cache a
 membership verdict, and canonical requests continue to recompute authority.
+
+The inactive source-transfer seam makes that writer boundary explicit.
+`SyncEngine.retire()` permanently rejects new Store-writing cycles and joins
+all cycles already in flight before returning an owner-bound receipt. The
+existing `LocalInputRuntime` accepts a node page runtime only with the receipt
+from the exact `Mesh.sync`, its single pre-retirement transfer owner, transport
+and Store, and only when the node recovery
+runtime uses that same mutation-owned transport. It then joins its own
+document-ingestion and local-append worker before switching the
+message/document source scheduler. The transfer is one way. A stale
+exact-append admission cannot restore the old source after it completes.
+The destination publisher starts without a Store-write capability. Only the
+successful source transfer consumes its one-shot activation token, after all
+fallible route and recovery-wake work has completed; direct publication and
+runtime driving fail before that point. Discovery dispatch also holds the
+handoff lock while choosing its destination, so each discovered chat is either
+present in the transferred legacy snapshot or routed to the active node owner.
+The retirement proof cannot be replayed by a second local-input owner to
+activate another publisher against the same Store.
+
+Page preparation, presence, auxiliary inputs, unread work and read-model events
+remain owned by `LocalInputRuntime`. A changed coupled publication schedules a
+fresh canonical page and emits a content-free chat invalidation; authority is
+still recomputed by that read. Selected-chat activity, Realtime hints and local
+mutation settlement delegate to the node scheduler after transfer. This seam
+copies the bounded legacy chat queue, preserves the selected route and wakes
+node recovery before activating the destination and publishing the new owner
+pointer; an earlier exception leaves both inactive so the same irreversible
+retirement can be retried. It remains uncalled by GUI and harness startup.
+Product activation must additionally replace
+the legacy record-content event pump (notifications and delivered receipts)
+with a node-owned, replay-safe event boundary before retiring the old sync owner
+in a running app.
