@@ -1294,3 +1294,17 @@ installed, no seal was issued and the app remained shut down. The next concrete
 gate is disposable PostgreSQL/Supabase execution of the source schema, RLS and
 two-transaction shared/exclusive advisory-lock schedules before P1b typed RPC
 implementation.
+
+PR 135 is stacked on PR 134 and adds the executable disposable-PostgreSQL gate
+for that remaining P1a evidence. It applies the exact source section, validates
+state/grant/replay/cursor behavior, and uses persistent named `psql` sessions to
+observe the exact root-lock holder and waiter before explicitly releasing either
+transaction. It refuses non-test database names and existing AgentBridge
+objects, preserves existing Supabase auth functions and reaps every child on
+failure. Independent review found and drove closure of four harness defects,
+then reported no remaining P1/P2. Ruff, Python compilation, whitespace and the
+pure safety/source probes pass. This machine still has no `psql`, PostgreSQL,
+Docker or Podman, so PR 135 is executable preparation rather than database
+execution evidence. No provider or app runtime action occurred. Next, run PR
+135 against a fresh disposable database and record its server/version output;
+only a passing run unblocks P1b implementation.
