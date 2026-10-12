@@ -964,6 +964,30 @@ maps migrate through a deterministic 4,096-entry cut that always preserves the
 new action. The 85-test reaction/security/index/page gate and Ruff/diff checks
 pass locally; replacement review and cross-platform CI remain pending.
 
+The next current-head review found two remaining recovery edges. A rejected
+foreign-signed document could still advance from its untrusted namespace and
+exhaust future writes, and a legacy map below the entry cap could still exceed
+the v2 byte cap. Genuine writes now advance only from authenticated prior state;
+the deterministic migration cut satisfies both the 4,096-entry and one-MiB
+document budgets while preserving the current operation. The focused reaction
+document gate passes 13 tests and Ruff.
+
+A further current-head review found that a non-object reaction document still
+raised before the genuine overwrite and that startup resealing authenticated an
+attacker-selected v2 namespace. Genuine writes now treat every non-object prior
+value as unauthenticated empty state. Unsigned v2 startup migration preserves
+only the display mapping, mints a fresh bounded namespace and a single resealed
+placeholder operation, and never signs attacker-controlled operation timing as
+native evidence. The reaction/security gate passes 21 tests (16 unrelated
+security tests deselected); Ruff and diff checks pass.
+
+The next current-head review distinguished a missing signing key from a bad
+signature. When the signer callable cannot produce a proof, plaintext/keyless
+writes now preserve the structurally valid display mapping while discarding all
+unauthenticated operation and namespace evidence. A usable mismatched proof
+still resets the forged state. The 19-test reaction-document gate and four
+focused security tests pass; Ruff and diff checks pass.
+
 ## Fresh retained reaction mapping and notifications — v0.24.376
 
 The retained info lane now semantically maps only future exact human reaction
@@ -1005,6 +1029,51 @@ boundary and leaves the journal item retryable. Current mapping verifies the
 new `ops_sig` proof while `sig` remains a legacy display signature. The combined
 retained-event/journal/page/reaction/security gate passes 125 tests; Ruff and
 diff checks pass locally.
+
+The latest current-head review found two more fresh-read gaps. Notification
+drain now applies the reactor tenure's lower history bound as well as the
+reaction-time upper bound, so a later `send_history=false` policy cannot expose
+a pre-join target. Exact reaction projection also disables indexed reaction
+candidate fan-in because it already captures the one actor document directly;
+unrelated and departed actors can no longer exhaust that bounded operation.
+The 160-test reaction, retained-event, overlay-index and page-operation gate
+passes with two expected skips; Ruff and diff checks pass locally.
+
+A later current-head review noted that a newer signed state document is not
+historical proof: ordinary later writes preserve hidden/cleared fields while
+advancing the envelope namespace. Semantic mapping now degrades to generic
+invalidation whenever the actor state is newer than the reaction cut. Historical
+state evidence is not inferred from the current overlay. The combined retained
+reaction/document gate passes 71 tests; Ruff and diff checks pass locally.
+
+The following current-head review showed that reactor-local hidden and clear
+state was still absent from semantic proof. Exact reaction input now captures
+each actor's bounded state document beside their reaction document, verifies its
+signature, and suppresses targets hidden or cleared before the operation. State
+written later cannot retroactively invalidate an earlier genuine reaction, and
+malformed signed visibility evidence cannot authorize a semantic wake. The
+expanded 184-test reaction, retained-event, local-source, overlay and page gate
+passes with two expected skips; Ruff and diff checks pass locally.
+
+The final current-head review closed three consistency edges. A reaction write
+that observes key availability changing between compatibility and v2 signing
+now retries the complete pair once and aborts before publication if it changes
+again. Native-operation readers reject asymmetric dual-signature documents, so
+direct and indexed crypto paths suppress the same input. Semantic reaction
+wakes no longer treat the current `send_history` value as reaction-time proof:
+group reactions retain the actor tenure join cut unless a future bounded,
+authenticated historical permission witness is added. Focused reaction and
+retained-event validation passes 36 tests; Ruff and diff checks pass locally.
+
+A subsequent current-head review closed three final retained-reaction gaps.
+Semantic mapping now requires a signed actor-state witness at or before the
+operation cut, so deleted or malformed state cannot erase earlier hidden/clear
+evidence. A per-target operation behind the breadcrumb retries only while the
+whole signed document is also behind; an already advanced document makes the
+breadcrumb terminally generic instead of pinning the journal. DM mapping also
+captures both account records under the same authority/finalization round and
+suppresses blocked participants. All 56 retained-event tests, Ruff and diff
+checks pass locally.
 
 The PR 132 Windows full suite exposed a test-isolation race, not an escaped
 read-ack fence: the acknowledgment reservation had reached `aborted`, while an
@@ -1052,3 +1121,136 @@ owners, followed by real-app observability and rollback validation.
 The completed #128 Defender experiment did not improve Windows CI: the full
 test step took 60m27s versus the 59m44s baseline, and its attempted restore step
 failed. PR #128 was closed without merging; keep the GitHub runner defaults.
+
+## GUI-owned local-node activation — v0.24.377
+
+GUI session adoption now starts the existing owners and exposes cached session
+reads before a background thread opens and authenticates the local node. A
+pre-retirement node-open failure leaves legacy sync available for that session.
+Successful opening binds the exact event owner, permanently retires the matching
+legacy Store writer and installs the node source. A failure after retirement
+detaches the broken session; the old writer is never recreated.
+
+Shutdown now treats `SyncEngine.retire()` as the Store-write barrier. The watcher
+poke only wakes the run loop; it is not completion evidence. If an active write
+lease does not drain, Store closure is withheld and `GuiApp` retains the exact
+detached Mesh for a later cleanup attempt. Restore and login cannot construct a
+replacement while that owner remains. Restore also final-fences the captured
+generation, empty current Mesh, unchanged session file, closed state and
+teardown completion after directory I/O, preventing stale restore from replacing
+a concurrent login or unlinking its new session.
+
+Signup and login now reject a closed `GuiApp` immediately after taking the
+session lock, before building a Mesh, creating/upgrading an account or claiming
+machine agents. This closes the shutdown race where a queued authentication
+handler could mutate durable identity state before `_adopt` noticed closure.
+`close()` now marks and detaches the app under that lock before diagnostics
+flushes, so the same guard applies throughout shutdown. A local-node event-owner
+binding failure is also handled on the reversible side of the handoff: the
+attempted owner closes, activation returns unavailable, and legacy sync remains
+live because retirement has not begun.
+
+Focused lifecycle/session/sync validation passes 57 tests. Four targeted
+closed-auth/restore tests pass after the shutdown-entry correction. The latest
+43-test local-node/session/cold-login gate passes after correcting the shutdown
+ordering and a stale test that had used `close()` merely to detach. The final broader
+page-runtime/event/notification/GUI gate passes 150 tests. Ruff and diff checks
+pass. Astra independently reproduced the active-write Store-close
+race and stale-restore overwrite, verified both repairs with controlled probes,
+and found no remaining P1/P2. No app restart, deployment, merge or live-provider
+acceptance has occurred. See
+[docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md](docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md).
+
+The latest PR 133 review found that a legacy sync-retirement timeout returned
+before stopping other background owners, and that a successful background node
+activation was sampled out under normal diagnostics. Mesh shutdown now revokes
+sync, notifier, presence and outbox work before waiting on the legacy Store
+lease; the Store remains open and the exact Mesh remains retained when that
+barrier times out. Background outbox flushing checks revocation between
+dispatches and releases every exact unprocessed lease by CAS, so an
+in-flight handler may finish but a later queued mutation cannot start after
+stop. Successful `local_node_activation` is now a retained breadcrumb. The
+focused lifecycle, outbox, sync and diagnostics gate passes 104 tests; Ruff and
+whitespace checks pass. Astra's independent follow-up found no remaining P1/P2;
+its stop-after-claim and stale-lease CAS probes are preserved as regressions.
+
+Three later current-head findings tighten that shutdown contract. Background
+outbox dispatch admission and `stop()` now linearize on one gate: an already
+admitted handler may finish, while a stop that wins the gate prevents every
+later claimed mutation and the worker releases its exact leases. Authenticated
+logout removes the durable session file even when Mesh teardown is retained for
+retry, so restart cannot restore a signed-out account. `GuiApp.close()` also
+records a failed shutdown outcome and closes the diagnostics recorder before
+re-raising the primary teardown error. The focused outbox/session/local-node/
+sync/diagnostics gate passes 107 tests; Ruff and whitespace checks pass. If an
+in-flight dispatch does not yield the gate inside the stop deadline, stop raises
+without declaring `_stop`; Mesh close remains incomplete and retains the exact
+owner for retry. A deterministic pre-handler pause covers that boundary. Astra's
+final combined review and independent Mesh-level timeout/Store-close probe found
+no remaining P1/P2; its review gate passes 88 tests.
+
+The final current-head shutdown review found a broader ordering gap: fallible
+local-input and local-node drains still ran before all background owners were
+revoked. Shutdown now first closes admission for sync, outbox dispatch, local
+ingestion and unread work, then stops notifier and presence and drains the
+outbox, local-input and node owners. A timeout at any drain retains the exact
+Mesh, node owner and open Store for retry without allowing a detached session
+to begin more work. The outbox request wake is repeated after its linearized
+stop boundary so a worker cannot consume the early hint and sleep through the
+completed stop. Deterministic outbox-, input-, node- and legacy-retirement
+timeout regressions plus the expanded 193-test lifecycle gate pass; Ruff and
+whitespace checks pass locally.
+
+The next current-head review found two follow-on races. A timed-out outbox stop
+left `_stop_requested` set but allowed the worker loop to keep pruning and
+claiming/releasing due rows; the loop now exits on that revocation hint after
+the admitted handler returns. A stale restore-retry thread could also swallow a
+fatal activation's retry request while its boolean owner flag was still set;
+retry owners now carry exact tokens and a pending handoff that rearms only for
+the still-current durable session. Windows CI separately proved that consecutive
+`time_ns()` values can be identical, so outbox lease deadlines are now strictly
+increasing within the Store and an old exact-CAS release cannot clear a newer
+same-runtime claim. The expanded lifecycle gate passes 194 tests; the exact
+Ubuntu selected-read failure passes five consecutive reruns and remains an
+isolated `SourceChanged` fixture retry pending replacement CI. Ruff and
+whitespace checks pass locally.
+
+PR 132 head `2b96eee` and PR 133 head `5b2c63c` subsequently passed both Ubuntu
+and Windows CI. The first live macOS activation of PR 133 recorded a successful
+activation breadcrumb and a single node-coordinator owner, then exposed a
+cutover readiness gap: 64 durable historical mutation fences were copied into
+the new node, so it remained generation zero and `pending`, but Mesh had already
+retired the legacy writer. The app was shut down cleanly, its node endpoint was
+withdrawn, and no ambiguous intent was cleared.
+
+The local correction on `codex/local-node-app-activation` first reversibly
+quiesces legacy sync and drains admitted callbacks, then holds the coordinator
+root writer and exact node cut across retirement and node-source installation
+while excluding legacy local ingestion. Parallel scan children inherit their
+admitted parent lineage so they can finish during the drain without reopening
+unrelated work. Existing durable intents prevent retirement, and a new mutation
+cannot enter between the readiness decision and handoff. Exact transient startup
+fences receive bounded rechecks; a persistent fence resumes legacy sync, closes
+the attempted owner, emits a retained
+`local_node_activation/pending` breadcrumb with `source_mutation_pending`, and
+keeps legacy sync live. Failed endpoint withdrawal retains the owner for shutdown
+retry. Regressions cover a mutation inserted after event binding, transient
+settlement, persistent intent preservation, failed withdrawal, root-dependent
+sync callbacks and children delayed before inherited parallel admission. The
+focused sync gate passes 23 tests and the broader handoff, page-runtime,
+recovery, mutation-fence, GUI-read and diagnostics gate passes 232 tests; Ruff
+and diff checks pass. Independent review found no remaining P1/P2. Replacement
+CI remains. Next, validate this fallback against the live historical fences,
+then design the separate explicit operator/recovery contract for those ambiguous
+intents without guessing from age or process death.
+
+The latest PR 133 review found that a node-side active fence can survive a
+rolled-back coordinator root transaction even when the root retains no token.
+The activation cut now verifies both the exact root token coverage and the
+absence of every active node fence before allowing irreversible legacy-sync
+retirement. Completed fences remain recoverable historical evidence. The exact
+fanout-rollback regression, all 31 mutation-fence tests and all 31 loopback
+activation tests pass; Ruff and whitespace checks pass locally. The previous
+Windows run's sole failure was the documented isolated signup SQLite commit
+stall at the ten-second fixture deadline; this corrected head still requires
+replacement cross-platform CI.

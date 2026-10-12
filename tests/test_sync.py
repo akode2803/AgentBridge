@@ -226,6 +226,163 @@ def test_retirement_joins_active_write_and_permanently_rejects_future_sync(
     store.close()
 
 
+def test_quiescence_drains_writers_blocks_new_cycles_and_resumes(tmp_path, clouds):
+    import threading
+    import time
+
+    tx = clouds.bare(tmp_path / "mesh2")
+    store = Store(tmp_path / "cache.sqlite")
+    engine = SyncEngine(tx, store)
+    first_entered = threading.Event()
+    first_release = threading.Event()
+    cut_entered = threading.Event()
+    cut_release = threading.Event()
+    second_entered = threading.Event()
+
+    def first_writer():
+        with engine._write_cycle():
+            first_entered.set()
+            assert first_release.wait(2.0)
+
+    def hold_cut():
+        with engine.quiesce(timeout_s=2.0):
+            cut_entered.set()
+            assert cut_release.wait(2.0)
+
+    def second_writer():
+        with engine._write_cycle():
+            second_entered.set()
+
+    first = threading.Thread(target=first_writer, daemon=True)
+    first.start()
+    assert first_entered.wait(1.0)
+    cut = threading.Thread(target=hold_cut, daemon=True)
+    cut.start()
+    deadline = time.monotonic() + 1.0
+    while not engine._quiescing and time.monotonic() < deadline:
+        time.sleep(.005)
+    assert engine._quiescing and not cut_entered.is_set()
+    second = threading.Thread(target=second_writer, daemon=True)
+    second.start()
+    assert not second_entered.wait(.05)
+
+    first_release.set()
+    assert cut_entered.wait(1.0)
+    assert not second_entered.is_set()
+    cut_release.set()
+    first.join(2.0)
+    cut.join(2.0)
+    second.join(2.0)
+
+    assert not first.is_alive() and not cut.is_alive() and not second.is_alive()
+    assert second_entered.is_set() and not engine.retired
+    store.close()
+
+
+def test_exact_quiescence_proof_permits_irreversible_retirement(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "mesh2")
+    store = Store(tmp_path / "cache.sqlite")
+    engine = SyncEngine(tx, store)
+
+    with engine.quiesce(timeout_s=1.0) as cut:
+        proof = engine.retire(timeout_s=1.0, quiescence=cut)
+
+    assert engine.retired
+    engine.validate_retirement(proof, tx, store)
+    with pytest.raises(RuntimeError, match="legacy sync owner retired"):
+        engine.sync_once()
+    store.close()
+
+
+def test_quiescence_timeout_resumes_legacy_writer(tmp_path, clouds):
+    import threading
+
+    tx = clouds.bare(tmp_path / "mesh2")
+    store = Store(tmp_path / "cache.sqlite")
+    engine = SyncEngine(tx, store)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def writer():
+        with engine._write_cycle():
+            entered.set()
+            assert release.wait(2.0)
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    assert entered.wait(1.0)
+    with pytest.raises(TimeoutError, match="active writes"):
+        with engine.quiesce(timeout_s=0.0):
+            raise AssertionError("unreachable")
+    assert not engine.retired and not engine._quiescing
+
+    release.set()
+    thread.join(2.0)
+    assert not thread.is_alive()
+    with engine._write_cycle():
+        pass
+    store.close()
+
+
+def test_quiescence_drains_parallel_children_of_admitted_scan(
+        tmp_path, clouds, monkeypatch):
+    import threading
+    import time
+
+    tx = clouds.bare(tmp_path / "mesh2")
+    seed(tx, "one", "ann", 1)
+    seed(tx, "two", "ann", 1)
+    store = Store(tmp_path / "cache.sqlite")
+    engine = SyncEngine(tx, store, workers=2)
+    children_ready = threading.Event()
+    children_release = threading.Event()
+    cut_entered = threading.Event()
+    seen = []
+    errors = []
+    original = engine._inherited_sync_chat
+
+    def delayed_child(lineage, chat_id, lane):
+        seen.append(chat_id)
+        if len(seen) == 2:
+            children_ready.set()
+        assert children_release.wait(2.0)
+        return original(lineage, chat_id, lane)
+
+    monkeypatch.setattr(engine, "_inherited_sync_chat", delayed_child)
+
+    def scan():
+        try:
+            assert engine.sync_once(chat_ids=("one", "two")) == 2
+        except BaseException as exc:
+            errors.append(exc)
+
+    def quiesce():
+        try:
+            with engine.quiesce(timeout_s=2.0):
+                cut_entered.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    scanner = threading.Thread(target=scan, daemon=True)
+    scanner.start()
+    assert children_ready.wait(1.0)
+    cutter = threading.Thread(target=quiesce, daemon=True)
+    cutter.start()
+    deadline = time.monotonic() + 1.0
+    while not engine._quiescing and time.monotonic() < deadline:
+        time.sleep(.005)
+    assert engine._quiescing and not cut_entered.is_set()
+
+    children_release.set()
+    scanner.join(2.0)
+    cutter.join(2.0)
+
+    assert errors == []
+    assert not scanner.is_alive() and not cutter.is_alive()
+    assert cut_entered.is_set() and set(seen) == {"one", "two"}
+    store.close()
+
+
 def test_retirement_timeout_stays_retired_and_receipt_is_exact(
         tmp_path, clouds, monkeypatch):
     import threading
@@ -263,6 +420,46 @@ def test_retirement_timeout_stays_retired_and_receipt_is_exact(
     with pytest.raises(ValueError, match="invalid sync retirement timeout"):
         engine.retire(timeout_s=float("nan"))
     other.close()
+    store.close()
+
+
+def test_retirement_wakes_and_joins_a_waiting_hint_loop(tmp_path):
+    import threading
+
+    class WakeWatcher(Watcher):
+        def __init__(self):
+            self.entered = threading.Event()
+            self.wake = threading.Event()
+
+        def wait(self, timeout):
+            self.entered.set()
+            return self.wake.wait(timeout)
+
+        def poke(self):
+            self.wake.set()
+
+    class WakeTransport(FeedTransport):
+        def __init__(self):
+            super().__init__()
+            self.watcher = WakeWatcher()
+
+        def watch(self):
+            return self.watcher
+
+    tx = WakeTransport()
+    store = Store(tmp_path / 'cache.sqlite')
+    engine = SyncEngine(tx, store)
+    thread = threading.Thread(
+        target=engine.run, kwargs={'poll_s': 60.0}, daemon=True,
+    )
+    thread.start()
+    assert tx.watcher.entered.wait(2.0)
+
+    proof = engine.retire(timeout_s=1.0)
+    thread.join(2.0)
+
+    assert not thread.is_alive()
+    engine.validate_retirement(proof, tx, store)
     store.close()
 
 

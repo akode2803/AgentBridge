@@ -1,9 +1,10 @@
-"""Authenticated lifecycle owner for the inactive local-node page runtime.
+"""Authenticated lifecycle owner for the local-node page runtime.
 
 Opening performs one member-authenticated recovery-fence read before any local
 node state is opened.  The resulting provider principal is pinned into the
 replica identity; later recovery independently rechecks the same principal.
-This module is not wired into GUI, harness, or canonical read routes.
+The GUI activates this owner after cached session adoption. Harnesses retain
+their existing process-owned ingestion path.
 """
 from __future__ import annotations
 

@@ -80,7 +80,8 @@ def test_restoring_flag_and_cold_directory_login(rig, monkeypatch):
 
     # simulate the cold-transport boot: session on disk, mesh not attached,
     # the background retry alive, directory unreadable
-    rig.app.close()                          # detaches; session file stays
+    with rig.app._lock:
+        rig.app._detach()                    # detaches; app remains live
     rig.app._restore_retrying = True
     assert (rig.home / "gui_session.json").exists()
     assert rig.get("/api/state")["restoring"] is True

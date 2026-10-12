@@ -406,6 +406,39 @@ class MutationCoordinator:
             self._advance_root_revision(root)
         return registration
 
+    @contextmanager
+    def node_activation_gate(self, node):
+        """Exclude every root mutation across one node-writer handoff.
+
+        Registration has already copied the exact durable intent set into the
+        node.  Holding the root writer makes the empty-intent observation and
+        the caller's legacy retirement one cut: a new mutation cannot begin
+        until the node source is installed, and an existing mutation prevents
+        retirement altogether.
+        """
+        from ..node.store import NodeStore
+
+        if type(node) is not NodeStore:
+            raise ValueError('invalid local node')
+        registration = node.coordinator_registration()
+        with self._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as root:
+            self._schema(root)
+            if self._registered_node(root, registration.database_path) != registration:
+                raise owner.SourceChanged('registered_node_replaced')
+            tokens = self._pending_tokens(root)
+            with NodeStore.coordinator_cut(registration) as node_conn:
+                NodeStore.coordinator_require_fences(
+                    node_conn, coordinator_epoch=self.epoch, tokens=tokens,
+                )
+                # Node fences commit independently before the root transaction.
+                # A later root rollback can therefore leave an active orphan
+                # that is absent from ``tokens``.  It remains ambiguous and
+                # must prevent the irreversible legacy-writer retirement.
+                if tokens or NodeStore.coordinator_has_active_fences(node_conn):
+                    yield False
+                    return
+                yield True
+
     def claim_node_recovery(self, node):
         """Capture one immutable root/node cut without reading the provider."""
         from ..node.store import NodeStore

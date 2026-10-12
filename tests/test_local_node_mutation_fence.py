@@ -533,6 +533,21 @@ def test_begin_fanout_failure_leaves_node_pending_and_no_root_intent(
         ).fetchone() == ("active",)
     with pytest.raises(NodeGenerationChanged, match="fences are not claimable"):
         root.claim_node_recovery(node)
+    with root.node_activation_gate(node) as ready:
+        assert ready is False
+
+
+def test_activation_gate_allows_completed_recovery_fence(world):
+    root, _store, node, _definition, _position = world
+    registration = node.coordinator_registration()
+    with NodeStore.coordinator_cut(registration) as conn:
+        NodeStore.coordinator_add_fence(
+            conn, coordinator_epoch=root.epoch, token="f" * 64,
+            state="completed",
+        )
+
+    with root.node_activation_gate(node) as ready:
+        assert ready is True
 
 
 def test_completion_node_commit_then_root_rollback_cannot_be_claimed(

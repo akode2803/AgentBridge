@@ -382,7 +382,8 @@ class Diagnostics:
             'origin_minted', 'local_commit', 'outbox_attempt', 'transport_append',
             'append_ack_observed', 'local_append_completed',
             'local_snapshot_admitted', 'outbox_retry', 'outbox_dead', 'canonical_dom',
-            'native_ack', 'send_reconciled', 'abandoned', 'shutdown') or (
+            'native_ack', 'send_reconciled', 'abandoned', 'shutdown',
+            'local_node_activation') or (
             event.get('phase') in ('request_started', 'request_finished',
                                   'browser_request_started', 'browser_response')
             and event.get('route') == '/api/mesh/post') or (

@@ -1,5 +1,6 @@
 """OutboxWorker: retry-until-delivered semantics against a flaky transport."""
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -174,3 +175,177 @@ def test_worker_thread_start_notify_stop(store):
     finally:
         w.stop()
     assert not w._thread.is_alive()
+
+
+def test_worker_stop_wakes_after_linearized_boundary(store, monkeypatch):
+    worker = OutboxWorker(store, {}, poll_s=30.0)
+    wake_states = []
+    original_set = worker._wake.set
+
+    def record_wake():
+        wake_states.append(worker._stop.is_set())
+        original_set()
+
+    monkeypatch.setattr(worker._wake, 'set', record_wake)
+    worker.start()
+    worker.stop(timeout=1.0)
+
+    # The early request wake can be consumed while stop waits for the dispatch
+    # gate. A second wake after _stop is linearized prevents a lost-wakeup join
+    # timeout when the worker has already re-entered its long poll.
+    assert wake_states[-2:] == [False, True]
+    assert not worker._thread.is_alive()
+
+
+def test_worker_stop_does_not_dispatch_later_queued_items(store):
+    entered = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def handler(_target, payload):
+        sent.append(payload['id'])
+        if payload['id'] == 'first':
+            entered.set()
+            assert release.wait(5)
+
+    worker = OutboxWorker(store, {'post': handler}, poll_s=30.0)
+    store.outbox_add('post', 'first-target', {'id': 'first'})
+    store.outbox_add('post', 'second-target', {'id': 'second'})
+    worker.start()
+    worker.notify()
+    assert entered.wait(5)
+
+    stopped = threading.Thread(target=worker.stop)
+    stopped.start()
+    try:
+        assert worker._stop_requested.wait(5)
+        assert not worker._stop.is_set()
+    finally:
+        release.set()
+    stopped.join(5)
+
+    assert not stopped.is_alive()
+    assert not worker._thread.is_alive()
+    assert sent == ['first']
+    assert store.outbox_counts() == {'pending': 1}
+
+    # Explicit deterministic callers remain able to drain a stopped worker.
+    assert worker.flush_once() == 1
+    assert sent == ['first', 'second']
+
+
+def test_background_stop_after_claim_releases_item_without_dispatch(
+        store, monkeypatch):
+    sent = []
+    stopped = threading.Event()
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_claim = store.outbox_claim_due
+
+    def claim_then_stop(**kwargs):
+        claimed = original_claim(**kwargs)
+        stopped.set()
+        return claimed
+
+    monkeypatch.setattr(store, 'outbox_claim_due', claim_then_stop)
+    assert worker._flush_once(stop=stopped) == 0
+    assert sent == []
+
+    monkeypatch.setattr(store, 'outbox_claim_due', original_claim)
+    assert worker.flush_once() == 1
+    assert sent == ['queued']
+
+
+def test_stop_linearizes_after_claim_before_handler_start(
+        store, monkeypatch):
+    claimed = threading.Event()
+    release_claim = threading.Event()
+    sent = []
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+        poll_s=30.0,
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_claim = store.outbox_claim_due
+
+    def pause_after_claim(**kwargs):
+        result = original_claim(**kwargs)
+        claimed.set()
+        assert release_claim.wait(5)
+        return result
+
+    monkeypatch.setattr(store, 'outbox_claim_due', pause_after_claim)
+    worker.start()
+    worker.notify()
+    assert claimed.wait(5)
+    stopped = threading.Thread(target=worker.stop, daemon=True)
+    stopped.start()
+    try:
+        assert worker._stop.wait(5)
+    finally:
+        release_claim.set()
+    stopped.join(5)
+
+    assert not stopped.is_alive()
+    assert sent == []
+    assert store.outbox_counts() == {'pending': 1}
+
+
+def test_stop_timeout_does_not_declare_boundary_before_handler_start(
+        store, monkeypatch):
+    observed = threading.Event()
+    release = threading.Event()
+    sent = []
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+        poll_s=30.0,
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_observe = worker.latency.observe
+
+    def pause_before_handler(*args, **kwargs):
+        result = original_observe(*args, **kwargs)
+        if args[0] == 'outbox_attempt':
+            observed.set()
+            assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(worker.latency, 'observe', pause_before_handler)
+    worker.start()
+    worker.notify()
+    assert observed.wait(5)
+
+    with pytest.raises(TimeoutError, match='outbox dispatch did not stop'):
+        worker.stop(timeout=.01)
+    assert not worker._stop.is_set()
+    assert sent == []
+
+    release.set()
+    assert worker._stop_requested.wait(5)
+    worker._thread.join(5)
+    assert not worker._thread.is_alive()
+    assert not worker._stop.is_set()
+    worker.stop()
+    assert sent == ['queued']
+
+
+def test_stale_outbox_release_cannot_clear_a_newer_lease(store, monkeypatch):
+    monkeypatch.setattr(
+        'agentbridge.store.db.time', SimpleNamespace(time_ns=lambda: 1_000_000),
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    old = store.outbox_claim_due()[0]
+    with store._conn() as connection:
+        connection.execute(
+            'UPDATE outbox SET lease_ns=0 WHERE seq=? AND lease_ns=?',
+            (old.seq, old.lease_ns),
+        )
+    current = store.outbox_claim_due()[0]
+    assert current.lease_ns != old.lease_ns
+
+    assert not store.outbox_release_claim(old)
+    assert store.outbox_claim_due() == []
+    assert store.outbox_release_claim(current)
+    assert store.outbox_claim_due()[0].seq == current.seq

@@ -1,8 +1,9 @@
 # Local admitted-input node architecture
 
-Status: N0 plus the N1 atomic-store, bounded local-read protocol and exact-source
-shadow collector slices are inactive; no GUI, harness or runtime routing uses
-them.
+Status: the GUI now activates the N0/N1 recovery, publication and retained-event
+owner behind cached session adoption. Harnesses retain their existing process
+owners. Live provider acceptance and rollback observation remain separate from
+this source checkpoint.
 
 ## Measured reason for the change
 
@@ -944,11 +945,10 @@ owner's interruption cleanup boundary, and concurrent close calls serialize
 while preserving the owner for a later cleanup retry if shutdown fails.
 
 The owner closes only its local node server/runtime. The app continues to own
-the shared transport and canonical Store. It is not yet imported by GUI or
-harness code: product adoption must acquire it away from cached first paint,
-stop and join the legacy `SyncEngine` before the first node-to-Store
-publication, then route one app-owned scheduler without overlapping message
-writers.
+the shared transport and canonical Store. GUI adoption acquires it in a
+background activation thread after cached session readiness, then retires the
+legacy `SyncEngine` before the first node-to-Store publication. Harness startup
+does not use this owner.
 
 The receipt initializer recognizes only the exact earlier eight-column table
 that lacked message-cut provenance. It discards those unusable rows and creates
@@ -1199,4 +1199,30 @@ admitted sequence high-water: unresolved reactions rotate behind later generic
 info, and a continuously growing tail waits for the next sweep rather than
 postponing retained earlier work forever. Schedulers retain only bounded
 identity, cursor and operation-ledger state; final exact-CAS remains the sole
-consumption decision. The local node owner is still inactive in app startup.
+consumption decision.
+
+### GUI-owned activation and close — v0.24.377
+
+`GuiApp` starts the established local-input, outbox, notifier and presence
+owners, makes the cached session readable, and only then opens the authenticated
+local node in a background activation thread. A provider/node-open failure
+before retirement leaves the legacy sync owner running for that session. Once
+retirement begins, the transfer is one way: a later handoff failure detaches the
+session and restore builds no replacement until the exact failed Mesh has
+closed.
+
+`SyncEngine.retire()` now wakes a waiting Realtime watcher as an exit hint, but
+the retirement receipt remains the writer barrier. `Mesh.close()` obtains that
+same active-cycle drain before `Store.close()`; a timeout retains the old Mesh
+and its open Store for a later cleanup retry. Stop signals and bounded thread
+joins are not treated as proof that a leased write has ended.
+
+Restore captures its session generation and session-file value before directory
+I/O. Under the final app lock it rechecks generation, current Mesh, closed state,
+unchanged file intent and completed teardown before deleting a stale session or
+constructing a replacement. A concurrent login/signup, close, logout or failed
+teardown therefore makes the old restore result inert.
+
+This activates only the GUI ownership path; it does not establish deployed
+provider behavior, live latency, rollback success or harness consolidation.
+Those remain the next acceptance and architecture slices.

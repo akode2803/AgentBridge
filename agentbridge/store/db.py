@@ -129,6 +129,7 @@ class OutboxItem:
     target: str
     payload: dict[str, Any]
     attempts: int
+    lease_ns: int = 0
 
 
 class Store:
@@ -137,6 +138,8 @@ class Store:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        self._outbox_lease_lock = threading.Lock()
+        self._outbox_lease_ns = 0
         with _store_init_lock(self.path):
             self._initialize()
 
@@ -721,7 +724,15 @@ class Store:
         """Claim due pending items by taking a lease. A crash mid-send simply
         lets the lease expire, after which the item is claimable again."""
         now = time.time_ns()
-        lease_until = now + int(lease_s * 1e9)
+        with self._outbox_lease_lock:
+            # Windows clocks can return the same time_ns across consecutive
+            # release/reclaim cycles. Keep this Store's lease tokens strictly
+            # increasing so an old exact-CAS release can never clear a newer
+            # claim from the same runtime owner.
+            lease_until = max(
+                now + int(lease_s * 1e9), self._outbox_lease_ns + 1,
+            )
+            self._outbox_lease_ns = lease_until
         items: list[OutboxItem] = []
         with self._conn() as c:
             rows = c.execute(
@@ -738,8 +749,21 @@ class Store:
                     (lease_until, seq, now),
                 ).rowcount
                 if claimed:
-                    items.append(OutboxItem(seq, kind, target, json.loads(payload), attempts))
+                    items.append(OutboxItem(
+                        seq, kind, target, json.loads(payload), attempts, lease_until,
+                    ))
         return items
+
+    def outbox_release_claim(self, item: OutboxItem) -> bool:
+        """Release this worker's exact unprocessed lease after revocation."""
+        if type(item) is not OutboxItem or item.lease_ns <= 0:
+            raise ValueError("invalid outbox claim")
+        with self._conn() as c:
+            return bool(c.execute(
+                "UPDATE outbox SET lease_ns=0 WHERE seq=? AND state='pending'"
+                " AND lease_ns=?",
+                (item.seq, item.lease_ns),
+            ).rowcount)
 
     def outbox_done(self, seq: int) -> None:
         with self._conn() as c:

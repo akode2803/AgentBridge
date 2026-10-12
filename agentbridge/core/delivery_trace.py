@@ -36,6 +36,7 @@ PHASES = frozenset({
     'browser_request_started', 'browser_response', 'browser_request_failed',
     'canonical_dom', 'native_ack', 'retry_scheduled', 'refresh_queued',
     'refresh_started', 'refresh_finished', 'send_reconciled', 'abandoned', 'shutdown',
+    'local_node_activation',
 })
 
 

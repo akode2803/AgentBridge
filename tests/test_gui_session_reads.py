@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
 
 from agentbridge.applink import AppLink
+from agentbridge.core.config import read_json
 from agentbridge.gui import api_chats, api_pages
 from agentbridge.gui.context import GuiApp, SessionReadToken
 from agentbridge.gui.routing import Request, authed, authed_read
@@ -239,8 +241,111 @@ def test_generation_exhaustion_and_detach_failure_still_clear_session(rig, monke
     with pytest.raises(RuntimeError, match="close interrupted"):
         rig.app.logout("hexagon")
     assert rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
     assert not rig.app.validate_session_read(old)
     assert rig.app.capture_session_read() is None
+    monkeypatch.setattr(mesh, "close", original_close)
+    assert rig.app._finish_teardown()
+    assert rig.app._teardown_mesh is None
+
+
+def test_stale_restore_cannot_replace_a_concurrent_login(rig, monkeypatch):
+    rig.signup()
+    with rig.app._lock:
+        rig.app._detach()
+    entered = threading.Event()
+    release = threading.Event()
+    original_names = rig.app.directory0.names
+
+    def blocked_names():
+        entered.set()
+        assert release.wait(10)
+        return original_names()
+
+    monkeypatch.setattr(rig.app.directory0, "names", blocked_names)
+    restoring = threading.Thread(target=rig.app.restore, daemon=True)
+    restoring.start()
+    assert entered.wait(10)
+
+    assert rig.app.login("aryan", "hexagon")["ok"] is True
+    current = rig.app.mesh
+    stale_builds = []
+    monkeypatch.setattr(
+        rig.app, "_build",
+        lambda name: stale_builds.append(name) or pytest.fail("stale restore built a Mesh"),
+    )
+    release.set()
+    _join(restoring)
+
+    assert rig.app.mesh is current
+    assert not stale_builds
+
+
+def test_stale_authoritative_restore_cannot_unlink_a_new_session(rig, monkeypatch):
+    rig.signup()
+    with rig.app._lock:
+        rig.app._detach()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_names():
+        entered.set()
+        assert release.wait(10)
+        return ["aryan"]
+
+    monkeypatch.setattr(rig.app.directory0, "names", blocked_names)
+    monkeypatch.setattr(rig.app.directory0, "get", lambda _name: None)
+    restoring = threading.Thread(target=rig.app.restore, daemon=True)
+    restoring.start()
+    assert entered.wait(10)
+
+    assert rig.app.signup("fable", "", "fablepass")["ok"] is True
+    release.set()
+    _join(restoring)
+
+    assert rig.app.user == "fable"
+    assert rig.app._session_path.exists()
+    assert read_json(rig.app._session_path)["user"] == "fable"
+
+
+def test_pending_restore_retry_hands_off_after_stale_owner_exit(
+        tmp_path, clouds, monkeypatch):
+    app = GuiApp(
+        clouds.root(tmp_path / 'retry-root'), home=tmp_path / 'retry-home',
+        machine='gui', encrypt=False,
+    )
+    app._session_path.parent.mkdir(parents=True, exist_ok=True)
+    app._session_path.write_text(json.dumps({'user': 'aryan'}), encoding='utf-8')
+    started = []
+
+    class DeferredThread:
+        def __init__(self, *, target, daemon, name):
+            self.target, self.daemon, self.name = target, daemon, name
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(threading, 'Thread', DeferredThread)
+    old_token = object()
+    with app._lock:
+        app._restore_retrying = True
+        app._restore_retry_token = old_token
+        app._restore_retry_pending = False
+
+    # A fatal activation that arrives before the old retry's finally block
+    # must leave a durable handoff instead of being discarded as a duplicate.
+    app._schedule_restore_retry(every_s=.01, cap_s=1)
+    assert app._restore_retry_pending
+    assert started == []
+
+    assert app._release_restore_retry(old_token)
+    app._schedule_restore_retry(every_s=.01, cap_s=1)
+
+    assert len(started) == 1
+    assert app._restore_retrying
+    assert app._restore_retry_token is not None
+    assert app._restore_retry_token is not old_token
+    app.close()
 
 
 def test_failed_adopt_is_transient_then_cleanup_and_re_adopt_recovers(rig, monkeypatch):
@@ -288,6 +393,113 @@ def test_adopt_announces_machine_before_starting_presence(rig, monkeypatch):
     assert events[:3] == [
         ("mesh_start", False), ("announce", ("gui",)), ("presence_start", None),
     ]
+
+
+def test_closed_app_rejects_signup_before_account_mutation(rig, monkeypatch):
+    rig.app.close()
+    builds = []
+    monkeypatch.setattr(
+        rig.app, '_build',
+        lambda name: builds.append(name) or pytest.fail('closed app built a Mesh'),
+    )
+
+    with pytest.raises(RuntimeError, match='GUI app is closed'):
+        rig.app.signup('late-user', '', 'late-password')
+
+    assert builds == []
+
+
+def test_closed_app_rejects_login_before_account_or_agent_mutation(rig, monkeypatch):
+    rig.signup()
+    assert rig.app.logout('hexagon') == {'ok': True}
+    rig.app.close()
+    builds = []
+    monkeypatch.setattr(
+        rig.app, '_build',
+        lambda name: builds.append(name) or pytest.fail('closed app built a Mesh'),
+    )
+
+    with pytest.raises(RuntimeError, match='GUI app is closed'):
+        rig.app.login('aryan', 'hexagon')
+
+    assert builds == []
+
+
+def test_close_marks_app_closed_before_diagnostics_flush(rig, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    original_close = rig.app.diagnostics.close
+
+    def delayed_diagnostics_close():
+        entered.set()
+        assert release.wait(10)
+        return original_close()
+
+    monkeypatch.setattr(rig.app.diagnostics, 'close', delayed_diagnostics_close)
+    closer = threading.Thread(target=rig.app.close, daemon=True)
+    closer.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(RuntimeError, match='GUI app is closed'):
+            rig.app.signup('late-user', '', 'late-password')
+    finally:
+        release.set()
+        _join(closer)
+
+
+def test_authenticated_logout_clears_session_when_teardown_is_retained(
+        rig, monkeypatch):
+    rig.signup()
+    mesh = rig.app.mesh
+    assert mesh is not None and rig.app._session_path.exists()
+    original_close = mesh.close
+    monkeypatch.setattr(
+        mesh, 'close',
+        lambda: (_ for _ in ()).throw(TimeoutError('retirement pending')),
+    )
+
+    with pytest.raises(TimeoutError, match='retirement pending'):
+        rig.app.logout('hexagon')
+
+    assert rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
+    assert not rig.app._session_path.exists()
+    monkeypatch.setattr(mesh, 'close', original_close)
+    with rig.app._lock:
+        assert rig.app._finish_teardown()
+
+
+def test_close_flushes_failed_shutdown_diagnostics(rig, monkeypatch):
+    rig.signup()
+    mesh = rig.app.mesh
+    assert mesh is not None
+    original_close = mesh.close
+    assert rig.app.diagnostics.set_enabled(True, sample_rate=0)
+    monkeypatch.setattr(
+        mesh, 'close',
+        lambda: (_ for _ in ()).throw(RuntimeError('close failed')),
+    )
+
+    with pytest.raises(RuntimeError, match='close failed'):
+        rig.app.close()
+
+    assert rig.app._closed and rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
+    recorded = [
+        json.loads(line)
+        for path in sorted(rig.app.diagnostics.directory.glob('events*.jsonl'))
+        for line in path.read_text().splitlines()
+    ]
+    assert any(
+        row.get('event') == 'delivery'
+        and row.get('phase') == 'shutdown'
+        and row.get('status') == 'error'
+        and row.get('outcome') == 'failed'
+        and row.get('error_type') == 'OtherError'
+        for row in recorded
+    )
+    monkeypatch.setattr(mesh, 'close', original_close)
+    with rig.app._lock:
+        assert rig.app._finish_teardown()
 
 
 def test_writes_keep_entry_only_auth_and_lock_denials(rig):

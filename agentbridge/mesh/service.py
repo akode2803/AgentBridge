@@ -7,6 +7,7 @@ reach past it to the transport.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from pathlib import Path
 
@@ -73,8 +74,8 @@ class Mesh:
             store_path = self.home / "cache" / f"{user}@{machine}-{root_tag}.sqlite"
         self.store = Store(store_path)
 
-        # Internal opt-in until bounded API metadata and session handout are
-        # wired. Capture the legacy durable namespace BEFORE adding the owner.
+        # Capture the legacy durable namespace before adding the local-input
+        # owner. Product activation remains an explicit app lifecycle step.
         from ..transport.local_mutations import LocalMutationTransport, owned_transport
         self.local_inputs = None
         if local_inputs or type(self.tx) is LocalMutationTransport:
@@ -167,6 +168,9 @@ class Mesh:
 
         if self.local_inputs is not None:
             self.local_inputs.bind_page_owner(self)
+        self._local_node_owner = None
+        self._local_node_lock = threading.RLock()
+        self._closed = False
 
     def _mirror_changed(self) -> None:
         """Wake local read-model consumers without exposing changed paths."""
@@ -484,16 +488,187 @@ class Mesh:
         if heartbeat:
             self.presence.start()
 
+    @property
+    def local_node_active(self) -> bool:
+        with self._local_node_lock:
+            owner = self._local_node_owner
+            return (not self._closed and owner is not None and owner.runtime is not None
+                    and self.local_inputs is not None
+                    and self.local_inputs._node_source is owner.runtime)
+
+    def activate_local_node(self) -> bool:
+        """Transfer one supported app session from legacy sync to its node.
+
+        Provider authentication and node opening happen before irreversible
+        legacy-writer retirement. A transient failure at that preparatory
+        boundary leaves the existing sync path usable for this session. Once
+        retirement begins, any handoff failure is fatal to this Mesh rather
+        than silently reintroducing a second Store writer.
+        """
+        from ..core import delivery_trace
+        from .local_input_runtime import LocalNodeActivationPending
+        from .node_page_owner import LocalNodePageOwner
+
+        with self._local_node_lock:
+            if self._closed:
+                raise RuntimeError('mesh is closed')
+            if self.local_node_active:
+                return True
+            inputs = self.local_inputs
+            if inputs is None or not self.tx.supports_recovery_source:
+                delivery_trace.emit(
+                    'local_node_activation', status='unsupported', outcome='skipped',
+                )
+                return False
+            try:
+                owner = LocalNodePageOwner.open(
+                    self.home, self.tx, self.store, self.machine,
+                )
+            except Exception as exc:
+                delivery_trace.emit(
+                    'local_node_activation', status='unavailable',
+                    outcome='skipped', error_type=type(exc).__name__,
+                )
+                return False
+            try:
+                runtime = owner.runtime
+                if runtime is None:
+                    raise RuntimeError('local node runtime did not open')
+                runtime.bind_event_owner(self, inputs)
+            except Exception as exc:
+                # Event-journal preparation is still reversible: the legacy
+                # writer has not retired. Close the attempted owner and keep
+                # this signed-in session on its existing sync path.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='unavailable',
+                    outcome='skipped', error_type=type(exc).__name__,
+                )
+                return False
+            try:
+                # Drain legacy callbacks before taking the coordinator writer:
+                # a callback may itself settle a local mutation. Quiescence is
+                # reversible until the root is proven mutation-free.
+                with self.sync.quiesce(timeout_s=10.0) as quiescence:
+                    with inputs.node_source_activation_cut(runtime):
+                        retirement = self.sync.retire(
+                            timeout_s=10.0, quiescence=quiescence,
+                        )
+                        inputs.install_node_source(runtime, retirement)
+            except LocalNodeActivationPending:
+                # No irreversible retirement occurred. Retain cleanup
+                # ownership until endpoint withdrawal succeeds, then keep the
+                # legacy writer serving this session.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='pending',
+                    outcome='skipped', reason='source_mutation_pending',
+                )
+                return False
+            except Exception as exc:
+                if self.sync.retired:
+                    # Installation crossed the irreversible retirement cut.
+                    # Let the fatal path retain/withdraw the exact owner.
+                    self._local_node_owner = owner
+                    try:
+                        owner.close()
+                    except BaseException:
+                        delivery_trace.emit(
+                            'local_node_activation', status='cleanup_error',
+                            outcome='failed',
+                        )
+                        raise
+                    self._local_node_owner = None
+                    delivery_trace.emit(
+                        'local_node_activation', status='error', outcome='failed',
+                    )
+                    raise
+                # Quiescence and root-gate failures before retirement are
+                # reversible. Withdraw the attempted node and keep legacy
+                # ingestion available for this session.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='unavailable',
+                    outcome='skipped', error_type=type(exc).__name__,
+                )
+                return False
+            except BaseException:
+                # Retirement may already be irreversible. Keep a failed
+                # cleanup owner reachable so Mesh.close() can retry endpoint
+                # withdrawal before the Store is closed.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='error', outcome='failed',
+                )
+                raise
+            self._local_node_owner = owner
+            delivery_trace.emit(
+                'local_node_activation', status='ok', outcome='completed',
+            )
+            return True
+
     def close(self) -> None:
-        if self.local_inputs is not None:
-            self.local_inputs.stop()
+        with self._local_node_lock:
+            self._closed = True
+            # Revoke each independent producer before either fallible owner
+            # drain. If local ingestion or node recovery does not quiesce in
+            # time, the exact Mesh and open Store remain reachable for a later
+            # cleanup retry, but the detached session can no longer publish
+            # presence, notifications, sync writes or queued mutations.
+            self.sync.stop()
+            self.outbox.request_stop()
+            if self.local_inputs is not None:
+                self.local_inputs.request_stop()
+            self.notifier.stop()
+            self.presence.stop()  # writes the clean offline marker
+            self.outbox.stop()
+            if self.local_inputs is not None:
+                self.local_inputs.stop()
+            if self._local_node_owner is not None:
+                self._local_node_owner.close()
+                self._local_node_owner = None
         if self._mirror_unsubscribe is not None:
             self._mirror_unsubscribe()
             self._mirror_unsubscribe = None
-        self.sync.stop()
-        self.notifier.stop()
-        self.presence.stop()  # writes the clean offline marker
-        self.outbox.stop()
+        # stop() only wakes the sync loop. Retire is the Store-write barrier and
+        # joins every leased write cycle. On timeout Store.close() is withheld.
+        self.sync.retire(timeout_s=10.0)
         self.store.close()
 
     def __enter__(self) -> "Mesh":

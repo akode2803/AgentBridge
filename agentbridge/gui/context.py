@@ -140,6 +140,12 @@ class GuiApp:
             warm()
         self._lock = threading.RLock()
         self._sync_thread: threading.Thread | None = None
+        self._node_activation_thread: threading.Thread | None = None
+        self._teardown_mesh: Mesh | None = None
+        self._restore_retrying = False
+        self._restore_retry_token: object | None = None
+        self._restore_retry_pending = False
+        self._closed = False
         self._subs: set[Subscription] = set()
         # V111 app lock: an optional local passphrase gate — starts LOCKED
         # whenever configured (launch always asks); routing.authed enforces it
@@ -318,7 +324,14 @@ class GuiApp:
         hard sign-out ("the app signs out", three live reports). Blind or
         failed restores keep the session and retry in the background; the
         frontend already flips to chats the moment a user appears."""
-        doc = read_json(self._session_path, default=None)
+        with self._lock:
+            if self._closed or self.mesh is not None:
+                return
+            if not self._finish_teardown():
+                self._schedule_restore_retry()
+                return
+            generation = self._session_generation
+            doc = read_json(self._session_path, default=None)
         name = (doc or {}).get("user")
         if not name:
             return
@@ -334,8 +347,11 @@ class GuiApp:
             return
         acc = self.directory0.get(name)
         if acc is None or not acc.active or acc.auth is None:
-            _breadcrumb(f"restore: account {name!r} gone — session cleared")
-            self._session_path.unlink(missing_ok=True)   # authoritative: gone
+            with self._lock:
+                if not self._restore_intent_current(generation, doc):
+                    return
+                _breadcrumb(f"restore: account {name!r} gone — session cleared")
+                self._session_path.unlink(missing_ok=True)  # authoritative: gone
             return
         if self.encrypt and (
             KeyStore(self.home).load(name) is None  # local private bundle gone
@@ -348,18 +364,35 @@ class GuiApp:
             # fresh machine (no local bundle) likewise re-logs in. (The
             # keystore is a local, deterministic read, and the directory was
             # just proven healthy — this branch stays authoritative.)
-            _breadcrumb(f"restore: {name!r} must log in again (identity "
-                        "keys) — session cleared")
-            self._session_path.unlink(missing_ok=True)
+            with self._lock:
+                if not self._restore_intent_current(generation, doc):
+                    return
+                _breadcrumb(f"restore: {name!r} must log in again (identity "
+                            "keys) — session cleared")
+                self._session_path.unlink(missing_ok=True)
             return
         try:
             with self._lock:
+                if not self._restore_intent_current(generation, doc):
+                    return
+                if not self._finish_teardown():
+                    self._schedule_restore_retry()
+                    return
                 self._adopt(self._build(name))
             _breadcrumb(f"restore: attached {name!r}")
         except Exception as e:  # noqa: BLE001 — a failed attach is transient too
             _breadcrumb(f"restore: attach failed ({type(e).__name__}) — "
                         "retrying in background")
             self._schedule_restore_retry()
+
+    def _restore_intent_current(self, generation: int, doc) -> bool:
+        """Check one restore observation while the caller holds ``_lock``."""
+        return bool(
+            not self._closed
+            and self.mesh is None
+            and self._session_generation == generation
+            and read_json(self._session_path, default=None) == doc
+        )
 
     def _schedule_restore_retry(self, *, every_s: float = 5.0,
                                 cap_s: float = 600.0) -> None:
@@ -370,27 +403,55 @@ class GuiApp:
         import time as _time
 
         with self._lock:
-            if getattr(self, "_restore_retrying", False):
+            if self._closed:
                 return
+            if self._restore_retrying:
+                # The current owner may already be on its way out. Preserve a
+                # handoff request so its finally block cannot leave the
+                # durable session without a retry owner.
+                self._restore_retry_pending = True
+                return
+            token = object()
             self._restore_retrying = True
+            self._restore_retry_token = token
+            self._restore_retry_pending = False
 
         def run() -> None:
             deadline = _time.time() + cap_s
             try:
                 while _time.time() < deadline:
                     _time.sleep(every_s)
-                    if self.user or not self._session_path.exists():
-                        return
                     with self._lock:
+                        if self._restore_retry_token is not token:
+                            return
+                        if (self._closed or self.user
+                                or not self._session_path.exists()):
+                            return
                         self._restore_retrying = False
+                        self._restore_retry_token = None
+                        self._restore_retry_pending = False
                     self.restore()   # reschedules itself if still blind
                     return
             finally:
-                with self._lock:
-                    self._restore_retrying = False
+                if self._release_restore_retry(token):
+                    self._schedule_restore_retry(every_s=every_s, cap_s=cap_s)
 
         threading.Thread(target=run, daemon=True,
                          name="ab-restore-retry").start()
+
+    def _release_restore_retry(self, token: object) -> bool:
+        """Release one exact retry owner and report whether it owes a handoff."""
+        with self._lock:
+            if self._restore_retry_token is not token:
+                return False
+            self._restore_retry_token = None
+            self._restore_retrying = False
+            pending = self._restore_retry_pending
+            self._restore_retry_pending = False
+            return bool(
+                pending and not self._closed and self.mesh is None
+                and self._session_path.exists()
+            )
 
     def signup(self, name: str, display: str, password: str,
                *, include_binding: bool = False) -> dict:
@@ -401,8 +462,13 @@ class GuiApp:
         signup while signed in, so only a script or a passer-by hits this;
         the legitimate swap is logout (password) → signup."""
         with self._lock:
+            if self._closed:
+                raise RuntimeError('GUI app is closed')
             if self.mesh is not None:
                 raise ValidationError("Already signed in — sign out first")
+            if not self._finish_teardown():
+                raise ValidationError(
+                    "Previous session is still closing — try again in a moment")
             mesh = self._build(name)
             try:
                 _, code = mesh.accounts.create_human(
@@ -422,6 +488,8 @@ class GuiApp:
     def login(self, name: str, password: str,
               *, include_binding: bool = False) -> dict:
         with self._lock:
+            if self._closed:
+                raise RuntimeError('GUI app is closed')
             # V130 (V124's twin): login was a session swap needing only the
             # CALLER's credentials — a passer-by with their own account
             # could adopt this machine (and claim its agents) without the
@@ -429,6 +497,9 @@ class GuiApp:
             # signed in; the legitimate swap is logout (password) → login.
             if self.mesh is not None:
                 raise ValidationError("Already signed in — sign out first")
+            if not self._finish_teardown():
+                raise ValidationError(
+                    "Previous session is still closing — try again in a moment")
             return self._login_locked(name, password, include_binding=include_binding)
 
     def _login_locked(self, name: str, password: str,
@@ -491,8 +562,13 @@ class GuiApp:
             if mesh is not None:
                 if not mesh.accounts.verify_password(mesh.user, password):
                     raise ValidationError("Password is incorrect")
-            self._detach()
-            self._session_path.unlink(missing_ok=True)
+            # Once authentication succeeds, durable sign-out must survive a
+            # bounded teardown failure. _detach retains the exact failed owner
+            # for retry; the session file must not resurrect it on restart.
+            try:
+                self._detach()
+            finally:
+                self._session_path.unlink(missing_ok=True)
             out = {"ok": True}
             if include_binding:
                 token = self.capture_session_read()
@@ -502,10 +578,25 @@ class GuiApp:
 
     def close(self) -> None:
         from ..core.delivery_trace import emit
+        try:
+            with self._lock:
+                self._closed = True
+                self._detach()
+        except BaseException as exc:
+            # Flush a truthful terminal breadcrumb even when teardown retains
+            # the Mesh for retry. Diagnostics failure must not replace the
+            # primary shutdown exception.
+            emit(
+                'shutdown', status='error', outcome='failed',
+                error_type=type(exc).__name__,
+            )
+            try:
+                self.diagnostics.close()
+            except BaseException:
+                pass
+            raise
         emit('shutdown', outcome='completed')
         self.diagnostics.close()
-        with self._lock:
-            self._detach()
 
     # ------------------------------------------------------------ internals
     def _build(self, name: str) -> Mesh:
@@ -525,6 +616,12 @@ class GuiApp:
 
     def _adopt(self, mesh: Mesh) -> None:
         """Adopt a Mesh while the caller holds ``self._lock``."""
+        if self._closed:
+            mesh.close()
+            raise RuntimeError('GUI app is closed')
+        if not self._finish_teardown():
+            mesh.close()
+            raise RuntimeError('previous session cleanup is incomplete')
         self._advance_session_generation()
         self.mesh = mesh
         # The first presence beat and the machine announcement both mutate the
@@ -553,6 +650,49 @@ class GuiApp:
             self._session_path, {"user": mesh.user, "ts": utcnow_iso()}
         )
         self._session_read_ready = True
+        self._node_activation_thread = threading.Thread(
+            target=self._activate_node, args=(mesh,), daemon=True,
+            name='gui-node-activation',
+        )
+        self._node_activation_thread.start()
+
+    def _activate_node(self, mesh: Mesh) -> None:
+        """Transfer writers after cached session adoption, never before paint."""
+        failed = False
+        try:
+            active = mesh.activate_local_node()
+        except BaseException:
+            active, failed = False, True
+        sync_thread = None
+        should_retry = False
+        try:
+            with self._lock:
+                if self.mesh is not mesh:
+                    return
+                if failed:
+                    # Retirement cannot be reversed safely. Remove the broken
+                    # session and let ordinary restore build a fresh Mesh.
+                    try:
+                        self._detach()
+                    except Exception:
+                        # _detach retains the exact Mesh for the restore loop
+                        # to drain before it can build a replacement owner.
+                        pass
+                    should_retry = not self._closed
+                elif active:
+                    sync_thread = self._sync_thread
+            if sync_thread is not None and sync_thread is not threading.current_thread():
+                sync_thread.join(timeout=self.poll_s + 10)
+            if sync_thread is not None and not sync_thread.is_alive():
+                with self._lock:
+                    if self.mesh is mesh and self._sync_thread is sync_thread:
+                        self._sync_thread = None
+            if should_retry:
+                self._schedule_restore_retry()
+        finally:
+            with self._lock:
+                if self._node_activation_thread is threading.current_thread():
+                    self._node_activation_thread = None
 
     def _detach(self) -> None:
         """Detach a present Mesh while the caller holds ``self._lock``.
@@ -561,6 +701,8 @@ class GuiApp:
         """
         mesh = self.mesh
         if mesh is None:
+            if not self._finish_teardown():
+                raise RuntimeError('session cleanup is incomplete')
             return
         self._advance_session_generation()
         self.mesh = None
@@ -572,7 +714,32 @@ class GuiApp:
         t, self._sync_thread = self._sync_thread, None
         if t is not None:
             t.join(timeout=self.poll_s + 10)
-        mesh.close()
+        self._teardown_mesh = mesh
+        try:
+            mesh.close()
+        except BaseException:
+            # Keep the exact failed owner reachable. Restore/login must drain
+            # it before opening a replacement Store writer.
+            raise
+        else:
+            self._teardown_mesh = None
+
+    def _finish_teardown(self) -> bool:
+        """Retry a detached Mesh close before any replacement is constructed.
+
+        The caller holds ``self._lock``. A failed close deliberately retains
+        the Mesh and its open Store; treating a timeout as completion could
+        overlap an old leased sync write with a new session writer.
+        """
+        mesh = self._teardown_mesh
+        if mesh is None:
+            return True
+        try:
+            mesh.close()
+        except Exception:
+            return False
+        self._teardown_mesh = None
+        return True
 
     # ----------------------------------------------------------------- SSE
     def subscribe(self) -> Subscription | None:

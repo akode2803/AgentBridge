@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 import threading
+import time
 from typing import Any, Callable
 
 from ..core.errors import ValidationError
@@ -49,6 +50,11 @@ class OutboxWorker:
         self.prune_hooks = prune_hooks or {}
         self._wake = threading.Event()
         self._stop = threading.Event()
+        # Linearizes background-dispatch admission with stop(). A dispatch
+        # admitted before stop is in flight and may finish; once stop wins this
+        # gate, no later claimed item can begin a transport mutation.
+        self._dispatch_gate = threading.RLock()
+        self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self.latency = sink_for_store(store)
 
@@ -56,15 +62,43 @@ class OutboxWorker:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._stop.clear()
+        with self._dispatch_gate:
+            self._stop_requested.clear()
+            self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="ab-outbox")
         self._thread.start()
 
+    def request_stop(self) -> None:
+        """Prevent another background dispatch without claiming full stop."""
+        self._stop_requested.set()
+        self._wake.set()
+
     def stop(self, timeout: float = 5.0) -> None:
-        self._stop.set()
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        # The early hint keeps a completed handler from admitting another item
+        # while stop waits for the shared gate. _stop itself is the linearized
+        # boundary: when the gate is busy, a handler has already started.
+        self.request_stop()
+        acquired = self._dispatch_gate.acquire(timeout=timeout)
+        if not acquired:
+            # A handler may not have reached its transport call yet, so a
+            # timeout cannot declare the stop boundary complete. Keep the
+            # request hint set, leave _stop unset and make Mesh.close retain
+            # this owner for an exact later teardown retry.
+            raise TimeoutError('outbox dispatch did not stop')
+        try:
+            self._stop.set()
+        finally:
+            self._dispatch_gate.release()
+        # request_stop() may have woken a worker that then re-entered its wait
+        # before this linearized boundary was established. Wake again so the
+        # completed stop is always observed promptly.
         self._wake.set()
         if self._thread:
-            self._thread.join(timeout)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+            if self._thread.is_alive():
+                raise TimeoutError('outbox worker did not stop')
 
     def notify(self) -> None:
         """Wake the worker immediately (call right after outbox_add)."""
@@ -72,31 +106,59 @@ class OutboxWorker:
 
     # ------------------------------------------------------------------ work
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._stop_requested.is_set():
             self._wake.wait(self.poll_s)
             self._wake.clear()
-            if self._stop.is_set():
+            if self._stop.is_set() or self._stop_requested.is_set():
                 break
             try:
-                self.flush_once()
+                self._flush_once(stop=self._stop)
             except Exception:  # noqa: BLE001 — the loop must survive anything
                 pass
 
-    @delivery_trace.observed('outbox_batch')
     def flush_once(self) -> int:
         """Claim and dispatch every currently-due item. Returns how many were
         completed. Deterministic — tests and synchronous callers use this."""
+        return self._flush_once()
+
+    @delivery_trace.observed('outbox_batch')
+    def _flush_once(self, *, stop: threading.Event | None = None) -> int:
+        """Flush due work, honoring revocation only for the background owner.
+
+        Explicit synchronous callers may still use ``flush_once`` after
+        stopping the worker. The background path releases every unprocessed
+        exact lease when stopped, so it never strands a claimed batch or starts
+        a later transport mutation.
+        """
         done = 0
+        if stop is not None and stop.is_set():
+            return done
         for item in self.store.outbox_prune_dead():
             self._hook(self.prune_hooks, item)
         while True:
+            if stop is not None and stop.is_set():
+                return done
             items = self.store.outbox_claim_due(lease_s=self.lease_s)
             if not items:
                 return done
-            for item in items:
-                done += self._dispatch(item)
+            for index, item in enumerate(items):
+                result = self._dispatch(item, stop=stop)
+                if result is None:
+                    for pending in items[index:]:
+                        self.store.outbox_release_claim(pending)
+                    return done
+                done += result
 
-    def _dispatch(self, item: OutboxItem) -> int:
+    def _dispatch(self, item: OutboxItem, *, stop: threading.Event | None = None) -> int | None:
+        if stop is not None:
+            # Keep the shared gate through the handler call. stop() either sets
+            # the boundary first (and this lease is released) or observes an
+            # already-started handler; a transport handler cannot begin after
+            # the stop boundary.
+            with self._dispatch_gate:
+                if stop.is_set() or self._stop_requested.is_set():
+                    return None
+                return self._dispatch(item)
         handler = self.handlers.get(item.kind)
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")

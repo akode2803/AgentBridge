@@ -33,7 +33,7 @@ from ..core.latency import clock_id, sink_for_store
 from ..core import delivery_trace
 from ..transport.base import Transport
 
-__all__ = ["SyncEngine", "SyncRetirement"]
+__all__ = ["SyncEngine", "SyncQuiescence", "SyncRetirement"]
 
 # where the change-feed cursor persists (the store's local doc cache)
 CURSOR_DOC = "sync/log_cursor"
@@ -46,6 +46,14 @@ class SyncRetirement:
     _engine: "SyncEngine"
     _token: object
     _owner: object | None = None
+
+
+@dataclass(frozen=True)
+class SyncQuiescence:
+    """Opaque proof that one legacy owner has reversibly drained its writers."""
+
+    _engine: "SyncEngine"
+    _token: object
 
 
 class SyncEngine:
@@ -72,20 +80,32 @@ class SyncEngine:
         self._ownership = threading.Condition()
         self._ownership_local = threading.local()
         self._active_cycles = 0
+        self._active_lineages: dict[object, int] = {}
+        self._quiescing = False
+        self._quiescence_token = None
         self._retired = False
         self._retirement_token = object()
         self._transfer_owner = None
+        self._watcher = None
         # membership as of the last feed tick — a chat that APPEARS here gets
         # one full scan (its history may predate the cursor). Deliberately
         # in-memory: a fresh process full-scans once, which also heals any
         # miss while it was down.
         self._known: set[str] = set()
 
+    @property
+    def retired(self) -> bool:
+        with self._ownership:
+            return self._retired
+
     @contextmanager
-    def _write_cycle(self):
+    def _write_cycle(self, *, lineage=None):
         """Hold the legacy writer lease for one possibly nested sync call."""
         depth = getattr(self._ownership_local, "depth", 0)
         if depth:
+            if (lineage is not None
+                    and lineage is not self._ownership_local.lineage):
+                raise RuntimeError("foreign legacy sync write lineage")
             self._ownership_local.depth = depth + 1
             try:
                 yield
@@ -93,20 +113,78 @@ class SyncEngine:
                 self._ownership_local.depth -= 1
             return
         with self._ownership:
-            if self._retired:
-                raise RuntimeError("legacy sync owner retired")
+            if lineage is None:
+                while self._quiescing and not self._retired:
+                    self._ownership.wait()
+                if self._retired:
+                    raise RuntimeError("legacy sync owner retired")
+                lineage = object()
+                self._active_lineages[lineage] = 0
+            elif lineage not in self._active_lineages:
+                raise RuntimeError("legacy sync write lineage ended")
+            self._active_lineages[lineage] += 1
             self._active_cycles += 1
             self._ownership_local.depth = 1
+            self._ownership_local.lineage = lineage
         try:
             yield
         finally:
             self._ownership_local.depth = 0
+            self._ownership_local.lineage = None
             with self._ownership:
+                count = self._active_lineages.get(lineage)
+                if count is None or count < 1:
+                    raise RuntimeError("legacy sync write lineage changed")
+                if count == 1:
+                    del self._active_lineages[lineage]
+                else:
+                    self._active_lineages[lineage] = count - 1
                 self._active_cycles -= 1
                 if self._active_cycles == 0:
                     self._ownership.notify_all()
 
-    def retire(self, *, timeout_s: float = 10.0) -> SyncRetirement:
+    @contextmanager
+    def quiesce(self, *, timeout_s: float = 10.0):
+        """Reversibly stop new cycles and drain every admitted Store writer."""
+        if (type(timeout_s) not in (int, float) or isinstance(timeout_s, bool)
+                or not math.isfinite(timeout_s) or timeout_s < 0):
+            raise ValueError("invalid sync quiescence timeout")
+        if getattr(self._ownership_local, "depth", 0):
+            raise RuntimeError("cannot quiesce sync owner from its write cycle")
+        deadline = time.monotonic() + float(timeout_s)
+        with self._ownership:
+            if self._retired:
+                raise RuntimeError("legacy sync owner retired")
+            if self._quiescing:
+                raise RuntimeError("legacy sync owner already quiescing")
+            self._quiescing = True
+            token = self._quiescence_token = object()
+            try:
+                while self._active_cycles:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not self._ownership.wait(remaining):
+                        if self._active_cycles:
+                            raise TimeoutError(
+                                "legacy sync owner has active writes")
+                proof = SyncQuiescence(self, token)
+            except BaseException:
+                self._quiescing = False
+                self._quiescence_token = None
+                self._ownership.notify_all()
+                raise
+        try:
+            yield proof
+        finally:
+            with self._ownership:
+                if not self._retired:
+                    self._quiescing = False
+                    self._quiescence_token = None
+                    self._ownership.notify_all()
+
+    def retire(
+        self, *, timeout_s: float = 10.0,
+        quiescence: SyncQuiescence | None = None,
+    ) -> SyncRetirement:
         """Permanently reject new writes and join every in-flight write cycle.
 
         A timeout leaves the owner retired.  The caller may retry later to
@@ -118,9 +196,22 @@ class SyncEngine:
         if getattr(self._ownership_local, "depth", 0):
             raise RuntimeError("cannot retire sync owner from its write cycle")
         deadline = time.monotonic() + float(timeout_s)
-        self._stop.set()
         with self._ownership:
+            if self._quiescing and quiescence is None:
+                raise RuntimeError("legacy sync owner is quiescing")
+            if quiescence is not None and (
+                    type(quiescence) is not SyncQuiescence
+                    or quiescence._engine is not self
+                    or quiescence._token is not self._quiescence_token
+                    or not self._quiescing or self._active_cycles):
+                raise ValueError("invalid sync quiescence")
+            self._stop.set()
             self._retired = True
+            self._quiescing = False
+            self._quiescence_token = None
+            self._ownership.notify_all()
+        self._wake_run_loop()
+        with self._ownership:
             while self._active_cycles:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not self._ownership.wait(remaining):
@@ -226,6 +317,11 @@ class SyncEngine:
     def my_chat_ids(self) -> list[str]:
         return [c for c in self.tx.list_chat_ids() if self.is_member(c)]
 
+    def _inherited_sync_chat(self, lineage, chat_id: str, lane: str) -> int:
+        """Run one pool child inside its already-admitted parent family."""
+        with self._write_cycle(lineage=lineage):
+            return self.sync_chat(chat_id, lane=lane)
+
     def _scan(self, ids: list[str], *, lane: str) -> int:
         """Per-chat catch-up, parallel across chats."""
         with self._write_cycle():
@@ -233,8 +329,14 @@ class SyncEngine:
                 return 0
             if len(ids) == 1:
                 return self.sync_chat(ids[0], lane=lane)
+            lineage = self._ownership_local.lineage
+
             with ThreadPoolExecutor(max_workers=min(self.workers, len(ids))) as pool:
-                return sum(pool.map(lambda cid: self.sync_chat(cid, lane=lane), ids))
+                return sum(pool.map(
+                    lambda chat_id: self._inherited_sync_chat(
+                        lineage, chat_id, lane),
+                    ids,
+                ))
 
     def sync_once(self, chat_ids: Iterable[str] | None = None, *,
                   lane: str = "startup") -> int:
@@ -301,6 +403,8 @@ class SyncEngine:
         one answers ``suggest_poll_s`` with its profile's slow safety poll
         (R76) — pokes keep message latency instant either way."""
         watcher = self.tx.watch()
+        with self._ownership:
+            self._watcher = watcher
         last_hinted: bool | None = None
         try:
             while not self._stop.is_set():
@@ -320,7 +424,21 @@ class SyncEngine:
                     break
                 last_hinted = watcher.wait(self.tx.suggest_poll_s(poll_s))
         finally:
+            with self._ownership:
+                if self._watcher is watcher:
+                    self._watcher = None
             watcher.close()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake_run_loop()
+
+    def _wake_run_loop(self) -> None:
+        with self._ownership:
+            watcher = self._watcher
+        poke = getattr(watcher, 'poke', None)
+        if callable(poke):
+            try:
+                poke()
+            except Exception:
+                pass
