@@ -1267,3 +1267,20 @@ typed idempotent mutation receipts. Only a complete recovery bound to that seal
 may archive and consume the exact old fence set in the admission transaction.
 Permanent legacy fallback remains the safe interim behavior; scoped pending
 reads are a later availability optimization and do not resolve an intent.
+
+The first inactive provider slice is now implemented locally. It adds a
+database-only shared-lock legacy gate for `ab_docs`, `ab_logs` and `ab_members`,
+an irreversible admin-only `database-v1` seal receipt, a private future receipt
+table and an authenticated read-only protocol-state probe. Schema installation
+does not seal any root, no API role can call the seal or write receipts, and the
+application exposes observation only. Blob writes are explicitly reported as
+unsealed. The strict Supabase wire re-reads state on every request, rejects
+unknown or inconsistent fields and binds the result to the requested root and
+pinned authenticated principal through both cache and local-mutation wrappers.
+Focused validation passes 214 tests with two expected skips; Ruff and whitespace
+checks pass. Independent Astra review found no P1/P2 and confirmed adversarial
+principal/root rejection. No provider schema has been deployed and PostgreSQL
+syntax, RLS/query behavior and concurrent shared/exclusive lock schedules remain
+unverified. Next, run this P1a slice against a disposable PostgreSQL/Supabase
+project, then design the inactive typed receipt RPCs and bounded receipt
+lifecycle before any legacy seal or historical-fence admission.

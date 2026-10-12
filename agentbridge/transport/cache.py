@@ -1093,6 +1093,13 @@ class CachingTransport(Transport):
     def supports_reference_source(self) -> bool:  # type: ignore[override]
         return self.inner.supports_reference_source
 
+    @property
+    def supports_mutation_protocol(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_mutation_protocol
+
+    def mutation_protocol_state(self):
+        return self.inner.mutation_protocol_state()
+
     def source_documents(self, paths, *, max_bytes):
         return self.inner.source_documents(paths, max_bytes=max_bytes)
 

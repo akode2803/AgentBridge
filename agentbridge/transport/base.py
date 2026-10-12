@@ -44,6 +44,7 @@ from .change_ledger import (
     ChangeLedgerPage,
 )
 from .recovery_sources import RecoveryCut, RecoveryPage
+from .mutation_protocol import ProviderMutationProtocolState
 from .reference_sources import (
     ReferenceDocumentPage, ReferenceLogPage, ReferenceStreamPage,
 )
@@ -156,6 +157,11 @@ class Transport(ABC):
     supports_scoped_source_reads: bool = False
     supports_recovery_source: bool = False
     supports_reference_source: bool = False
+    supports_mutation_protocol: bool = False
+
+    def mutation_protocol_state(self) -> ProviderMutationProtocolState:
+        raise NotImplementedError(
+            f"{type(self).__name__} has no provider mutation protocol")
 
     def recovery_fence(self) -> RecoveryCut:
         raise NotImplementedError(f"{type(self).__name__} has no recovery source")

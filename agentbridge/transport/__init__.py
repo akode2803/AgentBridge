@@ -18,6 +18,10 @@ from .recovery_sources import (
     RecoveryPage,
     RecoveryStream,
 )
+from .mutation_protocol import (
+    ProviderDatabaseSeal,
+    ProviderMutationProtocolState,
+)
 from .source_ledger import SourceLedgerEvent, SourceLedgerFence, SourceLedgerPage
 from .scoped_sources import (
     ScopedDocumentBatch,
@@ -32,6 +36,7 @@ __all__ = [
     "ChangeLedgerCapability", "ChangeLedgerEpoch", "ChangeLedgerEvent",
     "ChangeLedgerPage",
     "RecoveryChat", "RecoveryCut", "RecoveryPage", "RecoveryStream",
+    "ProviderDatabaseSeal", "ProviderMutationProtocolState",
     "SourceLedgerEvent", "SourceLedgerFence", "SourceLedgerPage",
     "ScopedDocumentBatch", "ScopedDocumentRow", "ScopedLogPage", "ScopedLogRow",
     "ScopedSourceOverflow",

@@ -36,7 +36,18 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   seal-bound recovery, then archive and consume the exact historical fence set
   atomically with admission. Presence participates in receipt-floor inputs and
   is not exempt. Provider schema deployment, operator execution and live
-  acceptance remain separate approval/release checkpoints.
+  acceptance remain separate approval/release checkpoints. The exact stopped-
+  app inventory and fail-closed parser are now source-complete. An inactive
+  `database-v1` schema slice adds the shared-lock legacy gate, irreversible
+  admin-only seal receipt, private future receipt table and authenticated
+  read-only state probe; installation does not seal a root and the app has no
+  seal API. The strict transport wire rejects unknown/malformed fields, wrong
+  roots, non-member roles, epoch inconsistencies and blob-sealed claims, and
+  binds reads to the pinned provider principal. Focused validation passes 214
+  tests with two expected skips and independent Astra review found no P1/P2.
+  No schema was deployed and PostgreSQL execution/concurrency remains unproven.
+  Next: validate P1a on a disposable PostgreSQL/Supabase project, then design
+  the typed receipt RPCs and bounded receipt lifecycle as P1b.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

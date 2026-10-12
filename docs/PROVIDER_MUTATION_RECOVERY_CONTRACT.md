@@ -122,6 +122,10 @@ The seal is irreversible for that root. Rollback after it may stop the updated
 application or retain read-only presentation, but must not re-enable legacy
 direct writes or start an old binary.
 
+The first provider seal is explicitly `database-v1`: its state response reports
+`blob_writes_sealed: false`, and it gates `ab_docs`, `ab_logs` and `ab_members`.
+It must never be interpreted as a complete writer-domain cut.
+
 Object storage needs a separate receipt boundary. A database receipt cannot
 atomically prove an external object overwrite. New uploads use immutable staged
 object identities; a typed database RPC publishes their signed/encrypted
@@ -139,8 +143,11 @@ The operator transition is an exact, resumable state machine:
 2. Capture the coordinator identity, epoch, revision, complete normal/sentinel
    token set, quarantine archive digest, registered Store and registered node
    under the root writer. Persist an immutable migration request.
-3. Invoke the provider legacy-seal RPC with the expected current provider writer
-   state. Persist or recover its exact receipt.
+3. Invoke the provider legacy-database-seal RPC with the expected current
+   provider writer state. Persist or recover its exact `database-v1` receipt.
+   If the captured legacy set can include a blob-coupled operation, stop until
+   the separate storage seal/manifest receipt exists; the database receipt is
+   insufficient.
 4. Recheck the unchanged migration request, then bind its digest and seal receipt
    to one whole-root node recovery claim.
 5. Enumerate and replay a complete provider recovery beginning at or after the
@@ -165,13 +172,29 @@ diagnostics.
 
 ## Staged delivery
 
-### P1 — inactive provider contract
+### P1a — inactive database seal and observation contract
 
-- Add root-protocol-epoch, operation-receipt and legacy-gate tables/functions with
-  exact schema/capability probes.
+- Add root-protocol-epoch, private operation-receipt and legacy-gate
+  tables/functions with exact schema/capability probes.
 - Keep legacy writes enabled and current clients unchanged.
-- Test RLS, wrong-root/principal rejection, operation-ID digest mismatch,
-  receipt replay, bounded retention and lock ordering.
+- Test private grants, wrong-root/principal rejection and lock/check ordering.
+
+The current source implements this database-only slice. Installation leaves
+every root in legacy mode, exposes no application seal function, and gives no
+API role a receipt writer. The Python transport can only inspect strict,
+fresh `database-v1` state through the authenticated principal and reports blob
+writes as unsealed. Static schema and focused transport tests pass; actual
+PostgreSQL execution, RLS plans and two-transaction lock schedules remain a
+required disposable-provider gate before installation.
+
+### P1b — inactive typed mutation RPCs
+
+- Define one typed RPC per supported mutation family and give authenticated
+  clients execute-only access after each function is complete.
+- Test operation-ID digest mismatch, exact receipt replay, concurrent duplicate
+  requests and active receipt ceilings/acknowledgment pruning.
+- Add the immutable staged-object and manifest proof before claiming coverage of
+  blob-coupled operations.
 
 ### P2 — node mutation journal and typed adapter
 

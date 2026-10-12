@@ -1,12 +1,15 @@
 """Outer transport mutation ordering over durable local-source owners."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from agentbridge.store import local_source, source_selectors
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.transport.supabase import SupabaseTransport
+from agentbridge.transport.mutation_protocol import ProviderMutationProtocolState
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport, root_identity,
 )
@@ -549,6 +552,43 @@ def test_recovery_source_reads_delegate_without_creating_mutation_intents(
             "limit": 7, "max_bytes": 8192,
         }),
     ]
+    assert _pending(coordinator) == 0
+
+
+def test_mutation_protocol_read_delegates_without_creating_intent(
+        rig, monkeypatch):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    state = ProviderMutationProtocolState(
+        1, "12345678-1234-5678-9234-567812345679", "authenticated",
+        inner.root, "12345678-1234-5678-9234-567812345670",
+        True, None, False,
+    )
+    monkeypatch.setattr(
+        SupabaseTransport, "supports_mutation_protocol",
+        property(lambda _self: calls.append(("capability",)) or True),
+    )
+    inner.mutation_protocol_state = lambda: calls.append(("state",)) or state
+
+    assert proxy.supports_mutation_protocol is True
+    assert proxy.mutation_protocol_state() is state
+    assert calls == [("capability",), ("state",)]
+    assert _pending(coordinator) == 0
+
+
+def test_mutation_protocol_state_must_match_pinned_provider_principal(rig):
+    _store, coordinator, inner, proxy = rig
+    principal = "12345678-1234-5678-9234-567812345679"
+    inner.recovery_fence = lambda: SimpleNamespace(account_id=principal)
+    proxy.bind_provider_principal(principal)
+    inner.mutation_protocol_state = lambda: ProviderMutationProtocolState(
+        1, "12345678-1234-5678-9234-567812345680", "authenticated",
+        inner.root, "12345678-1234-5678-9234-567812345670",
+        True, None, False,
+    )
+
+    with pytest.raises(ValueError, match="principal changed"):
+        proxy.mutation_protocol_state()
     assert _pending(coordinator) == 0
 
 
