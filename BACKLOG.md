@@ -45,8 +45,25 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   roots, non-member roles, epoch inconsistencies and blob-sealed claims, and
   binds reads to the pinned provider principal. Focused validation passes 214
   tests with two expected skips and independent Astra review found no P1/P2.
-  No schema was deployed and PostgreSQL execution/concurrency remains unproven.
-  Next: validate P1a on a disposable PostgreSQL/Supabase project, then design
+  No production schema was deployed.
+  The next stacked branch adds a fail-closed disposable-database gate that
+  executes the source protocol SQL, state/grant/replay checks and both exact
+  named-session advisory-lock orders without timing inference. It also proves
+  that the seal cursor includes an admitted writer's committed source event.
+  This machine has no local PostgreSQL runtime, so PR135 runs the gate only when
+  those files change against an isolated GitHub Actions service. Run
+  `38310823448` passed on PostgreSQL 16.15: schema/grants/replay/source-cut checks
+  and both exact named-session lock orders completed. The disposable hosted
+  acceptance then installed the P1a section over minimal prerequisites on
+  Supabase PostgreSQL 17.11. Real Supabase roles/auth functions enforced the
+  authenticated member-only state probe and rejected foreign-principal state,
+  anonymous readiness, API-role sealing and direct protocol-table DML. Exact
+  seal replay was stable; the cut included the pre-seal event; later direct
+  writes failed. The management connector did not expose simultaneous sessions,
+  so the exact lock-wait evidence remains the CI database gate. See
+  [the hosted acceptance record](docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
+  A browser-issued authenticated PostgREST call and full-schema scratch install
+  remain separate evidence, not blockers for inactive P1b design. Next: design
   the typed receipt RPCs and bounded receipt lifecycle as P1b.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**

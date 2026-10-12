@@ -187,6 +187,49 @@ writes as unsealed. Static schema and focused transport tests pass; actual
 PostgreSQL execution, RLS plans and two-transaction lock schedules remain a
 required disposable-provider gate before installation.
 
+`devtools/validate_mutation_protocol_postgres.py` is the executable P1a gate.
+It reads the protocol section from `docs/supabase_schema.sql`, bootstraps only
+the prerequisite Supabase roles/tables in an otherwise empty disposable
+PostgreSQL database, and then verifies the authenticated state/grant boundary,
+exact seal replay and post-seal rejection. Two independent `psql` sessions
+exercise both lock orders: an admitted legacy write must commit before the seal,
+while a write waiting behind the seal must recheck the gate and fail. The script
+observes the exact named holder and waiter on the root advisory-lock key before
+releasing either transaction, and checks that the seal cut includes the source
+event committed by the admitted writer. It does not use sleep duration as
+contention evidence. Existing Supabase `auth.uid()`/`auth.role()` functions are
+preserved rather than replaced.
+
+The script
+reads its URL from `AGENTBRIDGE_TEST_DATABASE_URL`, refuses databases whose name
+does not match `agentbridge_mutation_test[_<suffix>]`, and refuses any database
+that already contains a public/private `ab_*` relation or function. Run it only
+against a disposable database owned by an administrative test role:
+
+```bash
+AGENTBRIDGE_TEST_DATABASE_URL='postgresql://…/agentbridge_mutation_test' \
+  .venv/bin/python devtools/validate_mutation_protocol_postgres.py
+```
+
+The development machine currently has no `psql`, PostgreSQL server, Docker or
+Podman runtime. The path-filtered PR workflow therefore executes this gate
+against a fresh PostgreSQL service only when the validator, schema or workflow
+changes. GitHub Actions run `38310823448` passed on PostgreSQL server 16.15 with
+client 16.15, including both named-session lock schedules.
+
+The subsequent disposable Supabase acceptance installed the exact P1a section
+over minimal prerequisites on PostgreSQL 17.11. Real Supabase roles and auth
+functions enforced the intended observer-only API: authenticated member state
+succeeded, foreign-principal state, direct protocol-table DML, anonymous
+readiness and API-role sealing failed, exact seal replay was stable and a sealed
+root rejected later direct writes. The receipt cut included the admitted
+pre-seal event. The full observations and their boundary are recorded in
+[PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md](PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
+The management SQL connector did not expose simultaneous sessions to the
+observer query, so exact holder/waiter evidence still comes from the PostgreSQL
+gate rather than being overstated as hosted contention evidence. Neither run is
+production installation or PostgREST end-to-end acceptance.
+
 ### P1b — inactive typed mutation RPCs
 
 - Define one typed RPC per supported mutation family and give authenticated

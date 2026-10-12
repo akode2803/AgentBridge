@@ -1,0 +1,41 @@
+name: mutation-protocol-postgres
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/mutation-protocol-postgres.yml
+      - devtools/validate_mutation_protocol_postgres.py
+      - docs/supabase_schema.sql
+
+jobs:
+  postgres-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: agentbridge_mutation_test_ci
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentbridge_mutation_test_ci"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes postgresql-client
+          fi
+          psql --version
+      - name: Execute inactive mutation protocol gate
+        env:
+          AGENTBRIDGE_TEST_DATABASE_URL: >-
+            postgresql://postgres:postgres@127.0.0.1:5432/agentbridge_mutation_test_ci
+        run: python3 devtools/validate_mutation_protocol_postgres.py
