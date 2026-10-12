@@ -949,3 +949,20 @@ harness code: product adoption must acquire it away from cached first paint,
 stop and join the legacy `SyncEngine` before the first node-to-Store
 publication, then route one app-owned scheduler without overlapping message
 writers.
+
+The receipt initializer recognizes only the exact earlier eight-column table
+that lacked message-cut provenance. It discards those unusable rows and creates
+the complete schema in one owned transaction; changed schemas and attached
+triggers still fail closed. Page-first scheduling snapshots the selected chat
+around the potentially long publication and clears the marker only when it
+still names that chat, so a concurrent route change keeps its own first local
+publication opportunity.
+
+Node-source reads are additionally bound to the authenticated account captured
+at owner startup. The built-in Supabase transport freezes its endpoint input,
+serializes session/location changes against each source cut, and advances a
+monotonic identity revision so an endpoint/root ABA cannot pass equal-value
+postchecks. Every data-bearing source call brackets provider I/O with an
+account-bearing recovery fence; account or session drift discards the result.
+This process-local fencing is admission provenance only. It does not cache a
+membership verdict, and canonical requests continue to recompute authority.

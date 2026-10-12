@@ -27,6 +27,14 @@ _TABLE = (
     "message_generation INTEGER NOT NULL,node_position BLOB NOT NULL)"
 )
 
+_LEGACY_TABLE = (
+    "CREATE TABLE node_publication_receipts("
+    "source TEXT PRIMARY KEY,source_epoch TEXT NOT NULL,"
+    "source_revision INTEGER NOT NULL,physical TEXT NOT NULL,"
+    "raw_incarnation TEXT NOT NULL,raw_generation INTEGER NOT NULL,"
+    "raw_cursor INTEGER NOT NULL,node_position BLOB NOT NULL)"
+)
+
 
 class NodePublicationReceiptChanged(local_source.SourceChanged):
     """The durable Store/node publication binding is malformed or changed."""
@@ -52,6 +60,21 @@ def initialize(store) -> None:
             "SELECT sql FROM sqlite_master WHERE name='node_publication_receipts'",
         ).fetchone()
         if row is None:
+            conn.execute(_TABLE)
+        elif row == (_LEGACY_TABLE,):
+            # The earlier receipt did not bind the admitted message cut. Its
+            # rows cannot be upgraded by filling defaults: doing so would turn
+            # missing provenance into evidence. Drop only the exact owned
+            # legacy schema and let the complete coupled publisher recreate
+            # every receipt from a fresh node/Store capture.
+            if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                    "AND tbl_name='node_publication_receipts' LIMIT 1",
+            ).fetchone() is not None:
+                raise NodePublicationReceiptChanged(
+                    "node publication receipt triggers changed",
+                )
+            conn.execute("DROP TABLE node_publication_receipts")
             conn.execute(_TABLE)
         _schema(conn)
         conn.commit()

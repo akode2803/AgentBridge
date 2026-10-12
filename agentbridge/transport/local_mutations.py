@@ -5,6 +5,8 @@ explicit: a new mutating driver API must not silently bypass this owner.
 """
 from __future__ import annotations
 
+import threading
+
 from .base import Transport
 from ..store.source_selectors import Selector
 from ..store.mutation_coordinator import MutationCoordinator
@@ -17,7 +19,12 @@ class LocalMutationTransport(Transport):
         if isinstance(transport, LocalMutationTransport):
             raise ValueError('nested local mutation owners are unsupported')
         self._transport = transport
+        self._provider_transport = transport
+        self._provider_identity_owner = None
         self._coordinator = coordinator
+        self._provider_guard = threading.RLock()
+        self._provider_principal = None
+        self._provider_revision = None
 
     @property
     def scheme(self):
@@ -191,16 +198,93 @@ class LocalMutationTransport(Transport):
         if current != self._coordinator.identity:
             raise ValueError('local mutation owner identity changed')
 
+    def _identity_revision(self):
+        transport = self._identity_owner()
+        revision = transport.node_identity_revision()
+        if type(revision) is not int or revision < 0:
+            raise ValueError('local mutation owner identity changed')
+        return revision
+
+    def _identity_owner(self):
+        transport = self._transport
+        if transport is not self._provider_transport:
+            raise ValueError('local mutation owner identity changed')
+        from .cache import CachingTransport
+        from .supabase import SupabaseTransport
+        if type(transport) is CachingTransport:
+            transport = transport.inner
+        if type(transport) is not SupabaseTransport:
+            raise ValueError('unsupported transport owner')
+        pinned = self._provider_identity_owner
+        if pinned is None:
+            self._provider_identity_owner = transport
+        elif transport is not pinned:
+            raise ValueError('local mutation owner identity changed')
+        return transport
+
+    def _principal_fence(self, expected):
+        cut = self._identity_owner().recovery_fence()
+        if (type(expected) is not str or not expected
+                or getattr(cut, 'account_id', None) != expected):
+            raise ValueError('local mutation owner principal changed')
+        return cut
+
+    def bind_provider_principal(self, principal):
+        """Pin node-source reads to one authenticated provider principal."""
+        if (type(principal) is not str or not principal
+                or len(principal.encode('utf-8')) > 4096):
+            raise ValueError('invalid provider principal')
+        with self._provider_guard:
+            self._assert_provider_identity()
+            before = self._identity_revision()
+            self._principal_fence(principal)
+            self._assert_provider_identity()
+            after = self._identity_revision()
+            if after != before:
+                raise ValueError('local mutation owner identity changed')
+            if (self._provider_principal is not None
+                    and self._provider_principal != principal):
+                raise ValueError('local mutation owner principal changed')
+            self._provider_principal = principal
+            self._provider_revision = after
+
     def _provider_read(self, operation):
         """Return provider data only when one pinned location bounds the call."""
-        self._assert_provider_identity()
-        result = operation()
-        self._assert_provider_identity()
-        return result
+        with self._provider_guard:
+            provider = self._identity_owner()
+            self._assert_provider_identity()
+            principal = self._provider_principal
+            if principal is None:
+                # Cold client creation publishes the chosen authenticated
+                # session. Do that before the revision-bounded source cut so
+                # its legitimate initialization is not confused with an ABA.
+                provider.prepare_node_identity()
+            before = self._identity_revision()
+            if principal is not None:
+                if self._provider_revision != before:
+                    raise ValueError('local mutation owner identity changed')
+                self._principal_fence(principal)
+                if self._identity_revision() != before:
+                    raise ValueError('local mutation owner identity changed')
+            # Execute through the exact provider object pinned above. A mutable
+            # cache wrapper is not an authenticated source owner and cannot
+            # retarget this cut by swapping its public ``inner`` reference.
+            # Do not hold the provider's identity lock across network I/O:
+            # the cold-client path acquires its client lock before publishing
+            # identity fields. The monotonic revision detects every change.
+            result = operation(provider)
+            if principal is not None:
+                self._principal_fence(principal)
+            self._identity_owner()
+            self._assert_provider_identity()
+            after = self._identity_revision()
+            if after != before:
+                raise ValueError('local mutation owner identity changed')
+            return result
 
     def source_documents(self, paths, *, max_bytes):
         return self._provider_read(
-            lambda: self._transport.source_documents(
+            lambda provider: provider.source_documents(
                 paths, max_bytes=max_bytes,
             ),
         )
@@ -209,7 +293,7 @@ class LocalMutationTransport(Transport):
             self, chat_id, log_name, *, after_cursor, through_cursor, limit,
             max_bytes):
         return self._provider_read(
-            lambda: self._transport.source_log_page(
+            lambda provider: provider.source_log_page(
                 chat_id, log_name, after_cursor=after_cursor,
                 through_cursor=through_cursor, limit=limit,
                 max_bytes=max_bytes,
@@ -217,42 +301,42 @@ class LocalMutationTransport(Transport):
         )
 
     def source_ledger_fence(self):
-        return self._provider_read(self._transport.source_ledger_fence)
+        return self._provider_read(lambda provider: provider.source_ledger_fence())
 
     def source_ledger_events(self, after_cursor, *, limit):
         return self._provider_read(
-            lambda: self._transport.source_ledger_events(
+            lambda provider: provider.source_ledger_events(
                 after_cursor, limit=limit,
             ),
         )
 
     def recovery_fence(self):
-        return self._provider_read(self._transport.recovery_fence)
+        return self._provider_read(lambda provider: provider.recovery_fence())
 
     def recovery_page(self, family, after, *, limit, max_bytes):
         return self._provider_read(
-            lambda: self._transport.recovery_page(
+            lambda provider: provider.recovery_page(
                 family, after, limit=limit, max_bytes=max_bytes,
             ),
         )
 
     def reference_documents(self, after, *, limit, max_bytes):
         return self._provider_read(
-            lambda: self._transport.reference_documents(
+            lambda provider: provider.reference_documents(
                 after, limit=limit, max_bytes=max_bytes,
             ),
         )
 
     def reference_streams(self, after, *, limit):
         return self._provider_read(
-            lambda: self._transport.reference_streams(after, limit=limit),
+            lambda provider: provider.reference_streams(after, limit=limit),
         )
 
     def reference_log_page(
             self, chat_id, log_name, *, after_cursor, through_cursor, limit,
             max_bytes):
         return self._provider_read(
-            lambda: self._transport.reference_log_page(
+            lambda provider: provider.reference_log_page(
                 chat_id, log_name, after_cursor=after_cursor,
                 through_cursor=through_cursor, limit=limit,
                 max_bytes=max_bytes,
@@ -260,14 +344,16 @@ class LocalMutationTransport(Transport):
         )
 
     def change_ledger_capability(self):
-        return self._provider_read(self._transport.change_ledger_capability)
+        return self._provider_read(
+            lambda provider: provider.change_ledger_capability(),
+        )
 
     def change_ledger_epoch(self):
-        return self._provider_read(self._transport.change_ledger_epoch)
+        return self._provider_read(lambda provider: provider.change_ledger_epoch())
 
     def change_ledger_events(self, after_cursor, *, limit):
         return self._provider_read(
-            lambda: self._transport.change_ledger_events(
+            lambda provider: provider.change_ledger_events(
                 after_cursor, limit=limit,
             ),
         )

@@ -37,6 +37,7 @@ import os
 import random
 import threading
 import time
+from types import MappingProxyType
 from pathlib import Path
 from typing import Any
 
@@ -204,10 +205,51 @@ class SupabaseTransport(Transport):
         silent_prefixes=("presence/",),   # mirrors _HINT_CLASSES' None entry
     )
 
+    _NODE_IDENTITY_FIELDS = frozenset({
+        "root", "cache_key", "auth_mode", "_client",
+    })
+
+    def __setattr__(self, name, value):
+        """Version every mutable field that can retarget a node-source read."""
+        lock = self.__dict__.get("_node_identity_lock")
+        if lock is None or name not in self._NODE_IDENTITY_FIELDS:
+            object.__setattr__(self, name, value)
+            return
+        with lock:
+            present = name in self.__dict__
+            old = self.__dict__.get(name)
+            object.__setattr__(self, name, value)
+            changed = present and (
+                old is not value if name == "_client" else old != value
+            )
+            if changed:
+                object.__setattr__(
+                    self, "_node_identity_revision",
+                    self._node_identity_revision + 1,
+                )
+
+    def _touch_node_identity(self) -> None:
+        with self._node_identity_lock:
+            self._node_identity_revision += 1
+
+    def node_identity_revision(self) -> int:
+        with self._node_identity_lock:
+            return self._node_identity_revision
+
+    def prepare_node_identity(self) -> int:
+        """Choose the client/session before an authenticated source cut."""
+        self._sb()
+        return self.node_identity_revision()
+
     def __init__(self, root: str, *, env: dict[str, str] | None = None,
                  home: Path | None = None, client=None) -> None:
+        self._node_identity_lock = threading.RLock()
+        self._node_identity_revision = 0
         self.root = (root or "mesh").strip("/ ") or "mesh"
-        self._env = env or load_supabase_env(home)
+        # Provider location and credentials do not retarget inside one
+        # transport owner. Session refresh remains supported and separately
+        # advances the monotonic node identity revision below.
+        self._env = MappingProxyType(dict(env or load_supabase_env(home)))
         # the local-cache identity: unique per (project, root) — two projects
         # sharing a root name must never share a SQLite cache
         self.cache_key = f"supabase:{self._env.get('SUPABASE_URL', '')}:{self.root}"
@@ -331,23 +373,26 @@ class SupabaseTransport(Transport):
         the refresh token and signs in from the local member credential; RLS
         42501 is ambiguous, so that path gets exactly one clean re-auth before
         the unchanged policy is allowed to fail for real."""
-        client, mode = self._client, self.auth_mode
-        if client is None or not mode.startswith("member:"):
-            return False
-        if not fresh:
+        with self._node_identity_lock:
+            client, mode = self._client, self.auth_mode
+            if client is None or not mode.startswith("member:"):
+                return False
+            if not fresh:
+                try:
+                    client.auth.refresh_session()
+                    self._touch_node_identity()
+                    return True
+                except Exception:  # noqa: BLE001 — fresh sign-in is last resort
+                    pass
             try:
-                client.auth.refresh_session()
+                client.auth.sign_in_with_password({
+                    "email": self._env.get("SUPABASE_MEMBER_EMAIL", ""),
+                    "password": self._env.get("SUPABASE_MEMBER_PASSWORD", ""),
+                })
+                self._touch_node_identity()
                 return True
-            except Exception:  # noqa: BLE001 — fresh sign-in is last resort
-                pass
-        try:
-            client.auth.sign_in_with_password({
-                "email": self._env.get("SUPABASE_MEMBER_EMAIL", ""),
-                "password": self._env.get("SUPABASE_MEMBER_PASSWORD", ""),
-            })
-            return True
-        except Exception:  # noqa: BLE001 — the retry loop reports it
-            return False
+            except Exception:  # noqa: BLE001 — the retry loop reports it
+                return False
 
     def _retry(self, fn):
         last = None
