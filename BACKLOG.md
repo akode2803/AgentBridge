@@ -229,6 +229,11 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   semantic delivery still requires fresh signature, membership, target/visibility
   and final source/session/journal checks. Node runtime startup remains inactive.
 
+  The v0.24.376 review correction also requires the canonical target namespace
+  to be no newer than the signed reaction operation and keeps decode resource
+  failures retryable. A precreated operation cannot attach to a future message
+  that later reuses its chosen ID.
+
   v0.24.376 completes fresh semantic mapping and notification reads for exact
   signed native-v2 human reaction breadcrumbs. It verifies actor tenure at the
   operation and event namespaces, current operation identity, canonical target

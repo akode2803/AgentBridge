@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from .. import crypto
 from ..core.models import MsgKind, UserKind
-from ..store import node_event_journal, overlay_index
+from ..store import node_event_journal, overlay_index, page_inputs
 from ..transport.authority_observation import _part
 from . import eventbus, events, page_fence, readmodel, reaction_documents
 from .eventbus import Event
@@ -56,11 +56,13 @@ class _Candidate:
     sender: str
     event_ns: int
     target_id: str
+    reaction_ns: int
     emoji: str
 
     def to_dict(self):
         return {'id': self.event_id, 'from': self.sender, 'ns': self.event_ns,
-                'target': self.target_id, 'emoji': self.emoji}
+                'target': self.target_id, 'reaction_ns': self.reaction_ns,
+                'emoji': self.emoji}
 
 
 @dataclass(frozen=True)
@@ -124,7 +126,9 @@ class ReactionProjectionOperation(PageOperation):
             return None
         try:
             env = row.decoded()
-        except Exception:  # malformed admitted payload is terminally nonsemantic
+        except page_inputs.PageInputsChanged:
+            # Malformed admitted payload is terminally nonsemantic. Resource
+            # failures must reach the operation boundary and leave work queued.
             return None
         if (set(env) != {'id', 'ns', 'ts', 'from', 'kind', 'sig', 'event'}
                 or env.get('kind') != 'info' or not _text(env.get('ts'), 256, empty=True)
@@ -216,7 +220,8 @@ class ReactionProjectionOperation(PageOperation):
                     or not operation.emoji):
                 continue
             candidates.append(_Candidate(
-                ident, env['from'], env['ns'], hint['msg_id'], operation.emoji,
+                ident, env['from'], env['ns'], hint['msg_id'], operation.ns,
+                operation.emoji,
             ))
         absent = set(inputs.absent_ids)
         if any(item.target_id in absent for item in candidates):
@@ -259,6 +264,7 @@ class ReactionProjectionOperation(PageOperation):
             message = messages.get(item['target'])
             if (message is not None and message.kind is MsgKind.MESSAGE
                     and not message.deleted and not message.undecrypted
+                    and message.ns <= item['reaction_ns']
                     and message.from_ == viewer and item['from'] != viewer):
                 result.append(Event(
                     eventbus.REACTION, message.chat_id,
@@ -335,7 +341,9 @@ class ReactionNotificationOperation(ReactionProjectionOperation):
         message = next((message for message in result.page.messages
                         if message.id == candidate['target']), None)
         if (message is None or message.kind is not MsgKind.MESSAGE
-                or message.deleted or message.undecrypted or message.from_ != self.viewer):
+                or message.deleted or message.undecrypted
+                or message.ns > candidate['reaction_ns']
+                or message.from_ != self.viewer):
             return ReactionNotificationResult('ready')
         state = json.loads(result.presentation.viewer_state_json)
         if state['mute'] is None or Notifier._muted(state) or wake.ns <= state['read_ns']:

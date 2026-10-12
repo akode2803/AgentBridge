@@ -1179,6 +1179,13 @@ preview text. Breadcrumb `to` is never notification authority. Agent-authored
 reaction breadcrumbs remain generic invalidations until a captured historical
 responsible-owner witness exists.
 
+The signed operation namespace is retained through presentation and must be at
+least the canonical target message namespace. This prevents an actor from
+precreating evidence for a nonexistent chosen ID and later attaching it to a
+newer message. Malformed admitted breadcrumb JSON is terminally nonsemantic,
+while resource exhaustion during decode propagates to the bounded operation
+failure mapper and leaves the journal identity pending.
+
 Info scheduling processes one identity per quantum. Each chat has a finite
 admitted sequence high-water: unresolved reactions rotate behind later generic
 info, and a continuously growing tail waits for the next sweep rather than

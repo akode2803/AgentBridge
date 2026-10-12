@@ -993,6 +993,14 @@ after the sweep wraps. The focused page/journal/pump/notification/SSE gate passe
 verified the finite-sweep repair under a continuously growing tail and found no
 remaining P1/P2.
 
+The PR review correction carries the signed operation namespace through final
+target mapping and suppresses a target whose canonical message is newer than
+the reaction. A future message can no longer inherit a precreated operation for
+the same chosen ID. Breadcrumb decoding catches only malformed admitted input;
+`MemoryError` reaches the page-operation resource boundary and leaves the
+journal item retryable. The focused retained-event/notification gate passes 57
+tests including both regressions.
+
 This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for
 the reviewed local-node recovery, publication, retained-event and notification

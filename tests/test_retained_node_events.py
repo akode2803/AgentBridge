@@ -184,6 +184,48 @@ def test_authentic_reaction_waits_for_delayed_target_then_maps(world):
     ]
 
 
+def test_reaction_cannot_attach_to_target_created_after_operation(world):
+    mesh, _mirror, _provider, chat, _base, _reader, _publisher = world
+    env, _document = _signed_reaction(world, target='future-target')
+    reaction_ns = env['event']['reaction_ns']
+    mesh.store.upsert_messages(
+        chat, (_message('future-target', reaction_ns + 1, 'aryan'),),
+    )
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and not final.gap
+    assert final.reactions == ()
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_reaction_decode_resource_failure_remains_retryable(world, monkeypatch):
+    mesh, _mirror, _provider, chat, _base, reader, _publisher = world
+    _signed_reaction(world)
+    identities = node_event_journal.peek_event_identities(mesh.store, kind='info')
+    operation = ReactionProjectionOperation(
+        mesh, chat, tuple(item.message_id for item in identities),
+        source_reader=reader, event_identities=identities,
+    )
+    _reader, receipt, index = mesh.local_inputs.inputs(chat)
+
+    monkeypatch.setattr(
+        page_inputs.SerializedMessage, 'decoded',
+        lambda _self: (_ for _ in ()).throw(MemoryError()),
+    )
+    result = operation.prepare(receipt, receipt, index)
+
+    assert result.status == 'unavailable'
+    assert result.reason == 'resource_unavailable'
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == identities
+
+
 def test_missing_actor_tenure_cannot_authorize_semantic_reaction(world):
     mesh, mirror, _provider, chat, _base, reader, publisher = world
     _env, _document = _signed_reaction(world)
