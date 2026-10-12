@@ -16,6 +16,7 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.gui.applock import AppLock
 from agentbridge.gui.context import GuiApp, SessionReadToken
 from agentbridge.store import lifecycle_inputs, local_source, source_selectors
+from agentbridge.store import node_event_journal, page_inputs
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport import raw_documents
@@ -382,6 +383,33 @@ def test_exact_message_projection_excludes_info_and_reaction_events(world):
         mesh, chat, ('reaction-event', 'rename-event'), source_reader=reader,
     ), inputs)
     assert page.messages == ()
+
+
+def test_terminal_exact_message_budget_failure_can_retire_as_gap(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    huge = _message('huge', base + 500)
+    huge['ct'] = 'x' * page_inputs.MAX_BYTES
+    mesh.store.upsert_messages(chat, [huge])
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    node_event_journal.initialize(mesh.store)
+    conn = mesh.store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (chat, huge['id'], huge['ns'], huge['from'], huge['kind']),
+    )
+    conn.commit()
+    identity = node_event_journal.peek_event_identities(mesh.store)
+    assert len(identity) == 1
+
+    result = ExactMessageProjectionOperation(
+        mesh, chat, (huge['id'],), source_reader=reader,
+    ).prepare(*inputs)
+
+    assert (result.status, result.reason) == ('unavailable', 'budget_exhausted')
+    assert node_event_journal.retire_event_identities_as_gap(mesh.store, identity)
+    assert node_event_journal.peek_event_identities(mesh.store) == ()
+    assert node_event_journal.claim_gap(mesh.store)
 
 
 def test_gui_page_gate_hands_out_only_same_session_and_mesh(world, tmp_path):

@@ -1055,6 +1055,27 @@ progress across preparation work and app-owned activation remain separate
 work. Deleted, hidden, pre-join, absent and undecryptable records must never be
 converted into notification or agent-trigger payloads.
 
+The v0.24.360 journal seam separates observation from consumption. A
+payload-free peek chooses the globally oldest pending sequence's chat and
+returns at most 32 immutable `(sequence, chat, id, ns, sender, kind)`
+identities. Later same-chat rows are included only while their current payload
+sizes fit the 4 MiB exact canonical capture ceiling; an unprojectable first row
+is still returned so it cannot starve the queue. The global resync bit is
+claimed independently from identity work.
+
+After canonical final validation, a caller may compare-and-consume that exact
+identity tuple inside the existing Store transaction. Sequence and every
+identity field must still match, and the connection must belong to the same
+Store. Journal ABA consumes nothing. A matching row whose current message is
+missing, moved or larger than the exact capture ceiling is consumed with a
+durable resync gap. The caller owns commit, so rollback preserves the complete
+batch. Because payload size alone cannot bound overlay and proof inputs, a
+runtime must adaptively split any canonical byte-budget failure to one identity;
+an exact-CAS terminal retirement then consumes that still-unprojectable head
+and durably raises the same resync gap. Transient source, proof, key or authority
+work never uses terminal retirement. These primitives perform no EventBus
+callback and are not yet called by the runtime.
+
 Delivered high-waters are handled one chat per quantum. Failures retain the
 exact journal row and rotate to other chats under bounded per-chat retry state;
 a complete failed pass sleeps until retry rather than spinning. A successful

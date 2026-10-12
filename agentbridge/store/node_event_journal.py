@@ -13,11 +13,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import coupled_payload_stage
+from . import coupled_payload_stage, page_inputs
 from .document_observation import MAX_SQLITE_INTEGER
 
 MAX_PENDING_EVENTS = 1000
 MAX_CLAIM_EVENTS = 128
+MAX_PROJECT_EVENTS = 32
 MAX_DELIVERIES = 32
 MAX_CLAIM_BYTES = coupled_payload_stage.MAX_PAYLOAD_BYTES
 
@@ -64,6 +65,38 @@ class NodeEventRecord:
 class NodeEventClaim:
     records: tuple[NodeEventRecord, ...]
     gap: bool
+
+
+@dataclass(frozen=True)
+class NodeEventIdentity:
+    sequence: int
+    chat_id: str
+    message_id: str
+    ns: int
+    sender: str
+    kind: str
+
+    def __post_init__(self) -> None:
+        if (type(self.sequence) is not int or self.sequence < 1
+                or not _bounded_text(self.chat_id, 4096)
+                or not _bounded_text(self.message_id, 4096)
+                or type(self.ns) is not int
+                or not 0 <= self.ns <= MAX_SQLITE_INTEGER
+                or not _bounded_text(self.sender, 4096, empty=True)
+                or not _bounded_text(self.kind, 256)):
+            raise ValueError("invalid node event identity")
+
+
+@dataclass(frozen=True)
+class NodeEventConsume:
+    consumed: bool
+    gap: bool
+
+    def __post_init__(self) -> None:
+        if type(self.consumed) is not bool or type(self.gap) is not bool:
+            raise ValueError("invalid node event consumption")
+        if not self.consumed and self.gap:
+            raise ValueError("unconsumed node event cannot create a gap")
 
 
 @dataclass(frozen=True)
@@ -294,6 +327,184 @@ def claim_events(store, *, limit: int = MAX_CLAIM_EVENTS) -> NodeEventClaim | No
         raise
 
 
+def peek_event_identities(
+    store, *, limit: int = MAX_PROJECT_EVENTS,
+) -> tuple[NodeEventIdentity, ...]:
+    """Read one payload-free, single-chat projection batch.
+
+    The first pending sequence chooses the chat. Later identities for that chat
+    are included only while their current exact payload sizes fit the canonical
+    page capture ceiling. A missing, moved or individually oversize first row
+    is still returned so final transactional consumption can turn it into a
+    durable gap instead of starving the journal.
+    """
+    if (type(limit) is not int or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_PROJECT_EVENTS):
+        raise ValueError("invalid node event projection limit")
+    conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "node event projection read needs no transaction",
+        )
+    _schema(conn)
+    page_inputs._message_schema(conn)
+    first = conn.execute(
+        "SELECT chat FROM node_event_journal_items ORDER BY sequence LIMIT 1",
+    ).fetchone()
+    if first is None:
+        return ()
+    if len(first) != 1 or not _bounded_text(first[0], 4096):
+        raise NodeEventJournalChanged("malformed node event chat")
+    rows = conn.execute(
+        "SELECT j.sequence,j.chat,j.message_id,j.ns,j.sender,j.kind,"
+        "m.ns,m.sender,m.kind,length(CAST(m.payload AS BLOB)) "
+        "FROM node_event_journal_items j LEFT JOIN messages m "
+        "ON m.chat_id=j.chat AND m.id=j.message_id "
+        "WHERE j.chat=? ORDER BY j.sequence LIMIT ?",
+        (first[0], limit),
+    ).fetchall()
+    result = []
+    payload_bytes = 0
+    for row in rows:
+        try:
+            identity = NodeEventIdentity(*row[:6])
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise NodeEventJournalChanged(
+                "malformed node event identity",
+            ) from exc
+        current_size = row[9]
+        current_matches = (
+            row[6:9] == (identity.ns, identity.sender, identity.kind)
+            and type(current_size) is int and current_size > 0
+        )
+        if current_matches and result \
+                and payload_bytes + current_size > page_inputs.MAX_BYTES:
+            break
+        result.append(identity)
+        if current_matches:
+            payload_bytes += current_size
+        if payload_bytes > page_inputs.MAX_BYTES:
+            break
+    return tuple(result)
+
+
+def claim_gap(store) -> bool:
+    """Atomically consume only the durable global resync bit."""
+    conn = store._conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _schema(conn)
+        changed = conn.execute(
+            "UPDATE node_event_journal_state SET gap=0 "
+            "WHERE singleton=1 AND gap=1",
+        ).rowcount
+        if changed not in (0, 1):
+            raise NodeEventJournalChanged("node event gap state changed")
+        conn.commit()
+        return changed == 1
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def consume_event_identities_in_transaction(
+    conn: sqlite3.Connection, store,
+    expected: tuple[NodeEventIdentity, ...],
+) -> NodeEventConsume:
+    """CAS-consume an exact projected batch under its final canonical cut.
+
+    Caller owns the transaction and commit. Journal ABA leaves every row
+    pending. A matching journal batch whose current Store identity is missing,
+    moved or too large for exact canonical capture is consumed and records the
+    durable resync bit.
+    """
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "node event consumption requires a Store transaction",
+        )
+    if _store_path(conn) != Path(store.path).resolve():
+        raise ValueError("node event connection belongs to another Store")
+    _schema(conn)
+    page_inputs._message_schema(conn)
+    sequences, wanted, placeholders = _event_batch(expected)
+    rows = conn.execute(
+        "SELECT sequence,chat,message_id,ns,sender,kind "
+        f"FROM node_event_journal_items WHERE sequence IN ({placeholders}) "
+        "ORDER BY sequence",
+        sequences,
+    ).fetchall()
+    if tuple(rows) != wanted:
+        return NodeEventConsume(False, False)
+    gap = False
+    for item in expected:
+        row = conn.execute(
+            "SELECT ns,sender,kind,length(CAST(payload AS BLOB)) "
+            "FROM messages WHERE chat_id=? AND id=?",
+            (item.chat_id, item.message_id),
+        ).fetchone()
+        if (row is None
+                or row[:3] != (item.ns, item.sender, item.kind)
+                or type(row[3]) is not int
+                or not 1 <= row[3] <= page_inputs.MAX_BYTES):
+            gap = True
+    deleted = conn.execute(
+        f"DELETE FROM node_event_journal_items WHERE sequence IN ({placeholders})",
+        sequences,
+    ).rowcount
+    if deleted != len(expected):
+        raise NodeEventJournalChanged("node event consumption changed")
+    if gap:
+        changed = conn.execute(
+            "UPDATE node_event_journal_state SET gap=1 WHERE singleton=1",
+        ).rowcount
+        if changed != 1:
+            raise NodeEventJournalChanged("node event gap state changed")
+    return NodeEventConsume(True, gap)
+
+
+def retire_event_identities_as_gap(
+    store, expected: tuple[NodeEventIdentity, ...],
+) -> bool:
+    """CAS-retire one terminally unprojectable event and request resync.
+
+    Runtime callers must first adaptively split a budget failure down to one
+    identity, or establish another terminal malformed-input result. Transient
+    source, proof, key and authority work must retain the journal rows instead.
+    """
+    if type(expected) is not tuple or len(expected) != 1:
+        raise ValueError("terminal node event retirement requires one identity")
+    sequences, wanted, placeholders = _event_batch(expected)
+    conn = store._conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _schema(conn)
+        rows = conn.execute(
+            "SELECT sequence,chat,message_id,ns,sender,kind "
+            f"FROM node_event_journal_items WHERE sequence IN ({placeholders}) "
+            "ORDER BY sequence",
+            sequences,
+        ).fetchall()
+        if tuple(rows) != wanted:
+            conn.commit()
+            return False
+        deleted = conn.execute(
+            f"DELETE FROM node_event_journal_items WHERE sequence IN ({placeholders})",
+            sequences,
+        ).rowcount
+        if deleted != len(expected):
+            raise NodeEventJournalChanged("node event retirement changed")
+        changed = conn.execute(
+            "UPDATE node_event_journal_state SET gap=1 WHERE singleton=1",
+        ).rowcount
+        if changed != 1:
+            raise NodeEventJournalChanged("node event gap state changed")
+        conn.commit()
+        return True
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def pending_deliveries(
     store, *, limit: int = MAX_DELIVERIES,
 ) -> tuple[NodeDelivery, ...]:
@@ -407,8 +618,28 @@ def _store_path(conn: sqlite3.Connection) -> Path:
     return Path(main[0][2]).resolve()
 
 
-def _bounded_text(value, maximum: int) -> bool:
-    if type(value) is not str or not value:
+def _event_batch(expected):
+    if (type(expected) is not tuple or not expected
+            or len(expected) > MAX_PROJECT_EVENTS
+            or any(type(item) is not NodeEventIdentity for item in expected)
+            or len({item.sequence for item in expected}) != len(expected)
+            or len({item.message_id for item in expected}) != len(expected)
+            or len({item.chat_id for item in expected}) != 1
+            or tuple(item.sequence for item in expected) != tuple(sorted(
+                item.sequence for item in expected
+            ))):
+        raise ValueError("invalid node event consumption batch")
+    sequences = tuple(item.sequence for item in expected)
+    wanted = tuple(
+        (item.sequence, item.chat_id, item.message_id,
+         item.ns, item.sender, item.kind)
+        for item in expected
+    )
+    return sequences, wanted, ",".join("?" for _ in expected)
+
+
+def _bounded_text(value, maximum: int, *, empty: bool = False) -> bool:
+    if type(value) is not str or (not value and not empty):
         return False
     try:
         return len(value.encode("utf-8")) <= maximum
@@ -418,8 +649,10 @@ def _bounded_text(value, maximum: int) -> bool:
 
 __all__ = [
     "MAX_CLAIM_BYTES", "MAX_CLAIM_EVENTS", "MAX_DELIVERIES",
-    "MAX_PENDING_EVENTS",
-    "NodeDelivery", "NodeEventClaim", "NodeEventJournalChanged",
-    "NodeEventRecord", "claim_events", "complete_delivery", "initialize",
-    "pending_deliveries", "publish_in_transaction",
+    "MAX_PENDING_EVENTS", "MAX_PROJECT_EVENTS",
+    "NodeDelivery", "NodeEventClaim", "NodeEventConsume", "NodeEventIdentity",
+    "NodeEventJournalChanged", "NodeEventRecord", "claim_events", "claim_gap",
+    "complete_delivery", "consume_event_identities_in_transaction", "initialize",
+    "peek_event_identities", "pending_deliveries", "publish_in_transaction",
+    "retire_event_identities_as_gap",
 ]

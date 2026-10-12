@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
-from agentbridge.store import coupled_payload_stage, node_event_journal
+from agentbridge.store import coupled_payload_stage, node_event_journal, page_inputs
 from agentbridge.store.db import Store
 
 
@@ -149,6 +150,234 @@ def test_remove_reintroduce_aba_keeps_one_identity_and_sets_gap(store):
     assert claim is not None and claim.gap
     assert [item.record["id"] for item in claim.records] == [record["id"]]
     assert node_event_journal.claim_events(store) is None
+
+
+def test_projection_peek_is_payload_free_single_chat_and_byte_bounded(store):
+    large = page_inputs.MAX_BYTES // 2 + 1024
+    records = [
+        {**_record(1), 'text': 'a' * large},
+        {**_record(2), 'text': 'b' * large},
+        _record(3),
+    ]
+    store.upsert_messages(CHAT, records, observed_ns=1)
+    other = _record(4)
+    store.upsert_messages('other', [other], observed_ns=1)
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((CHAT, row['id'], row['ns'], row['from'], row['kind']) for row in records),
+    )
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ('other', other['id'], other['ns'], other['from'], other['kind']),
+    )
+    conn.commit()
+
+    first = node_event_journal.peek_event_identities(store)
+
+    assert [item.message_id for item in first] == ['m0001']
+    assert all(item.chat_id == CHAT for item in first)
+    assert not hasattr(first[0], 'record')
+
+
+def test_projection_peek_returns_missing_or_oversize_head_for_gap_retirement(store):
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((CHAT, 'missing', 1, 'alice', 'message'),
+         (CHAT, 'later', 2, 'alice', 'message')),
+    )
+    conn.commit()
+
+    page = node_event_journal.peek_event_identities(store)
+
+    assert [item.message_id for item in page] == ['missing', 'later']
+
+
+def test_exact_projection_consumption_is_transactional_and_cas_safe(store):
+    records = [_record(1), _record(2)]
+    store.upsert_messages(CHAT, records, observed_ns=1)
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((CHAT, row['id'], row['ns'], row['from'], row['kind']) for row in records),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store)
+
+    conn.execute('BEGIN IMMEDIATE')
+    consumed = node_event_journal.consume_event_identities_in_transaction(
+        conn, store, expected,
+    )
+    assert consumed == node_event_journal.NodeEventConsume(True, False)
+    conn.rollback()
+    assert node_event_journal.peek_event_identities(store) == expected
+
+    conn.execute(
+        "UPDATE node_event_journal_items SET ns=99 WHERE sequence=?",
+        (expected[0].sequence,),
+    )
+    conn.commit()
+    conn.execute('BEGIN IMMEDIATE')
+    stale = node_event_journal.consume_event_identities_in_transaction(
+        conn, store, expected,
+    )
+    conn.commit()
+    assert stale == node_event_journal.NodeEventConsume(False, False)
+    assert len(node_event_journal.peek_event_identities(store)) == 2
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'moved', 'oversize'])
+def test_projection_consumes_unprojectable_identity_as_durable_gap(store, mutation):
+    record = _record(1)
+    store.upsert_messages(CHAT, [record], observed_ns=1)
+    conn = store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (CHAT, record['id'], record['ns'], record['from'], record['kind']),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store)
+    if mutation == 'missing':
+        conn.execute('DELETE FROM messages WHERE chat_id=? AND id=?', (CHAT, record['id']))
+    elif mutation == 'moved':
+        conn.execute(
+            'UPDATE messages SET ns=ns+1 WHERE chat_id=? AND id=?',
+            (CHAT, record['id']),
+        )
+    else:
+        conn.execute(
+            'UPDATE messages SET payload=? WHERE chat_id=? AND id=?',
+            ('x' * (page_inputs.MAX_BYTES + 1), CHAT, record['id']),
+        )
+    conn.commit()
+
+    conn.execute('BEGIN IMMEDIATE')
+    result = node_event_journal.consume_event_identities_in_transaction(
+        conn, store, expected,
+    )
+    conn.commit()
+
+    assert result == node_event_journal.NodeEventConsume(True, True)
+    assert node_event_journal.peek_event_identities(store) == ()
+    assert node_event_journal.claim_gap(store)
+    assert not node_event_journal.claim_gap(store)
+
+
+def test_gap_claim_is_independent_of_pending_projection_rows(store):
+    conn = store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (CHAT, 'missing', 1, 'alice', 'message'),
+    )
+    conn.execute(
+        'UPDATE node_event_journal_state SET gap=1 WHERE singleton=1',
+    )
+    conn.commit()
+
+    assert node_event_journal.claim_gap(store)
+    assert [item.message_id for item in node_event_journal.peek_event_identities(store)] == [
+        'missing',
+    ]
+
+
+def test_projection_peek_caps_one_chat_at_thirty_two_identities(store):
+    records = [_record(index) for index in range(1, 41)]
+    store.upsert_messages(CHAT, records, observed_ns=1)
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((CHAT, row['id'], row['ns'], row['from'], row['kind']) for row in records),
+    )
+    conn.commit()
+
+    page = node_event_journal.peek_event_identities(store)
+
+    assert len(page) == node_event_journal.MAX_PROJECT_EVENTS
+    assert [item.message_id for item in page[:2]] == ['m0001', 'm0002']
+
+
+def test_projection_consume_requires_owned_active_transaction(store, tmp_path):
+    record = _record(1)
+    store.upsert_messages(CHAT, [record], observed_ns=1)
+    conn = store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (CHAT, record['id'], record['ns'], record['from'], record['kind']),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store)
+
+    with pytest.raises(sqlite3.OperationalError, match='requires a Store transaction'):
+        node_event_journal.consume_event_identities_in_transaction(
+            conn, store, expected,
+        )
+
+    other = Store(tmp_path / 'other.sqlite')
+    coupled_payload_stage.initialize(other)
+    node_event_journal.initialize(other)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        with pytest.raises(ValueError, match='another Store'):
+            node_event_journal.consume_event_identities_in_transaction(
+                conn, other, expected,
+            )
+        conn.rollback()
+    finally:
+        other.close()
+
+
+def test_terminal_gap_retirement_is_exact_cas_and_does_not_touch_newer_aba(store):
+    conn = store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (CHAT, 'blocked', 1, 'alice', 'message'),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store)
+    conn.execute(
+        'UPDATE node_event_journal_items SET ns=2 WHERE sequence=?',
+        (expected[0].sequence,),
+    )
+    conn.commit()
+
+    assert not node_event_journal.retire_event_identities_as_gap(store, expected)
+    current = node_event_journal.peek_event_identities(store)
+    assert len(current) == 1 and current[0].ns == 2
+    assert not node_event_journal.claim_gap(store)
+
+    assert node_event_journal.retire_event_identities_as_gap(store, current)
+    assert node_event_journal.peek_event_identities(store) == ()
+    assert node_event_journal.claim_gap(store)
+
+
+def test_terminal_gap_retirement_rejects_multiple_identities(store):
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((CHAT, 'blocked-1', 1, 'alice', 'message'),
+         (CHAT, 'blocked-2', 2, 'alice', 'message')),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store)
+
+    with pytest.raises(
+        ValueError, match="terminal node event retirement requires one identity"
+    ):
+        node_event_journal.retire_event_identities_as_gap(store, expected)
+
+    assert node_event_journal.peek_event_identities(store) == expected
+    assert not node_event_journal.claim_gap(store)
 
 
 def test_delivery_completion_cannot_erase_a_concurrently_newer_highwater(store):
