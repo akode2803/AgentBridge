@@ -997,3 +997,7 @@ This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for
 the reviewed local-node recovery, publication, retained-event and notification
 owners, followed by real-app observability and rollback validation.
+
+The completed #128 Defender experiment did not improve Windows CI: the full
+test step took 60m27s versus the 59m44s baseline, and its attempted restore step
+failed. PR #128 was closed without merging; keep the GitHub runner defaults.
