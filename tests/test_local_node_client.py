@@ -71,9 +71,14 @@ def replace_listener(server, body, *, sign=False, proof=None, delay=0.0):
     http = server._http
     thread = server._thread
     assert http is not None and thread is not None
+    http.begin_shutdown()
     http.shutdown()
-    http.server_close()
     thread.join(2)
+    deadline = time.monotonic() + 2
+    while http.active_handlers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert http.active_handlers == 0
+    http.server_close()
     server._http = None
     server._thread = None
 
