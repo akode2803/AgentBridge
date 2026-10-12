@@ -819,3 +819,19 @@ removes them. Cleanup always removes payload rows and state before the coupled
 owner and document stage. This slice still does not replace admitted messages,
 advance Store log positions, invoke the node finalization gate or route product
 reads.
+
+The private candidate assembler owns the authenticated local-node capture call;
+its supported entry point does not accept a caller-supplied detached snapshot.
+This prevents a self-consistent subset from omitting a prefix document or an
+accepted log row while retaining a later terminal head. It revalidates the
+captured raw bytes, classifications, exact-path absence evidence, node binding,
+scope positions and all row/document/byte budgets before opening the coupled
+stage. Live JSON `null` remains a document value rather than becoming a
+tombstone. Any conversion or staging failure abandons the private candidate, and
+no message or document half becomes visible.
+
+The returned candidate is still inactive. The next publication slice must own
+candidate acquisition and bind its Store and node positions to the durable
+stage before the root -> node -> Store transaction; a copied dataclass cannot
+be allowed to relabel staged bytes. No current product path consumes or admits
+this candidate.
