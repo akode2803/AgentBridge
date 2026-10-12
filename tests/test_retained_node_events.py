@@ -5,6 +5,7 @@ import pytest
 import sqlite3
 
 from agentbridge import crypto
+from agentbridge.core.timekit import next_ns
 from agentbridge.mesh import eventbus
 from agentbridge.mesh import events
 from agentbridge.mesh.eventbus import Event
@@ -77,7 +78,8 @@ def _notification(world, *, limits=PageOperationLimits()):
 
 
 def _signed_reaction(world, *, emoji='👍', target='two', event_id='reaction-info',
-                     actor='alice', publish_document=True, hint_changes=None):
+                     actor='alice', publish_document=True, publish_state=True,
+                     hint_changes=None):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     bundle = mesh.keys.keystore.load(actor, upgrade=False)
     if bundle is None:
@@ -89,6 +91,14 @@ def _signed_reaction(world, *, emoji='👍', target='two', event_id='reaction-in
         meta['members'][actor] = {'role': 'member', 'joined_ns': base - 1}
         meta.setdefault('tenure', {})[actor] = [[base - 1, 0]]
         mirror.put_doc(P.meta(chat), meta)
+    if publish_state:
+        state_ns = next_ns()
+        mirror.put_doc(P.state(chat, actor), {
+            'ns': state_ns,
+            'sig': crypto.sign(bundle, events.state_signing_bytes(
+                chat, actor, state_ns, {},
+            )),
+        })
     operation = ChatOverlays(mirror, chat).set_reaction(
         actor, target, emoji,
         signer=lambda data: crypto.sign(bundle, data),
@@ -292,6 +302,79 @@ def test_reactor_state_cannot_target_message_already_invisible_to_them(
 
     assert final.status == 'consumed' and not final.gap
     assert final.reactions == ()
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_deleted_reactor_state_cannot_prove_operation_time_visibility(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    _signed_reaction(world)
+    mirror.delete_doc(P.state(chat, 'alice'))
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_advanced_document_makes_older_target_operation_terminal(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    env, _document = _signed_reaction(world)
+    bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    assert bundle is not None
+    ChatOverlays(mirror, chat).set_reaction(
+        'alice', 'other-target', '👀',
+        signer=lambda data: crypto.sign(bundle, data),
+    )
+    document = mirror.get_doc(P.reactions(chat, 'alice'))
+    document['ops']['two'] = {
+        'id': 'older-stable-operation',
+        'ns': env['event']['reaction_ns'] - 1,
+        'emoji': '👍',
+        'previous': None,
+    }
+    document['sig'] = crypto.sign(bundle, events.reaction_signing_bytes(
+        chat, 'alice', document['ns'], document['v'],
+    ))
+    document['ops_sig'] = crypto.sign(bundle, events.reaction_v2_signing_bytes(
+        chat, 'alice', document,
+    ))
+    mirror.put_doc(P.reactions(chat, 'alice'), document)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_dm_block_suppresses_retained_reaction_semantics(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    _signed_reaction(world)
+    meta = mirror.get_doc(P.meta(chat))
+    meta['kind'] = 'dm'
+    mirror.put_doc(P.meta(chat), meta)
+    mesh.privacy.block('alice')
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
     assert node_event_journal.peek_event_identities(
         mesh.store, kind='info') == ()
 

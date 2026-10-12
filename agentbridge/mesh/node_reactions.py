@@ -166,6 +166,16 @@ class ReactionProjectionOperation(PageOperation):
         # generic read-model invalidations until that witness exists.
         if round_.kind(actor) is not UserKind.HUMAN:
             return None
+        if snapshot.kind is ChatKind.DM:
+            actor_account = round_.get(actor)
+            viewer_account = round_.get(self.viewer)
+            if (actor_account is None or viewer_account is None
+                    or self.viewer in actor_account.blocked
+                    or actor in viewer_account.blocked):
+                # Blocking kills existing DMs in both directions. Accounts are
+                # raw captured inputs in this authority round and are compared
+                # again by the final source fence.
+                return None
         public = round_.sign_pub(actor)
         signed = events.signing_bytes(self.chat, env)
         self.ledger.signature(signed)
@@ -236,7 +246,12 @@ class ReactionProjectionOperation(PageOperation):
                     raise _Work('reaction_document')
                 continue
             if operation.ns < hint['reaction_ns']:
-                raise _Work('reaction_document')
+                if document['ns'] < hint['reaction_ns']:
+                    raise _Work('reaction_document')
+                # Another target already advanced the signed document beyond
+                # this breadcrumb. The older per-target operation is stable,
+                # terminal evidence rather than a delayed source snapshot.
+                continue
             if (operation.ns != hint['reaction_ns']
                     or operation.id != hint['reaction_id']
                     or operation.emoji != hint['emoji']
@@ -263,13 +278,16 @@ class ReactionProjectionOperation(PageOperation):
     def _actor_visibility(self, record, actor, public, target, reaction_ns):
         """Return (hidden, clear/delete cut) from authenticated prior state."""
         if record is None or record.deleted or record.payload_json is None:
-            return False, 0
+            # Absence is not operation-time history: a hidden/cleared state
+            # could have been deleted before this fresh read. Degrade to the
+            # generic invalidation unless a signed prior state proves the cut.
+            return None
         try:
             document = record.decoded()
         except (TypeError, ValueError, RecursionError, UnicodeError):
-            return False, 0
+            return None
         if type(document) is not dict or not document:
-            return False, 0
+            return None
         fields = {key: value for key, value in document.items()
                   if key not in ('ns', 'sig')}
         try:
@@ -283,9 +301,9 @@ class ReactionProjectionOperation(PageOperation):
             )
         except (TypeError, ValueError, KeyError, OverflowError,
                 RecursionError, UnicodeError):
-            return False, 0
+            return None
         if not valid:
-            return False, 0
+            return None
         if state_ns > reaction_ns:
             # A current state document is not a history log. Later writes
             # preserve earlier hidden/cleared fields, so visibility at the
