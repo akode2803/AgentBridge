@@ -6,6 +6,7 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ...core.errors import ValidationError
@@ -205,15 +206,18 @@ class DelegationCoordinator:
             run_ids = tuple(self._pending_consumptions())
         return sum(self.consume_for_run(run_id) for run_id in run_ids)
 
-    def claim_ready(self, *, exclude: set[str]) -> list[ChildWork]:
+    def claim_ready(self, *, exclude: set[str],
+                    on_retryable: Callable[[], None] | None = None) -> list[ChildWork]:
         """Accept eligible offers and claim authorized work for this host."""
         try:
             account = self.mesh.directory.get(self.mesh.user)
         except PinStoreUnavailable as exc:
             if exc.reason != "lock_timeout":
                 raise
-            # A contended local pin read grants no authority. Retry discovery
-            # on the next poll without accepting or claiming any work now.
+            # A contended local pin read grants no authority. Signal a prompt
+            # retry because the caller may otherwise wait for its recovery scan.
+            if on_retryable is not None:
+                on_retryable()
             return []
         settings = HarnessSettings.from_account(account)
         work: list[ChildWork] = []

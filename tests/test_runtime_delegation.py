@@ -141,6 +141,7 @@ def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
     before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
     original_get = specialist.directory.get
     calls = 0
+    retryable = []
 
     def transient_get(name):
         nonlocal calls
@@ -151,7 +152,10 @@ def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
 
     with monkeypatch.context() as patch:
         patch.setattr(specialist.directory, "get", transient_get)
-        assert destination.claim_ready(exclude=set()) == []
+        assert destination.claim_ready(
+            exclude=set(), on_retryable=lambda: retryable.append(True),
+        ) == []
+        assert retryable == [True]
         assert specialist.store.cached_doc(
             destination._journal_path(handoff_id), default=None,
         ) is None

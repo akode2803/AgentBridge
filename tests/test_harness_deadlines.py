@@ -10,6 +10,7 @@ from agentbridge.harness import AgentRunner
 from agentbridge.harness.change_observer import HarnessChangeObserver
 from agentbridge.harness.queue import WorkItem, WorkQueue
 from agentbridge.harness.timers import TimerService
+from agentbridge.mesh.pin_storage import PinStoreUnavailable
 from agentbridge.mesh.service import Mesh
 from agentbridge.store import Store
 from agentbridge.transport.change_ledger import (
@@ -170,6 +171,76 @@ def test_runner_handoff_scan_is_dirty_on_start_and_mirror_change(hrig):
     assert runner._handoff_scan_due(now + 5.0, force=True) is True
     assert runner._handoff_scan_due(now + 30.0) is False
     assert runner._handoff_scan_due(now + 35.0) is True
+
+
+@pytest.mark.parametrize("failed_read", (1, 2))
+def test_healthy_observer_retries_pin_busy_handoff_discovery_promptly(
+        hrig, monkeypatch, failed_read):
+    runner = hrig.make_runner()
+    runner.responder = SimpleNamespace(
+        prepare_child=lambda *_args, **_kwargs: None,
+        respond_child=lambda *_args, **_kwargs: None,
+    )
+    now = time.monotonic()
+    assert runner._handoff_scan_due(now) is True
+    runner._change_observer._started = True
+    monkeypatch.setattr(
+        runner._change_observer, "next_check_in_s", lambda: 300.0,
+    )
+    original_get = runner.mesh.directory.get
+    calls = 0
+
+    def once_busy(name):
+        nonlocal calls
+        calls += 1
+        if calls == failed_read:
+            raise PinStoreUnavailable("lock_timeout")
+        return original_get(name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.mesh.directory, "get", once_busy)
+        assert runner.dispatch_handoffs() == 0
+        assert calls == failed_read
+
+    retry_at = runner._next_handoff_recovery
+    assert 0.0 < retry_at - time.monotonic() <= runner_module.HANDOFF_PIN_RETRY_S
+    assert runner._handoff_scan_due(retry_at - 0.001) is False
+    wait = runner._next_loop_wait(
+        now=time.monotonic(), last_full_scan=now,
+        announced=now, scanned_through_ns=time.time_ns(),
+    )
+    assert 0.0 < wait <= runner_module.HANDOFF_PIN_RETRY_S
+    assert runner._handoff_scan_due(retry_at) is True
+    assert runner.dispatch_handoffs() == 0
+    assert runner._handoff_scan_due(retry_at + 0.001) is False
+
+
+@pytest.mark.parametrize("failed_read", (1, 2))
+def test_handoff_dispatch_propagates_non_timeout_pin_failure(
+        hrig, monkeypatch, failed_read):
+    runner = hrig.make_runner()
+    runner.responder = SimpleNamespace(
+        prepare_child=lambda *_args, **_kwargs: None,
+        respond_child=lambda *_args, **_kwargs: None,
+    )
+    now = time.monotonic()
+    assert runner._handoff_scan_due(now) is True
+    original_get = runner.mesh.directory.get
+    calls = 0
+
+    def invalid_pins(name):
+        nonlocal calls
+        calls += 1
+        if calls == failed_read:
+            raise PinStoreUnavailable("invalid_file")
+        return original_get(name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.mesh.directory, "get", invalid_pins)
+        with pytest.raises(PinStoreUnavailable, match="invalid_file"):
+            runner.dispatch_handoffs()
+    assert calls == failed_read
+    assert runner._next_handoff_recovery == now + runner_module.HANDOFF_RECOVERY_S
 
 
 def test_child_completion_dirties_handoff_discovery(hrig):
