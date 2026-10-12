@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -123,6 +124,42 @@ def test_node_position_is_rechecked_under_finalization_cut(world):
     with pytest.raises(NodeGenerationChanged, match="generation changed"):
         with root.finalization_cut(store, definition, node_position=position):
             pytest.fail("stale node position reached caller")
+
+
+def test_node_position_is_rechecked_and_held_under_publication_gate(world):
+    root, store, node, definition, position = world
+    with root.publication_gate(
+            store, definition, node_position=position):
+        contender = sqlite3.connect(node.path, timeout=0.01)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+        finally:
+            contender.close()
+
+    generation = node.begin_candidate(created_ns=3)
+    node.seal_candidate(generation, NodeInputBatch(documents=(
+        NodeDocument("chats/room/meta.json", 2, False, b"two"),
+    )), observed_ns=4)
+    node.admit_candidate(generation)
+    with pytest.raises(NodeGenerationChanged, match="generation changed"):
+        with root.publication_gate(
+                store, definition, node_position=position):
+            pytest.fail("stale node position reached publisher")
+
+
+def test_publication_node_position_must_cover_log_scope(world):
+    root, store, _node, _definition, position = world
+    selected = source_selectors.definition(
+        root.identity, (S("log_chat", "room"),), build="node-log-test",
+    )
+    root_only = replace(position, scope_positions=tuple(
+        item for item in position.scope_positions if item.scope_kind == "root"
+    ))
+    with pytest.raises(ValueError, match="does not cover"):
+        with root.publication_gate(
+                store, selected, node_position=root_only):
+            pytest.fail("incomplete node scope reached publisher")
 
 
 def test_finalization_preflights_keyed_node_registration(world):

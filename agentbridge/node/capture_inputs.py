@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..mesh import local_page_source
-from ..store import source_selectors
-from ..store import document_observation, overlay_index
-from .admission import MAX_CAPTURE_LOG_REQUESTS, NodeScopePosition
+from ..store import document_observation, overlay_index, source_selectors
+from .admission import (
+    MAX_CAPTURE_LOG_REQUESTS, NodeFinalizationPosition, NodeScopePosition,
+)
 from .client import (
     ClientCapture, ClientCaptureRequest, ClientLogRequest, ClientLogStreamPage,
     LocalNodeClient, NodeBinding,
@@ -101,6 +102,7 @@ class DetachedNodeInputs:
     health: str
     last_success_ns: int
     scope_positions: tuple[NodeScopePosition, ...]
+    finalization_position: NodeFinalizationPosition
     documents: tuple[DetachedDocument, ...]
     missing_exact_paths: tuple[str, ...]
     streams: tuple[DetachedLogStream, ...]
@@ -406,7 +408,7 @@ def capture_detached_inputs(
     admitted late.  Malformed envelopes remain represented as rejected raw
     rows so publication can advance past them without repeatedly rescanning.
     """
-    if not hasattr(client, "capture") or not hasattr(client, "log_streams"):
+    if type(client) is not LocalNodeClient:
         raise TypeError("expected local node client")
     if type(limits) is not CaptureLimits:
         raise TypeError("expected capture limits")
@@ -556,11 +558,17 @@ def capture_detached_inputs(
     streams = tuple(DetachedLogStream(
         row.log_name, row.head, tuple(stream_rows[row.log_name])
     ) for row in inventory)
+    position = NodeFinalizationPosition(
+        str((client.directory / "replica.sqlite3").resolve()),
+        cut.binding.database_incarnation, cut.binding.identity_digest,
+        client.identity.provider_endpoint, client.identity.root, cut.generation,
+        cut.scope_positions,
+    )
     return DetachedNodeInputs(
         definition, chat_id, cut.binding, cut.capture, cut.generation,
         first.health, first.last_success_ns, cut.scope_positions,
-        tuple(documents), missing_exact, streams, raw_rows, accepted, rejected,
-        input_bytes, requests,
+        position, tuple(documents), missing_exact, streams, raw_rows, accepted,
+        rejected, input_bytes, requests,
     )
 
 

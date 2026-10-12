@@ -761,3 +761,19 @@ one root -> node -> Store finalization transaction, then thread the node positio
 through the existing page finalization fence. Chaining the current document
 publisher and `Store.ingest_log` would expose two different cuts and is not a
 valid implementation.
+
+Detached input snapshots now include a payload-free
+`NodeFinalizationPosition`: the protected node database path and identity, its
+admitted generation, and the exact non-pending scope positions observed during
+capture. The mutation coordinator's publication gate can accept this position.
+It validates that the receipt covers the source's root and declared chat-log
+scopes, then holds the root transaction and exact node writer cut while the
+caller performs its bounded Store admission. A replaced database, changed
+generation, new pending fence or moved scope rejects the publication before the
+caller runs.
+
+The optional node cut preserves existing document-only publishers and still
+does not make a node generation an authority verdict. It supplies the missing
+root -> node -> Store lock order for the next coupled candidate. Message and
+document rows are not yet staged or published together, and product routing
+remains disconnected.
