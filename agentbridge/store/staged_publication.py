@@ -228,18 +228,9 @@ def _admit_in_transaction(
     The caller owns commit/rollback and every other row mutation in that cut.
     It performs no transport work and never opens or commits a transaction.
     """
-    expected = owner._expected(store, expected)
-    if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
-        raise ValueError('invalid observation time')
-    if not conn.in_transaction:
-        raise ValueError('staged admission requires a Store transaction')
-    databases = {row[1]: row[2] for row in conn.execute('PRAGMA database_list')}
-    if (not databases.get('main')
-            or Path(databases['main']).resolve() != store.path.resolve()):
-        raise ValueError('wrong staged admission database')
-    current = owner.capture_in_transaction(conn, store, expected.source_id)
-    if current != expected or current.writes_pending:
-        raise owner.SourceChanged('source_changed_during_ingestion')
+    expected, current = _admission_context(
+        conn, store, expected, observed_ns,
+    )
     from . import coupled_stage
     coupled_stage.reject_generic_admission(conn, store, candidate)
     raw, index = staged_source.verify_sealed(
@@ -260,11 +251,36 @@ def _admit_in_transaction(
             raise owner.SourceChanged('foreign_reused_index')
         overlay_index._ready(conn, store.path, reuse)
         raw, index = current.raw, reuse
+    return _admit_verified_in_transaction(
+        conn, store, expected, current, raw, index,
+        observed_ns=observed_ns, replace=reuse is None,
+    )
+
+
+def _admission_context(conn, store, expected, observed_ns):
+    expected = owner._expected(store, expected)
+    if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
+        raise ValueError('invalid observation time')
+    if not conn.in_transaction:
+        raise ValueError('staged admission requires a Store transaction')
+    databases = {row[1]: row[2] for row in conn.execute('PRAGMA database_list')}
+    if (not databases.get('main')
+            or Path(databases['main']).resolve() != store.path.resolve()):
+        raise ValueError('wrong staged admission database')
+    current = owner.capture_in_transaction(conn, store, expected.source_id)
+    if current != expected or current.writes_pending:
+        raise owner.SourceChanged('source_changed_during_ingestion')
+    return expected, current
+
+
+def _admit_verified_in_transaction(
+        conn, store, expected, current, raw, index, *, observed_ns, replace):
+    """Swap one already-verified raw/index identity; never verify a stage."""
     # Retirement and pointer/readiness publication share this transaction.
     # Initial registration needs _advance's self mapping before replacing it;
     # rollback exposes the original admitted snapshot, never a subset.
     owner._advance(conn, expected.source_id, current.revision)
-    if reuse is None:
+    if replace:
         conn.execute(
             'INSERT INTO local_input_generations(source,physical) VALUES(?,?) '
             'ON CONFLICT(source) DO UPDATE SET physical=excluded.physical',
