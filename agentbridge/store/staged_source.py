@@ -213,7 +213,10 @@ def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes,
             # never steal one owned by the same revision or another active call.
             abandon_superseded(conn, store, logical_source, expected)
         existing = conn.execute("SELECT count(*),coalesce(sum(total_bytes),0),coalesce(sum(phase='building'),0) FROM (SELECT total_bytes,phase FROM staged_sources LIMIT ?)", (MAX_STAGES + 1,)).fetchone()
-        if existing[0] >= MAX_STAGES or existing[1] >= MAX_GLOBAL_BYTES or existing[2] >= MAX_ACTIVE_STAGES:
+        from . import coupled_payload_stage
+        payload_bytes = coupled_payload_stage.staged_bytes(conn)
+        if (existing[0] >= MAX_STAGES or existing[1] + payload_bytes >= MAX_GLOBAL_BYTES
+                or existing[2] >= MAX_ACTIVE_STAGES):
             raise OverflowError('global stage capacity exceeded')
         source_id = source_prefix + uuid.uuid4().hex
         epoch = uuid.uuid4().hex
@@ -283,7 +286,9 @@ def append(store, stage, documents):
         if count + len(raw) > max_docs or total + bytes_used + index_bytes > limit:
             raise OverflowError('stage cumulative budget exceeded')
         other_total = conn.execute('SELECT coalesce(sum(total_bytes),0) FROM (SELECT total_bytes FROM staged_sources WHERE source<>? LIMIT ?)', (stage.source_id, MAX_STAGES + 1)).fetchone()[0]
-        if other_total + total + bytes_used + index_bytes > MAX_GLOBAL_BYTES:
+        from . import coupled_payload_stage
+        payload_bytes = coupled_payload_stage.staged_bytes(conn)
+        if other_total + total + bytes_used + index_bytes + payload_bytes > MAX_GLOBAL_BYTES:
             raise OverflowError('global stage capacity exceeded')
         current = docs._capture_position(conn, store.path, stage.source_id)
         if (current.incarnation != stage.incarnation or current.generation != generation
@@ -510,6 +515,11 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
                 rows = conn.execute(f'SELECT rowid FROM {table} WHERE {key}=? LIMIT ?', (source_id, remaining)).fetchall()
                 conn.executemany(f'DELETE FROM {table} WHERE rowid=?', rows)
                 remaining -= len(rows)
+            if remaining > 0:
+                from . import coupled_payload_stage
+                remaining = coupled_payload_stage.cleanup_rows(
+                    conn, source_id, remaining,
+                )
             if remaining > 0:
                 from . import coupled_stage
                 coupled_stage.cleanup_owner(conn, source_id)
