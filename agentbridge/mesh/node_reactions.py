@@ -282,8 +282,13 @@ class ReactionProjectionOperation(PageOperation):
         except (TypeError, ValueError, KeyError, OverflowError,
                 RecursionError, UnicodeError):
             return False, 0
-        if not valid or state_ns > reaction_ns:
+        if not valid:
             return False, 0
+        if state_ns > reaction_ns:
+            # A current state document is not a history log. Later writes
+            # preserve earlier hidden/cleared fields, so visibility at the
+            # operation cut cannot be proven from this newer snapshot.
+            return None
         hidden = fields.get('hidden', [])
         starred = fields.get('starred', [])
         cleared = fields.get('cleared') or {}

@@ -263,14 +263,15 @@ def test_reactor_without_shared_history_cannot_target_prejoin_message(world):
 
 
 @pytest.mark.parametrize('visibility', ('hidden', 'cleared'))
+@pytest.mark.parametrize('state_timing', ('prior', 'later'))
 def test_reactor_state_cannot_target_message_already_invisible_to_them(
-        world, visibility):
+        world, visibility, state_timing):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     env, _document = _signed_reaction(world)
     fields = ({'hidden': ['two']} if visibility == 'hidden' else {
         'cleared': {'ns': base + 1, 'keep_starred': False, 'at': ''},
     })
-    state_ns = env['event']['reaction_ns'] - 1
+    state_ns = env['event']['reaction_ns'] + (-1 if state_timing == 'prior' else 1)
     bundle = mesh.keys.keystore.load('alice', upgrade=False)
     assert bundle is not None
     mirror.put_doc(P.state(chat, 'alice'), {
