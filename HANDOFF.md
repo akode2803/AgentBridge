@@ -709,3 +709,10 @@ no remaining P1/P2. Ruff/diff clean. PR #113 also has an unrelated signup timeou
 #111's second Windows rerun is still pending at this checkpoint. #112, #114 and
 #115 passed both platforms; #116 passed Ubuntu, Windows pending. Verify current
 head review and CI on resume and do not infer release from green tests.
+
+PR #119 review correction: retain the same 10-second GUI fixture deadline on
+Windows and other platforms. The prior 30-second Windows change was withdrawn
+because it masked signup stalls. The initial machine announcement already
+precedes the presence thread in `_adopt`; investigate new code-frame evidence
+without weakening startup/transaction fences. The bounded rejection drain and
+Windows socket-error assertions remain. This correction is not root-cause proof.

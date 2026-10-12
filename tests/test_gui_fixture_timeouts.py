@@ -10,8 +10,8 @@ from conftest import _fixture_response
 
 
 @pytest.mark.parametrize('phase', ['open', 'read'])
-@pytest.mark.parametrize('timeout_s', [10, 30])
-def test_timeout_preserves_identity_deadline_and_request_without_retry(monkeypatch, phase, timeout_s):
+def test_timeout_preserves_identity_deadline_and_request_without_retry(monkeypatch, phase):
+    timeout_s = 10
     monkeypatch.setattr(conftest, 'GUI_HTTP_TIMEOUT_S', timeout_s)
     marker = TimeoutError('disposable timeout')
     private = 'private-request-marker'
@@ -52,8 +52,8 @@ def test_timeout_preserves_identity_deadline_and_request_without_retry(monkeypat
 
 
 @pytest.mark.parametrize('diagnostic_failure', ['capture', 'attachment'])
-@pytest.mark.parametrize('timeout_s', [10, 30])
-def test_diagnostic_failure_does_not_replace_http_timeout(monkeypatch, diagnostic_failure, timeout_s):
+def test_diagnostic_failure_does_not_replace_http_timeout(monkeypatch, diagnostic_failure):
+    timeout_s = 10
     monkeypatch.setattr(conftest, 'GUI_HTTP_TIMEOUT_S', timeout_s)
     class UnannotatableTimeout(TimeoutError):
         def add_note(self, _note):

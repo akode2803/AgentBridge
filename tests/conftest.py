@@ -29,7 +29,7 @@ from agentbridge.transport.raw_documents import RawCollectionUnavailable
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport
 
-GUI_HTTP_TIMEOUT_S = 30 if sys.platform == 'win32' else 10
+GUI_HTTP_TIMEOUT_S = 10
 
 
 def _http_timeout_frames():
