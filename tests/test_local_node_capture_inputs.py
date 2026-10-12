@@ -76,6 +76,12 @@ def test_capture_detaches_documents_and_replays_every_stream_from_zero(tmp_path)
         )
 
     assert result.generation == generation
+    position = result.finalization_position
+    assert position.database_path == str(server.database_path.resolve())
+    assert position.database_incarnation == result.binding.database_incarnation
+    assert position.identity_digest == identity().digest
+    assert position.admitted_generation == generation
+    assert position.scope_positions == result.scope_positions
     assert result.chat_id == "chat-a"
     assert [row.path for row in result.documents] == [
         "chats/chat-a/meta.json",

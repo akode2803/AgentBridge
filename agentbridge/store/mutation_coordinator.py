@@ -727,14 +727,33 @@ class MutationCoordinator:
             self._advance_root_revision(conn)
 
     @contextmanager
-    def publication_gate(self, store, value):
+    def publication_gate(self, store, value, *, node_position=None):
         """Serialize registration/admission with mutation start/finish.
 
         Only already-collected bounded LOCAL work may execute in this scope.
         Transport reads, callbacks, signature work and scans belong outside it.
+        When supplied, ``node_position`` holds the exact admitted node cut under
+        root -> node ordering through the caller's later Store admission.
         """
+        from ..node.admission import NodeFinalizationPosition
+        from ..node.store import NodeStore
+
+        if node_position is not None and type(node_position) is not NodeFinalizationPosition:
+            raise ValueError('invalid node finalization position')
         store = SimpleNamespace(path=Path(store.path).resolve())
         value = scopes._definition(value)
+        if node_position is not None:
+            required_scopes = {("root", "")}
+            required_scopes.update(
+                ("chat", item.value) for item in value.selectors
+                if item.kind == "log_chat"
+            )
+            actual_scopes = {
+                (item.scope_kind, item.scope_id)
+                for item in node_position.scope_positions
+            }
+            if not required_scopes.issubset(actual_scopes):
+                raise ValueError('node position does not cover source definition')
         if json.loads(value.serialized)[0] != self.identity:
             raise ValueError('definition belongs to another transport root')
         with self._transaction() as root:
@@ -744,7 +763,16 @@ class MutationCoordinator:
                 self._check_store(conn, store, *row)
                 scopes.register_in_transaction(conn, store, value)
             self._require_no_pending(root, value)
-            yield
+            if node_position is None:
+                yield
+            else:
+                registration = self._registered_node(root, node_position.database_path)
+                with NodeStore.coordinator_cut(registration, node_position) as node_conn:
+                    NodeStore.coordinator_require_fences(
+                        node_conn, coordinator_epoch=self.epoch,
+                        tokens=self._pending_tokens(root),
+                    )
+                    yield
 
     def _require_no_pending(self, root, value):
         if root.execute("SELECT 1 FROM mutation_scopes WHERE typeof(kind)!='text' OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
