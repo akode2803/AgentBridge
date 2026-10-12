@@ -40,7 +40,10 @@ RECOVERY_SHUTDOWN_TIMEOUT_S = 5.0
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # POSIX rebinding after an orderly stop must not wait for accepted loopback
+    # sockets to leave TIME_WAIT. Windows SO_REUSEADDR can permit live port
+    # sharing, so retain the prior default; HMAC proves content, not DoS.
+    allow_reuse_address = os.name != "nt"
     request_queue_size = MAX_ACTIVE_REQUESTS
 
     def __init__(self, *args, **kwargs) -> None:
