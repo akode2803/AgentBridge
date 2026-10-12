@@ -215,7 +215,10 @@ def _prepare(store, expected, detached):
                 raise CoupledCandidateError("detached log scope changed")
             if type(row.payload) is not bytes:
                 raise CoupledCandidateError("invalid detached log payload")
-            charged += _charge(log_name, row.payload)
+            charged += (
+                _charge(log_name, row.payload)
+                + len(row.chat_id.encode("utf-8"))
+            )
             if charged > capture_inputs.MAX_INPUT_BYTES:
                 raise CoupledCandidateError("detached input byte budget exceeded")
             try:

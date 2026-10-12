@@ -18,6 +18,7 @@ from agentbridge.store import (
 )
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.store.source_publication import SourcePublisher
 
 
 CHAT = "room"
@@ -429,3 +430,29 @@ def test_source_revision_preflight_runs_before_chat_replacement(
 
 def test_staged_publication_has_no_coupled_document_only_admission(world):
     assert not hasattr(staged_publication, "_admit_coupled_in_transaction")
+
+
+def test_legacy_publishers_cannot_rewrite_admitted_coupled_source(world):
+    coordinator, store, _server, client, source, expected = world
+    result = coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    with pytest.raises(
+            local_source.SourceChanged,
+            match="staged_source_requires_staged_publication"):
+        local_source.publish(
+            store, result.source,
+            {f"chats/{CHAT}/meta.json": {"members": {"mallory": True}}},
+            observed_ns=100,
+        )
+    publisher = SourcePublisher(coordinator, store, source)
+    captured = publisher.capture()
+    with pytest.raises(
+            local_source.SourceChanged,
+            match="staged_source_requires_staged_publication"):
+        publisher.publish(
+            captured,
+            {f"chats/{CHAT}/meta.json": {"members": {"mallory": True}}},
+            observed_ns=100,
+        )
+    assert local_source.capture(store, source.source) == result.source

@@ -853,3 +853,19 @@ survive same-ID replacements. Empty chats still advance reset evidence, and
 counter exhaustion rejects before large chat mutation. The publisher remains
 disconnected from product ingestion and read routes; activation and foreground
 scheduling are separate work.
+
+The detached/coupled boundary also preserves the tolerated legacy Store input
+shape. Numeric message IDs are accepted only when nonzero and representable by
+SQLite's signed 64-bit binding, then normalized to text; boolean message IDs
+remain invalid while a true namespace retains its historical integer value of
+one. Empty writer owners remain valid only when they exactly match an empty log
+prefix. Chat IDs are charged for every raw log row, and replay request groups
+shrink before I/O when long stream names would exceed the local wire-request
+budget. The coupled assembler independently recomputes the same accounting.
+
+All consumers now include private coupled payload bytes in the shared staging
+cap, including presence-index construction. Coupled owner rows are shape-checked
+with bounded SQLite metadata reads before their values are materialized, node
+publication receipts are fully normalized before scope iteration, and legacy
+document publishers reject both `stage:` and `coupled:` physical sources. These
+are inactive protocol corrections; they do not activate local-node ingestion.

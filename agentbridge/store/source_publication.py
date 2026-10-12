@@ -61,7 +61,7 @@ class SourcePublisher:
         leave the source unavailable, including invalid/oversize input.
         """
         expected = self._expected(captured)
-        if expected.raw.source_id.startswith('stage:'):
+        if expected.raw.source_id.startswith(('stage:', 'coupled:')):
             raise owner.SourceChanged('staged_source_requires_staged_publication')
         with self.coordinator.publication_gate(self.store, self.definition):
             retired = owner.retire_for_publication(self.store, expected)

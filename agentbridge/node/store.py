@@ -10,6 +10,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .admission import (
+    MAX_ID_BYTES,
     MAX_ACTIVE_CANDIDATES, MAX_BATCH_FRONTIERS, MAX_STAGED_BYTES,
     MAX_STAGED_CHUNKS, MAX_STAGED_DOCUMENTS, MAX_STAGED_LOG_ROWS,
     MAX_STAGED_VISIBILITY,
@@ -569,10 +570,26 @@ def _node_position(value: object) -> NodeFinalizationPosition:
     if (type(value.admitted_generation) is not int
             or not 1 <= value.admitted_generation <= 2**63 - 1
             or type(value.scope_positions) is not tuple
-            or not 1 <= len(value.scope_positions) <= MAX_CAPTURE_SCOPE_POSITIONS
-            or any(type(item) is not NodeScopePosition
-                   for item in value.scope_positions)):
+            or not 1 <= len(value.scope_positions) <= MAX_CAPTURE_SCOPE_POSITIONS):
         raise ValueError("invalid node finalization position")
+    for item in value.scope_positions:
+        if (type(item) is not NodeScopePosition
+                or type(item.scope_kind) is not str
+                or type(item.scope_id) is not str
+                or type(item.generation) is not int
+                or not 0 <= item.generation <= 2**63 - 1
+                or item.pending_reason is not None):
+            raise ValueError("invalid node finalization position")
+        try:
+            scope_id_size = len(item.scope_id.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("invalid node finalization position") from None
+        if (item.scope_kind == "root" and item.scope_id != ""
+                or item.scope_kind == "chat" and (
+                    not item.scope_id or "\x00" in item.scope_id
+                    or scope_id_size > MAX_ID_BYTES)
+                or item.scope_kind not in ("root", "chat")):
+            raise ValueError("invalid node finalization position")
     positions = tuple(sorted(value.scope_positions,
                              key=lambda item: (item.scope_kind, item.scope_id)))
     if positions != value.scope_positions or len({
@@ -580,14 +597,7 @@ def _node_position(value: object) -> NodeFinalizationPosition:
         raise ValueError("invalid node finalization position")
     root = tuple(item for item in positions
                  if (item.scope_kind, item.scope_id) == ("root", ""))
-    if len(root) != 1 or any(
-            item.scope_kind not in ("root", "chat")
-            or type(item.scope_id) is not str
-            or (item.scope_kind == "root") != (item.scope_id == "")
-            or type(item.generation) is not int
-            or not 0 <= item.generation <= 2**63 - 1
-            or item.pending_reason is not None
-            for item in positions):
+    if len(root) != 1:
         raise ValueError("invalid node finalization position")
     return NodeFinalizationPosition(
         registration.database_path, registration.database_incarnation,

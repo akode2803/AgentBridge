@@ -80,7 +80,8 @@ def _inputs(position):
         0 if row.payload is None else len(row.payload)
     ) for row in documents)
     charged += len("alice@box".encode()) + 32
-    charged += sum(len("alice@box".encode()) + 32 + len(row.payload)
+    charged += sum(len("alice@box".encode()) + len(CHAT.encode()) + 32
+                   + len(row.payload)
                    for row in rows)
     return DetachedNodeInputs(
         _definition(), CHAT, NodeBinding("node", "d" * 32, "e" * 64, 1),

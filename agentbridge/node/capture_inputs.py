@@ -22,7 +22,8 @@ from .client import (
     ClientCapture, ClientCaptureRequest, ClientLogRequest, ClientLogStreamPage,
     LocalNodeClient, NodeBinding,
 )
-from .protocol import ProtocolError
+from .protocol import ProtocolError, encode_json
+from .wire import MAX_WIRE_REQUEST_BYTES
 
 MAX_INPUT_DOCUMENTS = 20_000
 MAX_INPUT_DOCUMENT_BYTES = 8 * 1024 * 1024
@@ -341,8 +342,12 @@ def _envelope(row, budget: _JSONBudget) -> DetachedLogRow:
         owner = row.log_name.split("@", 1)[0]
         message_id, ns, sender = plain.get("id"), plain.get("ns"), plain.get("from")
         kind = plain.get("kind", "message")
+        numeric_id = type(message_id) is int
         if (type(message_id) not in (str, int) or isinstance(message_id, bool)
-                or not str(message_id)):
+                or not str(message_id)
+                or (numeric_id and (
+                    message_id == 0
+                    or not -(2**63) <= message_id <= 2**63 - 1))):
             reason = "invalid_message_id"
         else:
             message_id = str(message_id)
@@ -352,7 +357,7 @@ def _envelope(row, budget: _JSONBudget) -> DetachedLogRow:
                 reason = "invalid_message_id"
             else:
                 reason = None
-        if reason is None and (type(ns) is not int
+        if reason is None and (not isinstance(ns, int)
                                or not 1 <= ns <= document_observation.MAX_SQLITE_INTEGER):
             reason = "invalid_namespace"
         elif reason is None and (type(sender) is not str or sender != owner):
@@ -506,6 +511,17 @@ def capture_detached_inputs(
                 max_log_rows=min(20_000, per_stream * chunk_size),
                 max_bytes=WIRE_CAPTURE_BYTES,
             )
+            try:
+                encode_json(
+                    request.payload(), max_bytes=MAX_WIRE_REQUEST_BYTES,
+                )
+            except ProtocolError:
+                if chunk_size > 1:
+                    chunk_size = max(1, chunk_size // 2)
+                    continue
+                raise DetachedInputOverflow(
+                    "one log request exceeds the wire request budget"
+                ) from None
             if requests >= limits.max_pages:
                 raise DetachedInputOverflow("node page count exceeds capture budget")
             requests += 1
@@ -530,7 +546,10 @@ def capture_detached_inputs(
             for row in log_page.rows:
                 if row.id > head:
                     raise ProtocolError("node log replay crossed captured head")
-                input_bytes += _input_charge(row.log_name, row.payload)
+                input_bytes += (
+                    _input_charge(row.log_name, row.payload)
+                    + len(row.chat_id.encode("utf-8"))
+                )
                 if input_bytes > limits.max_input_bytes:
                     raise DetachedInputOverflow(
                         "raw inputs exceed capture byte budget"

@@ -199,6 +199,24 @@ def _row(conn, store, handle):
     handle = _handle(store, handle)
     _schema(conn)
     stage = handle.document_stage
+    shape = conn.execute(
+        "SELECT typeof(stage),length(CAST(stage AS BLOB)),"
+        "typeof(logical_source),length(CAST(logical_source AS BLOB)),"
+        "typeof(chat),length(CAST(chat AS BLOB)),"
+        "typeof(epoch),length(CAST(epoch AS BLOB)),"
+        "typeof(phase),length(CAST(phase AS BLOB)),"
+        "typeof(store_incarnation),length(CAST(store_incarnation AS BLOB)),"
+        "typeof(owner_epoch),length(CAST(owner_epoch AS BLOB)),"
+        "typeof(owner_revision) FROM coupled_stage_owners WHERE stage=?",
+        (stage.source_id,),
+    ).fetchone()
+    if (shape is None or any(
+            kind != "text" or type(size) is not int or size > limit
+            for kind, size, limit in zip(
+                shape[:-1:2], shape[1:-1:2],
+                (64, 4096, 4096, 32, 16, 4096, 32), strict=True,
+            )) or shape[-1] != "integer"):
+        raise CoupledStageChanged("malformed coupled stage owner")
     row = conn.execute(
         "SELECT stage,logical_source,chat,epoch,phase,store_incarnation,"
         "owner_epoch,owner_revision FROM coupled_stage_owners WHERE stage=?",
