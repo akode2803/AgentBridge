@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 from ..core.models import Account, ChatSnapshot, UserKind, MsgKind
-from ..store import document_observation, lifecycle_inputs, local_source, membership_suffix, terminal_observation, send_status
+from ..store import document_observation, lifecycle_inputs, local_source, membership_suffix, node_event_journal, terminal_observation, send_status
 from ..store.membership_input_position import MembershipInputUnavailable
 from ..transport import authority_observation
 from . import authority_source, events, local_page_source, page_fence
@@ -64,6 +64,7 @@ class CoordinatorResult:
     send_statuses: dict | None = None
     unread: dict | None = None
     validated_now_ns: int | None = None
+    event_consumption: node_event_journal.NodeEventConsume | None = None
 
 
 class _Stop(RuntimeError):
@@ -356,13 +357,29 @@ class _Round:
         return (nullcontext(True) if self.source_reader is not None else
                 authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy))
 
-    def final(self, snapshot, proposal, *, page=None, mutation=None, expected_trust_version=None):
+    def final(self, snapshot, proposal, *, page=None, mutation=None,
+              expected_trust_version=None, event_identities=()):
+        if (type(event_identities) is not tuple
+                or len(event_identities) > node_event_journal.MAX_PROJECT_EVENTS
+                or any(type(item) is not node_event_journal.NodeEventIdentity
+                       for item in event_identities)):
+            raise ValueError('invalid final node event identities')
+        if event_identities and (
+                page is None or proposal is not None or mutation is not None
+                or self.source_reader is None
+                or any(item.chat_id != self.chat or item.kind != 'message'
+                       for item in event_identities)):
+            raise ValueError('node event consumption requires an exact local page')
         prepared_page = None if page is None else page_fence.prepare(
             self.mesh, page, self.suffix.position,
             self.receipt.mirror if self.source_reader is None else self.receipt,
             source_reader=self.source_reader, charge_source=self.ledger.charge)
         if prepared_page is not None:
             self.ledger.charge(prepared_page.comparison_bytes * (2 if proposal is not None else 1))
+        if event_identities and tuple(
+                item.message_id for item in event_identities
+        ) != prepared_page.fence.exact_targets:
+            raise ValueError('node event identities do not match exact page targets')
         view = self.mesh.key_pins.capture_effective_view()
         # Equality evidence for browser window invalidation, never a reused
         # authority verdict. The view is still checked under its final gate.
@@ -500,12 +517,20 @@ class _Round:
                             statuses = send_status.capture(conn, self.chat, tuple(
                                 m.id for m in selected.messages if m.from_ == self.viewer
                                 and m.kind is MsgKind.MESSAGE and not m.deleted)) if selected is not None else {}
+                            event_consumption = None
+                            if event_identities:
+                                event_consumption = node_event_journal.consume_event_identities_in_transaction(
+                                    conn, self.mesh.store, event_identities,
+                                )
+                                if not event_consumption.consumed:
+                                    raise _Stop('restart', 'node_event_journal_changed')
                             if mutation is not None:
                                 mutation.accepted = True
                             return CoordinatorResult('page', page=prepared_page.fence.selection,
                                 presentation=prepared_page.fence.presentation,
                                 local_trust_version=trust_version, send_statuses=statuses,
-                                validated_now_ns=last)
+                                validated_now_ns=last,
+                                event_consumption=event_consumption)
                         candidate = MembershipCandidate(self.chat, self.viewer, self.machine, serialized,
                             self.receipt, tuple(self.batches), policy, self.suffix, self.terminal,
                             tuple(self.subjects.values()), tuple(self.heads.values()), view,

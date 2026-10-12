@@ -1076,6 +1076,17 @@ and durably raises the same resync gap. Transient source, proof, key or authorit
 work never uses terminal retirement. These primitives perform no EventBus
 callback and are not yet called by the runtime.
 
+The v0.24.361 exact-message finalizer optionally binds one peeked journal batch
+to the canonical operation. Message IDs, chat and ordinary-message kind must
+match the requested projection. After every source, message, overlay,
+membership, lifecycle, key, trust, identity and session check passes, the
+final Store transaction exact-CAS consumes those identities. Journal ABA
+withholds the page and leaves work pending; any later finalization failure
+rolls the deletion back. A missing or moved current Store identity commits a
+durable gap with the consume result. The future mapper must publish only after
+that commit and must suppress canonical payload whenever the committed result
+contains a gap. No process event or startup path uses this seam yet.
+
 Delivered high-waters are handled one chat per quantum. Failures retain the
 exact journal row and rotate to other chats under bounded per-chat retry state;
 a complete failed pass sleeps until retry rather than spinning. A successful

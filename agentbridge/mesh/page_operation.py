@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 
 from ..core.models import ChatKind, MsgKind
 from ..core import delivery_trace
-from ..store import aux_inputs, document_observation, overlay_index, local_source, node_publication_receipt, page_metadata, presence_index, page_inputs as raw_pages
+from ..store import aux_inputs, document_observation, overlay_index, local_source, node_event_journal, node_publication_receipt, page_metadata, presence_index, page_inputs as raw_pages
 from ..transport import authority_observation
 from . import authority_source, epoch_inputs, events, membership_coordinator as membership
 from . import page_fence, page_overlays, page_pins, page_receipts
@@ -203,7 +203,10 @@ def _failure(exc):
         return PageWorkResult('unavailable', 'budget_exhausted')
     if isinstance(exc, (ValueError, TypeError, KeyError, AttributeError, RecursionError, UnicodeError)):
         return PageWorkResult('unavailable', 'invalid_inputs')
-    if isinstance(exc, (OSError, membership.sqlite3.Error)):
+    if isinstance(exc, (
+        OSError, membership.sqlite3.Error,
+        node_event_journal.NodeEventJournalChanged,
+    )):
         return PageWorkResult('unavailable', 'storage_unavailable')
     if isinstance(exc, PinStoreUnavailable):
         return PageWorkResult('unavailable', 'pins_unavailable')
@@ -221,14 +224,17 @@ _ERRORS = (aux_inputs.AuxInputsUnavailable, local_source.SourceChanged, membersh
     membership.lifecycle_inputs.LifecycleInputsUnavailable, membership.membership_suffix.MembershipSuffixUnavailable,
     membership.terminal_observation.TerminalObservationUnavailable, membership.MembershipInputUnavailable,
     membership.LifecycleUnavailable, PinStoreUnavailable, membership.sqlite3.Error,
+    node_event_journal.NodeEventJournalChanged,
     OSError, MemoryError, OverflowError, ValueError, TypeError, KeyError, AttributeError, RecursionError)
 
 
 class _PreparedPage:
     """Private one-use finalizer. GUI owner must hold its session gate outside."""
-    def __init__(self, operation, serial, round_, snapshot, fence):
+    def __init__(self, operation, serial, round_, snapshot, fence,
+                 *, event_identities=()):
         self._operation, self._serial = operation, serial
         self._round, self._snapshot, self._fence = round_, snapshot, fence
+        self._event_identities = tuple(event_identities)
         self._used = False
 
     @delivery_trace.observed('page_finalize')
@@ -245,7 +251,8 @@ class _PreparedPage:
                         raise ValueError('unread count cannot reserve a mutation')
                     expected_trust_version = candidate.evidence.trust_version
                 result = self._round.final(self._snapshot, None, page=self._fence,
-                    mutation=mutation, expected_trust_version=expected_trust_version)
+                    mutation=mutation, expected_trust_version=expected_trust_version,
+                    event_identities=self._event_identities)
                 if result.status == 'page' and candidate is not None and candidate.complete:
                     result = replace(result, unread=candidate.summary())
                 if result.status == 'page':
@@ -321,8 +328,10 @@ class PageOperation:
         # Use the selector's canonical argument validation, without reading data.
         CanonicalPageAccumulator(self.viewer, mesh.sealer, limit=limit, scan_budget=scan_budget)
         self.limit, self.scan_budget = limit, scan_budget
-        self._exact_message_ids: tuple[str, ...] = ()
         self.ledger, self._lock, self._serial = _Ledger(limits), threading.RLock(), 0
+
+    def _exact_projection_request(self):
+        return None
 
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
         return None, (), None
@@ -375,10 +384,12 @@ class PageOperation:
                        if snapshot.kind is ChatKind.GROUP and not snapshot.permissions.send_history else 0)
             sealer = _Sealer(round_, epochs)
             verifier = redaction_verifier(self.chat, round_) if encrypted else None
-            if self._exact_message_ids:
+            exact_request = self._exact_projection_request()
+            if exact_request is not None:
+                targets, event_identities = exact_request
                 return self._prepare_exact_messages(
                     round_, snapshot, source_binding, index, sealer, history,
-                    verifier, epochs, proofs,
+                    verifier, epochs, proofs, targets, event_identities,
                 )
             if self.unread_candidate is not None:
                 from .unread_counts import validate_inputs
@@ -496,7 +507,7 @@ class PageOperation:
 
     def _prepare_exact_messages(
         self, round_, snapshot, source_binding, index, sealer, history,
-        verifier, epochs, proofs,
+        verifier, epochs, proofs, targets, event_identities,
     ):
         """Project a bounded identity set under the same final cut as a page.
 
@@ -505,7 +516,6 @@ class PageOperation:
         ordered scan.  Reply parents are captured only to validate redaction
         effects on quoted content; they are not themselves emitted.
         """
-        targets = self._exact_message_ids
         exact, proof_keys, expected = targets, (), None
         while True:
             self.ledger.step()
@@ -567,11 +577,14 @@ class PageOperation:
             fence = page_fence.PageFence(
                 expected, source_binding,
                 tuple((p, k, v) for (p, k), v in sorted(proofs.items())),
-                tuple(epochs.values()), selection,
+                tuple(epochs.values()), selection, exact_targets=targets,
             )
             return PageWorkResult(
                 'prepared',
-                prepared=_PreparedPage(self, self._serial, round_, snapshot, fence),
+                prepared=_PreparedPage(
+                    self, self._serial, round_, snapshot, fence,
+                    event_identities=event_identities,
+                ),
             )
 
     def _pin_presentation(self, round_, snapshot, receipt, index, expected,
@@ -697,17 +710,34 @@ class ExactMessageProjectionOperation(PageOperation):
     MAX_MESSAGES = 32
 
     def __init__(self, mesh, chat_id, message_ids, *, source_reader,
-                 limits=PageOperationLimits()):
+                 limits=PageOperationLimits(), event_identities=()):
         if (type(message_ids) is not tuple or not message_ids
                 or len(message_ids) > self.MAX_MESSAGES
                 or len(set(message_ids)) != len(message_ids)):
             raise ValueError('invalid exact message projection IDs')
         for ident in message_ids:
             overlay_index._text(ident, 'message id')
+        if (type(event_identities) is not tuple
+                or len(event_identities) > self.MAX_MESSAGES
+                or any(type(item) is not node_event_journal.NodeEventIdentity
+                       for item in event_identities)
+                or event_identities and (
+                    tuple(item.message_id for item in event_identities) != message_ids
+                    or any(item.chat_id != chat_id or item.kind != 'message'
+                           for item in event_identities))):
+            raise ValueError('invalid exact message journal identities')
         super().__init__(
             mesh, chat_id, source_reader=source_reader,
             limit=len(message_ids), scan_budget=1, limits=limits,
             summary_only=True, defer_receipts=True,
             defer_group_receipts=True,
         )
-        self._exact_message_ids = tuple(message_ids)
+        self.__message_ids = tuple(message_ids)
+        self.__event_identities = tuple(event_identities)
+
+    def _exact_projection_request(self):
+        targets = tuple(self.__message_ids)
+        identities = tuple(self.__event_identities)
+        if identities and tuple(item.message_id for item in identities) != targets:
+            raise ValueError('exact message journal binding changed')
+        return targets, identities

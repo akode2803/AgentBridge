@@ -365,6 +365,169 @@ def test_exact_message_projection_rejects_unbounded_or_duplicate_ids(world):
         )
 
 
+def _journal_identity(mesh, chat, message_id, ns):
+    node_event_journal.initialize(mesh.store)
+    conn = mesh.store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (chat, message_id, ns, 'aryan', 'message'),
+    )
+    conn.commit()
+    return node_event_journal.peek_event_identities(mesh.store)
+
+
+def test_exact_projection_consumes_journal_identity_in_final_store_cut(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    identity = _journal_identity(mesh, chat, 'm198', base + 198)
+    prepared = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+        event_identities=identity,
+    ).prepare(*inputs)
+    assert prepared.status == 'prepared'
+
+    final = prepared.prepared.finalize()
+
+    assert final.status == 'page'
+    assert [item.id for item in final.result.page.messages] == ['m198']
+    assert final.result.event_consumption == node_event_journal.NodeEventConsume(
+        True, False,
+    )
+    assert node_event_journal.peek_event_identities(mesh.store) == ()
+
+
+def test_exact_projection_journal_aba_withholds_page_and_keeps_work(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    identity = _journal_identity(mesh, chat, 'm198', base + 198)
+    prepared = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+        event_identities=identity,
+    ).prepare(*inputs)
+    assert prepared.status == 'prepared'
+    conn = mesh.store._conn()
+    conn.execute(
+        'UPDATE node_event_journal_items SET ns=ns+1 WHERE sequence=?',
+        (identity[0].sequence,),
+    )
+    conn.commit()
+
+    final = prepared.prepared.finalize()
+
+    assert (final.status, final.reason, final.result) == (
+        'restart', 'node_event_journal_changed', None,
+    )
+    current = node_event_journal.peek_event_identities(mesh.store)
+    assert len(current) == 1 and current[0].ns == identity[0].ns + 1
+
+
+def test_exact_projection_moved_store_identity_consumes_with_gap(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    identity = _journal_identity(mesh, chat, 'm198', base + 999)
+    prepared = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+        event_identities=identity,
+    ).prepare(*inputs)
+    assert prepared.status == 'prepared'
+
+    final = prepared.prepared.finalize()
+
+    assert final.status == 'page'
+    assert final.result.event_consumption == node_event_journal.NodeEventConsume(
+        True, True,
+    )
+    assert node_event_journal.peek_event_identities(mesh.store) == ()
+    assert node_event_journal.claim_gap(mesh.store)
+
+
+def test_exact_projection_rolls_back_journal_consume_on_final_failure(
+    world, monkeypatch,
+):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    identity = _journal_identity(mesh, chat, 'm198', base + 198)
+    prepared = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+        event_identities=identity,
+    ).prepare(*inputs)
+    assert prepared.status == 'prepared'
+    original = node_event_journal.consume_event_identities_in_transaction
+
+    def fail_after_consume(*args):
+        original(*args)
+        raise local_source.SourceChanged('local_inputs_changed')
+
+    monkeypatch.setattr(
+        node_event_journal, 'consume_event_identities_in_transaction',
+        fail_after_consume,
+    )
+
+    final = prepared.prepared.finalize()
+
+    assert (final.status, final.reason) == ('restart', 'local_inputs_changed')
+    assert node_event_journal.peek_event_identities(mesh.store) == identity
+
+
+def test_exact_projection_rejects_unbound_journal_identity(world):
+    mesh, _mirror, _provider, chat, _base, reader, _publisher = world
+    identity = node_event_journal.NodeEventIdentity(
+        1, chat, 'other', 1, 'aryan', 'message',
+    )
+    with pytest.raises(ValueError, match='journal identities'):
+        ExactMessageProjectionOperation(
+            mesh, chat, ('m198',), source_reader=reader,
+            event_identities=(identity,),
+        )
+
+
+def test_prepared_exact_projection_freezes_journal_binding(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    node_event_journal.initialize(mesh.store)
+    conn = mesh.store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        ((chat, 'm198', base + 198, 'aryan', 'message'),
+         (chat, 'm199', base + 199, 'aryan', 'message')),
+    )
+    conn.commit()
+    identities = node_event_journal.peek_event_identities(mesh.store)
+    operation = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+        event_identities=identities[:1],
+    )
+    prepared = operation.prepare(*inputs)
+    assert prepared.status == 'prepared'
+    operation._ExactMessageProjectionOperation__message_ids = ('m199',)
+    operation._ExactMessageProjectionOperation__event_identities = identities[1:]
+
+    final = prepared.prepared.finalize()
+
+    assert final.status == 'page'
+    assert [item.id for item in final.result.page.messages] == ['m198']
+    pending = node_event_journal.peek_event_identities(mesh.store)
+    assert pending == identities[1:]
+
+
+def test_ordered_page_cannot_attach_journal_work_after_prepare(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    identity = _journal_identity(mesh, chat, 'm198', base + 198)
+    operation = PageOperation(mesh, chat, source_reader=reader, limit=1)
+    prepared = operation.prepare(*inputs)
+    assert prepared.status == 'prepared'
+    operation._event_identities = identity
+
+    final = prepared.prepared.finalize()
+
+    assert final.status == 'page'
+    assert final.result.event_consumption is None
+    assert node_event_journal.peek_event_identities(mesh.store) == identity
+
+
 def test_exact_message_projection_excludes_info_and_reaction_events(world):
     mesh, mirror, _provider, chat, _base, reader, publisher = world
     reaction = {

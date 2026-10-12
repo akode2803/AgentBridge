@@ -167,7 +167,11 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   required before activation. The v0.24.360 journal seam can now payload-free
   peek one 32-identity chat batch and exact-CAS consume it inside a caller's
   final Store transaction; missing, moved and over-4-MiB inputs retire as a
-  durable resync gap, while journal ABA leaves every row pending.
+  durable resync gap, while journal ABA leaves every row pending. The
+  v0.24.361 exact-message finalizer now performs that CAS only after every
+  current canonical fence passes and exposes its committed consume/gap outcome
+  to the future mapper. ABA or rollback withholds the page and preserves work.
+  Runtime translation and app-owned activation remain absent.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
