@@ -583,6 +583,18 @@ class Mesh:
     def close(self) -> None:
         with self._local_node_lock:
             self._closed = True
+            # Revoke each independent producer before either fallible owner
+            # drain. If local ingestion or node recovery does not quiesce in
+            # time, the exact Mesh and open Store remain reachable for a later
+            # cleanup retry, but the detached session can no longer publish
+            # presence, notifications, sync writes or queued mutations.
+            self.sync.stop()
+            self.outbox.request_stop()
+            if self.local_inputs is not None:
+                self.local_inputs.request_stop()
+            self.notifier.stop()
+            self.presence.stop()  # writes the clean offline marker
+            self.outbox.stop()
             if self.local_inputs is not None:
                 self.local_inputs.stop()
             if self._local_node_owner is not None:
@@ -591,14 +603,6 @@ class Mesh:
         if self._mirror_unsubscribe is not None:
             self._mirror_unsubscribe()
             self._mirror_unsubscribe = None
-        # Revoke every background producer before waiting for the legacy Store
-        # lease. A retirement timeout leaves this Mesh reachable for a later
-        # close retry, but must not leave presence beats, notification work or
-        # queued outbound mutations running for the detached session.
-        self.sync.stop()
-        self.notifier.stop()
-        self.presence.stop()  # writes the clean offline marker
-        self.outbox.stop()
         # stop() only wakes the sync loop. Retire is the Store-write barrier and
         # joins every leased write cycle. On timeout Store.close() is withheld.
         self.sync.retire(timeout_s=10.0)

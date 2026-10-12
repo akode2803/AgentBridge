@@ -38,6 +38,10 @@ the session and never revives the legacy writer.
 - Background outbox dispatch admission and stop share one synchronization gate;
   only a handler admitted before stop may finish, and later exact leases are
   released without dispatch.
+- Shutdown first closes admission for outbox dispatch, local ingestion and
+  unread work before any fallible drain. A timeout then retains the exact Mesh,
+  node owner and open Store without letting the detached session begin more
+  background work.
 - A dispatch-gate timeout is an incomplete shutdown: it raises without setting
   the stopped boundary, so the exact Mesh remains retained for teardown retry.
 - Teardown failure emits and flushes a failed shutdown breadcrumb before the
@@ -104,6 +108,13 @@ dispatch proves that a gate timeout cannot claim successful stop; a later retry
 completes after the admitted handler returns. Independent outbox review found no
 remaining P1/P2; final combined review also found no P1/P2 after an independent
 Mesh-level timeout/Store-closure probe and 88 passing tests.
+
+The final shutdown-order correction issues nonblocking stop requests before
+draining the outbox, local-input and node owners. Deterministic probes cover
+timeouts at all three boundaries, retained-owner/Store retry, and the outbox
+lost-wakeup schedule where an early request wake is consumed before `_stop` is
+linearized. The expanded lifecycle gate passes 193 tests; Ruff and whitespace
+checks pass locally.
 
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,

@@ -241,6 +241,151 @@ def test_mesh_close_waits_for_active_legacy_write_before_store_close(
     assert store_closed.is_set()
 
 
+def test_mesh_close_signals_local_input_before_outbox_drain_timeout(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    assert mesh.activate_local_node()
+    owner = mesh._local_node_owner
+    assert owner is not None
+    mesh.start()
+
+    original_outbox_stop = mesh.outbox.stop
+    original_store_close = mesh.store.close
+    store_closes = []
+
+    def fail_outbox_stop(*_args, **_kwargs):
+        assert mesh.sync._stop.is_set()
+        assert mesh.outbox._stop_requested.is_set()
+        assert mesh.local_inputs._closed
+        assert mesh.local_inputs._stop.is_set()
+        assert mesh.local_inputs.unread._closed
+        assert mesh.local_inputs.unread._stop.is_set()
+        raise TimeoutError('outbox dispatch did not stop')
+
+    def record_store_close():
+        store_closes.append(True)
+        original_store_close()
+
+    monkeypatch.setattr(mesh.outbox, 'stop', fail_outbox_stop)
+    monkeypatch.setattr(mesh.store, 'close', record_store_close)
+
+    with pytest.raises(TimeoutError, match='outbox dispatch did not stop'):
+        mesh.close()
+
+    assert mesh._local_node_owner is owner
+    assert owner.server is not None and owner.runtime is not None
+    assert store_closes == []
+
+    monkeypatch.setattr(mesh.outbox, 'stop', original_outbox_stop)
+    mesh.close()
+
+    assert mesh._local_node_owner is None
+    assert owner.server is None and owner.runtime is None
+    assert store_closes == [True]
+
+
+def test_mesh_close_revokes_background_owners_before_local_input_timeout(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    assert mesh.activate_local_node()
+    owner = mesh._local_node_owner
+    assert owner is not None
+
+    # Start only the independent producers. A synthetic busy worker lock makes
+    # the real local-input stop boundary fail without a five-second test delay.
+    mesh.outbox.start()
+    mesh.notifier.start()
+    mesh.presence.start(interval=60)
+    real_worker_lock = mesh.local_inputs._worker_lock
+    original_store_close = mesh.store.close
+    store_closes = []
+
+    class BusyLock:
+        @staticmethod
+        def acquire(*, timeout):
+            assert timeout == 5
+            assert mesh.sync._stop.is_set()
+            assert mesh.notifier._stop.is_set()
+            assert mesh.presence._stop.is_set()
+            assert mesh.outbox._stop.is_set()
+            assert not mesh.notifier._thread.is_alive()
+            assert not mesh.presence._thread.is_alive()
+            assert not mesh.outbox._thread.is_alive()
+            return False
+
+        @staticmethod
+        def release():
+            raise AssertionError('a busy lock must not be released')
+
+    def record_store_close():
+        store_closes.append(True)
+        original_store_close()
+
+    mesh.local_inputs._worker_lock = BusyLock()
+    monkeypatch.setattr(mesh.store, 'close', record_store_close)
+
+    with pytest.raises(RuntimeError, match='Store must remain open'):
+        mesh.close()
+
+    assert mesh._local_node_owner is owner
+    assert owner.server is not None and owner.runtime is not None
+    assert store_closes == []
+
+    mesh.local_inputs._worker_lock = real_worker_lock
+    mesh.close()
+
+    assert mesh._local_node_owner is None
+    assert owner.server is None and owner.runtime is None
+    assert store_closes == [True]
+
+
+def test_mesh_close_revokes_background_owners_before_node_withdrawal_timeout(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    assert mesh.activate_local_node()
+    owner = mesh._local_node_owner
+    assert owner is not None
+    mesh.start()
+
+    original_owner_close = owner.close
+    original_store_close = mesh.store.close
+    store_closes = []
+    withdrawal_calls = []
+
+    def fail_withdrawal():
+        withdrawal_calls.append(True)
+        assert mesh.sync._stop.is_set()
+        assert mesh.notifier._stop.is_set()
+        assert mesh.presence._stop.is_set()
+        assert mesh.outbox._stop.is_set()
+        assert not mesh.notifier._thread.is_alive()
+        assert not mesh.presence._thread.is_alive()
+        assert not mesh.outbox._thread.is_alive()
+        raise TimeoutError('local node recovery did not stop')
+
+    def record_store_close():
+        store_closes.append(True)
+        original_store_close()
+
+    monkeypatch.setattr(owner, 'close', fail_withdrawal)
+    monkeypatch.setattr(mesh.store, 'close', record_store_close)
+
+    with pytest.raises(TimeoutError, match='local node recovery did not stop'):
+        mesh.close()
+
+    assert withdrawal_calls == [True]
+    assert mesh._local_node_owner is owner
+    assert owner.server is not None and owner.runtime is not None
+    assert store_closes == []
+
+    monkeypatch.setattr(owner, 'close', original_owner_close)
+    mesh.close()
+
+    assert mesh._local_node_owner is None
+    assert owner.server is None and owner.runtime is None
+    assert store_closes == [True]
+
+
 def test_mesh_close_revokes_background_owners_before_retirement_timeout(
         tmp_path, monkeypatch):
     _client, mesh = _mesh_world(tmp_path)

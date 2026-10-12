@@ -1188,3 +1188,15 @@ without declaring `_stop`; Mesh close remains incomplete and retains the exact
 owner for retry. A deterministic pre-handler pause covers that boundary. Astra's
 final combined review and independent Mesh-level timeout/Store-close probe found
 no remaining P1/P2; its review gate passes 88 tests.
+
+The final current-head shutdown review found a broader ordering gap: fallible
+local-input and local-node drains still ran before all background owners were
+revoked. Shutdown now first closes admission for sync, outbox dispatch, local
+ingestion and unread work, then stops notifier and presence and drains the
+outbox, local-input and node owners. A timeout at any drain retains the exact
+Mesh, node owner and open Store for retry without allowing a detached session
+to begin more work. The outbox request wake is repeated after its linearized
+stop boundary so a worker cannot consume the early hint and sleep through the
+completed stop. Deterministic outbox-, input-, node- and legacy-retirement
+timeout regressions plus the expanded 193-test lifecycle gate pass; Ruff and
+whitespace checks pass locally.

@@ -68,25 +68,32 @@ class OutboxWorker:
         self._thread = threading.Thread(target=self._run, daemon=True, name="ab-outbox")
         self._thread.start()
 
+    def request_stop(self) -> None:
+        """Prevent another background dispatch without claiming full stop."""
+        self._stop_requested.set()
+        self._wake.set()
+
     def stop(self, timeout: float = 5.0) -> None:
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
         # The early hint keeps a completed handler from admitting another item
         # while stop waits for the shared gate. _stop itself is the linearized
         # boundary: when the gate is busy, a handler has already started.
-        self._stop_requested.set()
+        self.request_stop()
         acquired = self._dispatch_gate.acquire(timeout=timeout)
         if not acquired:
             # A handler may not have reached its transport call yet, so a
             # timeout cannot declare the stop boundary complete. Keep the
             # request hint set, leave _stop unset and make Mesh.close retain
             # this owner for an exact later teardown retry.
-            self._wake.set()
             raise TimeoutError('outbox dispatch did not stop')
         try:
             self._stop.set()
         finally:
             self._dispatch_gate.release()
+        # request_stop() may have woken a worker that then re-entered its wait
+        # before this linearized boundary was established. Wake again so the
+        # completed stop is always observed promptly.
         self._wake.set()
         if self._thread:
             self._thread.join(max(0.0, deadline - time.monotonic()))

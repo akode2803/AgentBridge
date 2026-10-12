@@ -177,6 +177,26 @@ def test_worker_thread_start_notify_stop(store):
     assert not w._thread.is_alive()
 
 
+def test_worker_stop_wakes_after_linearized_boundary(store, monkeypatch):
+    worker = OutboxWorker(store, {}, poll_s=30.0)
+    wake_states = []
+    original_set = worker._wake.set
+
+    def record_wake():
+        wake_states.append(worker._stop.is_set())
+        original_set()
+
+    monkeypatch.setattr(worker._wake, 'set', record_wake)
+    worker.start()
+    worker.stop(timeout=1.0)
+
+    # The early request wake can be consumed while stop waits for the dispatch
+    # gate. A second wake after _stop is linearized prevents a lost-wakeup join
+    # timeout when the worker has already re-entered its long poll.
+    assert wake_states[-2:] == [False, True]
+    assert not worker._thread.is_alive()
+
+
 def test_worker_stop_does_not_dispatch_later_queued_items(store):
     entered = threading.Event()
     release = threading.Event()

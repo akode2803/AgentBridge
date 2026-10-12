@@ -778,11 +778,19 @@ class LocalInputRuntime:
             if watcher is not None:
                 watcher.close()
 
+    def request_stop(self):
+        """Close admission and wake owned workers before any blocking drain."""
+        with self._lock:
+            self._closed = True
+            self._stop.set()
+            unread = self.unread
+        if unread is not None:
+            unread.request_stop()
+
     def stop(self):
+        self.request_stop()
         with self._notification_gate:
             with self._lock:
-                self._closed = True
-                self._stop.set()
                 if self.read_events is not None:
                     self.read_events.close()
                 if self._page_preparation is not None:

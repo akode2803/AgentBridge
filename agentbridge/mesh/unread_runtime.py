@@ -244,11 +244,15 @@ class UnreadRuntime:
         while not self._stop.wait(DISPATCH_SECONDS):
             self.step()
 
-    def stop(self):
+    def request_stop(self):
         with self._lock:
             self._closed = True
             self._jobs.clear()
             self._stop.set()
+
+    def stop(self):
+        self.request_stop()
+        with self._lock:
             thread = self._thread
         if thread is not None:
             thread.join(timeout=5)
