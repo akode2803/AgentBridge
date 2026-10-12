@@ -245,14 +245,14 @@ def test_state_sidebar_shape(rig):
     assert st["chats_complete"] and st["users_complete"]
 
 
-def _next_nonheartbeat_frame(frames, timeout=15):
+def _next_nonheartbeat_frame(frames, timeout=15, *, ignored_types=frozenset({'heartbeat'})):
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise queue.Empty
         event = frames.get(timeout=remaining)
-        if event.get('type') != 'heartbeat':
+        if event.get('type') not in ignored_types:
             return event
 
 
@@ -311,14 +311,17 @@ def test_sse_stream_delivers_peer_message(rig):
 
     with rig.peer_mesh("fable") as fable:
         fable.sync.sync_once()
-        fable.post(cid, "ping from fable")
+        posted = fable.post(cid, "ping from fable")
         fable.outbox.flush_once()
     # The shared rig deliberately disables provider auto-refresh. Observe the
     # peer's real published write; ordinary mesh polling still emits the SSE.
     refresh_cloud(rig.app)
 
-    ev = _next_nonheartbeat_frame(frames)
+    ev = _next_nonheartbeat_frame(
+        frames, ignored_types=frozenset({'heartbeat', 'mirror_update'}),
+    )
     assert ev["type"] == "message"
+    assert ev["id"] == posted.id
     assert ev["chat_id"] == cid and ev["from"] == "fable"
     conn.close()
 
