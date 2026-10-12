@@ -40,7 +40,9 @@ def identical_admitted(store, expected, chat_id, collect):
     return, or raise. A mismatch may stop collection early because no result is
     admitted; the caller then uses the ordinary complete staged path.
     """
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if not callable(collect):
         raise ValueError('complete collector must be callable')
     if not expected.ready or not expected.raw.initialized:
@@ -106,7 +108,9 @@ def identical_admitted(store, expected, chat_id, collect):
 
 def admit_identical(store, expected, comparison, *, observed_ns):
     """Refresh readiness after exact complete equality without a new stage."""
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
         raise ValueError('invalid observation time')
     if (type(comparison) is not _EqualAdmittedInputs
@@ -148,7 +152,9 @@ def observe_unchanged(store, expected, chat_id, *, observed_ns):
     ready Store owner/index still exists; it retains every generation identity
     and does not persist the mirror evidence.
     """
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if not expected.ready or expected.writes_pending or not expected.raw.initialized:
         raise owner.SourceChanged('unchanged_source_not_ready')
     if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
@@ -184,6 +190,9 @@ def identical(store, expected, candidate):
     The admission CAS must still check expected afterward. SQLite snapshot
     equality is content evidence only, never a membership or freshness verdict.
     """
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if not expected.raw.initialized:
         return False
     conn = docs._open_reader(store.path)
@@ -212,6 +221,9 @@ def admit(store, expected, candidate, *, observed_ns, reuse=None, comparison=Non
     ``reuse`` is an existing index after off-gate complete byte comparison.
     The source CAS protects that comparison from intervening local mutations.
     """
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     with owner._writer(store) as conn:
         return _admit_in_transaction(
             conn, store, expected, candidate, observed_ns=observed_ns,
@@ -228,6 +240,9 @@ def _admit_in_transaction(
     The caller owns commit/rollback and every other row mutation in that cut.
     It performs no transport work and never opens or commits a transaction.
     """
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     expected, current = _admission_context(
         conn, store, expected, observed_ns,
     )

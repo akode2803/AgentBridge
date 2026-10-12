@@ -5,7 +5,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 import json
 
-from ..store import overlay_index, page_inputs, presence_index
+from ..store import node_publication_receipt, overlay_index, page_inputs, presence_index
 from ..transport import key_observation
 from ..transport.authority_observation import _position_locked
 from ..transport.mirror_observation import MirrorExpectedPosition
@@ -85,6 +85,8 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
             or type(value.epochs) is not tuple or len(value.epochs) > 64):
         raise ValueError('invalid page fence bounds')
     size, keys = 0, set()
+    if source_reader is not None and source.node_position is not None:
+        size += node_publication_receipt.serialized_size(source.node_position)
     for row in value.proofs:
         if type(row) is not tuple or len(row) != 3:
             raise ValueError('invalid page proof')

@@ -16,7 +16,7 @@ from agentbridge.mesh.sync import SyncEngine
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.paths import P
 from agentbridge.mesh import page_operation
-from agentbridge.store import local_source
+from agentbridge.store import local_source, node_publication_receipt
 from agentbridge.store.page_inputs import MessageKey
 
 from conftest import refresh_cloud
@@ -67,6 +67,22 @@ def _settled_page(app, chat, **params):
             return result
         assert runtime.prepare_one()  # Background proof work; never endpoint work.
     pytest.fail('page proof preparation did not converge')
+
+
+def test_malformed_current_node_receipt_is_bounded_pending(page_app, monkeypatch):
+    app, chat = page_app
+    runtime = app.mesh.local_inputs
+
+    def malformed(_chat):
+        raise node_publication_receipt.NodePublicationReceiptChanged(
+            'malformed node publication receipt',
+        )
+
+    monkeypatch.setattr(runtime, 'inputs', malformed)
+    result = _page(app, chat)
+
+    assert result['status'] == 'pending'
+    assert result['reason'] == 'local_inputs_pending'
 
 
 def test_first_page_and_opaque_continuation_with_deferred_metadata(page_app):

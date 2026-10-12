@@ -6,7 +6,9 @@ from . import local_source as owner, presence_index, staged_source
 
 def admit(store, expected, stage, *, observed_ns):
     """Caller holds the registered presence source's root publication gate."""
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
         raise ValueError('invalid observation time')
     with owner._writer(store) as conn:

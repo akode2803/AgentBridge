@@ -10,7 +10,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ..store import document_observation as docs, lifecycle_inputs, page_metadata
-from ..store import local_source as owner, overlay_index, source_selectors as scopes
+from ..store import local_source as owner, node_publication_receipt
+from ..store import overlay_index, source_selectors as scopes
+from ..node.admission import NodeFinalizationPosition
 from ..store.mutation_coordinator import MutationCoordinator
 from ..transport.authority_observation import _part, _limit
 from .overlay_source import _chat
@@ -22,6 +24,7 @@ class LocalSourceReceipt:
     coordinator_path: str
     coordinator_epoch: str
     source: owner.SourcePosition
+    node_position: NodeFinalizationPosition | None = None
 
 
 @dataclass(frozen=True)
@@ -65,23 +68,49 @@ class LocalPageSource:
             raise ValueError('expected local source receipt')
         chat, path, epoch = value.chat_id, value.coordinator_path, value.coordinator_epoch
         source = owner._expected(self.store, value.source)
+        node_position = value.node_position
+        if node_position is not None:
+            node_position = node_publication_receipt._encode(node_position)[0]
+            if tuple(
+                    (item.scope_kind, item.scope_id)
+                    for item in node_position.scope_positions
+            ) != (("chat", self.chat), ("root", "")):
+                raise owner.SourceChanged('local_receipt_binding_changed')
         if (type(chat) is not str or chat != self.chat or type(path) is not str
                 or path != str(self.coordinator.path) or type(epoch) is not str
                 or epoch != self.coordinator.epoch
                 or source.source_id != self.definition.source
                 or not source.ready or source.writes_pending):
             raise owner.SourceChanged('local_receipt_binding_changed')
-        return LocalSourceReceipt(chat, path, epoch, source)
+        return LocalSourceReceipt(chat, path, epoch, source, node_position)
+
+    def capture_in_transaction(self, conn, source):
+        """Capture the source and its optional node provenance on one Store cut."""
+        source = owner._expected(self.store, source)
+        published = node_publication_receipt.capture_in_transaction(
+            conn, self.store, source,
+        )
+        return self._receipt(LocalSourceReceipt(
+            self.chat, str(self.coordinator.path), self.coordinator.epoch,
+            source, None if published is None else published.node_position,
+        ))
 
     def capture(self):
-        with self.coordinator.finalization_cut(self.store, self.definition) as (_conn, source):
-            result = LocalSourceReceipt(self.chat, str(self.coordinator.path),
-                                        self.coordinator.epoch, source)
+        with self.coordinator.finalization_cut(self.store, self.definition) as (conn, source):
+            result = self.capture_in_transaction(conn, source)
         return result
 
     def matches_in_transaction(self, conn, receipt):
         receipt = self._receipt(receipt)
-        return scopes.require_registered_in_transaction(conn, self.store, self.definition) == receipt.source
+        source = scopes.require_registered_in_transaction(
+            conn, self.store, self.definition,
+        )
+        if source != receipt.source:
+            return False
+        published = node_publication_receipt.capture_in_transaction(
+            conn, self.store, source,
+        )
+        return (None if published is None else published.node_position) == receipt.node_position
 
     @contextmanager
     def _read(self, receipt):
@@ -101,7 +130,7 @@ class LocalPageSource:
         receipt = self._receipt(receipt)
         with self.coordinator.finalization_cut(self.store, self.definition, companions=companions,
                                                 mutation=mutation) as (conn, source):
-            if source != receipt.source:
+            if source != receipt.source or not self.matches_in_transaction(conn, receipt):
                 raise owner.SourceChanged('local_inputs_changed')
             yield conn
 

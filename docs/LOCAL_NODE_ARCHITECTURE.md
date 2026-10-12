@@ -869,3 +869,19 @@ with bounded SQLite metadata reads before their values are materialized, node
 publication receipts are fully normalized before scope iteration, and legacy
 document publishers reject both `stage:` and `coupled:` physical sources. These
 are inactive protocol corrections; they do not activate local-node ingestion.
+
+Coupled publication now persists the exact node finalization position beside
+the admitted logical/physical Store source in the same SQLite commit. Local page
+receipts carry this bounded provenance through preparation and finalization, and
+the final root -> Store cut compares the durable binding again before returning
+a canonical page. A current `coupled:` physical source with a missing, malformed
+or mismatched receipt is unavailable rather than silently treated as a legacy
+source.
+
+Canonical reads deliberately do not reacquire the historical node generation.
+The node may admit a newer provider snapshot while the previous successfully
+published Store generation remains readable during background refresh. The
+durable receipt proves how that Store cut was admitted; it is not live freshness,
+membership authority or permission evidence. Local writes still retire source
+readiness through the mutation coordinator, and every request continues to
+recompute membership, history, trust, keys, lifecycle, overlays and visibility.

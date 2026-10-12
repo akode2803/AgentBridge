@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 
 from ..core.models import ChatKind, MsgKind
 from ..core import delivery_trace
-from ..store import aux_inputs, document_observation, overlay_index, local_source, page_metadata, presence_index, page_inputs as raw_pages
+from ..store import aux_inputs, document_observation, overlay_index, local_source, node_publication_receipt, page_metadata, presence_index, page_inputs as raw_pages
 from ..transport import authority_observation
 from . import authority_source, epoch_inputs, events, membership_coordinator as membership
 from . import page_fence, page_overlays, page_pins, page_receipts
@@ -208,6 +208,7 @@ def _failure(exc):
 
 
 _ERRORS = (aux_inputs.AuxInputsUnavailable, local_source.SourceChanged, membership._Stop, _Work, authority_source.AuthorityReadThroughRequired,
+    node_publication_receipt.NodePublicationReceiptChanged,
     page_metadata.PageMetadataUnavailable,
     presence_index.PresenceIndexUnavailable,
     authority_source.AuthoritySourceUnavailable, authority_observation.AuthorityObservationUnavailable,
