@@ -142,6 +142,9 @@ class GuiApp:
         self._sync_thread: threading.Thread | None = None
         self._node_activation_thread: threading.Thread | None = None
         self._teardown_mesh: Mesh | None = None
+        self._restore_retrying = False
+        self._restore_retry_token: object | None = None
+        self._restore_retry_pending = False
         self._closed = False
         self._subs: set[Subscription] = set()
         # V111 app lock: an optional local passphrase gate — starts LOCKED
@@ -400,9 +403,18 @@ class GuiApp:
         import time as _time
 
         with self._lock:
-            if self._closed or getattr(self, "_restore_retrying", False):
+            if self._closed:
                 return
+            if self._restore_retrying:
+                # The current owner may already be on its way out. Preserve a
+                # handoff request so its finally block cannot leave the
+                # durable session without a retry owner.
+                self._restore_retry_pending = True
+                return
+            token = object()
             self._restore_retrying = True
+            self._restore_retry_token = token
+            self._restore_retry_pending = False
 
         def run() -> None:
             deadline = _time.time() + cap_s
@@ -410,18 +422,36 @@ class GuiApp:
                 while _time.time() < deadline:
                     _time.sleep(every_s)
                     with self._lock:
+                        if self._restore_retry_token is not token:
+                            return
                         if (self._closed or self.user
                                 or not self._session_path.exists()):
                             return
                         self._restore_retrying = False
+                        self._restore_retry_token = None
+                        self._restore_retry_pending = False
                     self.restore()   # reschedules itself if still blind
                     return
             finally:
-                with self._lock:
-                    self._restore_retrying = False
+                if self._release_restore_retry(token):
+                    self._schedule_restore_retry(every_s=every_s, cap_s=cap_s)
 
         threading.Thread(target=run, daemon=True,
                          name="ab-restore-retry").start()
+
+    def _release_restore_retry(self, token: object) -> bool:
+        """Release one exact retry owner and report whether it owes a handoff."""
+        with self._lock:
+            if self._restore_retry_token is not token:
+                return False
+            self._restore_retry_token = None
+            self._restore_retrying = False
+            pending = self._restore_retry_pending
+            self._restore_retry_pending = False
+            return bool(
+                pending and not self._closed and self.mesh is None
+                and self._session_path.exists()
+            )
 
     def signup(self, name: str, display: str, password: str,
                *, include_binding: bool = False) -> dict:

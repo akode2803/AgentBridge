@@ -106,10 +106,10 @@ class OutboxWorker:
 
     # ------------------------------------------------------------------ work
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._stop_requested.is_set():
             self._wake.wait(self.poll_s)
             self._wake.clear()
-            if self._stop.is_set():
+            if self._stop.is_set() or self._stop_requested.is_set():
                 break
             try:
                 self._flush_once(stop=self._stop)

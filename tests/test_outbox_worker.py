@@ -324,11 +324,17 @@ def test_stop_timeout_does_not_declare_boundary_before_handler_start(
 
     release.set()
     assert worker._stop_requested.wait(5)
+    worker._thread.join(5)
+    assert not worker._thread.is_alive()
+    assert not worker._stop.is_set()
     worker.stop()
     assert sent == ['queued']
 
 
-def test_stale_outbox_release_cannot_clear_a_newer_lease(store):
+def test_stale_outbox_release_cannot_clear_a_newer_lease(store, monkeypatch):
+    monkeypatch.setattr(
+        'agentbridge.store.db.time', SimpleNamespace(time_ns=lambda: 1_000_000),
+    )
     store.outbox_add('post', 'target', {'id': 'queued'})
     old = store.outbox_claim_due()[0]
     with store._conn() as connection:

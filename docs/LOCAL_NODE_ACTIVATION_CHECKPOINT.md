@@ -116,6 +116,15 @@ lost-wakeup schedule where an early request wake is consumed before `_stop` is
 linearized. The expanded lifecycle gate passes 193 tests; Ruff and whitespace
 checks pass locally.
 
+Two follow-on races are also closed. A revoked outbox worker exits after its
+already-admitted handler returns even when the first stop attempt times out, so
+it cannot continue lease churn while teardown is retained. Restore retries use
+exact owner tokens plus a pending handoff, preventing an exiting stale retry
+from swallowing the retry requested by fatal node activation. Outbox lease
+deadlines are strictly increasing within one Store, closing the coarse-clock
+exact-CAS ABA reproduced by Windows CI. The expanded gate passes 194 tests;
+Ruff and whitespace checks pass.
+
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,
 exercise pre- and post-retirement rollback, and measure cached first paint plus

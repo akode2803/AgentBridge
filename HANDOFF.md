@@ -1200,3 +1200,17 @@ stop boundary so a worker cannot consume the early hint and sleep through the
 completed stop. Deterministic outbox-, input-, node- and legacy-retirement
 timeout regressions plus the expanded 193-test lifecycle gate pass; Ruff and
 whitespace checks pass locally.
+
+The next current-head review found two follow-on races. A timed-out outbox stop
+left `_stop_requested` set but allowed the worker loop to keep pruning and
+claiming/releasing due rows; the loop now exits on that revocation hint after
+the admitted handler returns. A stale restore-retry thread could also swallow a
+fatal activation's retry request while its boolean owner flag was still set;
+retry owners now carry exact tokens and a pending handoff that rearms only for
+the still-current durable session. Windows CI separately proved that consecutive
+`time_ns()` values can be identical, so outbox lease deadlines are now strictly
+increasing within the Store and an old exact-CAS release cannot clear a newer
+same-runtime claim. The expanded lifecycle gate passes 194 tests; the exact
+Ubuntu selected-read failure passes five consecutive reruns and remains an
+isolated `SourceChanged` fixture retry pending replacement CI. Ruff and
+whitespace checks pass locally.

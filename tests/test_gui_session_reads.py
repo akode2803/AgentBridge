@@ -308,6 +308,46 @@ def test_stale_authoritative_restore_cannot_unlink_a_new_session(rig, monkeypatc
     assert read_json(rig.app._session_path)["user"] == "fable"
 
 
+def test_pending_restore_retry_hands_off_after_stale_owner_exit(
+        tmp_path, clouds, monkeypatch):
+    app = GuiApp(
+        clouds.root(tmp_path / 'retry-root'), home=tmp_path / 'retry-home',
+        machine='gui', encrypt=False,
+    )
+    app._session_path.parent.mkdir(parents=True, exist_ok=True)
+    app._session_path.write_text(json.dumps({'user': 'aryan'}), encoding='utf-8')
+    started = []
+
+    class DeferredThread:
+        def __init__(self, *, target, daemon, name):
+            self.target, self.daemon, self.name = target, daemon, name
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(threading, 'Thread', DeferredThread)
+    old_token = object()
+    with app._lock:
+        app._restore_retrying = True
+        app._restore_retry_token = old_token
+        app._restore_retry_pending = False
+
+    # A fatal activation that arrives before the old retry's finally block
+    # must leave a durable handoff instead of being discarded as a duplicate.
+    app._schedule_restore_retry(every_s=.01, cap_s=1)
+    assert app._restore_retry_pending
+    assert started == []
+
+    assert app._release_restore_retry(old_token)
+    app._schedule_restore_retry(every_s=.01, cap_s=1)
+
+    assert len(started) == 1
+    assert app._restore_retrying
+    assert app._restore_retry_token is not None
+    assert app._restore_retry_token is not old_token
+    app.close()
+
+
 def test_failed_adopt_is_transient_then_cleanup_and_re_adopt_recovers(rig, monkeypatch):
     rig.signup()
     assert rig.app.logout("hexagon") == {"ok": True}
