@@ -813,3 +813,14 @@ correctly noted that returning an ordinary empty discovery result delays retry
 until the healthy observer's30-second safety fallback; Sol is implementing an
 explicit deferred signal plus bounded scheduler retry before this repair is
 considered complete. #111/#113/#117/#118 are now green on both platforms.
+
+## Prompt delegation discovery retry — v0.24.369
+
+The #122 review correction schedules a one-second retry when either current
+account read in handoff discovery encounters exactly `lock_timeout`. It makes
+no claim, preserves earlier deadlines, and avoids an immediate dirty-loop retry.
+Other pin failures still propagate. Sol's focused delegation/deadline/dispatch
+gate passed 39 tests; Astra's final diff review found no P1/P2. Ruff/diff clean.
+The separate #121 Ubuntu failure is a peer-message SSE test assuming that a
+message arrives before a harmless mirror-update frame; its bounded test repair
+is ready for a separate commit. No activation, restart, deployment or merge.

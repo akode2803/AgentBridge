@@ -41,6 +41,7 @@ from ..core.lock import SingleInstance as FleetInstance
 from ..core.models import ChatKind, UserKind
 from ..core.runstate import clear_beat, write_beat
 from ..mesh import authz
+from ..mesh.pin_storage import PinStoreUnavailable
 from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
 from ..mesh.service import Mesh
@@ -75,6 +76,7 @@ RATE_RETRY_S = 600.0     # capped chat: revisit in this many seconds
 BLOB_GRACE_S = 600.0     # v1 value: a lost attachment must not wedge a chat
 FULL_SCAN_AUDIT_S = 300.0  # recovery audit; realtime/ledger owns normal wakeups
 HANDOFF_RECOVERY_S = 30.0  # crash-left child claim lease / missed-wake recovery
+HANDOFF_PIN_RETRY_S = 1.0  # transient local trust-pin contention
 RUNSTATE_BEAT_S = 10.0     # one third of runstate.FRESH_S (30 seconds)
 NOTICE = ("@{agent}'s harness could not produce a reply here "
           "({err}). Its responsible member can check the harness on "
@@ -319,6 +321,19 @@ class AgentRunner:
                 HANDOFF_RECOVERY_S,
                 max(0.0, self._next_handoff_recovery - now),
             )
+
+    def _retry_handoff_discovery(self) -> None:
+        """Recheck a deferred trust-pin read without claiming from stale authority."""
+        now = time.monotonic()
+        retry_at = now + HANDOFF_PIN_RETRY_S
+        with self._handoff_wake_lock:
+            if self._next_handoff_recovery <= now:
+                self._next_handoff_recovery = retry_at
+            else:
+                self._next_handoff_recovery = min(
+                    self._next_handoff_recovery, retry_at,
+                )
+        self._wake.set()
 
     def _prioritize_chat(self, chat_id: str, _count: int = 0) -> None:
         if not chat_id:
@@ -624,7 +639,13 @@ class AgentRunner:
                 or not callable(getattr(self.responder, "prepare_child", None))
                 or not callable(getattr(self.responder, "respond_child", None))):
             return 0
-        settings = self.settings()
+        try:
+            settings = self.settings()
+        except PinStoreUnavailable as exc:
+            if exc.reason != "lock_timeout":
+                raise
+            self._retry_handoff_discovery()
+            return 0
         started = 0
         with self._inflight_lock:
             room = (min(settings.concurrency, MAX_WORKERS)
@@ -632,7 +653,10 @@ class AgentRunner:
             if room <= 0:
                 return 0
             exclude = set(self._child_inflight)
-            for work in self.delegation.claim_ready(exclude=exclude)[:room]:
+            for work in self.delegation.claim_ready(
+                    exclude=exclude,
+                    on_retryable=self._retry_handoff_discovery,
+            )[:room]:
                 future = self._child_pool.submit(
                     self.delegation.execute, work, self.responder,
                 )
