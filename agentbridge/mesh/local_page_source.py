@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from ..store import document_observation as docs, lifecycle_inputs, page_metadata
 from ..store import local_source as owner, node_publication_receipt
-from ..store import overlay_index, source_selectors as scopes
+from ..store import membership_input_position, overlay_index, source_selectors as scopes
 from ..node.admission import NodeFinalizationPosition
 from ..store.mutation_coordinator import MutationCoordinator
 from ..transport.authority_observation import _part, _limit
@@ -25,6 +25,7 @@ class LocalSourceReceipt:
     coordinator_epoch: str
     source: owner.SourcePosition
     node_position: NodeFinalizationPosition | None = None
+    node_messages: membership_input_position.MembershipInputPosition | None = None
 
 
 @dataclass(frozen=True)
@@ -69,12 +70,19 @@ class LocalPageSource:
         chat, path, epoch = value.chat_id, value.coordinator_path, value.coordinator_epoch
         source = owner._expected(self.store, value.source)
         node_position = value.node_position
+        node_messages = value.node_messages
+        if (node_position is None) != (node_messages is None):
+            raise owner.SourceChanged('local_receipt_binding_changed')
         if node_position is not None:
             node_position = node_publication_receipt._encode(node_position)[0]
+            node_messages = membership_input_position._copy_expected(
+                node_messages, str(self.store.path.resolve()),
+            )
             if tuple(
                     (item.scope_kind, item.scope_id)
                     for item in node_position.scope_positions
-            ) != (("chat", self.chat), ("root", "")):
+            ) != (("chat", self.chat), ("root", "")) \
+                    or node_messages.chat_id != self.chat:
                 raise owner.SourceChanged('local_receipt_binding_changed')
         if (type(chat) is not str or chat != self.chat or type(path) is not str
                 or path != str(self.coordinator.path) or type(epoch) is not str
@@ -82,17 +90,20 @@ class LocalPageSource:
                 or source.source_id != self.definition.source
                 or not source.ready or source.writes_pending):
             raise owner.SourceChanged('local_receipt_binding_changed')
-        return LocalSourceReceipt(chat, path, epoch, source, node_position)
+        return LocalSourceReceipt(
+            chat, path, epoch, source, node_position, node_messages,
+        )
 
     def capture_in_transaction(self, conn, source):
         """Capture the source and its optional node provenance on one Store cut."""
         source = owner._expected(self.store, source)
         published = node_publication_receipt.capture_in_transaction(
-            conn, self.store, source,
+            conn, self.store, source, self.chat,
         )
         return self._receipt(LocalSourceReceipt(
             self.chat, str(self.coordinator.path), self.coordinator.epoch,
             source, None if published is None else published.node_position,
+            None if published is None else published.messages,
         ))
 
     def capture(self):
@@ -108,9 +119,25 @@ class LocalPageSource:
         if source != receipt.source:
             return False
         published = node_publication_receipt.capture_in_transaction(
-            conn, self.store, source,
+            conn, self.store, source, self.chat,
         )
-        return (None if published is None else published.node_position) == receipt.node_position
+        return (
+            None if published is None else published.node_position
+        ) == receipt.node_position and (
+            None if published is None else published.messages
+        ) == receipt.node_messages
+
+    def record_refresh_observation(
+            self, receipt, *, health, last_success_ns):
+        """CAS health only while the complete published input cut still matches."""
+        receipt = self._receipt(receipt)
+        with owner._writer(self.store) as conn:
+            if not self.matches_in_transaction(conn, receipt):
+                return False
+            return owner.record_refresh_observation_in_transaction(
+                conn, self.store, receipt.source, health=health,
+                last_success_ns=last_success_ns,
+            )
 
     @contextmanager
     def _read(self, receipt):

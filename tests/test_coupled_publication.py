@@ -134,6 +134,7 @@ def test_publish_replaces_messages_offsets_and_documents_in_one_cut(world):
     ).capture()
     assert receipt.source == result.source
     assert receipt.node_position == result.node_position
+    assert receipt.node_messages == store.capture_membership_input_position(CHAT)
 
 
 def test_page_receipt_keeps_last_published_cut_readable_after_node_advances(world):

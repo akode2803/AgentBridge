@@ -78,6 +78,9 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
         source = source_reader._receipt(value.source)
         if source.chat_id != position.messages.chat_id or position.overlays.source != source.source.raw:
             raise PageFenceChanged('page_local_source_changed')
+        if (source.node_position is not None
+                and source.node_messages != position.messages):
+            raise PageFenceChanged('page_node_message_cut_changed')
     # All page sources and demanded keys must belong to this exact local cut.
     if position.messages != suffix_position or source != authority_source:
         raise PageFenceChanged('page_authority_cut_changed')

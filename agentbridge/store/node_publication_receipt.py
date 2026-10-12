@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..node.admission import NodeFinalizationPosition, NodeScopePosition
 from ..node.store import _node_position
-from . import document_observation, local_source
+from . import document_observation, local_source, membership_input_position
 
 MAX_RECEIPT_BYTES = 64 * 1024
 
@@ -22,7 +22,9 @@ _TABLE = (
     "source TEXT PRIMARY KEY,source_epoch TEXT NOT NULL,"
     "source_revision INTEGER NOT NULL,physical TEXT NOT NULL,"
     "raw_incarnation TEXT NOT NULL,raw_generation INTEGER NOT NULL,"
-    "raw_cursor INTEGER NOT NULL,node_position BLOB NOT NULL)"
+    "raw_cursor INTEGER NOT NULL,message_incarnation TEXT NOT NULL,"
+    "message_namespace_epoch TEXT NOT NULL,chat TEXT NOT NULL,"
+    "message_generation INTEGER NOT NULL,node_position BLOB NOT NULL)"
 )
 
 
@@ -33,6 +35,7 @@ class NodePublicationReceiptChanged(local_source.SourceChanged):
 @dataclass(frozen=True)
 class NodePublicationReceipt:
     source: local_source.SourcePosition
+    messages: membership_input_position.MembershipInputPosition
     node_position: NodeFinalizationPosition
 
 
@@ -60,6 +63,7 @@ def initialize(store) -> None:
 def publish_in_transaction(
         conn: sqlite3.Connection, store,
         source: local_source.SourcePosition,
+        messages: membership_input_position.MembershipInputPosition,
         node_position: NodeFinalizationPosition,
 ) -> NodePublicationReceipt:
     """Bind an admitted Store source to its exact node cut in the same commit."""
@@ -92,24 +96,45 @@ def publish_in_transaction(
         raise NodePublicationReceiptChanged(
             "local source changed before node receipt publication",
         )
+    path = str(store.path.resolve())
+    messages = membership_input_position._copy_expected(messages, path)
+    current_messages = membership_input_position._capture(
+        conn, store.path, messages.chat_id,
+    )
+    if current_messages != messages:
+        raise NodePublicationReceiptChanged(
+            "message inputs changed before node receipt publication",
+        )
     checked, encoded = _encode(node_position)
+    if tuple(
+            (item.scope_kind, item.scope_id)
+            for item in checked.scope_positions
+    ) != (("chat", messages.chat_id), ("root", "")):
+        raise NodePublicationReceiptChanged(
+            "node receipt message scope changed",
+        )
     conn.execute(
-        "INSERT INTO node_publication_receipts VALUES(?,?,?,?,?,?,?,?) "
+        "INSERT INTO node_publication_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(source) DO UPDATE SET source_epoch=excluded.source_epoch,"
         "source_revision=excluded.source_revision,physical=excluded.physical,"
         "raw_incarnation=excluded.raw_incarnation,"
         "raw_generation=excluded.raw_generation,raw_cursor=excluded.raw_cursor,"
+        "message_incarnation=excluded.message_incarnation,"
+        "message_namespace_epoch=excluded.message_namespace_epoch,"
+        "chat=excluded.chat,message_generation=excluded.message_generation,"
         "node_position=excluded.node_position",
         (source.source_id, source.epoch, source.revision, source.raw.source_id,
          source.raw.incarnation, source.raw.generation, source.raw.cursor,
-         encoded),
+         messages.incarnation, messages.namespace_epoch, messages.chat_id,
+         messages.generation, encoded),
     )
-    return NodePublicationReceipt(source, checked)
+    return NodePublicationReceipt(source, messages, checked)
 
 
 def capture_in_transaction(
         conn: sqlite3.Connection, store,
         source: local_source.SourcePosition,
+        chat_id: str,
 ) -> NodePublicationReceipt | None:
     """Capture matching provenance from the caller's existing Store snapshot.
 
@@ -124,6 +149,9 @@ def capture_in_transaction(
     if store_path(conn) != store.path.resolve():
         raise ValueError("node receipt connection belongs to another Store")
     source = local_source._expected(store, source)
+    current_messages = membership_input_position._capture(
+        conn, store.path, chat_id,
+    )
     coupled = source.raw.source_id.startswith("coupled:")
     if not _installed(conn):
         if coupled:
@@ -139,7 +167,12 @@ def capture_in_transaction(
         "typeof(source_revision),typeof(physical),"
         "length(CAST(physical AS BLOB)),typeof(raw_incarnation),"
         "length(CAST(raw_incarnation AS BLOB)),typeof(raw_generation),"
-        "typeof(raw_cursor),typeof(node_position),"
+        "typeof(raw_cursor),typeof(message_incarnation),"
+        "length(CAST(message_incarnation AS BLOB)),"
+        "typeof(message_namespace_epoch),"
+        "length(CAST(message_namespace_epoch AS BLOB)),"
+        "typeof(chat),length(CAST(chat AS BLOB)),"
+        "typeof(message_generation),typeof(node_position),"
         "length(CAST(node_position AS BLOB)) "
         "FROM node_publication_receipts WHERE source=?",
         (key,),
@@ -159,17 +192,26 @@ def capture_in_transaction(
             or shape[7] != "text" or type(shape[8]) is not int
             or not 1 <= shape[8] <= 4096
             or shape[9] != "integer" or shape[10] != "integer"
-            or shape[11] != "blob" or type(shape[12]) is not int
-            or not 1 <= shape[12] <= MAX_RECEIPT_BYTES):
+            or shape[11] != "text" or shape[12] != 32
+            or shape[13] != "text" or shape[14] != 64
+            or shape[15] != "text" or type(shape[16]) is not int
+            or not 1 <= shape[16] <= membership_input_position.MAX_IDENTITY_BYTES
+            or shape[17] != "integer"
+            or shape[18] != "blob" or type(shape[19]) is not int
+            or not 1 <= shape[19] <= MAX_RECEIPT_BYTES):
         raise NodePublicationReceiptChanged("malformed node publication receipt")
     binding = conn.execute(
         "SELECT source,source_epoch,source_revision,physical,raw_incarnation,"
-        "raw_generation,raw_cursor FROM node_publication_receipts WHERE source=?",
+        "raw_generation,raw_cursor,message_incarnation,"
+        "message_namespace_epoch,chat,message_generation "
+        "FROM node_publication_receipts WHERE source=?",
         (key,),
     ).fetchone()
     expected = (
         key, source.epoch, source.revision, source.raw.source_id,
         source.raw.incarnation, source.raw.generation, source.raw.cursor,
+        current_messages.incarnation, current_messages.namespace_epoch,
+        current_messages.chat_id, current_messages.generation,
     )
     if binding != expected:
         if coupled:
@@ -181,7 +223,7 @@ def capture_in_transaction(
         "SELECT node_position FROM node_publication_receipts WHERE source=?",
         (key,),
     ).fetchone()[0]
-    return NodePublicationReceipt(source, _decode(encoded))
+    return NodePublicationReceipt(source, current_messages, _decode(encoded))
 
 
 def _encode(value: NodeFinalizationPosition) -> tuple[
