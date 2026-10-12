@@ -158,8 +158,12 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   per-chat delivery high-waters without caching authority. The v0.24.358
   bounded consumer emits only content-free canonical-refetch invalidations,
   rotates idempotent receipt retries and explicitly arbitrates journal,
-  provider and publication work. Bounded exact-ID canonical event projection
-  for notifications/agent triggers plus app-owned startup/close binding remain
+  provider and publication work. The v0.24.359 exact-message operation projects
+  at most 32 ordinary message identities through current membership,
+  history-on-join, trust, keys, edits/redactions, reactions and viewer
+  visibility, then repeats the complete source/message/overlay/authority cut
+  before handout. Authenticated info/reaction projection, transactional journal
+  consumption, runtime translation and app-owned startup/close binding remain
   required before activation.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.

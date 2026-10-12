@@ -1034,6 +1034,27 @@ events, notifications or agent message triggers. A bounded exact-ID canonical
 projection and final current-source/owner cut remain prerequisites for product
 activation.
 
+The v0.24.359 exact-message operation supplies the ordinary-message part of
+that canonical projection seam without activating it. One operation accepts
+at most 32 message identities,
+uses only zero-row ordered captures, and explicitly captures absent IDs plus
+bounded reply-parent dependencies. It recomputes current membership,
+history-on-join, account lifecycle, trust, key epochs, edits, redactions,
+reactions and the viewer's hidden/clear/delete state. Info and reaction rows
+are excluded: membership events need an authenticated outcome-returning event
+fold, while reactions must be derived from a verified signed current overlay
+and a canonical target message rather than trusting the breadcrumb. Finalization
+rechecks the exact source, message, overlay, membership, lifecycle, key, trust
+and session inputs before returning any result. The selection makes no history
+exhaustion or continuation claim.
+
+The operation currently returns canonical ordinary `Message` objects only.
+Authenticated info/reaction projection, exact journal CAS consumption after
+successful final validation, allowlisted EventBus mapping, retained bounded
+progress across preparation work and app-owned activation remain separate
+work. Deleted, hidden, pre-join, absent and undecryptable records must never be
+converted into notification or agent-trigger payloads.
+
 Delivered high-waters are handled one chat per quantum. Failures retain the
 exact journal row and rotate to other chats under bounded per-chat retry state;
 a complete failed pass sleeps until retry rather than spinning. A successful

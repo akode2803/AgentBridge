@@ -19,7 +19,10 @@ from . import authority_source, epoch_inputs, events, membership_coordinator as 
 from . import page_fence, page_overlays, page_pins, page_receipts
 from .local_page_source import LocalPageSource
 from .overlay_source import OverlaySourceUnavailable
-from .page_selection import CanonicalPageAccumulator, PageDependencyPending, select_exact_messages
+from .page_selection import (
+    CanonicalPageAccumulator, PageDependencyPending, PageSelection,
+    select_exact_messages,
+)
 from .paths import P
 from .pin_storage import PinStoreUnavailable
 from .redaction_verification import redaction_verifier
@@ -318,6 +321,7 @@ class PageOperation:
         # Use the selector's canonical argument validation, without reading data.
         CanonicalPageAccumulator(self.viewer, mesh.sealer, limit=limit, scan_budget=scan_budget)
         self.limit, self.scan_budget = limit, scan_budget
+        self._exact_message_ids: tuple[str, ...] = ()
         self.ledger, self._lock, self._serial = _Ledger(limits), threading.RLock(), 0
 
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
@@ -370,12 +374,17 @@ class PageOperation:
             history = (snapshot.members[self.viewer].joined_ns
                        if snapshot.kind is ChatKind.GROUP and not snapshot.permissions.send_history else 0)
             sealer = _Sealer(round_, epochs)
+            verifier = redaction_verifier(self.chat, round_) if encrypted else None
+            if self._exact_message_ids:
+                return self._prepare_exact_messages(
+                    round_, snapshot, source_binding, index, sealer, history,
+                    verifier, epochs, proofs,
+                )
             if self.unread_candidate is not None:
                 from .unread_counts import validate_inputs
                 validate_inputs(round_, index, sealer, self.unread_candidate)
             accumulator = CanonicalPageAccumulator(self.viewer, sealer, limit=self.limit, scan_budget=self.scan_budget)
             before, expected, exact, proof_keys = self.before, self.expected_position, (), ()
-            verifier = redaction_verifier(self.chat, round_) if encrypted else None
             while True:
                 ledger.step()
                 consumed = accumulator._selection.raw_examined if accumulator._selection is not None else 0
@@ -485,6 +494,86 @@ class PageOperation:
             result = round_.final(None, ready.value, page=fence)
             return PageWorkResult(result.status, result.reason or '')
 
+    def _prepare_exact_messages(
+        self, round_, snapshot, source_binding, index, sealer, history,
+        verifier, epochs, proofs,
+    ):
+        """Project a bounded identity set under the same final cut as a page.
+
+        This path is for transient event delivery after node admission.  It
+        never claims history exhaustion and never widens an identity into an
+        ordered scan.  Reply parents are captured only to validate redaction
+        effects on quoted content; they are not themselves emitted.
+        """
+        targets = self._exact_message_ids
+        exact, proof_keys, expected = targets, (), None
+        while True:
+            self.ledger.step()
+            inputs = self.source_reader.capture_page(
+                source_binding, index, raw_limit=0, expected=expected,
+                exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
+                proof_keys=proof_keys, include_reactions=True,
+                max_bytes=self.ledger.remaining(),
+            )
+            self.ledger.charge(inputs.captured_bytes)
+            if inputs.position.messages != round_.suffix.position:
+                raise page_fence.PageFenceChanged('page_membership_cut_changed')
+            expected = inputs.position
+            for path, key, valid in inputs.proofs:
+                old = proofs.get((path, key), valid)
+                if old != valid:
+                    raise page_fence.PageFenceChanged('page_proofs_changed')
+                proofs[(path, key)] = valid
+            if len(proofs) > overlay_index.MAX_DEPENDENCIES:
+                raise membership._Stop('unavailable', 'operation_proof_budget')
+            try:
+                overlays = page_overlays.assemble_page_overlays(
+                    inputs, self.viewer, snapshot, directory=round_,
+                    crypto_boundary=type(self.mesh.sealer) is E2EESealer,
+                )
+            except page_overlays.PageOverlayProofsPending as pending:
+                requested = tuple(dict.fromkeys(proof_keys + pending.keys))
+                if requested == proof_keys:
+                    raise _Work('overlay_proofs', pending.keys) from pending
+                proof_keys = requested
+                continue
+            edits, redactions = _overlays(inputs)
+            try:
+                messages = select_exact_messages(
+                    inputs, targets, self.viewer, sealer,
+                    edits=edits, redactions=redactions,
+                    reactions=overlays.reactions, state=overlays.state,
+                    tenure=snapshot.tenure, history_from_ns=history,
+                    owner_of=round_.owner_of, verify_redaction=verifier,
+                )
+                messages = tuple(
+                    message for message in messages
+                    if message.kind is MsgKind.MESSAGE
+                )
+            except PageDependencyPending as parents:
+                exact = tuple(dict.fromkeys((*exact, *parents.ids)))
+                if len(exact) > raw_pages.MAX_EXACT_IDS:
+                    raise membership._Stop(
+                        'unavailable', 'operation_parent_budget',
+                    ) from parents
+                continue
+            parent_ids = frozenset(set(exact).difference(targets))
+            available = {row.key.id for row in inputs.exact_rows}
+            selection = PageSelection(
+                expected, messages, None, len(targets),
+                len(parent_ids.intersection(available)), len(parent_ids),
+                False, False, False, False, parent_ids, None,
+            )
+            fence = page_fence.PageFence(
+                expected, source_binding,
+                tuple((p, k, v) for (p, k), v in sorted(proofs.items())),
+                tuple(epochs.values()), selection,
+            )
+            return PageWorkResult(
+                'prepared',
+                prepared=_PreparedPage(self, self._serial, round_, snapshot, fence),
+            )
+
     def _pin_presentation(self, round_, snapshot, receipt, index, expected,
                           sealer, history, verifier, proofs):
         manifest = self.source_reader.capture_pin_manifest(receipt, index)
@@ -535,6 +624,7 @@ class PageOperation:
             if len(encoded.encode()) > page_metadata.MAX_PIN_BYTES:
                 raise OverflowError('pins presentation byte budget')
             return encoded
+
 
     def _receipt_presentation(self, round_, snapshot, receipt, index, expected, selection, proofs):
         own = tuple(m for m in selection.messages if m.from_ == self.viewer
@@ -594,3 +684,30 @@ class PageOperation:
         if len(encoded.encode()) > 1024 * 1024:
             raise OverflowError('receipt presentation byte budget')
         return encoded, presence
+
+
+class ExactMessageProjectionOperation(PageOperation):
+    """One bounded exact-ID canonical projection for ordinary messages.
+
+    Info and reaction events require their own authenticated event-state
+    projection. They are intentionally excluded here even if an exact target
+    happens to be a transcript-visible info row.
+    """
+
+    MAX_MESSAGES = 32
+
+    def __init__(self, mesh, chat_id, message_ids, *, source_reader,
+                 limits=PageOperationLimits()):
+        if (type(message_ids) is not tuple or not message_ids
+                or len(message_ids) > self.MAX_MESSAGES
+                or len(set(message_ids)) != len(message_ids)):
+            raise ValueError('invalid exact message projection IDs')
+        for ident in message_ids:
+            overlay_index._text(ident, 'message id')
+        super().__init__(
+            mesh, chat_id, source_reader=source_reader,
+            limit=len(message_ids), scan_budget=1, limits=limits,
+            summary_only=True, defer_receipts=True,
+            defer_group_receipts=True,
+        )
+        self._exact_message_ids = tuple(message_ids)
