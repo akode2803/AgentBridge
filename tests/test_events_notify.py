@@ -8,6 +8,7 @@ import pytest
 from agentbridge.mesh import eventbus
 from agentbridge.mesh.eventbus import Event, EventBus
 from agentbridge.mesh.notify import CommandHook
+from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 
 
@@ -350,11 +351,18 @@ def test_reaction_breadcrumb_notifies_author_only(world):
     ev = rx[0]
     assert ev.data["by"] == "fable" and ev.data["emoji"] == "👍"
     assert ev.data["to"] == "aryan" and ev.data["msg_id"] == env.id
+    reaction = fable.tx.get_doc(P.reactions(chat.id, 'fable'))
+    assert ev.data['reaction_id'] == reaction['ops'][env.id]['id']
+    assert ev.data['reaction_ns'] == reaction['ops'][env.id]['ns']
 
     note = aryan.notifier.consider(ev)
     assert note is not None and note.kind == "reaction"
     assert note.emoji == "👍" and note.from_ == "fable"
     assert note.chat_kind == "group" and "👍" in note.preview
+    fable.react(chat.id, env.id, None)
+    fable.outbox.flush_once()
+    aryan.sync.sync_once([chat.id])
+    assert not any(e.type == eventbus.REACTION for e in sub_a.drain())
     # the reactor themselves never pings on their own reaction
     assert fable.notifier.consider(ev) is None
     # a reaction to someone ELSE's message doesn't ping a bystander: aryan

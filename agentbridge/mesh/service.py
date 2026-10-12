@@ -342,15 +342,41 @@ class Mesh:
             ov.put_pin(msg_id, by=by, ns=ns, until_ns=until, sig=sig)
 
     def _reseal_reactions(self, chat_id: str, ov) -> None:
-        from ..core.timekit import next_ns, utcnow_iso
-        from .events import reaction_signing_bytes
+        from ..core.timekit import new_id, next_ns, utcnow_iso
+        from .events import reaction_signing_bytes, reaction_v2_signing_bytes
         from .overlays import reaction_map
+        from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 
         for user, doc in ov.reaction_docs().items():
-            if not isinstance(doc, dict) or doc.get("sig"):
+            if not isinstance(doc, dict):
                 continue
             bundle = self.keystore.load(user)
             if bundle is None:
+                continue
+            if is_v2_candidate(doc):
+                try:
+                    _mapping, operations = parse_v2(doc)
+                    if operation_signature(doc):
+                        continue
+                    mapping = reaction_map(doc)
+                    ns = next_ns()
+                    target = min(mapping) if mapping else min(operations)
+                    resealed = {
+                        'schema': 2, 'v': mapping, 'ops_origin': 'resealed',
+                        'ops': {target: {
+                            'id': new_id('rx', ns), 'ns': ns,
+                            'emoji': mapping.get(target, ''), 'previous': None,
+                        }},
+                        'ns': ns, 'sig': '', 'ops_sig': '',
+                    }
+                    resealed['sig'] = crypto.sign(bundle, reaction_signing_bytes(
+                        chat_id, user, ns, mapping))
+                    sig = crypto.sign(bundle, reaction_v2_signing_bytes(chat_id, user, resealed))
+                except ValueError:
+                    continue
+                self.tx.put_doc(P.reactions(chat_id, user), {**resealed, 'ops_sig': sig})
+                continue
+            if doc.get("sig"):
                 continue
             mapping = reaction_map(doc)
             ns = next_ns()  # fresh write: the signature binds the new ns

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentbridge.mesh.events import reaction_signing_bytes, state_signing_bytes
+from agentbridge.mesh.events import reaction_signing_bytes, reaction_v2_signing_bytes, state_signing_bytes
 from agentbridge.mesh.overlay_index import (
     capture_indexed_overlay_inputs,
     prepare_overlay_index,
@@ -67,6 +67,23 @@ def test_reaction_candidates_match_reaction_map_and_existing_signing_recipe(stor
     assert [(item.kind, item.target, item.value) for item in prepared.candidates] == [
         ("reaction", "m-valid", "✅"),
     ]
+
+
+def test_v2_index_binds_operations_and_rejects_inconsistent_document(store):
+    doc = {'schema': 2, 'ops_origin': 'native', 'v': {'m1': '👍'}, 'ops': {'m1': {
+        'id': 'rx-42-00000000', 'ns': 42, 'emoji': '👍', 'previous': None,
+    }}, 'ns': 42, 'sig': 'legacy-signature', 'ops_sig': 'candidate-signature'}
+    prepared = prepare_overlay_index(_observation(store, {REACTION: doc}), CHAT)
+    indexed = _document(prepared, REACTION)
+    assert indexed.signing_bytes == reaction_v2_signing_bytes(CHAT, 'alice', doc)
+    assert indexed.signature == doc['ops_sig']
+    assert [(item.target, item.value) for item in prepared.candidates] == [('m1', '👍')]
+
+    malformed = {**doc, 'ops': {'m1': {**doc['ops']['m1'], 'emoji': ''}}}
+    prepared = prepare_overlay_index(_observation(store, {REACTION: malformed}), CHAT)
+    indexed = _document(prepared, REACTION)
+    assert indexed.signing_bytes is None and indexed.shape_error == 'reaction_map'
+    assert prepared.candidates == ()
 
 
 def test_invalid_signature_is_preserved_without_dropping_candidates(store):

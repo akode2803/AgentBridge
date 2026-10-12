@@ -28,9 +28,10 @@ from ..transport.base import Transport
 from . import authz, events
 from .attachments import PreparedAttachment, attachment_path
 from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
-    pin_signing_bytes, reaction_signing_bytes, redaction_signing_bytes, \
+    pin_signing_bytes, reaction_signing_bytes, reaction_v2_signing_bytes, redaction_signing_bytes, \
     signing_bytes, state_signing_bytes, unredaction_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
+from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 from .paths import P
 from .projection import ProjectionObserver, observed, observed_count
 from .readmodel import build_messages, parse_tags, unread_info
@@ -369,7 +370,7 @@ class MessagingService:
 
     def react(self, chat_id: str, msg_id: str, emoji: str | None) -> None:
         self._require_member(chat_id)
-        ChatOverlays(self.tx, chat_id).set_reaction(
+        operation = ChatOverlays(self.tx, chat_id).set_reaction(
             self.user, msg_id, emoji, signer=self._sign_event)
         # V50: a notification breadcrumb — the overlay doc above stays the
         # authoritative store, but overlay docs never ride the log, so
@@ -385,6 +386,7 @@ class MessagingService:
                 self.post_event(chat_id, {
                     "type": EV_REACTION, "msg_id": msg_id, "emoji": emoji,
                     "to": target.get("from", ""),
+                    "reaction_id": operation.id, "reaction_ns": operation.ns,
                 })
             except Exception:  # noqa: BLE001 — a lost ping never blocks a react
                 pass
@@ -603,9 +605,17 @@ class MessagingService:
             pub = self.directory.sign_pub(user)
             if not sig or not pub or not self._ever_member(snap, user):
                 continue
-            mapping = reaction_map(doc)
-            data = reaction_signing_bytes(
-                chat_id, user, int(doc.get("ns", 0)), mapping)
+            if is_v2_candidate(doc):
+                try:
+                    mapping, _operations = parse_v2(doc)
+                    data = reaction_v2_signing_bytes(chat_id, user, doc)
+                    sig = operation_signature(doc)
+                except ValueError:
+                    continue
+            else:
+                mapping = reaction_map(doc)
+                data = reaction_signing_bytes(
+                    chat_id, user, int(doc.get("ns", 0)), mapping)
             if crypto.verify(pub, sig, data):
                 verified[user] = mapping
         return fold_reactions(verified)

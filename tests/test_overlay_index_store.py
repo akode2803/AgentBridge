@@ -385,3 +385,27 @@ def test_owned_index_schema_tamper_is_unavailable(store, damage):
     expected = "index_triggers_changed" if damage == "trigger" else "index_schema_changed"
     with pytest.raises(overlay_index.OverlayIndexUnavailable, match=expected):
         store.capture_overlay_index(indexed, ("m1",))
+
+
+def test_older_normalization_recipe_is_unavailable_until_rebuilt(store):
+    path = _reaction_path("alice")
+    raw = _payload({"v": {"m1": "x"}})
+    source = _publish_source(store, {path: json.loads(raw)})
+    indexed = _build(
+        store, source, [_indexed_document(path, "alice", raw)],
+        [overlay_index.OverlayCandidate(path, "reaction", "m1", "x")],
+    )
+    assert indexed.schema == overlay_index.SCHEMA
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE overlay_index_ready SET schema=? WHERE source=?",
+            (overlay_index.SCHEMA - 1, SOURCE),
+        )
+    overlay_index.initialize(store._conn())
+    assert store._conn().execute(
+        "SELECT count(*) FROM overlay_index_ready WHERE source=?", (SOURCE,),
+    ).fetchone() == (0,)
+    with pytest.raises(
+        overlay_index.OverlayIndexUnavailable, match="index_changed_or_pending",
+    ):
+        store.capture_overlay_index(indexed, ("m1",))

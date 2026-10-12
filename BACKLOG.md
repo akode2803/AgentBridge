@@ -219,6 +219,16 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   protocol and apply only to future admissions unless an explicit migration is
   designed. Full node runtime startup remains inactive.
 
+  v0.24.375 adds strict signed reaction-document v2 operation evidence for new
+  local adds/removes/re-adds. `ops_origin` prevents startup resealing or a key
+  transition from laundering unsigned operation history; legacy/resealed docs
+  remain display-compatible only. Latest per-target operations are bounded and
+  eviction suppresses semantic mapping. The durable overlay-index normalization
+  recipe advances to schema 3 and stale readiness is rebuilt from preserved raw
+  observations. Breadcrumb linkage is now available for future admissions, but
+  semantic delivery still requires fresh signature, membership, target/visibility
+  and final source/session/journal checks. Node runtime startup remains inactive.
+
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
 - [x] **V202 — pure key-pin evaluation** (R177,2026-09-15): source969044d/

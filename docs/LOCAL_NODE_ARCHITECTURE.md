@@ -1128,10 +1128,34 @@ durable global gap. Independent circular cursors and alternating message/info
 service prevent either lane from starving the other, and info work cannot reset
 an ordinary message operation's split, cooldown or finite ledger.
 
-Reaction breadcrumbs are included in this generic lane because the current
-signed reaction overlay has no per-addition incarnation or removal tombstone.
+Reaction breadcrumbs are included in this generic lane because the v1 signed
+reaction overlay has no per-addition incarnation or removal tombstone.
 Consequently add, remove and re-add of the same emoji cannot be linked strictly
 to one old breadcrumb. Consumed breadcrumbs are not retained for a later
-semantic notification. A future protocol must add signed operation identity and
-linked removal evidence for new admissions, or define an explicit migration;
-it must not reinterpret these generic invalidations retroactively.
+semantic notification and must not be reinterpreted retroactively.
+
+Version 0.24.375 introduces the prerequisite v2 document for new writes. Its
+signature binds the current mapping, a bounded latest operation per target, the
+document namespace and `ops_origin`. Each operation binds a unique ID, namespace,
+emoji (empty for removal) and prior incarnation ID when retained. `native`
+operations originate from a fresh local write. Startup conversion forces
+unsigned v2 material to `resealed`; v1 and resealed documents may still render
+after normal signature/membership checks but can never prove a semantic reaction
+operation. A native write after resealing, or after encountering an unsigned v2
+document while a signer is available, drops the unproven operation history.
+
+The operation set retains at most 128 targets. Eviction preserves the current
+mapping but intentionally makes old breadcrumbs unverifiable; consumers must
+suppress semantic delivery rather than infer missing evidence. The overlay-index
+normalization contract is schema 3 because v2 uses a new signing recipe. On
+upgrade, Store initialization removes stale ready rows while retaining raw source
+observations, so an unchanged source rebuilds before foreground use; proof rows
+remain tied to the old build identity.
+
+These operation records remain evidence, not authority. A semantic mapper must
+independently verify the exact breadcrumb and the current signed native v2 doc,
+match chat/actor/target/operation ID/namespace, recompute actor tenure and the
+canonical visible target author, then finalize against current source, session
+and journal identity. Superseded, removed, evicted, legacy and resealed evidence
+falls back to the content-free invalidation lane. This version does not activate
+the local node event owner.

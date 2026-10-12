@@ -1,4 +1,4 @@
-"""Store schema-v2 shape evidence and complete reaction-manifest contracts."""
+"""Store shape evidence and complete reaction-manifest contracts."""
 from __future__ import annotations
 
 import json

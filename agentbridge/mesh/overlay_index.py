@@ -13,8 +13,9 @@ from ..store.overlay_index import (
     MAX_BUILD_BYTES, MAX_CANDIDATES, MAX_DOCUMENTS,
     DocumentShape, IndexedDocument, OverlayCandidate, OverlayIndexPosition, OverlayIndexUnavailable, PreparedOverlayIndex,
 )
-from .events import reaction_signing_bytes, state_signing_bytes
+from .events import reaction_signing_bytes, reaction_v2_signing_bytes, state_signing_bytes
 from .overlays import UserState, reaction_map
+from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 from .overlay_source import OverlaySourceReceipt, capture_overlay_inputs
 
 _STATE_SCALARS = (
@@ -69,16 +70,26 @@ def prepare_overlay_index(observation: DocumentObservation, chat_id: str) -> Pre
         scalars = {}
         entries = []
         if kind == 'reactions':
-            if 'v' in doc and type(doc['v']) is not dict:
-                shape_error = shape_error or 'reaction_map'
-            mapping = reaction_map(doc)
+            if is_v2_candidate(doc):
+                try:
+                    mapping, _operations = parse_v2(doc)
+                    signing = reaction_v2_signing_bytes(chat_id, actor, doc)
+                    signature = operation_signature(doc)
+                    raw_signature = signature
+                except ValueError:
+                    mapping, signing = {}, None
+                    shape_error = shape_error or 'reaction_map'
+            else:
+                if 'v' in doc and type(doc['v']) is not dict:
+                    shape_error = shape_error or 'reaction_map'
+                mapping = reaction_map(doc)
+                try:
+                    signing = reaction_signing_bytes(chat_id, actor, int(doc.get('ns', 0)), mapping)
+                except (TypeError, ValueError, OverflowError):
+                    signing, shape_error = None, 'signing_input'
             if len(mapping) + len(candidates) > MAX_CANDIDATES:
                 raise OverflowError('candidate budget exceeded')
             entries = [OverlayCandidate(record.path, 'reaction', k, v) for k, v in mapping.items()]
-            try:
-                signing = reaction_signing_bytes(chat_id, actor, int(doc.get('ns', 0)), mapping)
-            except (TypeError, ValueError, OverflowError):
-                signing, shape_error = None, 'signing_input'
         else:
             fields = UserState.signed_fields(doc)
             try:
