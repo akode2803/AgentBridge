@@ -6,15 +6,16 @@ import json
 
 import pytest
 
-from agentbridge.mesh.local_page_source import definition
+from agentbridge.mesh.local_page_source import LocalPageSource, definition
 from agentbridge.node.admission import NodeDocument, NodeInputBatch, NodeLogRow
 from agentbridge.node.client import LocalNodeClient
 from agentbridge.node.protocol import ReplicaIdentity
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.store import (
     coupled_admission, coupled_payload_stage, coupled_publication,
-    coupled_stage, local_source, membership_input_position, source_selectors,
-    staged_publication, staged_source,
+    coupled_stage, local_source, membership_input_position,
+    node_publication_receipt, presence_publication, raw_publication,
+    source_selectors, staged_publication, staged_source,
 )
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
@@ -128,6 +129,154 @@ def test_publish_replaces_messages_offsets_and_documents_in_one_cut(world):
         "SELECT phase FROM staged_sources WHERE source=?",
         (result.source.raw.source_id,),
     ).fetchone() == ("sealed",)
+    receipt = LocalPageSource(
+        coordinator, store, CHAT,
+    ).capture()
+    assert receipt.source == result.source
+    assert receipt.node_position == result.node_position
+
+
+def test_page_receipt_keeps_last_published_cut_readable_after_node_advances(world):
+    coordinator, store, server, client, source, expected = world
+    result = coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    reader = LocalPageSource(coordinator, store, CHAT)
+    receipt = reader.capture()
+
+    generation = server.store.begin_candidate(created_ns=3)
+    server.store.seal_candidate(generation, NodeInputBatch(
+        documents=(NodeDocument(
+            f"chats/{CHAT}/meta.json", 8, False,
+            b'{"members":{"alice":true},"later":true}',
+        ),),
+        documents_mode="replace",
+    ), observed_ns=4)
+    server.store.admit_candidate(generation)
+
+    assert reader.capture() == receipt
+    assert receipt.node_position == result.node_position
+    with reader.finalization(receipt):
+        pass
+
+
+def test_coupled_publisher_can_replace_an_admitted_coupled_cut(world):
+    coordinator, store, server, client, source, expected = world
+    first = coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    generation = server.store.begin_candidate(created_ns=3)
+    server.store.seal_candidate(generation, NodeInputBatch(
+        documents=(NodeDocument(
+            f"chats/{CHAT}/meta.json", 8, False,
+            b'{"members":{"alice":true}}',
+        ),),
+        log_rows=(NodeLogRow(
+            6, CHAT, "alice@box",
+            json.dumps({
+                "id": "later", "ns": 8, "from": "alice",
+                "kind": "message", "text": "later",
+            }, separators=(",", ":")).encode(),
+        ),),
+        documents_mode="replace", logs_mode="replace",
+    ), observed_ns=4)
+    server.store.admit_candidate(generation)
+
+    current = coupled_admission.capture(store, first.source, CHAT)
+    second = coupled_publication.publish(
+        coordinator, store, current, client, source, observed_ns=100,
+    )
+
+    assert second.previous_physical_source == first.source.raw.source_id
+    assert second.node_position.admitted_generation == 2
+    assert store.messages(CHAT) == [{
+        "id": "later", "ns": 8, "from": "alice", "kind": "message",
+        "text": "later",
+    }]
+    assert LocalPageSource(
+        coordinator, store, CHAT,
+    ).capture().node_position == second.node_position
+
+
+def test_confirmed_local_append_cannot_relabel_coupled_snapshot(world):
+    coordinator, store, _server, client, source, expected = world
+    result = coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    intent = local_source.begin_write(store, source.source)
+    local_source.complete_write(store, intent)
+
+    with pytest.raises(
+            local_source.SourceChanged,
+            match="coupled_source_requires_coupled_publication"):
+        local_source.admit_confirmed_local_message(
+            store, result.source, CHAT, {
+                "id": "new", "ns": 7, "from": "alice", "kind": "message",
+                "text": "new",
+            },
+        )
+
+    pending = local_source.capture(store, source.source)
+    assert not pending.ready and pending.writes_pending == 0
+    assert pending.revision == result.source.revision + 2
+
+
+def test_page_finalization_rejects_changed_node_publication_receipt(world):
+    coordinator, store, _server, client, source, expected = world
+    coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    reader = LocalPageSource(coordinator, store, CHAT)
+    receipt = reader.capture()
+    with store._conn() as conn:
+        conn.execute(
+            "DELETE FROM node_publication_receipts WHERE source=?",
+            (source.source,),
+        )
+
+    with pytest.raises(
+            node_publication_receipt.NodePublicationReceiptChanged,
+            match="no node publication receipt"):
+        with reader.finalization(receipt):
+            pytest.fail("changed node receipt reached canonical caller")
+
+
+def test_current_malformed_node_publication_receipt_fails_closed(world):
+    coordinator, store, _server, client, source, expected = world
+    coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE node_publication_receipts SET node_position=x'5b5b5b' "
+            "WHERE source=?",
+            (source.source,),
+        )
+
+    with pytest.raises(
+            node_publication_receipt.NodePublicationReceiptChanged,
+            match="malformed"):
+        LocalPageSource(coordinator, store, CHAT).capture()
+
+
+def test_current_node_publication_receipt_cannot_relabel_chat_scope(world):
+    coordinator, store, _server, client, source, expected = world
+    coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    with store._conn() as conn:
+        raw = json.loads(conn.execute(
+            "SELECT node_position FROM node_publication_receipts WHERE source=?",
+            (source.source,),
+        ).fetchone()[0])
+        raw[6][0][1] = "other"
+        conn.execute(
+            "UPDATE node_publication_receipts SET node_position=? WHERE source=?",
+            (json.dumps(raw, separators=(",", ":")).encode(), source.source),
+        )
+
+    with pytest.raises(local_source.SourceChanged, match="receipt_binding_changed"):
+        LocalPageSource(coordinator, store, CHAT).capture()
 
 
 def test_failure_after_pointer_swap_rolls_back_every_visible_half(
@@ -159,6 +308,9 @@ def test_failure_after_pointer_swap_rolls_back_every_visible_half(
         "SELECT physical FROM local_input_generations WHERE source=?",
         (source.source,),
     ).fetchone() == (expected.source.raw.source_id,)
+    assert conn.execute(
+        "SELECT count(*) FROM node_publication_receipts",
+    ).fetchone() == (0,)
 
 
 def test_message_change_between_replacement_and_admission_rolls_back(
@@ -456,3 +608,88 @@ def test_legacy_publishers_cannot_rewrite_admitted_coupled_source(world):
             observed_ns=100,
         )
     assert local_source.capture(store, source.source) == result.source
+
+
+def test_generic_staged_ingestion_cannot_downgrade_coupled_cut(world):
+    coordinator, store, _server, client, source, expected = world
+    result = coupled_publication.publish(
+        coordinator, store, expected, client, source, observed_ns=99,
+    )
+    before_messages = store.messages(CHAT)
+    before_offsets = store.log_offsets(CHAT)
+    before_receipt = LocalPageSource(coordinator, store, CHAT).capture()
+
+    with pytest.raises(
+            local_source.SourceChanged,
+            match="coupled_source_requires_coupled_publication"):
+        local_source.claim_collection(store, result.source)
+
+    stage = staged_source.begin(
+        store, source.source, CHAT, expected=result.source,
+    )
+    staged_source.append(
+        store, stage,
+        {f"chats/{CHAT}/meta.json": {"members": {"mallory": True}}},
+    )
+    staged_source.finish(store, stage)
+    rejected = (
+        lambda: local_source.retire_for_publication(store, result.source),
+        lambda: local_source.admit(
+            store, result.source, result.source.raw, observed_ns=100,
+            allow_unchanged=True,
+        ),
+        lambda: staged_publication.identical_admitted(
+            store, result.source, CHAT, lambda _consume: None,
+        ),
+        lambda: staged_publication.admit_identical(
+            store, result.source, object(), observed_ns=100,
+        ),
+        lambda: staged_publication.observe_unchanged(
+            store, result.source, CHAT, observed_ns=100,
+        ),
+        lambda: staged_publication.identical(store, result.source, stage),
+    )
+    for operation in rejected:
+        with pytest.raises(
+                local_source.SourceChanged,
+                match="coupled_source_requires_coupled_publication"):
+            operation()
+
+    raw_stage = staged_source.begin_raw(
+        store, source.source, expected=result.source,
+    )
+    staged_source.append_raw(
+        store, raw_stage,
+        {"presence/mallory.json": {"last_seen_ns": 100}},
+    )
+    staged_source.finish_raw(store, raw_stage)
+    raw_rejected = (
+        lambda: raw_publication.identical(
+            store, result.source, raw_stage,
+        ),
+        lambda: raw_publication.admit(
+            store, result.source, raw_stage, observed_ns=100,
+        ),
+        lambda: presence_publication.admit(
+            store, result.source, raw_stage, observed_ns=100,
+        ),
+    )
+    for operation in raw_rejected:
+        with pytest.raises(
+                local_source.SourceChanged,
+                match="coupled_source_requires_coupled_publication"):
+            operation()
+    staged_source.abort(store, raw_stage)
+
+    with pytest.raises(
+            local_source.SourceChanged,
+            match="coupled_source_requires_coupled_publication"):
+        staged_publication.admit(
+            store, result.source, stage, observed_ns=100,
+        )
+    staged_source.abort(store, stage)
+
+    assert local_source.capture(store, source.source) == result.source
+    assert LocalPageSource(coordinator, store, CHAT).capture() == before_receipt
+    assert store.messages(CHAT) == before_messages
+    assert store.log_offsets(CHAT) == before_offsets

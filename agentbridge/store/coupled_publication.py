@@ -8,7 +8,7 @@ from ..node.client import LocalNodeClient
 from . import (
     coupled_admission, coupled_candidate, coupled_payload_stage, coupled_stage,
     local_source, log_position, membership_input_position, overlay_index,
-    source_selectors, staged_publication, staged_source,
+    node_publication_receipt, source_selectors, staged_publication, staged_source,
 )
 from .mutation_coordinator import MutationCoordinator
 
@@ -41,6 +41,7 @@ def publish(
         raise TypeError("expected mutation coordinator")
     if type(observed_ns) is not int or not 0 <= observed_ns <= MAX_INTEGER:
         raise ValueError("invalid observation time")
+    node_publication_receipt.initialize(store)
     candidate = coupled_candidate.assemble(
         store, expected, client, definition,
     )
@@ -60,6 +61,9 @@ def publish(
                 source, index = _admit_candidate(
                     conn, store, expected.source, candidate,
                     observed_ns=observed_ns,
+                )
+                node_publication_receipt.publish_in_transaction(
+                    conn, store, source, candidate.node_position,
                 )
                 staged_source._retire_generation_in_transaction(
                     conn, store, expected.source.raw.source_id,

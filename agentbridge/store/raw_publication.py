@@ -19,7 +19,9 @@ class _Identical:
 
 def identical(store, expected, stage):
     """Compare complete raw rows off the root gate, one bounded row at a time."""
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if not expected.ready or not expected.raw.initialized:
         return None
     conn = docs._open_reader(store.path)
@@ -43,7 +45,9 @@ def identical(store, expected, stage):
 
 def admit(store, expected, stage, *, observed_ns, comparison=None):
     """Caller holds this registered definition's root publication gate."""
-    expected = owner._expected(store, expected)
+    expected = owner._require_generic_publication(
+        owner._expected(store, expected),
+    )
     if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
         raise ValueError('invalid observation time')
     with owner._writer(store) as conn:

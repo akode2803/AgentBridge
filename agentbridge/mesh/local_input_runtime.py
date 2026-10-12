@@ -19,7 +19,7 @@ from ..store.source_publication import SourcePublisher
 from ..transport.local_mutations import LocalMutationTransport
 from ..transport.mirror_observation import MirrorChangeRequest, MirrorExpectedPosition
 from ..transport.raw_documents import collect_document_batches, RawCollectionUnavailable
-from .local_page_source import LocalPageSource, LocalSourceReceipt
+from .local_page_source import LocalPageSource
 from .source_schedule import SourceSchedule
 
 
@@ -310,8 +310,7 @@ class LocalInputRuntime:
         reader = self.reader(chat)
         with self.coordinator.finalization_cut(self.store, reader.definition) as (conn, source):
             with span('index_checks'):
-                receipt = LocalSourceReceipt(reader.chat, str(self.coordinator.path),
-                                             self.coordinator.epoch, source)
+                receipt = reader.capture_in_transaction(conn, source)
                 row = conn.execute('SELECT build,schema FROM overlay_index_ready WHERE source=? '
                                    "AND typeof(build)='text' AND length(CAST(build AS BLOB))=32 "
                                    "AND typeof(schema)='integer'",

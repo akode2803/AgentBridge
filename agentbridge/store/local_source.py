@@ -96,6 +96,13 @@ def _expected(store, value):
     return SourcePosition(raw, epoch, revision, ready, pending, logical)
 
 
+def _require_generic_publication(value):
+    """Reject legacy document-only publication over a coupled raw cut."""
+    if value.raw.source_id.startswith('coupled:'):
+        raise SourceChanged('coupled_source_requires_coupled_publication')
+    return value
+
+
 def _schema(conn, *, legacy=False):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?,?) LIMIT 1", ('local_source_schema', 'local_sources', 'local_source_writes')).fetchone():
         raise SourceChanged('unexpected_source_trigger')
@@ -280,7 +287,7 @@ def admit(store, expected, published, *, observed_ns, allow_unchanged=False):
         raise ValueError('allow_unchanged must be a bool')
     if type(expected) is not SourcePosition or type(published) is not docs.DocumentPosition:
         raise ValueError('invalid source admission')
-    expected = _expected(store, expected)
+    expected = _require_generic_publication(_expected(store, expected))
     published = docs._validate_expected(published, store.path)
     if type(observed_ns) is not int or not 0 <= observed_ns <= MAX:
         raise ValueError('invalid observation time')
@@ -309,7 +316,7 @@ def admit_confirmed_local_message(store, expected, chat_id, record):
     must still equal the sealed envelope byte-for-byte. This admits local raw
     input only; readers continue to recompute authority and visibility.
     """
-    expected = _expected(store, expected)
+    expected = _require_generic_publication(_expected(store, expected))
     if not expected.ready or expected.writes_pending:
         raise SourceChanged('local_append_source_not_ready')
     if (type(chat_id) is not str or not chat_id or len(chat_id.encode()) > 4096
@@ -395,7 +402,7 @@ def retire_for_publication(store, expected):
     The root-scoped owner must also hold its publication gate when used across
     registered Stores. No transport reads or payload work belongs in this step.
     """
-    expected = _expected(store, expected)
+    expected = _require_generic_publication(_expected(store, expected))
     # Retire the old ready generation durably before any raw publication work.
     # CAS losers do not own a publication attempt and cannot retire a winner.
     with _writer(store) as conn:
@@ -417,7 +424,7 @@ def claim_collection(store, expected):
     retire this claim. Readiness and its original observation time are preserved
     atomically; no pending write can be cleared or admitted here.
     """
-    expected = _expected(store, expected)
+    expected = _require_generic_publication(_expected(store, expected))
     with _writer(store) as conn:
         current = capture_in_transaction(conn, store, expected.source_id)
         if current != expected or current.writes_pending:
