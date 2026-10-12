@@ -599,6 +599,10 @@ def main() -> int:
     if auth_functions not in {"0:0", "1:1"}:
         parser.error("refusing incomplete existing auth.uid/auth.role contract")
 
+    server_version = _scalar(database_url, "show server_version;")
+    server_version_num = int(_scalar(
+        database_url, "show server_version_num;"))
+
     _run(database_url, BOOTSTRAP_SQL, timeout=30)
     _run(database_url, _protocol_sql(), timeout=30)
     _validate_state_and_grants(database_url)
@@ -609,6 +613,8 @@ def main() -> int:
         "database": database_name,
         "gate": "inactive-mutation-protocol-p1a",
         "result": "passed",
+        "server_version": server_version,
+        "server_version_num": server_version_num,
         "schedules": ["legacy-before-seal", "legacy-after-seal"],
     }, sort_keys=True))
     return 0
