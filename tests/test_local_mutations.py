@@ -7,7 +7,9 @@ from agentbridge.store import local_source, source_selectors
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.transport.supabase import SupabaseTransport
-from agentbridge.transport.local_mutations import LocalMutationTransport
+from agentbridge.transport.local_mutations import (
+    LocalMutationTransport, root_identity,
+)
 
 
 S = source_selectors.Selector
@@ -57,9 +59,11 @@ def rig(tmp_path, clouds):
     store = Store(tmp_path / "store.sqlite")
     local_source.initialize(store)
     source_selectors.initialize(store)
-    coordinator = MutationCoordinator(tmp_path / "home", "mesh-root")
-    coordinator.register_store(store)
     inner = _recording_provider(clouds, tmp_path / "provider")
+    coordinator = MutationCoordinator(
+        tmp_path / "home", root_identity(inner),
+    )
+    coordinator.register_store(store)
     proxy = LocalMutationTransport(inner, coordinator)
     try:
         yield store, coordinator, inner, proxy
@@ -476,6 +480,23 @@ def test_scoped_source_reads_delegate_without_creating_mutation_intents(
             "limit": 7, "max_bytes": 8192,
         }),
     ]
+    assert _pending(coordinator) == 0
+
+
+def test_source_read_rejects_location_change_during_provider_call(rig):
+    _store, coordinator, inner, proxy = rig
+    result = object()
+
+    def drifting_read(_paths, *, max_bytes):
+        assert max_bytes == 4096
+        inner.root = "other"
+        inner.cache_key = f"supabase:{inner._env['SUPABASE_URL']}:other"
+        return result
+
+    inner.source_documents = drifting_read
+
+    with pytest.raises(ValueError, match="identity changed"):
+        proxy.source_documents(("users/a.json",), max_bytes=4096)
     assert _pending(coordinator) == 0
 
 

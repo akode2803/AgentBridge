@@ -182,57 +182,98 @@ class LocalMutationTransport(Transport):
     def changed_logs(self, cursor):
         return self._transport.changed_logs(cursor)
 
+    def _assert_provider_identity(self):
+        """Fail before a node-source read if endpoint/root ownership moved."""
+        try:
+            current = root_identity(self._transport)
+        except ValueError as exc:
+            raise ValueError('local mutation owner identity changed') from exc
+        if current != self._coordinator.identity:
+            raise ValueError('local mutation owner identity changed')
+
+    def _provider_read(self, operation):
+        """Return provider data only when one pinned location bounds the call."""
+        self._assert_provider_identity()
+        result = operation()
+        self._assert_provider_identity()
+        return result
+
     def source_documents(self, paths, *, max_bytes):
-        return self._transport.source_documents(paths, max_bytes=max_bytes)
+        return self._provider_read(
+            lambda: self._transport.source_documents(
+                paths, max_bytes=max_bytes,
+            ),
+        )
 
     def source_log_page(
             self, chat_id, log_name, *, after_cursor, through_cursor, limit,
             max_bytes):
-        return self._transport.source_log_page(
-            chat_id, log_name, after_cursor=after_cursor,
-            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
+        return self._provider_read(
+            lambda: self._transport.source_log_page(
+                chat_id, log_name, after_cursor=after_cursor,
+                through_cursor=through_cursor, limit=limit,
+                max_bytes=max_bytes,
+            ),
         )
 
     def source_ledger_fence(self):
-        return self._transport.source_ledger_fence()
+        return self._provider_read(self._transport.source_ledger_fence)
 
     def source_ledger_events(self, after_cursor, *, limit):
-        return self._transport.source_ledger_events(after_cursor, limit=limit)
+        return self._provider_read(
+            lambda: self._transport.source_ledger_events(
+                after_cursor, limit=limit,
+            ),
+        )
 
     def recovery_fence(self):
-        return self._transport.recovery_fence()
+        return self._provider_read(self._transport.recovery_fence)
 
     def recovery_page(self, family, after, *, limit, max_bytes):
-        return self._transport.recovery_page(
-            family, after, limit=limit, max_bytes=max_bytes,
+        return self._provider_read(
+            lambda: self._transport.recovery_page(
+                family, after, limit=limit, max_bytes=max_bytes,
+            ),
         )
 
     def reference_documents(self, after, *, limit, max_bytes):
-        return self._transport.reference_documents(
-            after, limit=limit, max_bytes=max_bytes,
+        return self._provider_read(
+            lambda: self._transport.reference_documents(
+                after, limit=limit, max_bytes=max_bytes,
+            ),
         )
 
     def reference_streams(self, after, *, limit):
-        return self._transport.reference_streams(after, limit=limit)
+        return self._provider_read(
+            lambda: self._transport.reference_streams(after, limit=limit),
+        )
 
     def reference_log_page(
             self, chat_id, log_name, *, after_cursor, through_cursor, limit,
             max_bytes):
-        return self._transport.reference_log_page(
-            chat_id, log_name, after_cursor=after_cursor,
-            through_cursor=through_cursor, limit=limit, max_bytes=max_bytes,
+        return self._provider_read(
+            lambda: self._transport.reference_log_page(
+                chat_id, log_name, after_cursor=after_cursor,
+                through_cursor=through_cursor, limit=limit,
+                max_bytes=max_bytes,
+            ),
         )
 
     def change_ledger_capability(self):
-        return self._transport.change_ledger_capability()
+        return self._provider_read(self._transport.change_ledger_capability)
 
     def change_ledger_epoch(self):
-        return self._transport.change_ledger_epoch()
+        return self._provider_read(self._transport.change_ledger_epoch)
 
     def change_ledger_events(self, after_cursor, *, limit):
-        return self._transport.change_ledger_events(after_cursor, limit=limit)
+        return self._provider_read(
+            lambda: self._transport.change_ledger_events(
+                after_cursor, limit=limit,
+            ),
+        )
 
     def subscribe_change_ledger(self, callback):
+        self._assert_provider_identity()
         return self._transport.subscribe_change_ledger(callback)
 
     def change_ledger_realtime_status(self):
@@ -281,13 +322,8 @@ class LocalMutationTransport(Transport):
         return self._transport.watch()
 
 
-def root_identity(transport):
-    """Trusted built-in transport identity, excluding member credentials.
-
-    Production composition must use owned_transport, before writable references
-    escape. Unknown drivers need an explicit identity contract before activation.
-    """
-    import json
+def provider_location(transport):
+    """Return the credential-free endpoint and root for one built-in owner."""
     from urllib.parse import urlsplit, urlunsplit
     from .cache import CachingTransport
     from .supabase import SupabaseTransport
@@ -298,7 +334,7 @@ def root_identity(transport):
         from .mirror_observation import transport_identities
         if (transport._mirror_root_identity, transport._mirror_cache_identity) != transport_identities(transport.inner):
             raise ValueError('cache identity changed')
-        return root_identity(transport.inner)
+        return provider_location(transport.inner)
     if type(transport) is SupabaseTransport:
         url, root = transport._env.get('SUPABASE_URL'), transport.root
         if type(url) is not str or not url or len(url) > 4096 or type(root) is not str or not root:
@@ -318,9 +354,21 @@ def root_identity(transport):
         canonical = urlunsplit((parsed.scheme, host, parsed.path.rstrip('/'), '', ''))
         if transport.cache_key != f'supabase:{url}:{root}':
             raise ValueError('provider identity changed')
-        fields = ['local-root-v1', 'supabase', canonical, root]
+        return canonical, root
     else:
         raise ValueError('unsupported transport owner')
+
+
+def root_identity(transport):
+    """Trusted built-in transport identity, excluding member credentials.
+
+    Production composition must use owned_transport, before writable references
+    escape. Unknown drivers need an explicit identity contract before activation.
+    """
+    import json
+
+    canonical, root = provider_location(transport)
+    fields = ['local-root-v1', 'supabase', canonical, root]
     identity = json.dumps(fields, ensure_ascii=False, separators=(',', ':'))
     if len(identity.encode()) > 4096:
         raise ValueError('transport identity budget')

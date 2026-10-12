@@ -7,6 +7,7 @@ from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport,
     owned_transport,
+    provider_location,
     root_identity,
 )
 from agentbridge.transport.supabase import SupabaseTransport
@@ -42,6 +43,7 @@ def test_cloud_identity_binds_canonical_endpoint_and_root_not_credentials():
     assert "secret-one" not in identity
     assert "different-password" not in identity
     assert "different-key" not in identity
+    assert provider_location(first) == ("https://example.test", "team")
 
 
 @pytest.mark.parametrize(
