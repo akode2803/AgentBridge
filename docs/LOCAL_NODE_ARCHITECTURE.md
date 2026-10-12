@@ -1117,3 +1117,21 @@ provider recovery, Store publication and journal consumption bounded service.
 The consumer binds only to the Mesh object retained by the exact
 `LocalInputRuntime` page owner, its SyncEngine, transport, Store and EventBus.
 It remains absent from GUI and harness startup.
+
+The v0.24.374 retained info lane performs a narrower operation than semantic
+event mapping. It peeks at most 32 single-chat `kind=info` identities and uses
+one owned SQLite transaction to compare and consume the exact journal batch.
+It never parses the payload or claims an event type, actor, membership outcome
+or reaction. Successful consumption emits one content-free per-chat read-model
+invalidation; a missing, moved or oversized current row produces the existing
+durable global gap. Independent circular cursors and alternating message/info
+service prevent either lane from starving the other, and info work cannot reset
+an ordinary message operation's split, cooldown or finite ledger.
+
+Reaction breadcrumbs are included in this generic lane because the current
+signed reaction overlay has no per-addition incarnation or removal tombstone.
+Consequently add, remove and re-add of the same emoji cannot be linked strictly
+to one old breadcrumb. Consumed breadcrumbs are not retained for a later
+semantic notification. A future protocol must add signed operation identity and
+linked removal evidence for new admissions, or define an explicit migration;
+it must not reinterpret these generic invalidations retroactively.

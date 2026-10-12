@@ -245,6 +245,83 @@ def test_projection_peek_is_payload_free_single_chat_and_byte_bounded(store):
     assert not hasattr(first[0], 'record')
 
 
+@pytest.mark.parametrize('changed', [False, True])
+def test_info_invalidation_consumes_exact_identity_without_semantic_claim(
+        store, changed):
+    record = {
+        'id': 'info-1', 'ns': 11, 'from': 'alice', 'kind': 'info',
+        'event': {'type': 'reaction', 'msg_id': 'target', 'emoji': 'secret'},
+    }
+    store.upsert_messages(CHAT, (record,), observed_ns=1)
+    conn = store._conn()
+    conn.execute(
+        'INSERT INTO node_event_journal_items'
+        '(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)',
+        (CHAT, record['id'], record['ns'], record['from'], record['kind']),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store, kind='info')
+    if changed:
+        conn.execute('UPDATE messages SET ns=ns+1 WHERE chat_id=? AND id=?',
+                     (CHAT, record['id']))
+        conn.commit()
+
+    consumed = node_event_journal.consume_info_invalidations(store, expected)
+
+    assert consumed == node_event_journal.NodeEventConsume(True, changed)
+    assert node_event_journal.peek_event_identities(store, kind='info') == ()
+    assert node_event_journal.claim_gap(store) is changed
+
+
+def test_info_invalidation_rejects_other_kinds_and_caller_transaction(store):
+    message = node_event_journal.NodeEventIdentity(
+        1, CHAT, 'm1', 1, 'alice', 'message')
+    with pytest.raises(ValueError, match='exact info identities'):
+        node_event_journal.consume_info_invalidations(store, (message,))
+
+    info = node_event_journal.NodeEventIdentity(
+        1, CHAT, 'i1', 1, 'alice', 'info')
+    conn = store._conn()
+    conn.execute('BEGIN IMMEDIATE')
+    with pytest.raises(sqlite3.OperationalError, match='owned transaction'):
+        node_event_journal.consume_info_invalidations(store, (info,))
+    assert conn.in_transaction
+    conn.rollback()
+
+
+def test_info_invalidation_aba_and_post_consume_failure_retain_work(store, monkeypatch):
+    record = {'id': 'info-1', 'ns': 11, 'from': 'alice', 'kind': 'info',
+              'event': {'type': 'renamed'}}
+    store.upsert_messages(CHAT, (record,), observed_ns=1)
+    conn = store._conn()
+    conn.execute(
+        'INSERT INTO node_event_journal_items'
+        '(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)',
+        (CHAT, record['id'], record['ns'], record['from'], record['kind']),
+    )
+    conn.commit()
+    expected = node_event_journal.peek_event_identities(store, kind='info')
+    original = node_event_journal.consume_event_identities_in_transaction
+
+    def fail_after_consume(*args):
+        original(*args)
+        raise OSError('disposable post-consume failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(node_event_journal,
+                      'consume_event_identities_in_transaction', fail_after_consume)
+        with pytest.raises(OSError, match='post-consume'):
+            node_event_journal.consume_info_invalidations(store, expected)
+    assert node_event_journal.peek_event_identities(store, kind='info') == expected
+
+    conn.execute('UPDATE node_event_journal_items SET ns=ns+1')
+    conn.commit()
+    assert node_event_journal.consume_info_invalidations(store, expected) == (
+        node_event_journal.NodeEventConsume(False, False)
+    )
+    assert len(node_event_journal.peek_event_identities(store, kind='info')) == 1
+
+
 def test_projection_peek_returns_missing_or_oversize_head_for_gap_retirement(store):
     conn = store._conn()
     conn.executemany(

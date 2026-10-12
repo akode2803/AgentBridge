@@ -90,6 +90,72 @@ def test_retained_message_commits_before_bus_publish_and_leaves_info_pending(wor
     assert 'one' not in str(pump._preparation._jobs)  # completed jobs retain no page
 
 
+def test_info_and_reaction_rows_emit_only_exact_content_free_invalidation(world):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    rows = (
+        {'id': 'membership-info', 'ns': base + 2, 'from': 'alice', 'kind': 'info',
+         'event': {'type': 'renamed', 'name': 'private-name'}},
+        {'id': 'reaction-info', 'ns': base + 3, 'from': 'alice', 'kind': 'info',
+         'event': {'type': 'reaction', 'msg_id': 'one', 'emoji': 'secret-emoji'}},
+    )
+    mesh.store.upsert_messages(chat, rows)
+    for row in rows:
+        _enqueue(mesh, chat, row['ns'], kind='info', ident=row['id'])
+    sub = mesh.bus.subscribe()
+
+    step = NodeEventPump.for_mesh(mesh).run_due()
+
+    assert step.operation == 'events' and step.records == 2 and not step.gap
+    received = list(sub.drain())
+    assert [(event.type, event.chat_id, event.data) for event in received] == [
+        (eventbus.READ_MODEL, chat, {'scope': 'chat'}),
+    ]
+    assert 'private-name' not in str(received)
+    assert 'secret-emoji' not in str(received)
+    assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
+
+
+def test_info_invalidation_rotates_with_continuous_message_work(world):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    info = {'id': 'info', 'ns': base + 2, 'from': 'alice', 'kind': 'info',
+            'event': {'type': 'reaction', 'msg_id': 'one', 'emoji': 'x'}}
+    mesh.store.upsert_messages(chat, (info,))
+    _enqueue(mesh, chat, info['ns'], kind='info', ident=info['id'])
+    _enqueue(mesh, chat, base)
+    worker = NodeMessageEventPreparation(mesh)
+
+    first = worker.run_one()
+    second = worker.run_one()
+
+    assert first.status == 'consumed' and first.messages[0].id == 'one'
+    assert second.status == 'consumed' and second.records == 1 \
+        and second.messages == () and not second.gap
+
+
+def test_same_chat_info_invalidation_preserves_retained_message_retry(world, monkeypatch):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    info = {'id': 'info', 'ns': base + 2, 'from': 'alice', 'kind': 'info',
+            'event': {'type': 'reaction', 'msg_id': 'one', 'emoji': 'x'}}
+    mesh.store.upsert_messages(chat, (info,))
+    _enqueue(mesh, chat, info['ns'], kind='info', ident=info['id'])
+    _enqueue(mesh, chat, base)
+    monkeypatch.setattr(
+        'agentbridge.mesh.node_event_preparation.ExactMessageProjectionOperation.prepare',
+        lambda *_args: PageWorkResult('work', 'overlay_proofs', ()),
+    )
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: 10.0)
+
+    assert worker.run_one().status == 'pending'
+    retained = worker._jobs[chat]
+    retry_due = retained.next_due
+    info_step = worker.run_one()
+
+    assert info_step.status == 'consumed' and info_step.messages == ()
+    assert worker._jobs[chat] is retained
+    assert retained.next_due == retry_due
+    assert tuple(item.message_id for item in retained.identities) == ('one',)
+
+
 def test_pending_source_keeps_identity_and_other_chat_can_progress(world, monkeypatch):
     mesh, _mirror, _provider, chat, base, _reader, _publisher = world
     _enqueue(mesh, 'a-pending', base, ident='missing')
@@ -339,7 +405,7 @@ def test_prepared_denial_is_final_fenced_and_consumption_rolls_back(world, chang
     assert len(node_event_journal.peek_event_identities(mesh.store)) == 1
 
 
-def test_unknown_kind_gap_does_not_consume_info_or_starve_message(world):
+def test_unknown_kind_gap_does_not_starve_message_or_info_invalidation(world):
     mesh, _mirror, _provider, chat, base, _reader, _publisher = world
     _enqueue(mesh, chat, base, ident='info', kind='info')
     for i in range(3):
@@ -353,7 +419,7 @@ def test_unknown_kind_gap_does_not_consume_info_or_starve_message(world):
     for _ in range(4):
         worker.run_one()
     assert node_event_journal.peek_event_identities(mesh.store, kind='unknown') == ()
-    assert len(node_event_journal.peek_event_identities(mesh.store, kind='info')) == 1
+    assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
 
 
 def test_near_ceiling_payload_is_terminal_only_when_irreducible_capture_floor_exceeds_cap(world):
