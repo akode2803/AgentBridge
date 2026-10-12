@@ -908,3 +908,21 @@ document source and the exact membership-input generation, so an accidental
 second writer makes canonical pages unavailable until a complete coupled
 republish repairs the cut. This is a fail-closed guard, not a supported
 dual-writer protocol.
+
+The threadless local-node page runtime composes the provider-to-node scheduler
+and node-to-Store publisher without activating either product route. One call
+does at most one provider or Store operation. A newly selected chat receives one
+local publication opportunity before provider fallback work, so a persisted
+node can serve a cold Store without first paying for a network reconciliation.
+When both planes remain due, the runtime alternates after one Store operation so
+a large room backlog cannot starve node recovery. Realtime and settlement wakes
+remain content-free scheduling hints.
+
+This composition still does not solve product cutover. Startup must derive and
+pin the authenticated provider principal before creating the node owner, and the
+app must stop legacy `SyncEngine` message writes before this runtime can publish
+to the same Store. Optimistic local sends also need an explicit presentation
+contract: invalidation must remain durable, while the browser retains the last
+canonical page plus its bounded pending bubble until node recovery republishes
+the confirmed remote cut. These requirements stay separate from this inactive
+scheduler composition.
