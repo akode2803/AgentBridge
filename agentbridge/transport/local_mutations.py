@@ -63,6 +63,12 @@ class LocalMutationTransport(Transport):
         return self._transport.supports_reference_source
 
     @property
+    def supports_mutation_protocol(self):
+        return self._provider_read(
+            lambda provider: provider.supports_mutation_protocol,
+        )
+
+    @property
     def supports_exclusive_create(self):
         return self._transport.supports_exclusive_create
 
@@ -312,6 +318,16 @@ class LocalMutationTransport(Transport):
 
     def recovery_fence(self):
         return self._provider_read(lambda provider: provider.recovery_fence())
+
+    def mutation_protocol_state(self):
+        def read(provider):
+            state = provider.mutation_protocol_state()
+            principal = self._provider_principal
+            if (principal is not None
+                    and getattr(state, 'account_id', None) != principal):
+                raise ValueError('local mutation owner principal changed')
+            return state
+        return self._provider_read(read)
 
     def recovery_page(self, family, after, *, limit, max_bytes):
         return self._provider_read(

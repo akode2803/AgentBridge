@@ -52,6 +52,11 @@ from .change_ledger import (
     MAX_LEDGER_PAGE_SIZE,
 )
 from .health import classify_transport_error, retry_inline
+from .mutation_protocol import (
+    MUTATION_PROTOCOL_SCHEMA_VERSION,
+    ProviderDatabaseSeal,
+    ProviderMutationProtocolState,
+)
 from .recovery_sources import (
     MAX_RECOVERY_PAGE_ROWS,
     RECOVERY_RESPONSE_OVERHEAD,
@@ -118,6 +123,7 @@ _SCOPED_SOURCE_REPROBE_S = 60.0
 _RECOVERY_SOURCE_REPROBE_S = 60.0
 _REFERENCE_SOURCE_SCHEMA_VERSION = 1
 _REFERENCE_SOURCE_REPROBE_S = 60.0
+_MUTATION_PROTOCOL_REPROBE_S = 60.0
 
 
 def _is_missing_column(err: Exception) -> bool:
@@ -285,6 +291,8 @@ class SupabaseTransport(Transport):
         self._recovery_source_reprobe = 0.0
         self._reference_source_ready: bool | None = None
         self._reference_source_reprobe = 0.0
+        self._mutation_protocol_ready: bool | None = None
+        self._mutation_protocol_reprobe = 0.0
         self._hints = _HintCoalescer(self._send_hint)
         self._stats_lock = threading.Lock()
         self._stats = {"queries": 0, "rx_bytes": 0, "blob_bytes": 0,
@@ -436,6 +444,91 @@ class SupabaseTransport(Transport):
             if rows is not None:
                 self._stats["rx_bytes"] += len(repr(rows))
             self._stats["blob_bytes"] += blob
+
+    # -------------------------- inactive provider mutation recovery contract
+    @property
+    def supports_mutation_protocol(self) -> bool:  # type: ignore[override]
+        return self._mutation_protocol_capability()
+
+    def _mutation_protocol_capability(self) -> bool:
+        """Probe the observation-only v1 marker on a slow leash."""
+        now = time.monotonic()
+        if (self._mutation_protocol_ready is not None
+                and now < self._mutation_protocol_reprobe):
+            return self._mutation_protocol_ready
+        try:
+            ready = self._retry(
+                lambda: self._sb().rpc("ab_mutation_protocol_ready").execute(),
+            ).data
+            self._count(ready)
+            self._mutation_protocol_ready = (
+                type(ready) is int
+                and ready == MUTATION_PROTOCOL_SCHEMA_VERSION
+            )
+        except Exception as exc:  # noqa: BLE001 - optional inactive capability
+            if _is_missing_column(exc):
+                self._mutation_protocol_ready = False
+            elif self._mutation_protocol_ready is None:
+                return False
+        self._mutation_protocol_reprobe = now + _MUTATION_PROTOCOL_REPROBE_S
+        return bool(self._mutation_protocol_ready)
+
+    def _require_mutation_protocol(self) -> None:
+        if not self._mutation_protocol_capability():
+            raise NotImplementedError(
+                "Supabase mutation protocol is unavailable")
+
+    @staticmethod
+    def _mutation_protocol_state(
+        raw: object,
+    ) -> ProviderMutationProtocolState:
+        if type(raw) is not dict:
+            raise ValueError("invalid mutation protocol state")
+        required = {
+            "schema_version", "account_id", "role", "root",
+            "protocol_epoch", "legacy_writes_enabled", "database_seal",
+            "blob_writes_sealed",
+        }
+        if set(raw) != required:
+            raise ValueError("incomplete mutation protocol state")
+        seal_raw = raw["database_seal"]
+        seal = None
+        if seal_raw is not None:
+            seal_required = {
+                "seal_id", "plan_digest", "sealed_from_epoch",
+                "protocol_epoch", "source_epoch", "minimum_cursor", "cursor",
+                "seal_scope",
+            }
+            if type(seal_raw) is not dict or set(seal_raw) != seal_required:
+                raise ValueError("invalid database seal")
+            seal = ProviderDatabaseSeal(**{
+                key: seal_raw[key] for key in seal_required
+            })
+        return ProviderMutationProtocolState(
+            schema_version=raw["schema_version"],
+            account_id=raw["account_id"],
+            role=raw["role"],
+            root=raw["root"],
+            protocol_epoch=raw["protocol_epoch"],
+            legacy_writes_enabled=raw["legacy_writes_enabled"],
+            database_seal=seal,
+            blob_writes_sealed=raw["blob_writes_sealed"],
+        )
+
+    def mutation_protocol_state(self) -> ProviderMutationProtocolState:
+        self._require_mutation_protocol()
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_mutation_protocol_state", {"p_root": self.root},
+        ).execute()).data
+        self._count(raw)
+        try:
+            state = self._mutation_protocol_state(raw)
+            if state.root != self.root:
+                raise ValueError("mutation protocol root mismatch")
+            return state
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid mutation protocol state") from exc
 
     def transfer_stats(self) -> dict:
         with self._stats_lock:

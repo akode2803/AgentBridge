@@ -1254,3 +1254,43 @@ activation tests pass; Ruff and whitespace checks pass locally. The previous
 Windows run's sole failure was the documented isolated signup SQLite commit
 stall at the ten-second fixture deadline; this corrected head still requires
 replacement cross-platform CI.
+
+The next stacked branch is `codex/provider-mutation-recovery-contract`. A
+read-only inspection of the stopped development instance found the exact
+capacity shape behind that fallback: 62 normal intents (59 presence documents,
+two machine documents and three chat logs), two current sentinel fences and 64
+quarantined historical log intents. The node remains generation zero/pending.
+No token or outcome was inferred from age or process state. The proposed
+[provider mutation recovery contract](docs/PROVIDER_MUTATION_RECOVERY_CONTRACT.md)
+uses one irreversible provider legacy-write seal, a root protocol epoch and
+typed idempotent mutation receipts. Only a complete recovery bound to that seal
+may archive and consume the exact old fence set in the admission transaction.
+Permanent legacy fallback remains the safe interim behavior; scoped pending
+reads are a later availability optimization and do not resolve an intent.
+
+The first inactive provider slice is now implemented locally. It adds a
+database-only shared-lock legacy gate for `ab_docs`, `ab_logs` and `ab_members`,
+an irreversible admin-only `database-v1` seal receipt, a private future receipt
+table and an authenticated read-only protocol-state probe. Schema installation
+does not seal any root, no API role can call the seal or write receipts, and the
+application exposes observation only. Blob writes are explicitly reported as
+unsealed. The strict Supabase wire re-reads state on every request, rejects
+unknown or inconsistent fields and binds the result to the requested root and
+pinned authenticated principal through both cache and local-mutation wrappers.
+Focused validation passes 214 tests with two expected skips; Ruff and whitespace
+checks pass. Independent Astra review found no P1/P2 and confirmed adversarial
+principal/root rejection. No provider schema has been deployed and PostgreSQL
+syntax, RLS/query behavior and concurrent shared/exclusive lock schedules remain
+unverified. Next, run this P1a slice against a disposable PostgreSQL/Supabase
+project, then design the inactive typed receipt RPCs and bounded receipt
+lifecycle before any legacy seal or historical-fence admission.
+
+PR 134 now carries that provider slice, stacked on the repaired PR 133 head. The
+rebase preserved both the orphan-node-fence activation block and the exact
+legacy inventory/provider protocol work. Its post-rebase gate passes 254 tests
+with two expected skips; Ruff and whitespace checks pass. PR 133 replacement
+Ubuntu and Windows jobs were still running when PR 134 opened. No schema was
+installed, no seal was issued and the app remained shut down. The next concrete
+gate is disposable PostgreSQL/Supabase execution of the source schema, RLS and
+two-transaction shared/exclusive advisory-lock schedules before P1b typed RPC
+implementation.

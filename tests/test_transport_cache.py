@@ -667,6 +667,7 @@ def test_local_node_source_reads_delegate_through_the_wrapper():
     inner.supports_scoped_source_reads = True
     inner.supports_recovery_source = True
     inner.supports_reference_source = True
+    inner.supports_mutation_protocol = True
     inner.source_documents = lambda paths, **kwargs: calls.append(
         ("documents", paths, kwargs)) or "documents"
     inner.source_log_page = lambda chat, log, **kwargs: calls.append(
@@ -685,11 +686,14 @@ def test_local_node_source_reads_delegate_through_the_wrapper():
         ("reference-streams", after, kwargs)) or "reference-streams"
     inner.reference_log_page = lambda chat, log, **kwargs: calls.append(
         ("reference-log", chat, log, kwargs)) or "reference-log"
+    inner.mutation_protocol_state = lambda: calls.append(
+        ("mutation-protocol",)) or "mutation-protocol"
 
     assert cached.supports_source_ledger is True
     assert cached.supports_scoped_source_reads is True
     assert cached.supports_recovery_source is True
     assert cached.supports_reference_source is True
+    assert cached.supports_mutation_protocol is True
     assert cached.source_documents(("users/a.json",), max_bytes=4096) == "documents"
     assert cached.source_log_page(
         "room", "main", after_cursor=1, through_cursor=2,
@@ -710,6 +714,7 @@ def test_local_node_source_reads_delegate_through_the_wrapper():
         "room", "main", after_cursor=10, through_cursor=11,
         limit=12, max_bytes=8192,
     ) == "reference-log"
+    assert cached.mutation_protocol_state() == "mutation-protocol"
     assert calls == [
         ("documents", ("users/a.json",), {"max_bytes": 4096}),
         ("source-log", "room", "main", {
@@ -730,6 +735,7 @@ def test_local_node_source_reads_delegate_through_the_wrapper():
             "after_cursor": 10, "through_cursor": 11,
             "limit": 12, "max_bytes": 8192,
         }),
+        ("mutation-protocol",),
     ]
 
 

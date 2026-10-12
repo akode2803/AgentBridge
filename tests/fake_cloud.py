@@ -305,7 +305,9 @@ class FakeClient:
                    "_source_ledger_version": None,
                    "_scoped_source_version": None,
                    "_recovery_version": None,
-                   "_reference_version": None}
+                   "_reference_version": None,
+                   "_mutation_protocol_version": None,
+                   "_mutation_protocol_state": None}
         self.storage = FakeStorage(lock=self.lock)
 
     def migrate(self):
@@ -341,6 +343,19 @@ class FakeClient:
             return int(bool(self.db["_effects_ready"]))
         if fn == "ab_change_ledger_ready":
             return self.db.get("_change_ledger_version")
+        if fn == "ab_mutation_protocol_ready":
+            return (self.db.get("_mutation_protocol_version")
+                    if self.db.get("_mutation_protocol_role", "authenticated")
+                    == "authenticated"
+                    and self.db.get("_mutation_protocol_timeout_ok", True) else 0)
+        if fn == "ab_mutation_protocol_state":
+            state = self.db.get("_mutation_protocol_state")
+            if (self.db.get("_mutation_protocol_version") != 1
+                    or state is None
+                    or self.db.get("_mutation_protocol_role", "authenticated")
+                    != "authenticated"):
+                raise ValueError("mutation protocol is unavailable")
+            return copy.deepcopy(state)
         if fn == "ab_node_recovery_ready":
             return (self.db.get("_recovery_version")
                     if self.db.get("_recovery_role", "authenticated")

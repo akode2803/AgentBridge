@@ -110,6 +110,137 @@ def test_begin_retires_node_before_provider_and_completion_never_restores(world)
         node_epoch="reopened", started_ns=2).pending_mutations == 1
 
 
+def test_legacy_recovery_inventory_binds_exact_root_and_node_cut_without_payload(
+        world):
+    root, _store, node, _definition, _position = world
+    document = root.begin((S("doc_exact", "presence/alice@machine.json"),))
+    log = root.begin((S("log_chat", "room"),))
+
+    first = root.capture_legacy_recovery_inventory(node)
+    repeated = root.capture_legacy_recovery_inventory(node)
+    assert first == repeated
+    assert first.schema_version == 1
+    assert len(first.plan_digest) == 64
+    assert len(first.coordinator_identity_digest) == 64
+    assert first.normal_intents == 2
+    assert first.sentinel_intents == 0
+    assert first.quarantined_intents == 0
+    assert first.pending_scope_counts == (("doc_exact", 1), ("log_chat", 1))
+    assert first.quarantine_scope_counts == ()
+    assert first.registered_stores == first.registered_nodes == 1
+    assert first.admitted_generation == 1
+    assert first.node_health == "pending"
+    assert first.node_fence_counts == (("active", 2),)
+    assert document.token not in repr(first)
+    assert log.token not in repr(first)
+    assert "presence/alice@machine.json" not in repr(first)
+
+    root.complete(document)
+    after = root.capture_legacy_recovery_inventory(node)
+    assert after.plan_digest != first.plan_digest
+    assert after.root_revision == first.root_revision + 1
+    assert after.normal_intents == 1
+    assert after.pending_scope_counts == (("log_chat", 1),)
+    assert after.node_fence_counts == (("active", 1), ("completed", 1))
+
+
+def test_legacy_recovery_inventory_includes_quarantine_without_exposing_tokens(
+        world):
+    root, _store, node, _definition, _position = world
+    attempts = tuple(
+        root.begin((S("log_chat", "a" if index < 2 else "b"),))
+        for index in range(4)
+    )
+    issued = root.quarantine(tuple(intent.token for intent in attempts))
+    current_tokens = tuple(item[0] for item in issued)
+
+    inventory = root.capture_legacy_recovery_inventory(node)
+    assert inventory.normal_intents == 0
+    assert inventory.sentinel_intents == 2
+    assert inventory.quarantined_intents == 4
+    assert inventory.pending_scope_counts == (("log_chat", 2),)
+    assert inventory.quarantine_scope_counts == (("log_chat", 4),)
+    assert inventory.node_fence_counts == (("active", 6),)
+    rendered = repr(inventory)
+    assert all(intent.token not in rendered for intent in attempts)
+    assert all(token not in rendered for token in current_tokens)
+    assert "'a'" not in rendered and "'b'" not in rendered
+
+
+def test_legacy_recovery_inventory_rejects_private_recovery_work(world):
+    root, _store, node, _definition, _position = world
+    node.begin_candidate(created_ns=3)
+    with pytest.raises(NodeGenerationChanged,
+                       match="recovery work already exists"):
+        root.capture_legacy_recovery_inventory(node)
+
+
+def test_legacy_recovery_inventory_requires_the_only_registered_node(
+        world, tmp_path):
+    root, _store, node, _definition, _position = world
+    other = NodeStore(
+        tmp_path / "other-node" / "replica.sqlite",
+        ReplicaIdentity(
+            "https://example.supabase.co", "supabase://mesh", "alice", "other",
+        ),
+    )
+    root.register_node(other)
+
+    with pytest.raises(SourceChanged, match="legacy_recovery_requires_one_node"):
+        root.capture_legacy_recovery_inventory(node)
+
+
+def test_legacy_recovery_inventory_rejects_foreign_node_owner(world):
+    root, _store, node, _definition, _position = world
+    with sqlite3.connect(node.path) as conn:
+        conn.execute(
+            "UPDATE node_coordinator_owner SET coordinator_identity=?",
+            ("foreign-root",),
+        )
+
+    with pytest.raises(SourceChanged, match="node_coordinator_owner_changed"):
+        root.capture_legacy_recovery_inventory(node)
+
+
+def test_legacy_recovery_inventory_rejects_unbounded_node_metadata(world):
+    root, _store, node, _definition, _position = world
+    with sqlite3.connect(node.path) as conn:
+        conn.execute("UPDATE node_meta SET health=?", ("x" * 1_000_000,))
+
+    with pytest.raises(sqlite3.DatabaseError,
+                       match="invalid local node metadata"):
+        root.capture_legacy_recovery_inventory(node)
+
+
+def test_legacy_recovery_inventory_rejects_unknown_root_pending_reason(world):
+    root, _store, node, _definition, _position = world
+    with sqlite3.connect(node.path) as conn:
+        conn.execute(
+            "UPDATE scope_versions SET pending_reason=? "
+            "WHERE scope_kind='root' AND scope_id=''",
+            ("x" * 1_000_000,),
+        )
+
+    with pytest.raises(sqlite3.DatabaseError,
+                       match="invalid local node scope"):
+        root.capture_legacy_recovery_inventory(node)
+
+
+@pytest.mark.parametrize("table", ("mutation_scopes", "quarantine_scopes"))
+def test_legacy_recovery_inventory_rejects_unknown_selector_classes(
+        world, table):
+    root, _store, node, _definition, _position = world
+    attempts = tuple(root.begin((S("log_chat", "room"),)) for _ in range(2))
+    if table == "quarantine_scopes":
+        root.quarantine(tuple(intent.token for intent in attempts))
+    with sqlite3.connect(root.path) as conn:
+        conn.execute(f"UPDATE {table} SET kind='alice@secret'")
+
+    with pytest.raises(
+            SourceChanged, match="invalid_(pending_selector|quarantine_scope)"):
+        root.capture_legacy_recovery_inventory(node)
+
+
 def test_node_position_is_rechecked_under_finalization_cut(world):
     root, store, node, definition, position = world
     with root.finalization_cut(

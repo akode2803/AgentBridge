@@ -171,3 +171,24 @@ valid historical recovery evidence, while an orphan active fence keeps legacy
 sync available and the node pending. The exact fanout-rollback regression plus
 the 31-test mutation-fence and 31-test loopback activation gates pass; Ruff and
 whitespace checks pass locally. Replacement CI remains required.
+
+## Historical mutation recovery prerequisite
+
+The follow-up branch `codex/provider-mutation-recovery-contract` captures the
+exact stopped-app legacy inventory under root-to-node exclusion and adds the
+first inactive provider prerequisite. The source schema defines a database-only
+legacy-write gate for documents, logs and membership rows, an admin-only
+irreversible seal receipt, a private future receipt table, and an authenticated
+read-only protocol-state function. Installing it leaves legacy writes enabled;
+the application has no seal or receipt-write path. Blob writes remain explicitly
+unsealed.
+
+The Python transport observes this state freshly through its exact provider and
+pinned principal, rejects malformed/unknown fields and never caches the state in
+the document mirror. Focused schema/transport/wrapper validation passes 214
+tests with two expected skips; Ruff and whitespace checks pass. Independent
+Astra review found no P1/P2 and added adversarial principal/root probes. No live
+schema installation or PostgreSQL concurrency validation has occurred. Typed
+idempotent mutation RPCs, bounded receipt retention, object-storage proof, the
+seal-bound full recovery and atomic historical-fence admission remain separate
+stages; the legacy writer remains the safe runtime owner meanwhile.
