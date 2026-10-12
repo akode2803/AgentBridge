@@ -143,11 +143,6 @@ def test_signed_native_reaction_maps_to_identity_wake_and_fresh_notification(wor
 def test_reaction_notification_rechecks_reactor_history_cutoff(world):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     env, _document = _signed_reaction(world)
-    meta = mirror.get_doc(P.meta(chat))
-    meta['members']['alice']['joined_ns'] = base + 2
-    meta['tenure']['alice'] = [[base + 2, 0]]
-    mirror.put_doc(P.meta(chat), meta)
-    _inputs(mesh, mirror, reader, publisher, chat)
     sub = mesh.bus.subscribe()
     clock = [0.0]
     pump = NodeEventPump.for_mesh(mesh, clock=lambda: clock[0])
@@ -161,6 +156,8 @@ def test_reaction_notification_rechecks_reactor_history_cutoff(world):
     assert reaction.data['id'] == env['id']
 
     meta = mirror.get_doc(P.meta(chat))
+    meta['members']['alice']['joined_ns'] = base + 2
+    meta['tenure']['alice'] = [[base + 2, 0]]
     meta['permissions']['send_history'] = False
     mirror.put_doc(P.meta(chat), meta)
     _inputs(mesh, mirror, reader, publisher, chat)
@@ -239,11 +236,16 @@ def test_reaction_cannot_attach_to_target_created_after_operation(world):
         mesh.store, kind='info') == ()
 
 
-def test_reactor_without_shared_history_cannot_target_prejoin_message(world):
+@pytest.mark.parametrize('current_send_history', (False, True))
+def test_reactor_without_proven_shared_history_cannot_target_prejoin_message(
+        world, current_send_history):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     env, _document = _signed_reaction(world)
     meta = mirror.get_doc(P.meta(chat))
-    meta['permissions']['send_history'] = False
+    # Current permission cannot prove what was enabled when the reaction was
+    # minted. Both an explicitly disabled room and a later enabled room must
+    # conservatively suppress a semantic wake for the pre-join target.
+    meta['permissions']['send_history'] = current_send_history
     meta['members']['alice']['joined_ns'] = base + 2
     meta['tenure']['alice'] = [[base + 2, 0]]
     mirror.put_doc(P.meta(chat), meta)

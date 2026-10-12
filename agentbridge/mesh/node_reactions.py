@@ -175,16 +175,18 @@ class ReactionProjectionOperation(PageOperation):
                 or not readmodel.member_at(
                     spans, event['reaction_ns'])):
             return None
-        # Both signed records must belong to one tenure. When history sharing
-        # is disabled, that tenure's join cut also bounds what the reactor was
-        # allowed to target; recipient visibility alone is insufficient.
+        # Both signed records must belong to one tenure. The current metadata
+        # is not a history of permission changes, so a currently enabled
+        # send_history flag cannot prove that pre-join history was shared when
+        # the operation was minted. Keep the tenure join as a conservative cut
+        # for semantic wakes; a later protocol can widen it only with bounded
+        # authenticated reaction-time permission evidence.
         shared = next((joined for joined, left in spans
                        if joined <= event['reaction_ns'] < row.key.ns
                        and (left == 0 or row.key.ns < left)), None)
         if shared is None:
             return None
-        history_from = (shared if snapshot.kind is ChatKind.GROUP
-                        and not snapshot.permissions.send_history else 0)
+        history_from = shared if snapshot.kind is ChatKind.GROUP else 0
         return env, event, public, history_from
 
     def _resolve_exact_projection(
