@@ -305,6 +305,23 @@ def test_three_persistent_lanes_receive_round_robin_service(world, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize('delivered', [True, False])
+def test_delivery_attempt_wakes_recovery_and_source_republication(world, monkeypatch, delivered):
+    runtime, _store, _server, _clock = world
+    before = runtime.node._wake_revision
+    requested = []
+    monkeypatch.setattr(runtime.publisher, 'request',
+                        lambda chat, **flags: requested.append((chat, flags)) or True)
+    monkeypatch.setattr(runtime._events, 'run_due', lambda: NodeEventPumpStep(
+        'delivery', chat_id=CHAT, up_to_ns=7, delivered=delivered))
+
+    result = runtime._run_event()
+
+    assert result.operation == 'event'
+    assert runtime.node._wake_revision == before + 1
+    assert requested == [(CHAT, {'selected': False, 'activity': True, 'settled': True})]
+
+
 def test_concurrent_node_tick_is_reported_as_no_operation(world, monkeypatch):
     runtime, _store, _server, _clock = world
     monkeypatch.setattr(

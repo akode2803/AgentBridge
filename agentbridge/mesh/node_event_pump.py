@@ -72,6 +72,7 @@ class NodeEventPump:
         self._next_due = 0.0
         self._delivery_cursor = ""
         self._delivery_retry = OrderedDict()
+        self._prefer_delivery = False
         node_event_journal.initialize(store)
 
     @classmethod
@@ -98,6 +99,12 @@ class NodeEventPump:
         now = self.clock()
         if now < self._next_due:
             return NodeEventPumpStep("none")
+        delivery = None
+        if self._prefer_delivery:
+            delivery = self._run_delivery(now)
+            if delivery.operation != 'none':
+                self._prefer_delivery = False
+                return delivery
         claim = node_event_journal.claim_events(self.store)
         if claim is not None:
             gap = claim.gap
@@ -113,9 +120,13 @@ class NodeEventPump:
                     gap = True
                     self._global_invalidation()
             self._next_due = 0.0
+            self._prefer_delivery = True
             return NodeEventPumpStep(
                 "events", records=len(claim.records), gap=gap,
             )
+        return delivery if delivery is not None else self._run_delivery(now)
+
+    def _run_delivery(self, now: float) -> NodeEventPumpStep:
         page = node_event_journal.delivery_page(
             self.store, after_chat=self._delivery_cursor,
         )
@@ -135,6 +146,7 @@ class NodeEventPump:
             self.messaging.mark_delivered(
                 pending.chat_id, up_to_ns=pending.max_ns,
             )
+            node_event_journal.complete_delivery(self.store, pending)
         except Exception:  # receipt failure never breaks admitted event delivery
             overflow = (pending.chat_id not in self._delivery_retry
                         and len(self._delivery_retry) >= 128)
@@ -147,7 +159,6 @@ class NodeEventPump:
                 "delivery", chat_id=pending.chat_id,
                 up_to_ns=pending.max_ns, delivered=False,
             )
-        node_event_journal.complete_delivery(self.store, pending)
         self._delivery_retry.pop(pending.chat_id, None)
         self._next_due = 0.0
         return NodeEventPumpStep(

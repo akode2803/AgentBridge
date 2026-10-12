@@ -176,6 +176,13 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   require a fresh bounded exact-ID read when the queued event is drained:
   queued preview or viewer-policy fields must never become continuing authority.
   Runtime translation and app-owned activation remain absent.
+  GitHub review corrections in v0.24.363 preserve an outer transaction during
+  nested journal calls, reject connection-local TEMP journal objects, retain
+  normalized legacy numeric IDs, rotate identity peeks past a failed chat,
+  alternate event claims with receipt attempts and wake recovery after receipt
+  attempts. Exact projection rejects unknown raw kinds and explicitly reports
+  legacy IDs that cannot be represented as overlay basenames for one-ID gap
+  retirement. These corrections must be included before stack activation.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 

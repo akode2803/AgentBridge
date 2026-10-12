@@ -240,6 +240,11 @@ class LocalNodePageRuntime:
         if events is None:
             return None
         result = events.run_due()
+        if result.operation == 'delivery':
+            # Both success and ambiguous failure can durably retire the local
+            # source. Recovery must observe settlement without waiting for the
+            # safety poll or treating receipt success as admission evidence.
+            self.request(result.chat_id, activity=True, settled=True)
         if result.operation == "none":
             return None
         return self._result("event", event=result)

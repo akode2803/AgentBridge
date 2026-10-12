@@ -1096,6 +1096,19 @@ exact-ID projection when the event is consumed. Until that read is integrated,
 the legacy notifier suppresses identity-only message wakes. Deleted,
 undecryptable and non-message results do not map to message events.
 
+The v0.24.363 review corrections make every journal operation that owns its
+transaction reject an active caller transaction before rollback scope. Main
+and TEMP schemas are checked for unowned journal objects. Payload-ID checks
+use the same guarded integer-to-text normalization as admission. A bounded
+chat cursor on identity peek supports circular service while transiently
+failed work remains pending. Unsupported raw kinds cannot be coerced into an
+ordinary message, and admitted legacy IDs incompatible with overlay basenames
+report `event_id_not_projectable`; the future consumer must isolate those to
+one identity before exact-CAS gap retirement. Receipt attempts alternate with
+event work and wake both node recovery and source republication after either
+success or ambiguous failure. A wake is never proof of successful receipt
+delivery or ready canonical inputs.
+
 Delivered high-waters are handled one chat per quantum. Failures retain the
 exact journal row and rotate to other chats under bounded per-chat retry state;
 a complete failed pass sleeps until retry rather than spinning. A successful

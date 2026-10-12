@@ -548,6 +548,27 @@ def test_exact_message_projection_excludes_info_and_reaction_events(world):
     assert page.messages == ()
 
 
+def test_exact_projection_does_not_coerce_unknown_raw_kind(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    mesh.store.upsert_messages(chat, [{**_message('future', base + 500), 'kind': 'future-kind'}])
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+
+    page = _finalize(ExactMessageProjectionOperation(
+        mesh, chat, ('future', 'm198'), source_reader=reader), inputs)
+
+    assert [message.id for message in page.messages] == ['m198']
+
+
+def test_exact_projection_reports_legacy_nonbasename_as_terminal_work(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    mesh.store.upsert_messages(chat, [_message('a/b', base + 500)])
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    result = ExactMessageProjectionOperation(
+        mesh, chat, ('a/b',), source_reader=reader).prepare(*inputs)
+
+    assert (result.status, result.reason) == ('unavailable', 'event_id_not_projectable')
+
+
 def test_terminal_exact_message_budget_failure_can_retire_as_gap(world):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     huge = _message('huge', base + 500)

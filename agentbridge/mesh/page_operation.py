@@ -517,6 +517,16 @@ class PageOperation:
         effects on quoted content; they are not themselves emitted.
         """
         exact, proof_keys, expected = targets, (), None
+        for ident in targets:
+            try:
+                document_observation._validate_document_path(P.edit(self.chat, ident))
+                if len(P.edit(self.chat, ident).split('/')) != 5:
+                    raise ValueError('exact target is not an overlay basename')
+            except ValueError:
+                # Admission preserves legacy opaque IDs. The future consumer
+                # must isolate this identity and retire it with a durable gap;
+                # never guess which noncanonical overlay path to authorize.
+                return PageWorkResult('unavailable', 'event_id_not_projectable')
         while True:
             self.ledger.step()
             inputs = self.source_reader.capture_page(
@@ -549,8 +559,12 @@ class PageOperation:
                 continue
             edits, redactions = _overlays(inputs)
             try:
+                ordinary_targets = tuple(
+                    row.key.id for row in inputs.exact_rows
+                    if row.key.id in targets and row.kind == 'message'
+                )
                 messages = select_exact_messages(
-                    inputs, targets, self.viewer, sealer,
+                    inputs, ordinary_targets, self.viewer, sealer,
                     edits=edits, redactions=redactions,
                     reactions=overlays.reactions, state=overlays.state,
                     tenure=snapshot.tenure, history_from_ns=history,

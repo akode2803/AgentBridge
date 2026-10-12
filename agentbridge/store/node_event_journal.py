@@ -248,6 +248,8 @@ def claim_events(store, *, limit: int = MAX_CLAIM_EVENTS) -> NodeEventClaim | No
             or not 1 <= limit <= MAX_CLAIM_EVENTS):
         raise ValueError("invalid node event claim limit")
     conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError('node event claim needs an owned transaction')
     try:
         conn.execute("BEGIN IMMEDIATE")
         _schema(conn)
@@ -301,7 +303,12 @@ def claim_events(store, *, limit: int = MAX_CLAIM_EVENTS) -> NodeEventClaim | No
             except (json.JSONDecodeError, UnicodeError, RecursionError):
                 gap = True
                 continue
-            if (type(payload) is not dict or payload.get("id") != message_id
+            payload_id = payload.get('id') if type(payload) is dict else None
+            if (type(payload) is not dict
+                    or type(payload_id) not in (str, int)
+                    or type(payload_id) is int and (
+                        payload_id == 0 or not -(2**63) <= payload_id <= 2**63 - 1)
+                    or str(payload_id) != message_id
                     or payload.get("ns") != ns
                     or payload.get("from", "") != sender
                     or payload.get("kind", "message") != kind):
@@ -328,7 +335,7 @@ def claim_events(store, *, limit: int = MAX_CLAIM_EVENTS) -> NodeEventClaim | No
 
 
 def peek_event_identities(
-    store, *, limit: int = MAX_PROJECT_EVENTS,
+    store, *, limit: int = MAX_PROJECT_EVENTS, after_chat: str | None = None,
 ) -> tuple[NodeEventIdentity, ...]:
     """Read one payload-free, single-chat projection batch.
 
@@ -341,6 +348,8 @@ def peek_event_identities(
     if (type(limit) is not int or isinstance(limit, bool)
             or not 1 <= limit <= MAX_PROJECT_EVENTS):
         raise ValueError("invalid node event projection limit")
+    if after_chat is not None and not _bounded_text(after_chat, 4096, empty=True):
+        raise ValueError('invalid node event rotation cursor')
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError(
@@ -348,9 +357,20 @@ def peek_event_identities(
         )
     _schema(conn)
     page_inputs._message_schema(conn)
-    first = conn.execute(
-        "SELECT chat FROM node_event_journal_items ORDER BY sequence LIMIT 1",
-    ).fetchone()
+    if after_chat is None:
+        first = conn.execute(
+            "SELECT chat FROM node_event_journal_items ORDER BY sequence LIMIT 1",
+        ).fetchone()
+    else:
+        first = conn.execute(
+            'SELECT chat FROM node_event_journal_items WHERE chat>? '
+            'ORDER BY chat,sequence LIMIT 1', (after_chat,),
+        ).fetchone()
+        if first is None:
+            first = conn.execute(
+                'SELECT chat FROM node_event_journal_items WHERE chat<=? '
+                'ORDER BY chat,sequence LIMIT 1', (after_chat,),
+            ).fetchone()
     if first is None:
         return ()
     if len(first) != 1 or not _bounded_text(first[0], 4096):
@@ -391,6 +411,8 @@ def peek_event_identities(
 def claim_gap(store) -> bool:
     """Atomically consume only the durable global resync bit."""
     conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError('node event gap claim needs an owned transaction')
     try:
         conn.execute("BEGIN IMMEDIATE")
         _schema(conn)
@@ -475,6 +497,8 @@ def retire_event_identities_as_gap(
         raise ValueError("terminal node event retirement requires one identity")
     sequences, wanted, placeholders = _event_batch(expected)
     conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError('node event retirement needs an owned transaction')
     try:
         conn.execute("BEGIN IMMEDIATE")
         _schema(conn)
@@ -566,6 +590,8 @@ def complete_delivery(store, expected: NodeDelivery) -> bool:
     if type(expected) is not NodeDelivery:
         raise TypeError("expected node delivery")
     conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError('node delivery completion needs an owned transaction')
     try:
         conn.execute("BEGIN IMMEDIATE")
         _schema(conn)
@@ -601,6 +627,11 @@ def _schema(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if triggers is not None or indexes is not None:
         raise NodeEventJournalChanged("node event journal objects changed")
+    if conn.execute(
+        "SELECT 1 FROM sqlite_temp_master WHERE tbl_name IN (?,?,?) "
+        "OR name IN (?,?,?) LIMIT 1", owned + owned,
+    ).fetchone() is not None:
+        raise NodeEventJournalChanged('node event journal temporary objects changed')
     state = conn.execute(
         "SELECT singleton,gap,typeof(singleton),typeof(gap) "
         "FROM node_event_journal_state",
