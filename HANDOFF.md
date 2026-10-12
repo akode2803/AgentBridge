@@ -1302,9 +1302,12 @@ observe the exact root-lock holder and waiter before explicitly releasing either
 transaction. It refuses non-test database names and existing AgentBridge
 objects, preserves existing Supabase auth functions and reaps every child on
 failure. Independent review found and drove closure of four harness defects,
-then reported no remaining P1/P2. Ruff, Python compilation, whitespace and the
-pure safety/source probes pass. This machine still has no `psql`, PostgreSQL,
-Docker or Podman, so PR 135 is executable preparation rather than database
-execution evidence. No provider or app runtime action occurred. Next, run PR
-135 against a fresh disposable database and record its server/version output;
-only a passing run unblocks P1b implementation.
+then reported no remaining P1/P2. The first CI attempt correctly exposed that a
+connection URI in `PGDATABASE` fell back to a local socket. The reviewed repair
+parses it into sanitized libpq settings and suppresses malformed-URL credential
+leaks. Replacement mutation-protocol run `38310823448` passed on PostgreSQL
+16.15 with client 16.15: state/grant/replay/source-cut checks and both exact
+named-session lock orders completed. Normal PR 133-135 platform jobs remain
+separate and may still be running. No provider schema, app runtime or live mesh
+was touched. Next, validate Supabase-specific auth/PostgREST/RLS exposure in a
+scratch project before provider installation, then begin P1b typed RPC design.

@@ -212,9 +212,13 @@ AGENTBRIDGE_TEST_DATABASE_URL='postgresql://…/agentbridge_mutation_test' \
 ```
 
 The development machine currently has no `psql`, PostgreSQL server, Docker or
-Podman runtime, so adding the gate does not itself constitute PostgreSQL
-execution evidence. A passing run and captured server version remain required
-before any provider installation.
+Podman runtime. The path-filtered PR workflow therefore executes this gate
+against a fresh PostgreSQL service only when the validator, schema or workflow
+changes. GitHub Actions run `38310823448` passed on PostgreSQL server 16.15 with
+client 16.15, including both named-session lock schedules. This is database
+execution evidence for the P1a SQL/lock contract; it is not Supabase
+PostgREST/auth/RLS acceptance. A later scratch-project run remains required
+before installing the section in a real mesh.
 
 ### P1b — inactive typed mutation RPCs
 

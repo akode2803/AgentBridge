@@ -50,10 +50,13 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   executes the source protocol SQL, state/grant/replay checks and both exact
   named-session advisory-lock orders without timing inference. It also proves
   that the seal cursor includes an admitted writer's committed source event.
-  This machine has no `psql`, PostgreSQL server, Docker or Podman runtime, so the
-  gate is source-complete but not execution evidence. Next: run it on a fresh
-  disposable PostgreSQL/Supabase database, then design the typed receipt RPCs
-  and bounded receipt lifecycle as P1b.
+  This machine has no local PostgreSQL runtime, so PR135 runs the gate only when
+  those files change against an isolated GitHub Actions service. Run
+  `38310823448` passed on PostgreSQL 16.15: schema/grants/replay/source-cut checks
+  and both exact named-session lock orders completed. Supabase-specific
+  `auth`/PostgREST/RLS exposure still requires a scratch project before provider
+  installation. Next: record that acceptance, then design the typed receipt
+  RPCs and bounded receipt lifecycle as P1b.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady
