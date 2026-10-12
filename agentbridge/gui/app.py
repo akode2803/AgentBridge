@@ -70,7 +70,7 @@ for mod in (api_auth, api_chats, api_pages, api_page_aux, api_page_receipts, api
     RAW_ROUTES.update(getattr(mod, "RAW_POST", {}))
 
 MAX_BODY = 64 * 1024 * 1024  # JSON bodies and raw uploads alike
-MAX_REJECT_DRAIN = 64 * 1024
+MAX_REJECT_DRAIN = 128 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):

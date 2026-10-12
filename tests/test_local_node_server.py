@@ -719,7 +719,7 @@ def test_partial_unauthenticated_requests_are_bounded_and_expire(tmp_path):
             overflow.settimeout(2)
             try:
                 assert overflow.recv(1) == b""
-            except ConnectionResetError:
+            except (ConnectionResetError, ConnectionAbortedError):
                 pass
             overflow.close()
 
