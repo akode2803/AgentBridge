@@ -1055,6 +1055,16 @@ malformed signed visibility evidence cannot authorize a semantic wake. The
 expanded 184-test reaction, retained-event, local-source, overlay and page gate
 passes with two expected skips; Ruff and diff checks pass locally.
 
+The final current-head review closed three consistency edges. A reaction write
+that observes key availability changing between compatibility and v2 signing
+now retries the complete pair once and aborts before publication if it changes
+again. Native-operation readers reject asymmetric dual-signature documents, so
+direct and indexed crypto paths suppress the same input. Semantic reaction
+wakes no longer treat the current `send_history` value as reaction-time proof:
+group reactions retain the actor tenure join cut unless a future bounded,
+authenticated historical permission witness is added. Focused reaction and
+retained-event validation passes 36 tests; Ruff and diff checks pass locally.
+
 The PR 132 Windows full suite exposed a test-isolation race, not an escaped
 read-ack fence: the acknowledgment reservation had reached `aborted`, while an
 unrelated writer owned the one remaining root intent. Read-ack tests now assert
