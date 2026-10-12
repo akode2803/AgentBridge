@@ -166,6 +166,28 @@ def test_delivery_completion_cannot_erase_a_concurrently_newer_highwater(store):
     assert node_event_journal.pending_deliveries(store) == ()
 
 
+def test_delivery_page_rotates_in_bounded_chat_order(store):
+    conn = store._conn()
+    conn.executemany(
+        "INSERT INTO node_event_delivery VALUES(?,?)",
+        ((f"chat-{index:02}", index + 1) for index in range(35)),
+    )
+    conn.commit()
+
+    first = node_event_journal.delivery_page(store)
+    second = node_event_journal.delivery_page(
+        store, after_chat=first.deliveries[-1].chat_id,
+    )
+
+    assert len(first.deliveries) == node_event_journal.MAX_DELIVERIES
+    assert first.has_more
+    assert [item.chat_id for item in second.deliveries[:3]] == [
+        "chat-32", "chat-33", "chat-34",
+    ]
+    assert second.deliveries[3].chat_id == "chat-00"
+    assert second.has_more
+
+
 def test_publication_failure_rolls_back_event_and_delivery_work(store):
     rec = _record(1)
     conn = store._conn()

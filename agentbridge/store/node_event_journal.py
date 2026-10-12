@@ -78,6 +78,12 @@ class NodeDelivery:
             raise ValueError("invalid node delivery")
 
 
+@dataclass(frozen=True)
+class NodeDeliveryPage:
+    deliveries: tuple[NodeDelivery, ...]
+    has_more: bool
+
+
 def initialize(store) -> None:
     """Install the complete journal namespace or validate the existing one."""
     conn = store._conn()
@@ -309,6 +315,39 @@ def pending_deliveries(
             raise NodeEventJournalChanged("malformed node delivery")
         result.append(NodeDelivery(chat, max_ns))
     return tuple(result)
+
+
+def delivery_page(
+    store, *, after_chat: str = "", limit: int = MAX_DELIVERIES,
+) -> NodeDeliveryPage:
+    """Read one bounded circular delivery slice after the prior chat key."""
+    if (type(after_chat) is not str or len(after_chat.encode()) > 4096
+            or type(limit) is not int or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_DELIVERIES):
+        raise ValueError("invalid node delivery page")
+    conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("node delivery read needs no transaction")
+    _schema(conn)
+    rows = conn.execute(
+        "SELECT chat,max_ns FROM node_event_delivery WHERE chat>? "
+        "ORDER BY chat LIMIT ?",
+        (after_chat, limit + 1),
+    ).fetchall()
+    if after_chat and len(rows) < limit + 1:
+        rows.extend(conn.execute(
+            "SELECT chat,max_ns FROM node_event_delivery WHERE chat<=? "
+            "ORDER BY chat LIMIT ?",
+            (after_chat, limit + 1 - len(rows)),
+        ).fetchall())
+    has_more = len(rows) > limit
+    deliveries = []
+    for chat, max_ns in rows[:limit]:
+        try:
+            deliveries.append(NodeDelivery(chat, max_ns))
+        except (TypeError, ValueError) as exc:
+            raise NodeEventJournalChanged("malformed node delivery") from exc
+    return NodeDeliveryPage(tuple(deliveries), has_more)
 
 
 def complete_delivery(store, expected: NodeDelivery) -> bool:

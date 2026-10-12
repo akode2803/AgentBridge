@@ -11,6 +11,7 @@ import pytest
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.local_input_runtime import LocalInputRuntime
 from agentbridge.mesh.node_input_publisher import NodeInputPublishResult
+from agentbridge.mesh.node_event_pump import NodeEventPumpStep
 from agentbridge.mesh.node_page_runtime import (
     LocalNodePageRuntime, NodePageRuntimeStep,
 )
@@ -94,6 +95,7 @@ def world(inactive_world):
     inputs = LocalInputRuntime(server.recovery_runtime.transport, store)
     engine = SyncEngine(server.recovery_runtime.transport, store)
     inputs.bind_sync_owner(engine)
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, engine.retire())
     try:
         yield runtime, store, server, clock
@@ -105,6 +107,38 @@ def _advance(runtime, clock):
     wait = runtime.wait_s(300.0)
     clock[0] += wait
     return runtime.run_due()
+
+
+def _event_mesh(store, *, inputs=None, engine=None):
+    from agentbridge.mesh.eventbus import EventBus
+    from agentbridge.mesh.service import Mesh
+
+    mesh = object.__new__(Mesh)
+    mesh.store = store
+    mesh.bus = EventBus()
+    mesh.user = "alice"
+    mesh.tx = None if inputs is None else inputs.transport
+    mesh.local_inputs = inputs
+    mesh.sync = engine
+    mesh.messaging = SimpleNamespace(
+        store=store, user="alice",
+        mark_delivered=lambda *_args, **_kwargs: True,
+    )
+    return mesh
+
+
+def _bind_event_owner(runtime, store, inputs, engine):
+    mesh = _event_mesh(store, inputs=inputs, engine=engine)
+    inputs._page_preparation = SimpleNamespace(
+        mesh=mesh, close=lambda: None, select=lambda _chat: True,
+        request=lambda *_args, **_kwargs: True,
+        health=lambda _chat: None, run_one=lambda: False,
+    )
+    inputs.read_events = SimpleNamespace(
+        bus=mesh.bus, close=lambda: None, changed=lambda *_args: None,
+        tick=lambda: None,
+    )
+    runtime.bind_event_owner(mesh, inputs)
 
 
 def test_selected_chat_gets_first_local_publication_opportunity(world):
@@ -245,6 +279,32 @@ def test_due_room_backlog_cannot_starve_due_node_work(world):
     assert second.operation == "node"
 
 
+def test_three_persistent_lanes_receive_round_robin_service(world, monkeypatch):
+    runtime, _store, _server, _clock = world
+    publication = NodeInputPublishResult(
+        "background", "published", True, 1, None,
+    )
+    node = NodeSyncTickResult(
+        "ready", "recovery", "delta", 1, "ready", 1, 0,
+    )
+    monkeypatch.setattr(
+        runtime.publisher, "run_due_result",
+        lambda chat_id=None: (True, publication),
+    )
+    runtime.node._next_due_ns = 0
+    monkeypatch.setattr(runtime.node, "tick", lambda **_kwargs: node)
+    monkeypatch.setattr(
+        runtime._events, "run_due",
+        lambda: NodeEventPumpStep("events", records=1),
+    )
+
+    operations = [runtime.run_due().operation for _ in range(6)]
+
+    assert operations == [
+        "publication", "node", "event", "publication", "node", "event",
+    ]
+
+
 def test_concurrent_node_tick_is_reported_as_no_operation(world, monkeypatch):
     runtime, _store, _server, _clock = world
     monkeypatch.setattr(
@@ -380,6 +440,7 @@ def test_sync_retirement_can_activate_only_its_bound_local_owner(
         clock_ns=lambda: int(clock[0] * 1_000_000_000),
     )
 
+    _bind_event_owner(runtime, store, owner, engine)
     owner.install_node_source(runtime, proof)
 
     with pytest.raises(ValueError, match="foreign legacy sync owner"):
@@ -427,6 +488,7 @@ def test_node_transfer_keeps_bounded_legacy_queue_and_wakes_recovery(
     assert inputs.schedule.discover("discovered-room", now=time.monotonic())
     before = runtime.node._wake_revision
 
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, engine.retire())
 
     assert {
@@ -445,6 +507,7 @@ def test_local_input_owner_transfers_selection_and_scheduling_once(
     inputs.bind_sync_owner(engine)
     assert inputs.request(CHAT, selected=True)
     proof = engine.retire()
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, proof)
 
     assert runtime.selected == CHAT
@@ -473,6 +536,7 @@ def test_node_transfer_joins_active_legacy_document_publication(
     engine = SyncEngine(transport, store)
     inputs.bind_sync_owner(engine)
     proof = engine.retire()
+    _bind_event_owner(runtime, store, inputs, engine)
     entered = threading.Event()
     release = threading.Event()
     original = local_input_runtime.collect_document_batches
@@ -528,6 +592,7 @@ def test_discovery_dispatch_is_serialized_with_source_transfer(
         next_batch=lambda *, max_rooms: ("race-room",),
     )
     inputs._discovery_due = 0.0
+    _bind_event_owner(runtime, store, inputs, engine)
     entered = threading.Event()
     release = threading.Event()
     original = inputs.schedule.discover
@@ -574,9 +639,50 @@ def test_node_publication_requires_successful_source_transfer(inactive_world):
     with pytest.raises(RuntimeError, match="inactive"):
         runtime.publisher.publish(CHAT)
 
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, engine.retire())
 
     assert runtime.publisher.publish(CHAT).state == "pending"
+    inputs.stop()
+
+
+def test_source_transfer_requires_event_owner_before_retirement_activation(
+        inactive_world):
+    _runtime, store, server, clock = inactive_world
+    unbound = LocalNodePageRuntime(
+        server, store, clock=lambda: clock[0],
+        clock_ns=lambda: int(clock[0] * 1_000_000_000),
+    )
+    inputs = LocalInputRuntime(server.recovery_runtime.transport, store)
+    engine = SyncEngine(server.recovery_runtime.transport, store)
+    inputs.bind_sync_owner(engine)
+
+    with pytest.raises(RuntimeError, match="event owner is not bound"):
+        inputs.install_node_source(unbound, engine.retire())
+
+    assert inputs._node_source is None
+    with pytest.raises(RuntimeError, match="inactive"):
+        unbound.run_due()
+    inputs.stop()
+
+
+def test_same_fields_mesh_decoy_cannot_bind_event_owner(inactive_world):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    owner = _event_mesh(store, inputs=inputs, engine=engine)
+    inputs._page_preparation = SimpleNamespace(
+        mesh=owner, close=lambda: None,
+    )
+    inputs.read_events = SimpleNamespace(bus=owner.bus, close=lambda: None)
+    decoy = _event_mesh(store, inputs=inputs, engine=engine)
+
+    with pytest.raises(ValueError, match="foreign node event source owner"):
+        runtime.bind_event_owner(decoy, inputs)
+
+    runtime.bind_event_owner(owner, inputs)
     inputs.stop()
 
 
@@ -590,6 +696,7 @@ def test_changed_node_publication_wakes_page_and_read_model(
     engine = SyncEngine(transport, store)
     inputs.bind_sync_owner(engine)
     proof = engine.retire()
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, proof)
     result = NodeInputPublishResult(CHAT, "published", True, 1, None)
     monkeypatch.setattr(
@@ -612,6 +719,35 @@ def test_changed_node_publication_wakes_page_and_read_model(
     assert page_requests == [CHAT]
     assert read_events == [("chat", CHAT)]
     inputs.stop()
+
+
+def test_bound_event_consumer_runs_one_journal_quantum(world):
+    runtime, store, _server, _clock = world
+    subscription = runtime._events.bus.subscribe()
+    record = {
+        "id": "node-message", "ns": 11, "from": "alice",
+        "kind": "message", "text": "ready",
+    }
+    store.upsert_messages(CHAT, (record,), observed_ns=1)
+    conn = store._conn()
+    conn.execute(
+        "INSERT INTO node_event_journal_items"
+        "(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)",
+        (CHAT, record["id"], record["ns"], record["from"], record["kind"]),
+    )
+    conn.commit()
+    runtime._lane_cursor = 2
+
+    step = runtime.run_due()
+
+    assert step.operation == "event"
+    assert step.event is not None and step.event.operation == "events"
+    received = list(subscription.drain())
+    assert [(item.type, item.chat_id, item.data) for item in received] == [
+        ("read_model", CHAT, {"scope": "chat"}),
+    ]
+    with pytest.raises(RuntimeError, match="already bound"):
+        runtime.bind_event_owner(_event_mesh(store), None)
 
 
 def test_transfer_disables_stale_exact_append_and_settlement_wakes_node(
@@ -655,6 +791,7 @@ def test_transfer_disables_stale_exact_append_and_settlement_wakes_node(
     engine = SyncEngine(transport, store)
     inputs.bind_sync_owner(engine)
     proof = engine.retire()
+    _bind_event_owner(runtime, store, inputs, engine)
     inputs.install_node_source(runtime, proof)
 
     assert inputs.prepare_local_append(CHAT, record) is None
