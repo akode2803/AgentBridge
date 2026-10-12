@@ -58,12 +58,15 @@ class _Candidate:
     target_id: str
     reaction_ns: int
     history_from_ns: int
+    visibility_cut_ns: int
     emoji: str
 
     def to_dict(self):
         return {'id': self.event_id, 'from': self.sender, 'ns': self.event_ns,
                 'target': self.target_id, 'reaction_ns': self.reaction_ns,
-                'history_from_ns': self.history_from_ns, 'emoji': self.emoji}
+                'history_from_ns': self.history_from_ns,
+                'visibility_cut_ns': self.visibility_cut_ns,
+                'emoji': self.emoji}
 
 
 @dataclass(frozen=True)
@@ -237,9 +240,15 @@ class ReactionProjectionOperation(PageOperation):
                     or operation.emoji != hint['emoji']
                     or not operation.emoji):
                 continue
+            visibility = self._actor_visibility(
+                by_path.get(P.state(self.chat, env['from'])), env['from'],
+                public, hint['msg_id'], operation.ns,
+            )
+            if visibility is None or visibility[0]:
+                continue
             candidates.append(_Candidate(
                 ident, env['from'], env['ns'], hint['msg_id'], operation.ns,
-                history_from, operation.emoji,
+                history_from, visibility[1], operation.emoji,
             ))
         absent = set(inputs.absent_ids)
         if any(item.target_id in absent for item in candidates):
@@ -248,6 +257,54 @@ class ReactionProjectionOperation(PageOperation):
             # terminally by canonical selection below; absence is unresolved.
             raise _Work('reaction_target')
         return tuple(dict.fromkeys(item.target_id for item in candidates)), tuple(candidates)
+
+    def _actor_visibility(self, record, actor, public, target, reaction_ns):
+        """Return (hidden, clear/delete cut) from authenticated prior state."""
+        if record is None or record.deleted or record.payload_json is None:
+            return False, 0
+        try:
+            document = record.decoded()
+        except (TypeError, ValueError, RecursionError, UnicodeError):
+            return False, 0
+        if type(document) is not dict or not document:
+            return False, 0
+        fields = {key: value for key, value in document.items()
+                  if key not in ('ns', 'sig')}
+        try:
+            state_ns = int(document.get('ns', 0))
+            signed = events.state_signing_bytes(
+                self.chat, actor, state_ns, fields,
+            )
+            self.ledger.signature(signed)
+            valid = bool(public) and bool(document.get('sig')) and crypto.verify(
+                public, document['sig'], signed,
+            )
+        except (TypeError, ValueError, KeyError, OverflowError,
+                RecursionError, UnicodeError):
+            return False, 0
+        if not valid or state_ns > reaction_ns:
+            return False, 0
+        hidden = fields.get('hidden', [])
+        starred = fields.get('starred', [])
+        cleared = fields.get('cleared') or {}
+        deleted = fields.get('deleted')
+        if (type(hidden) is not list or type(starred) is not list
+                or any(type(item) is not str for item in (*hidden, *starred))
+                or type(cleared) is not dict):
+            return None
+        clear_ns = cleared.get('ns', 0)
+        keep_starred = cleared.get('keep_starred', False)
+        if (type(clear_ns) is not int or isinstance(clear_ns, bool)
+                or not 0 <= clear_ns <= 2**63 - 1
+                or type(keep_starred) is not bool):
+            return None
+        if keep_starred and target in starred:
+            clear_ns = 0
+        deleted_ns = (deleted if type(deleted) is int
+                      and not isinstance(deleted, bool) else 0)
+        if not 0 <= deleted_ns <= 2**63 - 1:
+            return None
+        return target in hidden, max(clear_ns, deleted_ns)
 
     def _exact_presentation(self, snapshot, viewer_state, context=None):
         mute = viewer_state.get('mute', False)
@@ -284,6 +341,7 @@ class ReactionProjectionOperation(PageOperation):
                     and not message.deleted and not message.undecrypted
                     and message.ns <= item['reaction_ns']
                     and message.ns >= item['history_from_ns']
+                    and message.ns > item['visibility_cut_ns']
                     and message.from_ == viewer and item['from'] != viewer):
                 result.append(Event(
                     eventbus.REACTION, message.chat_id,
@@ -363,6 +421,7 @@ class ReactionNotificationOperation(ReactionProjectionOperation):
                 or message.deleted or message.undecrypted
                 or message.ns > candidate['reaction_ns']
                 or message.ns < candidate['history_from_ns']
+                or message.ns <= candidate['visibility_cut_ns']
                 or message.from_ != self.viewer):
             return ReactionNotificationResult('ready')
         state = json.loads(result.presentation.viewer_state_json)

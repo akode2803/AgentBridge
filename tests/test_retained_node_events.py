@@ -262,6 +262,37 @@ def test_reactor_without_shared_history_cannot_target_prejoin_message(world):
         mesh.store, kind='info') == ()
 
 
+@pytest.mark.parametrize('visibility', ('hidden', 'cleared'))
+def test_reactor_state_cannot_target_message_already_invisible_to_them(
+        world, visibility):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    env, _document = _signed_reaction(world)
+    fields = ({'hidden': ['two']} if visibility == 'hidden' else {
+        'cleared': {'ns': base + 1, 'keep_starred': False, 'at': ''},
+    })
+    state_ns = env['event']['reaction_ns'] - 1
+    bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    assert bundle is not None
+    mirror.put_doc(P.state(chat, 'alice'), {
+        **fields, 'ns': state_ns,
+        'sig': crypto.sign(bundle, events.state_signing_bytes(
+            chat, 'alice', state_ns, fields,
+        )),
+    })
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and not final.gap
+    assert final.reactions == ()
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
 def test_reaction_decode_resource_failure_remains_retryable(world, monkeypatch):
     mesh, _mirror, _provider, chat, _base, reader, _publisher = world
     _signed_reaction(world)
