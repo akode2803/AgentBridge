@@ -543,11 +543,11 @@ class GuiApp:
 
     def close(self) -> None:
         from ..core.delivery_trace import emit
-        emit('shutdown', outcome='completed')
-        self.diagnostics.close()
         with self._lock:
             self._closed = True
             self._detach()
+        emit('shutdown', outcome='completed')
+        self.diagnostics.close()
 
     # ------------------------------------------------------------ internals
     def _build(self, name: str) -> Mesh:

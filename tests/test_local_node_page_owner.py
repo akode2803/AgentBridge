@@ -8,6 +8,7 @@ import pytest
 
 from agentbridge.gui.context import GuiApp
 from agentbridge.mesh.node_page_owner import LocalNodePageOwner
+from agentbridge.mesh.node_page_runtime import LocalNodePageRuntime
 from agentbridge.mesh.service import Mesh
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.store.db import Store
@@ -103,6 +104,32 @@ def test_mesh_keeps_legacy_writer_when_authenticated_node_open_is_unavailable(tm
         assert mesh._local_node_owner is None
         assert mesh.local_inputs._node_source is None
         assert not mesh.sync._retired
+    finally:
+        mesh.close()
+
+
+def test_mesh_keeps_legacy_writer_when_event_owner_binding_is_unavailable(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    closed = []
+    original_close = LocalNodePageOwner.close
+
+    def record_close(owner):
+        original_close(owner)
+        closed.append(owner)
+
+    monkeypatch.setattr(LocalNodePageOwner, 'close', record_close)
+    monkeypatch.setattr(
+        LocalNodePageRuntime, 'bind_event_owner',
+        lambda *_args: (_ for _ in ()).throw(RuntimeError('journal busy')),
+    )
+    try:
+        assert not mesh.activate_local_node()
+        assert mesh._local_node_owner is None
+        assert mesh.local_inputs._node_source is None
+        assert not mesh.sync._retired
+        assert len(closed) == 1
+        assert closed[0].server is None and closed[0].runtime is None
     finally:
         mesh.close()
 

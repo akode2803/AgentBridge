@@ -384,6 +384,27 @@ def test_closed_app_rejects_login_before_account_or_agent_mutation(rig, monkeypa
     assert builds == []
 
 
+def test_close_marks_app_closed_before_diagnostics_flush(rig, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    original_close = rig.app.diagnostics.close
+
+    def delayed_diagnostics_close():
+        entered.set()
+        assert release.wait(10)
+        return original_close()
+
+    monkeypatch.setattr(rig.app.diagnostics, 'close', delayed_diagnostics_close)
+    closer = threading.Thread(target=rig.app.close, daemon=True)
+    closer.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(RuntimeError, match='GUI app is closed'):
+            rig.app.signup('late-user', '', 'late-password')
+    finally:
+        release.set()
+        _join(closer)
+
+
 def test_writes_keep_entry_only_auth_and_lock_denials(rig):
     rig.signup()
     chat_id = rig.post("/api/mesh/create_chat", name="Writes", members=[])["chat"]["id"]

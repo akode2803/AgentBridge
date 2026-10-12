@@ -534,6 +534,26 @@ class Mesh:
                 if runtime is None:
                     raise RuntimeError('local node runtime did not open')
                 runtime.bind_event_owner(self, inputs)
+            except Exception as exc:
+                # Event-journal preparation is still reversible: the legacy
+                # writer has not retired. Close the attempted owner and keep
+                # this signed-in session on its existing sync path.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='unavailable',
+                    outcome='skipped', error_type=type(exc).__name__,
+                )
+                return False
+            try:
                 retirement = self.sync.retire(timeout_s=10.0)
                 inputs.install_node_source(runtime, retirement)
             except BaseException:

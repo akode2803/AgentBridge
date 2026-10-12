@@ -13,10 +13,11 @@ runs afterward on `gui-node-activation`, so authenticated provider setup is not
 on the cached first-paint boundary.
 
 Before retirement, authenticated node-open failure leaves the legacy sync owner
-running. After opening succeeds, the runtime binds the exact Mesh/event owner,
-retires the exact `SyncEngine`, transfers pending source work and activates the
-node publisher. Retirement is irreversible; later failure detaches the session
-and never revives the legacy writer.
+running. A runtime/event-owner binding failure also closes the attempted owner
+and keeps legacy sync because no retirement has started. After binding succeeds,
+the runtime retires the exact `SyncEngine`, transfers pending source work and
+activates the node publisher. Retirement is irreversible; later failure detaches
+the session and never revives the legacy writer.
 
 ## Shutdown and restore invariants
 
@@ -30,6 +31,8 @@ and never revives the legacy writer.
   either session-file deletion or Mesh construction.
 - Signup and login recheck app closure under the session lock before building a
   Mesh or mutating accounts and machine-agent ownership.
+- App closure marks and detaches the session under that lock before diagnostics
+  flushing begins.
 
 These checks prevent a slow legacy provider read from writing after Store close,
 and prevent a stale restore from replacing or deleting a concurrently created
@@ -45,6 +48,26 @@ wake, shutdown or restore.
 
 The later closed-auth review correction passes four targeted authentication and
 restore race tests plus Ruff and whitespace checks.
+
+The follow-up shutdown-order and pre-retirement binding corrections pass the
+43-test local-node/session/cold-login gate plus Ruff and whitespace checks. The
+superseded Ubuntu run's sole failure was the cold-login test using `close()` as
+a detach helper; it now uses the internal detach boundary while leaving the app
+open, which matches the scenario it exercises.
+
+The parent PR's Windows full-suite failure was an over-broad test assertion:
+the read acknowledgment's exact reservation was aborted, while an unrelated
+writer still had a root intent. The tests now verify removal of their own intent
+and scopes rather than global coordinator idleness. All four affected cases pass
+across five consecutive focused runs; replacement CI is pending.
+
+The rebased parent also binds each new semantic reaction operation to a
+same-namespace signed actor-state checkpoint. Restored older state, later state
+and legacy unbound operations now degrade to generic invalidation, while matching
+hidden and cleared checkpoints still suppress the wake. Reaction and state
+documents are captured under one SQLite read transaction with independent 4 MiB
+ceilings. The parent-focused gate passes 145 tests; an independent Astra review
+found no P1/P2 and its one durable coverage suggestion is included.
 
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,

@@ -1144,9 +1144,16 @@ Signup and login now reject a closed `GuiApp` immediately after taking the
 session lock, before building a Mesh, creating/upgrading an account or claiming
 machine agents. This closes the shutdown race where a queued authentication
 handler could mutate durable identity state before `_adopt` noticed closure.
+`close()` now marks and detaches the app under that lock before diagnostics
+flushes, so the same guard applies throughout shutdown. A local-node event-owner
+binding failure is also handled on the reversible side of the handoff: the
+attempted owner closes, activation returns unavailable, and legacy sync remains
+live because retirement has not begun.
 
 Focused lifecycle/session/sync validation passes 57 tests. Four targeted
-closed-auth/restore tests pass after the shutdown-entry correction. The final broader
+closed-auth/restore tests pass after the shutdown-entry correction. The latest
+43-test local-node/session/cold-login gate passes after correcting the shutdown
+ordering and a stale test that had used `close()` merely to detach. The final broader
 page-runtime/event/notification/GUI gate passes 150 tests. Ruff and diff checks
 pass. Astra independently reproduced the active-write Store-close
 race and stale-restore overwrite, verified both repairs with controlled probes,
