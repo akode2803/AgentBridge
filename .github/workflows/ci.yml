@@ -42,5 +42,25 @@ jobs:
       - name: Windows attachment handoff boundary
         if: runner.os == 'Windows'
         run: uv run pytest -q tests/test_gui_attachment_cache.py tests/test_gui_attachment_read.py tests/test_gui_cache_filename.py
+      # Diagnostic experiment: the Windows full suite is roughly four times
+      # slower than Ubuntu. Keep checkout, dependency installation and focused
+      # boundary tests protected; allow this only for trusted same-repo PRs.
+      - name: Disable Defender real-time monitoring for full-suite benchmark
+        if: runner.os == 'Windows' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: powershell
+        run: |
+          $before = (Get-MpComputerStatus).RealTimeProtectionEnabled
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          $after = (Get-MpComputerStatus).RealTimeProtectionEnabled
+          Write-Output "Defender real-time protection: before=$before after=$after"
+          if ($after) { throw "Defender benchmark did not disable real-time monitoring" }
       - name: Tests
         run: uv run pytest -q
+      - name: Restore Defender real-time monitoring after benchmark
+        if: always() && runner.os == 'Windows' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: powershell
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          $after = (Get-MpComputerStatus).RealTimeProtectionEnabled
+          Write-Output "Defender real-time protection restored: $after"
+          if (-not $after) { throw "Defender real-time monitoring was not restored" }
