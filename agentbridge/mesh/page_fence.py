@@ -54,6 +54,7 @@ class PageFence:
     presence: PresenceFence | None = field(default=None, repr=False)
     auxiliary: tuple[AuxSourceReceipt, ...] = field(default=(), repr=False)
     display_presence: PresenceDisplayFence | None = field(default=None, repr=False)
+    exact_targets: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,13 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
     selected = value.selection
     if selected is not None and (type(selected) is not PageSelection or selected.position != position):
         raise ValueError('inconsistent canonical page selection')
+    exact_targets = value.exact_targets
+    if (type(exact_targets) is not tuple or len(exact_targets) > 32
+            or len(set(exact_targets)) != len(exact_targets)
+            or exact_targets and selected is None):
+        raise ValueError('invalid exact page targets')
+    for ident in exact_targets:
+        overlay_index._text(ident, 'message id')
     presentation = value.presentation
     if presentation is not None:
         if selected is None or type(presentation) is not PagePresentation:
@@ -252,7 +260,7 @@ def prepare(mesh, value, suffix_position, authority_source, *, source_reader=Non
         size += sum(len(row[0].encode()) + len(row[2].encode()) + 32 for row in inputs.subjects)
         display = PresenceDisplayFence(receipt, inputs)
     owned = PageFence(position, source, value.proofs, epochs, selected, presentation,
-                      presence, tuple(auxiliary), display)
+                      presence, tuple(auxiliary), display, exact_targets)
     wraps = tuple(v.wrap for v in epochs if v.wrap is not None)
     if source_reader is None:
         prepared_wraps = key_observation._prepare_key_wraps(wraps)
