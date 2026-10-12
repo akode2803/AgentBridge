@@ -171,10 +171,8 @@ class InfoEventIdentity:
 
     def __post_init__(self):
         if (type(self.ns) is not int or not 0 <= self.ns <= 2**63 - 1
-                or type(self.sender) is not str or len(self.sender.encode()) > 4096
-                or '\x00' in self.sender
-                or type(self.id) is not str or not self.id
-                or len(self.id.encode()) > 4096 or '\x00' in self.id):
+                or not _bounded_utf8(self.sender, 4096)
+                or not _bounded_utf8(self.id, 4096, nonempty=True)):
             raise ValueError('invalid info event identity')
 
 
@@ -301,20 +299,30 @@ def _advance_suffix(materialized, envelopes, directory, requested=None):
         if identity in wanted:
             event = env['event']
             etype = event.get('type', '')
-            if type(etype) is not str or len(etype.encode()) > 256:
+            if not _bounded_utf8(etype, 256):
                 # Unknown/malformed types are ignored by _apply. Preserve that
                 # semantic without exposing an unbounded value or blocking the
                 # rest of this captured suffix's outcomes.
                 etype = ''
             genesis = etype == EV_CREATED
             actor = event.get('creator', '') if genesis else env.get('from', '')
-            if type(actor) is not str or len(actor.encode()) > 4096:
+            if not _bounded_utf8(actor, 4096):
                 actor = ''  # No bounded actor attribution; never truncate one.
             outcomes[identity] = InfoEventOutcome(identity,
                 'applied' if applied else 'ignored',
                 ('gid_content' if genesis else 'signed_author') if applied else 'unproven',
                 actor if applied else '', etype)
     return snap, outcomes
+
+
+def _bounded_utf8(value, maximum: int, *, nonempty: bool = False) -> bool:
+    """Validate bounded wire text without leaking surrogate encoding errors."""
+    if type(value) is not str or '\x00' in value or nonempty and not value:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= maximum
+    except UnicodeEncodeError:
+        return False
 
 
 def _authentic(chat_id: str, env: dict, etype: str, author: str, d: Resolver) -> bool:

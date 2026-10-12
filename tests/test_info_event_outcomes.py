@@ -144,7 +144,9 @@ def test_normalized_numeric_id_collision_is_rejected_and_mixed_ids_have_canonica
     assert all(o.status == 'applied' for o in result.outcomes)
 
 
-@pytest.mark.parametrize('malformed_type', [None, 7, ['future'], {'type': 'future'}, 'x' * 257])
+@pytest.mark.parametrize('malformed_type', [
+    None, 7, ['future'], {'type': 'future'}, 'x' * 257, '\ud800',
+])
 def test_unknown_type_gets_bounded_ignored_outcome_without_blocking_later_valid_event(world, malformed_type):
     _chat, directory, _genesis, snapshot = world
     malformed = signed(world, 'unknown', 2, 'alice', {'type': malformed_type})
@@ -154,3 +156,10 @@ def test_unknown_type_gets_bounded_ignored_outcome_without_blocking_later_valid_
     assert [o.status for o in result.outcomes] == ['ignored', 'applied']
     assert result.outcomes[0].event_type == '' and result.outcomes[0].actor == ''
     assert result.snapshot.name == 'Valid'
+
+
+def test_unencodable_exact_identity_is_rejected_as_input_not_an_encoding_crash():
+    with pytest.raises(ValueError, match='invalid info event identity'):
+        events.InfoEventIdentity(2, '\ud800', 'event')
+    with pytest.raises(ValueError, match='invalid info event identity'):
+        events.InfoEventIdentity(2, 'alice', '\ud800')
