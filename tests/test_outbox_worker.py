@@ -198,7 +198,8 @@ def test_worker_stop_does_not_dispatch_later_queued_items(store):
     stopped = threading.Thread(target=worker.stop)
     stopped.start()
     try:
-        assert worker._stop.wait(5)
+        assert worker._stop_requested.wait(5)
+        assert not worker._stop.is_set()
     finally:
         release.set()
     stopped.join(5)
@@ -234,6 +235,76 @@ def test_background_stop_after_claim_releases_item_without_dispatch(
 
     monkeypatch.setattr(store, 'outbox_claim_due', original_claim)
     assert worker.flush_once() == 1
+    assert sent == ['queued']
+
+
+def test_stop_linearizes_after_claim_before_handler_start(
+        store, monkeypatch):
+    claimed = threading.Event()
+    release_claim = threading.Event()
+    sent = []
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+        poll_s=30.0,
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_claim = store.outbox_claim_due
+
+    def pause_after_claim(**kwargs):
+        result = original_claim(**kwargs)
+        claimed.set()
+        assert release_claim.wait(5)
+        return result
+
+    monkeypatch.setattr(store, 'outbox_claim_due', pause_after_claim)
+    worker.start()
+    worker.notify()
+    assert claimed.wait(5)
+    stopped = threading.Thread(target=worker.stop, daemon=True)
+    stopped.start()
+    try:
+        assert worker._stop.wait(5)
+    finally:
+        release_claim.set()
+    stopped.join(5)
+
+    assert not stopped.is_alive()
+    assert sent == []
+    assert store.outbox_counts() == {'pending': 1}
+
+
+def test_stop_timeout_does_not_declare_boundary_before_handler_start(
+        store, monkeypatch):
+    observed = threading.Event()
+    release = threading.Event()
+    sent = []
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+        poll_s=30.0,
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_observe = worker.latency.observe
+
+    def pause_before_handler(*args, **kwargs):
+        result = original_observe(*args, **kwargs)
+        if args[0] == 'outbox_attempt':
+            observed.set()
+            assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(worker.latency, 'observe', pause_before_handler)
+    worker.start()
+    worker.notify()
+    assert observed.wait(5)
+
+    with pytest.raises(TimeoutError, match='outbox dispatch did not stop'):
+        worker.stop(timeout=.01)
+    assert not worker._stop.is_set()
+    assert sent == []
+
+    release.set()
+    assert worker._stop_requested.wait(5)
+    worker.stop()
     assert sent == ['queued']
 
 

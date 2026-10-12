@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -403,6 +404,62 @@ def test_close_marks_app_closed_before_diagnostics_flush(rig, monkeypatch):
     finally:
         release.set()
         _join(closer)
+
+
+def test_authenticated_logout_clears_session_when_teardown_is_retained(
+        rig, monkeypatch):
+    rig.signup()
+    mesh = rig.app.mesh
+    assert mesh is not None and rig.app._session_path.exists()
+    original_close = mesh.close
+    monkeypatch.setattr(
+        mesh, 'close',
+        lambda: (_ for _ in ()).throw(TimeoutError('retirement pending')),
+    )
+
+    with pytest.raises(TimeoutError, match='retirement pending'):
+        rig.app.logout('hexagon')
+
+    assert rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
+    assert not rig.app._session_path.exists()
+    monkeypatch.setattr(mesh, 'close', original_close)
+    with rig.app._lock:
+        assert rig.app._finish_teardown()
+
+
+def test_close_flushes_failed_shutdown_diagnostics(rig, monkeypatch):
+    rig.signup()
+    mesh = rig.app.mesh
+    assert mesh is not None
+    original_close = mesh.close
+    assert rig.app.diagnostics.set_enabled(True, sample_rate=0)
+    monkeypatch.setattr(
+        mesh, 'close',
+        lambda: (_ for _ in ()).throw(RuntimeError('close failed')),
+    )
+
+    with pytest.raises(RuntimeError, match='close failed'):
+        rig.app.close()
+
+    assert rig.app._closed and rig.app.mesh is None
+    assert rig.app._teardown_mesh is mesh
+    recorded = [
+        json.loads(line)
+        for path in sorted(rig.app.diagnostics.directory.glob('events*.jsonl'))
+        for line in path.read_text().splitlines()
+    ]
+    assert any(
+        row.get('event') == 'delivery'
+        and row.get('phase') == 'shutdown'
+        and row.get('status') == 'error'
+        and row.get('outcome') == 'failed'
+        and row.get('error_type') == 'OtherError'
+        for row in recorded
+    )
+    monkeypatch.setattr(mesh, 'close', original_close)
+    with rig.app._lock:
+        assert rig.app._finish_teardown()
 
 
 def test_writes_keep_entry_only_auth_and_lock_denials(rig):

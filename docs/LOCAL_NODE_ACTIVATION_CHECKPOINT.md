@@ -26,6 +26,8 @@ the session and never revives the legacy writer.
 - `Mesh.close()` does not close SQLite until that drain succeeds.
 - Failed cleanup retains the exact detached Mesh and open Store for retry.
 - Restore/login cannot build a replacement while retained teardown is pending.
+- Authenticated logout durably removes the session file even if exact-owner
+  teardown is retained for retry; restart cannot restore a signed-out account.
 - Restore rechecks session generation, current Mesh, app close state, unchanged
   session-file contents and teardown completion after directory I/O and before
   either session-file deletion or Mesh construction.
@@ -33,6 +35,13 @@ the session and never revives the legacy writer.
   Mesh or mutating accounts and machine-agent ownership.
 - App closure marks and detaches the session under that lock before diagnostics
   flushing begins.
+- Background outbox dispatch admission and stop share one synchronization gate;
+  only a handler admitted before stop may finish, and later exact leases are
+  released without dispatch.
+- A dispatch-gate timeout is an incomplete shutdown: it raises without setting
+  the stopped boundary, so the exact Mesh remains retained for teardown retry.
+- Teardown failure emits and flushes a failed shutdown breadcrumb before the
+  primary exception is re-raised.
 
 These checks prevent a slow legacy provider read from writing after Store close,
 and prevent a stale restore from replacing or deleting a concurrently created
@@ -82,6 +91,19 @@ sampling retains the ownership transition without requiring full capture. The
 focused lifecycle, outbox, sync and diagnostics gate passes 104 tests; Ruff and
 whitespace checks pass. Astra's independent follow-up found no remaining P1/P2;
 its stop-after-claim and stale-lease CAS probes are preserved as regressions.
+
+Three subsequent current-head findings close the remaining stop/logout
+boundaries. Outbox stop and dispatch admission now have an explicit linearized
+order rather than an event check-to-call window. Successful logout unlinks the
+session file in a `finally` block after password verification, while preserving
+the failed Mesh owner for teardown retry. App close emits `shutdown/failed`,
+flushes diagnostics and then preserves the original teardown exception. The
+focused outbox/session/local-node/sync/diagnostics gate passes 107 tests; Ruff
+and whitespace checks pass. A deterministic pause immediately before transport
+dispatch proves that a gate timeout cannot claim successful stop; a later retry
+completes after the admitted handler returns. Independent outbox review found no
+remaining P1/P2; final combined review also found no P1/P2 after an independent
+Mesh-level timeout/Store-closure probe and 88 passing tests.
 
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,

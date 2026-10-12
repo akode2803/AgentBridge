@@ -1173,3 +1173,18 @@ stop. Successful `local_node_activation` is now a retained breadcrumb. The
 focused lifecycle, outbox, sync and diagnostics gate passes 104 tests; Ruff and
 whitespace checks pass. Astra's independent follow-up found no remaining P1/P2;
 its stop-after-claim and stale-lease CAS probes are preserved as regressions.
+
+Three later current-head findings tighten that shutdown contract. Background
+outbox dispatch admission and `stop()` now linearize on one gate: an already
+admitted handler may finish, while a stop that wins the gate prevents every
+later claimed mutation and the worker releases its exact leases. Authenticated
+logout removes the durable session file even when Mesh teardown is retained for
+retry, so restart cannot restore a signed-out account. `GuiApp.close()` also
+records a failed shutdown outcome and closes the diagnostics recorder before
+re-raising the primary teardown error. The focused outbox/session/local-node/
+sync/diagnostics gate passes 107 tests; Ruff and whitespace checks pass. If an
+in-flight dispatch does not yield the gate inside the stop deadline, stop raises
+without declaring `_stop`; Mesh close remains incomplete and retains the exact
+owner for retry. A deterministic pre-handler pause covers that boundary. Astra's
+final combined review and independent Mesh-level timeout/Store-close probe found
+no remaining P1/P2; its review gate passes 88 tests.

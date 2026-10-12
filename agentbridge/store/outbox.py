@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 import threading
+import time
 from typing import Any, Callable
 
 from ..core.errors import ValidationError
@@ -49,6 +50,11 @@ class OutboxWorker:
         self.prune_hooks = prune_hooks or {}
         self._wake = threading.Event()
         self._stop = threading.Event()
+        # Linearizes background-dispatch admission with stop(). A dispatch
+        # admitted before stop is in flight and may finish; once stop wins this
+        # gate, no later claimed item can begin a transport mutation.
+        self._dispatch_gate = threading.RLock()
+        self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self.latency = sink_for_store(store)
 
@@ -56,15 +62,36 @@ class OutboxWorker:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._stop.clear()
+        with self._dispatch_gate:
+            self._stop_requested.clear()
+            self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="ab-outbox")
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        self._stop.set()
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        # The early hint keeps a completed handler from admitting another item
+        # while stop waits for the shared gate. _stop itself is the linearized
+        # boundary: when the gate is busy, a handler has already started.
+        self._stop_requested.set()
+        acquired = self._dispatch_gate.acquire(timeout=timeout)
+        if not acquired:
+            # A handler may not have reached its transport call yet, so a
+            # timeout cannot declare the stop boundary complete. Keep the
+            # request hint set, leave _stop unset and make Mesh.close retain
+            # this owner for an exact later teardown retry.
+            self._wake.set()
+            raise TimeoutError('outbox dispatch did not stop')
+        try:
+            self._stop.set()
+        finally:
+            self._dispatch_gate.release()
         self._wake.set()
         if self._thread:
-            self._thread.join(timeout)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+            if self._thread.is_alive():
+                raise TimeoutError('outbox worker did not stop')
 
     def notify(self) -> None:
         """Wake the worker immediately (call right after outbox_add)."""
@@ -108,13 +135,23 @@ class OutboxWorker:
             if not items:
                 return done
             for index, item in enumerate(items):
-                if stop is not None and stop.is_set():
+                result = self._dispatch(item, stop=stop)
+                if result is None:
                     for pending in items[index:]:
                         self.store.outbox_release_claim(pending)
                     return done
-                done += self._dispatch(item)
+                done += result
 
-    def _dispatch(self, item: OutboxItem) -> int:
+    def _dispatch(self, item: OutboxItem, *, stop: threading.Event | None = None) -> int | None:
+        if stop is not None:
+            # Keep the shared gate through the handler call. stop() either sets
+            # the boundary first (and this lease is released) or observes an
+            # already-started handler; a transport handler cannot begin after
+            # the stop boundary.
+            with self._dispatch_gate:
+                if stop.is_set() or self._stop_requested.is_set():
+                    return None
+                return self._dispatch(item)
         handler = self.handlers.get(item.kind)
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")

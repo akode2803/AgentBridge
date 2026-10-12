@@ -254,7 +254,7 @@ def test_mesh_close_revokes_background_owners_before_retirement_timeout(
         sent.append(payload['id'])
         if payload['id'] == 'first':
             outbox_entered.set()
-            assert outbox_release.wait(5)
+            assert outbox_release.wait(10)
 
     mesh.outbox.handlers = {'probe': handler}
     mesh.store.outbox_add('probe', 'first-target', {'id': 'first'})
@@ -266,7 +266,7 @@ def test_mesh_close_revokes_background_owners_before_retirement_timeout(
     def leased_write():
         with mesh.sync._write_cycle():
             sync_entered.set()
-            assert sync_release.wait(5)
+            assert sync_release.wait(10)
 
     writer = threading.Thread(target=leased_write)
     writer.start()
@@ -302,7 +302,8 @@ def test_mesh_close_revokes_background_owners_before_retirement_timeout(
     closer = threading.Thread(target=close_mesh)
     closer.start()
     try:
-        assert mesh.outbox._stop.wait(5)
+        assert mesh.outbox._stop_requested.wait(5)
+        assert not mesh.outbox._stop.is_set()
     finally:
         outbox_release.set()
     closer.join(5)

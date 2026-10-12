@@ -532,8 +532,13 @@ class GuiApp:
             if mesh is not None:
                 if not mesh.accounts.verify_password(mesh.user, password):
                     raise ValidationError("Password is incorrect")
-            self._detach()
-            self._session_path.unlink(missing_ok=True)
+            # Once authentication succeeds, durable sign-out must survive a
+            # bounded teardown failure. _detach retains the exact failed owner
+            # for retry; the session file must not resurrect it on restart.
+            try:
+                self._detach()
+            finally:
+                self._session_path.unlink(missing_ok=True)
             out = {"ok": True}
             if include_binding:
                 token = self.capture_session_read()
@@ -543,9 +548,23 @@ class GuiApp:
 
     def close(self) -> None:
         from ..core.delivery_trace import emit
-        with self._lock:
-            self._closed = True
-            self._detach()
+        try:
+            with self._lock:
+                self._closed = True
+                self._detach()
+        except BaseException as exc:
+            # Flush a truthful terminal breadcrumb even when teardown retains
+            # the Mesh for retry. Diagnostics failure must not replace the
+            # primary shutdown exception.
+            emit(
+                'shutdown', status='error', outcome='failed',
+                error_type=type(exc).__name__,
+            )
+            try:
+                self.diagnostics.close()
+            except BaseException:
+                pass
+            raise
         emit('shutdown', outcome='completed')
         self.diagnostics.close()
 
