@@ -1160,3 +1160,16 @@ race and stale-restore overwrite, verified both repairs with controlled probes,
 and found no remaining P1/P2. No app restart, deployment, merge or live-provider
 acceptance has occurred. See
 [docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md](docs/LOCAL_NODE_ACTIVATION_CHECKPOINT.md).
+
+The latest PR 133 review found that a legacy sync-retirement timeout returned
+before stopping other background owners, and that a successful background node
+activation was sampled out under normal diagnostics. Mesh shutdown now revokes
+sync, notifier, presence and outbox work before waiting on the legacy Store
+lease; the Store remains open and the exact Mesh remains retained when that
+barrier times out. Background outbox flushing checks revocation between
+dispatches and releases every exact unprocessed lease by CAS, so an
+in-flight handler may finish but a later queued mutation cannot start after
+stop. Successful `local_node_activation` is now a retained breadcrumb. The
+focused lifecycle, outbox, sync and diagnostics gate passes 104 tests; Ruff and
+whitespace checks pass. Astra's independent follow-up found no remaining P1/P2;
+its stop-after-claim and stale-lease CAS probes are preserved as regressions.

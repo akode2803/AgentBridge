@@ -241,6 +241,95 @@ def test_mesh_close_waits_for_active_legacy_write_before_store_close(
     assert store_closed.is_set()
 
 
+def test_mesh_close_revokes_background_owners_before_retirement_timeout(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    outbox_entered = threading.Event()
+    outbox_release = threading.Event()
+    sync_entered = threading.Event()
+    sync_release = threading.Event()
+    sent = []
+
+    def handler(_target, payload):
+        sent.append(payload['id'])
+        if payload['id'] == 'first':
+            outbox_entered.set()
+            assert outbox_release.wait(5)
+
+    mesh.outbox.handlers = {'probe': handler}
+    mesh.store.outbox_add('probe', 'first-target', {'id': 'first'})
+    mesh.store.outbox_add('probe', 'second-target', {'id': 'second'})
+    mesh.start()
+    mesh.outbox.notify()
+    assert outbox_entered.wait(5)
+
+    def leased_write():
+        with mesh.sync._write_cycle():
+            sync_entered.set()
+            assert sync_release.wait(5)
+
+    writer = threading.Thread(target=leased_write)
+    writer.start()
+    assert sync_entered.wait(5)
+
+    original_retire = mesh.sync.retire
+    retire_calls = []
+    store_closes = []
+    original_store_close = mesh.store.close
+    close_errors = []
+
+    def short_retire(*, timeout_s):
+        retire_calls.append(timeout_s)
+        assert mesh.sync._stop.is_set()
+        assert mesh.notifier._stop.is_set()
+        assert mesh.presence._stop.is_set()
+        assert mesh.outbox._stop.is_set()
+        return original_retire(timeout_s=.01 if len(retire_calls) == 1 else timeout_s)
+
+    def record_store_close():
+        store_closes.append(True)
+        original_store_close()
+
+    monkeypatch.setattr(mesh.sync, 'retire', short_retire)
+    monkeypatch.setattr(mesh.store, 'close', record_store_close)
+
+    def close_mesh():
+        try:
+            mesh.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    closer = threading.Thread(target=close_mesh)
+    closer.start()
+    try:
+        assert mesh.outbox._stop.wait(5)
+    finally:
+        outbox_release.set()
+    closer.join(5)
+
+    assert not closer.is_alive()
+    assert len(close_errors) == 1
+    assert isinstance(close_errors[0], TimeoutError)
+    assert str(close_errors[0]) == 'legacy sync owner has active writes'
+    assert retire_calls == [10.0]
+    assert store_closes == []
+    assert not mesh.notifier._thread.is_alive()
+    assert not mesh.presence._thread.is_alive()
+    assert not mesh.outbox._thread.is_alive()
+    assert sent == ['first']
+    assert mesh.store.outbox_counts() == {'pending': 1}
+
+    sync_release.set()
+    writer.join(5)
+    assert not writer.is_alive()
+    try:
+        mesh.close()
+    finally:
+        sync_release.set()
+    assert retire_calls == [10.0, 10.0]
+    assert store_closes == [True]
+
+
 def test_gui_adopts_node_scheduler_then_retires_legacy_sync_thread(
         tmp_path, clouds):
     _client, mesh = _mesh_world(tmp_path)

@@ -1,5 +1,6 @@
 """OutboxWorker: retry-until-delivered semantics against a flaky transport."""
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -174,3 +175,80 @@ def test_worker_thread_start_notify_stop(store):
     finally:
         w.stop()
     assert not w._thread.is_alive()
+
+
+def test_worker_stop_does_not_dispatch_later_queued_items(store):
+    entered = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def handler(_target, payload):
+        sent.append(payload['id'])
+        if payload['id'] == 'first':
+            entered.set()
+            assert release.wait(5)
+
+    worker = OutboxWorker(store, {'post': handler}, poll_s=30.0)
+    store.outbox_add('post', 'first-target', {'id': 'first'})
+    store.outbox_add('post', 'second-target', {'id': 'second'})
+    worker.start()
+    worker.notify()
+    assert entered.wait(5)
+
+    stopped = threading.Thread(target=worker.stop)
+    stopped.start()
+    try:
+        assert worker._stop.wait(5)
+    finally:
+        release.set()
+    stopped.join(5)
+
+    assert not stopped.is_alive()
+    assert not worker._thread.is_alive()
+    assert sent == ['first']
+    assert store.outbox_counts() == {'pending': 1}
+
+    # Explicit deterministic callers remain able to drain a stopped worker.
+    assert worker.flush_once() == 1
+    assert sent == ['first', 'second']
+
+
+def test_background_stop_after_claim_releases_item_without_dispatch(
+        store, monkeypatch):
+    sent = []
+    stopped = threading.Event()
+    worker = OutboxWorker(
+        store, {'post': lambda _target, payload: sent.append(payload['id'])},
+    )
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    original_claim = store.outbox_claim_due
+
+    def claim_then_stop(**kwargs):
+        claimed = original_claim(**kwargs)
+        stopped.set()
+        return claimed
+
+    monkeypatch.setattr(store, 'outbox_claim_due', claim_then_stop)
+    assert worker._flush_once(stop=stopped) == 0
+    assert sent == []
+
+    monkeypatch.setattr(store, 'outbox_claim_due', original_claim)
+    assert worker.flush_once() == 1
+    assert sent == ['queued']
+
+
+def test_stale_outbox_release_cannot_clear_a_newer_lease(store):
+    store.outbox_add('post', 'target', {'id': 'queued'})
+    old = store.outbox_claim_due()[0]
+    with store._conn() as connection:
+        connection.execute(
+            'UPDATE outbox SET lease_ns=0 WHERE seq=? AND lease_ns=?',
+            (old.seq, old.lease_ns),
+        )
+    current = store.outbox_claim_due()[0]
+    assert current.lease_ns != old.lease_ns
+
+    assert not store.outbox_release_claim(old)
+    assert store.outbox_claim_due() == []
+    assert store.outbox_release_claim(current)
+    assert store.outbox_claim_due()[0].seq == current.seq

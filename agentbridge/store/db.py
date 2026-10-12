@@ -129,6 +129,7 @@ class OutboxItem:
     target: str
     payload: dict[str, Any]
     attempts: int
+    lease_ns: int = 0
 
 
 class Store:
@@ -738,8 +739,21 @@ class Store:
                     (lease_until, seq, now),
                 ).rowcount
                 if claimed:
-                    items.append(OutboxItem(seq, kind, target, json.loads(payload), attempts))
+                    items.append(OutboxItem(
+                        seq, kind, target, json.loads(payload), attempts, lease_until,
+                    ))
         return items
+
+    def outbox_release_claim(self, item: OutboxItem) -> bool:
+        """Release this worker's exact unprocessed lease after revocation."""
+        if type(item) is not OutboxItem or item.lease_ns <= 0:
+            raise ValueError("invalid outbox claim")
+        with self._conn() as c:
+            return bool(c.execute(
+                "UPDATE outbox SET lease_ns=0 WHERE seq=? AND state='pending'"
+                " AND lease_ns=?",
+                (item.seq, item.lease_ns),
+            ).rowcount)
 
     def outbox_done(self, seq: int) -> None:
         with self._conn() as c:

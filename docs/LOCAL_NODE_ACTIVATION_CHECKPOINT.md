@@ -69,6 +69,20 @@ documents are captured under one SQLite read transaction with independent 4 MiB
 ceilings. The parent-focused gate passes 145 tests; an independent Astra review
 found no P1/P2 and its one durable coverage suggestion is included.
 
+The latest activation review found two observability and teardown gaps. Mesh
+shutdown now revokes sync, notification, presence and outbox background owners
+before waiting for the legacy Store-write lease; a retirement timeout still
+withholds Store closure and retains the exact Mesh for retry, but cannot leave a
+signed-out session producing background work. Background outbox flushing checks
+revocation between dispatches and releases every exact unprocessed lease by CAS;
+an already-running handler may finish, but no later queued mutation starts.
+Explicit deterministic flushing remains available without the background owner.
+Successful local-node activation is now a diagnostics breadcrumb, so normal
+sampling retains the ownership transition without requiring full capture. The
+focused lifecycle, outbox, sync and diagnostics gate passes 104 tests; Ruff and
+whitespace checks pass. Astra's independent follow-up found no remaining P1/P2;
+its stop-after-claim and stale-lease CAS probes are preserved as regressions.
+
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,
 exercise pre- and post-retirement rollback, and measure cached first paint plus

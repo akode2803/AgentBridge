@@ -78,22 +78,40 @@ class OutboxWorker:
             if self._stop.is_set():
                 break
             try:
-                self.flush_once()
+                self._flush_once(stop=self._stop)
             except Exception:  # noqa: BLE001 — the loop must survive anything
                 pass
 
-    @delivery_trace.observed('outbox_batch')
     def flush_once(self) -> int:
         """Claim and dispatch every currently-due item. Returns how many were
         completed. Deterministic — tests and synchronous callers use this."""
+        return self._flush_once()
+
+    @delivery_trace.observed('outbox_batch')
+    def _flush_once(self, *, stop: threading.Event | None = None) -> int:
+        """Flush due work, honoring revocation only for the background owner.
+
+        Explicit synchronous callers may still use ``flush_once`` after
+        stopping the worker. The background path releases every unprocessed
+        exact lease when stopped, so it never strands a claimed batch or starts
+        a later transport mutation.
+        """
         done = 0
+        if stop is not None and stop.is_set():
+            return done
         for item in self.store.outbox_prune_dead():
             self._hook(self.prune_hooks, item)
         while True:
+            if stop is not None and stop.is_set():
+                return done
             items = self.store.outbox_claim_due(lease_s=self.lease_s)
             if not items:
                 return done
-            for item in items:
+            for index, item in enumerate(items):
+                if stop is not None and stop.is_set():
+                    for pending in items[index:]:
+                        self.store.outbox_release_claim(pending)
+                    return done
                 done += self._dispatch(item)
 
     def _dispatch(self, item: OutboxItem) -> int:

@@ -226,6 +226,20 @@ def test_local_snapshot_admission_is_retained_as_delivery_breadcrumb(tmp_path):
     assert 'private-chat' not in sink.path.read_text()
 
 
+def test_local_node_activation_is_retained_as_delivery_breadcrumb(tmp_path):
+    sink = Diagnostics(tmp_path)
+    assert sink.set_enabled(True, sample_rate=0)
+
+    trace.emit('local_node_activation', status='ok', outcome='completed')
+
+    retained = rows(sink)
+    event = next(
+        row for row in retained if row.get('phase') == 'local_node_activation'
+    )
+    assert event['status'] == 'ok'
+    assert event['outcome'] == 'completed'
+
+
 def test_source_reconciliation_profile_keeps_only_bounded_stage_metrics(tmp_path):
     sink = Diagnostics(tmp_path)
     assert sink.set_enabled(True, sample_rate=1)

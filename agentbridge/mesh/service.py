@@ -591,13 +591,17 @@ class Mesh:
         if self._mirror_unsubscribe is not None:
             self._mirror_unsubscribe()
             self._mirror_unsubscribe = None
-        # stop() wakes the run loop but is not a Store-write barrier. Retire
-        # also joins every leased write cycle. On timeout this method exits
-        # before Store.close(), and the owning app retains this Mesh to retry.
-        self.sync.retire(timeout_s=10.0)
+        # Revoke every background producer before waiting for the legacy Store
+        # lease. A retirement timeout leaves this Mesh reachable for a later
+        # close retry, but must not leave presence beats, notification work or
+        # queued outbound mutations running for the detached session.
+        self.sync.stop()
         self.notifier.stop()
         self.presence.stop()  # writes the clean offline marker
         self.outbox.stop()
+        # stop() only wakes the sync loop. Retire is the Store-write barrier and
+        # joins every leased write cycle. On timeout Store.close() is withheld.
+        self.sync.retire(timeout_s=10.0)
         self.store.close()
 
     def __enter__(self) -> "Mesh":
