@@ -793,3 +793,12 @@ verified before their positions are trusted. A transaction-level staged-source
 admission helper lets the later publisher swap documents and messages in one
 commit; rollback retains the former admitted snapshot. This slice does not yet
 create a coupled candidate or replace any chat rows.
+
+Coupled candidates reserve a distinct `coupled:<nonce>` physical source ID and
+a verified private ownership row before document collection can finish. The
+ordinary staged publisher rejects the reserved prefix even if the side table is
+missing or damaged, so a document/index generation cannot become ready without
+its future message and offset half. Existing `stage:<nonce>` publishers retain
+their document-only behavior. Abort marks the underlying stage first; bounded
+stage cleanup removes the private owner in the same transaction as its payload
+rows, making either crash order fail closed without a time-based lease.

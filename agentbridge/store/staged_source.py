@@ -100,8 +100,15 @@ def _handle(store, stage):
         index._chat(stage.chat_id)
     elif stage.kind != 'raw' or stage.chat_id != '':
         raise ValueError('invalid raw stage kind or chat')
-    if (not stage.source_id.startswith('stage:') or len(stage.source_id) != 38
-            or any(c not in '0123456789abcdef' for c in stage.source_id[6:])
+    if stage.source_id.startswith('coupled:'):
+        prefix = 'coupled:'
+    elif stage.source_id.startswith('stage:'):
+        prefix = 'stage:'
+    else:
+        raise ValueError('invalid stage source prefix')
+    if (len(stage.source_id) != len(prefix) + 32
+            or any(c not in '0123456789abcdef'
+                   for c in stage.source_id[len(prefix):])
             or type(stage.epoch) is not str or len(stage.epoch) != 32
             or any(c not in '0123456789abcdef' for c in stage.epoch)):
         raise ValueError('invalid stage handle')
@@ -183,8 +190,11 @@ def abandon_superseded(conn, store, logical_source, expected):
         )
 
 
-def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes, max_documents):
+def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes,
+           max_documents, source_prefix='stage:'):
     logical_source = docs._validate_source_id(logical_source)
+    if source_prefix not in ('stage:', 'coupled:'):
+        raise ValueError('invalid stage source prefix')
     if (type(max_total_bytes) is not int or not 0 <= max_total_bytes <= MAX_TOTAL_BYTES
             or type(max_documents) is not int or not 0 <= max_documents <= MAX_DOCUMENTS):
         raise ValueError('invalid stage budgets')
@@ -205,7 +215,7 @@ def _begin(store, logical_source, chat, kind, *, expected, max_total_bytes, max_
         existing = conn.execute("SELECT count(*),coalesce(sum(total_bytes),0),coalesce(sum(phase='building'),0) FROM (SELECT total_bytes,phase FROM staged_sources LIMIT ?)", (MAX_STAGES + 1,)).fetchone()
         if existing[0] >= MAX_STAGES or existing[1] >= MAX_GLOBAL_BYTES or existing[2] >= MAX_ACTIVE_STAGES:
             raise OverflowError('global stage capacity exceeded')
-        source_id = 'stage:' + uuid.uuid4().hex
+        source_id = source_prefix + uuid.uuid4().hex
         epoch = uuid.uuid4().hex
         conn.execute('INSERT INTO staged_sources '
                      '(source,logical_source,chat,epoch,incarnation,phase,document_count,index_count,'
@@ -443,7 +453,7 @@ def _admitted(conn, physical):
 def retire_generation(store, physical):
     """After a pointer swap, mark an unreferenced older physical source reclaimable."""
     physical = docs._validate_source_id(physical)
-    if not physical.startswith('stage:'):
+    if not physical.startswith(('stage:', 'coupled:')):
         return False
     conn = store._conn()
     if conn.in_transaction:
@@ -501,6 +511,8 @@ def cleanup(store, *, protected_ids=(), max_rows=128):
                 conn.executemany(f'DELETE FROM {table} WHERE rowid=?', rows)
                 remaining -= len(rows)
             if remaining > 0:
+                from . import coupled_stage
+                coupled_stage.cleanup_owner(conn, source_id)
                 conn.execute('DELETE FROM overlay_index_ready WHERE source=?', (source_id,))
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                 "AND name='presence_index_ready'").fetchone():
