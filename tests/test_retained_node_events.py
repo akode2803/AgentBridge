@@ -204,6 +204,29 @@ def test_reaction_cannot_attach_to_target_created_after_operation(world):
         mesh.store, kind='info') == ()
 
 
+def test_reactor_without_shared_history_cannot_target_prejoin_message(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    env, _document = _signed_reaction(world)
+    meta = mirror.get_doc(P.meta(chat))
+    meta['permissions']['send_history'] = False
+    meta['members']['alice']['joined_ns'] = base + 2
+    meta['tenure']['alice'] = [[base + 2, 0]]
+    mirror.put_doc(P.meta(chat), meta)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert env['event']['msg_id'] == 'two'
+    assert final.status == 'consumed' and not final.gap
+    assert final.reactions == ()
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
 def test_reaction_decode_resource_failure_remains_retryable(world, monkeypatch):
     mesh, _mirror, _provider, chat, _base, reader, _publisher = world
     _signed_reaction(world)

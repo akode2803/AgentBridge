@@ -996,10 +996,15 @@ remaining P1/P2.
 The PR review correction carries the signed operation namespace through final
 target mapping and suppresses a target whose canonical message is newer than
 the reaction. A future message can no longer inherit a precreated operation for
-the same chosen ID. Breadcrumb decoding catches only malformed admitted input;
-`MemoryError` reaches the page-operation resource boundary and leaves the
-journal item retryable. The focused retained-event/notification gate passes 57
-tests including both regressions.
+the same chosen ID. Event and operation must also fall in one actor tenure; when
+history sharing is disabled, the canonical target must be at or after that
+tenure's join cut. A newly joined member can no longer trigger semantic wakes or
+notifications for history they could not see. Breadcrumb decoding catches only
+malformed admitted input; `MemoryError` reaches the page-operation resource
+boundary and leaves the journal item retryable. Current mapping verifies the
+new `ops_sig` proof while `sig` remains a legacy display signature. The combined
+retained-event/journal/page/reaction/security gate passes 125 tests; Ruff and
+diff checks pass locally.
 
 This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for

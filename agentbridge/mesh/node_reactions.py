@@ -11,7 +11,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 
 from .. import crypto
-from ..core.models import MsgKind, UserKind
+from ..core.models import ChatKind, MsgKind, UserKind
 from ..store import node_event_journal, overlay_index, page_inputs
 from ..transport.authority_observation import _part
 from . import eventbus, events, page_fence, readmodel, reaction_documents
@@ -57,12 +57,13 @@ class _Candidate:
     event_ns: int
     target_id: str
     reaction_ns: int
+    history_from_ns: int
     emoji: str
 
     def to_dict(self):
         return {'id': self.event_id, 'from': self.sender, 'ns': self.event_ns,
                 'target': self.target_id, 'reaction_ns': self.reaction_ns,
-                'emoji': self.emoji}
+                'history_from_ns': self.history_from_ns, 'emoji': self.emoji}
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,17 @@ class ReactionProjectionOperation(PageOperation):
                 or not readmodel.member_at(
                     spans, event['reaction_ns'])):
             return None
-        return env, event, public
+        # Both signed records must belong to one tenure. When history sharing
+        # is disabled, that tenure's join cut also bounds what the reactor was
+        # allowed to target; recipient visibility alone is insufficient.
+        shared = next((joined for joined, left in spans
+                       if joined <= event['reaction_ns'] < row.key.ns
+                       and (left == 0 or row.key.ns < left)), None)
+        if shared is None:
+            return None
+        history_from = (shared if snapshot.kind is ChatKind.GROUP
+                        and not snapshot.permissions.send_history else 0)
+        return env, event, public, history_from
 
     def _resolve_exact_projection(
             self, round_, snapshot, source_binding, inputs, requested_targets):
@@ -181,7 +192,7 @@ class ReactionProjectionOperation(PageOperation):
                 prelim.append((ident, *value))
         if not prelim:
             return (), ()
-        actors = tuple(dict.fromkeys(env['from'] for _, env, _, _ in prelim))
+        actors = tuple(dict.fromkeys(env['from'] for _, env, _, _, _ in prelim))
         observed = self.source_reader.capture_reaction_documents(
             source_binding, actors, max_bytes=self.ledger.remaining())
         by_path = {record.path: record for record in observed.records}
@@ -191,7 +202,7 @@ class ReactionProjectionOperation(PageOperation):
             for record in observed.records
         ))
         candidates = []
-        for ident, env, hint, public in prelim:
+        for ident, env, hint, public, history_from in prelim:
             record = by_path.get(P.reactions(self.chat, env['from']))
             if record is None or record.deleted or record.payload_json is None:
                 # An authentic event may arrive before its overlay document.
@@ -202,7 +213,8 @@ class ReactionProjectionOperation(PageOperation):
                 signed = reaction_documents.signing_bytes(
                     self.chat, env['from'], document)
                 self.ledger.signature(signed)
-                signature_valid = crypto.verify(public, document['sig'], signed)
+                signature_valid = crypto.verify(
+                    public, reaction_documents.operation_signature(document), signed)
             except (TypeError, ValueError, KeyError, RecursionError, UnicodeError):
                 continue
             if not signature_valid:
@@ -221,7 +233,7 @@ class ReactionProjectionOperation(PageOperation):
                 continue
             candidates.append(_Candidate(
                 ident, env['from'], env['ns'], hint['msg_id'], operation.ns,
-                operation.emoji,
+                history_from, operation.emoji,
             ))
         absent = set(inputs.absent_ids)
         if any(item.target_id in absent for item in candidates):
@@ -265,6 +277,7 @@ class ReactionProjectionOperation(PageOperation):
             if (message is not None and message.kind is MsgKind.MESSAGE
                     and not message.deleted and not message.undecrypted
                     and message.ns <= item['reaction_ns']
+                    and message.ns >= item['history_from_ns']
                     and message.from_ == viewer and item['from'] != viewer):
                 result.append(Event(
                     eventbus.REACTION, message.chat_id,
