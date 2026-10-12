@@ -100,6 +100,8 @@ class LocalInputRuntime:
         self._stop = threading.Event()
         self._thread = None
         self._closed = False
+        self._node_source = None
+        self._sync_owner = None
         self._mirror_tokens = OrderedDict()
         self._page_preparation = None
         self._discovery = None
@@ -108,6 +110,70 @@ class LocalInputRuntime:
         self.auxiliary = None
         self.unread = None
         self.read_events = None
+
+    def bind_sync_owner(self, engine):
+        """Bind the exact Mesh legacy writer that a node transfer may retire."""
+        from .sync import SyncEngine
+        if (type(engine) is not SyncEngine or engine.tx is not self.transport
+                or engine.store is not self.store):
+            raise ValueError('foreign legacy sync owner')
+        with self._lock:
+            if self._closed or self._sync_owner is not None:
+                raise RuntimeError('legacy sync owner already bound or closed')
+            engine.bind_transfer_owner(self)
+            self._sync_owner = engine
+
+    def install_node_source(self, runtime, retirement):
+        """Irreversibly replace legacy message ingestion with a node runtime.
+
+        The retirement receipt proves that the exact legacy SyncEngine bound
+        to this transport and Store has joined every active write and rejects
+        future writes.  The worker lock then joins any document collection or
+        exact local-append admission before the new publisher becomes visible.
+        """
+        from .node_page_runtime import LocalNodePageRuntime
+        from .sync import SyncEngine, SyncRetirement
+        if type(runtime) is not LocalNodePageRuntime \
+                or type(retirement) is not SyncRetirement:
+            raise TypeError('invalid node source transfer')
+        engine = retirement._engine
+        if type(engine) is not SyncEngine:
+            raise TypeError('invalid legacy sync owner')
+        with self._lock:
+            if engine is not self._sync_owner:
+                raise ValueError('foreign legacy sync owner')
+        engine.validate_retirement(
+            retirement, self.transport, self.store, owner=self,
+        )
+        if (runtime.store is not self.store
+                or runtime.publisher.store is not self.store
+                or runtime.publisher.coordinator is not self.coordinator
+                or runtime.server.recovery_runtime.transport is not self.transport):
+            raise ValueError('foreign node source owner')
+        with self._worker_lock:
+            # Revalidate after joining legacy document/append work. Retirement
+            # is irreversible, but its no-active-writer proof is part of this
+            # exact handoff rather than a one-time advisory check.
+            engine.validate_retirement(
+                retirement, self.transport, self.store, owner=self,
+            )
+            with self._lock:
+                if self._closed or self._node_source is not None:
+                    raise RuntimeError('node source already installed or closed')
+                selected = self._selected
+                queued = self.schedule.transfer_snapshot()
+                for chat in queued:
+                    if chat != selected and not runtime.discover(chat):
+                        raise RuntimeError('node source transfer queue rejected')
+                if (selected is not None
+                        and not runtime.request(selected, selected=True)):
+                    raise RuntimeError('node source transfer queue rejected')
+                # Activity/settlement are coalesced hints in the legacy queue.
+                # One content-free recovery wake ensures their lost timing
+                # flags cannot delay the first node reconciliation.
+                runtime.wake('manual')
+                runtime._activate_source(self, retirement)
+                self._node_source = runtime
 
     def _retain_mirror_token(self, source, mirror):
         """Keep bounded process-local evidence for recently reconciled sources."""
@@ -129,6 +195,7 @@ class LocalInputRuntime:
         from .read_events import ReadEvents
         if mesh.store is not self.store or mesh.tx is not self.transport:
             raise ValueError('foreign page preparation owner')
+        self.bind_sync_owner(mesh.sync)
         with self._lock:
             if self._closed or self._page_preparation is not None:
                 raise RuntimeError('page preparation already bound or closed')
@@ -189,7 +256,15 @@ class LocalInputRuntime:
             return
         self._discovery_due = now + 4.0
         for chat in self._discovery.next_batch(max_rooms=32):
-            self.schedule.discover(chat, now=now)
+            # Serialize each dispatch with source transfer. A discovery that
+            # starts before handoff is therefore included in its queue
+            # snapshot; one that starts after handoff reaches the node owner.
+            with self._lock:
+                node_source = self._node_source
+                if node_source is None:
+                    self.schedule.discover(chat, now=now)
+                else:
+                    node_source.discover(chat)
 
     def reader(self, chat):
         return LocalPageSource(self.coordinator, self.store, chat)
@@ -201,9 +276,17 @@ class LocalInputRuntime:
         with self._lock:
             if self._closed:
                 return False
-            accepted = self.schedule.request(chat, now=time.monotonic(),
-                                             selected=selected, activity=activity,
-                                             settled=settled)
+            node_source = self._node_source
+            accepted = (
+                self.schedule.request(
+                    chat, now=time.monotonic(), selected=selected,
+                    activity=activity, settled=settled,
+                ) if node_source is None else
+                node_source.request(
+                    chat, selected=selected, activity=activity,
+                    settled=settled,
+                )
+            )
             if accepted and selected:
                 self._selected = chat
                 if self._page_preparation is not None:
@@ -213,7 +296,10 @@ class LocalInputRuntime:
     def clear_selection(self):
         with self._lock:
             self._selected = None
-            self.schedule.clear_selection()
+            if self._node_source is None:
+                self.schedule.clear_selection()
+            else:
+                self._node_source.clear_selection()
             if self._page_preparation is not None:
                 self._page_preparation.select(None)
             if self.unread is not None:
@@ -223,6 +309,9 @@ class LocalInputRuntime:
         # Hints contain no authority, changed paths or provider payloads.
         with self._lock:
             selected = self._selected
+            node_source = self._node_source
+        if node_source is not None:
+            node_source.wake('realtime')
         if selected is not None:
             self.request(selected, activity=True)
             if self.auxiliary is not None:
@@ -239,7 +328,7 @@ class LocalInputRuntime:
             return None
         reader = self.reader(chat)
         with self._lock:
-            if self._closed:
+            if self._closed or self._node_source is not None:
                 return None
         try:
             with self.coordinator.publication_gate(self.store, reader.definition):
@@ -254,30 +343,31 @@ class LocalInputRuntime:
         """Restore readiness only for the exact definitely appended local row."""
         if type(admission) is not _LocalAppendAdmission:
             return False
-        reader = self.reader(admission.chat)
-        if admission.source.source_id != reader.definition.source:
-            raise ValueError('foreign local append admission')
-        with self._lock:
-            if self._closed:
-                return False
-        try:
-            with self.coordinator.publication_gate(self.store, reader.definition):
-                result = local_source.admit_confirmed_local_message(
-                    self.store, admission.source, admission.chat, record,
-                )
+        with self._worker_lock:
+            reader = self.reader(admission.chat)
+            if admission.source.source_id != reader.definition.source:
+                raise ValueError('foreign local append admission')
             with self._lock:
-                token = self._mirror_tokens.get(result.source_id)
-                if token is not None and token.source == admission.source:
-                    self._retain_mirror_token(result, token.mirror)
-            delivery_trace.emit(
-                'local_snapshot_admitted', chat=admission.chat,
-                message=record.get('id', ''), outcome='completed',
-            )
-            return True
-        except (local_source.SourceChanged, OSError, OverflowError, ValueError):
-            # The ordinary complete-source ingestion path remains authoritative
-            # after any missed CAS, malformed row or unavailable storage.
-            return False
+                if self._closed or self._node_source is not None:
+                    return False
+            try:
+                with self.coordinator.publication_gate(self.store, reader.definition):
+                    result = local_source.admit_confirmed_local_message(
+                        self.store, admission.source, admission.chat, record,
+                    )
+                with self._lock:
+                    token = self._mirror_tokens.get(result.source_id)
+                    if token is not None and token.source == admission.source:
+                        self._retain_mirror_token(result, token.mirror)
+                delivery_trace.emit(
+                    'local_snapshot_admitted', chat=admission.chat,
+                    message=record.get('id', ''), outcome='completed',
+                )
+                return True
+            except (local_source.SourceChanged, OSError, OverflowError, ValueError):
+                # The ordinary complete-source ingestion path remains authoritative
+                # after any missed CAS, malformed row or unavailable storage.
+                return False
 
     def local_append_settled(self, chat, record):
         """After outbox deletion, prepare terminal facts and reconcile fully."""
@@ -328,6 +418,9 @@ class LocalInputRuntime:
         with self._worker_lock:
             if self._closed:
                 raise RuntimeError('local input runtime is closed')
+            with self._lock:
+                if self._node_source is not None:
+                    raise RuntimeError('legacy local input owner retired')
             reader = self.reader(chat)
             publisher = SourcePublisher(self.coordinator, self.store, reader.definition)
             expected = None
@@ -585,6 +678,19 @@ class LocalInputRuntime:
                         )
 
     def run_due(self):
+        with self._worker_lock:
+            with self._lock:
+                if self._closed:
+                    return False
+                node_source = self._node_source
+            if node_source is not None:
+                step = node_source.run_due()
+                publication = step.publication
+                if publication is not None and publication.changed:
+                    self.request_page(publication.chat_id)
+                    if self.read_events is not None:
+                        self.read_events.changed('chat', publication.chat_id)
+                return step.operation != 'none'
         job = self.schedule.take_due(now=time.monotonic())
         if job is None:
             return False
@@ -645,7 +751,12 @@ class LocalInputRuntime:
                     reclaimed = 0
                 if reclaimed or prepared:
                     continue
-                delay = self.schedule.wait_s(now=time.monotonic(), maximum=0.35)
+                with self._lock:
+                    node_source = self._node_source
+                delay = (
+                    self.schedule.wait_s(now=time.monotonic(), maximum=0.35)
+                    if node_source is None else node_source.wait_s(0.35)
+                )
                 if watcher is None:
                     self._stop.wait(delay)
                     continue

@@ -1,6 +1,8 @@
 """SyncEngine: parallel catch-up, membership gating, incremental offsets,
 and the R30 change-feed fast path (one query per tick on cloud drivers)."""
 
+import pytest
+
 from agentbridge.mesh.sync import SyncEngine
 from agentbridge.store.db import Store
 from agentbridge.core.latency import sink_for_store
@@ -179,6 +181,88 @@ def test_run_loop_stops_cleanly(tmp_path, clouds):
     eng.stop()
     t.join(5.0)
     assert not t.is_alive() and seen and seen[0] == 2
+    store.close()
+
+
+def test_retirement_joins_active_write_and_permanently_rejects_future_sync(
+        tmp_path, clouds, monkeypatch):
+    import threading
+    import time
+
+    tx = clouds.bare(tmp_path / "mesh2")
+    seed(tx, "c1", "ann", 1)
+    store = Store(tmp_path / "cache.sqlite")
+    engine = SyncEngine(tx, store)
+    entered = threading.Event()
+    release = threading.Event()
+    original = tx.read_log
+
+    def blocked_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(2.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tx, "read_log", blocked_read)
+    writer = threading.Thread(target=lambda: engine.sync_chat("c1"), daemon=True)
+    writer.start()
+    assert entered.wait(1.0)
+
+    result = []
+    retired = threading.Thread(
+        target=lambda: result.append(engine.retire(timeout_s=2.0)), daemon=True,
+    )
+    retired.start()
+    time.sleep(0.02)
+    assert retired.is_alive()
+    release.set()
+    writer.join(2.0)
+    retired.join(2.0)
+
+    assert not writer.is_alive() and not retired.is_alive()
+    engine.validate_retirement(result[0], tx, store)
+    assert store.message_count("c1") == 1
+    with pytest.raises(RuntimeError, match="legacy sync owner retired"):
+        engine.sync_once()
+    store.close()
+
+
+def test_retirement_timeout_stays_retired_and_receipt_is_exact(
+        tmp_path, clouds, monkeypatch):
+    import threading
+
+    tx = clouds.bare(tmp_path / "mesh2")
+    seed(tx, "c1", "ann", 1)
+    store = Store(tmp_path / "cache.sqlite")
+    other = Store(tmp_path / "other.sqlite")
+    engine = SyncEngine(tx, store)
+    entered = threading.Event()
+    release = threading.Event()
+    original = tx.read_log
+
+    def blocked_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(2.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tx, "read_log", blocked_read)
+    writer = threading.Thread(target=lambda: engine.sync_chat("c1"), daemon=True)
+    writer.start()
+    assert entered.wait(1.0)
+    with pytest.raises(TimeoutError, match="active writes"):
+        engine.retire(timeout_s=0.0)
+    with pytest.raises(RuntimeError, match="legacy sync owner retired"):
+        engine.sync_chat("c1")
+
+    release.set()
+    writer.join(2.0)
+    proof = engine.retire(timeout_s=1.0)
+    with pytest.raises(RuntimeError, match="already retired"):
+        engine.bind_transfer_owner(object())
+    with pytest.raises(ValueError, match="invalid legacy sync retirement"):
+        engine.validate_retirement(proof, tx, other)
+    with pytest.raises(ValueError, match="invalid sync retirement timeout"):
+        engine.retire(timeout_s=float("nan"))
+    other.close()
     store.close()
 
 

@@ -8,6 +8,7 @@ using the last admitted Store snapshot while background acquisition fails.
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
 from typing import Callable
 
@@ -56,6 +57,7 @@ class NodeInputPublisher:
         self, coordinator: MutationCoordinator, store, client: LocalNodeClient,
         *, background_s: float = 4.0,
         clock: Callable[[], float] = time.monotonic,
+        activation_token: object | None = None,
     ) -> None:
         if (type(coordinator) is not MutationCoordinator
                 or type(client) is not LocalNodeClient or not callable(clock)):
@@ -64,12 +66,28 @@ class NodeInputPublisher:
         self.store = store
         self.client = client
         self.clock = clock
+        self._activation_lock = threading.Lock()
+        self._activation_token = activation_token
+        self._active = activation_token is None
         local_source.initialize(store)
         source_selectors.initialize(store)
         coupled_admission.initialize(store)
         node_publication_receipt.initialize(store)
         coordinator.register_store(store)
         self.schedule = SourceSchedule(background_s=background_s)
+
+    def _activate(self, token: object) -> None:
+        """Consume the runtime owner's one-shot publication capability."""
+        with self._activation_lock:
+            if self._active or token is not self._activation_token:
+                raise RuntimeError("node input publisher activation rejected")
+            self._active = True
+            self._activation_token = None
+
+    def _require_active(self) -> None:
+        with self._activation_lock:
+            if not self._active:
+                raise RuntimeError("node input publisher is inactive")
 
     def reader(self, chat_id: str) -> LocalPageSource:
         return LocalPageSource(self.coordinator, self.store, chat_id)
@@ -145,6 +163,7 @@ class NodeInputPublisher:
 
     def publish(self, chat_id: str) -> NodeInputPublishResult:
         """Attempt one bounded publication without hiding the previous cut."""
+        self._require_active()
         reader = self.reader(chat_id)
         chat = reader.chat
         source = None
@@ -229,11 +248,15 @@ class NodeInputPublisher:
                 0 if status is None else status.admitted_generation,
             )
 
-    def run_due(self, chat_id: str | None = None) -> bool:
+    def run_due_result(
+        self, chat_id: str | None = None,
+    ) -> tuple[bool, NodeInputPublishResult | None]:
+        """Run one due attempt and retain its exact publication outcome."""
+        self._require_active()
         chat = None if chat_id is None else self.reader(chat_id).chat
         job = self.schedule.take_due(now=self.clock(), chat_id=chat)
         if job is None:
-            return False
+            return False, None
         result = None
         try:
             result = self.publish(job.chat_id)
@@ -255,7 +278,11 @@ class NodeInputPublisher:
                 job, now=self.clock(), changed=result.changed,
                 success=success and not blocked, blocked=blocked,
             )
-        return True
+        return True, result
+
+    def run_due(self, chat_id: str | None = None) -> bool:
+        attempted, _result = self.run_due_result(chat_id)
+        return attempted
 
 
 __all__ = ["NodeInputPublishResult", "NodeInputPublisher"]

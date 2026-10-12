@@ -3,16 +3,23 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from agentbridge.mesh.local_page_source import LocalPageSource
+from agentbridge.mesh.local_input_runtime import LocalInputRuntime
+from agentbridge.mesh.node_input_publisher import NodeInputPublishResult
 from agentbridge.mesh.node_page_runtime import (
     LocalNodePageRuntime, NodePageRuntimeStep,
 )
+from agentbridge.mesh.sync import SyncEngine, SyncRetirement
+from agentbridge.mesh import local_input_runtime
 from agentbridge.node.protocol import ReplicaIdentity
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.node.sync_scheduler import NodeSyncTickResult
+from agentbridge.store import local_source, staged_publication, staged_source
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.transport.local_mutations import (
@@ -34,7 +41,7 @@ def _identity():
 
 
 @pytest.fixture
-def world(tmp_path):
+def inactive_world(tmp_path):
     payload = json.dumps({
         "id": "remote", "ns": 7, "from": "alice",
         "kind": "message", "text": "ready",
@@ -79,6 +86,19 @@ def world(tmp_path):
     finally:
         server.stop()
         store.close()
+
+
+@pytest.fixture
+def world(inactive_world):
+    runtime, store, server, clock = inactive_world
+    inputs = LocalInputRuntime(server.recovery_runtime.transport, store)
+    engine = SyncEngine(server.recovery_runtime.transport, store)
+    inputs.bind_sync_owner(engine)
+    inputs.install_node_source(runtime, engine.retire())
+    try:
+        yield runtime, store, server, clock
+    finally:
+        inputs.stop()
 
 
 def _advance(runtime, clock):
@@ -145,9 +165,9 @@ def test_completed_page_first_cannot_clear_newer_selected_route(
         assert chat_id == CHAT
         entered.set()
         assert release.wait(2.0)
-        return True
+        return True, None
 
-    monkeypatch.setattr(runtime.publisher, "run_due", blocked_run)
+    monkeypatch.setattr(runtime.publisher, "run_due_result", blocked_run)
     thread = threading.Thread(target=runtime.run_due, daemon=True)
     thread.start()
     assert entered.wait(1.0)
@@ -227,7 +247,10 @@ def test_due_room_backlog_cannot_starve_due_node_work(world):
 
 def test_concurrent_node_tick_is_reported_as_no_operation(world, monkeypatch):
     runtime, _store, _server, _clock = world
-    monkeypatch.setattr(runtime.publisher, "run_due", lambda chat_id=None: False)
+    monkeypatch.setattr(
+        runtime.publisher, "run_due_result",
+        lambda chat_id=None: (False, None),
+    )
     monkeypatch.setattr(
         runtime.node, "tick",
         lambda **_kwargs: NodeSyncTickResult(
@@ -286,6 +309,363 @@ def test_settled_mutation_wakes_node_even_when_page_queue_is_full(world):
     assert runtime.node._wake_revision == before + 1
 
 
+def test_local_input_owner_requires_exact_legacy_retirement(
+        inactive_world, tmp_path):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    forged = SyncRetirement(engine, object())
+    with pytest.raises(ValueError, match="invalid legacy sync retirement"):
+        inputs.install_node_source(runtime, forged)
+
+    other = Store(tmp_path / "foreign.sqlite")
+    try:
+        foreign = SyncEngine(transport, other)
+        proof = foreign.retire()
+        with pytest.raises(ValueError, match="foreign legacy sync owner"):
+            inputs.install_node_source(runtime, proof)
+
+        decoy = SyncEngine(transport, store)
+        decoy_proof = decoy.retire()
+        with pytest.raises(ValueError, match="foreign legacy sync owner"):
+            inputs.install_node_source(runtime, decoy_proof)
+    finally:
+        other.close()
+        inputs.stop()
+
+
+def test_node_transfer_requires_exact_recovery_transport(
+        inactive_world, tmp_path):
+    _runtime, store, server, clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    proof = engine.retire()
+    other_transport = LocalMutationTransport(
+        transport._transport, transport._coordinator,
+    )
+    other_server = LocalNodeServer(
+        tmp_path / "other-node", _identity(),
+        recovery_transport=other_transport,
+    ).start()
+    other_runtime = LocalNodePageRuntime(
+        other_server, store, clock=lambda: clock[0],
+        clock_ns=lambda: int(clock[0] * 1_000_000_000),
+    )
+    try:
+        with pytest.raises(ValueError, match="foreign node source owner"):
+            inputs.install_node_source(other_runtime, proof)
+        assert inputs._node_source is None
+    finally:
+        other_server.stop()
+        inputs.stop()
+
+
+def test_sync_retirement_can_activate_only_its_bound_local_owner(
+        inactive_world):
+    runtime, store, server, clock = inactive_world
+    transport = server.recovery_runtime.transport
+    owner = LocalInputRuntime(transport, store)
+    challenger = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    owner.bind_sync_owner(engine)
+    with pytest.raises(ValueError, match="foreign legacy sync transfer owner"):
+        challenger.bind_sync_owner(engine)
+    proof = engine.retire()
+    second_runtime = LocalNodePageRuntime(
+        server, store, clock=lambda: clock[0],
+        clock_ns=lambda: int(clock[0] * 1_000_000_000),
+    )
+
+    owner.install_node_source(runtime, proof)
+
+    with pytest.raises(ValueError, match="foreign legacy sync owner"):
+        challenger.install_node_source(second_runtime, proof)
+    with pytest.raises(RuntimeError, match="inactive"):
+        second_runtime.run_due()
+    owner.stop()
+    challenger.stop()
+
+
+def test_node_transfer_publishes_owner_only_after_route_transfer(
+        inactive_world, monkeypatch):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    assert inputs.request(CHAT, selected=True)
+    proof = engine.retire()
+
+    monkeypatch.setattr(
+        runtime, "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("route transfer failed")),
+    )
+    with pytest.raises(RuntimeError, match="route transfer failed"):
+        inputs.install_node_source(runtime, proof)
+    assert inputs._node_source is None
+    with pytest.raises(RuntimeError, match="inactive"):
+        runtime.run_due()
+    with pytest.raises(RuntimeError, match="inactive"):
+        runtime.publisher.publish(CHAT)
+    inputs.stop()
+
+
+def test_node_transfer_keeps_bounded_legacy_queue_and_wakes_recovery(
+        inactive_world):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    assert inputs.request("activity-room", activity=True)
+    assert inputs.request("settled-room", settled=True)
+    assert inputs.schedule.discover("discovered-room", now=time.monotonic())
+    before = runtime.node._wake_revision
+
+    inputs.install_node_source(runtime, engine.retire())
+
+    assert {
+        "activity-room", "settled-room", "discovered-room",
+    }.issubset(runtime.publisher.schedule._states)
+    assert runtime.node._wake_revision == before + 1
+    inputs.stop()
+
+
+def test_local_input_owner_transfers_selection_and_scheduling_once(
+        inactive_world, monkeypatch):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    assert inputs.request(CHAT, selected=True)
+    proof = engine.retire()
+    inputs.install_node_source(runtime, proof)
+
+    assert runtime.selected == CHAT
+    assert inputs.request(CHAT, activity=True)
+    called = []
+    monkeypatch.setattr(
+        runtime, "run_due",
+        lambda: (called.append(True), NodePageRuntimeStep("publication", 0.0))[1],
+    )
+    assert inputs.run_due()
+    assert called == [True]
+    inputs.clear_selection()
+    assert runtime.selected is None
+    with pytest.raises(RuntimeError, match="legacy local input owner retired"):
+        inputs.ingest(CHAT)
+    with pytest.raises(RuntimeError, match="already installed"):
+        inputs.install_node_source(runtime, proof)
+    inputs.stop()
+
+
+def test_node_transfer_joins_active_legacy_document_publication(
+        inactive_world, monkeypatch):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    proof = engine.retire()
+    entered = threading.Event()
+    release = threading.Event()
+    original = local_input_runtime.collect_document_batches
+
+    def blocked_collection(*args, **kwargs):
+        entered.set()
+        assert release.wait(2.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        local_input_runtime, "collect_document_batches", blocked_collection,
+    )
+    legacy_errors = []
+
+    def legacy_ingest():
+        try:
+            inputs.ingest(CHAT)
+        except Exception as exc:
+            legacy_errors.append(exc)
+
+    legacy = threading.Thread(target=legacy_ingest, daemon=True)
+    legacy.start()
+    assert entered.wait(1.0)
+    installed = []
+    transfer = threading.Thread(
+        target=lambda: installed.append(
+            inputs.install_node_source(runtime, proof)),
+        daemon=True,
+    )
+    transfer.start()
+    time.sleep(0.02)
+    assert transfer.is_alive()
+
+    release.set()
+    legacy.join(2.0)
+    transfer.join(2.0)
+    assert not legacy.is_alive() and not transfer.is_alive()
+    assert len(legacy_errors) == 1
+    assert installed == [None]
+    with pytest.raises(RuntimeError, match="legacy local input owner retired"):
+        inputs.ingest(CHAT)
+    inputs.stop()
+
+
+def test_discovery_dispatch_is_serialized_with_source_transfer(
+        inactive_world, monkeypatch):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    inputs._discovery = SimpleNamespace(
+        next_batch=lambda *, max_rooms: ("race-room",),
+    )
+    inputs._discovery_due = 0.0
+    entered = threading.Event()
+    release = threading.Event()
+    original = inputs.schedule.discover
+
+    def blocked_discover(chat, *, now):
+        entered.set()
+        assert release.wait(2.0)
+        return original(chat, now=now)
+
+    monkeypatch.setattr(inputs.schedule, "discover", blocked_discover)
+    discovery = threading.Thread(target=inputs.discover, daemon=True)
+    discovery.start()
+    assert entered.wait(1.0)
+    installed = []
+    transfer = threading.Thread(
+        target=lambda: installed.append(
+            inputs.install_node_source(runtime, engine.retire())),
+        daemon=True,
+    )
+    transfer.start()
+    time.sleep(0.02)
+    assert transfer.is_alive()
+
+    release.set()
+    discovery.join(2.0)
+    transfer.join(2.0)
+
+    assert not discovery.is_alive() and not transfer.is_alive()
+    assert installed == [None]
+    assert "race-room" in runtime.publisher.schedule._states
+    inputs.stop()
+
+
+def test_node_publication_requires_successful_source_transfer(inactive_world):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    assert runtime.request(CHAT, selected=True)
+
+    with pytest.raises(RuntimeError, match="inactive"):
+        runtime.run_due()
+    with pytest.raises(RuntimeError, match="inactive"):
+        runtime.publisher.publish(CHAT)
+
+    inputs.install_node_source(runtime, engine.retire())
+
+    assert runtime.publisher.publish(CHAT).state == "pending"
+    inputs.stop()
+
+
+def test_changed_node_publication_wakes_page_and_read_model(
+        inactive_world, monkeypatch):
+    from types import SimpleNamespace
+
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    proof = engine.retire()
+    inputs.install_node_source(runtime, proof)
+    result = NodeInputPublishResult(CHAT, "published", True, 1, None)
+    monkeypatch.setattr(
+        runtime, "run_due",
+        lambda: NodePageRuntimeStep(
+            "publication", 0.0, publication=result,
+        ),
+    )
+    page_requests = []
+    read_events = []
+    monkeypatch.setattr(
+        inputs, "request_page", lambda chat: page_requests.append(chat) or True,
+    )
+    inputs.read_events = SimpleNamespace(
+        changed=lambda scope, chat: read_events.append((scope, chat)),
+        close=lambda: None,
+    )
+
+    assert inputs.run_due()
+    assert page_requests == [CHAT]
+    assert read_events == [("chat", CHAT)]
+    inputs.stop()
+
+
+def test_transfer_disables_stale_exact_append_and_settlement_wakes_node(
+        inactive_world):
+    runtime, store, server, _clock = inactive_world
+    transport = server.recovery_runtime.transport
+    inputs = LocalInputRuntime(transport, store)
+    inputs.request(CHAT, selected=True)
+    reader = inputs.reader(CHAT)
+    with inputs.coordinator.publication_gate(store, reader.definition):
+        expected = local_source.retire_for_publication(
+            store, local_source.capture(store, reader.definition.source),
+        )
+    stage = staged_source.begin(
+        store, reader.definition.source, CHAT, expected=expected,
+    )
+    staged_source.append(
+        store, stage,
+        {f"chats/{CHAT}/meta.json": {"members": {"alice": True}}},
+    )
+    staged_source.finish(store, stage)
+    with inputs.coordinator.publication_gate(store, reader.definition):
+        admitted, _index = staged_publication.admit(
+            store, expected, stage, observed_ns=1,
+        )
+    assert admitted.ready and not admitted.writes_pending
+    with store._conn() as conn:
+        store._insert_messages(conn, CHAT, ({
+            "id": "legacy", "ns": 7, "from": "alice",
+            "kind": "message", "text": "ready",
+        },), observed_ns=1)
+    current = local_source.capture(store, reader.definition.source)
+    assert current.ready and not current.writes_pending
+
+    record = {
+        "id": "local", "ns": 9, "from": "alice",
+        "kind": "message", "text": "pending",
+    }
+    stale = inputs.prepare_local_append(CHAT, record)
+    assert stale is not None
+    engine = SyncEngine(transport, store)
+    inputs.bind_sync_owner(engine)
+    proof = engine.retire()
+    inputs.install_node_source(runtime, proof)
+
+    assert inputs.prepare_local_append(CHAT, record) is None
+    assert not inputs.admit_local_append(stale, record)
+    before = runtime.node._wake_revision
+    assert inputs.local_append_settled(CHAT, record)
+    assert runtime.node._wake_revision == before + 1
+    assert store.message_count(CHAT) == 1
+    inputs.stop()
+
+
 def test_selection_and_realtime_mode_are_explicit(world):
     runtime, _store, _server, _clock = world
     runtime.request(CHAT, selected=True)
@@ -315,3 +695,6 @@ def test_invalid_result_and_wait_are_rejected():
         NodePageRuntimeStep("wrong", 0.0)
     with pytest.raises(ValueError):
         NodePageRuntimeStep("none", float("nan"))
+    publication = NodeInputPublishResult(CHAT, "published", True, 1, None)
+    with pytest.raises(ValueError):
+        NodePageRuntimeStep("none", 0.0, publication=publication)

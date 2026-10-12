@@ -145,9 +145,16 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
 - [ ] **Verify native integration, rich media and recorder overhead.** Headless
   Linux Chromium coverage does not establish interactive/native macOS access or
   actual-device scrolling, route changes, layout and diagnostic overhead.
-- [ ] **Coordinate runtime cutover.** Preserve source/configuration/stores/outboxes
+- [~] **Coordinate runtime cutover.** Preserve source/configuration/stores/outboxes
   and establish writer ownership before activation; no migration-complete claim
-  follows from source publication or passing CI.
+  follows from source publication or passing CI. The inactive one-way writer
+  retirement and local-input source-transfer seam is implemented at v0.24.356,
+  including serialized discovery dispatch and a one-shot destination
+  publication capability that rejects every pre-transfer Store write. The
+  receipt is bound to one local-input transfer owner and cannot activate a
+  second node publisher against the Store.
+  A replay-safe replacement for SyncEngine's content event/delivered-receipt
+  pump and app-owned startup/close integration remain required before activation.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 

@@ -16,7 +16,7 @@ from typing import Callable
 from ..node.client import LocalNodeClient
 from ..node.server import LocalNodeServer
 from ..node.sync_scheduler import LocalNodeSyncScheduler, NodeSyncTickResult
-from .node_input_publisher import NodeInputPublisher
+from .node_input_publisher import NodeInputPublisher, NodeInputPublishResult
 from .source_schedule import SELECTION_LEASE_S
 
 
@@ -25,6 +25,7 @@ class NodePageRuntimeStep:
     operation: str
     next_due_s: float
     node: NodeSyncTickResult | None = None
+    publication: NodeInputPublishResult | None = None
 
     def __post_init__(self) -> None:
         if self.operation not in {"none", "node", "publication"}:
@@ -32,7 +33,11 @@ class NodePageRuntimeStep:
         if (type(self.next_due_s) is not float
                 or not math.isfinite(self.next_due_s)
                 or not 0 <= self.next_due_s <= 300.0
-                or (self.operation == "node") != (self.node is not None)):
+                or (self.operation == "node") != (self.node is not None)
+                or (self.publication is not None and (
+                    self.operation != "publication"
+                    or type(self.publication) is not NodeInputPublishResult
+                ))):
             raise ValueError("invalid node page runtime result")
 
 
@@ -62,6 +67,8 @@ class LocalNodePageRuntime:
         self._page_first_chat: str | None = None
         self._last_operation = "none"
         self._lock = threading.RLock()
+        self._source_owner = None
+        self._publication_activation = object()
         self.node = LocalNodeSyncScheduler(
             server, foreground=False,
             realtime_healthy=realtime_healthy, clock_ns=clock_ns,
@@ -69,7 +76,32 @@ class LocalNodePageRuntime:
         self.publisher = NodeInputPublisher(
             server.recovery_runtime.coordinator, store,
             LocalNodeClient(server.home, server.identity), clock=clock,
+            activation_token=self._publication_activation,
         )
+
+    def _activate_source(self, owner, retirement) -> None:
+        """Accept the exact retired legacy owner and enable Store writes once."""
+        from .local_input_runtime import LocalInputRuntime
+        from .sync import SyncEngine, SyncRetirement
+
+        if (type(owner) is not LocalInputRuntime
+                or type(retirement) is not SyncRetirement):
+            raise TypeError("invalid node source activation")
+        engine = retirement._engine
+        if (type(engine) is not SyncEngine or engine is not owner._sync_owner
+                or owner.store is not self.store
+                or owner.coordinator is not self.publisher.coordinator
+                or self.server.recovery_runtime.transport is not owner.transport):
+            raise ValueError("foreign node source activation")
+        engine.validate_retirement(
+            retirement, owner.transport, owner.store, owner=owner,
+        )
+        with self._lock:
+            if self._source_owner is not None:
+                raise RuntimeError("node source already active")
+            self.publisher._activate(self._publication_activation)
+            self._publication_activation = None
+            self._source_owner = owner
 
     def request(
         self, chat_id: str, *, selected: bool = False,
@@ -153,21 +185,27 @@ class LocalNodePageRuntime:
 
     def _result(
         self, operation: str, node: NodeSyncTickResult | None = None,
+        publication: NodeInputPublishResult | None = None,
     ) -> NodePageRuntimeStep:
-        return NodePageRuntimeStep(operation, self.wait_s(300.0), node)
+        return NodePageRuntimeStep(
+            operation, self.wait_s(300.0), node, publication,
+        )
 
     def run_due(self) -> NodePageRuntimeStep:
         """Advance no more than one node or Store operation."""
         with self._lock:
+            if self._source_owner is None:
+                raise RuntimeError("node page runtime is inactive")
             self._expire_selection(self.clock())
             chat = self._page_first_chat
         if chat is not None:
-            if self.publisher.run_due(chat):
+            attempted, result = self.publisher.run_due_result(chat)
+            if attempted:
                 with self._lock:
                     if self._page_first_chat == chat:
                         self._page_first_chat = None
                     self._last_operation = "publication"
-                return self._result("publication")
+                return self._result("publication", publication=result)
             return self._result("none")
         now_ns = self.clock_ns()
         node_due = now_ns >= self.node.next_due_ns
@@ -176,11 +214,12 @@ class LocalNodePageRuntime:
         # exception and is consumed after one Store attempt above.
         with self._lock:
             last_operation = self._last_operation
-        if not (node_due and last_operation == "publication") \
-                and self.publisher.run_due():
-            with self._lock:
-                self._last_operation = "publication"
-            return self._result("publication")
+        if not (node_due and last_operation == "publication"):
+            attempted, result = self.publisher.run_due_result()
+            if attempted:
+                with self._lock:
+                    self._last_operation = "publication"
+                return self._result("publication", publication=result)
         if not node_due:
             return self._result("none")
         result = self.node.tick(now_ns=now_ns)

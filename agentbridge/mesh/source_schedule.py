@@ -146,6 +146,19 @@ class SourceSchedule:
             self._selected = None
             self._lease_until = self._hot_until = 0.0
 
+    def transfer_snapshot(self) -> tuple[str, ...]:
+        """Return the bounded queued chat set for a one-way owner transfer.
+
+        This is scheduling evidence only. The destination still performs its
+        own source checks and canonical reads recompute authority.
+        """
+        with self._lock:
+            return tuple(
+                chat for chat, _state in sorted(
+                    self._states.items(), key=lambda item: item[1].order,
+                )
+            )
+
     def take_due(self, *, now, chat_id=None):
         now = self._time(now)
         target = None if chat_id is None else self._chat(chat_id)
