@@ -239,11 +239,14 @@ class ChatOverlays:
                 operations = {}
         else:
             mapping, operations = reaction_map(old), {}
+            if type(old) is not dict:
+                authenticated_old = False
             if signer is not None:
-                legacy_sig = old.get('sig') if type(old) is dict else None
+                legacy = old if type(old) is dict else {}
+                legacy_sig = legacy.get('sig')
                 try:
                     legacy_data = reaction_signing_bytes(
-                        self.chat_id, user, int(old.get('ns', 0)), mapping)
+                        self.chat_id, user, int(legacy.get('ns', 0)), mapping)
                 except (TypeError, ValueError, OverflowError):
                     legacy_sig = None
                 if (type(legacy_sig) is not str or not legacy_sig

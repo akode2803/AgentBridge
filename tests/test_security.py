@@ -366,16 +366,24 @@ def test_v2_reaction_signature_tampering_and_unsigned_reseal(world):
     fable.tx.put_doc(path, {**signed, 'ops_origin': 'resealed'})
     assert visible() == {}
 
-    unsigned = {**signed, 'sig': '', 'ops_sig': '', 'ops_origin': 'native'}
+    from agentbridge.mesh.reaction_documents import MAX_NS, parse_native_v2
+    unsigned = {
+        **signed, 'sig': '', 'ops_sig': '', 'ops_origin': 'native',
+        'ns': MAX_NS,
+        'ops': {env.id: {
+            **signed['ops'][env.id], 'id': 'foreign-max-operation',
+            'ns': MAX_NS, 'previous': None,
+        }},
+    }
     fable.tx.put_doc(path, unsigned)
     assert visible() == {}
     fable.harden_startup()
     resealed = fable.tx.get_doc(path)
     assert resealed['schema'] == 2 and resealed['ops_origin'] == 'resealed'
-    assert resealed['v'] == signed['v'] and resealed['ops'] == signed['ops']
-    assert resealed['ns'] == signed['ns'] and resealed['sig'] and resealed['ops_sig']
+    assert resealed['v'] == signed['v'] and len(resealed['ops']) == 1
+    assert resealed['ns'] < MAX_NS and resealed['sig'] and resealed['ops_sig']
+    assert next(iter(resealed['ops'].values()))['ns'] == resealed['ns']
     assert visible() == {'👍': ['fable']}
-    from agentbridge.mesh.reaction_documents import parse_native_v2
     with pytest.raises(ValueError, match='not native'):
         parse_native_v2(resealed)
     fable.react(chat.id, env.id, '🎉')

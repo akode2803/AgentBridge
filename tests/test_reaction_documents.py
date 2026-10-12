@@ -153,6 +153,20 @@ def test_unverified_v1_mapping_is_not_laundered(forged):
     assert tx.get_doc(path)['v'] == {'fresh': '✅'}
 
 
+@pytest.mark.parametrize('forged', (None, [], 'scalar', 7))
+def test_non_object_reaction_document_cannot_block_genuine_write(forged):
+    tx = Documents()
+    path = P.reactions('chat', 'alice')
+    tx.put_doc(path, forged)
+
+    operation = ChatOverlays(tx, 'chat').set_reaction(
+        'alice', 'fresh', '✅', signer=_signed)
+
+    written = tx.get_doc(path)
+    assert written['v'] == {'fresh': '✅'}
+    assert written['ops'] == {'fresh': operation.to_dict()}
+
+
 def test_v2_dual_signature_remains_visible_to_v1_readers():
     tx = Documents()
     ChatOverlays(tx, 'chat').set_reaction('alice', 'm1', '👍', signer=_signed)
