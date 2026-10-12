@@ -150,6 +150,8 @@ function onEvent(frame, current) {
   diagnostic("delivery", {phase:"refresh_queued", outcome:"received", trace_ref:frame.diagnostic_ref});
   observe("browser_received", ref);
   handleNotifyFrame(frame);
+  // A delayed, freshly authorized notification is not another data change.
+  if (frame.type === "notification") return;
   if (pendingFrames.length >= 128) {
     // The bounded queue cannot silently drop the final event in a burst.
     pendingFrames = [];

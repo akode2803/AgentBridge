@@ -96,6 +96,9 @@ class LocalInputRuntime:
         self.schedule = SourceSchedule()
         self._lock = threading.RLock()
         self._worker_lock = threading.Lock()
+        # Background notification handout joins shutdown without retaining
+        # ingestion/scheduling locks while application callbacks run.
+        self._notification_gate = threading.RLock()
         self._selected = None
         self._stop = threading.Event()
         self._thread = None
@@ -776,19 +779,20 @@ class LocalInputRuntime:
                 watcher.close()
 
     def stop(self):
-        with self._lock:
-            self._closed = True
-            self._stop.set()
-            if self.read_events is not None:
-                self.read_events.close()
-            if self._page_preparation is not None:
-                self._page_preparation.close()
-            if self.presence is not None:
-                self.presence.stop()
-            if self.auxiliary is not None:
-                self.auxiliary.stop()
-            thread = self._thread
-            unread = self.unread
+        with self._notification_gate:
+            with self._lock:
+                self._closed = True
+                self._stop.set()
+                if self.read_events is not None:
+                    self.read_events.close()
+                if self._page_preparation is not None:
+                    self._page_preparation.close()
+                if self.presence is not None:
+                    self.presence.stop()
+                if self.auxiliary is not None:
+                    self.auxiliary.stop()
+                thread = self._thread
+                unread = self.unread
         # No GUI or runtime scheduling lock is held while joining count work.
         # Its canonical finalizer may need the source owner during shutdown.
         if unread is not None:

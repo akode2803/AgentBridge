@@ -26,6 +26,12 @@ from .context import GuiApp
 __all__ = ["frame", "stream"]
 
 
+def _notify_lane(note):
+    return {"kind": note.kind, "chat_name": note.chat_name,
+            "chat_kind": note.chat_kind, "from": note.from_,
+            "preview": note.preview, "ns": note.ns, "emoji": note.emoji}
+
+
 def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
     out = {"type": ev.type, "chat_id": ev.chat_id, "ns": ev.ns,
            "server_ns": time.time_ns()}
@@ -49,12 +55,7 @@ def frame(ev: Event, notifier: Notifier | None = None, latency=None) -> dict:
         except Exception:  # noqa: BLE001 — a notify hiccup never drops the frame
             note = None
         if note is not None:
-            out["notify"] = {
-                "kind": note.kind, "chat_name": note.chat_name,
-                "chat_kind": note.chat_kind,
-                "from": note.from_, "preview": note.preview, "ns": note.ns,
-                "emoji": note.emoji,
-            }
+            out["notify"] = _notify_lane(note)
     from ..core.delivery_trace import reference
     diagnostic_ref = reference(out["trace_ref"])
     if diagnostic_ref is not None:
@@ -103,37 +104,66 @@ def stream(app: GuiApp, sub: Subscription, ping_s: float, *, token=None) -> Iter
         yield _control(reason)
         return
     mesh = token.mesh
-    yield b": connected\n\n"
+    from ..mesh.local_input_runtime import LocalInputRuntime
+    from ..mesh.node_notification_preparation import NodeNotificationPreparation
+    notifications = (NodeNotificationPreparation(mesh, app=app, session=token)
+                     if type(getattr(mesh, 'local_inputs', None)) is LocalInputRuntime else None)
     last_ping = time.monotonic()
     health = _health(app, mesh)
-    while True:
-        reason = _reason(app, sub, token)
-        if reason is not None:
-            yield _control(reason)
-            return
-        current_health = _health(app, mesh)
-        if current_health != health:
-            health = current_health
-            yield _control('server_state_changed')
-        if sub.take_gap():
-            yield _control('resync')
-        # A local health check is not a broad read-model poll. It also applies
-        # idle lock deadlines when no data event arrives to wake this stream.
-        ev = sub.get(timeout=min(1.0, max(0.01, ping_s)))
-        reason = _reason(app, sub, token)
-        if reason is not None:
-            yield _control(reason)
-            return
-        if ev is None:
-            if time.monotonic() - last_ping >= min(ping_s, 15.0):
+    try:
+        yield b": connected\n\n"
+        while True:
+            reason = _reason(app, sub, token)
+            if reason is not None:
+                yield _control(reason)
+                return
+            current_health = _health(app, mesh)
+            if current_health != health:
+                health = current_health
+                yield _control('server_state_changed')
+            if sub.take_gap() or notifications is not None and notifications.take_gap():
+                yield _control('resync')
+            # Pending notification identities progress without another bus wake;
+            # one quantum also runs under continuous ordinary bus traffic.
+            timeout = min(1.0, max(0.01, ping_s))
+            if notifications is not None:
+                timeout = notifications.wait_s(timeout)
+            ev = sub.get(timeout=timeout)
+            reason = _reason(app, sub, token)
+            if reason is not None:
+                yield _control(reason)
+                return
+            if ev is not None:
+                if (notifications is not None and ev.type == eventbus.MESSAGE
+                        and type(ev.data) is dict and set(ev.data) == {'id', 'from'}):
+                    try:
+                        notifications.enqueue(ev)
+                    except ValueError:
+                        # Malformed wake metadata cannot reach legacy readers.
+                        yield _control('resync')
+                encoded = f"data: {json.dumps(frame(ev, mesh.notifier, app.latency))}\n\n".encode()
+                reason = _reason(app, sub, token)
+                if reason is not None:
+                    yield _control(reason)
+                    return
+                yield encoded
+            if notifications is not None:
+                step = notifications.run_one()
+                if step.notification is not None:
+                    note = step.notification
+                    payload = {"type": "notification", "chat_id": note.chat_id,
+                        "id": step.wake.message_id, "ns": note.ns,
+                        "server_ns": time.time_ns(), "trace_ref": step.wake.message_id,
+                        "notify": _notify_lane(note)}
+                    encoded = f"data: {json.dumps(payload)}\n\n".encode()
+                    reason = _reason(app, sub, token)
+                    if reason is not None:
+                        yield _control(reason)
+                        return
+                    yield encoded
+            if ev is None and time.monotonic() - last_ping >= min(ping_s, 15.0):
                 last_ping = time.monotonic()
-                # Visible to JS so a half-open stream cannot masquerade as a
-                # healthy event source forever. This never requests a read.
                 yield b'data: {"type":"heartbeat"}\n\n'
-            continue
-        encoded = f"data: {json.dumps(frame(ev, mesh.notifier, app.latency))}\n\n".encode()
-        reason = _reason(app, sub, token)
-        if reason is not None:
-            yield _control(reason)
-            return
-        yield encoded
+    finally:
+        if notifications is not None:
+            notifications.close()
