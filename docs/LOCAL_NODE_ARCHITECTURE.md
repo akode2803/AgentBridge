@@ -926,3 +926,26 @@ contract: invalidation must remain durable, while the browser retains the last
 canonical page plus its bounded pending bubble until node recovery republishes
 the confirmed remote cut. These requirements stay separate from this inactive
 scheduler composition.
+
+The inactive page owner supplies that authenticated lifecycle boundary. It
+first obtains one provider recovery fence through the mutation-owned member
+transport, derives the credential-free canonical endpoint/root from the exact
+built-in transport identity, and pins the returned account ID into the replica
+identity. Only then may it open the node lock, database and loopback server.
+Failure at the authenticated fence leaves no partial node owner. Later recovery
+still validates every cut against the pinned principal, so this startup probe is
+identity binding rather than continuing membership authority.
+
+The mutation transport revalidates the coordinator-bound endpoint/root both
+before and after every data-bearing node source, recovery, reference and ledger
+call. A process-local retarget during provider I/O therefore discards the
+returned rows before they can enter a candidate. Server startup is inside the
+owner's interruption cleanup boundary, and concurrent close calls serialize
+while preserving the owner for a later cleanup retry if shutdown fails.
+
+The owner closes only its local node server/runtime. The app continues to own
+the shared transport and canonical Store. It is not yet imported by GUI or
+harness code: product adoption must acquire it away from cached first paint,
+stop and join the legacy `SyncEngine` before the first node-to-Store
+publication, then route one app-owned scheduler without overlapping message
+writers.
