@@ -312,7 +312,13 @@ class AgentRunner:
         with self._handoff_wake_lock:
             if self._handoff_dirty:
                 return 0.0
-            return max(0.0, self._next_handoff_recovery - now)
+            # Adding a float deadline can round the subtraction a few ulps
+            # above the configured interval.  Never advertise a wait longer
+            # than the recovery ceiling that produced this deadline.
+            return min(
+                HANDOFF_RECOVERY_S,
+                max(0.0, self._next_handoff_recovery - now),
+            )
 
     def _prioritize_chat(self, chat_id: str, _count: int = 0) -> None:
         if not chat_id:
