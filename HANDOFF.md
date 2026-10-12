@@ -1214,3 +1214,32 @@ same-runtime claim. The expanded lifecycle gate passes 194 tests; the exact
 Ubuntu selected-read failure passes five consecutive reruns and remains an
 isolated `SourceChanged` fixture retry pending replacement CI. Ruff and
 whitespace checks pass locally.
+
+PR 132 head `2b96eee` and PR 133 head `5b2c63c` subsequently passed both Ubuntu
+and Windows CI. The first live macOS activation of PR 133 recorded a successful
+activation breadcrumb and a single node-coordinator owner, then exposed a
+cutover readiness gap: 64 durable historical mutation fences were copied into
+the new node, so it remained generation zero and `pending`, but Mesh had already
+retired the legacy writer. The app was shut down cleanly, its node endpoint was
+withdrawn, and no ambiguous intent was cleared.
+
+The local correction on `codex/local-node-app-activation` first reversibly
+quiesces legacy sync and drains admitted callbacks, then holds the coordinator
+root writer and exact node cut across retirement and node-source installation
+while excluding legacy local ingestion. Parallel scan children inherit their
+admitted parent lineage so they can finish during the drain without reopening
+unrelated work. Existing durable intents prevent retirement, and a new mutation
+cannot enter between the readiness decision and handoff. Exact transient startup
+fences receive bounded rechecks; a persistent fence resumes legacy sync, closes
+the attempted owner, emits a retained
+`local_node_activation/pending` breadcrumb with `source_mutation_pending`, and
+keeps legacy sync live. Failed endpoint withdrawal retains the owner for shutdown
+retry. Regressions cover a mutation inserted after event binding, transient
+settlement, persistent intent preservation, failed withdrawal, root-dependent
+sync callbacks and children delayed before inherited parallel admission. The
+focused sync gate passes 23 tests and the broader handoff, page-runtime,
+recovery, mutation-fence, GUI-read and diagnostics gate passes 232 tests; Ruff
+and diff checks pass. Independent review found no remaining P1/P2. Replacement
+CI remains. Next, validate this fallback against the live historical fences,
+then design the separate explicit operator/recovery contract for those ambiguous
+intents without guessing from age or process death.

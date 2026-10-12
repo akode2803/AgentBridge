@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
 from agentbridge.gui.context import GuiApp
+from agentbridge.mesh import local_input_runtime as local_input_runtime_module
 from agentbridge.mesh.node_page_owner import LocalNodePageOwner
 from agentbridge.mesh.node_page_runtime import LocalNodePageRuntime
 from agentbridge.mesh.service import Mesh
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.store.source_selectors import Selector
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport, root_identity,
@@ -106,6 +109,159 @@ def test_mesh_keeps_legacy_writer_when_authenticated_node_open_is_unavailable(tm
         assert not mesh.sync._retired
     finally:
         mesh.close()
+
+
+def test_mesh_keeps_legacy_writer_when_node_has_pending_mutation_fence(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    coordinator = mesh.tx._coordinator
+    intent = coordinator.begin((Selector('doc_exact', 'probe.json'),))
+    monkeypatch.setattr(
+        local_input_runtime_module, 'LOCAL_NODE_ACTIVATION_PENDING_WAIT_S', 0,
+    )
+    try:
+        assert not mesh.activate_local_node()
+        assert mesh._local_node_owner is None
+        assert mesh.local_inputs._node_source is None
+        assert not mesh.sync._retired
+        assert not list((mesh.home / 'nodes').glob('*/state.json'))
+        assert not list((mesh.home / 'nodes').glob('*/token'))
+        with coordinator._transaction() as conn:
+            assert conn.execute(
+                'SELECT token FROM mutation_intents'
+            ).fetchall() == [(intent.token,)]
+    finally:
+        mesh.close()
+
+
+def test_node_handoff_rechecks_mutation_cut_after_event_owner_binding(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    coordinator = mesh.tx._coordinator
+    original = LocalNodePageRuntime.bind_event_owner
+    intents = []
+
+    def bind_then_mutate(runtime, *args):
+        result = original(runtime, *args)
+        intents.append(coordinator.begin((Selector('doc_exact', 'race.json'),)))
+        return result
+
+    monkeypatch.setattr(LocalNodePageRuntime, 'bind_event_owner', bind_then_mutate)
+    monkeypatch.setattr(
+        local_input_runtime_module, 'LOCAL_NODE_ACTIVATION_PENDING_WAIT_S', 0,
+    )
+    try:
+        assert not mesh.activate_local_node()
+        assert len(intents) == 1
+        assert not mesh.sync._retired
+        assert mesh.local_inputs._node_source is None
+        assert mesh._local_node_owner is None
+    finally:
+        mesh.close()
+
+
+def test_node_handoff_retries_an_exact_transient_mutation_fence(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    coordinator = mesh.tx._coordinator
+    intent = coordinator.begin((Selector('doc_exact', 'transient.json'),))
+    original_gate = coordinator.node_activation_gate
+    attempts = []
+
+    @contextmanager
+    def settle_after_first_gate(node):
+        with original_gate(node) as ready:
+            attempts.append(ready)
+            yield ready
+        if not ready:
+            coordinator.complete(intent)
+
+    monkeypatch.setattr(coordinator, 'node_activation_gate', settle_after_first_gate)
+    try:
+        assert mesh.activate_local_node()
+        assert attempts == [False, True]
+        assert mesh.local_node_active
+        assert mesh.sync._retired
+    finally:
+        mesh.close()
+
+
+def test_node_handoff_drains_root_dependent_sync_work_before_root_cut(tmp_path):
+    _client, mesh = _mesh_world(tmp_path)
+    coordinator = mesh.tx._coordinator
+    writer_entered = threading.Event()
+    writer_release = threading.Event()
+    writer_done = threading.Event()
+    activation = []
+    errors = []
+
+    def root_dependent_sync_callback():
+        try:
+            with mesh.sync._write_cycle():
+                writer_entered.set()
+                assert writer_release.wait(5.0)
+                intent = coordinator.begin((
+                    Selector('doc_exact', 'delivery-receipt.json'),
+                ))
+                coordinator.complete(intent)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    writer = threading.Thread(target=root_dependent_sync_callback, daemon=True)
+    writer.start()
+    assert writer_entered.wait(1.0)
+    activator = threading.Thread(
+        target=lambda: activation.append(mesh.activate_local_node()), daemon=True,
+    )
+    activator.start()
+    deadline = time.monotonic() + 2.0
+    while not mesh.sync._quiescing and time.monotonic() < deadline:
+        time.sleep(.005)
+    assert mesh.sync._quiescing and not mesh.sync._retired
+
+    writer_release.set()
+    assert writer_done.wait(2.0)
+    writer.join(2.0)
+    activator.join(5.0)
+    try:
+        assert errors == []
+        assert activation == [True]
+        assert mesh.local_node_active and mesh.sync._retired
+    finally:
+        mesh.close()
+
+
+def test_pending_handoff_retains_owner_when_withdrawal_fails(
+        tmp_path, monkeypatch):
+    _client, mesh = _mesh_world(tmp_path)
+    coordinator = mesh.tx._coordinator
+    coordinator.begin((Selector('doc_exact', 'pending.json'),))
+    monkeypatch.setattr(
+        local_input_runtime_module, 'LOCAL_NODE_ACTIVATION_PENDING_WAIT_S', 0,
+    )
+    original_close = LocalNodePageOwner.close
+    calls = []
+
+    def fail_once(owner):
+        calls.append(owner)
+        if len(calls) == 1:
+            raise RuntimeError('controlled withdrawal failure')
+        return original_close(owner)
+
+    monkeypatch.setattr(LocalNodePageOwner, 'close', fail_once)
+    with pytest.raises(RuntimeError, match='controlled withdrawal failure'):
+        mesh.activate_local_node()
+    owner = mesh._local_node_owner
+    assert owner is not None
+    assert not mesh.sync._retired
+    assert owner.server is not None and owner.server.state_path.exists()
+
+    mesh.close()
+
+    assert calls == [owner, owner]
+    assert owner.server is None and owner.runtime is None
 
 
 def test_mesh_keeps_legacy_writer_when_event_owner_binding_is_unavailable(

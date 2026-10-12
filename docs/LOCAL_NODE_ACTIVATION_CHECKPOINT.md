@@ -125,8 +125,39 @@ deadlines are strictly increasing within one Store, closing the coarse-clock
 exact-CAS ABA reproduced by Windows CI. The expanded gate passes 194 tests;
 Ruff and whitespace checks pass.
 
-The app has not been restarted on this tree. The next checkpoint must finish CI,
-restart the real app, confirm activation diagnostics and single-writer behavior,
-exercise pre- and post-retirement rollback, and measure cached first paint plus
-selected-chat recovery against live Supabase. Harness process consolidation is
-separate work.
+PR 132 head `2b96eee` and PR 133 head `5b2c63c` passed Ubuntu and Windows CI.
+The first live Supabase activation on macOS then confirmed the retained
+`local_node_activation/completed` diagnostic and single node-coordinator owner,
+but exposed a pre-cutover readiness defect that deterministic fixtures had not
+represented. The durable root contained 64 unresolved historical mutation
+fences. Registration correctly copied them into the node, leaving generation
+zero in `pending`, but activation still retired the legacy writer. The node
+could therefore never establish its initial admitted source.
+
+The live process was shut down through `/api/shutdown`; state and token files
+were withdrawn, the owner lock had no remaining holder and shutdown diagnostics
+completed. No mutation intent was cleared or guessed through. Activation now
+first reversibly quiesces legacy sync and drains all admitted callbacks before
+holding the coordinator root writer and exact node cut across retirement and
+node-source installation. Parallel scan children inherit their admitted parent
+lineage, so they can finish during the drain while unrelated work remains
+blocked. Legacy local ingestion is also excluded. Existing durable mutation
+intents prevent retirement; a mutation cannot begin between the readiness
+decision and the handoff. Exact transient startup fences receive bounded
+rechecks without inferring their outcome from age or process death. A persistent
+fence resumes legacy sync, closes the attempted node owner, records
+`local_node_activation/pending` with reason `source_mutation_pending`, and leaves
+the legacy writer active. Failed endpoint withdrawal retains the owner for
+shutdown retry. The focused sync gate passes 23 tests; the broader handoff,
+page-runtime, recovery, mutation-fence, GUI-read and diagnostics gate passes 232
+tests. Ruff and whitespace checks pass locally. Independent review reproduced
+and drove closure of the status/retirement race, transient-fence liveness,
+withdrawal ownership and both root-callback and parallel-scan lock cycles, then
+found no remaining P1/P2.
+
+Replacement CI is still required for that live-found correction.
+After they pass, repeat live activation without retiring legacy sync while the
+historical fences remain, then resolve those fences only through a separately
+reviewed operator/recovery contract. Cached first paint and selected-chat
+recovery measurement remain open. Harness process consolidation is separate
+work.

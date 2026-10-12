@@ -506,6 +506,7 @@ class Mesh:
         than silently reintroducing a second Store writer.
         """
         from ..core import delivery_trace
+        from .local_input_runtime import LocalNodeActivationPending
         from .node_page_owner import LocalNodePageOwner
 
         with self._local_node_lock:
@@ -554,8 +555,70 @@ class Mesh:
                 )
                 return False
             try:
-                retirement = self.sync.retire(timeout_s=10.0)
-                inputs.install_node_source(runtime, retirement)
+                # Drain legacy callbacks before taking the coordinator writer:
+                # a callback may itself settle a local mutation. Quiescence is
+                # reversible until the root is proven mutation-free.
+                with self.sync.quiesce(timeout_s=10.0) as quiescence:
+                    with inputs.node_source_activation_cut(runtime):
+                        retirement = self.sync.retire(
+                            timeout_s=10.0, quiescence=quiescence,
+                        )
+                        inputs.install_node_source(runtime, retirement)
+            except LocalNodeActivationPending:
+                # No irreversible retirement occurred. Retain cleanup
+                # ownership until endpoint withdrawal succeeds, then keep the
+                # legacy writer serving this session.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='pending',
+                    outcome='skipped', reason='source_mutation_pending',
+                )
+                return False
+            except Exception as exc:
+                if self.sync.retired:
+                    # Installation crossed the irreversible retirement cut.
+                    # Let the fatal path retain/withdraw the exact owner.
+                    self._local_node_owner = owner
+                    try:
+                        owner.close()
+                    except BaseException:
+                        delivery_trace.emit(
+                            'local_node_activation', status='cleanup_error',
+                            outcome='failed',
+                        )
+                        raise
+                    self._local_node_owner = None
+                    delivery_trace.emit(
+                        'local_node_activation', status='error', outcome='failed',
+                    )
+                    raise
+                # Quiescence and root-gate failures before retirement are
+                # reversible. Withdraw the attempted node and keep legacy
+                # ingestion available for this session.
+                self._local_node_owner = owner
+                try:
+                    owner.close()
+                except BaseException:
+                    delivery_trace.emit(
+                        'local_node_activation', status='cleanup_error',
+                        outcome='failed',
+                    )
+                    raise
+                self._local_node_owner = None
+                delivery_trace.emit(
+                    'local_node_activation', status='unavailable',
+                    outcome='skipped', error_type=type(exc).__name__,
+                )
+                return False
             except BaseException:
                 # Retirement may already be irreversible. Keep a failed
                 # cleanup owner reachable so Mesh.close() can retry endpoint

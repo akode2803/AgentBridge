@@ -12,6 +12,7 @@ from ..core import delivery_trace
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ..store import local_source, overlay_index, source_selectors, staged_source, staged_publication, document_observation
@@ -36,6 +37,12 @@ class _SourceMirrorToken:
 
 
 _MAX_MIRROR_TOKENS = 128
+LOCAL_NODE_ACTIVATION_PENDING_WAIT_S = 5.0
+
+
+class LocalNodeActivationPending(RuntimeError):
+    """The node handoff could not obtain an exact mutation-free root cut."""
+
 
 _RAW_COLLECTION_FAILURE_REASONS = frozenset({
     'mirror_changed', 'mirror_pending', 'unsafe_cached_value',
@@ -95,7 +102,9 @@ class LocalInputRuntime:
         self.coordinator.register_store(store)
         self.schedule = SourceSchedule()
         self._lock = threading.RLock()
-        self._worker_lock = threading.Lock()
+        # Activation holds this gate across the root-wide mutation cut and
+        # calls install_node_source() reentrantly after legacy retirement.
+        self._worker_lock = threading.RLock()
         # Background notification handout joins shutdown without retaining
         # ingestion/scheduling locks while application callbacks run.
         self._notification_gate = threading.RLock()
@@ -125,6 +134,41 @@ class LocalInputRuntime:
                 raise RuntimeError('legacy sync owner already bound or closed')
             engine.bind_transfer_owner(self)
             self._sync_owner = engine
+
+    @contextmanager
+    def node_source_activation_cut(self, runtime):
+        """Yield only while legacy-to-node transfer is root-wide atomic.
+
+        A short-lived startup mutation may settle while the authenticated node
+        opens.  Recheck its exact durable fence with bounded backoff; no age,
+        process death or remote outcome is inferred.  Once the gate yields,
+        both the local ingestion worker and every coordinator mutation remain
+        excluded through retirement and node-source installation.
+        """
+        from .node_page_runtime import LocalNodePageRuntime
+
+        if (type(runtime) is not LocalNodePageRuntime
+                or runtime.store is not self.store
+                or runtime.publisher.coordinator is not self.coordinator):
+            raise ValueError('foreign node source owner')
+        deadline = time.monotonic() + LOCAL_NODE_ACTIVATION_PENDING_WAIT_S
+        delay = .025
+        while True:
+            with self._worker_lock:
+                server = runtime.server
+                node = server.store
+                if node is None:
+                    raise RuntimeError('local node recovery owner is not running')
+                with self.coordinator.node_activation_gate(node) as ready:
+                    if ready:
+                        yield
+                        return
+            remaining = deadline - time.monotonic()
+            if self._stop.is_set() or remaining <= 0:
+                raise LocalNodeActivationPending(
+                    'local node activation has pending mutations')
+            self._stop.wait(min(delay, remaining))
+            delay = min(delay * 2, .4)
 
     def install_node_source(self, runtime, retirement):
         """Irreversibly replace legacy message ingestion with a node runtime.
