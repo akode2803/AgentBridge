@@ -1065,6 +1065,16 @@ group reactions retain the actor tenure join cut unless a future bounded,
 authenticated historical permission witness is added. Focused reaction and
 retained-event validation passes 36 tests; Ruff and diff checks pass locally.
 
+A subsequent current-head review closed three final retained-reaction gaps.
+Semantic mapping now requires a signed actor-state witness at or before the
+operation cut, so deleted or malformed state cannot erase earlier hidden/clear
+evidence. A per-target operation behind the breadcrumb retries only while the
+whole signed document is also behind; an already advanced document makes the
+breadcrumb terminally generic instead of pinning the journal. DM mapping also
+captures both account records under the same authority/finalization round and
+suppresses blocked participants. All 56 retained-event tests, Ruff and diff
+checks pass locally.
+
 The PR 132 Windows full suite exposed a test-isolation race, not an escaped
 read-ack fence: the acknowledgment reservation had reached `aborted`, while an
 unrelated writer owned the one remaining root intent. Read-ack tests now assert
@@ -1130,7 +1140,13 @@ generation, empty current Mesh, unchanged session file, closed state and
 teardown completion after directory I/O, preventing stale restore from replacing
 a concurrent login or unlinking its new session.
 
-Focused lifecycle/session/sync validation passes 57 tests. The final broader
+Signup and login now reject a closed `GuiApp` immediately after taking the
+session lock, before building a Mesh, creating/upgrading an account or claiming
+machine agents. This closes the shutdown race where a queued authentication
+handler could mutate durable identity state before `_adopt` noticed closure.
+
+Focused lifecycle/session/sync validation passes 57 tests. Four targeted
+closed-auth/restore tests pass after the shutdown-entry correction. The final broader
 page-runtime/event/notification/GUI gate passes 150 tests. Ruff and diff checks
 pass. Astra independently reproduced the active-write Store-close
 race and stale-restore overwrite, verified both repairs with controlled probes,

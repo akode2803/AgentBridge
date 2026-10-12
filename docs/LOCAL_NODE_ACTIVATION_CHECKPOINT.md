@@ -28,6 +28,8 @@ and never revives the legacy writer.
 - Restore rechecks session generation, current Mesh, app close state, unchanged
   session-file contents and teardown completion after directory I/O and before
   either session-file deletion or Mesh construction.
+- Signup and login recheck app closure under the session lock before building a
+  Mesh or mutating accounts and machine-agent ownership.
 
 These checks prevent a slow legacy provider read from writing after Store close,
 and prevent a stale restore from replacing or deleting a concurrently created
@@ -40,6 +42,9 @@ page-runtime/event/notification/GUI gate passes 150 tests. Ruff and whitespace
 checks pass. Independent Astra probes reproduced both material races, verified their
 repairs and found no remaining P1/P2 in activation, source transfer, watcher
 wake, shutdown or restore.
+
+The later closed-auth review correction passes four targeted authentication and
+restore race tests plus Ruff and whitespace checks.
 
 The app has not been restarted on this tree. The next checkpoint must finish CI,
 restart the real app, confirm activation diagnostics and single-writer behavior,

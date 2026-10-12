@@ -354,6 +354,36 @@ def test_adopt_announces_machine_before_starting_presence(rig, monkeypatch):
     ]
 
 
+def test_closed_app_rejects_signup_before_account_mutation(rig, monkeypatch):
+    rig.app.close()
+    builds = []
+    monkeypatch.setattr(
+        rig.app, '_build',
+        lambda name: builds.append(name) or pytest.fail('closed app built a Mesh'),
+    )
+
+    with pytest.raises(RuntimeError, match='GUI app is closed'):
+        rig.app.signup('late-user', '', 'late-password')
+
+    assert builds == []
+
+
+def test_closed_app_rejects_login_before_account_or_agent_mutation(rig, monkeypatch):
+    rig.signup()
+    assert rig.app.logout('hexagon') == {'ok': True}
+    rig.app.close()
+    builds = []
+    monkeypatch.setattr(
+        rig.app, '_build',
+        lambda name: builds.append(name) or pytest.fail('closed app built a Mesh'),
+    )
+
+    with pytest.raises(RuntimeError, match='GUI app is closed'):
+        rig.app.login('aryan', 'hexagon')
+
+    assert builds == []
+
+
 def test_writes_keep_entry_only_auth_and_lock_denials(rig):
     rig.signup()
     chat_id = rig.post("/api/mesh/create_chat", name="Writes", members=[])["chat"]["id"]

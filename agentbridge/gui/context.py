@@ -432,6 +432,8 @@ class GuiApp:
         signup while signed in, so only a script or a passer-by hits this;
         the legitimate swap is logout (password) → signup."""
         with self._lock:
+            if self._closed:
+                raise RuntimeError('GUI app is closed')
             if self.mesh is not None:
                 raise ValidationError("Already signed in — sign out first")
             if not self._finish_teardown():
@@ -456,6 +458,8 @@ class GuiApp:
     def login(self, name: str, password: str,
               *, include_binding: bool = False) -> dict:
         with self._lock:
+            if self._closed:
+                raise RuntimeError('GUI app is closed')
             # V130 (V124's twin): login was a session swap needing only the
             # CALLER's credentials — a passer-by with their own account
             # could adopt this machine (and claim its agents) without the
