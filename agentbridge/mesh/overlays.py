@@ -225,14 +225,19 @@ class ChatOverlays:
                     expected = None
                 else:
                     expected = signer(data)
-                if not existing or existing != expected:
+                if expected and (not existing or existing != expected):
                     # A shared transport can replace this user's document.
                     # Never make a forged or unsigned v2 value a persistent
                     # write blocker, or launder its mapping/operation IDs.
                     mapping, operations = {}, {}
                     authenticated_old = False
-                else:
+                elif expected:
                     authenticated_old = True
+                else:
+                    # Keyless/plaintext operation preserves display mapping,
+                    # but cannot authenticate timing or operation identities.
+                    operations = {}
+                    authenticated_old = False
             if not existing or old.get('ops_origin') == 'resealed':
                 # A fresh local action must not promote unproven historical
                 # operation IDs into a native document.
@@ -248,13 +253,17 @@ class ChatOverlays:
                     legacy_data = reaction_signing_bytes(
                         self.chat_id, user, int(legacy.get('ns', 0)), mapping)
                 except (TypeError, ValueError, OverflowError):
-                    legacy_sig = None
-                if (type(legacy_sig) is not str or not legacy_sig
-                        or legacy_sig != signer(legacy_data)):
+                    expected = None
+                else:
+                    expected = signer(legacy_data)
+                if expected and (type(legacy_sig) is not str
+                                 or not legacy_sig or legacy_sig != expected):
                     mapping = {}
                     authenticated_old = False
-                else:
+                elif expected:
                     authenticated_old = True
+                else:
+                    authenticated_old = False
         previous = operations.get(msg_id)
         ns = next_ns()
         if authenticated_old and type(old) is dict and type(old.get('ns')) is int:

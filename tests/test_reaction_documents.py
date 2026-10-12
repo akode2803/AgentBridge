@@ -167,6 +167,28 @@ def test_non_object_reaction_document_cannot_block_genuine_write(forged):
     assert written['ops'] == {'fresh': operation.to_dict()}
 
 
+@pytest.mark.parametrize('legacy', (False, True))
+def test_keyless_writes_preserve_existing_plaintext_mapping(legacy):
+    tx = Documents()
+    path = P.reactions('chat', 'alice')
+    if legacy:
+        tx.put_doc(path, {'v': {'first': '👍'}, 'ns': 7, 'sig': ''})
+    else:
+        ChatOverlays(tx, 'chat').set_reaction(
+            'alice', 'first', '👍', signer=lambda _data: '',
+        )
+
+    operation = ChatOverlays(tx, 'chat').set_reaction(
+        'alice', 'second', '✅', signer=lambda _data: '',
+    )
+
+    written = tx.get_doc(path)
+    mapping, operations = parse_native_v2(written)
+    assert mapping == {'first': '👍', 'second': '✅'}
+    assert operations == {'second': operation}
+    assert written['sig'] == written['ops_sig'] == ''
+
+
 def test_v2_dual_signature_remains_visible_to_v1_readers():
     tx = Documents()
     ChatOverlays(tx, 'chat').set_reaction('alice', 'm1', '👍', signer=_signed)
