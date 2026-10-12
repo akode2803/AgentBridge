@@ -110,6 +110,9 @@ cut or the new cut. Its principal tables are:
 - `remote_docs(path, seq, deleted, payload, updated_generation)`;
 - `remote_log_rows(id, chat_id, log_name, payload, updated_generation)` plus
   `(chat_id, log_name, id)` and global `id` indexes;
+- `remote_log_streams(chat_id, log_name, head)`, maintained in the same
+  admission transaction, so exact-chat stream discovery is a bounded keyset
+  seek rather than a `DISTINCT` scan across retained messages;
 - `remote_chat_visibility(chat_id, updated_generation)` as provider/RLS
   observation, never canonical membership authority;
 - `remote_frontiers`: document cursor, global log cursor, durable-ledger
@@ -185,6 +188,11 @@ Read operations:
   admission;
 - `POST /v1/capture`: exact document paths/prefixes, forward log pages, bounded
   provider-visible chat IDs and exact frontiers from one SQLite read transaction;
+- `POST /v1/log-streams`: one exact chat's nonempty stream names and admitted
+  heads through a generation-bound keyset continuation. A client must enumerate
+  every stream and replay it from the beginning for the captured generation;
+  an earlier copied maximum row ID is not a safe incremental cursor because
+  exact ledger repair may later admit an older provider row ID;
 - `POST /v1/changes`: durable local keyset replay after a client cursor.
   Retention exposes its minimum cursor and database incarnation; an expired,
   foreign or compacted cursor returns `reset_required`, never an apparently

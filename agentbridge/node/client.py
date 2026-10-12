@@ -24,7 +24,8 @@ from typing import Any
 
 from .admission import (
     MAX_CHANGE_PAGE, NodeCaptureRequest, NodeDocument, NodeFrontier,
-    NodeInputError, NodeLogRow, NodeScopePosition, NodeVisibility,
+    NodeInputError, NodeLogRow, NodeLogStream, NodeLogStreamRequest,
+    NodeScopePosition, NodeVisibility,
 )
 from .protocol import (
     HEALTH_VALUES, MAX_STATUS_BYTES, PROTOCOL_VERSION, NodeStatus,
@@ -34,8 +35,9 @@ from .protocol import (
 from .security import LocalSecurityError, verify_private_path
 from .wire import (
     MAX_WIRE_REQUEST_BYTES, MAX_WIRE_RESPONSE_BYTES,
-    CursorReset, _incarnation, _integer, _log_selection,
+    CursorReset, _incarnation, _integer, _log_selection, _log_stream_selection,
     _parse_cursor_text, _untoken, parse_capture_request, parse_change_request,
+    parse_log_stream_request,
 )
 
 CLIENT_TIMEOUT_S = 2.0
@@ -135,6 +137,21 @@ class ClientCapture:
     visibility_cursor: str
     visibility_has_more: bool
     frontiers: tuple[NodeFrontier, ...]
+    scope_positions: tuple[NodeScopePosition, ...]
+    captured_bytes: int
+
+
+@dataclass(frozen=True)
+class ClientLogStreamPage:
+    binding: NodeBinding
+    capture: str
+    generation: int
+    health: str
+    last_success_ns: int
+    chat_id: str
+    streams: tuple[NodeLogStream, ...]
+    cursor: str
+    has_more: bool
     scope_positions: tuple[NodeScopePosition, ...]
     captured_bytes: int
 
@@ -281,6 +298,19 @@ def _capture_charge(documents: list[NodeDocument], logs: list[ClientLogPage],
         + len((row.epoch or "").encode("utf-8")) + 32
         for row in frontiers
     )
+    used += sum(
+        len(row.scope_kind.encode("utf-8"))
+        + len(row.scope_id.encode("utf-8")) + 24
+        + len((row.pending_reason or "").encode("utf-8"))
+        for row in scopes
+    )
+    return used
+
+
+def _log_stream_charge(chat_id: str, streams: tuple[NodeLogStream, ...],
+                       scopes: tuple[NodeScopePosition, ...]) -> int:
+    used = len(chat_id.encode("utf-8")) + 8
+    used += sum(len(row.log_name.encode("utf-8")) + 24 for row in streams)
     used += sum(
         len(row.scope_kind.encode("utf-8"))
         + len(row.scope_id.encode("utf-8")) + 24
@@ -717,6 +747,125 @@ class LocalNodeClient:
             raise ProtocolError("invalid node scope position order")
         return tuple(rows)
 
+    def log_streams(
+        self, chat_id: str, *, expected_capture: str | None = None,
+        cursor: str | None = None, limit: int = 1_000,
+        max_bytes: int = 256 * 1024,
+    ) -> ClientLogStreamPage:
+        """Return one generation-bound page of nonempty streams for a chat."""
+        endpoint = self._discover()
+        payload = {
+            "protocol_version": PROTOCOL_VERSION,
+            "expected_capture": expected_capture,
+            "chat_id": chat_id,
+            "cursor": cursor,
+            "limit": limit,
+            "max_bytes": max_bytes,
+        }
+        try:
+            parsed = parse_log_stream_request(
+                payload,
+                database_incarnation=endpoint.binding.database_incarnation)
+        except CursorReset:
+            raise NodeClientReset("local node continuation reset") from None
+        status, value = self._request(
+            endpoint, "POST", "/v1/log-streams", payload,
+            max_response=MAX_WIRE_RESPONSE_BYTES)
+        self._assert_current(endpoint)
+        if status != 200:
+            return self._capture_error(status, value)
+        return self._parse_log_streams(endpoint, parsed, value)
+
+    @staticmethod
+    def _parse_log_streams(
+        endpoint: _Endpoint, wanted: NodeLogStreamRequest, value: dict,
+    ) -> ClientLogStreamPage:
+        fields = {
+            "protocol_version", "capture", "generation", "health",
+            "last_success_ns", "captured_bytes", "chat_id", "streams",
+            "cursor", "has_more", "scope_positions",
+        }
+        if type(value) is not dict or set(value) != fields:
+            raise ProtocolError("invalid node log stream response")
+        if value["protocol_version"] != PROTOCOL_VERSION:
+            raise ProtocolError("unsupported node protocol")
+        generation = _integer(value["generation"], "capture generation")
+        capture = _untoken(value["capture"], "capture", {"db", "generation"})
+        _incarnation(capture["db"], endpoint.binding.database_incarnation)
+        if (_integer(capture["generation"], "capture generation") != generation
+                or (wanted.expected_generation is not None
+                    and wanted.expected_generation != generation)):
+            raise NodeClientGenerationChanged("local node generation changed")
+        health = value["health"]
+        if type(health) is not str or health not in HEALTH_VALUES:
+            raise ProtocolError("invalid node log stream health")
+        success = _integer(value["last_success_ns"], "last success time")
+        captured_bytes = _integer(value["captured_bytes"], "captured bytes")
+        if captured_bytes > wanted.max_bytes or value["chat_id"] != wanted.chat_id:
+            raise ProtocolError("invalid node log stream response")
+        raw_streams = value["streams"]
+        if (type(raw_streams) is not list or len(raw_streams) > wanted.limit
+                or type(value["has_more"]) is not bool):
+            raise ProtocolError("invalid node log streams")
+        streams = []
+        for raw in raw_streams:
+            if type(raw) is not dict or set(raw) != {"log_name", "head"}:
+                raise ProtocolError("invalid node log stream")
+            try:
+                streams.append(NodeLogStream(raw["log_name"], raw["head"]))
+            except (NodeInputError, TypeError, ValueError):
+                raise ProtocolError("invalid node log stream") from None
+        names = tuple(row.log_name for row in streams)
+        if (names != tuple(sorted(set(names)))
+                or any(name <= wanted.after_name for name in names)
+                or (value["has_more"] and not streams)):
+            raise ProtocolError("invalid node log stream order")
+        token = _untoken(
+            value["cursor"], "log_stream",
+            {"db", "generation", "selection", "after"},
+        )
+        _incarnation(token["db"], endpoint.binding.database_incarnation)
+        after = names[-1] if names else wanted.after_name
+        if (_integer(token["generation"], "capture generation") != generation
+                or token["selection"] != _log_stream_selection(wanted.chat_id)
+                or _parse_cursor_text(token["after"], "log stream") != after):
+            raise ProtocolError("log stream continuation changed")
+        scopes = LocalNodeClient._stream_scopes(
+            value["scope_positions"], wanted.chat_id)
+        copied = tuple(streams)
+        if _log_stream_charge(wanted.chat_id, copied, scopes) != captured_bytes:
+            raise ProtocolError("log stream byte charge mismatch")
+        return ClientLogStreamPage(
+            _binding(endpoint), value["capture"], generation, health, success,
+            wanted.chat_id, copied, value["cursor"], value["has_more"],
+            scopes, captured_bytes,
+        )
+
+    @staticmethod
+    def _stream_scopes(
+        value: Any, chat_id: str,
+    ) -> tuple[NodeScopePosition, ...]:
+        expected = (("chat", chat_id), ("root", ""))
+        if type(value) is not list or len(value) != len(expected):
+            raise ProtocolError("invalid node scope positions")
+        rows = []
+        for item in value:
+            if type(item) is not dict or set(item) != {
+                    "scope_kind", "scope_id", "generation", "pending_reason"}:
+                raise ProtocolError("invalid node scope position")
+            kind, ident = item["scope_kind"], item["scope_id"]
+            generation = _integer(item["generation"], "scope generation")
+            pending = item["pending_reason"]
+            if ((kind, ident) not in expected
+                    or (pending is not None and (
+                        type(pending) is not str or not pending
+                        or len(pending.encode("utf-8")) > 256))):
+                raise ProtocolError("invalid node scope position")
+            rows.append(NodeScopePosition(kind, ident, generation, pending))
+        if tuple((row.scope_kind, row.scope_id) for row in rows) != expected:
+            raise ProtocolError("invalid node scope position order")
+        return tuple(rows)
+
     def changes(self, *, cursor: str | None = None,
                 limit: int = MAX_CHANGE_PAGE) -> ClientChangePage:
         endpoint = self._discover()
@@ -806,6 +955,7 @@ class LocalNodeClient:
 __all__ = [
     "CLIENT_TIMEOUT_S", "ClientCapture", "ClientCaptureRequest",
     "ClientChange", "ClientChangePage", "ClientLogPage", "ClientLogRequest",
+    "ClientLogStreamPage",
     "LocalNodeClient", "NodeBinding", "NodeClientGenerationChanged",
     "NodeClientReset", "NodeClientUnavailable",
 ]

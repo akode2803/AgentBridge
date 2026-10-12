@@ -22,6 +22,7 @@ def identity(**changes):
 
 
 def drop_v9_tables(conn):
+    conn.execute("DROP TABLE remote_log_streams")
     conn.execute("DROP TRIGGER node_recovery_receipt_prune")
     conn.execute("DROP TRIGGER node_admission_permit_consumer")
     conn.execute("DROP TRIGGER node_claimed_generation_guard")
@@ -117,7 +118,7 @@ def test_v3_migration_preserves_admitted_and_retires_unbound_candidates(tmp_path
             .fetchone() == (b"a",)
         assert conn.execute("SELECT state FROM node_generations WHERE generation=?",
                             (sealed,)).fetchone() == ("abandoned",)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (11,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (12,)
 
 
 def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
@@ -178,7 +179,7 @@ def test_v4_migration_retires_unprovable_recovery_only(tmp_path):
             (recovery.generation,),
         ).fetchone() == (0,)
         assert conn.execute("SELECT count(*) FROM provider_recoveries").fetchone() == (0,)
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (11,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (12,)
 
 
 def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
@@ -213,7 +214,7 @@ def test_v5_migration_preserves_resumable_typed_recovery(tmp_path):
     with pytest.raises(NodeGenerationChanged):
         reopened.recovery_state(state.recovery_id, cut)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (11,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (12,)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
@@ -240,7 +241,7 @@ def test_v6_migration_adds_bounded_pending_stream_index(tmp_path):
     with pytest.raises(NodeGenerationChanged):
         reopened.next_recovery_stream(state.recovery_id, cut)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version FROM node_schema").fetchone() == (11,)
+        assert conn.execute("SELECT version FROM node_schema").fetchone() == (12,)
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' "
             "AND name='recovery_stream_pending'"
@@ -286,7 +287,7 @@ def test_v7_migration_retires_candidates_without_shared_fence_binding(tmp_path):
         ).fetchone() == (b"admitted",)
         assert conn.execute(
             "SELECT version FROM node_schema"
-        ).fetchone() == (11,)
+            ).fetchone() == (12,)
 
 
 def test_v8_migration_preserves_unowned_fence_and_manufactures_no_claim(tmp_path):
@@ -1107,8 +1108,40 @@ def test_store_persists_identity_and_incarnation(tmp_path):
     assert second.health == "inactive"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (11, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (12, 1)
         assert conn.execute("SELECT count(*) FROM remote_docs").fetchone() == (0,)
+
+
+def test_v11_migration_backfills_seekable_log_stream_inventory(tmp_path):
+    path = tmp_path / "private" / "node.sqlite3"
+    owner = NodeStore(path, identity())
+    generation = owner.begin_candidate(created_ns=1)
+    owner.seal_candidate(generation, NodeInputBatch(log_rows=(
+        NodeLogRow(4, "chat-a", "alice", b'a'),
+        NodeLogRow(9, "chat-a", "alice", b'b'),
+        NodeLogRow(7, "chat-a", "bob", b'c'),
+    )), observed_ns=2)
+    owner.admit_candidate(generation)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE remote_log_streams")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=11),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,11,1)")
+
+    NodeStore(path, identity())
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT version,protocol_version FROM node_schema"
+        ).fetchone() == (12, 1)
+        assert conn.execute(
+            "SELECT chat_id,log_name,head FROM remote_log_streams "
+            "ORDER BY chat_id,log_name"
+        ).fetchall() == [
+            ("chat-a", "alice", 9), ("chat-a", "bob", 7),
+        ]
 
 
 def test_store_rejects_rebinding_existing_database(tmp_path):
@@ -1154,7 +1187,7 @@ def test_v2_store_migration_retires_nonresumable_private_candidates(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version,protocol_version FROM node_schema"
-        ).fetchone() == (11, 1)
+        ).fetchone() == (12, 1)
         assert conn.execute(
             "SELECT state FROM node_generations WHERE generation=1"
         ).fetchone() == ("abandoned",)
