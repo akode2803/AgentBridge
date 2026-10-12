@@ -254,6 +254,17 @@ def test_discovery_rejects_token_state_mismatch(tmp_path):
             LocalNodeClient(tmp_path, identity()).status()
 
 
+def test_discovery_rejects_non_utf8_text_as_unavailable(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        state = json.loads(server.state_path.read_text())
+        state["node_epoch"] = "\ud800"
+        server.state_path.write_text(json.dumps(state))
+        if os.name != "nt":
+            os.chmod(server.state_path, 0o600)
+        with pytest.raises(NodeClientUnavailable, match="node epoch"):
+            LocalNodeClient(tmp_path, identity()).status()
+
+
 def test_response_is_discarded_when_owner_rotates_during_request(
         tmp_path, monkeypatch):
     home = tmp_path / "home"

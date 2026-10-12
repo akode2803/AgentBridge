@@ -226,7 +226,13 @@ def _private_directory(path: Path) -> None:
 
 
 def _text(value: Any, name: str, *, maximum: int = 128) -> str:
-    if type(value) is not str or not value or len(value.encode("utf-8")) > maximum:
+    if type(value) is not str or not value:
+        raise NodeClientUnavailable(f"invalid local node {name}")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise NodeClientUnavailable(f"invalid local node {name}") from None
+    if size > maximum:
         raise NodeClientUnavailable(f"invalid local node {name}")
     return value
 
