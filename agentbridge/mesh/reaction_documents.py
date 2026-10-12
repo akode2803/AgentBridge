@@ -101,6 +101,8 @@ def parse_native_v2(doc: dict) -> tuple[dict[str, str], dict[str, ReactionOperat
     result = parse_v2(doc)
     if doc['ops_origin'] != 'native':
         raise ValueError('reaction operations are not native')
+    if 'ops_sig' in doc and bool(doc['sig']) != bool(doc['ops_sig']):
+        raise ValueError('reaction v2 signatures are incomplete')
     return result
 
 
@@ -129,6 +131,8 @@ def operation_signature(doc: dict) -> str:
     complete v2 proof in ``ops_sig``.
     """
     parse_v2(doc)
+    if 'ops_sig' in doc and bool(doc['sig']) != bool(doc['ops_sig']):
+        raise ValueError('reaction v2 signatures are incomplete')
     return doc['ops_sig'] if 'ops_sig' in doc else doc['sig']
 
 

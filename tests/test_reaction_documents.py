@@ -96,6 +96,12 @@ def test_v2_strict_relations_and_signing_bind_all_fields():
         with pytest.raises(ValueError):
             parse_v2(broken)
         assert reaction_map(broken) == {}
+    for asymmetric in ({**original, 'sig': ''}, {**original, 'ops_sig': ''}):
+        assert parse_v2(asymmetric)[0] == original['v']
+        with pytest.raises(ValueError, match='signatures are incomplete'):
+            parse_native_v2(asymmetric)
+        with pytest.raises(ValueError, match='signatures are incomplete'):
+            operation_signature(asymmetric)
 
 
 def test_forged_v2_is_replaced_without_laundering_or_lockout():
@@ -271,13 +277,34 @@ def test_key_appearing_mid_write_does_not_promote_unsigned_native_ops():
     def key_appears(_data):
         nonlocal calls
         calls += 1
-        return '' if calls == 1 else 'fresh-signature'
+        return '' if calls <= 2 else 'fresh-signature'
 
     operation = ChatOverlays(tx, 'chat').set_reaction(
         'alice', 'm1', '🎉', signer=key_appears,
     )
     written = tx.get_doc(path)
-    assert calls == 3 and written['sig'] == written['ops_sig'] == 'fresh-signature'
+    assert calls == 5 and written['sig'] == written['ops_sig'] == 'fresh-signature'
     assert written['ops_origin'] == 'native'
     assert operation.previous is None
     assert written['ops'] == {'m1': operation.to_dict()}
+
+
+def test_repeated_key_transition_aborts_without_replacing_prior_overlay():
+    tx = Documents()
+    path = P.reactions('chat', 'alice')
+    prior = {'v': {'m0': '👍'}, 'ns': 7, 'sig': ''}
+    tx.put_doc(path, prior)
+    calls = 0
+
+    def unstable_key(_data):
+        nonlocal calls
+        calls += 1
+        return 'fresh-signature' if calls in (3, 5) else ''
+
+    with pytest.raises(RuntimeError, match='signing key changed'):
+        ChatOverlays(tx, 'chat').set_reaction(
+            'alice', 'm1', '✅', signer=unstable_key,
+        )
+
+    assert calls == 5
+    assert tx.get_doc(path) is prior

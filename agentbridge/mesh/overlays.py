@@ -292,9 +292,17 @@ class ChatOverlays:
             doc['ops_sig'] = signer(reaction_v2_signing_bytes(
                 self.chat_id, user, doc))
             # Do not publish half a compatibility pair if key availability
-            # changes between the two bounded signing calls.
+            # changes between the two bounded signing calls. Retry the whole
+            # pair once: the v2 proof binds the compatibility signature, so a
+            # proof minted across two key-availability states is not a coherent
+            # document. A second transition leaves the prior overlay intact.
             if bool(doc['sig']) != bool(doc['ops_sig']):
-                doc['sig'] = doc['ops_sig'] = ''
+                doc['sig'] = signer(reaction_signing_bytes(
+                    self.chat_id, user, ns, mapping))
+                doc['ops_sig'] = signer(reaction_v2_signing_bytes(
+                    self.chat_id, user, doc))
+                if bool(doc['sig']) != bool(doc['ops_sig']):
+                    raise RuntimeError('reaction signing key changed during write')
         self.tx.put_doc(path, doc)
         return operation
 
