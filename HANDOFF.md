@@ -1254,3 +1254,16 @@ activation tests pass; Ruff and whitespace checks pass locally. The previous
 Windows run's sole failure was the documented isolated signup SQLite commit
 stall at the ten-second fixture deadline; this corrected head still requires
 replacement cross-platform CI.
+
+The next stacked branch is `codex/provider-mutation-recovery-contract`. A
+read-only inspection of the stopped development instance found the exact
+capacity shape behind that fallback: 62 normal intents (59 presence documents,
+two machine documents and three chat logs), two current sentinel fences and 64
+quarantined historical log intents. The node remains generation zero/pending.
+No token or outcome was inferred from age or process state. The proposed
+[provider mutation recovery contract](docs/PROVIDER_MUTATION_RECOVERY_CONTRACT.md)
+uses one irreversible provider legacy-write seal, a root protocol epoch and
+typed idempotent mutation receipts. Only a complete recovery bound to that seal
+may archive and consume the exact old fence set in the admission transaction.
+Permanent legacy fallback remains the safe interim behavior; scoped pending
+reads are a later availability optimization and do not resolve an intent.
