@@ -7,6 +7,52 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_TABLES = {
+    "log_offsets": (
+        "CREATE TABLE log_offsets(chat_id TEXT NOT NULL,log_name TEXT NOT NULL,"
+        "offset INTEGER NOT NULL,PRIMARY KEY(chat_id,log_name))"
+    ),
+    "ingestion_identity": (
+        "CREATE TABLE ingestion_identity(singleton INTEGER PRIMARY KEY "
+        "CHECK(singleton=1),incarnation TEXT NOT NULL)"
+    ),
+    "ingestion_log_revisions": (
+        "CREATE TABLE ingestion_log_revisions(chat_id TEXT NOT NULL, "
+        "log_name TEXT NOT NULL,revision INTEGER NOT NULL "
+        "CHECK(typeof(revision)='integer' AND revision>=0),"
+        "PRIMARY KEY(chat_id,log_name))"
+    ),
+    "ingestion_chat_resets": (
+        "CREATE TABLE ingestion_chat_resets(chat_id TEXT PRIMARY KEY,"
+        "generation INTEGER NOT NULL CHECK(typeof(generation)='integer' "
+        "AND generation>=0))"
+    ),
+}
+
+
+def _trigger_sql(action, source):
+    return (
+        f"CREATE TRIGGER ingestion_offset_{action.lower()} AFTER {action} "
+        "ON log_offsets BEGIN INSERT INTO ingestion_log_revisions"
+        f"(chat_id,log_name,revision) VALUES({source}.chat_id,{source}.log_name,1) "
+        "ON CONFLICT(chat_id,log_name) DO UPDATE SET revision=revision+1; END"
+    )
+
+
+_TRIGGERS = {
+    f"ingestion_offset_{action.lower()}": _trigger_sql(action, source)
+    for action, source in (("INSERT", "NEW"), ("UPDATE", "NEW"),
+                           ("DELETE", "OLD"))
+}
+_TRIGGERS["ingestion_offset_move"] = (
+    "CREATE TRIGGER ingestion_offset_move AFTER UPDATE ON log_offsets "
+    "WHEN OLD.chat_id != NEW.chat_id OR OLD.log_name != NEW.log_name BEGIN "
+    "INSERT INTO ingestion_log_revisions(chat_id,log_name,revision) "
+    "VALUES(OLD.chat_id,OLD.log_name,1) ON CONFLICT(chat_id,log_name) "
+    "DO UPDATE SET revision=revision+1; END"
+)
+
+
 @dataclass(frozen=True)
 class LogPosition:
     database_path: str
@@ -71,6 +117,37 @@ def initialize(conn: sqlite3.Connection) -> None:
         )
 
 
+def _verify_schema(conn: sqlite3.Connection) -> None:
+    """Verify the exact tables/triggers that make log positions ABA-safe."""
+    tables = dict(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='table' "
+        "AND name IN (?,?,?,?)", tuple(_TABLES),
+    ).fetchall())
+    if ({name: _sql(value) for name, value in tables.items()}
+            != {name: _sql(value) for name, value in _TABLES.items()}):
+        raise RuntimeError("ingestion position schema changed")
+    triggers = dict(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
+        "(tbl_name='log_offsets' OR tbl_name IN (?,?) OR "
+        "(tbl_name='ingestion_chat_resets' AND "
+        "name NOT GLOB 'membership_input_resets_*') OR "
+        "name GLOB 'ingestion_offset_*')",
+        ("ingestion_identity", "ingestion_log_revisions"),
+    ).fetchall())
+    if triggers != _TRIGGERS:
+        raise RuntimeError("ingestion position triggers changed")
+    identity = conn.execute(
+        "SELECT singleton,typeof(incarnation),length(CAST(incarnation AS BLOB)),"
+        "CASE WHEN typeof(incarnation)='text' AND "
+        "length(CAST(incarnation AS BLOB))=32 THEN incarnation END "
+        "FROM ingestion_identity LIMIT 2",
+    ).fetchall()
+    if (len(identity) != 1 or identity[0][:3] != (1, "text", 32)
+            or type(identity[0][3]) is not str
+            or any(c not in "0123456789abcdef" for c in identity[0][3])):
+        raise RuntimeError("invalid ingestion database identity")
+
+
 def capture(conn: sqlite3.Connection, path: Path,
             chat_id: str, log_name: str) -> LogPosition:
     """Read one coherent position without creating metadata on a read path."""
@@ -97,3 +174,8 @@ def reset_chat(conn: sqlite3.Connection, chat_id: str) -> None:
         "ON CONFLICT(chat_id) DO UPDATE SET generation=generation+1",
         (chat_id,),
     )
+
+
+def _sql(value):
+    return (" ".join(str(value).split()).replace(", ", ",")
+            .replace("( ", "(").replace(" )", ")"))
