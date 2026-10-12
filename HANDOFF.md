@@ -686,3 +686,26 @@ the stack merges, provider-schema installation is a separate explicit release
 action. Only then run the one-shot diagnostic repeatedly and record step count,
 wall time, counts, digests and restart reasons. Equality is delivery evidence,
 never membership authority. Product reads remain on the existing path until N2.
+
+## Atomic event stack checkpoint — 2026-10-12
+
+The private local-node recovery plan linked above remains the detailed resume
+owner. Open PRs #111–#118 extend the inactive node stack through source transfer,
+atomic work journal, bounded consumer, exact-ID canonical projection, journal
+CAS/finalization, content-free message mapping and GitHub review corrections.
+All review corrections in #118 must be included before completing or activating
+the stack. Notification wakes contain no plaintext or cached policy: notification
+delivery still needs a fresh bounded canonical read when the event is drained.
+Authenticated info/reaction projection, retained bounded event work and app-owned
+startup/close binding remain next. No runtime restart, deploy or schema change.
+
+The v0.24.364 Windows CI follow-up repairs the rejected-body discard cap (128 KiB,
+existing 0.1-second deadline), accepts equivalent Windows TCP abort in the handler
+capacity test, and gives functional GUI fixture requests a 30-second Windows
+budget without retry. Other platforms retain 10 seconds. Product responsiveness
+needs its separate measured acceptance; a functional deadline is not a latency
+claim. Local focused validation: 29 passed; independent Sol review: 11 passed,
+no remaining P1/P2. Ruff/diff clean. PR #113 also has an unrelated signup timeout;
+#111's second Windows rerun is still pending at this checkpoint. #112, #114 and
+#115 passed both platforms; #116 passed Ubuntu, Windows pending. Verify current
+head review and CI on resume and do not infer release from green tests.

@@ -183,6 +183,12 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   attempts. Exact projection rejects unknown raw kinds and explicitly reports
   legacy IDs that cannot be represented as overlay basenames for one-ID gap
   retirement. These corrections must be included before stack activation.
+  v0.24.364 repairs observed Windows CI boundaries: the GUI's bounded rejected
+  body discard now includes a 70 KiB diagnostic payload, the partial-request
+  capacity test accepts TCP abort as well as reset, and Windows functional GUI
+  fixture requests get 30 seconds without retries (10 seconds elsewhere).
+  Product request deadlines, body admission limits and handler capacity remain
+  enforced; functional fixture timeouts are not responsiveness acceptance.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 
