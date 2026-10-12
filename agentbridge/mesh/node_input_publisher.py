@@ -91,8 +91,13 @@ class NodeInputPublisher:
     def clear_selection(self) -> None:
         self.schedule.clear_selection()
 
-    def wait_s(self, maximum: float = 0.35) -> float:
-        return self.schedule.wait_s(now=self.clock(), maximum=maximum)
+    def wait_s(
+        self, maximum: float = 0.35, chat_id: str | None = None,
+    ) -> float:
+        chat = None if chat_id is None else self.reader(chat_id).chat
+        return self.schedule.wait_s(
+            now=self.clock(), maximum=maximum, chat_id=chat,
+        )
 
     def _published_node_receipt(
         self, reader: LocalPageSource, source: local_source.SourcePosition,
@@ -224,8 +229,9 @@ class NodeInputPublisher:
                 0 if status is None else status.admitted_generation,
             )
 
-    def run_due(self) -> bool:
-        job = self.schedule.take_due(now=self.clock())
+    def run_due(self, chat_id: str | None = None) -> bool:
+        chat = None if chat_id is None else self.reader(chat_id).chat
+        job = self.schedule.take_due(now=self.clock(), chat_id=chat)
         if job is None:
             return False
         result = None

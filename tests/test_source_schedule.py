@@ -98,6 +98,25 @@ def test_only_one_job_runs_and_selected_yields_after_two_to_background():
     assert third is not None and third.chat_id.startswith("background-")
 
 
+def test_targeted_due_and_wait_never_consume_another_room():
+    schedule = SourceSchedule()
+    schedule.request("background", now=0)
+    schedule.request("selected", now=0.05, selected=True)
+
+    assert schedule.take_due(now=0.05, chat_id="selected") is None
+    assert schedule.wait_s(
+        now=0.05, maximum=10, chat_id="selected",
+    ) == pytest.approx(0.05)
+    assert schedule._running is None
+
+    selected = schedule.take_due(now=0.1, chat_id="selected")
+    assert selected is not None and selected.chat_id == "selected"
+    schedule.finish(selected, now=0.1)
+
+    background = schedule.take_due(now=0.1)
+    assert background is not None and background.chat_id == "background"
+
+
 def test_capacity_selected_request_evicts_oldest_nonrunning_slot():
     schedule = SourceSchedule(capacity=2)
     assert schedule.request("old", now=0)

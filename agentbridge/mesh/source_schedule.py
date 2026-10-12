@@ -10,6 +10,9 @@ import threading
 from dataclasses import dataclass
 
 
+SELECTION_LEASE_S = 15.0
+
+
 @dataclass(frozen=True)
 class IngestionJob:
     chat_id: str
@@ -104,7 +107,8 @@ class SourceSchedule:
             # backoff just like selecting a different room.
             changed_route = selected and (self._selected != chat or now >= self._lease_until)
             if selected:
-                self._selected, self._lease_until = chat, now + 15.0
+                self._selected = chat
+                self._lease_until = now + SELECTION_LEASE_S
             if changed_route:
                 # Explicit foreground demand may interrupt a long background
                 # ambiguity backoff once. Subsequent lease renewals cannot;
@@ -142,13 +146,22 @@ class SourceSchedule:
             self._selected = None
             self._lease_until = self._hot_until = 0.0
 
-    def take_due(self, *, now):
+    def take_due(self, *, now, chat_id=None):
         now = self._time(now)
+        target = None if chat_id is None else self._chat(chat_id)
         with self._lock:
             if self._running is not None or now < self._blocked_until:
                 return None
             selected = self._selected if now < self._lease_until else None
-            due = [(s.due, s.order, c) for c, s in self._states.items() if s.due <= now]
+            if target is not None:
+                state = self._states.get(target)
+                due = ([] if state is None or state.due > now else
+                       [(state.due, state.order, target)])
+            else:
+                due = [
+                    (s.due, s.order, c) for c, s in self._states.items()
+                    if s.due <= now
+                ]
             if not due:
                 return None
             background = [row for row in due if row[2] != selected]
@@ -240,11 +253,21 @@ class SourceSchedule:
             state.rerun_at = None
             self._running = None
 
-    def wait_s(self, *, now, maximum):
+    def wait_s(self, *, now, maximum, chat_id=None):
         now = self._time(now)
         maximum = self._time(maximum)
+        target = None if chat_id is None else self._chat(chat_id)
         with self._lock:
             if self._running is not None or not self._states:
                 return maximum
-            due = max(self._blocked_until, min(s.due for s in self._states.values()))
+            if target is not None:
+                state = self._states.get(target)
+                if state is None:
+                    return maximum
+                due = max(self._blocked_until, state.due)
+            else:
+                due = max(
+                    self._blocked_until,
+                    min(s.due for s in self._states.values()),
+                )
             return min(maximum, max(0.0, due - now))
