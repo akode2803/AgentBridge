@@ -240,6 +240,8 @@ def _admit_in_transaction(
     current = owner.capture_in_transaction(conn, store, expected.source_id)
     if current != expected or current.writes_pending:
         raise owner.SourceChanged('source_changed_during_ingestion')
+    from . import coupled_stage
+    coupled_stage.reject_generic_admission(conn, store, candidate)
     raw, index = staged_source.verify_sealed(
         conn, store, candidate, expected=expected,
     )
