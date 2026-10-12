@@ -9,7 +9,8 @@ from ..node.protocol import HEALTH_VALUES
 from . import (
     coupled_admission, coupled_candidate, coupled_payload_stage, coupled_stage,
     local_source, log_position, membership_input_position, overlay_index,
-    node_publication_receipt, source_selectors, staged_publication, staged_source,
+    node_event_journal, node_publication_receipt, source_selectors,
+    staged_publication, staged_source,
 )
 from .mutation_coordinator import MutationCoordinator
 
@@ -43,6 +44,7 @@ def publish(
     if type(observed_ns) is not int or not 0 <= observed_ns <= MAX_INTEGER:
         raise ValueError("invalid observation time")
     node_publication_receipt.initialize(store)
+    node_event_journal.initialize(store)
     candidate = coupled_candidate.assemble(
         store, expected, client, definition,
     )
@@ -58,6 +60,11 @@ def publish(
                     conn, store, candidate.payload,
                 )
                 _preflight_counters(conn, store, candidate)
+                node_event_journal.publish_in_transaction(
+                    conn, store,
+                    stage=candidate.payload.handle.owner.document_stage.source_id,
+                    chat_id=candidate.store_position.membership.chat_id,
+                )
                 _replace_chat(conn, candidate, observed_ns)
                 source, index = _admit_candidate(
                     conn, store, expected.source, candidate,
