@@ -824,3 +824,16 @@ gate passed 39 tests; Astra's final diff review found no P1/P2. Ruff/diff clean.
 The separate #121 Ubuntu failure is a peer-message SSE test assuming that a
 message arrives before a harmless mirror-update frame; its bounded test repair
 is ready for a separate commit. No activation, restart, deployment or merge.
+
+## Peer-message SSE test ordering repair — v0.24.370
+
+#121 Ubuntu failed one integration test after 4,022 passes and 18 skips because
+an explicit mirror refresh emitted `mirror_update` before the message. The
+test now skips only heartbeat/mirror-update frames within its original single
+15-second deadline and asserts the exact posted message ID, chat and sender.
+Control/session frames still fail the assertion. Product behavior and fixture
+timeouts are unchanged. Sol ran all three SSE integration tests, Ruff and diff
+checks; root reviewed the bounded helper and stronger identity assertion.
+No activation, restart, deployment or merge. Retained notification consumers
+are next; info acceptance provenance and reaction operation linkage remain
+separate prerequisites for full semantic event-owner activation.
