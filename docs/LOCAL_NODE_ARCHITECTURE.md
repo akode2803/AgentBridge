@@ -1024,7 +1024,21 @@ so a concurrent newer admission cannot be erased by completion of an older
 cloud receipt write. Canonical page invalidation remains separate and does not
 depend on this lossy work journal.
 
-This slice only establishes the atomic Store primitive. The app-owned runtime
-must next translate claimed records into the existing bus semantics, surface a
-content-free resync on gaps, retry idempotent delivery writes, and schedule
-that bounded work without extending a node provider/publication quantum.
+The v0.24.358 consumer deliberately turns claimed identities into content-free
+per-chat read-model invalidations, with one global invalidation for every known
+gap. Raw admitted payload is never placed on the process bus: admission is not
+canonical viewer visibility, and direct publication could bypass membership,
+history-on-join, sender tenure, redaction and per-viewer clear/hide policy.
+Consequently this slice does not yet replace legacy message/reaction/membership
+events, notifications or agent message triggers. A bounded exact-ID canonical
+projection and final current-source/owner cut remain prerequisites for product
+activation.
+
+Delivered high-waters are handled one chat per quantum. Failures retain the
+exact journal row and rotate to other chats under bounded per-chat retry state;
+a complete failed pass sleeps until retry rather than spinning. A successful
+no-op/nonmember result completes the row. Explicit round-robin arbitration gives
+provider recovery, Store publication and journal consumption bounded service.
+The consumer binds only to the Mesh object retained by the exact
+`LocalInputRuntime` page owner, its SyncEngine, transport, Store and EventBus.
+It remains absent from GUI and harness startup.

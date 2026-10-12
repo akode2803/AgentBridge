@@ -1,9 +1,9 @@
 """Threadless orchestration of provider-to-node and node-to-Store work.
 
 The app owner calls ``run_due`` and supplies content-free wakes.  One call
-performs at most one bounded provider operation or one Store publication.  A
-newly selected chat gets the first opportunity to use already-admitted local
-node data before any provider fallback work begins.
+performs at most one bounded provider, Store-publication, event-claim, or
+delivered-receipt operation. A newly selected chat gets the first opportunity
+to use already-admitted local node data before any provider fallback work.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Callable
 from ..node.client import LocalNodeClient
 from ..node.server import LocalNodeServer
 from ..node.sync_scheduler import LocalNodeSyncScheduler, NodeSyncTickResult
+from .node_event_pump import NodeEventPump, NodeEventPumpStep
 from .node_input_publisher import NodeInputPublisher, NodeInputPublishResult
 from .source_schedule import SELECTION_LEASE_S
 
@@ -26,9 +27,10 @@ class NodePageRuntimeStep:
     next_due_s: float
     node: NodeSyncTickResult | None = None
     publication: NodeInputPublishResult | None = None
+    event: NodeEventPumpStep | None = None
 
     def __post_init__(self) -> None:
-        if self.operation not in {"none", "node", "publication"}:
+        if self.operation not in {"none", "node", "publication", "event"}:
             raise ValueError("invalid node page runtime operation")
         if (type(self.next_due_s) is not float
                 or not math.isfinite(self.next_due_s)
@@ -37,7 +39,13 @@ class NodePageRuntimeStep:
                 or (self.publication is not None and (
                     self.operation != "publication"
                     or type(self.publication) is not NodeInputPublishResult
-                ))):
+                ))
+                or (self.event is not None and (
+                    self.operation != "event"
+                    or type(self.event) is not NodeEventPumpStep
+                    or self.event.operation == "none"
+                ))
+                or (self.operation == "event") != (self.event is not None)):
             raise ValueError("invalid node page runtime result")
 
 
@@ -65,9 +73,11 @@ class LocalNodePageRuntime:
         self.selected: str | None = None
         self._selection_until = 0.0
         self._page_first_chat: str | None = None
-        self._last_operation = "none"
+        self._lane_cursor = 0
         self._lock = threading.RLock()
         self._source_owner = None
+        self._events: NodeEventPump | None = None
+        self._event_source_owner = None
         self._publication_activation = object()
         self.node = LocalNodeSyncScheduler(
             server, foreground=False,
@@ -78,6 +88,32 @@ class LocalNodePageRuntime:
             LocalNodeClient(server.home, server.identity), clock=clock,
             activation_token=self._publication_activation,
         )
+
+    def bind_event_owner(self, mesh, source_owner) -> None:
+        """Bind the exact Mesh and source-handoff owner before activation."""
+        from .local_input_runtime import LocalInputRuntime
+        from .sync import SyncEngine
+
+        with self._lock:
+            if self._events is not None or self._source_owner is not None:
+                raise RuntimeError("node event owner already bound or active")
+            if (type(source_owner) is not LocalInputRuntime
+                    or source_owner.store is not self.store
+                    or source_owner.transport is not self.server.recovery_runtime.transport
+                    or mesh.local_inputs is not source_owner
+                    or source_owner._page_preparation is None
+                    or source_owner._page_preparation.mesh is not mesh
+                    or source_owner.read_events is None
+                    or source_owner.read_events.bus is not mesh.bus
+                    or type(mesh.sync) is not SyncEngine
+                    or source_owner._sync_owner is not mesh.sync
+                    or mesh.tx is not source_owner.transport):
+                raise ValueError("foreign node event source owner")
+            pump = NodeEventPump.for_mesh(mesh, clock=self.clock)
+            if pump.store is not self.store:
+                raise ValueError("foreign node event owner")
+            self._events = pump
+            self._event_source_owner = source_owner
 
     def _activate_source(self, owner, retirement) -> None:
         """Accept the exact retired legacy owner and enable Store writes once."""
@@ -99,6 +135,8 @@ class LocalNodePageRuntime:
         with self._lock:
             if self._source_owner is not None:
                 raise RuntimeError("node source already active")
+            if self._events is None or self._event_source_owner is not owner:
+                raise RuntimeError("node event owner is not bound")
             self.publisher._activate(self._publication_activation)
             self._publication_activation = None
             self._source_owner = owner
@@ -181,15 +219,30 @@ class LocalNodePageRuntime:
             node = max(0.0, (self.node.next_due_ns - now_ns) / 1_000_000_000)
             if self._page_first_chat is not None:
                 return page
-            return min(maximum, page, node)
+            events = (
+                maximum if self._events is None
+                else self._events.wait_s(maximum)
+            )
+            return min(maximum, page, node, events)
 
     def _result(
         self, operation: str, node: NodeSyncTickResult | None = None,
         publication: NodeInputPublishResult | None = None,
+        event: NodeEventPumpStep | None = None,
     ) -> NodePageRuntimeStep:
         return NodePageRuntimeStep(
-            operation, self.wait_s(300.0), node, publication,
+            operation, self.wait_s(300.0), node, publication, event,
         )
+
+    def _run_event(self) -> NodePageRuntimeStep | None:
+        with self._lock:
+            events = self._events
+        if events is None:
+            return None
+        result = events.run_due()
+        if result.operation == "none":
+            return None
+        return self._result("event", event=result)
 
     def run_due(self) -> NodePageRuntimeStep:
         """Advance no more than one node or Store operation."""
@@ -204,33 +257,43 @@ class LocalNodePageRuntime:
                 with self._lock:
                     if self._page_first_chat == chat:
                         self._page_first_chat = None
-                    self._last_operation = "publication"
+                    if (self._events is not None and result is not None
+                            and result.changed):
+                        self._events.wake()
+                    self._lane_cursor = 1
                 return self._result("publication", publication=result)
             return self._result("none")
         now_ns = self.clock_ns()
-        node_due = now_ns >= self.node.next_due_ns
-        # A bounded room backlog cannot starve provider progress. Alternate
-        # planes whenever both remain due; selected page-first is the sole
-        # exception and is consumed after one Store attempt above.
         with self._lock:
-            last_operation = self._last_operation
-        if not (node_due and last_operation == "publication"):
-            attempted, result = self.publisher.run_due_result()
-            if attempted:
+            cursor = self._lane_cursor
+        lanes = ("publication", "node", "event")
+        for offset in range(len(lanes)):
+            index = (cursor + offset) % len(lanes)
+            lane = lanes[index]
+            step = None
+            if lane == "publication":
+                attempted, result = self.publisher.run_due_result()
+                if attempted:
+                    with self._lock:
+                        if (self._events is not None and result is not None
+                                and result.changed):
+                            self._events.wake()
+                    step = self._result("publication", publication=result)
+            elif lane == "node" and now_ns >= self.node.next_due_ns:
+                result = self.node.tick(now_ns=now_ns)
+                if result.operation != "none":
+                    with self._lock:
+                        if (self.selected is not None
+                                and result.admitted_generation > 0):
+                            self.publisher.request(self.selected, activity=True)
+                    step = self._result("node", result)
+            elif lane == "event":
+                step = self._run_event()
+            if step is not None:
                 with self._lock:
-                    self._last_operation = "publication"
-                return self._result("publication", publication=result)
-        if not node_due:
-            return self._result("none")
-        result = self.node.tick(now_ns=now_ns)
-        if result.operation == "none":
-            return self._result("none")
-        with self._lock:
-            if (self.selected is not None and result.operation != "none"
-                    and result.admitted_generation > 0):
-                self.publisher.request(self.selected, activity=True)
-            self._last_operation = "node"
-        return self._result("node", result)
+                    self._lane_cursor = (index + 1) % len(lanes)
+                return step
+        return self._result("none")
 
 
 __all__ = ["LocalNodePageRuntime", "NodePageRuntimeStep"]
