@@ -868,3 +868,11 @@ stop contention and callback source shutdown, with no remaining P1/P2 in the
 repaired paths. Ruff/diff clean. Full node event-owner startup remains inactive;
 no deployment, merge or restart. Semantic info/reaction proof prerequisites are
 still required before the major activation checkpoint.
+
+## Bounded info outcome Unicode correction — v0.24.372
+
+The bounded info-outcome API now treats unencodable lone-surrogate event types
+as malformed/ignored and continues evaluating later valid suffix events. Exact
+requested identities reject unencodable sender/ID text as a normal validation
+error. The same bounded UTF-8 check protects outcome actor attribution. This
+closes #123's latest P2 without changing `_apply` or claiming event acceptance.
