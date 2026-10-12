@@ -383,6 +383,56 @@ def record_failure(store, source, *, reason, expected=None):
         return True
 
 
+def record_refresh_failure(store, expected, *, reason):
+    """Record background refresh health without retiring a readable cut.
+
+    This is valid only when the exact source position still exists. It does not
+    advance the owner revision or restore readiness, so a pending local write
+    remains pending while a previously admitted snapshot stays readable.
+    """
+    expected = _expected(store, expected)
+    if reason not in ('io', 'incomplete', 'budget', 'conflict', 'unavailable'):
+        raise ValueError('invalid source health reason')
+    with _writer(store) as conn:
+        current = capture_in_transaction(conn, store, expected.source_id)
+        if current != expected:
+            return False
+        conn.execute(
+            'UPDATE local_sources SET failures=min(failures+1,?),error=? '
+            'WHERE source=?',
+            (MAX, reason, expected.source_id),
+        )
+        return True
+
+
+def record_refresh_observation_in_transaction(
+        conn, store, expected, *, health, last_success_ns):
+    """Record exact node health without changing the canonical input cut."""
+    expected = _expected(store, expected)
+    if health not in ('ready', 'pending', 'catching_up', 'degraded', 'unavailable'):
+        raise ValueError('invalid source health observation')
+    if (type(last_success_ns) is not int
+            or not 0 <= last_success_ns <= MAX):
+        raise ValueError('invalid source last success observation')
+    current = capture_in_transaction(conn, store, expected.source_id)
+    if current != expected:
+        return False
+    if health == 'ready':
+        failures, error = 0, ''
+    else:
+        failures = conn.execute(
+            'SELECT max(failures,1) FROM local_sources WHERE source=?',
+            (expected.source_id,),
+        ).fetchone()[0]
+        error = 'unavailable' if health in ('degraded', 'unavailable') else 'incomplete'
+    conn.execute(
+        'UPDATE local_sources SET last_success_ns=?,failures=?,error=? '
+        'WHERE source=?',
+        (last_success_ns, failures, error, expected.source_id),
+    )
+    return True
+
+
 def health(store, source):
     source = docs._validate_source_id(source)
     conn = docs._open_reader(store.path)

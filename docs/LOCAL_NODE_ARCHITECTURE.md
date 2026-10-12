@@ -885,3 +885,26 @@ durable receipt proves how that Store cut was admitted; it is not live freshness
 membership authority or permission evidence. Local writes still retire source
 readiness through the mutation coordinator, and every request continues to
 recompute membership, history, trust, keys, lifecycle, overlays and visibility.
+
+A caller-driven node input publisher now composes that protocol without routing
+product reads to it. Its selected/background queue contains only chat IDs and
+each due job performs at most one status observation or one complete coupled
+publication. A Store receipt already bound to the node's admitted generation is
+left untouched, avoiding a full replay on quiet safety ticks. A newer admitted
+generation is captured and published only through the atomic operation above.
+
+Provider/node acquisition failures update bounded source-health metadata without
+advancing the source revision or retiring a readable admitted cut. This differs
+from a local write: mutation-coordinator invalidation remains durable before the
+external operation, and a failed refresh cannot restore that pending source.
+The publisher owns no thread, watcher, provider scheduler or GUI route. App-owner
+composition and removal of the legacy mirror collector remain separate cutover
+work.
+
+Activation must give this publisher exclusive ownership of message ingestion for
+each registered Store. Legacy `SyncEngine` or direct mirror ingestion must not
+write the same Store concurrently. The durable node receipt binds both the local
+document source and the exact membership-input generation, so an accidental
+second writer makes canonical pages unavailable until a complete coupled
+republish repairs the cut. This is a fail-closed guard, not a supported
+dual-writer protocol.

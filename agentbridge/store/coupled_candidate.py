@@ -31,6 +31,8 @@ class CoupledCandidate:
     definition: source_selectors.Definition
     store_position: coupled_admission.StoreChatPosition
     node_position: NodeFinalizationPosition
+    node_health: str
+    node_last_success_ns: int
     owner: coupled_stage.CoupledStageHandle
     payload: coupled_payload_stage.PayloadSeal
 
@@ -70,7 +72,8 @@ def _assemble_detached(store, expected, detached) -> CoupledCandidate:
         staged_source.finish(store, owner.document_stage)
         seal = coupled_payload_stage.seal(store, payload)
         return CoupledCandidate(
-            definition, expected, detached.finalization_position, owner, seal,
+            definition, expected, detached.finalization_position,
+            detached.health, detached.last_success_ns, owner, seal,
         )
     except BaseException as exc:
         try:

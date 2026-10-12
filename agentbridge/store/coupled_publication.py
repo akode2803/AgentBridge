@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from ..node.admission import MAX_INTEGER, NodeFinalizationPosition
 from ..node.client import LocalNodeClient
+from ..node.protocol import HEALTH_VALUES
 from . import (
     coupled_admission, coupled_candidate, coupled_payload_stage, coupled_stage,
     local_source, log_position, membership_input_position, overlay_index,
@@ -62,8 +63,19 @@ def publish(
                     conn, store, expected.source, candidate,
                     observed_ns=observed_ns,
                 )
+                if not local_source.record_refresh_observation_in_transaction(
+                        conn, store, source,
+                        health=candidate.node_health,
+                        last_success_ns=candidate.node_last_success_ns):
+                    raise CoupledPublicationChanged(
+                        "source changed before node health publication",
+                    )
+                messages = membership_input_position._capture(
+                    conn, store.path,
+                    candidate.store_position.membership.chat_id,
+                )
                 node_publication_receipt.publish_in_transaction(
-                    conn, store, source, candidate.node_position,
+                    conn, store, source, messages, candidate.node_position,
                 )
                 staged_source._retire_generation_in_transaction(
                     conn, store, expected.source.raw.source_id,
@@ -102,6 +114,10 @@ def _require_candidate(store, expected, candidate) -> None:
             or candidate.owner.document_stage.chat_id
             != expected.membership.chat_id):
         raise CoupledPublicationChanged("coupled candidate binding changed")
+    if (candidate.node_health not in HEALTH_VALUES
+            or type(candidate.node_last_success_ns) is not int
+            or not 0 <= candidate.node_last_success_ns <= MAX_INTEGER):
+        raise CoupledPublicationChanged("coupled candidate health changed")
     # Validate every exact Store handle again before using its source ID in SQL.
     coupled_stage._handle(store, candidate.owner)
 
