@@ -952,3 +952,14 @@ content-free invalidation. The focused corrected gate passes 146 tests; Ruff and
 diff checks pass. Astra independently reproduced both upgrade-boundary failures,
 verified their repairs end to end and found no remaining P1/P2. Full node event
 startup remains inactive; no restart, deployment or merge.
+
+The current PR review correction makes v2 publication rolling-upgrade safe:
+`sig` retains the legacy mapping recipe while `ops_sig` covers the complete v2
+document and binds that legacy signature. Current readers verify `ops_sig`;
+pre-v2 readers continue verifying `sig` and displaying the same mapping.
+Malformed, unsigned or foreign-signed prior documents are replaced by the next
+genuine local action without laundering their mapping or operation IDs, so a
+shared-transport overwrite cannot permanently lock out reactions. Oversized v1
+maps migrate through a deterministic 4,096-entry cut that always preserves the
+new action. The 85-test reaction/security/index/page gate and Ruff/diff checks
+pass locally; replacement review and cross-platform CI remain pending.

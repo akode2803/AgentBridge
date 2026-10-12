@@ -345,10 +345,10 @@ class Mesh:
         from ..core.timekit import next_ns, utcnow_iso
         from .events import reaction_signing_bytes, reaction_v2_signing_bytes
         from .overlays import reaction_map
-        from .reaction_documents import is_v2_candidate, parse_v2
+        from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 
         for user, doc in ov.reaction_docs().items():
-            if not isinstance(doc, dict) or doc.get("sig"):
+            if not isinstance(doc, dict):
                 continue
             bundle = self.keystore.load(user)
             if bundle is None:
@@ -356,11 +356,19 @@ class Mesh:
             if is_v2_candidate(doc):
                 try:
                     parse_v2(doc)
-                    resealed = {**doc, 'ops_origin': 'resealed', 'sig': ''}
+                    if operation_signature(doc):
+                        continue
+                    mapping = reaction_map(doc)
+                    resealed = {**doc, 'ops_origin': 'resealed', 'sig': '',
+                                'ops_sig': ''}
+                    resealed['sig'] = crypto.sign(bundle, reaction_signing_bytes(
+                        chat_id, user, resealed['ns'], mapping))
                     sig = crypto.sign(bundle, reaction_v2_signing_bytes(chat_id, user, resealed))
                 except ValueError:
                     continue
-                self.tx.put_doc(P.reactions(chat_id, user), {**resealed, 'sig': sig})
+                self.tx.put_doc(P.reactions(chat_id, user), {**resealed, 'ops_sig': sig})
+                continue
+            if doc.get("sig"):
                 continue
             mapping = reaction_map(doc)
             ns = next_ns()  # fresh write: the signature binds the new ns

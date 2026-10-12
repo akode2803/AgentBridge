@@ -31,7 +31,7 @@ from .events import EV_DELETED, EV_MEMBER_LEFT, EV_REACTION, \
     pin_signing_bytes, reaction_signing_bytes, reaction_v2_signing_bytes, redaction_signing_bytes, \
     signing_bytes, state_signing_bytes, unredaction_signing_bytes
 from .overlays import ChatOverlays, UserState, fold_reactions, reaction_map
-from .reaction_documents import is_v2_candidate, parse_v2
+from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 from .paths import P
 from .projection import ProjectionObserver, observed, observed_count
 from .readmodel import build_messages, parse_tags, unread_info
@@ -609,6 +609,7 @@ class MessagingService:
                 try:
                     mapping, _operations = parse_v2(doc)
                     data = reaction_v2_signing_bytes(chat_id, user, doc)
+                    sig = operation_signature(doc)
                 except ValueError:
                     continue
             else:

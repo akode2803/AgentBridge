@@ -366,14 +366,14 @@ def test_v2_reaction_signature_tampering_and_unsigned_reseal(world):
     fable.tx.put_doc(path, {**signed, 'ops_origin': 'resealed'})
     assert visible() == {}
 
-    unsigned = {**signed, 'sig': '', 'ops_origin': 'native'}
+    unsigned = {**signed, 'sig': '', 'ops_sig': '', 'ops_origin': 'native'}
     fable.tx.put_doc(path, unsigned)
     assert visible() == {}
     fable.harden_startup()
     resealed = fable.tx.get_doc(path)
     assert resealed['schema'] == 2 and resealed['ops_origin'] == 'resealed'
     assert resealed['v'] == signed['v'] and resealed['ops'] == signed['ops']
-    assert resealed['ns'] == signed['ns'] and resealed['sig']
+    assert resealed['ns'] == signed['ns'] and resealed['sig'] and resealed['ops_sig']
     assert visible() == {'👍': ['fable']}
     from agentbridge.mesh.reaction_documents import parse_native_v2
     with pytest.raises(ValueError, match='not native'):

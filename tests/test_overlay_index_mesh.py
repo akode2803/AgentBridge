@@ -72,10 +72,11 @@ def test_reaction_candidates_match_reaction_map_and_existing_signing_recipe(stor
 def test_v2_index_binds_operations_and_rejects_inconsistent_document(store):
     doc = {'schema': 2, 'ops_origin': 'native', 'v': {'m1': '👍'}, 'ops': {'m1': {
         'id': 'rx-42-00000000', 'ns': 42, 'emoji': '👍', 'previous': None,
-    }}, 'ns': 42, 'sig': 'candidate-signature'}
+    }}, 'ns': 42, 'sig': 'legacy-signature', 'ops_sig': 'candidate-signature'}
     prepared = prepare_overlay_index(_observation(store, {REACTION: doc}), CHAT)
     indexed = _document(prepared, REACTION)
     assert indexed.signing_bytes == reaction_v2_signing_bytes(CHAT, 'alice', doc)
+    assert indexed.signature == doc['ops_sig']
     assert [(item.target, item.value) for item in prepared.candidates] == [('m1', '👍')]
 
     malformed = {**doc, 'ops': {'m1': {**doc['ops']['m1'], 'emoji': ''}}}

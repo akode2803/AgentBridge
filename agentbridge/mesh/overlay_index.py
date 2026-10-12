@@ -15,7 +15,7 @@ from ..store.overlay_index import (
 )
 from .events import reaction_signing_bytes, reaction_v2_signing_bytes, state_signing_bytes
 from .overlays import UserState, reaction_map
-from .reaction_documents import is_v2_candidate, parse_v2
+from .reaction_documents import is_v2_candidate, operation_signature, parse_v2
 from .overlay_source import OverlaySourceReceipt, capture_overlay_inputs
 
 _STATE_SCALARS = (
@@ -74,6 +74,8 @@ def prepare_overlay_index(observation: DocumentObservation, chat_id: str) -> Pre
                 try:
                     mapping, _operations = parse_v2(doc)
                     signing = reaction_v2_signing_bytes(chat_id, actor, doc)
+                    signature = operation_signature(doc)
+                    raw_signature = signature
                 except ValueError:
                     mapping, signing = {}, None
                     shape_error = shape_error or 'reaction_map'

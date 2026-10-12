@@ -72,8 +72,11 @@ def _reaction_v2(actor, bundle, mapping, ns=11):
     doc = {'schema': 2, 'ops_origin': 'native', 'v': mapping, 'ops': {
         target: {'id': f'rx-{ns}-00000000', 'ns': ns,
                  'emoji': emoji, 'previous': None},
-    }, 'ns': ns, 'sig': ''}
-    doc['sig'] = crypto.sign(bundle, reaction_v2_signing_bytes(CHAT, actor, doc))
+    }, 'ns': ns, 'sig': '', 'ops_sig': ''}
+    doc['sig'] = crypto.sign(bundle, reaction_signing_bytes(
+        CHAT, actor, ns, mapping))
+    doc['ops_sig'] = crypto.sign(bundle, reaction_v2_signing_bytes(
+        CHAT, actor, doc))
     return doc
 
 
