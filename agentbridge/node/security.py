@@ -14,8 +14,9 @@ class LocalSecurityError(OSError):
     """The local node could not prove its private filesystem boundary."""
 
 
-def _windows_restrict(path: Path, *, directory: bool) -> None:
-    """Install and verify a protected DACL containing only the current user."""
+def _windows_restrict(path: Path, *, directory: bool,
+                      enforce: bool = True) -> None:
+    """Optionally install, then verify a protected current-user-only DACL."""
     import ctypes
     from ctypes import wintypes
 
@@ -112,33 +113,36 @@ def _windows_restrict(path: Path, *, directory: bool) -> None:
         sid_size = advapi.GetLengthSid(sid)
         if not sid_size:
             raise LocalSecurityError("could not inspect local owner")
-        # ACL + ACCESS_ALLOWED_ACE, excluding the ACE's placeholder SidStart.
-        acl_data = ctypes.create_string_buffer(ctypes.sizeof(ACL) + 8 + sid_size)
-        if not advapi.InitializeAcl(acl_data, len(acl_data), ACL_REVISION):
-            raise LocalSecurityError("could not protect local node files")
-        flags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
-        if not advapi.AddAccessAllowedAceEx(
-                acl_data, ACL_REVISION, flags, FILE_ALL_ACCESS, sid):
-            raise LocalSecurityError("could not protect local node files")
-        result = advapi.SetNamedSecurityInfoW(
-            str(path), SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            None, None, acl_data, None,
-        )
-        if result:
-            raise LocalSecurityError("could not protect local node files")
+        if enforce:
+            # ACL + ACCESS_ALLOWED_ACE, excluding the ACE's placeholder
+            # SidStart.
+            acl_data = ctypes.create_string_buffer(
+                ctypes.sizeof(ACL) + 8 + sid_size)
+            if not advapi.InitializeAcl(
+                    acl_data, len(acl_data), ACL_REVISION):
+                raise LocalSecurityError("could not protect local node files")
+            flags = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+                     if directory else 0)
+            if not advapi.AddAccessAllowedAceEx(
+                    acl_data, ACL_REVISION, flags, FILE_ALL_ACCESS, sid):
+                raise LocalSecurityError("could not protect local node files")
+            result = advapi.SetNamedSecurityInfoW(
+                str(path), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None, None, acl_data, None,
+            )
+            if result:
+                raise LocalSecurityError("could not protect local node files")
 
-        # Administrator tokens can create files whose default owner is the
-        # Administrators group rather than the token user.  The protected DACL
-        # above grants this user FILE_ALL_ACCESS (including WRITE_OWNER), so now
-        # bind ownership to the same user SID.  Doing this as a second call is
-        # intentional: the pre-existing descriptor may not grant WRITE_OWNER.
-        result = advapi.SetNamedSecurityInfoW(
-            str(path), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
-            sid, None, None, None,
-        )
-        if result:
-            raise LocalSecurityError("could not assign local node owner")
+            # Administrator tokens can create files whose default owner is the
+            # Administrators group rather than the token user. The protected
+            # DACL grants this user WRITE_OWNER, so bind ownership separately.
+            result = advapi.SetNamedSecurityInfoW(
+                str(path), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                sid, None, None, None,
+            )
+            if result:
+                raise LocalSecurityError("could not assign local node owner")
 
         owner = wintypes.LPVOID()
         dacl = wintypes.LPVOID()
@@ -197,6 +201,26 @@ def protect_path(path: Path, *, directory: bool) -> None:
         raise
     except OSError as exc:
         raise LocalSecurityError("could not protect local node files") from exc
+
+
+def verify_private_path(path: Path, *, directory: bool) -> None:
+    """Verify the owner-only boundary without repairing or changing it."""
+    try:
+        value = path.lstat()
+        wanted = stat.S_ISDIR if directory else stat.S_ISREG
+        if stat.S_ISLNK(value.st_mode) or not wanted(value.st_mode):
+            raise LocalSecurityError("invalid local node path")
+        if os.name == "nt":
+            _windows_restrict(path, directory=directory, enforce=False)
+            return
+        mode = stat.S_IMODE(value.st_mode)
+        if mode & 0o077 or (hasattr(os, "geteuid")
+                           and value.st_uid != os.geteuid()):
+            raise LocalSecurityError("local node files are not owner-only")
+    except LocalSecurityError:
+        raise
+    except OSError as exc:
+        raise LocalSecurityError("could not verify local node files") from exc
 
 
 def private_directory(path: Path) -> Path:

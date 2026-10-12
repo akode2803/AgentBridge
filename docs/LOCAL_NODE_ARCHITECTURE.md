@@ -75,13 +75,17 @@ current session/viewer from an exact admitted local cut.
   `127.0.0.1` on an ephemeral port.
 - Publish `{pid, port, node_epoch, database_incarnation, identity_digest,`
   `token_digest, started_ns, protocol_version}` in an
-  owner-only state file under the AgentBridge home. Store the random bearer token
+  owner-only state file under the AgentBridge home. Store the random MAC secret
   separately with the same restriction and rotate it on every process start.
   POSIX mode `0600` is necessary there; Windows additionally requires a protected,
   owner-only DACL on the containing directory, database, sidecars, token, state
   and atomic-replacement files. Startup fails closed when this cannot be proved.
-- Require the bearer on every request, reject browser Origin requests, cap body
-  and response sizes, and expose no general filesystem or SQL operation.
+- Require a fresh nonce and token-derived request MAC on every request, and a
+  separately domain-bound MAC over every exact response. The secret never crosses
+  the socket, so a stale state record pointing at a reused loopback port cannot
+  authenticate a forged response or recover the credential. Reject browser Origin
+  requests, cap body and response sizes, and expose no general filesystem or SQL
+  operation.
 - The node epoch identifies process/recreation continuity only. It is not
   authority and cannot validate a continuation by itself.
 

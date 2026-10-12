@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -19,10 +21,61 @@ HEALTH_VALUES = frozenset({
     "inactive", "starting", "catching_up", "ready", "degraded",
     "pending", "unavailable",
 })
+WIRE_NONCE_BYTES = 32
+WIRE_PROOF_BYTES = 32
+_WIRE_NONCE = re.compile(r"[0-9a-f]{64}")
+_WIRE_PROOF = re.compile(r"[0-9a-f]{64}")
 
 
 class ProtocolError(ValueError):
     """A local request or response does not match the bounded protocol."""
+
+
+def valid_wire_proof(value: Any) -> bool:
+    return type(value) is str and _WIRE_PROOF.fullmatch(value) is not None
+
+
+def _wire_mac(token: str, domain: bytes, fields: tuple[bytes, ...]) -> str:
+    if type(token) is not str or not token or any(char.isspace() for char in token):
+        raise ProtocolError("invalid local node credential")
+    try:
+        key = token.encode("ascii")
+    except UnicodeEncodeError:
+        raise ProtocolError("invalid local node credential") from None
+    framed = bytearray(domain)
+    for field in fields:
+        framed.extend(len(field).to_bytes(8, "big"))
+        framed.extend(field)
+    return hmac.new(key, framed, hashlib.sha256).hexdigest()
+
+
+def request_proof(token: str, nonce: str, method: str, path: str,
+                  body_digest: str) -> str:
+    """Bind one request without putting the owner credential on the wire."""
+    if (_WIRE_NONCE.fullmatch(nonce) is None
+            or _WIRE_PROOF.fullmatch(body_digest) is None
+            or method not in ("GET", "POST")
+            or type(path) is not str or not path.startswith("/v1/")):
+        raise ProtocolError("invalid local node request proof")
+    return _wire_mac(token, b"agentbridge-local-node-request-v1\0", (
+        nonce.encode("ascii"), method.encode("ascii"), path.encode("ascii"),
+        body_digest.encode("ascii"),
+    ))
+
+
+def response_proof(token: str, nonce: str, method: str, path: str,
+                   status: int, body: bytes) -> str:
+    """Authenticate exact response bytes to the request nonce."""
+    if (_WIRE_NONCE.fullmatch(nonce) is None
+            or method not in ("GET", "POST")
+            or type(path) is not str or not path.startswith("/v1/")
+            or type(status) is not int or not 100 <= status <= 599
+            or type(body) is not bytes):
+        raise ProtocolError("invalid local node response proof")
+    return _wire_mac(token, b"agentbridge-local-node-response-v1\0", (
+        nonce.encode("ascii"), method.encode("ascii"), path.encode("ascii"),
+        str(status).encode("ascii"), body,
+    ))
 
 
 def _identity_part(value: Any, name: str) -> str:
