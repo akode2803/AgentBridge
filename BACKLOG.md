@@ -171,6 +171,10 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   v0.24.361 exact-message finalizer now performs that CAS only after every
   current canonical fence passes and exposes its committed consume/gap outcome
   to the future mapper. ABA or rollback withholds the page and preserves work.
+  The v0.24.362 mapper emits only message ID and sender after current exact
+  projection; deleted and undecryptable results are suppressed. Notifications
+  require a fresh bounded exact-ID read when the queued event is drained:
+  queued preview or viewer-policy fields must never become continuing authority.
   Runtime translation and app-owned activation remain absent.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
