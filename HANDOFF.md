@@ -837,3 +837,34 @@ checks; root reviewed the bounded helper and stronger identity assertion.
 No activation, restart, deployment or merge. Retained notification consumers
 are next; info acceptance provenance and reaction operation linkage remain
 separate prerequisites for full semantic event-owner activation.
+
+## Retained fresh message notification consumers — v0.24.371
+
+Notifier and each GUI SSE session now drain bounded identity-only message jobs.
+Each due quantum recaptures raw inputs, canonical message visibility and signed
+read/mute policy, then finalizes immediately under the exact consumer gate.
+Pending work retries during idle periods and continuous bus traffic. Duplicate
+wakes preserve their existing backoff; exhausted operation ledgers reset under
+capped exponential cooldown. The queue retains 64 jobs and 128 completed
+identities, never a preview, page, policy decision or prepared finalizer. Overflow
+and terminal drops explicitly signal best-effort gaps; this is not lossless or
+durable notification delivery. Background instances with no sinks skip these
+reads; GUI streams independently own their fresh notification jobs.
+
+GUI message frames arrive before notification work; a later notification-only
+frame uses the canonical session/screen finalizer plus an immediate pre-yield
+session check. The browser displays its notification without another data
+refresh. Background handout joins exact source shutdown and notifier generation.
+Callbacks run after SQL commit without ingestion or scheduling locks, using a
+dedicated source handout gate. Cancellation revokes immediately and clears jobs
+without waiting for a callback-held delivery gate; callback stop skips thread
+join. These gates correct two P2s found by Astra's independent contention probes.
+
+Local gates: 109 notification/GUI/frontend tests and 107 broader runtime/GUI/
+event/checker tests passed; the final no-sink/start-stop adjustment passed 36
+affected tests. Frontend checker: all 36 modules pass. Sol's retained-owner gate
+passed 14 tests before the combined gate; Astra independently verified callback
+stop contention and callback source shutdown, with no remaining P1/P2 in the
+repaired paths. Ruff/diff clean. Full node event-owner startup remains inactive;
+no deployment, merge or restart. Semantic info/reaction proof prerequisites are
+still required before the major activation checkpoint.

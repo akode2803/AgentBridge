@@ -120,6 +120,21 @@ stopRealtime();
 ''')
 
 
+def test_delayed_notification_does_not_request_another_data_refresh(tmp_path):
+    _run(tmp_path, _JS_ENV + _realtime_source() + r'''
+startRealtime();const src=EventSource.instances[0];src.onopen();await tick(0);
+src.onmessage({data:JSON.stringify({type:'notification',chat_id:'selected',
+ id:'fresh-message',notify:{kind:'message',preview:'fresh preview'}})});
+await flush();assert.equal(notifications.length,1);
+assert.equal(notifications[0].notify.preview,'fresh preview');
+assert.equal(broad,1);assert.equal(scoped.length,0);
+assert.equal(pendingFrames.length,0);
+epoch++;document.dispatchEvent(new CustomEvent('ab:session-reset'));
+src.onmessage({data:JSON.stringify({type:'notification',notify:{preview:'stale'}})});
+assert.equal(notifications.length,1);stopRealtime();
+''')
+
+
 def test_half_open_stream_watchdog_reconnects_without_steady_broad_poll(tmp_path):
     _run(tmp_path, _JS_ENV + _realtime_source() + r'''
 startRealtime();const src=EventSource.instances[0];src.onopen();await tick(0);

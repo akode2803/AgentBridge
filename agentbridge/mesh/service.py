@@ -154,7 +154,7 @@ class Mesh:
             subscribe_changes(self._mirror_changed)
             if callable(subscribe_changes) else None
         )
-        self.notifier = Notifier(self.bus, self.messaging, self.sealer, user)
+        self.notifier = Notifier(self.bus, self.messaging, self.sealer, user, mesh=self)
         self.applink = AppLink(
             self.tx, self.store, self.directory, self.keystore, machine,
             user=user, app_version=app_version, release_info=release_info,

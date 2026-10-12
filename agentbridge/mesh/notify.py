@@ -56,6 +56,7 @@ class Notifier:
         messaging: MessagingService,
         sealer: Sealer,
         user: str,
+        *, mesh=None,
     ) -> None:
         self.bus = bus
         self.messaging = messaging
@@ -64,9 +65,15 @@ class Notifier:
         self._sinks: list[Callable[[Notification], None]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._node_mesh = mesh
+        self._node_preparation = None
+        self._delivery_gate = threading.RLock()
+        self._delivery_generation = 0
+        self._delivery_scope = threading.local()
 
     def add_sink(self, sink: Callable[[Notification], None]) -> None:
-        self._sinks.append(sink)
+        with self._delivery_gate:
+            self._sinks.append(sink)
 
     # ------------------------------------------------------------ filtering
     @staticmethod
@@ -144,36 +151,117 @@ class Notifier:
 
     # ------------------------------------------------------------- delivery
     def deliver(self, event: Event) -> Notification | None:
+        if self._queue_node(event):
+            return self._drain_node()
         note = self.consider(event)
-        if note is not None:
-            for sink in self._sinks:
-                try:
-                    sink(note)
-                except Exception:  # noqa: BLE001 — one sink never kills the rest
-                    continue
+        self._deliver_note(note)
         return note
+
+    def _deliver_note(self, note: Notification | None, *, owner=None) -> None:
+        # Node callers retain this gate from their fresh finalization through
+        # immediate handout. Never dispatch an old result after stop/restart.
+        with self._delivery_gate:
+            if note is None or self._stop.is_set():
+                return
+            generation = self._delivery_generation
+            depth = getattr(self._delivery_scope, 'depth', 0)
+            self._delivery_scope.depth = depth + 1
+            try:
+                for sink in tuple(self._sinks):
+                    if (self._stop.is_set() or generation != self._delivery_generation
+                            or owner is not None and (owner._closed
+                                or self._node_mesh.local_inputs is not owner)):
+                        break
+                    try:
+                        sink(note)
+                    except Exception:  # noqa: BLE001 — one sink never kills the rest
+                        continue
+            finally:
+                self._delivery_scope.depth = depth
+
+    def _queue_node(self, event: Event, *, only_with_sinks=False) -> bool:
+        if (event.type != eventbus.MESSAGE or type(event.data) is not dict
+                or set(event.data) != {'id', 'from'}):
+            return False
+        # Identity-only wakes never enter legacy snapshot/full-fold paths,
+        # including when no local owner exists or the consumer is stopped.
+        from .local_input_runtime import LocalInputRuntime
+        from .node_notification_preparation import NodeNotificationPreparation
+        from .service import Mesh
+        mesh = self._node_mesh
+        with self._delivery_gate:
+            if only_with_sinks and not self._sinks:
+                return True  # GUI streams have their own fresh-read owner.
+            if (self._stop.is_set() or type(mesh) is not Mesh
+                    or type(mesh.local_inputs) is not LocalInputRuntime):
+                return True
+            if self._node_preparation is None:
+                self._node_preparation = NodeNotificationPreparation(mesh)
+            preparation = self._node_preparation
+        # run_one holds the job lock before final delivery acquires our gate.
+        # Never invert that order by enqueueing while retaining the gate.
+        try:
+            preparation.enqueue(event)
+        except ValueError:
+            self.bus.publish(Event(eventbus.READ_MODEL, data={'scope': 'global'},
+                                   ns=time.time_ns()))
+        return True
+
+    def _drain_node(self) -> Notification | None:
+        with self._delivery_gate:
+            if self._stop.is_set():
+                return None
+            preparation = self._node_preparation
+            generation = self._delivery_generation
+        if preparation is None:
+            return None
+        step = preparation.run_one(notifier=self, notifier_generation=generation)
+        if preparation.take_gap():
+            # Notification delivery is best effort, as is EventBus itself.
+            # A visible content-free resync marks overflow/terminal losses.
+            self.bus.publish(Event(eventbus.READ_MODEL, data={'scope': 'global'},
+                                   ns=time.time_ns()))
+        return step.notification
+
+    def _node_wait(self) -> float:
+        with self._delivery_gate:
+            preparation = self._node_preparation
+        return .5 if preparation is None else preparation.wait_s(.5)
 
     def start(self) -> None:
         """Background pump: drain the bus and deliver."""
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        sub = self.bus.subscribe()
-
         def loop() -> None:
-            while not self._stop.is_set():
-                event = sub.get(timeout=0.5)
-                if event is not None:
-                    self.deliver(event)
-            sub.close()
+            try:
+                while not self._stop.is_set():
+                    event = sub.get(timeout=self._node_wait())
+                    if event is not None and not self._queue_node(event, only_with_sinks=True):
+                        self.deliver(event)
+                    self._drain_node()  # Due retries also progress while idle.
+            finally:
+                sub.close()
 
-        self._thread = threading.Thread(target=loop, daemon=True, name="ab-notify")
-        self._thread.start()
+        with self._delivery_gate:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            sub = self.bus.subscribe()
+            self._thread = threading.Thread(target=loop, daemon=True, name="ab-notify")
+            self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(5.0)
+        with self._delivery_gate:
+            self._stop.set()
+            self._delivery_generation += 1
+            preparation, self._node_preparation = self._node_preparation, None
+            thread = self._thread
+        # close() revokes immediately and never waits for an in-flight job.
+        # Callback stop may still be inside an outer delivery-gate acquisition.
+        if preparation is not None:
+            preparation.close()
+        if thread:
+            if (thread is not threading.current_thread()
+                    and not getattr(self._delivery_scope, 'depth', 0)):
+                thread.join(5.0)
 
 
 class CommandHook:
