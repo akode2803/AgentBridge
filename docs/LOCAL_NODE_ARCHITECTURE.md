@@ -733,3 +733,31 @@ configured AgentBridge home, performs one coordinator step, prints only bounded
 content-free progress, and exits. Repeating the same command resumes accepted
 Store work. Errors expose only a fixed exception category. This is a diagnostic
 tool, not a background scheduler or product read route.
+
+The inactive owner-only client can now turn one canonical-page source definition
+into a detached, immutable input snapshot. It validates the complete selector
+definition, captures every selected document all-or-overflow, records missing
+exact paths separately from durable tombstones, enumerates the selected chat's
+maintained stream inventory, and replays every stream from row zero through its
+captured head. The replay never treats an earlier maximum provider row ID as a
+permanent cursor, because exact-ledger repair may admit a lower ID later.
+
+Every request is bound to the same node process, database incarnation, admitted
+generation, capture token and ready root/chat positions. A pending local scope,
+generation change, incomplete terminal stream, malformed protocol response or
+explicit row/byte/page/JSON budget stops conversion. Malformed envelopes remain
+detached raw rows with fixed rejection reasons, so a later atomic publisher can
+advance past them without silently omitting provider input or repeatedly
+rescanning it. Document JSON fails the whole selection because an authority
+document cannot safely become an inferred absence. Degraded source health may be
+reported with the last admitted snapshot; health and last-success time remain
+observability, not authority.
+
+This conversion does not mutate the GUI Store, manufacture a local-source
+receipt, cache membership, run canonical crypto/visibility logic, schedule
+provider work or route a product read. The next activation slice must stage its
+documents and messages into one private GUI-Store candidate and publish them in
+one root -> node -> Store finalization transaction, then thread the node position
+through the existing page finalization fence. Chaining the current document
+publisher and `Store.ingest_log` would expose two different cuts and is not a
+valid implementation.
