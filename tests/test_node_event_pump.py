@@ -85,6 +85,21 @@ def test_event_claim_emits_only_content_free_canonical_refetch(store):
     assert list(subscription.drain()) == []
 
 
+def test_continuous_events_cannot_starve_delivery(store):
+    bus = EventBus()
+    messaging = MessagingStub(store)
+    pump = NodeEventPump(store, bus, messaging, 'bob')
+    _pending_record(store, _record('one'))
+    store._conn().execute('INSERT INTO node_event_delivery VALUES(?,?)', (CHAT, 7))
+    store._conn().commit()
+    assert pump.run_due().operation == 'events'
+    _pending_record(store, _record('two', ns=8))
+
+    assert pump.run_due().operation == 'delivery'
+    assert messaging.calls == [(CHAT, 7)]
+    assert pump.run_due().operation == 'events'
+
+
 def test_missing_claim_emits_one_content_free_global_invalidation(store):
     conn = store._conn()
     conn.execute(
@@ -128,6 +143,24 @@ def test_delivery_failure_retries_after_backoff_and_then_completes(store):
     assert completed.operation == "delivery" and completed.delivered is True
     assert messaging.calls == [(CHAT, 7), (CHAT, 7)]
     assert node_event_journal.pending_deliveries(store) == ()
+
+
+def test_receipt_completion_failure_retains_work_and_reports_attempt(store, monkeypatch):
+    store._conn().execute('INSERT INTO node_event_delivery VALUES(?,?)', (CHAT, 7))
+    store._conn().commit()
+    messaging = MessagingStub(store)
+    pump = NodeEventPump(store, EventBus(), messaging, 'bob')
+    def failed_completion(*_args):
+        raise OSError('post-write disk failure')
+    monkeypatch.setattr(node_event_journal, 'complete_delivery', failed_completion)
+
+    result = pump.run_due()
+
+    assert result.operation == 'delivery' and result.delivered is False
+    assert messaging.calls == [(CHAT, 7)]
+    assert node_event_journal.pending_deliveries(store) == (
+        node_event_journal.NodeDelivery(CHAT, 7),
+    )
 
 
 def test_failed_first_delivery_does_not_block_later_chat(store):

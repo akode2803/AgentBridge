@@ -91,6 +91,69 @@ def test_missing_or_moved_admitted_identity_becomes_one_at_most_once_gap(store):
     assert node_event_journal.claim_events(store) is None
 
 
+def test_numeric_legacy_payload_id_survives_claim(store):
+    record = {**_record(1), 'id': 123}
+    _stage(store._conn(), 'numeric', [record])
+    _publish_and_admit(store, 'numeric', [record])
+
+    claim = node_event_journal.claim_events(store)
+
+    assert not claim.gap
+    assert claim.records[0].record['id'] == 123
+
+
+@pytest.mark.parametrize('operation', ['claim', 'gap', 'retire', 'delivery'])
+def test_owned_journal_operations_preserve_caller_transaction(store, operation):
+    conn = store._conn()
+    conn.execute('CREATE TABLE unrelated(value TEXT)')
+    conn.commit()
+    conn.execute('BEGIN IMMEDIATE')
+    conn.execute("INSERT INTO unrelated VALUES('keep')")
+    identity = node_event_journal.NodeEventIdentity(1, CHAT, 'm1', 1, 'alice', 'message')
+    calls = {
+        'claim': lambda: node_event_journal.claim_events(store),
+        'gap': lambda: node_event_journal.claim_gap(store),
+        'retire': lambda: node_event_journal.retire_event_identities_as_gap(store, (identity,)),
+        'delivery': lambda: node_event_journal.complete_delivery(
+            store, node_event_journal.NodeDelivery(CHAT, 1)),
+    }
+
+    with pytest.raises(sqlite3.OperationalError, match='owned transaction'):
+        calls[operation]()
+
+    assert conn.in_transaction
+    assert conn.execute('SELECT value FROM unrelated').fetchall() == [('keep',)]
+    conn.rollback()
+
+
+def test_temporary_journal_trigger_is_rejected_before_publication(store):
+    conn = store._conn()
+    _stage(conn, 'stage', [_record(1)])
+    conn.execute('CREATE TEMP TRIGGER drop_event AFTER INSERT ON main.node_event_journal_items '
+                 'BEGIN DELETE FROM node_event_journal_items WHERE sequence=NEW.sequence; END')
+    conn.execute('BEGIN IMMEDIATE')
+    with pytest.raises(node_event_journal.NodeEventJournalChanged, match='temporary objects'):
+        node_event_journal.publish_in_transaction(conn, store, stage='stage', chat_id=CHAT)
+    conn.rollback()
+
+
+def test_projection_rotation_skips_retained_failed_head_chat(store):
+    conn = store._conn()
+    conn.executemany(
+        'INSERT INTO node_event_journal_items(chat,message_id,ns,sender,kind) VALUES(?,?,?,?,?)',
+        [('a', 'a1', 1, 'alice', 'message'), ('b', 'b1', 1, 'alice', 'message')],
+    )
+    conn.commit()
+
+    head = node_event_journal.peek_event_identities(store)
+    following = node_event_journal.peek_event_identities(store, after_chat=head[0].chat_id)
+    wrapped = node_event_journal.peek_event_identities(store, after_chat=following[0].chat_id)
+
+    assert head[0].chat_id == 'a' and following[0].chat_id == 'b'
+    assert wrapped == head
+    assert conn.execute('SELECT count(*) FROM node_event_journal_items').fetchone() == (2,)
+
+
 def test_claim_preflights_aggregate_payload_bytes_before_loading(store):
     size = node_event_journal.MAX_CLAIM_BYTES // 2 + 1024
     records = [
