@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-13",
+  "project_class": "disposable Supabase scratch project",
+  "postgres_server_version": "17.11",
+  "migration": {
+    "version": "20261012214054",
+    "name": "agentbridge_p1a_mutation_protocol_acceptance",
+    "statement_count": 1,
+    "sql_bytes": 14460,
+    "sql_sha256": "779734c8c7e9c69d77de587009c9688d860af4a2072edc2f42c35f6da1736433"
+  },
+  "checks": {
+    "protocol_tables_rls_enabled": true,
+    "api_roles_have_protocol_table_dml": false,
+    "authenticated_member_state": "passed",
+    "foreign_principal_state": "rejected_42501",
+    "anonymous_readiness": "rejected_42501",
+    "authenticated_protocol_table_insert": "rejected_42501",
+    "authenticated_admin_seal": "rejected_42501",
+    "unsealed_source_write": "passed",
+    "seal_scope": "database-v1",
+    "seal_cursor_included_preseal_event": true,
+    "seal_exact_replay": "same_receipt",
+    "seal_mismatched_replay": "rejected_55000",
+    "postseal_direct_write": "rejected_55000",
+    "performance_advisor_findings": 0
+  },
+  "limits": {
+    "production_touched": false,
+    "full_schema_installed": false,
+    "postgrest_http_jwt_exercised": false,
+    "hosted_holder_waiter_observed": false,
+    "blob_writes_sealed": false
+  }
+}

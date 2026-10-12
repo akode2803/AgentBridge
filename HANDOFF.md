@@ -1311,3 +1311,24 @@ named-session lock orders completed. Normal PR 133-135 platform jobs remain
 separate and may still be running. No provider schema, app runtime or live mesh
 was touched. Next, validate Supabase-specific auth/PostgREST/RLS exposure in a
 scratch project before provider installation, then begin P1b typed RPC design.
+
+The disposable hosted acceptance is now complete for the P1a slice. Migration
+`20261012214054_agentbridge_p1a_mutation_protocol_acceptance` installed the exact
+protocol section over minimal prerequisites in the AgentBridge Scratch project
+on Supabase PostgreSQL 17.11. Real `anon`, `authenticated` and `service_role`
+privileges and real Supabase auth functions enforced the observer-only boundary:
+member state and readiness succeeded, while foreign-principal state, anonymous
+readiness, authenticated protocol-table DML and API-role sealing returned
+`42501`. A disposable `database-v1` seal included the committed pre-seal event;
+exact replay returned the same receipt, mismatched replay and a later direct
+write returned `55000`, and another unsealed root remained writable. The
+management SQL connector serialized or hid the attempted concurrent sessions,
+so hosted holder/waiter observation is not claimed; exact two-session ordering
+remains the passing PostgreSQL 16.15 CI evidence. Supabase's performance advisor
+was clean. Security-advisor notices were either the intentional bounded state
+observer/no-policy inaccessible tables or disposable/project scaffold objects.
+No production project, app or harness was touched. Full evidence and limits are
+in
+[docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md](docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
+Next, specify and implement inactive P1b typed receipt RPCs with bounded receipt
+lifecycle; full-schema/PostgREST HTTP acceptance remains a later release gate.

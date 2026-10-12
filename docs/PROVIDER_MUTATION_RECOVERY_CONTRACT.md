@@ -215,10 +215,20 @@ The development machine currently has no `psql`, PostgreSQL server, Docker or
 Podman runtime. The path-filtered PR workflow therefore executes this gate
 against a fresh PostgreSQL service only when the validator, schema or workflow
 changes. GitHub Actions run `38310823448` passed on PostgreSQL server 16.15 with
-client 16.15, including both named-session lock schedules. This is database
-execution evidence for the P1a SQL/lock contract; it is not Supabase
-PostgREST/auth/RLS acceptance. A later scratch-project run remains required
-before installing the section in a real mesh.
+client 16.15, including both named-session lock schedules.
+
+The subsequent disposable Supabase acceptance installed the exact P1a section
+over minimal prerequisites on PostgreSQL 17.11. Real Supabase roles and auth
+functions enforced the intended observer-only API: authenticated member state
+succeeded, foreign-principal state, direct protocol-table DML, anonymous
+readiness and API-role sealing failed, exact seal replay was stable and a sealed
+root rejected later direct writes. The receipt cut included the admitted
+pre-seal event. The full observations and their boundary are recorded in
+[PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md](PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
+The management SQL connector did not expose simultaneous sessions to the
+observer query, so exact holder/waiter evidence still comes from the PostgreSQL
+gate rather than being overstated as hosted contention evidence. Neither run is
+production installation or PostgREST end-to-end acceptance.
 
 ### P1b — inactive typed mutation RPCs
 
