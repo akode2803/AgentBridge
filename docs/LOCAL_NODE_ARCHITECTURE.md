@@ -835,3 +835,21 @@ candidate acquisition and bind its Store and node positions to the durable
 stage before the root -> node -> Store transaction; a copied dataclass cannot
 be allowed to relabel staged bytes. No current product path consumes or admits
 this candidate.
+
+The inactive coupled publisher now owns that acquisition and performs the
+complete root -> node -> Store cut. Inside one Store writer it rechecks the
+captured source, membership and retained log positions; verifies the sealed
+document and payload stages; preflights every affected revision counter; resets
+the chat; replaces messages and terminal stream offsets; swaps document/index
+readiness; retires the prior staged physical generation; and consumes the
+private payload and owner markers. Any failure before the Store commit rolls the
+entire visible cut back and abandons only the new private candidate.
+
+The document pointer cannot be admitted through the generic staged publisher or
+a reusable coupled document-only helper. Coupled admission verifies that the
+same transaction already installed the candidate's exact message count and
+stream heads, including rejected-only streams. Existing message observations
+survive same-ID replacements. Empty chats still advance reset evidence, and
+counter exhaustion rejects before large chat mutation. The publisher remains
+disconnected from product ingestion and read routes; activation and foreground
+scheduling are separate work.

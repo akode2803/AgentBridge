@@ -308,6 +308,30 @@ def verify_sealed(conn, store, seal: PayloadSeal) -> None:
         raise CoupledPayloadChanged("coupled payload seal changed")
 
 
+def _consume_admitted(conn, store, seal: PayloadSeal) -> None:
+    """Delete copied private payload rows inside the admitting transaction."""
+    verify_sealed(conn, store, seal)
+    stage = seal.handle.owner.document_stage.source_id
+    if not staged_source._admitted(conn, stage):
+        raise CoupledPayloadChanged("coupled payload stage is not admitted")
+    expected = (
+        ("coupled_payload_raw", seal.raw_rows),
+        ("coupled_payload_messages", seal.messages),
+        ("coupled_payload_streams", seal.streams),
+    )
+    for table, count in expected:
+        changed = conn.execute(
+            f"DELETE FROM {table} WHERE stage=?", (stage,),
+        ).rowcount
+        if changed != count:
+            raise CoupledPayloadChanged("coupled payload count changed")
+    if conn.execute(
+            "DELETE FROM coupled_payload_stages WHERE stage=? AND epoch=?",
+            (stage, seal.handle.owner.epoch),
+    ).rowcount != 1:
+        raise CoupledPayloadChanged("coupled payload owner changed")
+
+
 def cleanup_rows(conn, source_id: str, remaining: int) -> int:
     """Delete bounded private rows before the underlying abandoned stage."""
     if not _present(conn):

@@ -7,6 +7,7 @@ Admission to a logical source is a separate, caller-owned transaction.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -458,22 +459,41 @@ def _admitted(conn, physical):
 def retire_generation(store, physical):
     """After a pointer swap, mark an unreferenced older physical source reclaimable."""
     physical = docs._validate_source_id(physical)
-    if not physical.startswith(('stage:', 'coupled:')):
-        return False
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError('stage retirement needs an owned transaction')
     try:
         conn.execute('BEGIN IMMEDIATE')
-        _schema(conn)
-        changed = False
-        if not _admitted(conn, physical):
-            changed = conn.execute("UPDATE staged_sources SET phase='abandoned' WHERE source=? AND phase='sealed'", (physical,)).rowcount == 1
+        changed = _retire_generation_in_transaction(
+            conn, store, physical,
+        )
         conn.commit()
         return changed
     except BaseException:
         conn.rollback()
         raise
+
+
+def _retire_generation_in_transaction(conn, store, physical):
+    """Retire an unmapped stage inside the caller's pointer-swap transaction."""
+    physical = docs._validate_source_id(physical)
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError(
+            'stage retirement requires a transaction',
+        )
+    databases = {row[1]: row[2] for row in conn.execute('PRAGMA database_list')}
+    if (not databases.get('main')
+            or Path(databases['main']).resolve() != store.path.resolve()):
+        raise ValueError('wrong stage retirement database')
+    if not physical.startswith(('stage:', 'coupled:')):
+        return False
+    _schema(conn)
+    if _admitted(conn, physical):
+        return False
+    return conn.execute(
+        "UPDATE staged_sources SET phase='abandoned' "
+        "WHERE source=? AND phase='sealed'", (physical,),
+    ).rowcount == 1
 
 
 def cleanup(store, *, protected_ids=(), max_rows=128):

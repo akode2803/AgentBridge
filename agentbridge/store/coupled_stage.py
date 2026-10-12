@@ -143,6 +143,29 @@ def reject_generic_admission(conn, store, stage) -> None:
         )
 
 
+def _consume_admitted(conn, store, handle: CoupledStageHandle) -> None:
+    """Remove private ownership only after this stage is the admitted source."""
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "coupled owner consumption requires a transaction",
+        )
+    handle = _handle(store, handle)
+    row = _row(conn, store, handle)
+    stage = handle.document_stage
+    staged_source._row(conn, store, stage, "sealed")
+    if row[4] != "building" or not staged_source._admitted(
+            conn, stage.source_id):
+        raise CoupledStageChanged("coupled stage is not admitted")
+    from . import coupled_payload_stage
+    if not coupled_payload_stage.owner_cleanup_ready(conn, stage.source_id):
+        raise CoupledStageChanged("coupled payload remains attached")
+    if conn.execute(
+            "DELETE FROM coupled_stage_owners WHERE stage=? AND epoch=?",
+            (stage.source_id, handle.epoch),
+    ).rowcount != 1:
+        raise CoupledStageChanged("coupled stage owner changed")
+
+
 def cleanup_owner(conn, source_id: str) -> None:
     """Delete one marker only while its underlying stage is abandoned."""
     existing = conn.execute(
