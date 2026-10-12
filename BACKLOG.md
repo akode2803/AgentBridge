@@ -185,10 +185,18 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   retirement. These corrections must be included before stack activation.
   v0.24.364 repairs observed Windows CI boundaries: the GUI's bounded rejected
   body discard now includes a 70 KiB diagnostic payload, the partial-request
-  capacity test accepts TCP abort as well as reset, and Windows functional GUI
-  fixture requests get 30 seconds without retries (10 seconds elsewhere).
+  capacity test accepts TCP abort as well as reset. All GUI fixture requests
+  retain the ten-second deadline without retries after review correction.
   Product request deadlines, body admission limits and handler capacity remain
   enforced; functional fixture timeouts are not responsiveness acceptance.
+
+  v0.24.365 adds retained ordinary-event preparation and a fresh bounded
+  notification projection primitive. Exact commit precedes identity-only bus
+  publication; failed authority/preparation retains work. Bounded rotation,
+  cooldown/splits, storage-failure containment and proven oversized-row gaps
+  cover liveness. Notification policy is final-fenced and never queued.
+  Notifier/SSE retry integration and historical info acceptance remain required
+  before app-owned activation; see the current HANDOFF blocker/prerequisite.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 

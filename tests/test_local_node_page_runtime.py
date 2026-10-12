@@ -20,7 +20,7 @@ from agentbridge.mesh import local_input_runtime
 from agentbridge.node.protocol import ReplicaIdentity
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.node.sync_scheduler import NodeSyncTickResult
-from agentbridge.store import local_source, staged_publication, staged_source
+from agentbridge.store import local_source, staged_publication, staged_source, node_event_journal
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.transport.local_mutations import (
@@ -121,7 +121,7 @@ def _event_mesh(store, *, inputs=None, engine=None):
     mesh.local_inputs = inputs
     mesh.sync = engine
     mesh.messaging = SimpleNamespace(
-        store=store, user="alice",
+        store=store, user="alice", machine='fixture',
         mark_delivered=lambda *_args, **_kwargs: True,
     )
     return mesh
@@ -758,11 +758,12 @@ def test_bound_event_consumer_runs_one_journal_quantum(world):
     step = runtime.run_due()
 
     assert step.operation == "event"
-    assert step.event is not None and step.event.operation == "events"
+    # A Store row without ready canonical inputs cannot be destructively
+    # claimed. The event lane yields and retains the identity for preparation.
+    assert step.event is not None and step.event.operation == "preparation"
     received = list(subscription.drain())
-    assert [(item.type, item.chat_id, item.data) for item in received] == [
-        ("read_model", CHAT, {"scope": "chat"}),
-    ]
+    assert received == []
+    assert len(node_event_journal.peek_event_identities(store)) == 1
     with pytest.raises(RuntimeError, match="already bound"):
         runtime.bind_event_owner(_event_mesh(store), None)
 

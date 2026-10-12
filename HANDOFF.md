@@ -701,8 +701,8 @@ startup/close binding remain next. No runtime restart, deploy or schema change.
 
 The v0.24.364 Windows CI follow-up repairs the rejected-body discard cap (128 KiB,
 existing 0.1-second deadline), accepts equivalent Windows TCP abort in the handler
-capacity test, and gives functional GUI fixture requests a 30-second Windows
-budget without retry. Other platforms retain 10 seconds. Product responsiveness
+capacity test. After review correction, every platform retains the ten-second
+functional GUI fixture deadline without retry. Product responsiveness
 needs its separate measured acceptance; a functional deadline is not a latency
 claim. Local focused validation: 29 passed; independent Sol review: 11 passed,
 no remaining P1/P2. Ruff/diff clean. PR #113 also has an unrelated signup timeout;
@@ -716,3 +716,41 @@ because it masked signup stalls. The initial machine announcement already
 precedes the presence thread in `_adopt`; investigate new code-frame evidence
 without weakening startup/transaction fences. The bounded rejection drain and
 Windows socket-error assertions remain. This correction is not root-cause proof.
+
+## Retained ordinary events and fresh notification primitive — v0.24.365
+
+Branch `codex/retained-node-message-preparation` stacks on corrected #119.
+The inactive node Mesh pump now retains ordinary journal identities while
+canonical inputs/proofs are pending; each quantum recaptures current authority.
+It consumes exact identities only in the final Store transaction and publishes
+content-free MESSAGE wakes after commit. Room rotation, bounded 16-job retention,
+receipt fairness, exponential exhausted-request cooldown, storage-failure
+containment, adaptive splits and same-transaction individual oversize retirement
+prevent retained head work from silently dying or starving later messages.
+Info rows remain pending in their separate fixed-kind lane.
+
+The new notification operation projects one exact message plus signed viewer
+read/mute policy through the existing final fence, then immediately derives a
+note through the GUI session/screen gate or exact source-owner shutdown gate.
+Typed results distinguish current suppression from failed/pending handout. No
+preview or policy is queued. This primitive is not wired to Notifier or SSE yet;
+retained wake retries and both consumer gates must be integrated together.
+
+Local current-tree checkpoint: 217 passed, 2 expected skips; 21 new regressions.
+Astra independently ran 57 changed journal/page-operation tests and verified
+repairs for exhausted-ledger liveness, shutdown gating, storage error containment
+and individual oversize head retirement; no remaining actionable P1/P2.
+Ruff/diff checks pass. No app/harness activation, restart, deploy or merge.
+
+Astra found an exact info activation blocker: a current snapshot/signature cannot
+prove an already-materialized event's event-time acceptance. `advance` only
+proves ns strictly newer than the trusted metadata boundary. Next add explicit
+applied/ignored/outside-suffix outcomes using the existing `_apply`; genesis
+GID binding authenticates content, not envelope sender/ID/ns. Older targets need
+a canonical predecessor, complete ordered intervening info at one admitted cut
+and fresh final validation of account/key/lifecycle/trust dependencies. A signed
+predecessor alone is insufficient. Reaction mapping must independently verify
+breadcrumb signature and applicable actor tenure, canonical target author and
+current signed actor overlay; breadcrumb `to`/`emoji` are not current authority.
+Do not activate the whole event owner or add full-history foreground fallback
+until those contracts and retained notification retries are complete.
