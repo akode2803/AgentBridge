@@ -22,6 +22,7 @@ import sys
 from threading import Thread
 import time
 from typing import Final
+from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import UUID, uuid4
 
 
@@ -134,9 +135,38 @@ def _psql_command() -> list[str]:
 
 
 def _environment(database_url: str) -> dict[str, str]:
+    try:
+        parsed = urlsplit(database_url)
+        hostname = parsed.hostname
+        username = parsed.username
+        password = parsed.password
+        port = parsed.port
+    except ValueError:
+        raise GateFailure("database URL is malformed") from None
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise GateFailure("database URL must use postgres or postgresql")
+    if (hostname is None or username is None
+            or not parsed.path.lstrip("/")):
+        raise GateFailure(
+            "database URL must include a host, user and database name")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    unsupported = set(query) - {"connect_timeout", "sslmode"}
+    if unsupported or any(len(values) != 1 for values in query.values()):
+        raise GateFailure("database URL contains unsupported connection options")
     env = os.environ.copy()
-    env["PGDATABASE"] = database_url
-    env.setdefault("PGCONNECT_TIMEOUT", "5")
+    for name in (
+            "PGDATABASE", "PGHOST", "PGHOSTADDR", "PGPORT", "PGUSER",
+            "PGPASSWORD", "PGSERVICE", "PGSERVICEFILE"):
+        env.pop(name, None)
+    env["PGDATABASE"] = unquote(parsed.path.lstrip("/"))
+    env["PGHOST"] = hostname
+    env["PGPORT"] = str(port or 5432)
+    env["PGUSER"] = unquote(username)
+    if password is not None:
+        env["PGPASSWORD"] = unquote(password)
+    env["PGCONNECT_TIMEOUT"] = query.get("connect_timeout", ["5"])[0]
+    if "sslmode" in query:
+        env["PGSSLMODE"] = query["sslmode"][0]
     return env
 
 
