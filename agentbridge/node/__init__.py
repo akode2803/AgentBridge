@@ -20,6 +20,9 @@ from .admission import (
     NodeInputError,
     NodeLogRequest,
     NodeLogRow,
+    NodeLogStream,
+    NodeLogStreamPage,
+    NodeLogStreamRequest,
     NodeVisibility,
 )
 from .protocol import PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
@@ -57,6 +60,9 @@ __all__ = [
     "NodeInputError",
     "NodeLogRequest",
     "NodeLogRow",
+    "NodeLogStream",
+    "NodeLogStreamPage",
+    "NodeLogStreamRequest",
     "NodeStatus",
     "NodeDiagnosticStepResult",
     "NodeRecoveryRuntimeResult",

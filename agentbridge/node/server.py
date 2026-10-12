@@ -27,8 +27,8 @@ from .security import atomic_private_bytes, atomic_private_json, private_directo
 from .store import NodeStore
 from .wire import (
     MAX_WIRE_REQUEST_BYTES, MAX_WIRE_RESPONSE_BYTES, CursorReset,
-    capture_response, change_response, parse_capture_request,
-    parse_change_request,
+    capture_response, change_response, log_stream_response,
+    parse_capture_request, parse_change_request, parse_log_stream_request,
 )
 
 MAX_REQUEST_BODY = MAX_WIRE_REQUEST_BYTES
@@ -408,7 +408,8 @@ class LocalNodeServer:
                 length = self._authorized(allow_body=True)
                 if length is None:
                     return
-                if self.path not in ("/v1/capture", "/v1/changes"):
+                if self.path not in (
+                        "/v1/capture", "/v1/changes", "/v1/log-streams"):
                     self._reply(404)
                     return
                 value = self._json_body(length)
@@ -427,6 +428,12 @@ class LocalNodeServer:
                             value,
                             database_incarnation=status.database_incarnation)
                         response = capture_response(store.capture(request))
+                    elif self.path == "/v1/log-streams":
+                        request = parse_log_stream_request(
+                            value,
+                            database_incarnation=status.database_incarnation)
+                        response = log_stream_response(
+                            store.capture_log_streams(request))
                     else:
                         incarnation, after, limit = parse_change_request(
                             value,

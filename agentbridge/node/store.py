@@ -18,7 +18,8 @@ from .admission import (
     NodeCapture, NodeCaptureOverflow, NodeCaptureRequest, NodeChange,
     NodeChangePage, NodeDocument, NodeFrontier, NodeGenerationChanged,
     NodeCandidateCapacityError, NodeInputBatch, NodeInputError,
-    NodeLogPage, NodeLogRow, NodeScopePosition,
+    NodeLogPage, NodeLogRow, NodeLogStream, NodeLogStreamPage,
+    NodeLogStreamRequest, NodeScopePosition,
     NodeCoordinatorRegistration, NodeFinalizationPosition, NodeRecoveryClaim,
     NodeVisibility,
     NodeProviderCut, NodeRecoveryPlan, NodeRecoveryScope, NodeRecoveryWork,
@@ -31,7 +32,7 @@ from .admission import (
 from .protocol import HEALTH_VALUES, PROTOCOL_VERSION, NodeStatus, ReplicaIdentity
 from .security import private_directory, protect_path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 RECOVERY_PLAN_SELECTION = b"provider-recovery-v1"
 REFERENCE_PLAN_SELECTION = b"provider-reference-v1"
 DIAGNOSTIC_RECOVERY_PLAN_SELECTION = b"provider-diagnostic-recovery-v1"
@@ -40,7 +41,7 @@ DIAGNOSTIC_REFERENCE_PLAN_SELECTION = b"provider-diagnostic-reference-v1"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS node_schema(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL CHECK(version=11),
+    version INTEGER NOT NULL CHECK(version=12),
     protocol_version INTEGER NOT NULL CHECK(protocol_version=1)
 );
 CREATE TABLE IF NOT EXISTS node_identity(
@@ -231,6 +232,11 @@ CREATE TABLE IF NOT EXISTS remote_log_rows(
 );
 CREATE INDEX IF NOT EXISTS remote_log_chat
     ON remote_log_rows(chat_id,log_name,id);
+CREATE TABLE IF NOT EXISTS remote_log_streams(
+    chat_id TEXT NOT NULL, log_name TEXT NOT NULL,
+    head INTEGER NOT NULL CHECK(head>0),
+    PRIMARY KEY(chat_id,log_name)
+);
 CREATE TABLE IF NOT EXISTS remote_chat_visibility(
     chat_id TEXT PRIMARY KEY,
     updated_generation INTEGER NOT NULL
@@ -360,6 +366,8 @@ _V9_TABLES = _V8_TABLES | frozenset({
     "node_admission_permits", "node_recovery_receipts",
 })
 _V10_TABLES = _V9_TABLES
+_V11_TABLES = _V10_TABLES
+_V12_TABLES = _V11_TABLES | frozenset({"remote_log_streams"})
 _RECOVERY_SCHEMA = _SCHEMA[_SCHEMA.index("CREATE TABLE IF NOT EXISTS provider_recoveries("):
                            _SCHEMA.index("CREATE TABLE IF NOT EXISTS remote_docs(")]
 _REQUIRED_INDEXES = frozenset({
@@ -2207,6 +2215,37 @@ class NodeStore:
             protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
         conn.execute("INSERT INTO node_schema VALUES(1,11,?)", (PROTOCOL_VERSION,))
 
+    def _migrate_v11(self, conn: sqlite3.Connection) -> None:
+        """Materialize a seekable admitted stream inventory once.
+
+        The potentially large scan happens during the one-time private schema
+        migration, never on the bounded loopback request path. Subsequent
+        admissions maintain the inventory from their already bounded candidate
+        rows in the same transaction as ``remote_log_rows``.
+        """
+        if conn.execute(
+                "SELECT version,protocol_version FROM node_schema WHERE singleton=1"
+        ).fetchall() != [(11, PROTOCOL_VERSION)]:
+            raise sqlite3.DatabaseError("unsupported local node schema")
+        self._check_identity(conn)
+        self._check_meta(conn)
+        self._check_mutation_guard(conn)
+        self._check_mutation_fences(conn)
+        self._check_coordinator_state(conn)
+        conn.execute("""CREATE TABLE remote_log_streams(
+            chat_id TEXT NOT NULL, log_name TEXT NOT NULL,
+            head INTEGER NOT NULL CHECK(head>0),
+            PRIMARY KEY(chat_id,log_name))""")
+        conn.execute("""INSERT INTO remote_log_streams(chat_id,log_name,head)
+            SELECT chat_id,log_name,MAX(id) FROM remote_log_rows
+            GROUP BY chat_id,log_name""")
+        conn.execute("DROP TABLE node_schema")
+        conn.execute("""CREATE TABLE node_schema(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(version=12),
+            protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""")
+        conn.execute("INSERT INTO node_schema VALUES(1,12,?)", (PROTOCOL_VERSION,))
+
     def _initialize(self) -> None:
         with closing(self._connect()) as conn:
             with conn:
@@ -2250,7 +2289,9 @@ class NodeStore:
                             [(SCHEMA_VERSION, PROTOCOL_VERSION)],
                     ):
                         raise sqlite3.DatabaseError("unsupported local node schema")
-                elif tables not in (_V7_TABLES, _V8_TABLES, _V9_TABLES):
+                elif tables not in (
+                        _V7_TABLES, _V8_TABLES, _V9_TABLES, _V11_TABLES,
+                        _V12_TABLES):
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 version = conn.execute(
                     "SELECT version,protocol_version FROM node_schema "
@@ -2266,10 +2307,13 @@ class NodeStore:
                     version = [(10, PROTOCOL_VERSION)]
                 if version == [(10, PROTOCOL_VERSION)]:
                     self._migrate_v10(conn)
+                    version = [(11, PROTOCOL_VERSION)]
+                if version == [(11, PROTOCOL_VERSION)]:
+                    self._migrate_v11(conn)
                 tables = frozenset(row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name NOT LIKE 'sqlite_%'"))
-                if tables != _V10_TABLES:
+                if tables != _V12_TABLES:
                     raise sqlite3.DatabaseError("incomplete local node schema")
                 if conn.execute(
                         "SELECT version,protocol_version FROM node_schema "
@@ -4225,12 +4269,20 @@ class NodeStore:
             raise NodeInputError("log row identity conflict")
         if logs_mode == "replace":
             conn.execute("DELETE FROM remote_log_rows")
+            conn.execute("DELETE FROM remote_log_streams")
         conn.execute("""
             INSERT OR IGNORE INTO remote_log_rows(
                 id,chat_id,log_name,payload,updated_generation)
             SELECT id,chat_id,log_name,payload,? FROM candidate_log_rows
             WHERE generation=?
         """, (generation, generation))
+        conn.execute("""
+            INSERT INTO remote_log_streams(chat_id,log_name,head)
+            SELECT chat_id,log_name,MAX(id) FROM candidate_log_rows
+            WHERE generation=? GROUP BY chat_id,log_name
+            ON CONFLICT(chat_id,log_name) DO UPDATE SET
+                head=MAX(remote_log_streams.head,excluded.head)
+        """, (generation,))
         if visibility_mode == "replace":
             conn.execute("DELETE FROM remote_chat_visibility")
         conn.execute("""
@@ -4724,6 +4776,55 @@ class NodeStore:
             incarnation, generation, health, last_success, documents, log_pages,
             visibility, visibility[-1] if visibility else request.visibility_after,
             visibility_more, frontiers, scope_positions, budget.used,
+        )
+
+    def capture_log_streams(
+        self, request: NodeLogStreamRequest,
+    ) -> NodeLogStreamPage:
+        """Seek one exact chat's admitted nonempty streams in bounded work.
+
+        The maintained ``remote_log_streams`` index makes request cost depend on
+        the page limit and names returned rather than the number of messages in
+        each stream.  The generation and scope positions are stability evidence
+        only; callers must still recompute canonical authority from raw inputs.
+        """
+        if type(request) is not NodeLogStreamRequest:
+            raise NodeInputError("expected detached log stream request")
+        request = NodeLogStreamRequest(
+            request.chat_id, request.after_name, request.limit,
+            request.expected_generation, request.max_bytes,
+        )
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            meta = conn.execute(
+                "SELECT database_incarnation,admitted_generation,health,"
+                "last_success_ns FROM node_meta WHERE singleton=1").fetchone()
+            if meta is None:
+                raise sqlite3.DatabaseError("invalid local node metadata")
+            incarnation, generation, health, last_success = meta
+            if (request.expected_generation is not None
+                    and request.expected_generation != generation):
+                raise NodeGenerationChanged("admitted generation changed")
+            budget = _CaptureBudget(request.max_bytes)
+            budget.add(_capture_size(request.chat_id) + 8)
+            raw = conn.execute("""
+                SELECT log_name,head FROM remote_log_streams
+                WHERE chat_id=? AND log_name>? ORDER BY log_name LIMIT ?
+            """, (request.chat_id, request.after_name,
+                  request.limit + 1)).fetchall()
+            has_more = len(raw) > request.limit
+            streams = []
+            for log_name, head in raw[:request.limit]:
+                value = NodeLogStream(log_name, head)
+                budget.add(_capture_size(value.log_name) + 24)
+                streams.append(value)
+            positions = self._capture_scope_positions(
+                conn, {("root", ""), ("chat", request.chat_id)}, budget)
+            conn.commit()
+        cursor = streams[-1].log_name if streams else request.after_name
+        return NodeLogStreamPage(
+            incarnation, generation, health, last_success, request.chat_id,
+            tuple(streams), cursor, has_more, positions, budget.used,
         )
 
     def capture_changes(self, *, database_incarnation: str, after_cursor: int,

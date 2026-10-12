@@ -36,6 +36,7 @@ MAX_CAPTURE_EXACT_DOCUMENTS = 128
 MAX_CAPTURE_DOCUMENT_PREFIXES = 8
 MAX_CAPTURE_LOG_REQUESTS = 64
 MAX_CAPTURE_LOG_ROWS = 20_000
+MAX_CAPTURE_LOG_STREAMS = 1_000
 MAX_CAPTURE_CHAT_IDS = 20_000
 MAX_CAPTURE_BYTES = 32 * 1024 * 1024
 MAX_CAPTURE_SCOPE_POSITIONS = (
@@ -258,6 +259,28 @@ class NodeLogRequest:
         ))
         _integer(self.after_id, "log cursor")
         _integer(self.limit, "log limit", minimum=1, maximum=MAX_CAPTURE_LOG_ROWS)
+
+
+@dataclass(frozen=True)
+class NodeLogStreamRequest:
+    chat_id: str
+    after_name: str = ""
+    limit: int = 1_000
+    expected_generation: int | None = None
+    max_bytes: int = 256 * 1024
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chat_id", _raw_text(self.chat_id, "chat id"))
+        object.__setattr__(self, "after_name", _raw_text(
+            self.after_name, "log stream cursor", max_bytes=MAX_LOG_NAME_BYTES,
+            allow_empty=True,
+        ))
+        _integer(self.limit, "log stream limit", minimum=1,
+                 maximum=MAX_CAPTURE_LOG_STREAMS)
+        if self.expected_generation is not None:
+            _integer(self.expected_generation, "expected generation")
+        _integer(self.max_bytes, "log stream byte limit",
+                 minimum=1, maximum=MAX_CAPTURE_BYTES)
 
 
 @dataclass(frozen=True)
@@ -612,6 +635,32 @@ class NodeLogPage:
     rows: tuple[NodeLogRow, ...]
     cursor: int
     has_more: bool
+
+
+@dataclass(frozen=True)
+class NodeLogStream:
+    log_name: str
+    head: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "log_name", _raw_text(
+            self.log_name, "log name", max_bytes=MAX_LOG_NAME_BYTES,
+        ))
+        _integer(self.head, "log stream head", minimum=1)
+
+
+@dataclass(frozen=True)
+class NodeLogStreamPage:
+    database_incarnation: str
+    generation: int
+    health: str
+    last_success_ns: int
+    chat_id: str
+    streams: tuple[NodeLogStream, ...]
+    cursor: str
+    has_more: bool
+    scope_positions: tuple[NodeScopePosition, ...]
+    captured_bytes: int
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ from typing import Any
 
 from .admission import (
     NodeCapture, NodeCaptureRequest, NodeChangePage, NodeInputError,
-    NodeLogRequest,
+    NodeLogRequest, NodeLogStreamPage, NodeLogStreamRequest,
 )
 from .protocol import PROTOCOL_VERSION, ProtocolError
 
@@ -59,21 +59,31 @@ def _log_selection(chat_id: str, log_name: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _log_stream_selection(chat_id: str) -> str:
+    try:
+        raw = json.dumps(
+            ("log-streams", chat_id), ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ProtocolError("invalid log stream request") from None
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _cursor_text(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(
         b"=",
     ).decode("ascii")
 
 
-def _parse_cursor_text(value: Any) -> str:
+def _parse_cursor_text(value: Any, name: str = "visibility") -> str:
     if type(value) is not str:
-        raise ProtocolError("invalid visibility continuation")
+        raise ProtocolError(f"invalid {name} continuation")
     try:
         raw = value.encode("ascii")
         raw += b"=" * (-len(raw) % 4)
         return base64.b64decode(raw, altchars=b"-_", validate=True).decode("utf-8")
     except (UnicodeError, ValueError):
-        raise ProtocolError("invalid visibility continuation") from None
+        raise ProtocolError(f"invalid {name} continuation") from None
 
 
 def _incarnation(value: Any, expected: str) -> None:
@@ -215,6 +225,86 @@ def capture_response(value: NodeCapture) -> dict[str, Any]:
         "scope_positions": [
             {"scope_kind": row.scope_kind, "scope_id": row.scope_id,
              "generation": row.generation, "pending_reason": row.pending_reason}
+            for row in value.scope_positions
+        ],
+    }
+
+
+_LOG_STREAM_FIELDS = {
+    "protocol_version", "expected_capture", "chat_id", "cursor", "limit",
+    "max_bytes",
+}
+
+
+def parse_log_stream_request(
+    value: Any, *, database_incarnation: str,
+) -> NodeLogStreamRequest:
+    if type(value) is not dict or set(value) != _LOG_STREAM_FIELDS:
+        raise ProtocolError("invalid log stream request")
+    if (type(value["protocol_version"]) is not int
+            or value["protocol_version"] != PROTOCOL_VERSION):
+        raise ProtocolError("unsupported node protocol")
+    expected = value["expected_capture"]
+    expected_generation = None
+    if expected is not None:
+        token = _untoken(expected, "capture", {"db", "generation"})
+        _incarnation(token["db"], database_incarnation)
+        expected_generation = _integer(
+            token["generation"], "capture generation")
+    after = ""
+    if value["cursor"] is not None:
+        token = _untoken(
+            value["cursor"], "log_stream",
+            {"db", "generation", "selection", "after"},
+        )
+        _incarnation(token["db"], database_incarnation)
+        if token["selection"] != _log_stream_selection(value["chat_id"]):
+            raise ProtocolError("continuation selection changed")
+        cursor_generation = _integer(
+            token["generation"], "capture generation")
+        if (expected_generation is not None
+                and cursor_generation != expected_generation):
+            raise ProtocolError("continuation capture changed")
+        expected_generation = cursor_generation
+        after = _parse_cursor_text(token["after"], "log stream")
+    max_bytes = _integer(value["max_bytes"], "log stream byte limit")
+    if max_bytes > MAX_WIRE_CAPTURE_BYTES:
+        raise ProtocolError("log stream byte limit exceeds wire maximum")
+    try:
+        return NodeLogStreamRequest(
+            value["chat_id"], after, value["limit"], expected_generation,
+            max_bytes,
+        )
+    except NodeInputError as exc:
+        raise ProtocolError(str(exc)) from None
+
+
+def log_stream_response(value: NodeLogStreamPage) -> dict[str, Any]:
+    if type(value) is not NodeLogStreamPage:
+        raise ProtocolError("invalid node log stream page")
+    db = value.database_incarnation
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "capture": _token("capture", db=db, generation=value.generation),
+        "generation": value.generation,
+        "health": value.health,
+        "last_success_ns": value.last_success_ns,
+        "captured_bytes": value.captured_bytes,
+        "chat_id": value.chat_id,
+        "streams": [
+            {"log_name": row.log_name, "head": row.head}
+            for row in value.streams
+        ],
+        "cursor": _token(
+            "log_stream", db=db, generation=value.generation,
+            selection=_log_stream_selection(value.chat_id),
+            after=_cursor_text(value.cursor),
+        ),
+        "has_more": value.has_more,
+        "scope_positions": [
+            {"scope_kind": row.scope_kind, "scope_id": row.scope_id,
+             "generation": row.generation,
+             "pending_reason": row.pending_reason}
             for row in value.scope_positions
         ],
     }

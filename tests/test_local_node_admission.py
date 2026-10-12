@@ -20,6 +20,7 @@ from agentbridge.node.admission import (
     NodeFinalizationPosition,
     NodeLogRequest,
     NodeLogRow,
+    NodeLogStreamRequest,
     NodeScopePosition,
     NodeVisibility,
 )
@@ -143,6 +144,67 @@ def test_candidate_can_require_the_captured_admitted_generation(tmp_path):
         created_ns=4, expected_generation=first,
     )
     assert candidate == first + 1
+
+
+def test_log_stream_inventory_pages_by_name_and_tracks_late_rows(tmp_path):
+    owner = store(tmp_path)
+    first = admit(owner, NodeInputBatch(log_rows=(
+        NodeLogRow(10, "chat-a", "alice", b'a'),
+        NodeLogRow(20, "chat-a", "bob", b'b'),
+        NodeLogRow(30, "chat-b", "other", b'o'),
+    )))
+
+    page = owner.capture_log_streams(NodeLogStreamRequest(
+        "chat-a", limit=1, expected_generation=first,
+    ))
+    assert [(row.log_name, row.head) for row in page.streams] == [
+        ("alice", 10),
+    ]
+    assert page.cursor == "alice" and page.has_more
+    assert [(row.scope_kind, row.scope_id) for row in page.scope_positions] == [
+        ("chat", "chat-a"), ("root", ""),
+    ]
+    rest = owner.capture_log_streams(NodeLogStreamRequest(
+        "chat-a", after_name=page.cursor, limit=1,
+        expected_generation=first,
+    ))
+    assert [(row.log_name, row.head) for row in rest.streams] == [("bob", 20)]
+    assert not rest.has_more
+
+    second = admit(owner, NodeInputBatch(log_rows=(
+        NodeLogRow(5, "chat-a", "alice", b'late-lower-id'),
+        NodeLogRow(25, "chat-a", "charlie", b'c'),
+    )), created=3, observed=4)
+    current = owner.capture_log_streams(NodeLogStreamRequest(
+        "chat-a", expected_generation=second,
+    ))
+    assert [(row.log_name, row.head) for row in current.streams] == [
+        ("alice", 10), ("bob", 20), ("charlie", 25),
+    ]
+    with pytest.raises(NodeGenerationChanged, match="generation changed"):
+        owner.capture_log_streams(NodeLogStreamRequest(
+            "chat-a", expected_generation=first,
+        ))
+
+    replacement = admit(owner, NodeInputBatch(
+        log_rows=(NodeLogRow(3, "chat-a", "zed", b'z'),),
+        logs_mode="replace",
+    ), created=5, observed=6)
+    replaced = owner.capture_log_streams(NodeLogStreamRequest(
+        "chat-a", expected_generation=replacement,
+    ))
+    assert [(row.log_name, row.head) for row in replaced.streams] == [("zed", 3)]
+
+
+def test_log_stream_inventory_has_independent_byte_budget(tmp_path):
+    owner = store(tmp_path)
+    admit(owner, NodeInputBatch(log_rows=(
+        NodeLogRow(1, "chat-a", "long-name", b'payload'),
+    )))
+    with pytest.raises(NodeCaptureOverflow, match="byte budget"):
+        owner.capture_log_streams(NodeLogStreamRequest(
+            "chat-a", max_bytes=1,
+        ))
 
 
 def test_refresh_health_preserves_admission_and_success_time(tmp_path):
@@ -952,7 +1014,7 @@ def test_empty_inactive_v1_database_migrates_without_rebinding(tmp_path):
     assert status.database_incarnation == "incarnation-v1"
     with sqlite3.connect(path) as conn:
         assert conn.execute(
-            "SELECT version,protocol_version FROM node_schema").fetchone() == (11, 1)
+            "SELECT version,protocol_version FROM node_schema").fetchone() == (12, 1)
         assert conn.execute(
             "SELECT minimum_cursor FROM local_change_state").fetchone() == (0,)
 

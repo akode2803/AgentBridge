@@ -1073,6 +1073,7 @@ def test_v9_migration_backfills_active_claim_generation_tag(tmp_path):
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_digest")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_id")
         conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
+        conn.execute("DROP TABLE remote_log_streams")
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -1086,7 +1087,7 @@ def test_v9_migration_backfills_active_claim_generation_tag(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version FROM node_schema WHERE singleton=1"
-        ).fetchone() == (11,)
+            ).fetchone() == (12,)
         assert conn.execute(
             "SELECT claim_id,claim_digest FROM node_generations "
             "WHERE generation=?", (started.generation,),
@@ -1122,6 +1123,7 @@ def test_v9_migration_retires_unmapped_active_claim_work(tmp_path):
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_digest")
         conn.execute("ALTER TABLE node_generations DROP COLUMN claim_id")
         conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
+        conn.execute("DROP TABLE remote_log_streams")
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -1156,6 +1158,7 @@ def test_v10_migration_preserves_tagged_claim_and_installs_permit_guards(tmp_pat
         conn.execute("DROP TRIGGER node_claimed_generation_guard")
         conn.execute(node_store._V10_PENDING_MUTATION_GUARD)
         conn.execute(node_store._V10_CLAIMED_GENERATION_GUARD)
+        conn.execute("DROP TABLE remote_log_streams")
         conn.execute("DROP TABLE node_schema")
         conn.execute("""CREATE TABLE node_schema(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -1169,7 +1172,7 @@ def test_v10_migration_preserves_tagged_claim_and_installs_permit_guards(tmp_pat
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version FROM node_schema WHERE singleton=1"
-        ).fetchone() == (11,)
+            ).fetchone() == (12,)
         assert {
             name for (name,) in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='trigger'"

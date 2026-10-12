@@ -43,6 +43,7 @@ def seed(server):
         log_rows=(
             NodeLogRow(1, "chat-a", "alice", b'{"id":"one"}'),
             NodeLogRow(2, "chat-a", "alice", b'{"id":"two"}'),
+            NodeLogRow(3, "chat-a", "bob", b'{"id":"three"}'),
         ),
         visibility=(NodeVisibility("chat-a", True),),
         frontiers=(NodeFrontier("provider", "epoch", 2, 0),),
@@ -180,6 +181,80 @@ def test_capture_continuation_rejects_generation_change(tmp_path):
                     "chat-a", "alice", first.logs[0].cursor, 1),),
                 visibility_cursor=first.visibility_cursor,
             ))
+
+
+def test_log_stream_inventory_is_generation_bound_and_pages_by_name(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        generation = seed(server)
+        client = LocalNodeClient(tmp_path, identity())
+        first = client.log_streams("chat-a", limit=1)
+        assert first.generation == generation
+        assert [(row.log_name, row.head) for row in first.streams] == [
+            ("alice", 2),
+        ]
+        assert first.has_more
+        assert [(row.scope_kind, row.scope_id)
+                for row in first.scope_positions] == [
+                    ("chat", "chat-a"), ("root", ""),
+                ]
+
+        second = client.log_streams(
+            "chat-a", expected_capture=first.capture,
+            cursor=first.cursor, limit=1,
+        )
+        assert [(row.log_name, row.head) for row in second.streams] == [
+            ("bob", 3),
+        ]
+        assert not second.has_more
+
+        admit(server, NodeInputBatch(log_rows=(
+            NodeLogRow(4, "chat-a", "charlie", b'{}'),
+        )), created=3, observed=4)
+        with pytest.raises(NodeClientGenerationChanged):
+            client.log_streams(
+                "chat-a", expected_capture=first.capture,
+                cursor=first.cursor, limit=1,
+            )
+
+
+def test_log_stream_cursor_is_bound_to_exact_chat_before_network(tmp_path,
+                                                                monkeypatch):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        seed(server)
+        client = LocalNodeClient(tmp_path, identity())
+        page = client.log_streams("chat-a", limit=1)
+        called = False
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("foreign stream cursor reached HTTP")
+
+        monkeypatch.setattr(client, "_request", forbidden)
+        with pytest.raises(ProtocolError, match="selection changed"):
+            client.log_streams("chat-b", cursor=page.cursor, limit=1)
+        assert not called
+
+
+def test_log_stream_cursor_fits_maximum_escaped_identifiers(tmp_path):
+    chat_id = '"' * 1_024
+    log_name = '"' * 4_096
+    with LocalNodeServer(tmp_path, identity()) as server:
+        generation = admit(server, NodeInputBatch(log_rows=(
+            NodeLogRow(1, chat_id, log_name, b'{}'),
+        )))
+        client = LocalNodeClient(tmp_path, identity())
+        page = client.log_streams(chat_id, limit=1)
+        assert page.generation == generation
+        assert [(row.log_name, row.head) for row in page.streams] == [
+            (log_name, 1),
+        ]
+        assert len(page.cursor.encode("utf-8")) <= 8 * 1024
+        terminal = client.log_streams(
+            chat_id, expected_capture=page.capture,
+            cursor=page.cursor, limit=1,
+        )
+        assert terminal.streams == () and not terminal.has_more
 
 
 def test_change_pages_are_bounded_and_foreign_cursors_reset(tmp_path):
