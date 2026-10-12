@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 
 from ...core.errors import ValidationError
 from ...core.jsonkit import canonical_json_bytes
+from ...mesh.pin_storage import PinStoreUnavailable
 from ..adapters.cli import ChildRequest
 from ..prompt import TRANSCRIPT_TAIL, render_message
 from ..settings import HarnessSettings
@@ -206,9 +207,15 @@ class DelegationCoordinator:
 
     def claim_ready(self, *, exclude: set[str]) -> list[ChildWork]:
         """Accept eligible offers and claim authorized work for this host."""
-        settings = HarnessSettings.from_account(
-            self.mesh.directory.get(self.mesh.user),
-        )
+        try:
+            account = self.mesh.directory.get(self.mesh.user)
+        except PinStoreUnavailable as exc:
+            if exc.reason != "lock_timeout":
+                raise
+            # A contended local pin read grants no authority. Retry discovery
+            # on the next poll without accepting or claiming any work now.
+            return []
+        settings = HarnessSettings.from_account(account)
         work: list[ChildWork] = []
         for snap in self.mesh.membership.chats_for():
             try:

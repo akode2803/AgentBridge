@@ -773,3 +773,15 @@ GitHub review on #120 identified final-fenced denial disposition, minimum exact
 capture byte cost and unknown-kind retirement gaps; repair these next at the
 stack tip. Sol's #116 trust-pin timeout repair is ready in two unstaged files,
 22 focused tests passing; commit it separately. No activation/restart/merge.
+
+## Windows delegation pin contention repair — v0.24.367
+
+#116 Windows failed one retained-agent delegation test after3956 passes and34
+expected skips. The initial current-account read hit the one-second process-
+local trust-pin gate timeout during concurrency. A narrow `claim_ready` repair
+defers this poll with zero accepted/claimed work only for `lock_timeout`. Other
+pin failures still propagate; no timeout, durability or authority fence is
+weakened. Sol implemented two focused regressions (failure then recovery,
+non-timeout propagation); all22 delegation tests pass, root reviewed the diff,
+Ruff/diff clean. #111 and #117 now green on both platforms. #113/#118/#119
+Windows still pending at this checkpoint. No merge, deployment or restart.

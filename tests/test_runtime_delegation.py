@@ -16,6 +16,7 @@ from agentbridge.harness.runtime.handoffs import HandoffLedger
 from agentbridge.harness.runtime.models import HandoffState
 from agentbridge.harness.runtime.runs import RunLedger
 from agentbridge.harness.runtime.tasks import TaskLedger
+from agentbridge.mesh.pin_storage import PinStoreUnavailable
 from agentbridge.mesh.service import Mesh
 
 
@@ -113,6 +114,66 @@ def _wait_until(predicate, timeout=5.0):
             return value
         time.sleep(0.01)
     raise AssertionError("condition was not reached")
+
+
+def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
+        delegation_meshes, monkeypatch):
+    _owner, manager, specialist, chat_id = delegation_meshes
+    _runs, tasks, source_handoffs, _source = _coordinator(manager)
+    tasks.start_with_run(
+        run_id="run-pin-busy", task_id="task-pin-busy", chat_id=chat_id,
+        trigger_id="message-pin-busy", provider="codex", model="gpt-test",
+    )
+    offered = source_handoffs.offer(
+        chat_id=chat_id, run_id="run-pin-busy", parent_task_id="task-pin-busy",
+        destination_agent="specialist", objective="Review", reason="Review",
+        success_criteria=("Return a finding",),
+    )
+    _dr, _dt, destination_handoffs, destination = _coordinator(specialist)
+    handoff_id = offered.events[0].meta.call_id or ""
+    destination_handoffs.decide(
+        chat_id=chat_id, run_id="run-pin-busy", handoff_id=handoff_id,
+        accept=True,
+    )
+    source_handoffs.authorize(
+        chat_id=chat_id, run_id="run-pin-busy", handoff_id=handoff_id,
+    )
+    before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
+    original_get = specialist.directory.get
+    calls = 0
+
+    def transient_get(name):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PinStoreUnavailable("lock_timeout")
+        return original_get(name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(specialist.directory, "get", transient_get)
+        assert destination.claim_ready(exclude=set()) == []
+        assert specialist.store.cached_doc(
+            destination._journal_path(handoff_id), default=None,
+        ) is None
+        claimed = destination.claim_ready(exclude=set())
+
+    assert calls >= 2
+    assert len(claimed) == 1 and claimed[0].handoff_id == handoff_id
+    assert [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)] == before
+
+
+def test_claim_ready_propagates_other_pin_store_failure(
+        delegation_meshes, monkeypatch):
+    _owner, _manager, specialist, _chat_id = delegation_meshes
+    _runs, _tasks, _handoffs, destination = _coordinator(specialist)
+
+    def invalid_pins(_name):
+        raise PinStoreUnavailable("invalid_file")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(specialist.directory, "get", invalid_pins)
+        with pytest.raises(PinStoreUnavailable, match="invalid_file"):
+            destination.claim_ready(exclude=set())
 
 
 def test_manager_retained_agent_tool_returns_once_without_room_post(
