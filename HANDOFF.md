@@ -754,3 +754,22 @@ breadcrumb signature and applicable actor tenure, canonical target author and
 current signed actor overlay; breadcrumb `to`/`emoji` are not current authority.
 Do not activate the whole event owner or add full-history foreground fallback
 until those contracts and retained notification retries are complete.
+
+## Bounded info outcome prerequisite — v0.24.366
+
+`advance_with_outcomes` shares `_apply` and the trusted suffix boundary with
+legacy `advance`. It returns immutable exact requested outcomes: applied,
+ignored (no state change), or outside_proven_suffix (old/equal/absent). An
+applied genesis reports GID-bound content/creator, never an authenticated
+envelope sender. Numeric IDs normalize to canonical text before bounded
+ordering; all captured identities, including untargeted ones, are checked for
+duplicates before authority evaluation. Count caps (128 rows,32 targets) do
+not replace caller byte/nesting/account/crypto budgets. This pure API remains
+unwired and requires source/provenance/final gates before journal use.
+Nine new tests pass; Astra independently ran91 compatibility tests and verified
+two ordering/duplicate corrections with no remaining actionableP1/P2.
+
+GitHub review on #120 identified final-fenced denial disposition, minimum exact
+capture byte cost and unknown-kind retirement gaps; repair these next at the
+stack tip. Sol's #116 trust-pin timeout repair is ready in two unstaged files,
+22 focused tests passing; commit it separately. No activation/restart/merge.
