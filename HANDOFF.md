@@ -964,6 +964,30 @@ maps migrate through a deterministic 4,096-entry cut that always preserves the
 new action. The 85-test reaction/security/index/page gate and Ruff/diff checks
 pass locally; replacement review and cross-platform CI remain pending.
 
+The next current-head review found two remaining recovery edges. A rejected
+foreign-signed document could still advance from its untrusted namespace and
+exhaust future writes, and a legacy map below the entry cap could still exceed
+the v2 byte cap. Genuine writes now advance only from authenticated prior state;
+the deterministic migration cut satisfies both the 4,096-entry and one-MiB
+document budgets while preserving the current operation. The focused reaction
+document gate passes 13 tests and Ruff.
+
+A further current-head review found that a non-object reaction document still
+raised before the genuine overwrite and that startup resealing authenticated an
+attacker-selected v2 namespace. Genuine writes now treat every non-object prior
+value as unauthenticated empty state. Unsigned v2 startup migration preserves
+only the display mapping, mints a fresh bounded namespace and a single resealed
+placeholder operation, and never signs attacker-controlled operation timing as
+native evidence. The reaction/security gate passes 21 tests (16 unrelated
+security tests deselected); Ruff and diff checks pass.
+
+The next current-head review distinguished a missing signing key from a bad
+signature. When the signer callable cannot produce a proof, plaintext/keyless
+writes now preserve the structurally valid display mapping while discarding all
+unauthenticated operation and namespace evidence. A usable mismatched proof
+still resets the forged state. The 19-test reaction-document gate and four
+focused security tests pass; Ruff and diff checks pass.
+
 ## Fresh retained reaction mapping and notifications — v0.24.376
 
 The retained info lane now semantically maps only future exact human reaction
@@ -1005,6 +1029,31 @@ boundary and leaves the journal item retryable. Current mapping verifies the
 new `ops_sig` proof while `sig` remains a legacy display signature. The combined
 retained-event/journal/page/reaction/security gate passes 125 tests; Ruff and
 diff checks pass locally.
+
+The latest current-head review found two more fresh-read gaps. Notification
+drain now applies the reactor tenure's lower history bound as well as the
+reaction-time upper bound, so a later `send_history=false` policy cannot expose
+a pre-join target. Exact reaction projection also disables indexed reaction
+candidate fan-in because it already captures the one actor document directly;
+unrelated and departed actors can no longer exhaust that bounded operation.
+The 160-test reaction, retained-event, overlay-index and page-operation gate
+passes with two expected skips; Ruff and diff checks pass locally.
+
+A later current-head review noted that a newer signed state document is not
+historical proof: ordinary later writes preserve hidden/cleared fields while
+advancing the envelope namespace. Semantic mapping now degrades to generic
+invalidation whenever the actor state is newer than the reaction cut. Historical
+state evidence is not inferred from the current overlay. The combined retained
+reaction/document gate passes 71 tests; Ruff and diff checks pass locally.
+
+The following current-head review showed that reactor-local hidden and clear
+state was still absent from semantic proof. Exact reaction input now captures
+each actor's bounded state document beside their reaction document, verifies its
+signature, and suppresses targets hidden or cleared before the operation. State
+written later cannot retroactively invalidate an earlier genuine reaction, and
+malformed signed visibility evidence cannot authorize a semantic wake. The
+expanded 184-test reaction, retained-event, local-source, overlay and page gate
+passes with two expected skips; Ruff and diff checks pass locally.
 
 The PR 132 Windows full suite exposed a test-isolation race, not an escaped
 read-ack fence: the acknowledgment reservation had reached `aborted`, while an
