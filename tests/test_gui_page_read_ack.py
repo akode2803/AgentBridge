@@ -40,6 +40,18 @@ def _state(app, chat):
     return app.mesh.tx.get_doc(P.state(chat, app.mesh.user), default={})
 
 
+def _assert_reservation_released(runtime, reservation):
+    """Check this operation's fence without constraining unrelated writers."""
+    token = reservation._intent.token
+    with sqlite3.connect(runtime.coordinator.path) as conn:
+        assert conn.execute(
+            'SELECT token FROM mutation_intents WHERE token=?', (token,),
+        ).fetchall() == []
+        assert conn.execute(
+            'SELECT token FROM mutation_scopes WHERE token=?', (token,),
+        ).fetchall() == []
+
+
 def _record(app, chat, ident, ns):
     return Envelope(
         id=ident, ns=ns, ts='2026-01-01T00:00:00Z', from_=app.mesh.user,
@@ -604,8 +616,7 @@ def test_provider_write_requires_durable_reservation_and_releases_gui_locks(page
     result = _ack(app, page)
     assert result['status'] == 'acknowledged', result
     assert len(observed) == 1 and observed[0]._state == 'completed'
-    with sqlite3.connect(runtime.coordinator.path) as conn:
-        assert conn.execute('SELECT token FROM mutation_intents').fetchall() == []
+    _assert_reservation_released(runtime, observed[0])
 
 
 def test_lock_expiring_after_reservation_aborts_unstarted_write(page_app, monkeypatch):
@@ -631,8 +642,7 @@ def test_lock_expiring_after_reservation_aborts_unstarted_write(page_app, monkey
     assert (result['status'], result['reason']) == ('locked', 'app_locked'), result
     assert len(reserved) == 1 and reserved[0]._state == 'aborted'
     assert _state(app, chat) == before
-    with sqlite3.connect(runtime.coordinator.path) as conn:
-        assert conn.execute('SELECT token FROM mutation_intents').fetchall() == []
+    _assert_reservation_released(runtime, reserved[0])
 
 
 @pytest.mark.parametrize('gate', ['lock', 'session'])
@@ -669,5 +679,4 @@ def test_gate_change_after_finalization_aborts_before_provider_start(page_app, m
         assert result == {'error': 'Sign in first'}
     assert len(reservations) == 1 and reservations[0]._state == 'aborted'
     assert _state(app, chat) == before
-    with sqlite3.connect(runtime.coordinator.path) as conn:
-        assert conn.execute('SELECT token FROM mutation_intents').fetchall() == []
+    _assert_reservation_released(runtime, reservations[0])

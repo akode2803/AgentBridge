@@ -1006,6 +1006,13 @@ new `ops_sig` proof while `sig` remains a legacy display signature. The combined
 retained-event/journal/page/reaction/security gate passes 125 tests; Ruff and
 diff checks pass locally.
 
+The PR 132 Windows full suite exposed a test-isolation race, not an escaped
+read-ack fence: the acknowledgment reservation had reached `aborted`, while an
+unrelated writer owned the one remaining root intent. Read-ack tests now assert
+that their exact durable intent and scopes are gone instead of requiring the
+shared coordinator to be globally idle. All four affected cases pass in five
+consecutive focused runs; Ruff and whitespace checks pass.
+
 This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for
 the reviewed local-node recovery, publication, retained-event and notification
