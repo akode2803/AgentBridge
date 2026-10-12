@@ -1826,6 +1826,22 @@ class NodeStore:
         if {token for (token,) in found} != set(tokens):
             raise NodeGenerationChanged("local node root fence missing")
 
+    @staticmethod
+    def coordinator_has_active_fences(conn: sqlite3.Connection) -> bool:
+        """Whether any ambiguous mutation can still reach this node's source.
+
+        A node-side fence can outlive a rolled-back root transaction because
+        the two SQLite databases commit independently.  Completed fences are
+        recoverable historical evidence; an active fence is still ambiguous
+        even when the root no longer retains its token.
+        """
+        if not conn.in_transaction:
+            raise ValueError("local node coordinator cut required")
+        NodeStore._check_mutation_fences(conn)
+        return conn.execute(
+            "SELECT 1 FROM node_mutation_fences WHERE state='active' LIMIT 1"
+        ).fetchone() is not None
+
     def _migrate_v1(self, conn: sqlite3.Connection) -> None:
         if conn.execute(
                 "SELECT version,protocol_version FROM node_schema WHERE singleton=1"

@@ -430,7 +430,11 @@ class MutationCoordinator:
                 NodeStore.coordinator_require_fences(
                     node_conn, coordinator_epoch=self.epoch, tokens=tokens,
                 )
-                if tokens:
+                # Node fences commit independently before the root transaction.
+                # A later root rollback can therefore leave an active orphan
+                # that is absent from ``tokens``.  It remains ambiguous and
+                # must prevent the irreversible legacy-writer retirement.
+                if tokens or NodeStore.coordinator_has_active_fences(node_conn):
                     yield False
                     return
                 yield True

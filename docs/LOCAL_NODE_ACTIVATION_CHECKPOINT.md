@@ -161,3 +161,13 @@ historical fences remain, then resolve those fences only through a separately
 reviewed operator/recovery contract. Cached first paint and selected-chat
 recovery measurement remain open. Harness process consolidation is separate
 work.
+
+A current-head review then found one more independent-database rollback edge.
+`begin()` commits the node fence before the coordinator root transaction, so a
+later Store failure or root rollback can leave an active node fence without a
+root token. The activation gate now checks for any active node fence under the
+same root-to-node cut after verifying the root token set. Completed fences remain
+valid historical recovery evidence, while an orphan active fence keeps legacy
+sync available and the node pending. The exact fanout-rollback regression plus
+the 31-test mutation-fence and 31-test loopback activation gates pass; Ruff and
+whitespace checks pass locally. Replacement CI remains required.

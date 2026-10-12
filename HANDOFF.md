@@ -1243,3 +1243,14 @@ and diff checks pass. Independent review found no remaining P1/P2. Replacement
 CI remains. Next, validate this fallback against the live historical fences,
 then design the separate explicit operator/recovery contract for those ambiguous
 intents without guessing from age or process death.
+
+The latest PR 133 review found that a node-side active fence can survive a
+rolled-back coordinator root transaction even when the root retains no token.
+The activation cut now verifies both the exact root token coverage and the
+absence of every active node fence before allowing irreversible legacy-sync
+retirement. Completed fences remain recoverable historical evidence. The exact
+fanout-rollback regression, all 31 mutation-fence tests and all 31 loopback
+activation tests pass; Ruff and whitespace checks pass locally. The previous
+Windows run's sole failure was the documented isolated signup SQLite commit
+stall at the ten-second fixture deadline; this corrected head still requires
+replacement cross-platform CI.
