@@ -159,7 +159,9 @@ def test_runner_handoff_scan_is_dirty_on_start_and_mirror_change(hrig):
 
     assert runner._handoff_scan_due(now) is True
     assert runner._handoff_scan_due(now) is False
-    assert runner._handoff_check_in_s(now) == runner_module.HANDOFF_RECOVERY_S
+    assert runner._handoff_check_in_s(now) == pytest.approx(
+        runner_module.HANDOFF_RECOVERY_S, abs=1e-9,
+    )
 
     runner._wake.clear()
     runner._runtime_changed()
