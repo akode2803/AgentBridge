@@ -2,6 +2,7 @@ import hashlib
 import http.client
 import json
 import os
+import secrets
 import socket
 import sqlite3
 import stat
@@ -10,7 +11,9 @@ import time
 
 import pytest
 
-from agentbridge.node.protocol import ReplicaIdentity, parse_status
+from agentbridge.node.protocol import (
+    ReplicaIdentity, parse_status, request_proof, response_proof,
+)
 from agentbridge.node.admission import (
     NodeDocument, NodeFrontier, NodeInputBatch, NodeLogRow, NodeVisibility,
 )
@@ -64,50 +67,75 @@ def recovery_transport(tmp_path):
     return LocalMutationTransport(provider, coordinator), coordinator
 
 
+def auth_headers(server, method, path, raw=b"", *, token=None):
+    credential = token if token is not None else server.token
+    nonce = secrets.token_hex(32)
+    digest = hashlib.sha256(raw).hexdigest()
+    return {
+        "Authorization": "AgentBridge-HMAC " + nonce + "." + request_proof(
+            credential, nonce, method, path, digest),
+        "X-AgentBridge-Body-SHA256": digest,
+    }, nonce, credential
+
+
+def read_response(response, credential, nonce, method, path):
+    raw = response.read()
+    supplied = response.headers.get("X-AgentBridge-Proof")
+    if supplied is not None:
+        assert secrets.compare_digest(supplied, response_proof(
+            credential, nonce, method, path, response.status, raw))
+    return response.status, json.loads(raw)
+
+
 def request(server, *, token=None, origin=None, host=None, path="/v1/status"):
     conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+    auth, nonce, credential = auth_headers(
+        server, "GET", path, token=token)
     headers = {
         "Host": host or f"127.0.0.1:{server.port}",
-        "Authorization": f"Bearer {token if token is not None else server.token}",
+        **auth,
     }
     if origin is not None:
         headers["Origin"] = origin
     conn.request("GET", path, headers=headers)
     response = conn.getresponse()
-    raw = response.read()
+    result = read_response(response, credential, nonce, "GET", path)
     conn.close()
-    return response.status, json.loads(raw)
+    return result
 
 
 def post(server, path, value, *, token=None, content_type="application/json",
          origin=None):
     conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=4)
     raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    auth, nonce, credential = auth_headers(
+        server, "POST", path, raw, token=token)
     headers = {
         "Host": f"127.0.0.1:{server.port}",
-        "Authorization": f"Bearer {token if token is not None else server.token}",
+        **auth,
         "Content-Type": content_type,
     }
     if origin is not None:
         headers["Origin"] = origin
     conn.request("POST", path, body=raw, headers=headers)
     response = conn.getresponse()
-    body = response.read()
+    result = read_response(response, credential, nonce, "POST", path)
     conn.close()
-    return response.status, json.loads(body)
+    return result
 
 
 def post_raw(server, path, raw, *, content_type="application/json"):
     conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=4)
+    auth, nonce, credential = auth_headers(server, "POST", path, raw)
     conn.request("POST", path, body=raw, headers={
         "Host": f"127.0.0.1:{server.port}",
-        "Authorization": f"Bearer {server.token}",
+        **auth,
         "Content-Type": content_type,
     })
     response = conn.getresponse()
-    body = response.read()
+    result = read_response(response, credential, nonce, "POST", path)
     conn.close()
-    return response.status, json.loads(body)
+    return result
 
 
 def capture_request(**changes):
@@ -450,6 +478,24 @@ def test_status_rejects_wrong_token_browser_origin_host_and_route(tmp_path):
         assert request(server, origin="http://127.0.0.1")[0] == 403
         assert request(server, host="localhost")[0] == 400
         assert request(server, path="/v1/unknown")[0] == 404
+
+
+def test_malformed_non_ascii_request_proof_is_rejected(tmp_path):
+    with LocalNodeServer(tmp_path, identity()) as server:
+        conn = http.client.HTTPConnection(
+            "127.0.0.1", server.port, timeout=3)
+        nonce = "0" * 64
+        conn.request("GET", "/v1/status", headers={
+            "Host": f"127.0.0.1:{server.port}",
+            "Authorization": (
+                "AgentBridge-HMAC " + nonce + "."
+                + "\N{LATIN SMALL LETTER E WITH ACUTE}"),
+            "X-AgentBridge-Body-SHA256": hashlib.sha256(b"").hexdigest(),
+        })
+        response = conn.getresponse()
+        assert response.status == 401
+        assert json.loads(response.read()) == {"error": "request_rejected"}
+        conn.close()
 
 
 def test_authenticated_capture_uses_opaque_bound_continuations(tmp_path):

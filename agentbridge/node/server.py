@@ -18,7 +18,10 @@ from .admission import (
     NodeCaptureOverflow, NodeGenerationChanged, NodeInputError,
 )
 from .collector import ShadowCollectionResult, ShadowCollector
-from .protocol import PROTOCOL_VERSION, ProtocolError, ReplicaIdentity, encode_json
+from .protocol import (
+    PROTOCOL_VERSION, ProtocolError, ReplicaIdentity, encode_json,
+    request_proof, response_proof, valid_wire_proof,
+)
 from .recovery_runtime import LocalNodeRecoveryRuntime, NodeRecoveryRuntimeResult
 from .security import atomic_private_bytes, atomic_private_json, private_directory
 from .store import NodeStore
@@ -37,7 +40,10 @@ RECOVERY_SHUTDOWN_TIMEOUT_S = 5.0
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # POSIX rebinding after an orderly stop must not wait for accepted loopback
+    # sockets to leave TIME_WAIT. Windows SO_REUSEADDR can permit live port
+    # sharing, so retain the prior default; HMAC proves content, not DoS.
+    allow_reuse_address = os.name != "nt"
     request_queue_size = MAX_ACTIVE_REQUESTS
 
     def __init__(self, *args, **kwargs) -> None:
@@ -269,6 +275,8 @@ class LocalNodeServer:
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            _request_nonce: str | None = None
+            _request_body_digest: str | None = None
 
             def log_message(self, _format, *_args) -> None:
                 return
@@ -292,6 +300,11 @@ class LocalNodeServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("Connection", "close")
+                    if self._request_nonce is not None:
+                        self.send_header("X-AgentBridge-Proof", response_proof(
+                            token, self._request_nonce, self.command,
+                            self.path, status, body,
+                        ))
                     self.end_headers()
                     self.wfile.write(body)
                 except OSError:
@@ -326,10 +339,29 @@ class LocalNodeServer:
                     self._reply(400)
                     return None
                 supplied = self.headers.get("Authorization", "")
-                if not secrets.compare_digest(
-                        supplied, f"Bearer {token}"):
+                body_digest = self.headers.get(
+                    "X-AgentBridge-Body-SHA256", "")
+                if not supplied.startswith("AgentBridge-HMAC "):
                     self._reply(401)
                     return None
+                credential = supplied.removeprefix("AgentBridge-HMAC ")
+                pieces = credential.split(".")
+                if len(pieces) != 2:
+                    self._reply(401)
+                    return None
+                nonce, proof = pieces
+                try:
+                    expected = request_proof(
+                        token, nonce, self.command, self.path, body_digest)
+                except ProtocolError:
+                    self._reply(401)
+                    return None
+                if (not valid_wire_proof(proof)
+                        or not secrets.compare_digest(proof, expected)):
+                    self._reply(401)
+                    return None
+                self._request_nonce = nonce
+                self._request_body_digest = body_digest
                 return length
 
             def _json_body(self, length: int) -> dict | None:
@@ -338,6 +370,11 @@ class LocalNodeServer:
                     return None
                 raw = self.rfile.read(length)
                 if len(raw) != length:
+                    self._reply(400)
+                    return None
+                if not secrets.compare_digest(
+                        hashlib.sha256(raw).hexdigest(),
+                        self._request_body_digest or ""):
                     self._reply(400)
                     return None
                 try:
