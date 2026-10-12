@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -130,6 +131,33 @@ def test_same_route_lease_renewal_does_not_restore_page_first(world):
     assert runtime.request(CHAT, selected=True)
     assert runtime._page_first_chat is None
     assert runtime.run_due().operation == "node"
+
+
+def test_completed_page_first_cannot_clear_newer_selected_route(
+        world, monkeypatch):
+    runtime, _store, _server, clock = world
+    assert runtime.request(CHAT, selected=True)
+    clock[0] = 0.05
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_run(chat_id=None):
+        assert chat_id == CHAT
+        entered.set()
+        assert release.wait(2.0)
+        return True
+
+    monkeypatch.setattr(runtime.publisher, "run_due", blocked_run)
+    thread = threading.Thread(target=runtime.run_due, daemon=True)
+    thread.start()
+    assert entered.wait(1.0)
+    assert runtime.request("new-route", selected=True)
+    release.set()
+    thread.join(2.0)
+
+    assert not thread.is_alive()
+    assert runtime.selected == "new-route"
+    assert runtime._page_first_chat == "new-route"
 
 
 def test_cold_node_recovery_eventually_publishes_one_coherent_store_cut(world):

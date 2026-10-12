@@ -9,6 +9,7 @@ from agentbridge.mesh.node_page_owner import LocalNodePageOwner
 from agentbridge.node.server import LocalNodeServer
 from agentbridge.store.db import Store
 from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import (
     LocalMutationTransport, root_identity,
 )
@@ -18,6 +19,7 @@ from fake_cloud import FakeClient
 
 EPOCH = "12345678-1234-5678-9234-567812345678"
 ACCOUNT = "12345678-1234-5678-9234-567812345679"
+OTHER_ACCOUNT = "12345678-1234-5678-9234-567812345680"
 
 
 def _world(tmp_path):
@@ -119,6 +121,163 @@ def test_recovery_rechecks_pinned_location_after_owner_open(tmp_path):
         assert owner.server.store.status(
             node_epoch="", started_ns=0,
         ).admitted_generation == 0
+    finally:
+        owner.close()
+        store.close()
+
+
+def test_incremental_reads_recheck_pinned_authenticated_principal(tmp_path):
+    client, transport, store = _world(tmp_path)
+    owner = LocalNodePageOwner.open(
+        tmp_path / "home", transport, store, "desktop",
+    )
+    try:
+        client.db["_recovery_account"] = OTHER_ACCOUNT
+        with pytest.raises(ValueError, match="principal changed"):
+            transport.source_ledger_fence()
+    finally:
+        client.db["_recovery_account"] = ACCOUNT
+        owner.close()
+        store.close()
+
+
+def test_incremental_read_rejects_principal_change_during_call(
+        tmp_path, monkeypatch):
+    client, transport, store = _world(tmp_path)
+    owner = LocalNodePageOwner.open(
+        tmp_path / "home", transport, store, "desktop",
+    )
+    provider = transport._transport
+    original = provider.source_ledger_fence
+
+    def changed_principal():
+        result = original()
+        client.db["_recovery_account"] = OTHER_ACCOUNT
+        return result
+
+    monkeypatch.setattr(provider, "source_ledger_fence", changed_principal)
+    try:
+        with pytest.raises(ValueError, match="principal changed"):
+            transport.source_ledger_fence()
+    finally:
+        client.db["_recovery_account"] = ACCOUNT
+        owner.close()
+        store.close()
+
+
+def test_incremental_read_rejects_endpoint_root_aba(tmp_path, monkeypatch):
+    _client, transport, store = _world(tmp_path)
+    owner = LocalNodePageOwner.open(
+        tmp_path / "home", transport, store, "desktop",
+    )
+    provider = transport._transport
+    original = provider.source_ledger_fence
+
+    def aba_read():
+        provider.root = "other"
+        provider.cache_key = "supabase:https://Example.TEST:443/:other"
+        provider.root = "team"
+        provider.cache_key = "supabase:https://Example.TEST:443/:team"
+        return original()
+
+    monkeypatch.setattr(provider, "source_ledger_fence", aba_read)
+    try:
+        with pytest.raises(ValueError, match="identity changed"):
+            transport.source_ledger_fence()
+    finally:
+        owner.close()
+        store.close()
+
+
+def test_node_source_reads_bypass_mutable_cache_wrapper(tmp_path, monkeypatch):
+    client, direct, store = _world(tmp_path)
+    provider = direct._transport
+    cached = CachingTransport(provider, auto_refresh=False)
+    coordinator = MutationCoordinator(
+        tmp_path / "cached-coordinator", root_identity(cached),
+    )
+    transport = LocalMutationTransport(cached, coordinator)
+    owner = LocalNodePageOwner.open(
+        tmp_path / "cached-home", transport, store, "desktop",
+    )
+    calls = []
+
+    def wrapper_bypass():
+        calls.append(True)
+        client.db["_recovery_account"] = OTHER_ACCOUNT
+        return cached.inner.source_ledger_fence()
+
+    monkeypatch.setattr(cached, "source_ledger_fence", wrapper_bypass)
+    try:
+        assert transport.source_ledger_fence().epoch == EPOCH
+        assert calls == []
+        replacement = SupabaseTransport(
+            "team", env={"SUPABASE_URL": "https://Example.TEST:443/",
+                         "SUPABASE_SECRET_KEY": "sb_secret_x"},
+            client=client,
+        )
+        cached.inner = replacement
+        with pytest.raises(ValueError, match="identity changed"):
+            transport.source_ledger_fence()
+        cached.inner = provider
+    finally:
+        cached.inner = provider
+        client.db["_recovery_account"] = ACCOUNT
+        owner.close()
+        cached.close()
+        store.close()
+
+
+def test_node_source_io_does_not_hold_identity_lock(tmp_path, monkeypatch):
+    _client, transport, store = _world(tmp_path)
+    owner = LocalNodePageOwner.open(
+        tmp_path / "home", transport, store, "desktop",
+    )
+    provider = transport._transport
+    original = provider.source_ledger_fence
+    entered = threading.Event()
+    release = threading.Event()
+    changed = threading.Event()
+    errors = []
+
+    def blocked_read():
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("source test did not release provider")
+        return original()
+
+    def read():
+        try:
+            transport.source_ledger_fence()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def retarget():
+        provider.root = "other"
+        provider.cache_key = "supabase:https://Example.TEST:443/:other"
+        provider.root = "team"
+        provider.cache_key = "supabase:https://Example.TEST:443/:team"
+        changed.set()
+
+    monkeypatch.setattr(provider, "source_ledger_fence", blocked_read)
+    reader = threading.Thread(target=read)
+    mutator = threading.Thread(target=retarget)
+    reader.start()
+    try:
+        assert entered.wait(5)
+        mutator.start()
+        # A source call must not hold the identity mutex while blocked in
+        # provider I/O. The monotonic revision rejects its result afterward.
+        assert changed.wait(5)
+    finally:
+        release.set()
+    reader.join(5)
+    mutator.join(5)
+    try:
+        assert not reader.is_alive() and not mutator.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], ValueError)
+        assert "identity changed" in str(errors[0])
     finally:
         owner.close()
         store.close()

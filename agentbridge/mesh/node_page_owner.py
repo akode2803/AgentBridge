@@ -60,6 +60,7 @@ class LocalNodePageOwner:
         transport._assert_provider_identity()
         if provider_location(transport._transport) != (endpoint, root):
             raise ValueError("local mutation owner identity changed")
+        transport.bind_provider_principal(cut.account_id)
         identity = ReplicaIdentity(
             endpoint, f"supabase://{root}", cut.account_id, machine,
         )

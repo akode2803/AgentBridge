@@ -25,6 +25,28 @@ from agentbridge.store.source_publication import SourcePublisher
 CHAT = "room"
 
 
+def test_initialize_replaces_unbound_legacy_receipts_without_promoting_them(
+        tmp_path):
+    store = Store(tmp_path / "store.sqlite")
+    conn = store._conn()
+    conn.execute(node_publication_receipt._LEGACY_TABLE)
+    conn.execute(
+        "INSERT INTO node_publication_receipts VALUES(?,?,?,?,?,?,?,?)",
+        ("source", "e" * 32, 1, "physical", "incarnation", 1, 1, b"old"),
+    )
+    conn.commit()
+
+    node_publication_receipt.initialize(store)
+
+    assert conn.execute(
+        "SELECT count(*) FROM node_publication_receipts",
+    ).fetchone() == (0,)
+    assert conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='node_publication_receipts'",
+    ).fetchone() == (node_publication_receipt._TABLE,)
+    store.close()
+
+
 def _identity():
     return ReplicaIdentity(
         "https://example.test", "supabase://mesh", "alice", "box",

@@ -450,6 +450,29 @@ def test_source_ledger_reads_delegate_without_creating_mutation_intents(
     assert _pending(coordinator) == 0
 
 
+def test_change_ledger_reads_use_exact_provider_without_mutation_intents(rig):
+    _store, coordinator, inner, proxy = rig
+    calls = []
+    capability = object()
+    epoch = object()
+    page = object()
+    inner.change_ledger_capability = lambda: calls.append(
+        ("capability",),
+    ) or capability
+    inner.change_ledger_epoch = lambda: calls.append(("epoch",)) or epoch
+    inner.change_ledger_events = lambda cursor, *, limit: calls.append(
+        ("events", cursor, limit),
+    ) or page
+
+    assert proxy.change_ledger_capability() is capability
+    assert proxy.change_ledger_epoch() is epoch
+    assert proxy.change_ledger_events(17, limit=23) is page
+    assert calls == [
+        ("capability",), ("epoch",), ("events", 17, 23),
+    ]
+    assert _pending(coordinator) == 0
+
+
 def test_scoped_source_reads_delegate_without_creating_mutation_intents(
         rig, monkeypatch):
     _store, coordinator, inner, proxy = rig
