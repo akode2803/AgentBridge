@@ -209,46 +209,47 @@ class DelegationCoordinator:
     def claim_ready(self, *, exclude: set[str],
                     on_retryable: Callable[[], None] | None = None) -> list[ChildWork]:
         """Accept eligible offers and claim authorized work for this host."""
+        work: list[ChildWork] = []
         try:
             account = self.mesh.directory.get(self.mesh.user)
+            settings = HarnessSettings.from_account(account)
+            for snap in self.mesh.membership.chats_for():
+                try:
+                    views = self.discovery_ledger.read(snap.id)
+                except PinStoreUnavailable:
+                    raise
+                except Exception:
+                    continue
+                for view in views:
+                    offer = view.events[0]
+                    if (offer.destination_agent != self.mesh.user
+                            or offer.handoff_type is not HandoffType.AGENT_TOOL
+                            or offer.requested_capabilities):
+                        continue
+                    if (len(view.events) == 1 and settings.agent_tools_enabled
+                            and time.time_ns() < int(offer.meta.expires_ns or 0)):
+                        try:
+                            self.ledger.decide(
+                                chat_id=snap.id, run_id=offer.meta.run_id or "",
+                                handoff_id=offer.meta.call_id or "", accept=True,
+                                result="Accepted for text-only specialist work",
+                            )
+                        except HandoffLedgerError:
+                            pass
+                        continue
+                    handoff_id = offer.meta.call_id or ""
+                    if handoff_id in exclude or not self._host_current():
+                        continue
+                    item = self._recover_or_claim(view)
+                    if item is not None:
+                        work.append(item)
         except PinStoreUnavailable as exc:
             if exc.reason != "lock_timeout":
                 raise
-            # A contended local pin read grants no authority. Signal a prompt
-            # retry because the caller may otherwise wait for its recovery scan.
+            # A contended pin read grants no authority for the remaining
+            # candidates. Preserve already-claimed work and retry discovery.
             if on_retryable is not None:
                 on_retryable()
-            return []
-        settings = HarnessSettings.from_account(account)
-        work: list[ChildWork] = []
-        for snap in self.mesh.membership.chats_for():
-            try:
-                views = self.discovery_ledger.read(snap.id)
-            except Exception:
-                continue
-            for view in views:
-                offer = view.events[0]
-                if (offer.destination_agent != self.mesh.user
-                        or offer.handoff_type is not HandoffType.AGENT_TOOL
-                        or offer.requested_capabilities):
-                    continue
-                if (len(view.events) == 1 and settings.agent_tools_enabled
-                        and time.time_ns() < int(offer.meta.expires_ns or 0)):
-                    try:
-                        self.ledger.decide(
-                            chat_id=snap.id, run_id=offer.meta.run_id or "",
-                            handoff_id=offer.meta.call_id or "", accept=True,
-                            result="Accepted for text-only specialist work",
-                        )
-                    except HandoffLedgerError:
-                        pass
-                    continue
-                handoff_id = offer.meta.call_id or ""
-                if handoff_id in exclude or not self._host_current():
-                    continue
-                item = self._recover_or_claim(view)
-                if item is not None:
-                    work.append(item)
         return work
 
     def execute(self, work: ChildWork, responder) -> None:
@@ -371,12 +372,10 @@ class DelegationCoordinator:
                 journal.update({"state": "committed",
                                 "updated_ns": time.time_ns()})
                 self.mesh.store.cache_doc(path, journal)
+            except PinStoreUnavailable:
+                # A busy trust-pin file does not invalidate a saved result.
+                raise
             except Exception as exc:
-                journal.update({
-                    "state": "interrupted", "updated_ns": time.time_ns(),
-                    "error": f"result_recovery:{type(exc).__name__}",
-                })
-                self.mesh.store.cache_doc(path, journal)
                 try:
                     self.ledger.interrupt(
                         chat_id=offer.meta.chat_id,
@@ -384,21 +383,33 @@ class DelegationCoordinator:
                         handoff_id=handoff_id,
                         reason="Saved child result could no longer be returned",
                     )
+                except PinStoreUnavailable:
+                    # The interruption still needs current pins; retry while
+                    # the saved result remains durably recoverable.
+                    raise
                 except Exception:
                     pass
+                journal.update({
+                    "state": "interrupted", "updated_ns": time.time_ns(),
+                    "error": f"result_recovery:{type(exc).__name__}",
+                })
+                self.mesh.store.cache_doc(path, journal)
             return None
         if last is HandoffState.ACTIVE and journal.get("state") == "executing":
-            journal.update({"state": "interrupted", "updated_ns": time.time_ns(),
-                            "error": "runner_restarted_during_execution"})
-            self.mesh.store.cache_doc(path, journal)
             try:
                 self.ledger.interrupt(
                     chat_id=offer.meta.chat_id, run_id=offer.meta.run_id or "",
                     handoff_id=handoff_id,
                     reason="Runner restarted during child execution",
                 )
+            except PinStoreUnavailable:
+                # Keep the durable execution marker for a later exact retry.
+                raise
             except Exception:
                 pass
+            journal.update({"state": "interrupted", "updated_ns": time.time_ns(),
+                            "error": "runner_restarted_during_execution"})
+            self.mesh.store.cache_doc(path, journal)
             return None
         if last not in {HandoffState.AUTHORIZED, HandoffState.ACTIVE}:
             return None

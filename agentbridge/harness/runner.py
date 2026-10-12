@@ -333,7 +333,6 @@ class AgentRunner:
                 self._next_handoff_recovery = min(
                     self._next_handoff_recovery, retry_at,
                 )
-        self._wake.set()
 
     def _prioritize_chat(self, chat_id: str, _count: int = 0) -> None:
         if not chat_id:
