@@ -10,7 +10,7 @@ import pytest
 
 from agentbridge.mesh.local_page_source import LocalPageSource
 from agentbridge.mesh.overlay_index import prepare_overlay_index
-from agentbridge.mesh.page_operation import PageOperation
+from agentbridge.mesh.page_operation import ExactMessageProjectionOperation, PageOperation
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
 from agentbridge.gui.applock import AppLock
@@ -314,6 +314,74 @@ def test_prepare_and_finalize_do_not_use_full_messages_mirror_or_provider(world,
             monkeypatch.setattr(transport, name, forbidden)
     page = _finalize(PageOperation(mesh, chat, source_reader=reader, limit=25), inputs)
     assert len(page.messages) == 25
+
+
+def test_exact_message_projection_is_bounded_and_finally_authorized(world, monkeypatch):
+    mesh, mirror, provider, chat, _base, reader, publisher = world
+    inputs = _inputs(
+        mesh, mirror, reader, publisher, chat,
+        state={'hidden': ['m197'], 'cleared': {'ns': 0}},
+    )
+    captures = []
+    original = reader.capture_page
+
+    def capture(*args, **kwargs):
+        captures.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reader, 'capture_page', capture)
+    operation = ExactMessageProjectionOperation(
+        mesh, chat, ('m197', 'm198', 'missing'), source_reader=reader,
+    )
+    page = _finalize(operation, inputs)
+    assert [message.id for message in page.messages] == ['m198']
+    assert page.raw_examined == 3
+    assert not page.history_exhausted and not page.has_more
+    assert captures and all(item['raw_limit'] == 0 for item in captures)
+    assert captures[0]['exact_ids'] == ('m197', 'm198', 'missing')
+
+    prepared = ExactMessageProjectionOperation(
+        mesh, chat, ('m198',), source_reader=reader,
+    ).prepare(*inputs)
+    assert prepared.status == 'prepared'
+    mesh.store.upsert_messages(chat, [_message('late', time.time_ns())])
+    final = prepared.prepared.finalize()
+    assert final.status == 'unavailable'
+    assert final.result is None
+    assert final.reason in {'membership_inputs_changed', 'page_inputs_changed'}
+
+
+def test_exact_message_projection_rejects_unbounded_or_duplicate_ids(world):
+    mesh, _mirror, _provider, chat, _base, reader, _publisher = world
+    with pytest.raises(ValueError, match='exact message projection'):
+        ExactMessageProjectionOperation(mesh, chat, (), source_reader=reader)
+    with pytest.raises(ValueError, match='exact message projection'):
+        ExactMessageProjectionOperation(mesh, chat, ('same', 'same'), source_reader=reader)
+    with pytest.raises(ValueError, match='exact message projection'):
+        ExactMessageProjectionOperation(
+            mesh, chat, tuple(f'm{index}' for index in range(33)),
+            source_reader=reader,
+        )
+
+
+def test_exact_message_projection_excludes_info_and_reaction_events(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    reaction = {
+        'id': 'reaction-event', 'ns': time.time_ns(),
+        'ts': '2026-01-01T00:00:00Z', 'from': 'aryan', 'kind': 'info',
+        'event': {'type': 'reaction', 'to': 'aryan', 'emoji': 'ok'},
+    }
+    renamed = {
+        'id': 'rename-event', 'ns': reaction['ns'] + 1,
+        'ts': reaction['ts'], 'from': 'aryan', 'kind': 'info',
+        'event': {'type': 'renamed', 'name': 'Unsafe without event fold'},
+    }
+    mesh.store.upsert_messages(chat, [reaction, renamed])
+    inputs = _inputs(mesh, mirror, reader, publisher, chat)
+    page = _finalize(ExactMessageProjectionOperation(
+        mesh, chat, ('reaction-event', 'rename-event'), source_reader=reader,
+    ), inputs)
+    assert page.messages == ()
 
 
 def test_gui_page_gate_hands_out_only_same_session_and_mesh(world, tmp_path):
