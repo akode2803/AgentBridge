@@ -10,18 +10,29 @@ import sqlite3
 from collections.abc import Iterable
 
 
-def initialize(conn: sqlite3.Connection) -> None:
-    with conn:
-        # Serialize backfill with worker completion, including other processes.
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""CREATE TABLE IF NOT EXISTS local_send_status(
+_STATUS_TABLE = """CREATE TABLE local_send_status(
             chat_id TEXT NOT NULL, message_id TEXT NOT NULL,
             outbox_seq INTEGER NOT NULL, state TEXT NOT NULL,
             accepted_ns INTEGER NOT NULL DEFAULT 0,
             client_ref TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY(chat_id,message_id))""")
+            PRIMARY KEY(chat_id,message_id))"""
+_UNRESOLVED_INDEX = (
+    "CREATE INDEX idx_send_unresolved_chat ON local_send_status(chat_id) "
+    "WHERE state<>'sent'"
+)
+
+
+def initialize(conn: sqlite3.Connection) -> None:
+    with conn:
+        # Serialize backfill with worker completion, including other processes.
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(_STATUS_TABLE.replace(
+            "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1,
+        ))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_send_outbox "
                      "ON local_send_status(outbox_seq)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_send_unresolved_chat "
+                     "ON local_send_status(chat_id) WHERE state<>'sent'")
         # Existing pending/dead sends must not become ticks on upgrade. Repeat
         # safely for old clients that may have queued work since the last open.
         for seq, target, payload, state in conn.execute(
@@ -40,6 +51,20 @@ def initialize(conn: sqlite3.Connection) -> None:
                          "(chat_id,message_id,outbox_seq,state) VALUES(?,?,?,?)",
                          (target.partition('|')[0], mid, seq,
                           "failed" if state == "dead" else "queued"))
+
+
+def _verify_unresolved_index(conn: sqlite3.Connection) -> None:
+    rows = dict(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE name IN "
+        "('local_send_status','idx_send_unresolved_chat')",
+    ).fetchall())
+    if (_sql(rows.get("local_send_status")) != _sql(_STATUS_TABLE)
+            or rows.get("idx_send_unresolved_chat") != _UNRESOLVED_INDEX):
+        raise RuntimeError("unresolved send schema changed")
+
+
+def _sql(value):
+    return " ".join(str(value).split())
 
 
 def capture(conn: sqlite3.Connection, chat_id: str, ids: Iterable[str]) -> dict:

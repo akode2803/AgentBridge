@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS outbox(
   last_error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(state, next_ns, lease_ns);
+CREATE INDEX IF NOT EXISTS idx_outbox_append_chat
+  ON outbox(CASE WHEN instr(target,'|')>0
+            THEN substr(target,1,instr(target,'|')-1) ELSE target END)
+  WHERE kind='append_log';
 """
 
 

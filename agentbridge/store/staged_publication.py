@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import document_observation as docs, local_source as owner, overlay_index
 from . import staged_source
@@ -211,38 +212,69 @@ def admit(store, expected, candidate, *, observed_ns, reuse=None, comparison=Non
     ``reuse`` is an existing index after off-gate complete byte comparison.
     The source CAS protects that comparison from intervening local mutations.
     """
+    with owner._writer(store) as conn:
+        return _admit_in_transaction(
+            conn, store, expected, candidate, observed_ns=observed_ns,
+            reuse=reuse, comparison=comparison,
+        )
+
+
+def _admit_in_transaction(
+        conn, store, expected, candidate, *, observed_ns, reuse=None,
+        comparison=None):
+    """Admit one sealed source inside the caller's Store transaction.
+
+    This is the single-transaction building block for coupled publication.
+    The caller owns commit/rollback and every other row mutation in that cut.
+    It performs no transport work and never opens or commits a transaction.
+    """
     expected = owner._expected(store, expected)
     if type(observed_ns) is not int or not 0 <= observed_ns <= owner.MAX:
         raise ValueError('invalid observation time')
-    with owner._writer(store) as conn:
-        current = owner.capture_in_transaction(conn, store, expected.source_id)
-        if current != expected or current.writes_pending:
-            raise owner.SourceChanged('source_changed_during_ingestion')
-        raw, index = staged_source.verify_sealed(conn, store, candidate, expected=expected)
-        if candidate.logical_source != expected.source_id or raw.incarnation != current.raw.incarnation:
-            raise owner.SourceChanged('foreign_staged_source')
-        if reuse is not None:
-            if (type(comparison) is not _EqualInputs or comparison.seal is not _COMPARISON
-                    or comparison.expected != expected or comparison.candidate != candidate
-                    or comparison.raw != raw or comparison.index != index):
-                raise owner.SourceChanged('unproven_source_equality')
-            reuse = overlay_index._wanted(reuse, store.path)
-            if reuse.source != current.raw or reuse.chat_id != index.chat_id:
-                raise owner.SourceChanged('foreign_reused_index')
-            overlay_index._ready(conn, store.path, reuse)
-            raw, index = current.raw, reuse
-        # Retirement and pointer/readiness publication share this transaction.
-        # Initial registration needs _advance's self mapping before replacing
-        # it; rollback exposes the original admitted snapshot, never a subset.
-        owner._advance(conn, expected.source_id, current.revision)
-        if reuse is None:
-            conn.execute('INSERT INTO local_input_generations(source,physical) VALUES(?,?) '
-                         'ON CONFLICT(source) DO UPDATE SET physical=excluded.physical',
-                         (expected.source_id, raw.source_id))
-        conn.execute("UPDATE local_sources SET ready_incarnation=?,ready_generation=?,"
-                     "ready_cursor=?,last_success_ns=?,failures=0,error='' WHERE source=?",
-                     (raw.incarnation, raw.generation, raw.cursor, observed_ns, expected.source_id))
-        result = owner.capture_in_transaction(conn, store, expected.source_id)
-        if not result.ready or result.raw != raw:
-            raise owner.SourceChanged('staged_admission_failed')
+    if not conn.in_transaction:
+        raise ValueError('staged admission requires a Store transaction')
+    databases = {row[1]: row[2] for row in conn.execute('PRAGMA database_list')}
+    if (not databases.get('main')
+            or Path(databases['main']).resolve() != store.path.resolve()):
+        raise ValueError('wrong staged admission database')
+    current = owner.capture_in_transaction(conn, store, expected.source_id)
+    if current != expected or current.writes_pending:
+        raise owner.SourceChanged('source_changed_during_ingestion')
+    raw, index = staged_source.verify_sealed(
+        conn, store, candidate, expected=expected,
+    )
+    if (candidate.logical_source != expected.source_id
+            or raw.incarnation != current.raw.incarnation):
+        raise owner.SourceChanged('foreign_staged_source')
+    if reuse is not None:
+        if (type(comparison) is not _EqualInputs
+                or comparison.seal is not _COMPARISON
+                or comparison.expected != expected
+                or comparison.candidate != candidate
+                or comparison.raw != raw or comparison.index != index):
+            raise owner.SourceChanged('unproven_source_equality')
+        reuse = overlay_index._wanted(reuse, store.path)
+        if reuse.source != current.raw or reuse.chat_id != index.chat_id:
+            raise owner.SourceChanged('foreign_reused_index')
+        overlay_index._ready(conn, store.path, reuse)
+        raw, index = current.raw, reuse
+    # Retirement and pointer/readiness publication share this transaction.
+    # Initial registration needs _advance's self mapping before replacing it;
+    # rollback exposes the original admitted snapshot, never a subset.
+    owner._advance(conn, expected.source_id, current.revision)
+    if reuse is None:
+        conn.execute(
+            'INSERT INTO local_input_generations(source,physical) VALUES(?,?) '
+            'ON CONFLICT(source) DO UPDATE SET physical=excluded.physical',
+            (expected.source_id, raw.source_id),
+        )
+    conn.execute(
+        "UPDATE local_sources SET ready_incarnation=?,ready_generation=?,"
+        "ready_cursor=?,last_success_ns=?,failures=0,error='' WHERE source=?",
+        (raw.incarnation, raw.generation, raw.cursor, observed_ns,
+         expected.source_id),
+    )
+    result = owner.capture_in_transaction(conn, store, expected.source_id)
+    if not result.ready or result.raw != raw:
+        raise owner.SourceChanged('staged_admission_failed')
     return result, index

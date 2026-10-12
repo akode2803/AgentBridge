@@ -777,3 +777,19 @@ does not make a node generation an authority verdict. It supplies the missing
 root -> node -> Store lock order for the next coupled candidate. Message and
 document rows are not yet staged or published together, and product routing
 remains disconnected.
+
+Before a coupled candidate may collect payloads, its logical source revision is
+claimed and one SQLite read snapshot captures the source position, membership
+input generation, the complete maintained log-position inventory, existing
+message count and payload-byte work. The capture rejects unresolved local sends,
+including non-message append-log outbox work. Admission rechecks the same
+evidence in the caller's Store writer after the coordinator has acquired the
+root and exact node cut. Removed streams remain represented by their retained
+log revisions, so delete-and-recreate and offset ABA changes cannot disappear.
+
+These checks use verified covering indexes for message sizes, unresolved sends
+and append-log targets. Log offset tables, primary keys and revision triggers are
+verified before their positions are trusted. A transaction-level staged-source
+admission helper lets the later publisher swap documents and messages in one
+commit; rollback retains the former admitted snapshot. This slice does not yet
+create a coupled candidate or replace any chat rows.
