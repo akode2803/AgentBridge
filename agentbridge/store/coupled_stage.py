@@ -152,6 +152,9 @@ def cleanup_owner(conn, source_id: str) -> None:
     if existing is None:
         return
     _schema(conn)
+    from . import coupled_payload_stage
+    if not coupled_payload_stage.owner_cleanup_ready(conn, source_id):
+        return
     conn.execute(
         "DELETE FROM coupled_stage_owners WHERE stage=? AND EXISTS "
         "(SELECT 1 FROM staged_sources WHERE source=? AND phase='abandoned')",

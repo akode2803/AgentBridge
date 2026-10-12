@@ -802,3 +802,20 @@ its future message and offset half. Existing `stage:<nonce>` publishers retain
 their document-only behavior. Abort marks the underlying stage first; bounded
 stage cleanup removes the private owner in the same transaction as its payload
 rows, making either crash order fail closed without a time-based lease.
+
+The candidate now has a separate invisible payload stage. It records each
+accepted unique message, every accepted or rejected provider row, and the
+terminal head for every stream, including empty streams. Provider row IDs are
+globally unique as they are in the local node. Stream append proves it reached
+the declared head, binds accepted senders to their writer log and rejects
+conflicting duplicate message IDs. Legacy numeric message IDs are normalized in
+the same way as the Store while boolean IDs remain invalid.
+
+Side-row triggers and per-append revision checkpoints prevent direct changes
+from being laundered into a seal. The seal remains private and is rechecked in
+the eventual Store writer transaction. Payload rows share the existing global
+staging byte cap with document stages and remain charged until bounded cleanup
+removes them. Cleanup always removes payload rows and state before the coupled
+owner and document stage. This slice still does not replace admitted messages,
+advance Store log positions, invoke the node finalization gate or route product
+reads.
