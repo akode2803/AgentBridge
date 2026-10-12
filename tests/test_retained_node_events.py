@@ -1,15 +1,17 @@
 """Current canonical event preparation and drain-time notification boundaries."""
 from __future__ import annotations
 
+import json
 import pytest
 import sqlite3
+import time
 
 from agentbridge import crypto
-from agentbridge.core.timekit import next_ns
 from agentbridge.mesh import eventbus
 from agentbridge.mesh import events
 from agentbridge.mesh.eventbus import Event
 from agentbridge.mesh.local_page_source import LocalPageSource
+from agentbridge.mesh.overlay_index import prepare_overlay_index
 from agentbridge.mesh.node_event_preparation import NodeMessageEventPreparation, MAX_RETAINED_CHATS
 from agentbridge.mesh.node_event_pump import NodeEventPump
 from agentbridge.mesh.node_notifications import MessageNotificationOperation, MessageNotificationWake
@@ -22,6 +24,7 @@ from agentbridge.mesh.service import Mesh
 from agentbridge.store import lifecycle_inputs, node_event_journal, page_inputs
 from agentbridge.store.source_publication import SourcePublisher
 from agentbridge.transport.cache import CachingTransport
+from agentbridge.transport import raw_documents
 from test_page_operation import _message, _inputs, _gui_for_page
 
 
@@ -79,7 +82,7 @@ def _notification(world, *, limits=PageOperationLimits()):
 
 def _signed_reaction(world, *, emoji='👍', target='two', event_id='reaction-info',
                      actor='alice', publish_document=True, publish_state=True,
-                     hint_changes=None):
+                     hint_changes=None, state_fields=None):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     bundle = mesh.keys.keystore.load(actor, upgrade=False)
     if bundle is None:
@@ -91,17 +94,21 @@ def _signed_reaction(world, *, emoji='👍', target='two', event_id='reaction-in
         meta['members'][actor] = {'role': 'member', 'joined_ns': base - 1}
         meta.setdefault('tenure', {})[actor] = [[base - 1, 0]]
         mirror.put_doc(P.meta(chat), meta)
-    if publish_state:
-        state_ns = next_ns()
-        mirror.put_doc(P.state(chat, actor), {
+    def checkpoint(state_ns):
+        fields = dict(state_fields or {})
+        state = {
+            **fields,
             'ns': state_ns,
             'sig': crypto.sign(bundle, events.state_signing_bytes(
-                chat, actor, state_ns, {},
+                chat, actor, state_ns, fields,
             )),
-        })
+        }
+        mirror.put_doc(P.state(chat, actor), state)
+        return state
     operation = ChatOverlays(mirror, chat).set_reaction(
         actor, target, emoji,
         signer=lambda data: crypto.sign(bundle, data),
+        state_checkpoint=checkpoint if publish_state else None,
     )
     document = mirror.get_doc(P.reactions(chat, actor))
     if not publish_document:
@@ -306,6 +313,25 @@ def test_reactor_state_cannot_target_message_already_invisible_to_them(
         mesh.store, kind='info') == ()
 
 
+@pytest.mark.parametrize('fields', (
+    {'hidden': ['two']},
+    {'cleared': {'ns': 2**63 - 2, 'keep_starred': False, 'at': ''}},
+))
+def test_matching_operation_checkpoint_enforces_actor_visibility(world, fields):
+    mesh, _mirror, _provider, _chat, _base, _reader, _publisher = world
+    _signed_reaction(world, state_fields=fields)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
 def test_deleted_reactor_state_cannot_prove_operation_time_visibility(world):
     mesh, mirror, _provider, chat, _base, reader, publisher = world
     _signed_reaction(world)
@@ -321,6 +347,118 @@ def test_deleted_reactor_state_cannot_prove_operation_time_visibility(world):
     assert final.status == 'consumed' and final.reactions == () and not final.gap
     assert node_event_journal.peek_event_identities(
         mesh.store, kind='info') == ()
+
+
+def test_rolled_back_actor_state_cannot_replace_operation_checkpoint(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    if bundle is None:
+        mesh.accounts.create_human('alice', 'disposable-password')
+        bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    assert bundle is not None
+    old_state = {
+        'ns': base,
+        'sig': crypto.sign(bundle, events.state_signing_bytes(
+            chat, 'alice', base, {},
+        )),
+    }
+    mirror.put_doc(P.state(chat, 'alice'), old_state)
+    _signed_reaction(world)
+    hidden_ns = base + 10
+    fields = {'hidden': ['two']}
+    mirror.put_doc(P.state(chat, 'alice'), {
+        **fields, 'ns': hidden_ns,
+        'sig': crypto.sign(bundle, events.state_signing_bytes(
+            chat, 'alice', hidden_ns, fields,
+        )),
+    })
+    mirror.put_doc(P.state(chat, 'alice'), old_state)
+    _inputs(mesh, mirror, reader, publisher, chat)
+
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_large_actor_state_and_reaction_capture_have_separate_byte_caps(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    if bundle is None:
+        mesh.accounts.create_human('alice', 'disposable-password')
+        bundle = mesh.keys.keystore.load('alice', upgrade=False)
+    assert bundle is not None
+    cap = 4 * 1024 * 1024
+
+    def checkpoint(ns):
+        fields = {'padding': 'x' * (cap - 1024)}
+        while True:
+            sig = crypto.sign(bundle, events.state_signing_bytes(
+                chat, 'alice', ns, fields,
+            ))
+            state = {**fields, 'ns': ns, 'sig': sig}
+            size = len(P.state(chat, 'alice').encode()) + len(
+                json.dumps(state, ensure_ascii=False).encode())
+            adjustment = cap - 64 - size
+            if adjustment == 0:
+                break
+            fields['padding'] += 'x' * adjustment if adjustment > 0 else ''
+            if adjustment < 0:
+                fields['padding'] = fields['padding'][:adjustment]
+        mirror.put_doc(P.state(chat, 'alice'), state)
+        return state
+
+    operation = ChatOverlays(mirror, chat).set_reaction(
+        'alice', 'two', '👍', signer=lambda data: crypto.sign(bundle, data),
+        state_checkpoint=checkpoint,
+    )
+    document = mirror.get_doc(P.reactions(chat, 'alice'))
+    state = mirror.get_doc(P.state(chat, 'alice'))
+    combined = sum(len(path.encode()) + len(json.dumps(value).encode()) for path, value in (
+        (P.reactions(chat, 'alice'), document), (P.state(chat, 'alice'), state),
+    ))
+    assert combined > cap
+    env = {'id': 'large-state-reaction', 'ns': operation.ns + 1, 'ts': '',
+           'from': 'alice', 'kind': 'info', 'event': {
+               'type': events.EV_REACTION, 'msg_id': 'two', 'emoji': '👍',
+               'to': '', 'reaction_id': operation.id, 'reaction_ns': operation.ns,
+           }}
+    env['sig'] = crypto.sign(bundle, events.signing_bytes(chat, env))
+    mesh.store.upsert_messages(chat, (env,))
+    mirror.refresh()
+    mesh.store.refresh_terminal_observation(
+        f"{chat}|{P.log_name(mesh.messaging.user, mesh.messaging.machine)}"
+    )
+    captured = publisher.capture()
+    documents = raw_documents.collect_documents(mirror, reader.definition)
+    publisher.publish(captured, documents, observed_ns=time.time_ns())
+    receipt = reader.capture()
+    paths = tuple(path for path in documents
+                  if path.startswith(f'chats/{chat}/overlays/'))
+    observed = mesh.store.capture_selected_documents(
+        receipt.source.raw, paths, max_documents=len(paths),
+        max_bytes=8 * 1024 * 1024,
+    )
+    mesh.store.publish_overlay_index(
+        prepare_overlay_index(observed, chat), shared_source=True,
+    )
+    _enqueue(mesh, chat, env['ns'], kind='info', ident=env['id'], sender='alice')
+
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and not final.gap
+    assert [(event.type, event.data) for event in final.reactions] == [
+        (eventbus.REACTION, {'id': env['id'], 'from': 'alice'}),
+    ]
 
 
 def test_advanced_document_makes_older_target_operation_terminal(world):

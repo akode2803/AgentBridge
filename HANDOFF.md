@@ -1013,6 +1013,21 @@ that their exact durable intent and scopes are gone instead of requiring the
 shared coordinator to be globally idle. All four affected cases pass in five
 consecutive focused runs; Ruff and whitespace checks pass.
 
+Two later PR 132 review findings tighten retained reaction proof. A new signed
+reaction first publishes an unchanged actor-state checkpoint at the operation's
+exact namespace, and its opaque operation ID binds that checkpoint signature.
+Semantic mapping requires the current authenticated state to match that exact
+checkpoint; an older restored state, a later state or a pre-checkpoint client
+therefore degrades to generic invalidation. Reaction and state documents are
+captured separately inside one SQLite read transaction with independent 4 MiB
+ceilings, then charged together to the request ledger, so two individually
+bounded documents no longer fail the old combined ceiling forever. Rollback,
+near-ceiling capture and the broader reaction, messaging, notification and
+security gate pass 145 tests; Ruff and whitespace checks pass. Astra found no
+P1/P2, verified preserved state fields and later-state rejection with independent
+probes, and identified a coverage gap for matching hidden/cleared checkpoints;
+the added durable parametrized regression passes.
+
 This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for
 the reviewed local-node recovery, publication, retained-event and notification

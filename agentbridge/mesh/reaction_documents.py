@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
+import secrets
 from dataclasses import dataclass
 
 
@@ -10,6 +13,10 @@ MAX_MAPPING_ENTRIES = 4096
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_NS = 2**63 - 1
 _OPS_ORIGINS = frozenset({'native', 'resealed'})
+_STATE_BOUND_ID = re.compile(
+    r'^rxs-(?P<ns>[1-9][0-9]{0,18})-(?P<nonce>[0-9a-f]{8})-'
+    r'(?P<digest>[0-9a-f]{64})$'
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,29 @@ class ReactionOperation:
     def to_dict(self) -> dict:
         return {"id": self.id, "ns": self.ns, "emoji": self.emoji,
                 "previous": self.previous}
+
+
+def state_bound_operation_id(ns: int, state: dict) -> str:
+    """Mint an opaque operation ID bound to a same-cut signed state checkpoint."""
+    if (type(ns) is not int or not 1 <= ns <= MAX_NS or type(state) is not dict
+            or state.get('ns') != ns or not _text(state.get('sig'), 4096)):
+        raise ValueError('invalid reaction state checkpoint')
+    digest = hashlib.sha256(f"{ns}|{state['sig']}".encode()).hexdigest()
+    return f'rxs-{ns}-{secrets.token_hex(4)}-{digest}'
+
+
+def matches_state_checkpoint(operation: ReactionOperation, state: dict) -> bool:
+    """Require the current signed state to be the operation's exact checkpoint."""
+    if type(operation) is not ReactionOperation or type(state) is not dict:
+        return False
+    match = _STATE_BOUND_ID.fullmatch(operation.id)
+    if match is None or int(match['ns']) != operation.ns \
+            or state.get('ns') != operation.ns or not _text(state.get('sig'), 4096):
+        return False
+    digest = hashlib.sha256(
+        f"{operation.ns}|{state['sig']}".encode()
+    ).hexdigest()
+    return secrets.compare_digest(match['digest'], digest)
 
 
 def _text(value, limit: int, *, empty: bool = False) -> bool:
@@ -138,6 +168,6 @@ def operation_signature(doc: dict) -> str:
 
 __all__ = [
     'MAX_LATEST_OPERATIONS', 'MAX_MAPPING_ENTRIES', 'ReactionOperation',
-    'is_v2_candidate', 'operation_signature', 'parse_v2', 'parse_native_v2',
-    'signing_bytes',
+    'is_v2_candidate', 'matches_state_checkpoint', 'operation_signature',
+    'parse_v2', 'parse_native_v2', 'signing_bytes', 'state_bound_operation_id',
 ]

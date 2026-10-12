@@ -199,7 +199,8 @@ class LocalPageSource:
         return captured.records[0]
 
     def capture_reaction_documents(
-            self, receipt, actors, *, max_bytes=4 * 1024 * 1024):
+            self, receipt, actors, *, max_reaction_bytes=4 * 1024 * 1024,
+            max_state_bytes=4 * 1024 * 1024):
         """Capture bounded exact actor reaction and state inputs.
 
         The returned rows are raw inputs only. Callers still verify signatures,
@@ -207,23 +208,28 @@ class LocalPageSource:
         """
         from .paths import P
 
-        _limit(max_bytes, 4 * 1024 * 1024)
+        _limit(max_reaction_bytes, 4 * 1024 * 1024)
+        _limit(max_state_bytes, 4 * 1024 * 1024)
         if (type(actors) is not tuple or not actors or len(actors) > 32
                 or len(set(actors)) != len(actors)):
             raise ValueError('invalid exact reaction actor selection')
-        paths = tuple(
-            path for actor in actors for path in (
-                P.reactions(self.chat, _part(actor)),
-                P.state(self.chat, _part(actor)),
-            )
-        )
+        reaction_paths = tuple(P.reactions(self.chat, _part(actor)) for actor in actors)
+        state_paths = tuple(P.state(self.chat, _part(actor)) for actor in actors)
+        paths = reaction_paths + state_paths
         if sum(len(path.encode()) for path in paths) > 64 * 1024:
             raise ValueError('exact reaction actor selection exceeds budget')
         with self._read(receipt) as (conn, receipt):
-            return docs._capture_selected(
-                conn, self.store.path, receipt.source.raw, paths,
-                max_documents=64, max_bytes=max_bytes,
+            reactions = docs._capture_selected(
+                conn, self.store.path, receipt.source.raw, reaction_paths,
+                max_documents=32, max_bytes=max_reaction_bytes,
             )
+            states = docs._capture_selected(
+                conn, self.store.path, receipt.source.raw, state_paths,
+                max_documents=32, max_bytes=max_state_bytes,
+            )
+        return docs.DocumentObservation(
+            reactions.position, reactions.records + states.records,
+        )
 
     def capture_page(self, receipt, index, **selection):
         receipt = self._receipt(receipt)

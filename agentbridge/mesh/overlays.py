@@ -20,6 +20,7 @@ from .paths import P
 from .reaction_documents import (
     MAX_DOCUMENT_BYTES, MAX_LATEST_OPERATIONS, MAX_MAPPING_ENTRIES, MAX_NS,
     ReactionOperation, is_v2_candidate, operation_signature, parse_v2,
+    state_bound_operation_id,
 )
 
 __all__ = ["ChatOverlays", "UserState", "reaction_map", "fold_reactions"]
@@ -199,6 +200,7 @@ class ChatOverlays:
     # -------------------------------------------------------------- reactions
     def set_reaction(
         self, user: str, msg_id: str, emoji: str | None, signer=None,
+        state_checkpoint=None,
     ) -> ReactionOperation:
         """One reaction per user per message (WhatsApp); None removes it.
         The per-USER file is single-writer, so this is a safe read-modify-write.
@@ -270,7 +272,10 @@ class ChatOverlays:
             ns = max(ns, old['ns'] + 1)
         if ns > MAX_NS:
             raise OverflowError('reaction operation namespace exhausted')
-        operation = ReactionOperation(new_id('rx', ns), ns, emoji or '',
+        checkpoint = state_checkpoint(ns) if state_checkpoint is not None else None
+        operation_id = (state_bound_operation_id(ns, checkpoint)
+                        if checkpoint is not None else new_id('rx', ns))
+        operation = ReactionOperation(operation_id, ns, emoji or '',
                                       previous.id if previous is not None else None)
         if emoji:
             mapping[msg_id] = emoji
@@ -397,6 +402,25 @@ class UserState:
                 state["sig"] = self._signer(
                     state_signing_bytes(self.chat_id, self.user, ns,
                                         self.signed_fields(state)))
+            self.tx.put_doc(self._path, state)
+            return state
+
+    def checkpoint(self, ns: int) -> dict[str, Any] | None:
+        """Publish an unchanged signed state at an operation's exact namespace."""
+        if type(ns) is not int or not 1 <= ns <= MAX_NS:
+            raise ValueError('invalid state checkpoint namespace')
+        if self._signer is None:
+            return None
+        with self._lock:
+            from .events import state_signing_bytes
+
+            fields = self.signed_fields(self.get())
+            sig = self._signer(state_signing_bytes(
+                self.chat_id, self.user, ns, fields,
+            ))
+            if not sig:
+                return None
+            state = {**fields, 'ns': ns, 'sig': sig}
             self.tx.put_doc(self._path, state)
             return state
 

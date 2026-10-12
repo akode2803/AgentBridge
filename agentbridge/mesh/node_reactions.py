@@ -214,8 +214,10 @@ class ReactionProjectionOperation(PageOperation):
         if not prelim:
             return (), ()
         actors = tuple(dict.fromkeys(env['from'] for _, env, _, _, _ in prelim))
+        dependency_budget = min(4 * 1024 * 1024, self.ledger.remaining())
         observed = self.source_reader.capture_reaction_documents(
-            source_binding, actors, max_bytes=self.ledger.remaining())
+            source_binding, actors, max_reaction_bytes=dependency_budget,
+            max_state_bytes=dependency_budget)
         by_path = {record.path: record for record in observed.records}
         self.ledger.charge(sum(
             len(record.path.encode()) +
@@ -259,7 +261,7 @@ class ReactionProjectionOperation(PageOperation):
                 continue
             visibility = self._actor_visibility(
                 by_path.get(P.state(self.chat, env['from'])), env['from'],
-                public, hint['msg_id'], operation.ns,
+                public, hint['msg_id'], operation,
             )
             if visibility is None or visibility[0]:
                 continue
@@ -275,7 +277,7 @@ class ReactionProjectionOperation(PageOperation):
             raise _Work('reaction_target')
         return tuple(dict.fromkeys(item.target_id for item in candidates)), tuple(candidates)
 
-    def _actor_visibility(self, record, actor, public, target, reaction_ns):
+    def _actor_visibility(self, record, actor, public, target, operation):
         """Return (hidden, clear/delete cut) from authenticated prior state."""
         if record is None or record.deleted or record.payload_json is None:
             # Absence is not operation-time history: a hidden/cleared state
@@ -287,6 +289,12 @@ class ReactionProjectionOperation(PageOperation):
         except (TypeError, ValueError, RecursionError, UnicodeError):
             return None
         if type(document) is not dict or not document:
+            return None
+        if not reaction_documents.matches_state_checkpoint(operation, document):
+            # A mutable state document cannot prove historical visibility. New
+            # reaction writes bind their operation ID to an unchanged state
+            # checkpoint at the same namespace; older/unbound operations stay
+            # content-free generic invalidations.
             return None
         fields = {key: value for key, value in document.items()
                   if key not in ('ns', 'sig')}
@@ -304,10 +312,7 @@ class ReactionProjectionOperation(PageOperation):
             return None
         if not valid:
             return None
-        if state_ns > reaction_ns:
-            # A current state document is not a history log. Later writes
-            # preserve earlier hidden/cleared fields, so visibility at the
-            # operation cut cannot be proven from this newer snapshot.
+        if state_ns != operation.ns:
             return None
         hidden = fields.get('hidden', [])
         starred = fields.get('starred', [])
