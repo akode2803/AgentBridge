@@ -336,10 +336,14 @@ def claim_events(store, *, limit: int = MAX_CLAIM_EVENTS) -> NodeEventClaim | No
 
 def peek_event_identities(
     store, *, limit: int = MAX_PROJECT_EVENTS, after_chat: str | None = None,
+    kind: str | None = None,
 ) -> tuple[NodeEventIdentity, ...]:
     """Read one payload-free, single-chat projection batch.
 
-    The first pending sequence chooses the chat. Later identities for that chat
+    An optional fixed kind lane prevents unresolved info work from starving
+    ordinary messages. It never consumes the excluded rows. The journal itself
+    is admission-bounded to 1000 rows. The first pending sequence chooses the
+    chat. Later identities for that chat
     are included only while their current exact payload sizes fit the canonical
     page capture ceiling. A missing, moved or individually oversize first row
     is still returned so final transactional consumption can turn it into a
@@ -350,6 +354,10 @@ def peek_event_identities(
         raise ValueError("invalid node event projection limit")
     if after_chat is not None and not _bounded_text(after_chat, 4096, empty=True):
         raise ValueError('invalid node event rotation cursor')
+    if kind is not None and kind not in ("message", "info"):
+        raise ValueError("invalid node event projection kind")
+    kind_filter = "" if kind is None else " AND kind=?"
+    kind_args = () if kind is None else (kind,)
     conn = store._conn()
     if conn.in_transaction:
         raise sqlite3.OperationalError(
@@ -359,17 +367,18 @@ def peek_event_identities(
     page_inputs._message_schema(conn)
     if after_chat is None:
         first = conn.execute(
-            "SELECT chat FROM node_event_journal_items ORDER BY sequence LIMIT 1",
+            "SELECT chat FROM node_event_journal_items WHERE 1=1" + kind_filter
+            + " ORDER BY sequence LIMIT 1", kind_args,
         ).fetchone()
     else:
         first = conn.execute(
-            'SELECT chat FROM node_event_journal_items WHERE chat>? '
-            'ORDER BY chat,sequence LIMIT 1', (after_chat,),
+            'SELECT chat FROM node_event_journal_items WHERE chat>?' + kind_filter
+            + ' ORDER BY chat,sequence LIMIT 1', (after_chat, *kind_args),
         ).fetchone()
         if first is None:
             first = conn.execute(
-                'SELECT chat FROM node_event_journal_items WHERE chat<=? '
-                'ORDER BY chat,sequence LIMIT 1', (after_chat,),
+                'SELECT chat FROM node_event_journal_items WHERE chat<=?' + kind_filter
+                + ' ORDER BY chat,sequence LIMIT 1', (after_chat, *kind_args),
             ).fetchone()
     if first is None:
         return ()
@@ -380,8 +389,9 @@ def peek_event_identities(
         "m.ns,m.sender,m.kind,length(CAST(m.payload AS BLOB)) "
         "FROM node_event_journal_items j LEFT JOIN messages m "
         "ON m.chat_id=j.chat AND m.id=j.message_id "
-        "WHERE j.chat=? ORDER BY j.sequence LIMIT ?",
-        (first[0], limit),
+        "WHERE j.chat=?" + ("" if kind is None else " AND j.kind=?")
+        + " ORDER BY j.sequence LIMIT ?",
+        (first[0], *kind_args, limit),
     ).fetchall()
     result = []
     payload_bytes = 0
@@ -486,14 +496,17 @@ def consume_event_identities_in_transaction(
 
 def retire_event_identities_as_gap(
     store, expected: tuple[NodeEventIdentity, ...],
+    *, require_oversize: bool = False,
 ) -> bool:
     """CAS-retire one terminally unprojectable event and request resync.
 
     Runtime callers must first adaptively split a budget failure down to one
     identity, or establish another terminal malformed-input result. Transient
     source, proof, key and authority work must retain the journal rows instead.
+    require_oversize proves a matching current individual row exceeds the exact
+    capture ceiling in this same transaction, without reading its payload.
     """
-    if type(expected) is not tuple or len(expected) != 1:
+    if type(expected) is not tuple or len(expected) != 1 or type(require_oversize) is not bool:
         raise ValueError("terminal node event retirement requires one identity")
     sequences, wanted, placeholders = _event_batch(expected)
     conn = store._conn()
@@ -511,6 +524,17 @@ def retire_event_identities_as_gap(
         if tuple(rows) != wanted:
             conn.commit()
             return False
+        if require_oversize:
+            item = expected[0]
+            page_inputs._message_schema(conn)
+            current = conn.execute(
+                'SELECT ns,sender,kind,length(CAST(payload AS BLOB)) FROM messages '
+                'WHERE chat_id=? AND id=?', (item.chat_id, item.message_id),
+            ).fetchone()
+            if (current is None or current[:3] != (item.ns, item.sender, item.kind)
+                    or type(current[3]) is not int or current[3] <= page_inputs.MAX_BYTES):
+                conn.commit()
+                return False
         deleted = conn.execute(
             f"DELETE FROM node_event_journal_items WHERE sequence IN ({placeholders})",
             sequences,

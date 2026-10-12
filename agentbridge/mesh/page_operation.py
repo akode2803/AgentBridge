@@ -333,6 +333,9 @@ class PageOperation:
     def _exact_projection_request(self):
         return None
 
+    def _exact_presentation(self, snapshot, viewer_state):
+        return None
+
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
         return None, (), None
 
@@ -591,7 +594,9 @@ class PageOperation:
             fence = page_fence.PageFence(
                 expected, source_binding,
                 tuple((p, k, v) for (p, k), v in sorted(proofs.items())),
-                tuple(epochs.values()), selection, exact_targets=targets,
+                tuple(epochs.values()), selection,
+                self._exact_presentation(snapshot, overlays.viewer_state),
+                exact_targets=targets,
             )
             return PageWorkResult(
                 'prepared',

@@ -8,6 +8,7 @@ explicit global read-model invalidation heals every known gap.
 from __future__ import annotations
 
 import math
+import sqlite3
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from typing import Callable
 from ..store import node_event_journal
 from . import eventbus
 from .eventbus import Event, EventBus
+from .node_event_preparation import NodeMessageEventPreparation
+from .node_event_mapping import message_event
 
 
 DELIVERY_RETRY_S = 4.0
@@ -32,7 +35,7 @@ class NodeEventPumpStep:
     delivered: bool | None = None
 
     def __post_init__(self) -> None:
-        if (self.operation not in {"none", "events", "delivery"}
+        if (self.operation not in {"none", "events", "delivery", "preparation"}
                 or type(self.records) is not int or self.records < 0
                 or type(self.gap) is not bool
                 or type(self.chat_id) is not str
@@ -51,6 +54,10 @@ class NodeEventPumpStep:
                 self.records or self.gap or not self.chat_id
                 or not self.up_to_ns or self.delivered is None):
             raise ValueError("invalid node delivery result")
+        if self.operation == 'preparation' and (
+                not self.chat_id or self.records or self.gap or self.up_to_ns
+                or self.delivered is not None):
+            raise ValueError('invalid node event preparation result')
 
 
 class NodeEventPump:
@@ -59,6 +66,7 @@ class NodeEventPump:
     def __init__(
         self, store, bus: EventBus, messaging, user: str, *,
         clock: Callable[[], float] = time.monotonic,
+        preparation: NodeMessageEventPreparation | None = None,
     ) -> None:
         if (type(bus) is not EventBus or not callable(clock)
                 or type(user) is not str or not user
@@ -73,6 +81,13 @@ class NodeEventPump:
         self._delivery_cursor = ""
         self._delivery_retry = OrderedDict()
         self._prefer_delivery = False
+        if preparation is not None and (
+                type(preparation) is not NodeMessageEventPreparation
+                or preparation.mesh.store is not store or preparation.mesh.bus is not bus
+                or preparation.mesh.messaging is not messaging
+                or preparation.mesh.user != user):
+            raise ValueError('foreign retained node event preparation')
+        self._preparation = preparation
         node_event_journal.initialize(store)
 
     @classmethod
@@ -84,7 +99,8 @@ class NodeEventPump:
         if (type(mesh) is not Mesh or mesh.messaging.store is not mesh.store
                 or mesh.messaging.user != mesh.user):
             raise TypeError("invalid node event mesh owner")
-        return cls(mesh.store, mesh.bus, mesh.messaging, mesh.user, clock=clock)
+        return cls(mesh.store, mesh.bus, mesh.messaging, mesh.user, clock=clock,
+                   preparation=NodeMessageEventPreparation(mesh, clock=clock))
 
     def wake(self) -> None:
         self._next_due = 0.0
@@ -105,6 +121,45 @@ class NodeEventPump:
             if delivery.operation != 'none':
                 self._prefer_delivery = False
                 return delivery
+        if self._preparation is not None:
+            try:
+                gap = node_event_journal.claim_gap(self.store)
+                result = None if gap else self._preparation.run_one()
+            except (sqlite3.Error, OSError, node_event_journal.NodeEventJournalChanged):
+                gap, result = False, None
+            if result is None and not gap or result is not None and result.status == 'unavailable':
+                # Journal storage failure must not terminate the app-owned
+                # ingestion loop or masquerade as successful idle consumption.
+                self._next_due = now + IDLE_RECHECK_S
+                self._prefer_delivery = True
+                self._global_invalidation()
+                return NodeEventPumpStep('events', gap=True)
+            if gap:
+                self._global_invalidation()
+                self._prefer_delivery = True
+                return NodeEventPumpStep('events', gap=True)
+            if result.status not in {'idle', 'closed'}:
+                self._prefer_delivery = True
+                if result.status != 'consumed':
+                    self._next_due = now + IDLE_RECHECK_S
+                    return NodeEventPumpStep('preparation', chat_id=result.chat_id)
+                gap = result.gap
+                if gap:
+                    self._global_invalidation()
+                else:
+                    try:
+                        for message in result.messages:
+                            event = message_event(message)
+                            if event is not None:
+                                self.bus.publish(event)
+                        self.bus.publish(Event(eventbus.READ_MODEL, result.chat_id,
+                                               {'scope': 'chat'}, ns=time.time_ns()))
+                    except Exception:
+                        gap = True
+                        self._global_invalidation()
+                self._next_due = 0.0
+                return NodeEventPumpStep('events', records=result.records, gap=gap)
+            return delivery if delivery is not None else self._run_delivery(now)
         claim = node_event_journal.claim_events(self.store)
         if claim is not None:
             gap = claim.gap
@@ -127,9 +182,14 @@ class NodeEventPump:
         return delivery if delivery is not None else self._run_delivery(now)
 
     def _run_delivery(self, now: float) -> NodeEventPumpStep:
-        page = node_event_journal.delivery_page(
-            self.store, after_chat=self._delivery_cursor,
-        )
+        try:
+            page = node_event_journal.delivery_page(
+                self.store, after_chat=self._delivery_cursor,
+            )
+        except (sqlite3.Error, OSError, node_event_journal.NodeEventJournalChanged):
+            self._next_due = now + DELIVERY_RETRY_S
+            self._global_invalidation()
+            return NodeEventPumpStep('events', gap=True)
         if not page.deliveries:
             self._next_due = now + IDLE_RECHECK_S
             return NodeEventPumpStep("none")
