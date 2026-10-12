@@ -1284,3 +1284,13 @@ syntax, RLS/query behavior and concurrent shared/exclusive lock schedules remain
 unverified. Next, run this P1a slice against a disposable PostgreSQL/Supabase
 project, then design the inactive typed receipt RPCs and bounded receipt
 lifecycle before any legacy seal or historical-fence admission.
+
+PR 134 now carries that provider slice, stacked on the repaired PR 133 head. The
+rebase preserved both the orphan-node-fence activation block and the exact
+legacy inventory/provider protocol work. Its post-rebase gate passes 254 tests
+with two expected skips; Ruff and whitespace checks pass. PR 133 replacement
+Ubuntu and Windows jobs were still running when PR 134 opened. No schema was
+installed, no seal was issued and the app remained shut down. The next concrete
+gate is disposable PostgreSQL/Supabase execution of the source schema, RLS and
+two-transaction shared/exclusive advisory-lock schedules before P1b typed RPC
+implementation.
