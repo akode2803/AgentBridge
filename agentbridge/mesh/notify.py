@@ -112,6 +112,10 @@ class Notifier:
             )
         if event.type != eventbus.MESSAGE:
             return None
+        # Node events carry only a content-free wake. A future bounded exact-ID
+        # notification read must recompute current authority when it is drained.
+        if set(event.data) == {"id", "from"}:
+            return None
         env = Envelope.from_dict(event.data)
         if env.from_ == self.user or env.kind is not MsgKind.MESSAGE:
             return None

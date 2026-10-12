@@ -1087,6 +1087,15 @@ durable gap with the consume result. The future mapper must publish only after
 that commit and must suppress canonical payload whenever the committed result
 contains a gap. No process event or startup path uses this seam yet.
 
+The v0.24.362 ordinary-message mapper emits content-free message identity
+wakes without activating the pump. The EventBus payload is restricted to
+message ID and sender. No preview, chat snapshot or viewer-policy fact may
+be queued as continuing notification authority: membership can change between
+projection and drain. Notification delivery must perform a fresh bounded
+exact-ID projection when the event is consumed. Until that read is integrated,
+the legacy notifier suppresses identity-only message wakes. Deleted,
+undecryptable and non-message results do not map to message events.
+
 Delivered high-waters are handled one chat per quantum. Failures retain the
 exact journal row and rotate to other chats under bounded per-chat retry state;
 a complete failed pass sleeps until retry rather than spinning. A successful
