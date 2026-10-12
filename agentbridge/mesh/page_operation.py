@@ -43,7 +43,7 @@ class PageWorkResult:
     status: str
     reason: str = ''
     work: tuple = ()
-    prepared: _PreparedPage | None = field(default=None, repr=False)
+    prepared: _PreparedPage | _PreparedEventSuppression | None = field(default=None, repr=False)
     result: membership.CoordinatorResult | None = field(default=None, repr=False)
 
 
@@ -268,6 +268,29 @@ class _PreparedPage:
                 return _failure(exc)
 
 
+class _PreparedEventSuppression:
+    """One-use canonical denial disposition; never a viewer permission lease."""
+    def __init__(self, operation, serial, round_, snapshot, identities):
+        self._operation, self._serial, self._round = operation, serial, round_
+        self._snapshot_json = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(',', ':'))
+        self._identities, self._used = tuple(identities), False
+        operation.ledger.charge(len(self._snapshot_json.encode()))
+
+    def finalize(self):
+        from ..core.models import ChatSnapshot
+        op = self._operation
+        with op._lock:
+            if self._used or self._serial != op._serial or not op._bound():
+                return PageWorkResult('unavailable', 'operation_superseded')
+            self._used = True
+            try:
+                result = self._round.final(ChatSnapshot.from_dict(json.loads(self._snapshot_json)),
+                    None, event_identities=self._identities, suppress_events=True)
+                return PageWorkResult(result.status, result.reason or '', result=result)
+            except _ERRORS as exc:
+                return _failure(exc)
+
+
 class PageOperation:
     """One server-owned request; counters survive every discard/restart.
 
@@ -382,6 +405,10 @@ class PageOperation:
             snapshot = events.advance(round_.snapshot,
                 [json.loads(r.payload_json) for r in round_.suffix.rows], round_)
             if not snapshot.is_member(self.viewer):
+                exact_request = self._exact_projection_request()
+                if exact_request is not None and exact_request[1]:
+                    return PageWorkResult('prepared', prepared=_PreparedEventSuppression(
+                        self, self._serial, round_, snapshot, exact_request[1]))
                 return PageWorkResult('forbidden', 'viewer_not_member')
             history = (snapshot.members[self.viewer].joined_ns
                        if snapshot.kind is ChatKind.GROUP and not snapshot.permissions.send_history else 0)

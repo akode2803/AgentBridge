@@ -302,11 +302,14 @@ def _advance_suffix(materialized, envelopes, directory, requested=None):
             event = env['event']
             etype = event.get('type', '')
             if type(etype) is not str or len(etype.encode()) > 256:
-                raise ValueError('invalid info outcome type')
+                # Unknown/malformed types are ignored by _apply. Preserve that
+                # semantic without exposing an unbounded value or blocking the
+                # rest of this captured suffix's outcomes.
+                etype = ''
             genesis = etype == EV_CREATED
             actor = event.get('creator', '') if genesis else env.get('from', '')
             if type(actor) is not str or len(actor.encode()) > 4096:
-                raise ValueError('invalid info outcome actor')
+                actor = ''  # No bounded actor attribution; never truncate one.
             outcomes[identity] = InfoEventOutcome(identity,
                 'applied' if applied else 'ignored',
                 ('gid_content' if genesis else 'signed_author') if applied else 'unproven',

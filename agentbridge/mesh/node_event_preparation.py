@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..store import node_event_journal
-import sqlite3
 from . import page_operation
 from .page_operation import ExactMessageProjectionOperation
+from .paths import P
 
 RETRY_S = 0.35
 MAX_RETAINED_CHATS = 16
@@ -56,6 +56,8 @@ class NodeMessageEventPreparation:
         self._store, self._transport = mesh.store, mesh.tx
         self._viewer, self._machine = mesh.user, mesh.messaging.machine
         self._cursor = None
+        self._unknown_cursor = None
+        self._prefer_unknown = True
         self._jobs = OrderedDict()
         self._lock = threading.RLock()
 
@@ -68,7 +70,7 @@ class NodeMessageEventPreparation:
     def run_one(self) -> NodeEventPreparationStep:
         try:
             return self._run_one()
-        except (sqlite3.Error, OSError, node_event_journal.NodeEventJournalChanged):
+        except page_operation._ERRORS:
             # Peeking or terminal CAS retirement can fail before preparation.
             # Report unavailable; never erase work or kill the ingestion owner.
             return NodeEventPreparationStep('unavailable', self._cursor or '')
@@ -77,6 +79,18 @@ class NodeMessageEventPreparation:
         with self._lock:
             if not self._bound():
                 return NodeEventPreparationStep('closed')
+            if self._prefer_unknown:
+                self._prefer_unknown = False
+                unknown = node_event_journal.peek_event_identities(self._store,
+                    after_chat=self._unknown_cursor, kind='unknown', limit=1)
+                if unknown:
+                    chat = unknown[0].chat_id
+                    self._unknown_cursor = chat
+                    retired = node_event_journal.retire_event_identities_as_gap(
+                        self._store, unknown, require_unknown=True)
+                    return NodeEventPreparationStep('consumed' if retired else 'restart',
+                        chat, 1 if retired else 0, retired)
+            self._prefer_unknown = True
             identities = node_event_journal.peek_event_identities(
                 self._store, after_chat=self._cursor, kind='message')
             if not identities:
@@ -107,14 +121,15 @@ class NodeMessageEventPreparation:
                     work = work.prepared.finalize()
             except page_operation._ERRORS as exc:
                 work = page_operation._failure(exc)
-            if work.status == 'page':
+            if work.status == 'page' or (work.status == 'forbidden' and work.result is not None
+                                         and work.result.event_consumption is not None):
                 consumption = work.result.event_consumption
                 if consumption is None or not consumption.consumed:
                     raise RuntimeError('canonical event consumption missing')
                 self._jobs.pop(chat, None)
                 return NodeEventPreparationStep('consumed', chat,
                     len(job.identities), consumption.gap,
-                    () if consumption.gap else work.result.page.messages)
+                    () if consumption.gap or work.result.page is None else work.result.page.messages)
             if work.reason == 'event_id_not_projectable':
                 if len(job.identities) > 1:
                     return self._split(job, chat)
@@ -131,7 +146,8 @@ class NodeMessageEventPreparation:
                 return self._split(job, chat)
             if work.reason == 'budget_exhausted' and len(job.identities) == 1:
                 if node_event_journal.retire_event_identities_as_gap(
-                        self._store, job.identities, require_oversize=True):
+                        self._store, job.identities, require_oversize=True,
+                        state_paths=(P.state(chat, self._viewer),)):
                     self._jobs.pop(chat, None)
                     return NodeEventPreparationStep('consumed', chat, 1, True)
             if work.reason in {

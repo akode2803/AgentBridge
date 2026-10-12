@@ -785,3 +785,31 @@ weakened. Sol implemented two focused regressions (failure then recovery,
 non-timeout propagation); all22 delegation tests pass, root reviewed the diff,
 Ruff/diff clean. #111 and #117 now green on both platforms. #113/#118/#119
 Windows still pending at this checkpoint. No merge, deployment or restart.
+
+## Retained event review disposition repairs — v0.24.368
+
+The #120/#121 GitHub findings are corrected at the stack tip. A private one-use
+prepared denial now consumes removed-member journal batches only through the
+existing final source/node-receipt, complete message-generation, meta/account,
+lifecycle, terminal, trust and identity gates. It freezes the denial snapshot
+and journal tuple, supports CAS/rollback, and returns no content. Ordinary GUI
+reads keep their existing early forbidden behavior; only journal-bound exact
+operations get this disposition.
+
+Single-row oversize retirement now proves the irreducible exact-capture floor
+using shared page-input field/selector accounting plus mandatory edit/redaction
+and viewer-state paths. Mutable overlays/parents cannot justify retirement. A
+bounded unknown-kind lane alternates with ordinary messages, exact-CAS retires
+one unsupported row with a durable gap, and preserves info work. Schema faults
+before preparation also yield without terminating ingestion. Unknown info types
+retain `_apply` ignored semantics with a bounded empty type, rather than blocking
+later valid outcomes.
+
+Local combined gate:196 passed, including29 retained regressions and14 outcome
+tests. Independent Astra:65 accounting/generation/boundary tests; reviewed the
+denial gates, minimum-size proof and lane fairness, no remaining P1/P2. Ruff and
+diff checks pass. No activation, restart, deployment or merge. #122's reviewer
+correctly noted that returning an ordinary empty discovery result delays retry
+until the healthy observer's30-second safety fallback; Sol is implementing an
+explicit deferred signal plus bounded scheduler retry before this repair is
+considered complete. #111/#113/#117/#118 are now green on both platforms.

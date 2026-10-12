@@ -358,14 +358,18 @@ class _Round:
                 authority_observation._locked_matching_lookup_policy(self.mesh.tx, policy))
 
     def final(self, snapshot, proposal, *, page=None, mutation=None,
-              expected_trust_version=None, event_identities=()):
+              expected_trust_version=None, event_identities=(), suppress_events=False):
         if (type(event_identities) is not tuple
                 or len(event_identities) > node_event_journal.MAX_PROJECT_EVENTS
                 or any(type(item) is not node_event_journal.NodeEventIdentity
                        for item in event_identities)):
             raise ValueError('invalid final node event identities')
+        if type(suppress_events) is not bool or suppress_events and (
+                not event_identities or page is not None or type(snapshot) is not ChatSnapshot
+                or snapshot.is_member(self.viewer)):
+            raise ValueError('invalid denied node event disposition')
         if event_identities and (
-                page is None or proposal is not None or mutation is not None
+                page is None and not suppress_events or proposal is not None or mutation is not None
                 or self.source_reader is None
                 or any(item.chat_id != self.chat or item.kind != 'message'
                        for item in event_identities)):
@@ -376,7 +380,7 @@ class _Round:
             source_reader=self.source_reader, charge_source=self.ledger.charge)
         if prepared_page is not None:
             self.ledger.charge(prepared_page.comparison_bytes * (2 if proposal is not None else 1))
-        if event_identities and tuple(
+        if event_identities and not suppress_events and tuple(
                 item.message_id for item in event_identities
         ) != prepared_page.fence.exact_targets:
             raise ValueError('node event identities do not match exact page targets')
@@ -512,6 +516,13 @@ class _Round:
                         if self.source_reader is None and prepared_page is not None and not page_fence.matches_mirror_locked(self.mesh, prepared_page):
                             raise _Stop('unavailable', 'page_mirror_changed')
                         last = self.clock(first)
+                        if suppress_events:
+                            consumed = node_event_journal.consume_event_identities_in_transaction(
+                                conn, self.mesh.store, event_identities)
+                            if not consumed.consumed:
+                                raise _Stop('restart', 'node_event_journal_changed')
+                            return CoordinatorResult('forbidden', reason='viewer_not_member',
+                                event_consumption=consumed, validated_now_ns=last)
                         if prepared_page is not None:
                             selected = prepared_page.fence.selection
                             statuses = send_status.capture(conn, self.chat, tuple(

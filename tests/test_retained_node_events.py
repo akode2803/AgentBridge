@@ -292,3 +292,110 @@ def test_notification_conflict_is_distinct_from_current_suppression(world):
     operation, work = _notification(world)
     suppressed = operation.finalize_notification(work.prepared)
     assert suppressed.status == 'ready' and suppressed.notification is None
+
+
+def test_canonical_membership_denial_consumes_without_message_payload_or_retry(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    _enqueue(mesh, chat, base)
+    meta = mirror.get_doc(P.meta(chat))
+    meta['members'].pop(mesh.user)
+    mirror.put_doc(P.meta(chat), meta)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    step = NodeMessageEventPreparation(mesh).run_one()
+    assert step.status == 'consumed' and not step.gap and step.messages == ()
+    assert node_event_journal.peek_event_identities(mesh.store) == ()
+
+
+@pytest.mark.parametrize('change', ['rejoin', 'journal_aba', 'post_consume_failure'])
+def test_prepared_denial_is_final_fenced_and_consumption_rolls_back(world, change, monkeypatch):
+    from agentbridge.mesh.page_operation import ExactMessageProjectionOperation
+    from agentbridge.store import local_source
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    _enqueue(mesh, chat, base)
+    expected = node_event_journal.peek_event_identities(mesh.store)
+    meta = mirror.get_doc(P.meta(chat))
+    member = meta['members'].pop(mesh.user)
+    mirror.put_doc(P.meta(chat), meta)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    receipt, index = mesh.local_inputs.inputs(chat)[1:]
+    prepared = ExactMessageProjectionOperation(mesh, chat, ('one',), source_reader=reader,
+        event_identities=expected).prepare(receipt, receipt, index)
+    assert prepared.status == 'prepared'
+    if change == 'rejoin':
+        meta['members'][mesh.user] = member
+        mirror.put_doc(P.meta(chat), meta)
+        _inputs(mesh, mirror, reader, publisher, chat)
+    elif change == 'journal_aba':
+        mesh.store._conn().execute('UPDATE node_event_journal_items SET ns=ns+1')
+        mesh.store._conn().commit()
+    else:
+        original = node_event_journal.consume_event_identities_in_transaction
+        def failed_after_consume(*args):
+            original(*args)
+            raise local_source.SourceChanged('local_inputs_changed')
+        monkeypatch.setattr(node_event_journal, 'consume_event_identities_in_transaction', failed_after_consume)
+    final = prepared.prepared.finalize()
+    assert final.status in {'restart', 'unavailable'} and final.result is None
+    assert len(node_event_journal.peek_event_identities(mesh.store)) == 1
+
+
+def test_unknown_kind_gap_does_not_consume_info_or_starve_message(world):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    _enqueue(mesh, chat, base, ident='info', kind='info')
+    for i in range(3):
+        _enqueue(mesh, chat, base, ident=f'future{i}', kind='future-kind')
+    _enqueue(mesh, chat, base)
+    worker = NodeMessageEventPreparation(mesh)
+    first = worker.run_one()
+    assert first.status == 'consumed' and first.gap and first.records == 1
+    second = worker.run_one()
+    assert second.status == 'consumed' and not second.gap and second.messages[0].id == 'one'
+    for _ in range(4):
+        worker.run_one()
+    assert node_event_journal.peek_event_identities(mesh.store, kind='unknown') == ()
+    assert len(node_event_journal.peek_event_identities(mesh.store, kind='info')) == 1
+
+
+def test_near_ceiling_payload_is_terminal_only_when_irreducible_capture_floor_exceeds_cap(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    row = _message('near-cap', base + 2, 'alice')
+    # Set valid JSON payload to exactly the cap; sender/ID/selector/mandatory
+    # overlay bytes make the single capture irreducibly too large.
+    import json
+    payload = json.dumps(row, ensure_ascii=False)
+    row['padding'] = 'x' * (page_inputs.MAX_BYTES - len(payload.encode()) - len(', "padding": ""'))
+    assert len(json.dumps(row, ensure_ascii=False).encode()) == page_inputs.MAX_BYTES
+    mesh.store.upsert_messages(chat, [row])
+    _inputs(mesh, mirror, reader, publisher, chat)
+    assert mesh.store._conn().execute('SELECT length(CAST(payload AS BLOB)) FROM messages '
+        'WHERE chat_id=? AND id=?', (chat, 'near-cap')).fetchone()[0] == page_inputs.MAX_BYTES
+    _enqueue(mesh, chat, base + 2, ident='near-cap')
+    _enqueue(mesh, chat, base)
+    worker = NodeMessageEventPreparation(mesh)
+    first = worker.run_one()
+    assert first.status == 'consumed' and first.gap
+    assert worker.run_one().messages[0].id == 'one'
+
+
+def test_generic_single_capture_budget_failure_is_not_terminal_size_evidence(world, monkeypatch):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    _enqueue(mesh, chat, base)
+    monkeypatch.setattr('agentbridge.mesh.node_event_preparation.ExactMessageProjectionOperation.prepare',
+                        lambda *_args: PageWorkResult('unavailable', 'budget_exhausted'))
+    first = NodeMessageEventPreparation(mesh).run_one()
+    assert first.status == 'pending' and not first.gap
+    assert len(node_event_journal.peek_event_identities(mesh.store)) == 1
+
+
+def test_message_schema_failure_before_prepare_yields_and_preserves_work(world, monkeypatch):
+    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
+    _enqueue(mesh, chat, base)
+    original = node_event_journal.peek_event_identities
+    pump = NodeEventPump.for_mesh(mesh)
+    def changed(*_args, **_kwargs):
+        raise page_inputs.PageInputsChanged('message_schema_changed')
+    with monkeypatch.context() as patch:
+        patch.setattr(node_event_journal, 'peek_event_identities', changed)
+        step = pump.run_due()
+        assert step.operation == 'events' and step.gap
+    assert len(original(mesh.store)) == 1
