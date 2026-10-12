@@ -234,16 +234,18 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   failures retryable. A precreated operation cannot attach to a future message
   that later reuses its chosen ID.
 
-  v0.24.376 completes fresh semantic mapping and notification reads for exact
-  signed native-v2 human reaction breadcrumbs. It verifies actor tenure at the
-  operation and event namespaces, current operation identity, canonical target
-  author/visibility and the final source/session/journal cut. EventBus wakes
-  contain only breadcrumb ID and actor; emoji, preview and viewer read/mute
-  policy are derived again at notification drain. Missing documents/targets
-  retry, while legacy/resealed/superseded/removed evidence and agent reactions
-  remain generic read-model invalidations. Finite per-chat journal sweeps prevent
-  multiple blocked reactions or a growing tail from starving later info. Full
-  app-owned node startup/close binding remains the next activation slice.
+  v0.24.376 builds the bounded fresh mapping and notification-read machinery for
+  exact signed native-v2 human reaction breadcrumbs, but independent rollback
+  probes found that current mutable account and redaction documents cannot prove
+  DM block policy or group target visibility at the reaction cut. A restored
+  signed delete/void cycle or absent redaction document can erase a newer
+  tombstone. Both DM and group reaction breadcrumbs therefore remain generic
+  read-model invalidations. Semantic delivery requires bounded authenticated
+  block and target-visibility history; a cached generation or current document
+  is not a substitute. Missing documents/targets still retry and finite per-chat
+  sweeps prevent blocked work or a growing tail from starving later info. Full
+  app-owned node startup/close binding may activate only the generic reaction
+  behavior until that protocol prerequisite is designed and reviewed.
 
 **Released 2026-09-16 (local): v0.24.279**, merge `283ad887ccab55e7c9f7695cdf906667e5902143`, [PR10](https://github.com/akode2803/AgentBridge/pull/10). Full CI35082949106 passed on `3a679538`; exact tree verified. R198 owned global/modal reads, immediate canonical actions/files, cached sidebar repaint, independent fenced info and delayed progress. 81 focused tests/checker28/review/browser PASS. No runtime restart. Next R199 residual transition profiling. See HANDOFF.md.
 

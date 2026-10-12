@@ -167,15 +167,12 @@ class ReactionProjectionOperation(PageOperation):
         if round_.kind(actor) is not UserKind.HUMAN:
             return None
         if snapshot.kind is ChatKind.DM:
-            actor_account = round_.get(actor)
-            viewer_account = round_.get(self.viewer)
-            if (actor_account is None or viewer_account is None
-                    or self.viewer in actor_account.blocked
-                    or actor in viewer_account.blocked):
-                # Blocking kills existing DMs in both directions. Accounts are
-                # raw captured inputs in this authority round and are compared
-                # again by the final source fence.
-                return None
+            # Current mutable account documents cannot prove that neither side
+            # blocked the other at the reaction cut: a later unblock or a
+            # restored older account document would erase that fact. Until the
+            # protocol carries bounded authenticated block history, DM
+            # reactions remain content-free read-model invalidations.
+            return None
         public = round_.sign_pub(actor)
         signed = events.signing_bytes(self.chat, env)
         self.ledger.signature(signed)
@@ -269,6 +266,13 @@ class ReactionProjectionOperation(PageOperation):
                 ident, env['from'], env['ns'], hint['msg_id'], operation.ns,
                 history_from, visibility[1], operation.emoji,
             ))
+        # Current redaction documents are mutable rather than an authenticated
+        # history. An active tombstone can suppress a wake, but absence or a
+        # signed void cannot prove that another deletion cycle was not active
+        # at the reaction cut: the transport may have restored an older complete
+        # document or removed it. No candidate may authorize a semantic wake
+        # until the protocol carries bounded historical target visibility.
+        candidates = []
         absent = set(inputs.absent_ids)
         if any(item.target_id in absent for item in candidates):
             # A valid breadcrumb/document pair can precede its target log row.

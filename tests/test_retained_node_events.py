@@ -126,9 +126,9 @@ def _signed_reaction(world, *, emoji='👍', target='two', event_id='reaction-in
     return env, document
 
 
-def test_signed_native_reaction_maps_to_identity_wake_and_fresh_notification(world):
+def test_signed_native_reaction_stays_generic_without_target_history(world):
     mesh, _mirror, _provider, chat, _base, _reader, _publisher = world
-    env, _document = _signed_reaction(world)
+    _env, _document = _signed_reaction(world)
     sub = mesh.bus.subscribe()
     clock = [0.0]
     pump = NodeEventPump.for_mesh(mesh, clock=lambda: clock[0])
@@ -140,37 +140,17 @@ def test_signed_native_reaction_maps_to_identity_wake_and_fresh_notification(wor
     assert first.operation == 'preparation'
     assert step.operation == 'events' and step.records == 1 and not step.gap
     emitted = list(sub.drain())
-    reaction = next(event for event in emitted if event.type == eventbus.REACTION)
-    assert reaction.data == {'id': env['id'], 'from': 'alice'}
-    assert 'emoji' not in reaction.data and 'to' not in reaction.data
-    notifications = NodeNotificationPreparation(mesh)
-    assert notifications.enqueue(reaction)
-    result = notifications.run_one()
-    if result.status == 'pending':
-        notifications._jobs[('reaction', chat, env['id'])].next_due = 0.0
-        result = notifications.run_one()
-    assert result.status == 'ready'
-    assert result.notification.kind == 'reaction'
-    assert result.notification.from_ == 'alice'
-    assert result.notification.emoji == '👍'
-    assert result.notification.preview == 'Reacted 👍 to your message'
+    assert all(event.type != eventbus.REACTION for event in emitted)
     assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
 
 
 def test_reaction_notification_rechecks_reactor_history_cutoff(world):
     mesh, mirror, _provider, chat, base, reader, publisher = world
     env, _document = _signed_reaction(world)
-    sub = mesh.bus.subscribe()
-    clock = [0.0]
-    pump = NodeEventPump.for_mesh(mesh, clock=lambda: clock[0])
-    first = pump.run_due()
-    clock[0] = .35
-    second = pump.run_due()
-    assert first.operation == 'preparation'
-    assert second.operation == 'events'
-    reaction = next(event for event in sub.drain()
-                    if event.type == eventbus.REACTION)
-    assert reaction.data['id'] == env['id']
+    reaction = Event(
+        eventbus.REACTION, chat,
+        {'id': env['id'], 'from': 'alice'}, env['ns'],
+    )
 
     meta = mirror.get_doc(P.meta(chat))
     meta['members']['alice']['joined_ns'] = base + 2
@@ -189,9 +169,9 @@ def test_reaction_notification_rechecks_reactor_history_cutoff(world):
     assert result.notification is None
 
 
-def test_authentic_reaction_waits_for_delayed_document_then_maps(world):
+def test_authentic_reaction_waits_for_delayed_document_then_retires_generic(world):
     mesh, mirror, _provider, chat, _base, reader, publisher = world
-    env, document = _signed_reaction(world, publish_document=False)
+    _env, document = _signed_reaction(world, publish_document=False)
     clock = [0.0]
     worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
 
@@ -207,30 +187,21 @@ def test_authentic_reaction_waits_for_delayed_document_then_maps(world):
     next(iter(worker._info_jobs.values())).next_due = 0.0
     second = worker.run_one()
     assert second.status == 'consumed' and not second.gap
-    assert [(event.type, event.data) for event in second.reactions] == [
-        (eventbus.REACTION, {'id': env['id'], 'from': 'alice'}),
-    ]
+    assert second.reactions == ()
 
 
-def test_authentic_reaction_waits_for_delayed_target_then_maps(world):
-    mesh, _mirror, _provider, chat, base, _reader, _publisher = world
-    env, _document = _signed_reaction(world, target='future-target')
+def test_authentic_reaction_does_not_wait_for_unusable_target_history(world):
+    mesh, _mirror, _provider, _chat, _base, _reader, _publisher = world
+    _env, _document = _signed_reaction(world, target='future-target')
     clock = [0.0]
     worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
 
     assert worker.run_one().status == 'pending'
     clock[0] = .35
-    assert worker.run_one().status == 'pending'
-    assert len(node_event_journal.peek_event_identities(mesh.store, kind='info')) == 1
-    mesh.store.upsert_messages(
-        chat, (_message('future-target', base + 3, 'aryan'),),
-    )
-    next(iter(worker._info_jobs.values())).next_due = 0.0
     final = worker.run_one()
     assert final.status == 'consumed' and not final.gap
-    assert [(event.type, event.data) for event in final.reactions] == [
-        (eventbus.REACTION, {'id': env['id'], 'from': 'alice'}),
-    ]
+    assert final.reactions == ()
+    assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
 
 
 def test_reaction_cannot_attach_to_target_created_after_operation(world):
@@ -456,9 +427,7 @@ def test_large_actor_state_and_reaction_capture_have_separate_byte_caps(world):
     final = worker.run_one() if first.status == 'pending' else first
 
     assert final.status == 'consumed' and not final.gap
-    assert [(event.type, event.data) for event in final.reactions] == [
-        (eventbus.REACTION, {'id': env['id'], 'from': 'alice'}),
-    ]
+    assert final.reactions == ()
 
 
 def test_advanced_document_makes_older_target_operation_terminal(world):
@@ -504,6 +473,27 @@ def test_dm_block_suppresses_retained_reaction_semantics(world):
     meta['kind'] = 'dm'
     mirror.put_doc(P.meta(chat), meta)
     mesh.privacy.block('alice')
+    _inputs(mesh, mirror, reader, publisher, chat)
+    clock = [0.0]
+    worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
+
+    first = worker.run_one()
+    clock[0] = .35
+    final = worker.run_one() if first.status == 'pending' else first
+
+    assert final.status == 'consumed' and final.reactions == () and not final.gap
+    assert node_event_journal.peek_event_identities(
+        mesh.store, kind='info') == ()
+
+
+def test_dm_unblock_cannot_reconstruct_reaction_time_policy(world):
+    mesh, mirror, _provider, chat, _base, reader, publisher = world
+    meta = mirror.get_doc(P.meta(chat))
+    meta['kind'] = 'dm'
+    mirror.put_doc(P.meta(chat), meta)
+    _signed_reaction(world)
+    mesh.privacy.block('alice')
+    mesh.privacy.unblock('alice')
     _inputs(mesh, mirror, reader, publisher, chat)
     clock = [0.0]
     worker = NodeMessageEventPreparation(mesh, clock=lambda: clock[0])
@@ -607,7 +597,7 @@ def test_multiple_blocked_reactions_rotate_retry_and_do_not_starve_tail(world):
     mirror.put_doc(P.reactions(chat, 'alice'), alice_document)
     mirror.put_doc(P.reactions(chat, 'bob'), bob_document)
     _inputs(mesh, mirror, reader, publisher, chat)
-    reactions = []
+    consumed = []
     for index in range(3, 11):
         # A growing later tail cannot extend the finite sweep and prevent the
         # two retained identities from receiving another turn.
@@ -618,13 +608,16 @@ def test_multiple_blocked_reactions_rotate_retry_and_do_not_starve_tail(world):
         _enqueue(mesh, chat, later['ns'], kind='info', ident=later['id'], sender='carol')
         clock[0] = index * .35
         step = worker.run_one()
-        reactions.extend(step.reactions)
-        if len(reactions) == 2:
+        if step.status == 'consumed':
+            consumed.append(step)
+        if not node_event_journal.peek_event_identities(
+                mesh.store, kind='info'):
             break
 
-    assert {(event.data['id'], event.data['from']) for event in reactions} == {
-        ('alice-reaction', 'alice'), ('bob-reaction', 'bob'),
-    }
+    assert len(consumed) >= 2
+    assert all(step.reactions == () for step in consumed)
+    remaining = node_event_journal.peek_event_identities(mesh.store, kind='info')
+    assert all(item.message_id.startswith('continuous-') for item in remaining)
 
 
 @pytest.mark.parametrize('change', ('hint', 'tampered_document', 'resealed'))
@@ -652,7 +645,7 @@ def test_unproven_or_stale_reaction_is_terminal_generic_invalidation(world, chan
     assert env['event']['to'] == 'forged-recipient'
 
 
-def test_mixed_equal_ns_info_batch_emits_only_verified_reaction(world):
+def test_mixed_equal_ns_info_batch_retires_without_unproven_reaction(world):
     mesh, _mirror, _provider, chat, _base, _reader, _publisher = world
     env, _document = _signed_reaction(world)
     unrelated = {'id': 'same-ns-other-sender', 'ns': env['ns'], 'ts': '',
@@ -674,9 +667,7 @@ def test_mixed_equal_ns_info_batch_emits_only_verified_reaction(world):
 
     assert [step.records for step in completed] == [1, 1]
     reactions = tuple(event for step in completed for event in step.reactions)
-    assert [(event.ns, event.data) for event in reactions] == [
-        (env['ns'], {'id': env['id'], 'from': 'alice'}),
-    ]
+    assert reactions == ()
     assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
 
 

@@ -1028,6 +1028,22 @@ P1/P2, verified preserved state fields and later-state rejection with independen
 probes, and identified a coverage gap for matching hidden/cleared checkpoints;
 the added durable parametrized regression passes.
 
+The next current-head review found two remaining historical-policy gaps. Current
+mutable account documents cannot prove whether either participant blocked a DM
+at the reaction cut after an unblock or rollback, so DM reactions now remain
+generic read-model invalidations until the protocol carries bounded authenticated
+block history. A real-signature independent probe then showed the same boundary
+for group target visibility: a complete signed delete/void cycle or absent
+redaction document can be restored after a newer deletion, so the current
+mutable document cannot prove visibility at the reaction cut. Active tombstones
+remain suppressing, while absence and signed voids now stay generic until the
+protocol carries bounded authenticated target-visibility history. Consequently
+retained semantic reaction notifications remain safely disabled for both DMs
+and groups; signed reaction operations and the bounded projection path are
+future protocol groundwork rather than release evidence. The final broader
+reaction, messaging, notification and security gate passes 146 tests; Ruff and
+whitespace checks pass.
+
 This stack remains inactive in product startup. No app restart, deployment or
 merge has occurred. The next major slice is app-owned startup/close binding for
 the reviewed local-node recovery, publication, retained-event and notification

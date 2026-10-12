@@ -1160,17 +1160,25 @@ and journal identity. Superseded, removed, evicted, legacy and resealed evidence
 falls back to the content-free invalidation lane. This version does not activate
 the local node event owner.
 
-Version 0.24.376 maps only an exact signed native v2 human reaction breadcrumb
-to an identity-only reaction wake. The request freshly verifies the breadcrumb
-signature, explicit actor tenure at both operation and event namespaces, the
-current actor reaction document and its matching operation, then canonically
-projects the exact target with current membership, history-on-join, keys,
-trust, edits, redactions and viewer hidden/clear state. It does not capture the
-room-wide reaction manifest. The final transaction repeats the source,
-authority, message/overlay and exact journal identity fences before consuming
-the breadcrumb. Missing admitted reaction documents or targets remain retryable;
+Version 0.24.376 builds a bounded projection for an exact signed native v2 human
+reaction breadcrumb. The request verifies the breadcrumb signature, explicit
+actor tenure at both operation and event namespaces, the current actor reaction
+document and its matching operation, then canonically projects the exact target
+under one final source/journal cut. It does not capture the room-wide reaction
+manifest. Missing admitted reaction documents or targets remain retryable;
 malformed, legacy, resealed, removed, evicted or superseded evidence becomes
 only the generic per-chat read-model invalidation.
+
+That machinery does not currently publish semantic reaction wakes. Current
+mutable account documents cannot prove that neither DM participant blocked the
+other at the reaction cut after an unblock or rollback. Current redaction
+documents likewise cannot prove group target visibility: a complete signed
+delete/void cycle, or document absence, can be restored after a newer tombstone
+that was active when the reaction occurred. An active authenticated tombstone
+can suppress, but absence or a void cannot authorize. All retained reactions
+therefore remain generic invalidations until the protocol carries bounded
+authenticated block history and target-visibility history. Local generations,
+transport cursors and current cached documents must not fill that authority gap.
 
 The EventBus receives only breadcrumb ID and actor. GUI and background
 notification consumers recapture the breadcrumb, operation, target, viewer
