@@ -46,8 +46,14 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   binds reads to the pinned provider principal. Focused validation passes 214
   tests with two expected skips and independent Astra review found no P1/P2.
   No schema was deployed and PostgreSQL execution/concurrency remains unproven.
-  Next: validate P1a on a disposable PostgreSQL/Supabase project, then design
-  the typed receipt RPCs and bounded receipt lifecycle as P1b.
+  The next stacked branch adds a fail-closed disposable-database gate that
+  executes the source protocol SQL, state/grant/replay checks and both exact
+  named-session advisory-lock orders without timing inference. It also proves
+  that the seal cursor includes an admitted writer's committed source event.
+  This machine has no `psql`, PostgreSQL server, Docker or Podman runtime, so the
+  gate is source-complete but not execution evidence. Next: run it on a fresh
+  disposable PostgreSQL/Supabase database, then design the typed receipt RPCs
+  and bounded receipt lifecycle as P1b.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady
