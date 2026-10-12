@@ -10,6 +10,7 @@ Rules enforced here (FORMAT2):
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any
 
@@ -17,8 +18,8 @@ from ..core.timekit import new_id, next_ns, utcnow_iso
 from ..transport.base import Transport
 from .paths import P
 from .reaction_documents import (
-    MAX_LATEST_OPERATIONS, MAX_MAPPING_ENTRIES, MAX_NS, ReactionOperation,
-    is_v2_candidate, operation_signature, parse_v2,
+    MAX_DOCUMENT_BYTES, MAX_LATEST_OPERATIONS, MAX_MAPPING_ENTRIES, MAX_NS,
+    ReactionOperation, is_v2_candidate, operation_signature, parse_v2,
 )
 
 __all__ = ["ChatOverlays", "UserState", "reaction_map", "fold_reactions"]
@@ -57,8 +58,10 @@ def fold_reactions(per_user: dict[str, dict[str, str]]) -> dict[str, dict[str, l
     return out
 
 
-def _bounded_reaction_mapping(mapping: dict, priority: str) -> dict[str, str]:
-    """Normalize a legacy map into the v2 budget, preserving this action."""
+def _bounded_reaction_state(
+    mapping: dict, operations: dict[str, ReactionOperation], priority: str, ns: int,
+) -> tuple[dict[str, str], dict[str, ReactionOperation]]:
+    """Normalize state into the v2 count/byte budgets, preserving this action."""
     valid = {}
     for target, emoji in mapping.items():
         try:
@@ -68,15 +71,54 @@ def _bounded_reaction_mapping(mapping: dict, priority: str) -> dict[str, str]:
             accepted = False
         if accepted:
             valid[target] = emoji
-    if len(valid) <= MAX_MAPPING_ENTRIES:
-        return valid
-    retained = sorted(valid)
+    ordered = sorted(valid)
+    minimum = 0
     if priority in valid:
-        retained.remove(priority)
-        retained = retained[:MAX_MAPPING_ENTRIES - 1] + [priority]
-    else:
-        retained = retained[:MAX_MAPPING_ENTRIES]
-    return {target: valid[target] for target in retained}
+        ordered.remove(priority)
+        ordered.insert(0, priority)
+        minimum = 1
+
+    def candidate(count):
+        kept_mapping = {target: valid[target] for target in ordered[:count]}
+        kept_operations = {
+            target: operation for target, operation in operations.items()
+            if not operation.emoji or target in kept_mapping
+        }
+        # The current removal has no mapping entry but is still the namespace
+        # head and must survive any migration cut.
+        if priority in operations:
+            kept_operations[priority] = operations[priority]
+        document = {
+            'schema': 2, 'v': kept_mapping, 'ops_origin': 'native',
+            'ops': {target: value.to_dict()
+                    for target, value in kept_operations.items()},
+            'ns': ns, 'sig': '', 'ops_sig': '',
+        }
+        try:
+            parse_v2(document)
+        except ValueError:
+            return None
+        body = json.dumps(
+            {key: document[key] for key in
+             ('schema', 'v', 'ops', 'ops_origin', 'ns')},
+            sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+        )
+        if len(body.encode('utf-8')) > MAX_DOCUMENT_BYTES:
+            return None
+        return kept_mapping, kept_operations
+
+    low, high, best = minimum, min(len(ordered), MAX_MAPPING_ENTRIES), None
+    while low <= high:
+        middle = (low + high) // 2
+        value = candidate(middle)
+        if value is None:
+            high = middle - 1
+        else:
+            best = value
+            low = middle + 1
+    if best is None:
+        raise OverflowError('reaction v2 document exceeds budget')
+    return best
 
 
 class ChatOverlays:
@@ -168,12 +210,14 @@ class ChatOverlays:
 
         path = P.reactions(self.chat_id, user)
         old = self.tx.get_doc(path, default={})
+        authenticated_old = signer is None
         if is_v2_candidate(old):
             try:
                 mapping, operations = parse_v2(old)
                 existing = operation_signature(old)
             except ValueError:
                 mapping, operations, existing = {}, {}, ''
+                authenticated_old = False
             if signer is not None:
                 try:
                     data = reaction_v2_signing_bytes(self.chat_id, user, old)
@@ -186,13 +230,16 @@ class ChatOverlays:
                     # Never make a forged or unsigned v2 value a persistent
                     # write blocker, or launder its mapping/operation IDs.
                     mapping, operations = {}, {}
+                    authenticated_old = False
+                else:
+                    authenticated_old = True
             if not existing or old.get('ops_origin') == 'resealed':
                 # A fresh local action must not promote unproven historical
                 # operation IDs into a native document.
                 operations = {}
         else:
             mapping, operations = reaction_map(old), {}
-            if signer is not None and mapping:
+            if signer is not None:
                 legacy_sig = old.get('sig') if type(old) is dict else None
                 try:
                     legacy_data = reaction_signing_bytes(
@@ -202,9 +249,12 @@ class ChatOverlays:
                 if (type(legacy_sig) is not str or not legacy_sig
                         or legacy_sig != signer(legacy_data)):
                     mapping = {}
+                    authenticated_old = False
+                else:
+                    authenticated_old = True
         previous = operations.get(msg_id)
         ns = next_ns()
-        if type(old) is dict and type(old.get('ns')) is int:
+        if authenticated_old and type(old) is dict and type(old.get('ns')) is int:
             ns = max(ns, old['ns'] + 1)
         if ns > MAX_NS:
             raise OverflowError('reaction operation namespace exhausted')
@@ -214,11 +264,13 @@ class ChatOverlays:
             mapping[msg_id] = emoji
         else:
             mapping.pop(msg_id, None)
-        mapping = _bounded_reaction_mapping(mapping, msg_id)
         operations[msg_id] = operation
         while len(operations) > MAX_LATEST_OPERATIONS:
             oldest = min(operations, key=lambda target: (operations[target].ns, target))
             del operations[oldest]
+        mapping, operations = _bounded_reaction_state(
+            mapping, operations, msg_id, ns,
+        )
         doc = {'schema': 2, 'v': mapping, 'ops_origin': 'native', 'ops': {
             target: value.to_dict() for target, value in operations.items()
         }, 'ns': ns, 'sig': '', 'ops_sig': ''}

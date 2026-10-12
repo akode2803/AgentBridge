@@ -10,7 +10,7 @@ from agentbridge.mesh.events import reaction_signing_bytes, reaction_v2_signing_
 from agentbridge.mesh.overlays import ChatOverlays, reaction_map
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.reaction_documents import (
-    MAX_LATEST_OPERATIONS, MAX_MAPPING_ENTRIES, operation_signature,
+    MAX_LATEST_OPERATIONS, MAX_MAPPING_ENTRIES, MAX_NS, operation_signature,
     parse_native_v2, parse_v2,
 )
 
@@ -116,6 +116,29 @@ def test_forged_v2_is_replaced_without_laundering_or_lockout():
 
 
 @pytest.mark.parametrize('forged', (
+    {
+        'schema': 2, 'v': {'forged': '👀'}, 'ops_origin': 'native',
+        'ops': {'forged': {'id': 'foreign-operation', 'ns': MAX_NS,
+                           'emoji': '👀', 'previous': None}},
+        'ns': MAX_NS, 'sig': 'foreign', 'ops_sig': 'foreign',
+    },
+    {'v': {'forged': '👀'}, 'ns': MAX_NS, 'sig': 'foreign'},
+))
+def test_forged_namespace_cannot_exhaust_genuine_reaction_writes(forged):
+    tx = Documents()
+    path = P.reactions('chat', 'alice')
+    tx.put_doc(path, forged)
+
+    operation = ChatOverlays(tx, 'chat').set_reaction(
+        'alice', 'fresh', '✅', signer=_signed)
+
+    written = tx.get_doc(path)
+    assert operation.ns == written['ns'] < MAX_NS
+    assert written['v'] == {'fresh': '✅'}
+    assert written['ops'] == {'fresh': operation.to_dict()}
+
+
+@pytest.mark.parametrize('forged', (
     {'m-old': '👍'},
     {'v': {'m-old': '👍'}, 'ns': 7, 'sig': 'foreign'},
 ))
@@ -156,6 +179,26 @@ def test_oversized_v1_map_migrates_deterministically_and_preserves_action():
     written = tx.get_doc(path)
     migrated, operations = parse_native_v2(written)
     assert len(migrated) == MAX_MAPPING_ENTRIES
+    assert migrated['priority-target'] == '🎉'
+    assert operations['priority-target'] == operation
+
+
+def test_byte_oversized_v1_map_migrates_within_native_document_budget():
+    tx = Documents()
+    path = P.reactions('chat', 'alice')
+    mapping = {
+        f'{index:03d}-' + 'x' * 4000: '👍'
+        for index in range(300)
+    }
+    tx.put_doc(path, {'v': mapping, 'ns': 7, 'sig': _signed(
+        reaction_signing_bytes('chat', 'alice', 7, mapping))})
+
+    operation = ChatOverlays(tx, 'chat').set_reaction(
+        'alice', 'priority-target', '🎉', signer=_signed)
+
+    written = tx.get_doc(path)
+    migrated, operations = parse_native_v2(written)
+    assert len(migrated) < len(mapping)
     assert migrated['priority-target'] == '🎉'
     assert operations['priority-target'] == operation
 
