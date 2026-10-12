@@ -14,7 +14,8 @@ from agentbridge.node.server import LocalNodeServer
 from agentbridge.store import (
     coupled_admission, coupled_payload_stage, coupled_publication,
     coupled_stage, local_source, membership_input_position,
-    node_publication_receipt, presence_publication, raw_publication,
+    node_event_journal, node_publication_receipt, presence_publication,
+    raw_publication,
     source_selectors, staged_publication, staged_source,
 )
 from agentbridge.store.db import Store
@@ -134,6 +135,18 @@ def test_publish_replaces_messages_offsets_and_documents_in_one_cut(world):
     }]
     assert store.log_offsets(CHAT) == {"alice@box": 5}
     assert store.message_observation(CHAT, "new") == (99, 0, "local-node")
+    events = node_event_journal.claim_events(store)
+    assert events == node_event_journal.NodeEventClaim((
+        node_event_journal.NodeEventRecord(CHAT, {
+            "id": "new", "ns": 7, "from": "alice", "kind": "message",
+            "text": "new",
+        }),
+    ), False)
+    assert node_event_journal.claim_events(store) is None
+    delivery = node_event_journal.pending_deliveries(store)
+    assert delivery == (node_event_journal.NodeDelivery(CHAT, 7),)
+    assert node_event_journal.complete_delivery(store, delivery[0])
+    assert node_event_journal.pending_deliveries(store) == ()
     assert store.capture_selected_documents(
         result.source.raw, (f"chats/{CHAT}/meta.json",),
     ).documents() == {

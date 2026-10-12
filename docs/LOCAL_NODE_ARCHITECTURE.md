@@ -999,3 +999,32 @@ Product activation must additionally replace
 the legacy record-content event pump (notifications and delivered receipts)
 with a node-owned, replay-safe event boundary before retiring the old sync owner
 in a running app.
+
+### Node-admitted event work
+
+Coupled publication now records process-event work in the same SQLite
+transaction that admits the node cut. The journal stores at most 1,000 record
+identities globally and one delivery high-water per affected chat; it never
+stores decrypted content, a membership decision or any other authority
+verdict. New work is defined exactly as a candidate message ID absent from the
+previous Store cut, matching the legacy sync pump's actually-inserted boundary.
+Repeated node publication of the same IDs therefore creates no event replay.
+
+The bounded journal retains the newest identities and raises an explicit gap
+when older work is coalesced. Pending `(chat, id)` identities are unique;
+remove/reintroduce ABA keeps one item and records a gap. A consumer claims at
+most 128 identities and 8 MiB in admission order, preflights payload sizes
+before materialization, and deletes them before best-effort process
+publication, so a crash can omit an event but cannot replay a notification.
+It rereads each current Store payload and accepts it only while the admitted
+`(ns, sender, kind, id)` identity still matches; deletion, movement or an
+oversize payload becomes the same resync gap. The owned tables reject unowned
+triggers and indexes. Delivery high-waters use an exact compare-and-delete completion,
+so a concurrent newer admission cannot be erased by completion of an older
+cloud receipt write. Canonical page invalidation remains separate and does not
+depend on this lossy work journal.
+
+This slice only establishes the atomic Store primitive. The app-owned runtime
+must next translate claimed records into the existing bus semantics, surface a
+content-free resync on gaps, retry idempotent delivery writes, and schedule
+that bounded work without extending a node provider/publication quantum.
