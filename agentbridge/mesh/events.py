@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Protocol
 
 from .. import crypto
@@ -44,6 +45,7 @@ __all__ = [
     "unredaction_signing_bytes",
     "reaction_signing_bytes", "pin_signing_bytes", "state_signing_bytes",
     "genesis_gid", "GID_LEN", "is_legacy_chat_id",
+    "InfoEventIdentity", "InfoEventOutcome", "InfoSuffixEvaluation", "advance_with_outcomes",
 ]
 
 # ------------------------------------------------------------- R13.5 integrity
@@ -160,6 +162,43 @@ class Resolver(Protocol):
     def sign_pub(self, name: str) -> str | None: ...  # R13.5 signature verify
 
 
+@dataclass(frozen=True)
+class InfoEventIdentity:
+    """Exact composite identity, not an event acceptance or authority result."""
+    ns: int
+    sender: str
+    id: str
+
+    def __post_init__(self):
+        if (type(self.ns) is not int or not 0 <= self.ns <= 2**63 - 1
+                or type(self.sender) is not str or len(self.sender.encode()) > 4096
+                or '\x00' in self.sender
+                or type(self.id) is not str or not self.id
+                or len(self.id.encode()) > 4096 or '\x00' in self.id):
+            raise ValueError('invalid info event identity')
+
+
+@dataclass(frozen=True)
+class InfoEventOutcome:
+    identity: InfoEventIdentity
+    status: str  # applied / ignored / outside_proven_suffix
+    authentication: str  # signed_author / gid_content / unproven
+    actor: str = ''
+    event_type: str = ''
+
+
+@dataclass(frozen=True)
+class InfoSuffixEvaluation:
+    """Request-only computation; requires canonical finalization before use.
+
+    These outcomes cannot be persisted or reused as continuing authority. An
+    ignored outcome means _apply evaluated the captured event without applying
+    a state change; it does not classify a reaction breadcrumb's authenticity.
+    """
+    snapshot: ChatSnapshot
+    outcomes: tuple[InfoEventOutcome, ...]
+
+
 def fold(chat_id: str, envelopes: list[dict], directory: Resolver) -> ChatSnapshot:
     """Deterministic replay of a chat's info events into its snapshot."""
     infos = sorted(
@@ -186,22 +225,93 @@ def advance(
     records are eligible, so an in-progress multi-log sync cannot reconstruct
     authority from a partial history and accidentally widen membership.
     """
+    return _advance_suffix(materialized, envelopes, directory)[0]
+
+
+def advance_with_outcomes(materialized: ChatSnapshot, envelopes: list[dict],
+                          directory: Resolver, requested: tuple[InfoEventIdentity, ...]
+                          ) -> InfoSuffixEvaluation:
+    """Evaluate only a bounded captured suffix with exact requested outcomes.
+
+    Caller must establish the predecessor's canonical provenance, complete
+    suffix capture, and fresh final validation of all raw/source/authority
+    dependencies. This pure computation proves none of those itself. Targets
+    at/below materialized_ns or absent from the supplied suffix stay explicitly
+    outside_proven_suffix, even if their signatures or current membership match.
+    Genesis GID binding proves event content, not envelope sender/id/ns.
+    Legacy integer IDs normalize to canonical text before composite ordering.
+    Count caps here do not bound raw bytes, nesting, directory/account work or
+    cryptography. The caller's capture and operation ledger must enforce those
+    limits before and during this computation.
+    """
+    if (type(materialized) is not ChatSnapshot or type(envelopes) is not list
+            or len(envelopes) > 128 or any(type(e) is not dict for e in envelopes)
+            or type(requested) is not tuple or len(requested) > 32
+            or any(type(i) is not InfoEventIdentity for i in requested)
+            or len(set(requested)) != len(requested)):
+        raise ValueError('invalid bounded info suffix evaluation')
+    snapshot, outcomes = _advance_suffix(materialized, envelopes, directory, requested)
+    return InfoSuffixEvaluation(snapshot, tuple(
+        outcomes.get(identity, InfoEventOutcome(identity, 'outside_proven_suffix', 'unproven'))
+        for identity in requested))
+
+
+def _advance_suffix(materialized, envelopes, directory, requested=None):
     snap = ChatSnapshot.from_dict(materialized.to_dict())
-    infos = sorted(
+    wanted, outcomes = set(requested or ()), {}
+    infos = list(
         (
             e for e in envelopes
             if e.get("kind") == "info"
             and isinstance(e.get("event"), dict)
             and int(e.get("ns", 0)) > materialized.materialized_ns
         ),
-        key=lambda e: (e.get("ns", 0), e.get("from", ""), e.get("id", "")),
     )
+    if requested is None:
+        infos.sort(key=lambda e: (e.get('ns', 0), e.get('from', ''), e.get('id', '')))
+    else:
+        # Normalize legacy integer IDs exactly as local admission does, before
+        # ordering and collision checks. Untargeted rows still affect authority.
+        captured, seen = [], set()
+        for env in infos:
+            ident = env.get('id')
+            if type(ident) is int:
+                ident = str(ident)
+            identity = InfoEventIdentity(env.get('ns', 0), env.get('from', ''), ident)
+            if identity in seen:
+                raise ValueError('duplicate captured info identity')
+            seen.add(identity)
+            captured.append((identity, env))
+        captured.sort(key=lambda item: (item[0].ns, item[0].sender, item[0].id))
+        infos = [env for _identity, env in captured]
     for env in infos:
-        if _apply(snap, env, directory):
+        identity = None
+        if requested is not None:
+            # Admission normalizes legacy integer IDs to text. Do not coerce
+            # arbitrary objects or booleans into projected identities.
+            ident = env.get('id')
+            if type(ident) is int:
+                ident = str(ident)
+            identity = InfoEventIdentity(env.get('ns', 0), env.get('from', ''), ident)
+        applied = _apply(snap, env, directory)
+        if applied:
             snap.materialized_ns = max(
                 snap.materialized_ns, int(env.get("ns", 0)),
             )
-    return snap
+        if identity in wanted:
+            event = env['event']
+            etype = event.get('type', '')
+            if type(etype) is not str or len(etype.encode()) > 256:
+                raise ValueError('invalid info outcome type')
+            genesis = etype == EV_CREATED
+            actor = event.get('creator', '') if genesis else env.get('from', '')
+            if type(actor) is not str or len(actor.encode()) > 4096:
+                raise ValueError('invalid info outcome actor')
+            outcomes[identity] = InfoEventOutcome(identity,
+                'applied' if applied else 'ignored',
+                ('gid_content' if genesis else 'signed_author') if applied else 'unproven',
+                actor if applied else '', etype)
+    return snap, outcomes
 
 
 def _authentic(chat_id: str, env: dict, etype: str, author: str, d: Resolver) -> bool:
