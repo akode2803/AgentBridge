@@ -876,3 +876,20 @@ as malformed/ignored and continues evaluating later valid suffix events. Exact
 requested identities reject unencodable sender/ID text as a normal validation
 error. The same bounded UTF-8 check protects outcome actor attribution. This
 closes #123's latest P2 without changing `_apply` or claiming event acceptance.
+
+## Delegation retry review corrections — v0.24.373
+
+The #124 review repair now honors the scheduled one-second pin retry instead of
+self-waking the harness before its deadline. Pin contention discovered after the
+initial account read, including discovery, host-current and saved-result recovery
+paths, reaches the same retry callback. A scan keeps any work already claimed
+before a later candidate blocks, but never claims the contended candidate.
+Non-timeout pin failures still propagate. Recovery journals remain in their
+durable `result_ready` or `executing` state until the pin-dependent settlement
+succeeds, including the nested interruption path after a failed result return.
+
+The focused delegation/deadline gate passed 46 tests. Sol's implementation gate
+and Ruff/diff checks passed; Astra independently reviewed the final call graph,
+ran a disposable partial-work probe and found no P1/P2. The older #119 Windows
+ten-second claim timeout remains causally unproven because its log contains no
+pin reason or timing trace. No product activation, restart, deployment or merge.

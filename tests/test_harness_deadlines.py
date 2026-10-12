@@ -159,7 +159,9 @@ def test_runner_handoff_scan_is_dirty_on_start_and_mirror_change(hrig):
 
     assert runner._handoff_scan_due(now) is True
     assert runner._handoff_scan_due(now) is False
-    assert runner._handoff_check_in_s(now) == runner_module.HANDOFF_RECOVERY_S
+    assert runner._handoff_check_in_s(now) == pytest.approx(
+        runner_module.HANDOFF_RECOVERY_S, abs=1e-9,
+    )
 
     runner._wake.clear()
     runner._runtime_changed()
@@ -183,6 +185,7 @@ def test_healthy_observer_retries_pin_busy_handoff_discovery_promptly(
     )
     now = time.monotonic()
     assert runner._handoff_scan_due(now) is True
+    runner._wake.clear()
     runner._change_observer._started = True
     monkeypatch.setattr(
         runner._change_observer, "next_check_in_s", lambda: 300.0,
@@ -203,6 +206,7 @@ def test_healthy_observer_retries_pin_busy_handoff_discovery_promptly(
         assert calls == failed_read
 
     retry_at = runner._next_handoff_recovery
+    assert not runner._wake.is_set()  # synchronous deferral must honor the deadline
     assert 0.0 < retry_at - time.monotonic() <= runner_module.HANDOFF_PIN_RETRY_S
     assert runner._handoff_scan_due(retry_at - 0.001) is False
     wait = runner._next_loop_wait(

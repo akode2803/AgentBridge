@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -116,27 +117,35 @@ def _wait_until(predicate, timeout=5.0):
     raise AssertionError("condition was not reached")
 
 
-def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
-        delegation_meshes, monkeypatch):
+def _pending_authorized_offer(delegation_meshes, *, suffix="pin-busy"):
     _owner, manager, specialist, chat_id = delegation_meshes
     _runs, tasks, source_handoffs, _source = _coordinator(manager)
+    run_id, task_id = f"run-{suffix}", f"task-{suffix}"
     tasks.start_with_run(
-        run_id="run-pin-busy", task_id="task-pin-busy", chat_id=chat_id,
-        trigger_id="message-pin-busy", provider="codex", model="gpt-test",
+        run_id=run_id, task_id=task_id, chat_id=chat_id,
+        trigger_id=f"message-{suffix}", provider="codex", model="gpt-test",
     )
     offered = source_handoffs.offer(
-        chat_id=chat_id, run_id="run-pin-busy", parent_task_id="task-pin-busy",
+        chat_id=chat_id, run_id=run_id, parent_task_id=task_id,
         destination_agent="specialist", objective="Review", reason="Review",
         success_criteria=("Return a finding",),
     )
     _dr, _dt, destination_handoffs, destination = _coordinator(specialist)
     handoff_id = offered.events[0].meta.call_id or ""
     destination_handoffs.decide(
-        chat_id=chat_id, run_id="run-pin-busy", handoff_id=handoff_id,
+        chat_id=chat_id, run_id=run_id, handoff_id=handoff_id,
         accept=True,
     )
     source_handoffs.authorize(
-        chat_id=chat_id, run_id="run-pin-busy", handoff_id=handoff_id,
+        chat_id=chat_id, run_id=run_id, handoff_id=handoff_id,
+    )
+    return manager, specialist, chat_id, destination, handoff_id
+
+
+def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
+        delegation_meshes, monkeypatch):
+    manager, specialist, chat_id, destination, handoff_id = (
+        _pending_authorized_offer(delegation_meshes)
     )
     before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
     original_get = specialist.directory.get
@@ -164,6 +173,168 @@ def test_claim_ready_defers_pin_lock_timeout_then_claims_authorized_work(
     assert calls >= 2
     assert len(claimed) == 1 and claimed[0].handoff_id == handoff_id
     assert [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)] == before
+
+
+@pytest.mark.parametrize("stage", ("discovery", "host"))
+@pytest.mark.parametrize("reason", ("lock_timeout", "invalid_file"))
+def test_claim_ready_late_pin_failure_retries_only_lock_contention(
+        delegation_meshes, monkeypatch, stage, reason):
+    manager, specialist, chat_id, destination, handoff_id = (
+        _pending_authorized_offer(delegation_meshes)
+    )
+    before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
+    target, method = ((destination.discovery_ledger, "read")
+                      if stage == "discovery" else (destination, "_host_current"))
+    original = getattr(target, method)
+    calls = 0
+    retries = []
+
+    def once_busy(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PinStoreUnavailable(reason)
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(target, method, once_busy)
+        if reason == "lock_timeout":
+            assert destination.claim_ready(
+                exclude=set(), on_retryable=lambda: retries.append(True),
+            ) == []
+        else:
+            with pytest.raises(PinStoreUnavailable, match=reason):
+                destination.claim_ready(
+                    exclude=set(), on_retryable=lambda: retries.append(True),
+                )
+        assert calls == 1 and retries == ([True] if reason == "lock_timeout" else [])
+        assert specialist.store.cached_doc(
+            destination._journal_path(handoff_id), default=None,
+        ) is None
+        claimed = destination.claim_ready(exclude=set())
+
+    assert len(claimed) == 1 and claimed[0].handoff_id == handoff_id
+    assert [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)] == before
+
+
+def test_claim_ready_preserves_first_claim_when_next_candidate_hits_pin_timeout(
+        delegation_meshes, monkeypatch):
+    manager, specialist, chat_id, destination, first_id = (
+        _pending_authorized_offer(delegation_meshes, suffix="first")
+    )
+    _manager, _specialist, _chat_id, _destination, second_id = (
+        _pending_authorized_offer(delegation_meshes, suffix="second")
+    )
+    before = [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)]
+    original_host_current = destination._host_current
+    calls = 0
+    retries = []
+
+    def busy_second_candidate():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PinStoreUnavailable("lock_timeout")
+        return original_host_current()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(destination, "_host_current", busy_second_candidate)
+        claimed = destination.claim_ready(
+            exclude=set(), on_retryable=lambda: retries.append(True),
+        )
+
+    assert calls == 2 and retries == [True]
+    assert [item.handoff_id for item in claimed] == [first_id]
+    assert specialist.store.cached_doc(
+        destination._journal_path(first_id), default={},
+    )["state"] == "claimed"
+    assert specialist.store.cached_doc(
+        destination._journal_path(second_id), default=None,
+    ) is None
+    assert [(m.id, m.from_, m.body) for m in manager.messages_for(chat_id)] == before
+    recovered = destination.claim_ready(exclude={first_id})
+    assert [item.handoff_id for item in recovered] == [second_id]
+
+
+@pytest.mark.parametrize("journal_state,method,settled", (
+    ("result_ready", "return_result", "committed"),
+    ("executing", "interrupt", "interrupted"),
+))
+def test_claim_ready_recovery_pin_contention_keeps_durable_state_for_retry(
+        delegation_meshes, monkeypatch, journal_state, method, settled):
+    _manager, specialist, chat_id, destination, handoff_id = (
+        _pending_authorized_offer(delegation_meshes)
+    )
+    path = destination._journal_path(handoff_id)
+    specialist.store.cache_doc(path, {
+        "state": journal_state, "result": "saved", "prompt_digest": "d" * 64,
+    })
+    current = destination.discovery_ledger.read(chat_id)[0]
+    active = replace(current, events=(
+        *current.events, SimpleNamespace(state=HandoffState.ACTIVE),
+    ))
+    attempts = 0
+    retries = []
+
+    def once_busy(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PinStoreUnavailable("lock_timeout")
+        return None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(destination.discovery_ledger, "read", lambda *_args: [active])
+        patch.setattr(destination.ledger, method, once_busy)
+        assert destination.claim_ready(
+            exclude=set(), on_retryable=lambda: retries.append(True),
+        ) == []
+        assert retries == [True] and attempts == 1
+        assert specialist.store.cached_doc(path)["state"] == journal_state
+        assert destination.claim_ready(exclude=set()) == []
+
+    assert attempts == 2
+    assert specialist.store.cached_doc(path)["state"] == settled
+
+
+def test_claim_ready_failed_result_recovery_defers_busy_interruption(
+        delegation_meshes, monkeypatch):
+    _manager, specialist, chat_id, destination, handoff_id = (
+        _pending_authorized_offer(delegation_meshes)
+    )
+    path = destination._journal_path(handoff_id)
+    specialist.store.cache_doc(path, {
+        "state": "result_ready", "result": "saved", "prompt_digest": "d" * 64,
+    })
+    current = destination.discovery_ledger.read(chat_id)[0]
+    active = replace(current, events=(
+        *current.events, SimpleNamespace(state=HandoffState.ACTIVE),
+    ))
+    attempts = 0
+    retries = []
+
+    def busy_interrupt(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PinStoreUnavailable("lock_timeout")
+
+    def invalid_result(*_args, **_kwargs):
+        raise ValueError("invalid saved result")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(destination.discovery_ledger, "read", lambda *_args: [active])
+        patch.setattr(destination.ledger, "return_result", invalid_result)
+        patch.setattr(destination.ledger, "interrupt", busy_interrupt)
+        assert destination.claim_ready(
+            exclude=set(), on_retryable=lambda: retries.append(True),
+        ) == []
+        assert retries == [True] and attempts == 1
+        assert specialist.store.cached_doc(path)["state"] == "result_ready"
+        assert destination.claim_ready(exclude=set()) == []
+
+    assert attempts == 2
+    assert specialist.store.cached_doc(path)["state"] == "interrupted"
 
 
 def test_claim_ready_propagates_other_pin_store_failure(
