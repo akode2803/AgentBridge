@@ -372,6 +372,9 @@ class PageOperation:
     def _exact_include_reactions(self):
         return True
 
+    def _exact_include_reaction_candidates(self):
+        return True
+
     def _decorate(self, round_, snapshot, receipt, index, expected, sealer):
         return None, (), None
 
@@ -576,6 +579,7 @@ class PageOperation:
                 source_binding, index, raw_limit=0, expected=expected,
                 exact_ids=exact, state_paths=(P.state(self.chat, self.viewer),),
                 proof_keys=proof_keys, include_reactions=self._exact_include_reactions(),
+                include_reaction_candidates=self._exact_include_reaction_candidates(),
                 max_bytes=self.ledger.remaining(),
             )
             self.ledger.charge(inputs.captured_bytes)

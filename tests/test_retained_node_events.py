@@ -140,6 +140,41 @@ def test_signed_native_reaction_maps_to_identity_wake_and_fresh_notification(wor
     assert node_event_journal.peek_event_identities(mesh.store, kind='info') == ()
 
 
+def test_reaction_notification_rechecks_reactor_history_cutoff(world):
+    mesh, mirror, _provider, chat, base, reader, publisher = world
+    env, _document = _signed_reaction(world)
+    meta = mirror.get_doc(P.meta(chat))
+    meta['members']['alice']['joined_ns'] = base + 2
+    meta['tenure']['alice'] = [[base + 2, 0]]
+    mirror.put_doc(P.meta(chat), meta)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    sub = mesh.bus.subscribe()
+    clock = [0.0]
+    pump = NodeEventPump.for_mesh(mesh, clock=lambda: clock[0])
+    first = pump.run_due()
+    clock[0] = .35
+    second = pump.run_due()
+    assert first.operation == 'preparation'
+    assert second.operation == 'events'
+    reaction = next(event for event in sub.drain()
+                    if event.type == eventbus.REACTION)
+    assert reaction.data['id'] == env['id']
+
+    meta = mirror.get_doc(P.meta(chat))
+    meta['permissions']['send_history'] = False
+    mirror.put_doc(P.meta(chat), meta)
+    _inputs(mesh, mirror, reader, publisher, chat)
+    notifications = NodeNotificationPreparation(mesh)
+    assert notifications.enqueue(reaction)
+    result = notifications.run_one()
+    if result.status == 'pending':
+        notifications._jobs[('reaction', chat, env['id'])].next_due = 0.0
+        result = notifications.run_one()
+
+    assert result.status == 'ready'
+    assert result.notification is None
+
+
 def test_authentic_reaction_waits_for_delayed_document_then_maps(world):
     mesh, mirror, _provider, chat, _base, reader, publisher = world
     env, document = _signed_reaction(world, publish_document=False)

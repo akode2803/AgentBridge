@@ -377,21 +377,32 @@ def publish(conn, path, prepared, *, shared_source=False):
     return position
 
 
-def capture(path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES, include_reactions=False):
+def capture(
+    path, expected, targets, state_paths=(), *, max_rows=2048,
+    max_bytes=MAX_SELECT_BYTES, include_reactions=False,
+    include_reaction_candidates=True,
+):
     conn = source._open_reader(path)
     try:
         conn.execute('BEGIN')
         return _capture(conn, path, expected, targets, state_paths,
-                        max_rows=max_rows, max_bytes=max_bytes, include_reactions=include_reactions)
+                        max_rows=max_rows, max_bytes=max_bytes,
+                        include_reactions=include_reactions,
+                        include_reaction_candidates=include_reaction_candidates)
     finally:
         conn.close()
 
 
-def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, max_bytes=MAX_SELECT_BYTES, include_reactions=False):
+def _capture(
+    conn, path, expected, targets, state_paths=(), *, max_rows=2048,
+    max_bytes=MAX_SELECT_BYTES, include_reactions=False,
+    include_reaction_candidates=True,
+):
     if not conn.in_transaction:
         raise sqlite3.OperationalError('capture requires an active read transaction')
     expected = _wanted(expected, path)
-    if type(include_reactions) is not bool:
+    if (type(include_reactions) is not bool
+            or type(include_reaction_candidates) is not bool):
         raise ValueError('invalid manifest selector')
     if type(targets) is not tuple or type(state_paths) is not tuple or len(targets) > MAX_TARGETS or len(state_paths) > MAX_DEPENDENCIES:
         raise ValueError('invalid index selectors')
@@ -424,7 +435,9 @@ def _capture(conn, path, expected, targets, state_paths=(), *, max_rows=2048, ma
         if len(paths) > MAX_DEPENDENCIES:
             raise OverflowError('complete input exceeds dependency budget')
     for target in targets:
-        queries = [('reaction', None)] + [(kind, state) for kind in ('hidden', 'starred') for state in state_paths]
+        queries = ([('reaction', None)] if include_reaction_candidates else [])
+        queries += [(kind, state) for kind in ('hidden', 'starred')
+                    for state in state_paths]
         for kind, state in queries:
             sql = 'SELECT kind,target,path,size FROM overlay_index_candidates WHERE source=? AND kind=? AND target=?'
             params = (source_id, kind, target)

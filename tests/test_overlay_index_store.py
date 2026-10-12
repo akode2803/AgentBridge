@@ -121,6 +121,35 @@ def test_publish_capture_and_key_specific_proof_lifecycle(store):
     ) == (None, None, None, None, False)
 
 
+def test_capture_can_skip_unrelated_target_reaction_candidates(store):
+    reaction_path = _reaction_path('alice')
+    state_path = _state_path('viewer')
+    reaction_raw = _payload({'v': {'target': '👍'}})
+    state_raw = _payload({'hidden': ['target'], 'sig': 'state-signature'})
+    source = _publish_source(store, {
+        reaction_path: json.loads(reaction_raw),
+        state_path: json.loads(state_raw),
+    })
+    indexed = _build(store, source, [
+        _indexed_document(reaction_path, 'alice', reaction_raw),
+        _indexed_document(state_path, 'viewer', state_raw),
+    ], [
+        overlay_index.OverlayCandidate(
+            reaction_path, 'reaction', 'target', '👍'),
+        overlay_index.OverlayCandidate(state_path, 'hidden', 'target', ''),
+    ])
+
+    selected = store.capture_overlay_index(
+        indexed, ('target',), (state_path,),
+        include_reaction_candidates=False,
+    )
+
+    assert [item.path for item in selected.documents] == [state_path]
+    assert selected.candidates == (
+        overlay_index.OverlayCandidate(state_path, 'hidden', 'target', ''),
+    )
+
+
 def test_source_invalidation_and_reset_reject_ready_index(store):
     path = _reaction_path("alice")
     raw = _payload({"v": {"m1": "x"}})

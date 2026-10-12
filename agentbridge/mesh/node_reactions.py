@@ -122,6 +122,12 @@ class ReactionProjectionOperation(PageOperation):
         # complete reaction manifest.
         return False
 
+    def _exact_include_reaction_candidates(self):
+        # The operation captures the actor's exact raw document separately.
+        # Selecting every target reaction candidate would add unrelated room
+        # fan-in and can exhaust a bounded proof operation.
+        return False
+
     def _breadcrumb(self, row, round_, snapshot):
         if row.kind != 'info':
             return None
@@ -356,6 +362,7 @@ class ReactionNotificationOperation(ReactionProjectionOperation):
         if (message is None or message.kind is not MsgKind.MESSAGE
                 or message.deleted or message.undecrypted
                 or message.ns > candidate['reaction_ns']
+                or message.ns < candidate['history_from_ns']
                 or message.from_ != self.viewer):
             return ReactionNotificationResult('ready')
         state = json.loads(result.presentation.viewer_state_json)
