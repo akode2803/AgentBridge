@@ -64,7 +64,15 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   [the hosted acceptance record](docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
   A browser-issued authenticated PostgREST call and full-schema scratch install
   remain separate evidence, not blockers for inactive P1b design. Next: design
-  the typed receipt RPCs and bounded receipt lifecycle as P1b.
+  the typed receipt RPCs and bounded receipt lifecycle as P1b. The design is now
+  recorded in
+  [PROVIDER_TYPED_MUTATION_RPC_PLAN.md](docs/PROVIDER_TYPED_MUTATION_RPC_PLAN.md):
+  a same-transaction applying receipt is the trusted sealed-write context; the
+  provider stores an independent request digest; 4,096 non-evicting slots bound
+  one epoch; acknowledgments do not free replay evidence; and an exclusive
+  epoch rotation prunes only after all receipts are acknowledged, making every
+  delayed old-epoch retry fail closed. Implementation begins with the private
+  receipt/gate core before any public readiness marker.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady
