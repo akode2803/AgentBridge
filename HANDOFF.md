@@ -893,3 +893,28 @@ and Ruff/diff checks passed; Astra independently reviewed the final call graph,
 ran a disposable partial-work probe and found no P1/P2. The older #119 Windows
 ten-second claim timeout remains causally unproven because its log contains no
 pin reason or timing trace. No product activation, restart, deployment or merge.
+
+## Retained info/reaction content-free invalidation — v0.24.374
+
+The retained owner now rotates a bounded info lane with canonical ordinary
+message preparation. At most 32 identities from one chat are exact-CAS consumed
+in one owned SQLite transaction. The operation reads no payload and publishes
+only a per-chat `READ_MODEL` invalidation after commit. It makes no event-type,
+actor, membership, visibility or reaction claim; missing, moved or oversized
+current rows raise the existing durable global gap. Separate cursors prevent
+cross-lane rotation coupling, and info consumption preserves ordinary message
+split, cooldown and finite-ledger state.
+
+This lane intentionally consumes reaction breadcrumbs as generic refresh work.
+Strict reaction notifications remain blocked because the signed overlay has no
+per-addition identity or linked removal tombstone; old add/remove/re-add events
+cannot be attributed without replay risk. Future semantic reaction delivery must
+start with a signed incarnation protocol for new admissions or an explicit
+migration, rather than assuming these journal rows remain pending.
+
+Focused journal/pump/retained-event validation passes 75 tests, and the broader
+node-runtime/page/membership/publication gate passes 114. Ruff/diff checks pass.
+Astra found and root fixed one P2 where same-chat info work cleared an ordinary
+retained retry job, then independently verified the preserved operation/cooldown
+state and found no remaining P1/P2. Full node event-owner startup remains
+inactive; no app restart, deployment or merge.

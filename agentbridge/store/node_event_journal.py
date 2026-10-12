@@ -495,6 +495,36 @@ def consume_event_identities_in_transaction(
     return NodeEventConsume(True, gap)
 
 
+def consume_info_invalidations(
+    store, expected: tuple[NodeEventIdentity, ...],
+) -> NodeEventConsume:
+    """CAS-consume exact info identities for content-free invalidation only.
+
+    This boundary intentionally reads no payload and establishes no event
+    type, actor, membership or visibility claim.  It is therefore suitable
+    only for a canonical read-model wake.  Semantic info/reaction mapping must
+    use a separately final-fenced operation with the required authority and
+    overlay evidence.
+    """
+    if (type(expected) is not tuple or not expected
+            or any(type(item) is not NodeEventIdentity or item.kind != "info"
+                   for item in expected)):
+        raise ValueError("info invalidation requires exact info identities")
+    conn = store._conn()
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "info invalidation consumption needs an owned transaction",
+        )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        consumed = consume_event_identities_in_transaction(conn, store, expected)
+        conn.commit()
+        return consumed
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def retire_event_identities_as_gap(
     store, expected: tuple[NodeEventIdentity, ...],
     *, require_oversize: bool = False,
@@ -718,7 +748,8 @@ __all__ = [
     "MAX_PENDING_EVENTS", "MAX_PROJECT_EVENTS",
     "NodeDelivery", "NodeEventClaim", "NodeEventConsume", "NodeEventIdentity",
     "NodeEventJournalChanged", "NodeEventRecord", "claim_events", "claim_gap",
-    "complete_delivery", "consume_event_identities_in_transaction", "initialize",
+    "complete_delivery", "consume_event_identities_in_transaction",
+    "consume_info_invalidations", "initialize",
     "peek_event_identities", "pending_deliveries", "publish_in_transaction",
     "retire_event_identities_as_gap",
 ]

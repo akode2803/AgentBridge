@@ -1,7 +1,8 @@
-"""Retained, bounded ordinary-message work; no cached authority or payloads.
+"""Retained, bounded admitted-event work; no cached authority or payloads.
 
-Info identities use a separate lane and remain pending until event-time
-acceptance can be established. This owner does not activate the node runtime.
+Ordinary messages use fresh canonical projection. Info/reaction breadcrumbs
+use only exact-CAS, content-free invalidation until their semantic proof
+protocols are complete. This owner does not activate the node runtime.
 """
 from __future__ import annotations
 
@@ -56,8 +57,10 @@ class NodeMessageEventPreparation:
         self._store, self._transport = mesh.store, mesh.tx
         self._viewer, self._machine = mesh.user, mesh.messaging.machine
         self._cursor = None
+        self._info_cursor = None
         self._unknown_cursor = None
         self._prefer_unknown = True
+        self._prefer_info = False
         self._jobs = OrderedDict()
         self._lock = threading.RLock()
 
@@ -90,11 +93,23 @@ class NodeMessageEventPreparation:
                         self._store, unknown, require_unknown=True)
                     return NodeEventPreparationStep('consumed' if retired else 'restart',
                         chat, 1 if retired else 0, retired)
+            attempted_info = self._prefer_info
+            if attempted_info:
+                self._prefer_info = False
+                result = self._consume_info()
+                if result is not None:
+                    return result
             self._prefer_unknown = True
+            self._prefer_info = True
             identities = node_event_journal.peek_event_identities(
                 self._store, after_chat=self._cursor, kind='message')
             if not identities:
                 self._jobs.clear()
+                if not attempted_info:
+                    result = self._consume_info()
+                    if result is not None:
+                        self._prefer_info = False
+                        return result
                 return NodeEventPreparationStep('idle')
             chat = identities[0].chat_id
             self._cursor = chat
@@ -168,6 +183,20 @@ class NodeMessageEventPreparation:
                 self.owner.request_page(chat)
             job.next_due = now + RETRY_S
             return NodeEventPreparationStep('pending', chat)
+
+    def _consume_info(self):
+        identities = node_event_journal.peek_event_identities(
+            self._store, after_chat=self._info_cursor, kind='info')
+        if not identities:
+            return None
+        chat = identities[0].chat_id
+        self._info_cursor = chat
+        consumed = node_event_journal.consume_info_invalidations(
+            self._store, identities)
+        if not consumed.consumed:
+            return NodeEventPreparationStep('restart', chat)
+        return NodeEventPreparationStep(
+            'consumed', chat, len(identities), consumed.gap)
 
     @staticmethod
     def _split(job, chat):
