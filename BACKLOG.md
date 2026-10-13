@@ -16,6 +16,14 @@
 These entries track the current cloud work; historical items below are preserved.
 Source/CI completion is separate from merge, runtime activation and live acceptance.
 
+- [ ] **Consolidate the accumulated PR stack after the provider/local-node
+  migration completes** (Aryan, 2026-10-13). Finish durable typed operation
+  journaling, authenticated writer integration and the migration acceptance
+  gates first. Then land the verified dependency chain and close superseded
+  PRs, checking ancestry so no unique work is discarded. Do not leave the
+  historical stack open once its changes are integrated. This is separate from
+  the future automated project-to-project migration feature below.
+
 Near-term order: finish and measure the remaining known interaction delays,
 including large-member rooms; then establish the durable Realtime recovery
 protocol below; then simplify and formalize the architecture against that stable

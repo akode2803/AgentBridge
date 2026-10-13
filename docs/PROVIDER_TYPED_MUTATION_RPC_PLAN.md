@@ -248,10 +248,54 @@ request with the original epoch/operation ID to recover its receipt. It must
 never generate another identity or bind the request to a new epoch. Receipt
 acknowledgment remains unavailable until the exact outcome is durable locally.
 
-This decoder is an implementation prerequisite, not a readiness claim. It has
-no runtime callers. Capability negotiation, authenticated transport pinning,
-durable operation preparation/replay, receipt persistence/acknowledgment and
-coordinator retirement remain separate work.
+This decoder is an implementation prerequisite, not a readiness claim. The
+inactive adapter and journal below use it; application writers remain unchanged.
+
+### Inactive authenticated driver and durable operation journal
+
+`transport/typed_mutations.py` prepares immutable canonical requests for all nine
+RPC families. A prepared request retains its original epoch, operation ID, actor,
+kind, target and client digest; its JSON payload is private replay material and
+must not be logged. The RPC adapter verifies the access token's actual user via
+Auth, pins the exact PostgREST authorization and checks session/provider identity
+around each call. This verification does not require current root membership:
+the original actor must still be able to recover and acknowledge an existing
+receipt after removal. Fresh source effects remain subject to the RPC's current
+authority checks.
+
+`store/operation_journal.py` owns a bounded journal in the root coordinator's
+SQLite database, bound to endpoint/root/actor and the registered node's exact
+identity/incarnation. Its format upgrade makes older coordinators fail closed.
+Preparation records the request and mutation intent in one root transaction,
+retiring affected node/Store inputs before any provider call. Seven scoped
+families are supported. Member claim/leave preparation is deliberately rejected
+until whole-root Store invalidation and publication exclusion are implemented;
+the wire supporting these RPCs is not sufficient to activate them.
+
+The driver in `transport/journaled_mutations.py` advances:
+
+`prepared -> attempted -> accepted -> completed -> acknowledged`
+
+Attempted is durable before I/O. Accepted contains the verified provider receipt
+before local intent completion. Completed atomically records that outcome and
+removes its exact intent, without restoring readiness. Only then may the driver
+acknowledge the provider receipt. A lost initial reply replays the identical
+request; a crash after accepted resumes local completion; a lost acknowledgment
+retries acknowledgment only. Concurrent replays can return the same terminal
+record and cannot downgrade it. Network calls never hold the root transaction.
+
+The journal retains at most 4,096 operations and 64 MiB of request/receipt bytes,
+reserving receipt space before admission. Terminal operations count toward the
+limit and are not evicted. Exhaustion rejects preparation before provider I/O.
+Epoch retirement/pruning needs a separate proven protocol; no age-based cleanup
+or ambiguous-operation cancellation is included. Ordinary coordinator completion
+and quarantine cannot consume typed intents without their journal proof.
+
+This slice is inactive: no readiness marker, GUI/harness/outbox writer switch,
+provider seal, production schema deployment or historical-fence recovery is
+performed. Capability negotiation, whole-root membership mutations, call-site
+operation identity, recovery scheduling and fleet cutover remain required before
+production activation.
 
 ### Protocol schedules
 

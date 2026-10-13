@@ -274,13 +274,22 @@ disposable Supabase PostgreSQL 17 SQL/RLS acceptance in
 Real Storage HTTP acceptance passed. Exact bounded provider logs reconcile the
 original class-only denials; the tightened client has local regression coverage
 but was not rerun live. PostgreSQL 16 CI passed for head `1fd31ec`; the subsequent
-Storage metadata cast repair requires its own gate. Readiness remains absent.
+Storage metadata cast repair passed its PostgreSQL 16 gate in run
+`38378186919`. Readiness remains absent.
 
 ### P2 — node mutation journal and typed adapter
 
-- Add the durable local operation record and bind outbox, presence, machine and
-  lifecycle writes to it.
-- Exercise the typed RPCs behind an inactive capability flag.
+- The inactive journal/driver slice retains exact prepared requests and verified
+  outcomes in the root coordinator transaction. It supports scoped document,
+  log, effect, chat-cleanup and blob-manifest operations, authenticates the actual
+  RPC principal, and recovers response/ACK loss without replacing the operation
+  identity. See [the wire and journal contract](PROVIDER_TYPED_MUTATION_RPC_PLAN.md#inactive-authenticated-driver-and-durable-operation-journal).
+- Add whole-root membership retirement, then bind outbox, presence, machine and
+  lifecycle writes to stable journal operation identities. These call sites
+  still use the existing write lane; the inactive driver does not constitute a
+  completed writer migration.
+- Exercise the complete typed driver against authenticated disposable provider
+  resources before enabling capability-gated application wiring.
 - Ensure overlapping retries resume the same operation instead of minting new
   intents. Independent operations on non-overlapping scopes may remain parallel.
 

@@ -11,6 +11,7 @@ from ..core import delivery_trace
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -26,6 +27,7 @@ MAX_NODES = 16
 MAX_PENDING = 64
 MAX_QUARANTINED = 256
 ROOT_LOCK_TIMEOUT_S = 5.0
+_WINDOWS = os.name == 'nt'
 _NORMAL_TOKEN = re.compile(r'[0-9a-f]{64}\Z')
 _SENTINEL_TOKEN = re.compile(r'q[0-9a-f]{63}\Z')
 _COORDINATOR_EPOCH = re.compile(r'[0-9a-f]{32}\Z')
@@ -36,6 +38,7 @@ _SCHEMA = {
     'mutation_intents': 'CREATE TABLE mutation_intents(token TEXT PRIMARY KEY)',
     'mutation_scopes': 'CREATE TABLE mutation_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
 }
+_V4_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=4')
 _V1_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
                    'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)')
 _V2_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
@@ -92,7 +95,8 @@ class MutationCoordinator:
             raise ValueError('invalid mutation root')
         self.identity = root_identity
         directory = Path(home).resolve() / 'local-input-owners'
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        from ..node.security import private_directory
+        private_directory(directory)
         self.path = directory / (hashlib.sha256(root_identity.encode()).hexdigest() + '.sqlite')
         # SQLite serializes concurrent initialization, including empty-file races.
         with self._transaction(create=True) as conn:
@@ -148,10 +152,36 @@ class MutationCoordinator:
             elif any(value is None for value in quarantine):
                 raise owner.SourceChanged('quarantine_schema_incomplete')
             self.epoch = self._schema(conn)
-        self.path.chmod(0o600)
+
+    def _private_files(self, *, create=False):
+        from ..node.security import LocalSecurityError, protect_path, verify_private_path
+
+        verify_private_path(self.path.parent, directory=True)
+        if create:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
+            protect_path(self.path, directory=False)
+        verify_private_path(self.path, directory=False)
+        for suffix in ('-wal', '-shm', '-journal'):
+            sidecar = Path(str(self.path) + suffix)
+            if sidecar.exists() or sidecar.is_symlink():
+                try:
+                    if create or _WINDOWS:
+                        protect_path(sidecar, directory=False)
+                    verify_private_path(sidecar, directory=False)
+                except LocalSecurityError:
+                    # SQLite may remove a sidecar between lstat and its final
+                    # close. A still-present unsafe file always fails closed.
+                    if sidecar.exists() or sidecar.is_symlink():
+                        raise
 
     @contextmanager
     def _transaction(self, *, create=False, timeout_s=1.0):
+        self._private_files(create=create)
         with delivery_trace.transaction('root', self.path) as trace:
             mode = 'rwc' if create else 'rw'
             with span('root_open'):
@@ -184,7 +214,12 @@ class MutationCoordinator:
         tables = tuple(_SCHEMA) + tuple(_QUARANTINE_SCHEMA)
         if conn.execute(f"SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN ({','.join('?' for _ in tables)}) LIMIT 1", tables).fetchone():
             raise owner.SourceChanged('unexpected_mutation_trigger')
-        for name, sql in {**_SCHEMA, **_QUARANTINE_SCHEMA}.items():
+        root_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='mutation_root'").fetchone()
+        journal_format = root_sql == (_V4_ROOT_SCHEMA,)
+        expected_schema = {**_SCHEMA, **_QUARANTINE_SCHEMA}
+        if journal_format:
+            expected_schema['mutation_root'] = _V4_ROOT_SCHEMA
+        for name, sql in expected_schema.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
         row = conn.execute(
@@ -192,7 +227,7 @@ class MutationCoordinator:
         ).fetchone()
         if (row is None or row[0] != self.identity or type(row[1]) is not str or len(row[1]) != 32
                 or any(c not in '0123456789abcdef' for c in row[1])
-                or row[2] != 3 or type(row[3]) is not int
+                or row[2] != (4 if journal_format else 3) or type(row[3]) is not int
                 or not 0 <= row[3] <= 2**63 - 1
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
@@ -227,6 +262,8 @@ class MutationCoordinator:
         if set(grouped) != {token for (token,) in tokens}:
             raise owner.SourceChanged('orphan_mutation_scope')
         self._quarantine_audit(conn, sentinels)
+        from .operation_journal import audit_journal
+        audit_journal(conn, self, required=journal_format)
         return row[1]
 
     @staticmethod
@@ -788,6 +825,9 @@ class MutationCoordinator:
             current = tuple(token for (token,) in pending if _NORMAL_TOKEN.fullmatch(token))
             if set(current) != set(expected_tokens):
                 raise owner.SourceChanged('quarantine_pending_changed')
+            from .operation_journal import require_legacy_intent
+            for token in current:
+                require_legacy_intent(conn, token)
             existing = conn.execute('SELECT count(*) FROM (SELECT 1 FROM quarantine_intents LIMIT ?)',
                                     (MAX_QUARANTINED + 1,)).fetchone()[0]
             if existing + len(current) > MAX_QUARANTINED:
@@ -840,9 +880,14 @@ class MutationCoordinator:
                     raise
 
     def _finish(self, value):
-        # Internal terminal transition; also used by an in-process reservation
-        # that proves the external operation was never started.
-        if type(value) is not MutationIntent:
+        # Reservations may prove a legacy call unstarted. Typed operations
+        # always require the journal's durable accepted outcome instead.
+        with self._transaction() as conn:
+            self._schema(conn)
+            self._finish_in_transaction(conn, value)
+
+    def _finish_in_transaction(self, conn, value, *, typed_receipt=None):
+        if not conn.in_transaction or type(value) is not MutationIntent:
             raise ValueError('invalid mutation intent')
         path, epoch, token = value.coordinator_path, value.epoch, value.token
         changes = scopes.selectors(value.selectors, limit=8)
@@ -850,17 +895,17 @@ class MutationCoordinator:
             raise ValueError('foreign mutation intent')
         if _SENTINEL_TOKEN.fullmatch(token):
             raise ValueError('quarantine fence cannot complete')
-        with self._transaction() as conn:
-            self._schema(conn)
-            pending = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9', (token,)).fetchall()
-            if tuple(scopes.Selector(*row) for row in pending) != changes:
-                raise owner.SourceChanged('mutation_intent_changed')
-            self._complete_nodes(conn, token)
-            self._retire(conn, changes)
-            if conn.execute('DELETE FROM mutation_intents WHERE token=?', (token,)).rowcount != 1:
-                raise owner.SourceChanged('mutation_intent_missing')
-            conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
-            self._advance_root_revision(conn)
+        from .operation_journal import require_completion_proof
+        require_completion_proof(conn, token, typed_receipt)
+        pending = conn.execute('SELECT kind,value FROM mutation_scopes WHERE token=? ORDER BY kind,value LIMIT 9', (token,)).fetchall()
+        if tuple(scopes.Selector(*row) for row in pending) != changes:
+            raise owner.SourceChanged('mutation_intent_changed')
+        self._complete_nodes(conn, token)
+        self._retire(conn, changes)
+        if conn.execute('DELETE FROM mutation_intents WHERE token=?', (token,)).rowcount != 1:
+            raise owner.SourceChanged('mutation_intent_missing')
+        conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
+        self._advance_root_revision(conn)
 
     @contextmanager
     def publication_gate(self, store, value, *, node_position=None):

@@ -1,5 +1,40 @@
 # Cloud source handoff
 
+## 2026-10-13 durable typed journal checkpoint
+
+Active branch: `codex/provider-operation-journal`, based on PR141 `1c164ff`.
+Adds `store/operation_journal.py`, coordinator format-4 guards,
+`transport/typed_mutations.py`, `transport/journaled_mutations.py` and focused
+regressions. The adapter verifies the actual JWT principal and pins PostgREST
+HTTP authorization. The journal co-publishes immutable replay material and local
+intent, preserves attempted/accepted/completed/acknowledged recovery boundaries,
+and blocks generic completion/quarantine of typed intents. Bounded keyset
+inventory discovers unfinished operations after restart without reading payloads.
+Application writers remain unchanged. Membership claim/leave is rejected by the
+journal until a whole-root Store/publication fence exists; all nine wire families
+are implemented. Terminal records are bounded/non-evicting; no pruning shortcut.
+
+Validation: combined focused gate 220 passed; final journal/driver follow-up
+covers the last audit/private-file/property changes. Ruff and whitespace checks
+pass. Independent Astra review found no remaining P1/P2 after correcting
+persisted principal binding and excess active-selector preflight. Its independent
+cross-database crash probe recovered accepted -> acknowledged with one provider
+mutation after node completion committed but the root transaction rolled back.
+The real installed Supabase SDK test uses mocked HTTP; older supported SDK
+header shapes are source-inspected and regression-tested. Native Windows CI and
+live authenticated provider-driver acceptance remain separate.
+
+CI inspected: PR140 PostgreSQL and Ubuntu green; PR141 Ubuntu green and no
+inline findings; current Windows runs and PR138's failed-job retry still pending.
+PR140's existing two Codex findings are fixed in parent `2fce098`.
+User requests continued implementation and stack cleanup after the local-node/
+provider migration completes. That cleanup is recorded in BACKLOG; automated
+project-to-project migration remains deferred. No merge, deployment, provider
+change, readiness marker, app/harness restart or writer activation this round.
+Next: CI/review findings, whole-root membership fencing, stable operation identity
+at writer call sites and authenticated disposable end-to-end driver acceptance;
+then capability-gated writer migration and verified stack consolidation.
+
 ## 2026-10-13 inactive typed receipt wire
 
 Active branch: `codex/provider-typed-receipt-wire`, stacked on PR140 repair
