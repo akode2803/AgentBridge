@@ -263,10 +263,17 @@ class MessagingService:
         return env
 
     def post_event(self, chat_id: str, event: dict) -> Envelope:
+        self._require_event_supported(event)
         self._require_member(chat_id)
         env = self.build_event(chat_id, event)
         self.commit_envelope(chat_id, env)
         return env
+
+    def _require_event_supported(self, event: dict) -> None:
+        if (getattr(self.tx, '_journal_writer', None) is not None
+                and isinstance(event, dict)
+                and event.get('type') in {EV_DELETED, EV_MEMBER_LEFT}):
+            raise TransportError('terminal lifecycle outbox migration is not enabled')
 
     def commit_envelope(
         self, chat_id: str, env: Envelope,
@@ -274,8 +281,10 @@ class MessagingService:
         client_ref: str = "",
     ) -> None:
         """Optimistic local cache + durable outbox commit (the send guarantee)."""
-        self._admit_attachment_count(list(attachments or []))
         payload = env.to_dict()
+        if payload.get('kind') == MsgKind.INFO.value:
+            self._require_event_supported(payload.get('event'))
+        self._admit_attachment_count(list(attachments or []))
         outbox_payload = payload
         if attachments:
             outbox_payload = {

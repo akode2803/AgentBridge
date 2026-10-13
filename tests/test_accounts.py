@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentbridge.core.errors import PermissionDenied, ValidationError
+from agentbridge.core.errors import PermissionDenied, TransportError, ValidationError
 from agentbridge.core.models import MsgKind, Role, UserKind
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.keyring import KeyStore
@@ -375,3 +375,22 @@ def test_deletion_preserves_identity_when_membership_removal_fails(world, monkey
     assert mesh.directory.get(subject).active
     assert mesh.directory.get('claude').active
     assert mesh.keystore.load(subject) == bundle
+
+
+def test_bound_account_deletion_rejects_before_cascade_or_key_destruction(world, monkeypatch):
+    meshes, _ = world
+    mesh = meshes['aryan']
+    mesh.accounts.create_agent('claude')
+    chat = mesh.create_chat('Bound deletion', members=['fable', 'claude'])
+    mesh.outbox.flush_once()
+    before = mesh.store.messages(chat.id)
+    bundles = {name: mesh.keystore.load(name) for name in ('aryan', 'claude')}
+    monkeypatch.setattr(mesh.messaging.tx, '_journal_writer', object(), raising=False)
+    with pytest.raises(TransportError, match='terminal lifecycle'):
+        mesh.accounts.delete_account('aryan-pass')
+    assert mesh.store.messages(chat.id) == before
+    assert mesh.store.outbox_counts() == {}
+    assert set(mesh.snapshot(chat.id).members) == {'aryan', 'fable', 'claude'}
+    for name, bundle in bundles.items():
+        assert mesh.directory.get(name).active
+        assert mesh.keystore.load(name) == bundle

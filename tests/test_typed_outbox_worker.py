@@ -69,6 +69,34 @@ def test_sent_tombstone_survives_release_crash_and_restart_without_redispatch(st
     assert store.outbox_owner_row(seq) is None
 
 
+@pytest.mark.parametrize('kind', [
+    'runtime-task-event', 'runtime-run-event', 'runtime-handoff-event',
+])
+def test_typed_binding_preserves_other_registered_handlers(store, kind):
+    runtime = store.outbox_add(kind, 'runtime-target', {'id': 'runtime'})
+    append = store.outbox_add('append_log', 'room|alice@machine', {'id': 'chat'})
+    owner, calls, successes = Owner(), [], []
+    worker = OutboxWorker(
+        store, {kind: lambda target, payload: calls.append((target, payload)),
+                'append_log': lambda *_: pytest.fail('typed append fell back')},
+        typed_owner=owner,
+        success_hooks={kind: lambda target, payload: successes.append((target, payload))})
+    assert worker.flush_once() == 2
+    assert calls == successes == [('runtime-target', {'id': 'runtime'})]
+    assert [seq for seq, _digest in owner.dispatches] == [append]
+    assert owner.dispatches == owner.releases
+    assert store.outbox_owner_row(runtime) is None
+    assert store.outbox_counts() == {}
+
+
+def test_typed_binding_keeps_unknown_kind_deadletter_behavior(store):
+    store.outbox_add('unknown-kind', 'target', {})
+    owner = Owner()
+    assert OutboxWorker(store, {}, typed_owner=owner).flush_once() == 0
+    assert store.outbox_counts() == {'dead': 1}
+    assert owner.dispatches == owner.releases == []
+
+
 def test_sent_tombstone_survives_cleanup_crash_after_ticket_release(store):
     seq = store.outbox_add('append_log', 'room|alice@machine', {'id': 'm1'})
     owner = Owner()

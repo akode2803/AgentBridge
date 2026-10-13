@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationError
+from agentbridge.core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from agentbridge.core.models import ChatKind, ChatSnapshot, Member, Role
 from agentbridge.mesh.paths import P
 from agentbridge.mesh.service import Mesh
@@ -234,6 +234,33 @@ def test_pending_message_cannot_recreate_a_deleted_chat(world):
     ann.outbox.flush_once()
     assert ann.store.outbox_counts() == {}
     assert not (ann.attachments.root / blob_id).exists()
+
+
+@pytest.mark.parametrize('event_type', ['chat_deleted', 'member_left'])
+@pytest.mark.parametrize('direct_commit', [False, True])
+def test_bound_terminal_event_rejected_before_local_commit(
+        world, monkeypatch, event_type, direct_commit):
+    ann = world['ann']
+    event = {'type': event_type, 'by': 'ann'}
+    envelope = ann.build_event(CHAT, event)
+    before = ann.store.messages(CHAT)
+    monkeypatch.setattr(ann.messaging.tx, '_journal_writer', object(), raising=False)
+    monkeypatch.setattr(
+        ann.store, 'cache_and_outbox_add',
+        lambda *_args, **_kwargs: pytest.fail('terminal event reached Store commit'))
+    monkeypatch.setattr(
+        ann.messaging, '_notify_outbox',
+        lambda: pytest.fail('rejected terminal event woke worker'))
+    with pytest.raises(TransportError, match='terminal lifecycle'):
+        if direct_commit:
+            ann.commit_envelope(CHAT, envelope)
+        else:
+            ann.post_event(CHAT, event)
+    assert ann.store.messages(CHAT) == before
+    assert ann.store.outbox_counts() == {}
+    assert not ann.messaging.pending_terminal(CHAT)
+    assert ann.snapshot(CHAT).is_member('ann')
+    assert not ann.snapshot(CHAT).deleted
 
 
 def test_terminal_event_stops_retrying_after_chat_is_physically_reclaimed(world):

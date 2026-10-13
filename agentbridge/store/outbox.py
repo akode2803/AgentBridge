@@ -193,7 +193,9 @@ class OutboxWorker:
                     return None
                 return self._dispatch(item)
         with self._dispatch_gate:
-            if self._typed_owner is not None:
+            # This owner binds chat log appends only. Other registered kinds
+            # retain their own delivery protocol and completion hooks.
+            if self._typed_owner is not None and item.kind == 'append_log':
                 return self._dispatch_typed(item)
             return self._dispatch_legacy(item)
 
