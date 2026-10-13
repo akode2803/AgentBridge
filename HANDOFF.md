@@ -1,5 +1,25 @@
 # Cloud source handoff
 
+## 2026-10-13 inactive typed receipt wire
+
+Active branch: `codex/provider-typed-receipt-wire`, stacked on PR140 repair
+`2fce098`. The new `transport/mutation_receipts.py` strictly decodes all nine
+terminal receipt families and binds the expected root, actor, epoch, operation,
+kind, client digest and targets. Results are immutable scalar tuples. Initial
+provider digests are retained for exact later resolution; a lost initial reply
+must instead replay the original typed request because receipt-read requires
+the unknown provider digest. No RPC caller, write activation or readiness marker
+is introduced. Review caught SQL compatibility for nested log names and legacy
+member-leave usernames; both have regressions. Automated migration remains a
+future backlog feature.
+
+PR140's repair passed its PostgreSQL 16 executable gate in run `38378186919`,
+including the new 18-case stored-size regression; replacement platform checks
+remain pending. Historical scratch SQL remains immutable and unmodified.
+Next: retain this strict wire in the durable local operation journal and bind
+the inactive authenticated RPC adapter to prepared identity/replay material.
+Never acknowledge a receipt or retire an intent before its outcome is durable.
+
 ## 2026-10-13 typed protocol review follow-up
 
 Automated project migration stays in the backlog. Active work remains typed
