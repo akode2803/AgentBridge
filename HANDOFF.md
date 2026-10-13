@@ -2,7 +2,8 @@
 
 ## 2026-10-13 typed blob-manifest checkpoint
 
-`codex/provider-typed-blob-manifest` is stacked on PR #139 at parent `e2247a3`.
+PR #140 (`codex/provider-typed-blob-manifest`) is stacked on PR #139 at parent
+`e2247a3`; its current head is `0ea72f5`.
 The final inactive P1b mutation family now adds a private immutable manifest,
 an exact owner/object-ID/size receipt RPC and a `blob-stage` Storage-policy
 carve-out. Existing permissive policies are replaced so they cannot OR-admit
@@ -47,8 +48,9 @@ is the reconciliation evidence for this run. No credential, token or API key
 entered the repository. The two disposable Auth users still exist.
 Astra's follow-up found the evidence P2 closed and no remaining actionable P1/P2;
 all 30 HTTP-classifier/schema tests passed independently. The combined focused
-gate passes 263 tests. Next, commit/open the stacked PR and use its PostgreSQL 16
-CI as the exact holder/waiter gate. No readiness marker or Python activation yet.
+gate passes 263 tests. PR #140 is open; its PostgreSQL 16 CI remains the exact
+holder/waiter gate and has not yet been accepted as completion evidence. No
+readiness marker or Python activation exists.
 Production project `eakewaaqbilmtswbbxix` and the local app/harness remain
 untouched and shut down.
 
