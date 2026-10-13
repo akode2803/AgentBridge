@@ -770,6 +770,13 @@ class MessagingService:
             recover = getattr(self.tx, "recover_append_log", None)
             recovered = callable(recover) and recover(chat_id, log_name, envelope)
             if not recovered:
+                # A manifest may already have committed before a lost reply.
+                # Settle that retained operation before fresh-send membership
+                # checks can dead-letter the outbox row. This lookup never
+                # stages bytes or prepares a new provider mutation.
+                if self.attachments is not None:
+                    for manifest in self.attachments.manifests(payload):
+                        self.attachments.recover_published(chat_id, manifest)
                 if kind == "message":
                     try:
                         self.require_send(chat_id, drain_before_terminal=True)

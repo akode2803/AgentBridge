@@ -147,7 +147,7 @@ class Janitor:
             body = self.mesh.sealer.unseal(chat_id, env)
             for item in (body.files if body else None) or []:
                 try:
-                    paths.add(attachment_path(chat_id, item.get("id")))
+                    paths.add(attachment_path(chat_id, item.get("id"), item))
                 except (AttributeError, ValidationError):
                     continue  # malformed signed body: skip, never guess
         return sorted(paths)
@@ -186,7 +186,7 @@ class Janitor:
                 if not blob_id:
                     continue
                 try:
-                    path = attachment_path(chat_id, blob_id)
+                    path = attachment_path(chat_id, blob_id, f)
                 except ValidationError:  # malformed signed body: skip, never guess
                     continue
                 got = self.mesh.tx.blob_size(path)

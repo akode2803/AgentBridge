@@ -2128,7 +2128,7 @@ create table if not exists public.ab_mutation_receipts (
   operation_id    uuid not null,
   actor_uid       uuid not null,
   operation_kind  text not null check (operation_kind in (
-    'doc_put','doc_create','doc_delete','log_append','effect_transition',
+    'doc_put','doc_compare_put','doc_create','doc_delete','log_append','effect_transition',
     'chat_delete','member_claim','member_leave','blob_manifest'
   )),
   payload_digest  text not null check (payload_digest ~ '^[0-9a-f]{64}$'),
@@ -2406,6 +2406,14 @@ alter table public.ab_mutation_roots
   add column if not exists rotation_id uuid;
 alter table public.ab_mutation_roots
   add column if not exists rotated_at timestamptz;
+-- Stable lineage plus monotonic closure counter: UUID epochs alone cannot
+-- provide a bounded local retirement floor across multiple rotations.
+alter table public.ab_mutation_roots
+  add column if not exists receipt_lifecycle_id uuid not null
+  default pg_catalog.gen_random_uuid();
+alter table public.ab_mutation_roots
+  add column if not exists receipt_generation bigint not null default 0
+  check (receipt_generation >= 0);
 create unique index if not exists ab_mutation_roots_rotation_id
   on public.ab_mutation_roots(rotation_id) where rotation_id is not null;
 
@@ -2472,6 +2480,8 @@ language sql immutable set search_path = pg_catalog as $$
   select case p_kind
     when 'doc_put' then p_table = 'ab_docs'
       and p_operation in ('INSERT', 'UPDATE')
+    when 'doc_compare_put' then p_table = 'ab_docs'
+      and p_operation in ('INSERT', 'UPDATE')
     when 'doc_create' then p_table = 'ab_docs' and p_operation = 'INSERT'
     when 'doc_delete' then p_table = 'ab_docs'
       and p_operation in ('UPDATE', 'DELETE')
@@ -2528,7 +2538,7 @@ begin
      or pg_catalog.octet_length(p_root) > 1024
      or p_protocol_epoch is null or p_operation_id is null
      or p_operation_kind is null or p_operation_kind not in (
-       'doc_put','doc_create','doc_delete','log_append','effect_transition',
+       'doc_put','doc_compare_put','doc_create','doc_delete','log_append','effect_transition',
        'chat_delete','member_claim','member_leave','blob_manifest'
      )
      or p_payload_digest is null
@@ -2968,6 +2978,9 @@ begin
     raise exception 'mutation receipts are not fully acknowledged'
       using errcode = '55000';
   end if;
+  if v_root.receipt_generation = 9223372036854775807 then
+    raise exception 'mutation epoch generation exhausted' using errcode = '54000';
+  end if;
   delete from public.ab_mutation_receipts r
   where r.root = p_root and r.protocol_epoch = p_expected_epoch;
   v_next_epoch := pg_catalog.gen_random_uuid();
@@ -2975,6 +2988,7 @@ begin
   set previous_protocol_epoch = p_expected_epoch,
       protocol_epoch = v_next_epoch,
       protocol_version = 2,
+      receipt_generation = receipt_generation + 1,
       rotation_id = p_rotation_id,
       rotated_at = pg_catalog.clock_timestamp()
   where root = p_root and protocol_epoch = p_expected_epoch;
@@ -2992,6 +3006,42 @@ end
 $$;
 revoke all on function public.ab_admin_rotate_mutation_epoch(text,uuid,uuid)
   from public, anon, authenticated, service_role;
+
+-- Authenticated observation of receipt closure, not membership authority.
+-- Every increase in this lineage is produced only by the all-ACK rotation
+-- above. Removed members can recover their own local completed/ACK-lost work;
+-- Only nonsecret protocol metadata for the supplied root is exposed; neither
+-- the root label nor this observation grants membership or source authority.
+create or replace function public.ab_mutation_epoch_state(p_root text)
+returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog as $$
+declare
+  v_result jsonb;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024 then
+    raise exception 'invalid mutation root' using errcode = '22023';
+  end if;
+  if auth.uid() is null or auth.role() is distinct from 'authenticated' then
+    raise exception 'mutation root is unavailable' using errcode = '42501';
+  end if;
+  select pg_catalog.jsonb_build_object(
+    'schema_version', 1, 'root', r.root, 'actor_id', auth.uid(),
+    'role', auth.role(), 'lifecycle_id', r.receipt_lifecycle_id,
+    'protocol_epoch', r.protocol_epoch, 'generation', r.receipt_generation,
+    'sealed', true
+  ) into v_result
+  from public.ab_mutation_roots r
+  where r.root = p_root and not r.legacy_writes_enabled
+    and exists (select 1 from public.ab_database_mutation_seals s where s.root = r.root);
+  if v_result is null then
+    raise exception 'sealed mutation lifecycle is unavailable' using errcode = '55000';
+  end if;
+  return v_result;
+end
+$$;
+revoke all on function public.ab_mutation_epoch_state(text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_mutation_epoch_state(text) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- P1b document/log slice: inactive receipt-bearing source mutation RPCs.
@@ -4077,3 +4127,104 @@ revoke all on function public.ab_mutation_blob_manifest(
   from public, anon, authenticated, service_role;
 grant execute on function public.ab_mutation_blob_manifest(
   text,uuid,uuid,text,text,text,uuid,bigint,text,text) to authenticated;
+
+-- Inactive conditional mutable-document replacement. A conflict is a terminal
+-- outcome, including an obsolete source epoch; it never leaves an applying
+-- receipt that callers could accidentally retry with regenerated content.
+alter table public.ab_mutation_receipts
+  drop constraint if exists ab_mutation_receipts_operation_kind_check;
+alter table public.ab_mutation_receipts
+  add constraint ab_mutation_receipts_operation_kind_check check (
+    operation_kind in (
+      'doc_put','doc_compare_put','doc_create','doc_delete','log_append',
+      'effect_transition','chat_delete','member_claim','member_leave','blob_manifest'
+    )
+  );
+
+create or replace function public.ab_mutation_doc_compare_put(
+  p_root text, p_protocol_epoch uuid, p_operation_id uuid,
+  p_payload_digest text, p_path text, p_data jsonb,
+  p_expected_source_epoch uuid, p_expected_seq bigint, p_expected_deleted boolean
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_member text;
+  v_chat text;
+  v_provider_digest text;
+  v_begin jsonb;
+  v_source_epoch uuid;
+  v_applied boolean := false;
+begin
+  if not private.ab_mutation_path_valid(p_path, 4096, 32)
+     or p_data is null
+     or public.ab_source_json_bytes(p_data) > 8355840
+     or p_expected_source_epoch is null
+     or p_expected_seq is null or p_expected_seq < 0
+     or p_expected_deleted is null
+     or (p_expected_seq = 0 and p_expected_deleted) then
+    raise exception 'invalid conditional document put' using errcode = '22023';
+  end if;
+  v_provider_digest := private.ab_mutation_provider_digest(
+    pg_catalog.jsonb_build_array('doc_compare_put', p_path, p_data,
+      p_expected_source_epoch, p_expected_seq, p_expected_deleted)
+  );
+  if not private.ab_mutation_root_sealed(p_root) then
+    raise exception 'typed mutation root is not sealed' using errcode = '55000';
+  end if;
+  v_begin := private.ab_mutation_begin(
+    p_root, p_protocol_epoch, p_operation_id, 'doc_compare_put',
+    p_payload_digest, v_provider_digest
+  );
+  if (v_begin->>'replay')::boolean then
+    return v_begin->'receipt';
+  end if;
+  v_member := private.ab_mutation_lock_actor(p_root);
+  v_chat := public.ab_chat_of(p_path);
+  if v_chat <> '' then
+    perform private.ab_mutation_lock_chat(
+      p_root, v_chat, p_path = 'chats/' || v_chat || '/meta.json'
+    );
+  end if;
+  if v_actor is null or v_member = ''
+     or p_path like 'chats/%/runtime/effects/%'
+     or (v_chat <> '' and not public.ab_is_member(p_root, v_chat)) then
+    raise exception 'conditional document put is unauthorized'
+      using errcode = '42501';
+  end if;
+  -- The root epoch cannot reset between comparison and source mutation. The
+  -- ordinary source triggers acquire this same shared ledger lock.
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  select e.epoch into v_source_epoch from public.ab_change_epochs e
+  where e.root = p_root and e.source_schema_version = 2;
+  if v_source_epoch = p_expected_source_epoch then
+    if p_expected_seq = 0 then
+      -- Unique-key arbitration also covers concurrent unconditional puts and
+      -- creates. READ COMMITTED waits for their outcome; a winner means conflict.
+      insert into public.ab_docs(root, path, data, deleted)
+      values (p_root, p_path, p_data, false)
+      on conflict (root, path) do nothing;
+      v_applied := found;
+    else
+      -- UPDATE rechecks the predicate after waiting on a concurrent row writer.
+      -- A put/delete changes seq, so a stale observed version cannot overwrite it.
+      update public.ab_docs d set data = p_data, deleted = false
+      where d.root = p_root and d.path = p_path
+        and d.seq = p_expected_seq and d.deleted = p_expected_deleted;
+      v_applied := found;
+    end if;
+  end if;
+  return private.ab_mutation_finish(
+    p_root, p_protocol_epoch, p_operation_id, 'doc_compare_put',
+    p_payload_digest, v_provider_digest,
+    pg_catalog.jsonb_build_object('path', p_path, 'applied', v_applied)
+  );
+end
+$$;
+revoke all on function public.ab_mutation_doc_compare_put(
+  text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_mutation_doc_compare_put(
+  text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean) to authenticated;

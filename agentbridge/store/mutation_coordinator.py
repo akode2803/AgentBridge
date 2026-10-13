@@ -40,6 +40,7 @@ _SCHEMA = {
 }
 _V4_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=4')
 _V5_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=5')
+_V6_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=6')
 _V1_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
                    'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)')
 _V2_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
@@ -218,11 +219,13 @@ class MutationCoordinator:
         if conn.execute(f"SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN ({','.join('?' for _ in tables)}) LIMIT 1", tables).fetchone():
             raise owner.SourceChanged('unexpected_mutation_trigger')
         root_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='mutation_root'").fetchone()
-        root_all_format = root_sql == (_V5_ROOT_SCHEMA,)
+        lifecycle_format = root_sql == (_V6_ROOT_SCHEMA,)
+        root_all_format = lifecycle_format or root_sql == (_V5_ROOT_SCHEMA,)
         journal_format = root_all_format or root_sql == (_V4_ROOT_SCHEMA,)
         expected_schema = {**_SCHEMA, **_QUARANTINE_SCHEMA}
         if journal_format:
-            expected_schema['mutation_root'] = _V5_ROOT_SCHEMA if root_all_format else _V4_ROOT_SCHEMA
+            expected_schema['mutation_root'] = (_V6_ROOT_SCHEMA if lifecycle_format else
+                                               _V5_ROOT_SCHEMA if root_all_format else _V4_ROOT_SCHEMA)
         for name, sql in expected_schema.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
@@ -231,7 +234,7 @@ class MutationCoordinator:
         ).fetchone()
         if (row is None or row[0] != self.identity or type(row[1]) is not str or len(row[1]) != 32
                 or any(c not in '0123456789abcdef' for c in row[1])
-                or row[2] != (5 if root_all_format else 4 if journal_format else 3) or type(row[3]) is not int
+                or row[2] != (6 if lifecycle_format else 5 if root_all_format else 4 if journal_format else 3) or type(row[3]) is not int
                 or not 0 <= row[3] <= 2**63 - 1
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
@@ -803,7 +806,7 @@ class MutationCoordinator:
 
     def _insert_intent(self, conn, changes):
         if any(change.kind == 'root_all' for change in changes):
-            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (5,):
+            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in ((5,), (6,)):
                 raise owner.SourceChanged('whole_root_mutation_requires_journal')
         for kind, value in conn.execute("SELECT s.kind,s.value FROM mutation_scopes s JOIN mutation_intents i ON i.token=s.token WHERE substr(i.token,1,1)='q' LIMIT ?", (MAX_PENDING * 8 + 1,)):
             blocked = scopes.selectors((scopes.Selector(kind, value),), limit=1)[0]
@@ -978,7 +981,7 @@ class MutationCoordinator:
                 scopes.register_in_transaction(conn, store, value)
             self._require_no_pending(root, value)
             if (node_position is None
-                    and root.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() == (5,)):
+                    and root.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() in ((5,), (6,))):
                 raise owner.SourceChanged('node_publication_required')
             if node_position is None:
                 yield

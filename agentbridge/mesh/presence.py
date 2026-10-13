@@ -18,6 +18,7 @@ import time
 from ..core.models import PresenceRecord
 from ..core.timekit import utcnow_iso
 from ..transport.base import Transport
+from ..transport.mutable_documents import publish_latest_document
 from .paths import P
 from .privacy import PrivacyService
 
@@ -59,18 +60,19 @@ class PresenceService:
         flipped = online != self._last_online
         if not (force or due or flipped):
             return False
-        self.tx.put_doc(
-            P.presence(self.user, self.machine),
-            {
+        def build():
+            return {
                 "user": self.user,
                 "machine": self.machine,
                 "online": online,
                 "last_seen": utcnow_iso(),
-                "last_seen_ns": now,
+                "last_seen_ns": time.time_ns(),
                 "app": self.app,
-            },
-        )
-        self._last_write_ns = now
+            }
+
+        document = publish_latest_document(
+            self.tx, P.presence(self.user, self.machine), build)
+        self._last_write_ns = document["last_seen_ns"]
         self._last_online = online
         if flipped:
             # sign-in/out should show promptly even though beats never poke

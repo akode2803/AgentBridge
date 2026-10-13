@@ -41,6 +41,8 @@ def _receipt(request, *, provider_digest='c' * 64):
     result = dict(expected.targets)
     if expected.kind == 'doc_put':
         result['updated'] = True
+    if expected.kind == 'doc_compare_put':
+        result['applied'] = True
     raw = {name: getattr(expected, name) for name in (
         'root', 'protocol_epoch', 'operation_id', 'actor_id', 'kind', 'client_digest')}
     raw.update(schema_version=2, provider_digest=provider_digest, result=result)
@@ -653,6 +655,45 @@ def test_strict_preparation_scopes_operation_id_by_epoch(world):
         restored.get_operation(first.expectation.operation_id)
     with pytest.raises(local_source.SourceChanged, match='duplicate_operation_id'):
         restored.prepare_operation(first)
+
+
+def test_document_inventory_keeps_completed_ack_retry_and_excludes_other_scopes(world):
+    _, _, _, _, journal = world
+    path = 'presence/alice.json'
+    target = _request(arguments={'p_path': path, 'p_data': {'ns': 1}})
+    journal.prepare(target)
+    other = _request(2, arguments={'p_path': 'presence/bob.json', 'p_data': {}})
+    journal.prepare(other)
+    expected = ((EPOCH, target.expectation.operation_id),)
+    assert journal.pending_document_keys(path) == expected
+    journal.mark_attempted(target)
+    journal.accept(target, _receipt(target))
+    journal.complete(target)
+    assert _reload(world).pending_document_keys(path) == expected
+    journal.mark_acknowledged(target)
+    assert journal.pending_document_keys(path) == ()
+
+
+def test_document_inventory_is_bounded_even_for_completed_records(world, monkeypatch):
+    _, _, _, _, journal = world
+    request = _request()
+    journal.prepare(request)
+    journal.mark_attempted(request)
+    journal.accept(request, _receipt(request))
+    journal.complete(request)
+    monkeypatch.setattr(module, 'MAX_PENDING', 0)
+    with pytest.raises(local_source.SourceChanged, match='document_inventory_budget'):
+        journal.pending_document_keys('chats/room/meta.json')
+
+
+def test_document_inventory_checks_owner_and_rejects_invalid_path(world):
+    root, _, _, _, journal = world
+    with pytest.raises(ValueError):
+        journal.pending_document_keys('../escape')
+    with sqlite3.connect(root.path) as conn:
+        conn.execute('UPDATE typed_operation_owner SET actor_id=?', (str(uuid.uuid4()),))
+    with pytest.raises(local_source.SourceChanged):
+        journal.pending_document_keys('presence/alice.json')
 
 
 def test_node_publication_and_normal_page_capture_survive_journal_upgrade_and_restart(tmp_path):

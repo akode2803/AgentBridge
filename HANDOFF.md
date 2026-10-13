@@ -1,5 +1,44 @@
 # Cloud source handoff
 
+## 2026-10-13 mutable owners / attachment sequencing checkpoint
+
+Active branch `codex/mutable-writer-sequencing`, parent PR143 now `c42fdd1`.
+That committed/pushed parent repair pins the provider principal during journal
+binding and preserves strict epoch-scoped operation IDs; both Codex findings
+are covered by focused regressions. PR142 Ubuntu passes and Windows remains
+running; PR143 replacement checks remain running at the latest inspection.
+
+The current slice adds conditional document writes with terminal CAS
+conflicts, fresh bounded authenticated observations, periodic presence/machine
+snapshot recovery, staged attachment manifest-before-log sequencing, and explicit
+format-6 lifecycle tickets with a durable consumer-release barrier. UserState
+semantic actions use atomic action/ticket allocation.
+Generic snapshot writes reject UserState paths. The journal independently refuses
+to release a ticket while a linked action has not durably settled its outcome.
+ACK alone never permits pruning. Legacy opaque operations remain non-prunable.
+
+Independent review found and repaired attachment manifest recovery occurring too
+late (after fresh send authorization), premature linked-action ticket release,
+and a lifetime CAS retry cap that could permanently wedge the action FIFO.
+The combined local gate passed 238 tests; attachment/outbox/overlay compatibility
+passed 113 with 3 intentional skips. Subsequent action tests cover settlement,
+release/pruning crash gaps, allocation rollback and bound UserState dispatch.
+Final changed journal/action/schema gate passed 144 tests; changed Python Ruff
+and whitespace checks pass. Astra reported no remaining actionable P1/P2
+with six additional targeted crash/ownership probes passing. PostgreSQL
+concurrency schedules are in the executable CI validator, not executed locally.
+Bound state checkpoints remain explicitly unavailable until the compound reaction
+owner durably retains its exact signed result across receipt retirement.
+
+Remaining activation work: durable ticket bindings for outbox/attachment owners;
+compound reaction/checkpoint and lifecycle/key/account mutation owners (account
+creation currently compensates every exception by deleting identity material,
+which is unsafe after ambiguous provider commits); typed staged-blob cleanup;
+reserved writes and harness owners; disposable authenticated acceptance and
+fleet migration. Production startup still does not bind the journal. No provider
+schema changes, restart, deployment or merge in this slice. Consolidate/clear the
+PR stack only after migration acceptance, preserving each unique dependency.
+
 ## 2026-10-13 whole-root fencing and application journal integration
 
 Active branch: `codex/journal-application-writes`, based on PR142 repair

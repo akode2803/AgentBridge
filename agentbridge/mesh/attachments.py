@@ -24,6 +24,7 @@ __all__ = ["AttachmentDelivery", "PreparedAttachment", "attachment_path"]
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$")
 _SHA_RE = re.compile(r"^[a-f0-9]{64}$")
+_STAGED_PREFIX = "f2-"
 SPOOL_MAX_AGE_S = 7 * 86400.0
 SPOOL_MAX_BYTES = 2 * 1024 * 1024 * 1024
 SPOOL_MAX_FILES = 200
@@ -45,11 +46,30 @@ def _safe_name(name: str) -> str:
     return value[:120]
 
 
-def attachment_path(chat_id: str, blob_id: str) -> str:
-    """Return the only valid remote path for a stable attachment id."""
+def attachment_path(chat_id: str, blob_id: str, record: dict | None = None) -> str:
+    """Map a signed v2 file identity to staging; retain the v1 path."""
     blob_id = str(blob_id or "")
     if not _ID_RE.fullmatch(blob_id):
         raise ValidationError("malformed attachment blob id")
+    staged = blob_id.startswith(_STAGED_PREFIX)
+    if record is not None:
+        if (type(record) is not dict or record.get("id") != blob_id
+                or (type(record.get("storage_v")) is int
+                    and record.get("storage_v") == 2) != staged
+                or ("storage_v" in record
+                    and (type(record["storage_v"]) is not int
+                         or record["storage_v"] != 2))):
+            raise ValidationError("attachment storage identity mismatch")
+    if staged:
+        if (type(chat_id) is not str or not chat_id or "/" in chat_id
+                or "\x00" in chat_id or chat_id in {".", ".."}):
+            raise ValidationError("malformed attachment chat id")
+        try:
+            if len(chat_id.encode("utf-8")) > 1024:
+                raise ValidationError("malformed attachment chat id")
+        except UnicodeError:
+            raise ValidationError("malformed attachment chat id") from None
+        return f"blob-stage/{chat_id}/{blob_id}"
     return P.file(chat_id, blob_id)
 
 
@@ -70,7 +90,8 @@ class AttachmentDelivery:
         name = _safe_name(name)
         dot = name.rfind(".")
         suffix = name[dot:][:12].lower() if dot > 0 else ""
-        blob_id = new_id("f") + suffix
+        writer = self._typed_writer()
+        blob_id = new_id("f2" if writer is not None else "f") + suffix
         sealed = self.sealer.seal_blob(chat_id, blob_id, raw)
         cap = int(getattr(self.tx, "max_upload_bytes", 0) or 0)
         if cap and len(sealed) > cap:
@@ -89,8 +110,10 @@ class AttachmentDelivery:
             "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
         }
+        if writer is not None:
+            record["storage_v"] = 2
         manifest = {
-            "v": 1,
+            "v": 2 if writer is not None else 1,
             "blob_id": blob_id,
             "sealed_bytes": len(sealed),
             "sealed_sha256": hashlib.sha256(sealed).hexdigest(),
@@ -100,19 +123,45 @@ class AttachmentDelivery:
 
     def upload(self, chat_id: str, manifest: dict) -> None:
         item = self._validate(chat_id, manifest)
+        writer = self._typed_writer()
+        if item["v"] == 2 and writer is None:
+            raise ValidationError("typed attachment journal is unavailable")
+        if item["v"] == 1 and writer is not None:
+            raise ValidationError("legacy attachment cannot use typed writer")
         spool = self._spool(item["blob_id"])
-        try:
-            sealed = spool.read_bytes()
-        except OSError:
-            # Cleanup runs only after outbox acknowledgement, so this branch is
-            # exceptional. A verified remote copy can still complete a retry.
-            sealed = self.tx.get_blob(attachment_path(chat_id, item["blob_id"]))
-            if sealed is None:
-                raise ValidationError("attachment spool is missing")
-        if (len(sealed) != item["sealed_bytes"]
-                or hashlib.sha256(sealed).hexdigest() != item["sealed_sha256"]):
-            raise ValidationError("attachment spool failed verification")
-        self.tx.put_blob(attachment_path(chat_id, item["blob_id"]), sealed)
+        if writer is not None:
+            from ..transport.staged_attachments import StagedAttachmentPublisher
+            StagedAttachmentPublisher(writer).publish(chat_id, item, spool)
+        else:
+            try:
+                sealed = spool.read_bytes()
+            except OSError:
+                # Cleanup runs only after outbox acknowledgement, so this branch is
+                # exceptional. A verified remote copy can still complete a retry.
+                sealed = self.tx.get_blob(attachment_path(chat_id, item["blob_id"]))
+                if sealed is None:
+                    raise ValidationError("attachment spool is missing")
+            if (len(sealed) != item["sealed_bytes"]
+                    or hashlib.sha256(sealed).hexdigest() != item["sealed_sha256"]):
+                raise ValidationError("attachment spool failed verification")
+            self.tx.put_blob(attachment_path(chat_id, item["blob_id"]), sealed)
+
+    def recover_published(self, chat_id: str, manifest: dict) -> bool:
+        """Settle only an existing typed manifest before fresh-send checks."""
+        item = self._validate(chat_id, manifest)
+        if item["v"] == 1:
+            return False
+        writer = self._typed_writer()
+        if writer is None:
+            raise ValidationError("typed attachment journal is unavailable")
+        from ..transport.staged_attachments import StagedAttachmentPublisher
+        return StagedAttachmentPublisher(writer).recover(chat_id, item)
+
+    def _typed_writer(self):
+        from ..transport.local_mutations import LocalMutationTransport
+        if isinstance(self.tx, LocalMutationTransport):
+            return self.tx._bound_writer()
+        return None
 
     def cancel(self, prepared: list[PreparedAttachment]) -> None:
         for item in prepared or []:
@@ -189,7 +238,8 @@ class AttachmentDelivery:
         return self.root / blob_id
 
     def _validate(self, chat_id: str, manifest: dict) -> dict:
-        if not isinstance(manifest, dict) or manifest.get("v") != 1:
+        if (type(manifest) is not dict or type(manifest.get("v")) is not int
+                or manifest["v"] not in (1, 2)):
             raise ValidationError("malformed attachment manifest")
         blob_id = str(manifest.get("blob_id") or "")
         record = manifest.get("record")
@@ -202,14 +252,19 @@ class AttachmentDelivery:
             sealed_bytes = int(manifest.get("sealed_bytes", -1))
         except (TypeError, ValueError) as exc:
             raise ValidationError("malformed attachment sizes") from exc
-        if plain_bytes < 0 or sealed_bytes <= 0:
+        if (plain_bytes < 0 or sealed_bytes <= 0
+                or manifest["v"] == 2
+                and (type(record.get("bytes")) is not int
+                     or type(manifest.get("sealed_bytes")) is not int)):
             raise ValidationError("malformed attachment sizes")
         sealed_sha = str(manifest.get("sealed_sha256") or "")
         if not _SHA_RE.fullmatch(sealed_sha):
             raise ValidationError("malformed sealed attachment hash")
         # Deriving the remote path here keeps a tampered outbox payload from
         # choosing an arbitrary transport destination.
-        attachment_path(chat_id, blob_id)
+        if (manifest["v"] == 2) != blob_id.startswith(_STAGED_PREFIX):
+            raise ValidationError("attachment storage identity mismatch")
+        attachment_path(chat_id, blob_id, record)
         return {
             **manifest,
             "blob_id": blob_id,

@@ -343,6 +343,62 @@ must retain staging-object identity and exact manifest bytes before retrying
 publication. None of these callers may convert a rejected unkeyed write into an
 uncoordinated direct provider write.
 
+### Staged receipt retirement and consumer settlement
+
+The opt-in format-6 lifecycle now separates **new work allocation**, exact ticket
+retry, provider acknowledgement, and durable consumer settlement. This is local
+implementation and executable test source, not a deployed capability or startup
+activation. Existing opaque-ID operations remain permanently nonprunable. Once a
+journal opts in, unknown IDs through the old prepare APIs reject; this prevents a
+retired ticket UUID from being rebound to a new provider epoch.
+
+`OperationJournal.adopt_epoch(rpc)` fetches fresh authenticated epoch metadata
+through the same pinned RPC client before opening the local transaction. The
+provider returns a stable receipt lifecycle UUID, current protocol epoch and
+monotonic 64-bit generation. Only the administrative, sealed, all-terminal-and-ACK
+rotation advances that counter; overflow rejects before deleting receipts. Old
+wire epochs continue to reject before a new effect can execute. The metadata read
+is authenticated but does not require continuing membership, so a removed member
+can settle an ACK response lost before rotation. It exposes only nonsecret protocol
+metadata for the supplied root, never membership lists, source data or outcomes.
+A root label, generation or lifecycle UUID is not membership authority.
+
+A journal pins the provider lineage and refuses generation rollback or identity
+changes. Adoption cannot resolve prepared, attempted or accepted old requests;
+they remain fail closed. A validated local **completed** receipt can become locally
+acknowledged after authenticated closure: the provider could only have rotated
+once its exact receipt was ACKed. This handles remote ACK commit followed by reply
+loss without repeating the mutation. Adoption never makes Store sources ready.
+
+`allocate_ticket(kind, arguments)` generates a new UUID and atomically records the
+exact request, source intent and ticket generation. `get_ticket(ticket)` and the
+existing driver `resume(epoch, id)` only look up that original operation. Missing
+or retired tickets never allocate. Generic callers must durably bind the returned
+ticket to their logical work before dispatch; the per-document snapshot owner uses
+bounded pending discovery as its durable owner slot. Semantic UserState actions
+use `allocate_action_ticket` to link the action and exact CAS ticket in the same
+root transaction, closing the caller-binding crash gap.
+
+ACK alone does **not** permit local pruning. The caller first durably consumes its
+exact outcome, then calls `release_ticket`. Current-epoch released tickets retain
+replay evidence until provider closure. Closed released tickets can be deleted;
+unreleased closed tickets retain their exact result and stay discoverable,
+including ACKed tickets, until the consumer settles them. Release is idempotent
+cleanup, never proof that an unknown operation succeeded. Applied/conflict action
+settlement is stored before release, so a crash between those commits cannot lose
+the semantic outcome or create a new effect. No TTL, age heuristic, eviction or
+background rotation is introduced.
+
+All replay records, including closed unreleased and old opaque records, continue
+to count against 4,096 records and 64 MiB. Ticket metadata is bounded by those
+records; lifecycle state uses one monotonic floor rather than an accumulating
+closed-epoch or UUID tombstone list. Result-dependent owners must drain/release
+outcomes for progress. A legacy-only full journal is intentionally not rescued by
+unsafe deletion. Provider rotation remains administrative and explicit, and
+active ambiguous operations can still block adoption. Fleet quiescence, caller
+migration, PostgreSQL execution and authenticated disposable acceptance remain
+production prerequisites.
+
 ### Protocol schedules
 
 - exact replay returns one receipt and one semantic effect under concurrent

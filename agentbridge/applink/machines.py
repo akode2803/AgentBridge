@@ -10,6 +10,7 @@ from ..core.models import UserKind
 from ..core.jsonkit import canonical_json_bytes
 from ..core.timekit import utcnow_iso
 from ..transport.base import Transport
+from ..transport.mutable_documents import publish_latest_document
 
 __all__ = ["MachineRegistry", "MachineRegistryError", "STALE_S"]
 
@@ -80,21 +81,24 @@ class MachineRegistry:
     def announce(self, *, capabilities: list[str] | None = None) -> dict:
         if not self.user or self.directory is None or self.keystore is None:
             raise MachineRegistryError("signed machine identity is unavailable")
-        bundle = self.keystore.load(self.user)
-        if not bundle:
-            raise MachineRegistryError(
-                f"identity key for @{self.user} is locked or unavailable")
-        rec = {
-            "v": 1, "machine": self.machine, "user": self.user,
-            "app_version": self.app_version or "unknown",
-            "platform": platform.system() or "unknown",
-            "capabilities": sorted(set(capabilities or [])),
-            "last_seen": utcnow_iso(), "last_seen_ns": time.time_ns(),
-        }
-        doc = {"record": rec,
-               "sig": crypto.sign(bundle, canonical_json_bytes(rec))}
-        self.tx.put_doc(self._path(self.machine, self.user), doc)
-        return rec
+        def build():
+            bundle = self.keystore.load(self.user)
+            if not bundle:
+                raise MachineRegistryError(
+                    f"identity key for @{self.user} is locked or unavailable")
+            rec = {
+                "v": 1, "machine": self.machine, "user": self.user,
+                "app_version": self.app_version or "unknown",
+                "platform": platform.system() or "unknown",
+                "capabilities": sorted(set(capabilities or [])),
+                "last_seen": utcnow_iso(), "last_seen_ns": time.time_ns(),
+            }
+            return {"record": rec,
+                    "sig": crypto.sign(bundle, canonical_json_bytes(rec))}
+
+        doc = publish_latest_document(
+            self.tx, self._path(self.machine, self.user), build)
+        return doc["record"]
 
     def records(self, machine: str | None = None, *, active_only: bool = True) -> list[dict]:
         floor = time.time_ns() - int(STALE_S * 1e9)
