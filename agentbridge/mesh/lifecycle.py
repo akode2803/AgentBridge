@@ -11,8 +11,8 @@ from ..core.jsonkit import canonical_json_bytes
 from ..core.timekit import new_id, next_ns
 
 __all__ = [
-    "LifecycleError", "LifecycleUnavailable", "ensure_bootstrap", "lifecycle_prefix",
-    "publish_change", "resolve_lifecycle",
+    "LifecycleError", "LifecycleUnavailable", "canonical_bootstrap_id",
+    "ensure_bootstrap", "lifecycle_prefix", "publish_change", "resolve_lifecycle",
 ]
 
 
@@ -276,6 +276,38 @@ def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
         if result is not _CONFLICT:
             return result
     raise LifecycleUnavailable("retained lifecycle head changed repeatedly")
+
+
+MAX_CHAIN = 256
+
+
+def canonical_bootstrap_id(directory, subject: str, *, store=None) -> str | None:
+    """Return the bootstrap id that begins ``subject``'s canonical chain.
+
+    Every accepted record extends its predecessor by ``previous_id`` and only
+    a bootstrap may begin a chain, so this identifies which bootstrap the
+    canonical state descends from, even after later accepted changes. Returns
+    None without any lifecycle; unreadable or inconsistent evidence raises.
+    """
+    current = resolve_lifecycle(directory, subject, store=store)
+    for _hop in range(MAX_CHAIN):
+        if current is None:
+            return None
+        if not current["previous_id"]:
+            if current["action"] != "bootstrap":
+                raise LifecycleUnavailable("lifecycle chain lacks its bootstrap")
+            return current["id"]
+        path = _path(subject, current["previous_id"])
+        try:
+            record, _subject_sig = _verify_doc(directory, path, directory.tx.get_doc(path))
+        except LifecycleUnavailable:
+            raise
+        except (LifecycleError, OSError, TypeError, ValueError) as exc:
+            raise LifecycleUnavailable("lifecycle chain is unavailable") from exc
+        if record["id"] != current["previous_id"] or record["subject"] != subject:
+            raise LifecycleUnavailable("lifecycle chain is inconsistent")
+        current = record
+    raise LifecycleUnavailable("lifecycle chain exceeds its bound")
 
 
 def _write(directory, keystore, record: dict, *, subject_proof: bool) -> dict:

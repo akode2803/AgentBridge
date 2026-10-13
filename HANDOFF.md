@@ -23,11 +23,18 @@ identities and private material, and `certify_closure()` records cancel/receipt
 ACKs proven by rotation so admitted owners can still settle and reap. Combined
 admission gate: 273 passed.
 
-Next: the agent identity dispatcher (install exact keys, admit, account CAS,
-bootstrap only if applied, canonical acceptance), which is also the
-private-material consumer that lets identity owners reap. Operator eviction of
-never-settled member legs is deliberately deferred (pre-existing parity; needs
-retained lineage). No production schema, activation or merge.
+The inactive agent identity dispatcher (mesh/identity_dispatch.py) now drives
+a frozen owner: exact key install, admission, account CAS, pin and bootstrap
+only after the account applied, canonical-lifecycle descent check, and reap
+after proving the keystore holds the exact key. Taken names cancel the unused
+bootstrap and keep the key unpinned. Gate: 350 passed.
+
+Next: route AccountsService.create_agent through the dispatcher behind the
+bound typed writer (with a durable pending-creation record), then the remaining
+human/password/adoption, key and terminal owners, then migration acceptance.
+Operator eviction of never-settled member legs is deliberately deferred
+(pre-existing parity; needs retained lineage). No production schema, activation
+or merge.
 
 ## 2026-10-13 provider admission and private identity checkpoint
 

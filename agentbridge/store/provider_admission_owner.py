@@ -737,13 +737,12 @@ class ProviderAdmissionOwnerJournal:
             self._check(conn)
             return len(completed) + cancelled
 
-    def reap(self, owner_id: str) -> bool:
-        """Delete a fully settled owner; returns False when already absent.
+    def abandon(self, owner_id: str) -> bool:
+        """Delete a draft the provider never admitted; False when absent.
 
-        Every leg must hold a released receipt outcome or an acknowledged
-        cancellation. Private material needs its own domain consumer, so an
-        owner that still carries it is never reaped here. Released journal
-        records stay until authenticated epoch closure, like other tickets.
+        Only ``prepared`` (never sent) and ``full`` (the provider holds no
+        reservation, and in-epoch occupancy never shrinks) qualify. An
+        ambiguous owner must first resolve by exact replay or epoch closure.
         """
         _uuid(owner_id, "admission owner")
         with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
@@ -751,9 +750,34 @@ class ProviderAdmissionOwnerJournal:
             record = self._find(conn, owner_id)
             if record is None:
                 return False
+            if record.state not in ("prepared", "full"):
+                _fail("owner_not_abandonable")
+            conn.execute("DELETE FROM typed_admission_legs WHERE owner_id=?", (owner_id,))
+            conn.execute("DELETE FROM typed_admission_owners WHERE owner_id=?", (owner_id,))
+            self.journal.coordinator._advance_root_revision(conn)
+            self._check(conn)
+            return True
+
+    def reap(self, owner_id: str, *, private_payload: bytes = b"") -> bool:
+        """Delete a fully settled owner; returns False when already absent.
+
+        Every leg must hold a released receipt outcome or an acknowledged
+        cancellation. An owner carrying private material is reaped only by its
+        domain consumer, which passes the exact bytes it durably retained
+        elsewhere. Released journal records stay until authenticated epoch
+        closure, like other tickets.
+        """
+        _uuid(owner_id, "admission owner")
+        if type(private_payload) is not bytes:
+            raise TypeError("invalid consumed private payload")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            self._check(conn)
+            record = self._find(conn, owner_id)
+            if record is None:
+                return False
             if record.state != "admitted":
                 _fail("owner_unsettled")
-            if record.private_payload:
+            if record.private_payload != private_payload:
                 _fail("private_material_unsettled")
             epoch = record.plan.protocol_epoch
             for request, linked, cancel, outcome in zip(

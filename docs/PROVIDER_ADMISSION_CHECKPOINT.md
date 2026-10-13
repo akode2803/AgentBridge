@@ -138,6 +138,34 @@ ACK across rotation, certification bounds, epoch audit, tampered draft) and
 deliberate-breakage checks of the certification, rebase state, attempt guard
 and binding guard, each caught. Combined gate: 273 passed.
 
+## Agent identity dispatcher (inactive)
+
+`agentbridge/mesh/identity_dispatch.py` drives one frozen identity owner; every
+call resumes from durable state and regenerates nothing:
+
+1. recover the frozen artifact; no-clobber install of its exact key (a
+   different local key fails before any provider call or capacity);
+2. admit the whole plan (`full` keeps the draft for rotation or `abandon`);
+3. settle the account absent-CAS. On `conflict` (name taken) cancel and
+   acknowledge the never-dispatched bootstrap leg, never pin, retain the key,
+   and reap: outcome `name_taken`;
+4. only after the account applied, pin the keys (a conflicting local pin stops
+   before bootstrap) and mark this machine's agent verified;
+5. dispatch and settle the exact bootstrap, then require the canonical
+   lifecycle to descend from it (`lifecycle.canonical_bootstrap_id` walks
+   `previous_id` to the single bootstrap, so later accepted changes still
+   count; unreadable ancestry fails closed). Otherwise `canonical_pending`
+   keeps the owner and key for a later retry;
+6. reap only after proving the keystore still holds the exact bundle;
+   `reap(private_payload=...)` requires the exact retained bytes.
+
+No legacy `_publish_identity` compensation, key deletion, or AccountsService
+activation; `AccountsService` still refuses typed identity writes. Evidence: 11
+tests in `tests/test_identity_dispatch.py` (provider writes into the same
+document table the directory reads); deliberate breakage of conflict
+handling, pin ordering, canonical verification and key-retention proof was
+each caught. Identity/lifecycle/pin/admission gate: 350 passed.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.
@@ -145,10 +173,11 @@ and binding guard, each caught. Combined gate: 273 passed.
    eviction of legs a member never settles is deliberately not added: it is
    pre-existing receipt-ACK parity, and eviction would need retained lineage so
    evicted owners could still prove non-effect after rotation.
-3. Wire agent identity install, account-CAS outcome, bootstrap sequencing and
-   canonical acceptance. Then migrate human/password/adoption, key rotation and
-   membership-bound wrapping, and terminal cleanup phases. Retain keys through
-   unknown outcomes. Distinguish pre-existing namespace weaknesses from new
-   migration regressions rather than adding unrelated prerequisites.
+3. Done above: inactive agent identity dispatcher. Next: route
+   `AccountsService.create_agent` through it behind the bound typed writer
+   (with a durable pending-creation record for the UI), then migrate
+   human/password/adoption, key rotation and membership-bound wrapping, and
+   terminal cleanup phases. Retain keys through unknown outcomes. Distinguish
+   pre-existing namespace weaknesses from new migration regressions.
 4. Complete disposable authenticated migration acceptance, then release and
    consolidate the PR stack. Production remains untouched and activation gated.
