@@ -71,8 +71,13 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   provider stores an independent request digest; 4,096 non-evicting slots bound
   one epoch; acknowledgments do not free replay evidence; and an exclusive
   epoch rotation prunes only after all receipts are acknowledged, making every
-  delayed old-epoch retry fail closed. Implementation begins with the private
-  receipt/gate core before any public readiness marker.
+  delayed old-epoch retry fail closed. The private receipt/gate core is now
+  implemented and accepted sequentially on disposable hosted PostgreSQL 17,
+  including a 4,095-slot allocator probe that held only three advisory locks.
+  Evidence is in
+  [PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md](docs/PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md).
+  PostgreSQL 16 concurrency CI is pending; typed document/log RPCs are next and
+  no public P1b readiness marker or application activation exists yet.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

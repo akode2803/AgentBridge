@@ -9,6 +9,7 @@ from uuid import UUID
 from .scoped_sources import validate_source_cursor
 
 MUTATION_PROTOCOL_SCHEMA_VERSION = 1
+MUTATION_PROTOCOL_STATE_VERSIONS = frozenset((1, 2))
 DATABASE_SEAL_SCOPE = "database-v1"
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -76,7 +77,7 @@ class ProviderMutationProtocolState:
 
     def __post_init__(self) -> None:
         if (type(self.schema_version) is not int
-                or self.schema_version != MUTATION_PROTOCOL_SCHEMA_VERSION):
+                or self.schema_version not in MUTATION_PROTOCOL_STATE_VERSIONS):
             raise ValueError("unsupported mutation protocol contract")
         _uuid(self.account_id, "mutation protocol account")
         if self.role != "authenticated":
@@ -92,18 +93,24 @@ class ProviderMutationProtocolState:
                 or type(self.blob_writes_sealed) is not bool
                 or self.blob_writes_sealed):
             raise ValueError("invalid mutation protocol state")
-        seal_epoch_mismatch = (
-            self.database_seal is not None
-            and self.database_seal.protocol_epoch != self.protocol_epoch
-        )
+        seal_epoch_invalid = False
+        if self.database_seal is not None:
+            matches_current = (
+                self.database_seal.protocol_epoch == self.protocol_epoch)
+            seal_epoch_invalid = (
+                matches_current if self.schema_version == 2
+                else not matches_current
+            )
         if ((self.database_seal is None) != self.legacy_writes_enabled
-                or seal_epoch_mismatch):
+                or self.schema_version == 2 and self.legacy_writes_enabled
+                or seal_epoch_invalid):
             raise ValueError("inconsistent mutation protocol seal")
 
 
 __all__ = [
     "DATABASE_SEAL_SCOPE",
     "MUTATION_PROTOCOL_SCHEMA_VERSION",
+    "MUTATION_PROTOCOL_STATE_VERSIONS",
     "ProviderDatabaseSeal",
     "ProviderMutationProtocolState",
 ]
