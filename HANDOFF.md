@@ -3,7 +3,8 @@
 ## 2026-10-13 inactive typed receipt wire
 
 Active branch: `codex/provider-typed-receipt-wire`, stacked on PR140 repair
-`2fce098`. The new `transport/mutation_receipts.py` strictly decodes all nine
+`2fce098`; PR141 implementation head `0fa8bbf`. The new
+`transport/mutation_receipts.py` strictly decodes all nine
 terminal receipt families and binds the expected root, actor, epoch, operation,
 kind, client digest and targets. Results are immutable scalar tuples. Initial
 provider digests are retained for exact later resolution; a lost initial reply
@@ -12,6 +13,12 @@ the unknown provider digest. No RPC caller, write activation or readiness marker
 is introduced. Review caught SQL compatibility for nested log names and legacy
 member-leave usernames; both have regressions. Automated migration remains a
 future backlog feature.
+
+Validation: 112 focused receipt/protocol/schema/HTTP-classifier tests passed,
+plus Ruff and whitespace checks. Astra independently passed 58 receipt tests
+and 19 boundary probes, compared all nine SQL result shapes, and reported no
+remaining actionable findings. This is local/source review evidence; PR141 CI
+and runtime activation remain separate.
 
 PR140's repair passed its PostgreSQL 16 executable gate in run `38378186919`,
 including the new 18-case stored-size regression; replacement platform checks
