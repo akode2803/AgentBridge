@@ -44,6 +44,8 @@ evidence. Do not repeatedly reload every ledger or duplicate the same update.
   Distinguish shipped source from the currently running build; no need to keep the
   app live on every intermediate release. Documentation needs no runtime restart.
   Version releases in agentbridge/__init__.py; scope commits and verify pushes.
+- Record every deferred task or decision in BACKLOG.md the moment it is made
+  (Aryan, 2026-10-14); never let a large task list live only in conversation.
 - Save non-obvious decisions, completed evidence and the next action in a concise
   durable handoff. Update other documents only when their meaning or status changes.
   Closing summaries include the next concrete work and any unfinished gates.

@@ -11,6 +11,45 @@
 
 ## Active, partial, and deferred requirements
 
+### Typed-writer migration ledger (Claude Opus takeover, 2026-10-13/14)
+
+Rule (Aryan, 2026-10-14): every deferred task and decision lands here the
+moment it is made, so a large task list never lives only in conversation.
+
+- [x] **Option B: admission optional per owner** (Aryan, 2026-10-13). Single-leg
+  writes skip admission; closure + durable-receipt-before-ACK proves ticketed
+  unreceipted attempts unexecuted. `394bebe`/`b13ba66`; PostgreSQL gate and
+  full local suite passed. Rationale: docs/PROVIDER_ADMISSION_CHECKPOINT.md.
+- [ ] **Human sign-up typed migration** (Aryan, 2026-10-14, next task):
+  `supabase_admin join` must claim via typed `ab_mutation_member_claim` (the
+  seal blocks its direct `ab_members` insert), journaled under a deterministic
+  key; `create_human` gets a human identity owner (account + self-signed
+  bootstrap). Decision: the plaintext recovery code is retained in the local
+  private owner payload until the account is published and shown, then wiped.
+- [D] **Fold `join` into in-app sign-up** (Aryan, 2026-10-14): deferred to the
+  setup/account overhaul, which also retires `legacy/bridge.py`.
+- [ ] **Chat-key rotation owner** binding membership and key versions
+  (membership-bound wraps; private chat keys) — needed by leave/remove.
+- [ ] **Terminal flows under a bound writer**: delete agent/account need typed
+  leave/remove events plus the key-rotation owner.
+- [ ] **Keyless agent adoption** (minting keys) needs an identity owner; bound
+  adoption refuses it today.
+- [ ] **Bound generic submits after lifecycle opt-in**: `put_doc`/`create_doc`/
+  `delete_doc`/effects/`append_log` via `ApplicationMutationWriter.submit`
+  refuse (`ticket_required`) until each writer's binding is recoverable.
+- [ ] **Identity owner UX**: surface `full`/`canonical_pending` agent creations
+  and offer `abandon`; a stale local pin conflict leaves a published agent
+  pending until resolved.
+- [D] **Operator eviction of never-settled member legs** (deferred 2026-10-13):
+  pre-existing receipt-ACK parity; would need retained lineage.
+- [ ] Optional: typed `full` result from execute (UX only, not safety); measure
+  send-path RPC latency in diagnostics.
+- [ ] **Disposable migration acceptance on Scratch** (needs credentials on this
+  Mac), then PR stack consolidation (item below).
+- [ ] Housekeeping: rewrite the stale local (git-excluded) `CLAUDE.md` as a
+  pointer to AGENTS.md (offered, unanswered); prune ~40 prunable
+  `/private/tmp` worktrees (ask first).
+
 ### Current cloud responsiveness tasks (Aryan, 2026-10-05)
 
 These entries track the current cloud work; historical items below are preserved.
