@@ -110,7 +110,7 @@ def validate_request(key, target, request):
 def insert_slot(conn, key, request):
     if conn.execute('SELECT count(*) FROM typed_operation_consumers').fetchone()[0] >= MAX_CONSUMERS:
         _fail('budget')
-    if conn.execute('SELECT format FROM mutation_root').fetchone() == (8,):
+    if conn.execute('SELECT format FROM mutation_root').fetchone() in {(8,), (9,)}:
         reserved = conn.execute('SELECT request_bytes FROM typed_outbox_reservations WHERE owner_kind=? AND owner_path=? AND owner_incarnation=? AND owner_seq=? AND leg=?', (*key[:3], key[4], key[5])).fetchone()
         if reserved is None or len(request.request_json) > reserved[0]:
             _fail('reservation_request_changed')
@@ -120,7 +120,7 @@ def insert_slot(conn, key, request):
 
 
 def require_consumed(conn, ticket):
-    if conn.execute("SELECT format FROM mutation_root WHERE singleton=1").fetchone() not in {(7,), (8,)}:
+    if conn.execute("SELECT format FROM mutation_root WHERE singleton=1").fetchone() not in {(7,), (8,), (9,)}:
         return
     if conn.execute('SELECT 1 FROM typed_operation_consumers WHERE protocol_epoch=? AND operation_id=? AND consumed=0 LIMIT 1',
                     (ticket.protocol_epoch, ticket.operation_id)).fetchone():
@@ -188,7 +188,7 @@ def reap_deleted_owners(conn, store_conn, key):
         present = {row[0] for row in store_conn.execute('SELECT seq FROM outbox WHERE seq IN (' + ','.join('?' for _ in seqs) + ')', seqs)}
         for seq in seqs:
             if seq not in present and not conn.execute('SELECT 1 FROM typed_operation_consumers WHERE owner_kind=? AND owner_path=? AND owner_incarnation=? AND owner_seq=? AND consumed=0 LIMIT 1', (*key[:3], seq)).fetchone():
-                if conn.execute('SELECT format FROM mutation_root').fetchone() == (8,):
+                if conn.execute('SELECT format FROM mutation_root').fetchone() in {(8,), (9,)}:
                     conn.execute('DELETE FROM typed_outbox_reservations WHERE owner_kind=? AND owner_path=? AND owner_incarnation=? AND owner_seq=?', (*key[:3], seq))
                 conn.execute('DELETE FROM typed_operation_consumers WHERE owner_kind=? AND owner_path=? AND owner_incarnation=? AND owner_seq=? AND consumed=1', (*key[:3], seq))
 
@@ -217,7 +217,7 @@ _JOIN = ('c.owner_kind=r.owner_kind AND c.owner_path=r.owner_path AND '
 
 
 def reservation_capacity(conn):
-    if conn.execute('SELECT format FROM mutation_root').fetchone() != (8,):
+    if conn.execute('SELECT format FROM mutation_root').fetchone() not in {(8,), (9,)}:
         return 0, 0
     return conn.execute('SELECT count(*),coalesce(sum(r.request_bytes),0) FROM typed_outbox_reservations r '
                         'LEFT JOIN typed_operation_consumers c ON ' + _JOIN + ' WHERE c.operation_id IS NULL').fetchone()
@@ -227,7 +227,7 @@ def audit_reservations(conn):
     from .operation_journal import MAX_REQUEST_BYTES
 
     present = conn.execute("SELECT sql FROM sqlite_master WHERE name='typed_outbox_reservations'").fetchone()
-    if conn.execute('SELECT format FROM mutation_root').fetchone() != (8,):
+    if conn.execute('SELECT format FROM mutation_root').fetchone() not in {(8,), (9,)}:
         if present is not None:
             _fail('unexpected_reservations')
         return
@@ -311,7 +311,7 @@ def reserve_owner(conn, store_conn, key, target, journal):
 
 def require_no_reserved_legacy_append(conn, request):
     if (request.expectation.kind == 'log_append'
-            and conn.execute('SELECT format FROM mutation_root').fetchone() == (8,)
+            and conn.execute('SELECT format FROM mutation_root').fetchone() in {(8,), (9,)}
             and conn.execute('SELECT 1 FROM typed_outbox_reservations WHERE append_operation=? LIMIT 1',
                              (request.expectation.operation_id,)).fetchone()):
         _fail('append_consumer_owned')

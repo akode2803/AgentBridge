@@ -1,14 +1,39 @@
 # Cloud source handoff
 
-## 2026-10-13 recoverable provider admission foundation
+## 2026-10-13 provider admission and private identity checkpoint
 
-Prospective SQL admission/cancellation and strict Python wire are implemented,
-with 118 focused tests passing and rollback-only authenticated Scratch acceptance.
-Exact executed SQL is retained. No Scratch schema or fixture remains applied.
-See docs/PROVIDER_ADMISSION_CHECKPOINT.md for evidence and missing local-owner
-integration. Two-session PostgreSQL CI remains required. New PR145 terminal
-pre-enqueue and unsupported-runtime-outbox review findings are being repaired.
-No activation, production change or merge is authorized by this checkpoint.
+Active branch `codex/provider-owner-admission`, PR #146 stacked on PR #145.
+PR145's terminal enqueue/runtime dispatch findings are fixed at `21ca727`:
+terminal actions reject before cascade/cache/outbox effects; non-append runtime
+rows retain their handlers. Focused repair gate139 passed.
+
+Prospective provider admission/cancellation, strict Python wire, and format9
+root-owned immutable admission plans are implemented. Positive admission commits
+before exact leg-to-ticket linkage; reserved capacity transfers once. Ambiguous
+or full replies cannot dispatch. Private agent identity bundle/account/bootstrap
+and both absent-CAS requests freeze atomically and survive restart. This is
+inactive preparation, not an activated account writer. Bound legacy identity
+workflows reject before mutation; legacy workflows retain binding admission
+through bootstrap to prevent mid-workflow key destruction.
+
+Local combined coordinator/journal/owner gate186 passed including the separately
+rerun localhost test. Identity gate21 and existing account gate19 passed.
+Independent admission review11 passed; final binding-race repair review passed
+with no remaining scoped finding. Two distinct admission probes are permanent
+in tests/test_provider_admission_recovery.py (3 final independent probes passed).
+Provider PostgreSQL16 full-capacity/two-session CI passed `3c939f8`, run38401966688;
+later Python changes still need current-head platform evidence. Exact authenticated
+Scratch SQL passed and rolled back completely; the executed script is retained.
+See docs/PROVIDER_ADMISSION_CHECKPOINT.md for evidence and limitations.
+
+Next: exact cancellation and domain-owner settlement/consumption, then recover
+full/ambiguous effect-free drafts across authenticated epoch closure. Current
+format9 intentionally blocks adoption while owners remain. Then agent creation
+install/account-CAS/bootstrap/canonical acceptance, remaining human/password/key
+and terminal owners, disposable migration acceptance and PR consolidation.
+Do not invent an authority verdict or clear old attempted mutations. Global
+name/handle uniqueness is pre-existing hardening, not a new migration blocker.
+No production schema, app/harness activation, restart or merge occurred.
 
 ## 2026-10-13 local capacity and lifecycle safety checkpoint
 
