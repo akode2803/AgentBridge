@@ -2634,21 +2634,31 @@ begin
   end if;
 
   if v_root.admission_required then
+    -- Admission is optional per owner. Shared, this mutex excludes only an
+    -- admission (held exclusive) from this lookup through commit, so an
+    -- operation is either admitted or receipted unadmitted, never both, and
+    -- admission counts every slot taken here. Order: epoch, operation, mutex.
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-mutation-admission:' || p_root, 0));
     select l.*, g.actor_uid into v_leg from public.ab_mutation_admission_legs l
       join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
       where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = p_operation_id;
-    if not found or v_leg.actor_uid is distinct from v_actor
-       or v_leg.operation_kind is distinct from p_operation_kind
-       or v_leg.client_digest is distinct from p_payload_digest or v_leg.cancelled then
-      raise exception 'typed mutation requires matching uncancelled admission' using errcode = '55000';
+    if found then
+      -- An admitted operation runs only through its exact uncancelled leg;
+      -- it never falls back to an unadmitted slot.
+      if v_leg.actor_uid is distinct from v_actor
+         or v_leg.operation_kind is distinct from p_operation_kind
+         or v_leg.client_digest is distinct from p_payload_digest or v_leg.cancelled then
+        raise exception 'typed mutation requires matching uncancelled admission' using errcode = '55000';
+      end if;
+      insert into public.ab_mutation_receipts(root, protocol_epoch, operation_id, actor_uid,
+        operation_kind, payload_digest, provider_digest, receipt_slot, receipt_state, applying_xid, result)
+      values (p_root, p_protocol_epoch, p_operation_id, v_actor, p_operation_kind,
+        p_payload_digest, p_provider_digest, v_leg.receipt_slot, 'applying',
+        pg_catalog.pg_current_xact_id(), '{}'::jsonb) returning * into v_receipt;
+      return pg_catalog.jsonb_build_object('replay', false,
+        'receipt', private.ab_mutation_receipt_json(v_receipt));
     end if;
-    insert into public.ab_mutation_receipts(root, protocol_epoch, operation_id, actor_uid,
-      operation_kind, payload_digest, provider_digest, receipt_slot, receipt_state, applying_xid, result)
-    values (p_root, p_protocol_epoch, p_operation_id, v_actor, p_operation_kind,
-      p_payload_digest, p_provider_digest, v_leg.receipt_slot, 'applying',
-      pg_catalog.pg_current_xact_id(), '{}'::jsonb) returning * into v_receipt;
-    return pg_catalog.jsonb_build_object('replay', false,
-      'receipt', private.ab_mutation_receipt_json(v_receipt));
   end if;
 
   v_base := (pg_catalog.hashtextextended(p_operation_id::text, 0) & 4095)::integer;
@@ -2657,10 +2667,16 @@ begin
     -- Do not accumulate one heavyweight transaction lock per immutable
     -- occupied slot in a near-full epoch.  The first read skips settled rows;
     -- the second closes the race after the nonblocking candidate lock.
+    -- Admitted owners' reserved slots are never taken; they cannot change
+    -- while the shared admission mutex above is held.
     if exists (
       select 1 from public.ab_mutation_receipts r
       where r.root = p_root and r.protocol_epoch = p_protocol_epoch
         and r.receipt_slot = v_slot
+    ) or exists (
+      select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+        and l.receipt_slot = v_slot
     ) then
       continue;
     end if;
@@ -2699,9 +2715,14 @@ begin
     end;
   end loop;
 
-  select pg_catalog.count(*) into v_count
-  from public.ab_mutation_receipts r
-  where r.root = p_root and r.protocol_epoch = p_protocol_epoch;
+  -- Reserved admission slots are occupied too; only a free slot held by an
+  -- in-flight writer is contention.
+  select pg_catalog.count(*) into v_count from (
+    select r.receipt_slot from public.ab_mutation_receipts r
+    where r.root = p_root and r.protocol_epoch = p_protocol_epoch
+    union
+    select l.receipt_slot from public.ab_mutation_admission_legs l
+    where l.root = p_root and l.protocol_epoch = p_protocol_epoch) occupied;
   if v_count >= 4096 then
     raise exception 'typed mutation receipt epoch is full'
       using errcode = '54000';
@@ -4413,9 +4434,11 @@ grant execute on function public.ab_mutation_reaction_pair(
   text,uuid,uuid,text,text,text,jsonb,jsonb,uuid,bigint,boolean,bigint,boolean)
   to authenticated;
 
--- Effect-free immutable owner admission. Epoch lock always precedes the root
--- admission mutex. Execution/cancellation use epoch then operation lock and
--- never acquire the admission mutex, so the lock order cannot invert.
+-- Effect-free immutable owner admission, optional per owner: single-leg
+-- writes may take free slots directly. Lock order is epoch, then operation,
+-- then the root admission mutex. Admission holds the mutex exclusive and never
+-- takes an operation lock; execution in an admission-enabled epoch holds it
+-- shared after its operation lock; cancellation never takes it. No cycle.
 create or replace function public.ab_admin_enable_mutation_admission(
   p_root text, p_expected_epoch uuid
 ) returns jsonb
@@ -4561,12 +4584,22 @@ begin
       raise exception 'unaffiliated mutation admission budget exhausted' using errcode = '54000';
     end if;
   end if;
+  -- An operation that already executed unadmitted can never settle a new leg.
   if exists (select 1 from public.ab_mutation_admission_legs l
-      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = any(v_ids)) then
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = any(v_ids))
+     or exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.operation_id = any(v_ids)) then
     raise exception 'mutation admission operation collision' using errcode = '55000';
   end if;
-  select pg_catalog.count(*) into v_occupied from public.ab_mutation_admission_legs l
-    where l.root = p_root and l.protocol_epoch = p_protocol_epoch;
+  -- Admission is optional per owner: single-leg writes may take free slots
+  -- directly. Occupancy is every reserved or receipted slot; neither table
+  -- ever frees a slot within the epoch, so a counted full is final.
+  select pg_catalog.count(*) into v_occupied from (
+    select l.receipt_slot from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+    union
+    select r.receipt_slot from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch) occupied;
   if v_occupied + v_count > 4096 then
     -- No control row is needed: no source effect is eligible without positive
     -- durable admission. Slots, including cancelled legs, never free in-epoch.
@@ -4574,10 +4607,14 @@ begin
       'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
       'status', 'full', 'plan', p_plan);
   end if;
+  -- Unadmitted writes hold this mutex shared from their leg lookup through
+  -- commit, so under the exclusive hold no unadmitted receipt is in flight.
   select pg_catalog.array_agg(candidate order by candidate) into v_slots from (
     select slot as candidate from pg_catalog.generate_series(0,4095) as slot
     where not exists (select 1 from public.ab_mutation_admission_legs l
       where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.receipt_slot = slot)
+      and not exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.receipt_slot = slot)
     order by slot limit v_count
   ) free_slots;
   insert into public.ab_mutation_admission_groups(root, protocol_epoch, owner_id, actor_uid)

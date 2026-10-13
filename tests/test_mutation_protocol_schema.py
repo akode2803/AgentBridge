@@ -666,7 +666,40 @@ def test_gated_begin_uses_exact_admission_slot_without_changing_terminal_replay(
                      'v_leg.client_digest is distinct from p_payload_digest',
                      'v_leg.cancelled', "v_leg.receipt_slot, 'applying'"):
         assert expected in gated
-    assert 'pg_advisory_xact_lock' not in gated  # reuses the existing operation lock
+    # Option B: admission is optional per owner. Only the shared admission
+    # mutex is taken, after the operation lock and before the leg lookup; a
+    # found leg is exact and never falls back to an unadmitted slot.
+    assert gated.count('pg_advisory_xact_lock') == 1
+    assert 'pg_advisory_xact_lock_shared(' in gated
+    assert begin.index("'agentbridge-mutation-operation:'") < begin.index(
+        "'agentbridge-mutation-admission:'")
+    assert gated.index('pg_advisory_xact_lock_shared(') < gated.index(
+        'from public.ab_mutation_admission_legs l')
+    found = gated[gated.index('if found then'):]
+    assert found.index("'typed mutation requires matching uncancelled admission'") < found.index(
+        "return pg_catalog.jsonb_build_object('replay', false")
+    allocator = begin[begin.index('  v_base :='):]
+    assert allocator.index('from public.ab_mutation_admission_legs l') < allocator.index(
+        'pg_try_advisory_xact_lock')
+    full = allocator[allocator.rindex('select pg_catalog.count(*) into v_count'):]
+    assert 'from public.ab_mutation_admission_legs l' in full and 'union' in full
+
+
+def test_admission_shares_slots_with_unadmitted_writes():
+    admit = _body('create or replace function public.ab_admit_mutation_owner(',
+                  'revoke all on function public.ab_admit_mutation_owner(')
+    collision = admit[admit.index("-- An operation that already executed unadmitted"):]
+    assert 'from public.ab_mutation_receipts r' in collision[:collision.index(
+        "'mutation admission operation collision'")]
+    occupancy = admit[admit.index('into v_occupied'):admit.index('v_occupied + v_count > 4096')]
+    assert 'ab_mutation_admission_legs' in occupancy and 'ab_mutation_receipts' in occupancy
+    assert 'union' in occupancy
+    selection = admit[admit.index('into v_slots'):admit.index(
+        'insert into public.ab_mutation_admission_groups')]
+    assert 'ab_mutation_admission_legs' in selection and 'ab_mutation_receipts' in selection
+    # Exclusive mutex only: no per-slot or per-operation locks can invert order.
+    assert 'pg_try_advisory_xact_lock' not in admit
+    assert "'agentbridge-mutation-operation:'" not in admit
 
 
 def test_cancel_is_exact_no_effect_control_and_ack_requires_cancellation():

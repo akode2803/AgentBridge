@@ -2960,7 +2960,9 @@ def _validate_provider_admission(database_url: str) -> None:
     altered = [dict(item) for item in plan]
     altered[0]['client_digest'] = 'b' * 64
     authenticated(admit(owner, altered), ok=False)
-    authenticated(put(leg(), 'unadmitted.json'), ok=False)
+    # Option B: admission is optional per owner; a single-leg write takes a
+    # free unreserved slot directly and must be acknowledged before closure.
+    unadmitted = json.loads(authenticated(put(leg(), 'unadmitted.json')))
     first = json.loads(authenticated(put(plan[0], 'admitted.json')))
     if json.loads(authenticated(cancel(owner, plan[0])))['status'] != 'executed':
         raise GateFailure('cancellation fabricated non-effect after committed write')
@@ -2972,6 +2974,7 @@ def _validate_provider_admission(database_url: str) -> None:
                 f'{_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid);')
     _run(database_url, rotation, expect_ok=False)
     authenticated(ack(first))
+    authenticated(ack(unadmitted))
     authenticated(cancel(owner, plan[1], ack=True))
     _run(database_url, rotation, expect_ok=False)  # Unused membership leg pins epoch.
     member = plan[2]
@@ -2984,8 +2987,10 @@ def _validate_provider_admission(database_url: str) -> None:
     authenticated(ack(left))
     _run(database_url, rotation)
     authenticated(put(plan[0], 'admitted.json'), ok=False)
-    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path in ('unadmitted.json','cancelled.json');") != '0':
-        raise GateFailure('unadmitted or cancelled mutation changed source')
+    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path='cancelled.json';") != '0':
+        raise GateFailure('cancelled admitted mutation changed source')
+    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path='unadmitted.json';") != '1':
+        raise GateFailure('optional admission refused an unadmitted single-leg write')
 
     # A new authenticated principal can reserve its one claim, but not source
     # writes before membership exists.
@@ -3037,10 +3042,25 @@ def _validate_provider_admission(database_url: str) -> None:
     owner, plan = uuid4(), [leg(), leg()]
     authenticated(admit(owner, plan))
     primary_actor, actor = actor, other_actor
-    for size in (1024, 1024, 1024, 1022):
+    for size in (1024, 1024, 1024, 1020):
         result = json.loads(authenticated(admit(uuid4(), [leg() for _ in range(size)])))
         if result['status'] != 'admitted':
             raise GateFailure('provider rejected available owner reservation capacity')
+    # Unadmitted writes take only the two unreserved slots, then see a full
+    # epoch (reservations count), never contention and never a reserved slot.
+    direct = [leg(), leg()]
+    for item in direct:
+        authenticated(put(item, 'direct-' + item['operation_id'] + '.json'))
+    overflow = authenticated(put(leg(), 'overflow.json'), ok=False)
+    if 'epoch is full' not in overflow.stderr.lower():
+        raise GateFailure('unadmitted write did not count reserved slots as occupied')
+    if _scalar(database_url, 'select count(*) from public.ab_mutation_receipts r '
+               'join public.ab_mutation_admission_legs l on l.root=r.root '
+               'and l.protocol_epoch=r.protocol_epoch and l.receipt_slot=r.receipt_slot '
+               f'and l.operation_id<>r.operation_id where r.root={_quote(root)};') != '0':
+        raise GateFailure('unadmitted write took a reserved admission slot')
+    # An operation that already executed unadmitted can never gain a leg.
+    authenticated(admit(uuid4(), [direct[0]]), ok=False)
     actor = primary_actor
     waiting_owner, waiting_plan = uuid4(), [leg()]
     full = json.loads(authenticated(admit(waiting_owner, waiting_plan)))

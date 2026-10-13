@@ -140,6 +140,48 @@ def _validate_provider_admission_races(database_url: str) -> None:
             holder.abort()
             waiter.abort()
 
+    def legs(root):
+        return _scalar(database_url, 'select count(*) from public.ab_mutation_admission_legs '
+                       f'where root={_quote(root)};')
+
+    # Option B: an in-flight unadmitted write holds the admission mutex shared,
+    # so an admission of the same operation waits, then sees its receipt.
+    root, epoch, owner, leg = setup('unadmitted-first')
+    contend(put(root, epoch, leg), admit(root, epoch, owner, leg), denied='collision')
+    if source_count(root) != '1' or receipt_count(root) != '1' or legs(root) != '0':
+        raise GateFailure('admission reserved an operation that executed unadmitted')
+
+    # Conversely an execution waiting on a committing admission uses its leg.
+    root, epoch, owner, leg = setup('admitted-first')
+    contend(admit(root, epoch, owner, leg), put(root, epoch, leg))
+    if _scalar(database_url, 'select bool_and(r.receipt_slot = l.receipt_slot) '
+               'from public.ab_mutation_receipts r join public.ab_mutation_admission_legs l '
+               'using (root, protocol_epoch, operation_id) '
+               f'where r.root={_quote(root)};') != 't' or receipt_count(root) != '1':
+        raise GateFailure('execution after admission ignored its reserved leg')
+
+    # Unadmitted writers share the mutex: one in flight never blocks another.
+    root, epoch, _owner, first = setup('unadmitted-shared')
+    second = {'operation_id': str(uuid4()), 'kind': 'doc_put', 'client_digest': 'c' * 64}
+    marker = 'shared-' + uuid4().hex
+    holder = _PsqlSession(database_url)
+    try:
+        holder.send("set statement_timeout='12s'; begin; set local role authenticated; "
+                    + _claims(actor) + put(root, epoch, first) + f'; select {_quote(marker)};')
+        holder.wait_marker(marker)
+        _scalar(database_url, "begin; set local statement_timeout='3s'; "
+                "set local role authenticated; " + _claims(actor)
+                + 'select public.ab_mutation_doc_put('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(second["operation_id"])}::uuid, {_quote(second["client_digest"])}, '
+                "'shared.json', '{\"value\":2}'::jsonb); commit;")
+        holder.send('commit;')
+        holder.finish()
+    finally:
+        holder.abort()
+    if receipt_count(root) != '2':
+        raise GateFailure('concurrent unadmitted writes did not both commit')
+
     # A committed effect must win against a cancellation waiting on that leg.
     root, epoch, owner, leg = setup('execute-first')
     result(admit(root, epoch, owner, leg))
