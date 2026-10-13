@@ -1,8 +1,8 @@
 # Typed provider mutation RPC plan
 
-Status: inactive P1b design with the receipt core, document/log, lifecycle and
-effect-transition sub-slices implemented. Storage-manifest proof and the final
-readiness marker remain absent. This work does not activate the local node as
+Status: inactive P1b design with the receipt core, document/log, lifecycle,
+effect-transition and object-ID blob-manifest sub-slices implemented. Real
+Storage HTTP acceptance and the final readiness marker remain absent. This work does not activate the local node as
 provider writer, seal a production root, clear any historical fence, or
 authorize a storage-object claim.
 
@@ -215,8 +215,9 @@ or diagnostics.
 4. **P1b-effects (implemented and hosted-accepted):** wrap the existing effect
    validator/writer with receipt identity, stable authority and an exact
    effect-path lock; reject a fresh operation for existing effect evidence.
-5. **P1b-storage:** implement immutable staged object verification and manifest
-   publication without claiming object/data atomicity.
+5. **P1b-storage (implemented; hosted SQL accepted):** immutable staged-object
+   owner/object-ID/size verification and manifest publication without claiming
+   object/data atomicity. Real Storage HTTP acceptance remains open.
 6. Install the P1b readiness marker last. Add the strict inactive Python wire,
    but keep the local mutation adapter on legacy writes until P2 has a durable
    local operation journal.

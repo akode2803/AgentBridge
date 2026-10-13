@@ -101,9 +101,25 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   evidence, sealed legacy denial and exact replay after room removal; see
   [PROVIDER_TYPED_EFFECT_ACCEPTANCE.md](docs/PROVIDER_TYPED_EFFECT_ACCEPTANCE.md).
   Astra's follow-up found no remaining P1/P2 after the disposable gate installed
-  the exact pre-existing R142 source dependency. Blob-manifest proof remains the
-  final missing mutation family before the readiness marker and inactive Python
-  wire.
+  the exact pre-existing R142 source dependency. The final inactive mutation
+  family now publishes immutable staged-blob manifests with exact authenticated
+  owner, API-visible Storage object ID and bounded-size evidence. Hosted PostgreSQL 17
+  acceptance covered owner-only unpublished visibility, room-member published
+  visibility, outsider denial, exact replay, collision/fresh-duplicate and
+  owner/object-ID/size rejection, update denial, replacement-ID fail-closed
+  behavior and post-removal replay; see
+  [PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md](docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md).
+  Real Storage HTTP acceptance now passes with two auto-confirmed disposable
+  principals: create-only upload/recovery, byte/hash round trip, pre-publication
+  denial, exact publication replay, post-publication second-member read,
+  upsert/move denial and exact API cleanup all held. Sanitized evidence and the
+  exact setup/verification SQL are retained under
+  `docs/provider-mutation-acceptance/`. Independent review tightened the client
+  from exception-class checks to exact per-operation status/code checks; the
+  exact five-second provider log reconciles the original run, and ten pure
+  regressions reject transient or unrelated errors. Current-head PostgreSQL 16
+  CI remains open. Install no readiness marker before that passes; the inactive
+  Python wire follows.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

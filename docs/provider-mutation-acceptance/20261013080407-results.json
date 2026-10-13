@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-13T08:07:57Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "region": "ap-south-1",
+  "postgresql_version": "17.11",
+  "migration": {
+    "version": "20261013080407",
+    "name": "agentbridge_p1b_blob_manifest_object_id_correction",
+    "statement_bytes": 10864,
+    "statement_sha256": "590a94a00adf588be4e344e7207656187db8127683cd01c86f5d1135e285aa2a"
+  },
+  "scripts": {
+    "cleanup_sha256": "3bb43eadb4bfbd901f36791f13230903d5e6ff2efd2246add1488b7df09dbb63",
+    "verification_sha256": "e2d7a2bfe1c0c1a76d552bd4c6237da0612c0f5301e82e45dfd934ef9c2aebbb",
+    "acceptance_sha256": "3eb450044d3812e24212be482b37c70d158ed738935a7eef29f63680ef2ab255"
+  },
+  "supersedes_scratch_migration": {
+    "version": "20261013074701",
+    "field": "object_version",
+    "reason": "storage.objects.version is not a supported client-visible identity contract"
+  },
+  "post_migration_shape": {
+    "object_id_uuid_not_null_columns": 1,
+    "object_version_columns": 0,
+    "object_id_read_predicates": 1,
+    "all_read_predicate_overloads": 1,
+    "object_id_manifest_rpcs": 1,
+    "all_manifest_rpc_overloads": 1,
+    "storage_policies": 4
+  },
+  "hosted_sql_observations": {
+    "authenticated_owner_staged_insert": true,
+    "unpublished_owner_visible_rows": 1,
+    "unpublished_room_member_visible_rows": 0,
+    "unpublished_outsider_visible_rows": 0,
+    "manifest_and_receipt_atomic": true,
+    "exact_replay_stable": true,
+    "receipt_result_uses_object_id": true,
+    "wrong_object_id_rejected": true,
+    "wrong_object_id_receipts": 0,
+    "published_owner_visible_rows": 1,
+    "published_room_member_visible_rows": 1,
+    "published_outsider_visible_rows": 0,
+    "authenticated_stage_update_rows": 0,
+    "replacement_object_id_owner_visible_rows": 0,
+    "replacement_object_id_member_visible_rows": 0,
+    "post_replacement_exact_replay_stable": true,
+    "manifest_rows": 1,
+    "blob_receipts": 1
+  },
+  "independent_review": {
+    "focused_tests_passed": 44,
+    "clean_install_p1_or_p2_findings": 0,
+    "upgrade_findings_fixed": 1,
+    "fixed_issue": "upgrade now requires both draft manifests and blob-manifest receipts to be absent"
+  },
+  "local_validation": {
+    "focused_tests_passed": 253,
+    "ruff_passed": true,
+    "python_compile_passed": true,
+    "whitespace_passed": true
+  },
+  "advisors": {
+    "performance_findings": 0,
+    "intentional_private_manifest_rls_notice": true,
+    "intentional_authenticated_security_definer_notices": true,
+    "preexisting_scaffold_findings_remain": true
+  },
+  "limits": {
+    "real_storage_api_exercised": false,
+    "object_bytes_uploaded": false,
+    "real_delete_reupload_exercised": false,
+    "provider_computed_hash_proved": false,
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}

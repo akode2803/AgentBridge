@@ -372,6 +372,128 @@ def test_p1b_effect_rpc_is_narrow_and_does_not_advertise_readiness():
         not in section
 
 
+def test_p1b_blob_manifest_table_is_private_bounded_and_receipt_gated():
+    section = SCHEMA[SCHEMA.index("-- P1b blob-manifest slice:") :]
+    table = section[:section.index(
+        "create or replace function private.ab_storage_object_size")]
+    assert "create table if not exists public.ab_blob_manifests" in table
+    assert "primary key (root, chat_id, blob_id)" in table
+    assert "unique (root, protocol_epoch, operation_id)" in table
+    assert "sealed_bytes between 1 and 52428800" in table
+    assert "sealed_sha256 ~ '^[0-9a-f]{64}$'" in table
+    assert "manifest_digest ~ '^[0-9a-f]{64}$'" in table
+    assert "object_id        uuid not null" in table
+    assert "alter table public.ab_blob_manifests enable row level security" \
+        in table
+    assert "revoke all on table public.ab_blob_manifests" in table
+    assert (
+        "before insert or update or delete on public.ab_blob_manifests"
+        in table
+    )
+    permit = _body(
+        "create or replace function private.ab_mutation_kind_permits(",
+        "revoke all on function private.ab_mutation_kind_permits(",
+    )
+    assert "when 'blob_manifest' then p_table = 'ab_blob_manifests'" in permit
+    assert "and p_operation = 'INSERT'" in permit
+
+
+def test_p1b_blob_storage_policies_isolate_exact_staged_lane():
+    section = SCHEMA[SCHEMA.index("-- P1b blob-manifest slice:") :]
+    policy = section[section.index(
+        "-- Existing policies are permissive."):
+        section.index("create or replace function public.ab_mutation_blob_manifest(")]
+    for name in ("select", "insert", "update", "delete"):
+        assert policy.count(
+            f"drop policy if exists ab_blobs_member_{name} on storage.objects"
+        ) == 1
+        assert policy.count(
+            f"create policy ab_blobs_member_{name} on storage.objects"
+        ) == 1
+    assert policy.count(
+        "pg_catalog.split_part(name, '/', 2) <> 'blob-stage'"
+    ) >= 5
+    assert policy.count(
+        "pg_catalog.split_part(name, '/', 5) = ''"
+    ) == 3
+    assert "private.ab_storage_object_size(metadata)" not in policy
+    assert "public.ab_staged_blob_readable(" in policy
+    update = policy[policy.index(
+        "create policy ab_blobs_member_update"):
+        policy.index("drop policy if exists ab_blobs_member_delete")]
+    assert update.count(
+        "pg_catalog.split_part(name, '/', 2) <> 'blob-stage'"
+    ) == 2
+    assert ") with check (" in update
+    delete = policy[policy.index(
+        "create policy ab_blobs_member_delete"):]
+    assert "owner_id = auth.uid()::text" in delete
+    assert "public.ab_is_member(" in delete
+
+
+def test_p1b_staged_read_predicate_fails_closed_after_any_manifest():
+    size = _body(
+        "create or replace function private.ab_storage_object_size(",
+        "revoke all on function private.ab_storage_object_size(",
+    )
+    assert "p_metadata->>'size' ~ '^[0-9]{1,8}$'" in size
+    assert "between 1 and 52428800" in size
+    helper = _body(
+        "create or replace function public.ab_staged_blob_readable(",
+        "revoke all on function public.ab_staged_blob_readable(",
+    )
+    any_manifest = helper.index("if exists (")
+    exact_manifest = helper.index("return public.ab_can_read_chat", any_manifest)
+    owner_fallback = helper.index("return p_owner_id = v_actor::text")
+    assert any_manifest < exact_manifest < owner_fallback
+    assert "m.object_id = p_object_id" in helper
+    assert "m.sealed_bytes = v_sealed_bytes" in helper
+    assert "private.ab_storage_object_size(p_metadata)" in helper
+    assert "and public.ab_is_member(p_root, p_chat)" in helper
+
+
+def test_p1b_blob_manifest_rpc_binds_exact_storage_row_and_receipt():
+    body = _body(
+        "create or replace function public.ab_mutation_blob_manifest(",
+        "revoke all on function public.ab_mutation_blob_manifest(",
+    )
+    sealed = body.index("private.ab_mutation_root_sealed(p_root)")
+    begin = body.index("private.ab_mutation_begin(")
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    actor = body.index("private.ab_mutation_lock_actor(p_root)", replay)
+    room = body.index("private.ab_mutation_lock_chat(p_root, p_chat, false)")
+    blob_lock = body.index("'agentbridge-blob-manifest:'")
+    authority = body.index("from public.ab_docs d", blob_lock)
+    duplicate = body.index("typed blob manifest already exists", authority)
+    storage = body.index("from storage.objects o", duplicate)
+    insert = body.index("insert into public.ab_blob_manifests", storage)
+    finish = body.index("private.ab_mutation_finish(", insert)
+    assert sealed < begin < replay < actor < room < blob_lock
+    assert blob_lock < authority < duplicate < storage < insert < finish
+    assert "'blob_manifest', p_chat, p_blob, p_object_id" in body
+    assert "p_sealed_bytes, p_sealed_sha256, p_manifest_digest" in body
+    assert "o.name = p_root || '/blob-stage/' || p_chat || '/' || p_blob" \
+        in body
+    assert "o.owner_id = v_actor::text" in body
+    assert "o.id = p_object_id" in body
+    assert "o.archived_at is null" in body
+    assert "not coalesce(o.is_delete_marker, false)" in body
+    assert "v_storage_size is distinct from p_sealed_bytes" in body
+    assert body.count("for share") >= 2
+
+
+def test_p1b_blob_manifest_rpc_is_narrow_and_not_ready():
+    section = SCHEMA[SCHEMA.index("-- P1b blob-manifest slice:") :]
+    revoke = section.index(
+        "revoke all on function public.ab_mutation_blob_manifest(")
+    tail = section[revoke:revoke + 620]
+    assert "from public, anon, authenticated, service_role" in tail
+    assert "grant execute on function public.ab_mutation_blob_manifest(" in tail
+    assert "to authenticated" in tail
+    assert "create or replace function public.ab_mutation_protocol_ready" \
+        not in section
+
+
 def test_state_probe_is_authorized_and_marker_is_installed_last():
     state = _body(
         "create or replace function public.ab_mutation_protocol_state",

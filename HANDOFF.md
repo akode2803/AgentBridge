@@ -1,5 +1,57 @@
 # Cloud source handoff
 
+## 2026-10-13 typed blob-manifest checkpoint
+
+`codex/provider-typed-blob-manifest` is stacked on PR #139 at parent `e2247a3`.
+The final inactive P1b mutation family now adds a private immutable manifest,
+an exact owner/object-ID/size receipt RPC and a `blob-stage` Storage-policy
+carve-out. Existing permissive policies are replaced so they cannot OR-admit
+the staged lane. Unpublished reads are uploader/current-member only; published
+reads require an exact manifest plus current/history chat authority; replacement
+identities fail closed. The provider does not claim to hash Storage bytes or make
+upload and manifest publication atomic.
+
+The focused local checkpoint passes 263 tests plus Ruff, Python compilation and
+whitespace checks. Independent Astra review ran 44 focused tests and found no
+P1/P2 in the clean-install slice. Client-wire review then found that the first
+scratch draft used internal `storage.objects.version`, which the supported
+client does not expose as an identity contract. The corrected product schema
+uses API-visible `storage.objects.id`. Scratch migration `20261013080407` drops
+the old overloads and column and installs the UUID signatures; a review finding
+also made it refuse upgrade while either draft manifests or receipts remain.
+Hosted SQL/RLS acceptance covered owner-only unpublished visibility,
+member-only published visibility, outsider denial, exact replay, wrong-ID
+rejection without a receipt, update denial and replacement-ID fail-closed
+behavior. The performance advisor remains clean. Exact migration, cleanup,
+verification and acceptance scripts are retained with their hashes in
+`docs/provider-mutation-acceptance/`; full evidence and explicit limits are in
+[docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md](docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md).
+
+Real Storage HTTP acceptance now passes. Two generated `example.com` users were
+auto-confirmed in AgentBridge Scratch and authenticated through the public API;
+their API UUIDs matched the dashboard rows. On fresh sealed root
+`typed-blob-http-20261013081948`, the exact two-phase client proved create-only
+upload/recovery, stable API-visible object ID, owner byte/SHA-256 round trip,
+second-member pre-publication denial, exact manifest replay, second-member
+post-publication read, upsert/move denial and exact Storage API cleanup. Final
+SQL verification saw zero object rows, one immutable manifest and one terminal
+receipt. Exact setup/verification SQL and the sanitized result are retained as
+`docs/provider-mutation-acceptance/20261013081948-http-*`. Astra found that the
+first client result's class-only denials could hide a transient failure; the
+exact five-second Storage log window proves `404 NoSuchKey`,
+`409 KeyAlreadyExists`, `403 AccessDenied`, `404 NoSuchKey` and HTTP-200 cleanup.
+The validator now requires those per-operation status/code pairs and ten pure
+regressions reject 429/5xx/unrelated failures. Generated passwords were already
+destroyed, so the tightened client was not rerun live; the bounded provider log
+is the reconciliation evidence for this run. No credential, token or API key
+entered the repository. The two disposable Auth users still exist.
+Astra's follow-up found the evidence P2 closed and no remaining actionable P1/P2;
+all 30 HTTP-classifier/schema tests passed independently. The combined focused
+gate passes 263 tests. Next, commit/open the stacked PR and use its PostgreSQL 16
+CI as the exact holder/waiter gate. No readiness marker or Python activation yet.
+Production project `eakewaaqbilmtswbbxix` and the local app/harness remain
+untouched and shut down.
+
 Delivery diagnostics, Supabase-only transport, mandatory bound GUI paging and
 PR34 attachment reconciliation are implemented and independently reviewed.
 The complete offline suite passed 3071 tests with 15 expected skips; Ruff and
