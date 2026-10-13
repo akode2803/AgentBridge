@@ -18,11 +18,15 @@ from .mutation_receipts import (
     MutationReceiptExpectation, ProviderMutationReceipt, decode_mutation_receipt,
 )
 from .scoped_sources import validate_source_cursor, validate_source_paths
+from .recovery_sources import RecoveryCut
 
 
 # Each tuple is (public RPC name, ordered SQL argument names, result target names).
 _FAMILIES = {
     "doc_put": ("ab_mutation_doc_put", ("p_path", "p_data"), ("path",)),
+    "doc_compare_put": ("ab_mutation_doc_compare_put",
+                        ("p_path", "p_data", "p_expected_source_epoch",
+                         "p_expected_seq", "p_expected_deleted"), ("path",)),
     "doc_create": ("ab_mutation_doc_create", ("p_path", "p_data"), ("path",)),
     "doc_delete": ("ab_mutation_doc_delete", ("p_path",), ("path",)),
     "log_append": ("ab_mutation_log_append", ("p_chat", "p_log", "p_record"),
@@ -154,6 +158,13 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
                 raise ValueError("invalid typed mutation blob id")
         elif name == "p_object_id":
             _uuid(value, "typed mutation object id")
+        elif name == "p_expected_source_epoch":
+            _uuid(value, "typed document source epoch")
+        elif name == "p_expected_seq":
+            validate_source_cursor(value, "typed document sequence")
+        elif name == "p_expected_deleted":
+            if type(value) is not bool:
+                raise ValueError("invalid typed document deletion state")
         elif name == "p_sealed_bytes":
             validate_source_cursor(value, "typed mutation sealed bytes")
             if not 1 <= value <= 52_428_800:
@@ -161,6 +172,9 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
         elif name in {"p_sealed_sha256", "p_manifest_digest"}:
             if type(value) is not str or _DIGEST.fullmatch(value) is None:
                 raise ValueError("invalid typed mutation digest")
+    if kind == "doc_compare_put" and arguments["p_expected_seq"] == 0 \
+            and arguments["p_expected_deleted"]:
+        raise ValueError("absent typed document cannot be a tombstone")
     if kind == "effect_transition":
         path = arguments["p_path"]
         if _EFFECT_PATH.fullmatch(path) is None:
@@ -275,6 +289,48 @@ def _provider_endpoint(value: object) -> str | None:
         return canonical_endpoint(value)
     except (TypeError, ValueError):
         return None
+
+
+@dataclass(frozen=True)
+class DocumentMutationObservation:
+    """Detached provider version for an atomic compare-and-replace.
+
+    Sequence zero denotes physical absence. Tombstones retain their positive
+    sequence; neither missing data nor a failed read is an absence proof.
+    """
+
+    path: str
+    source_epoch: str
+    seq: int
+    deleted: bool
+    payload_json: bytes | None
+
+    def __post_init__(self) -> None:
+        validate_source_paths((self.path,))
+        _uuid(self.source_epoch, "document source epoch")
+        validate_source_cursor(self.seq, "document source sequence")
+        if (type(self.deleted) is not bool
+                or self.seq == 0 and self.deleted
+                or (self.seq == 0 or self.deleted) != (self.payload_json is None)):
+            raise ValueError("invalid document observation")
+        if self.payload_json is not None:
+            if type(self.payload_json) is not bytes:
+                raise ValueError("invalid document observation payload")
+            data = json.loads(self.payload_json)
+            _bounded_json(data)
+            if _canonical(data) != self.payload_json:
+                raise ValueError("noncanonical document observation")
+
+    @property
+    def payload(self) -> Any:
+        return None if self.payload_json is None else json.loads(self.payload_json)
+
+    def arguments(self, data: Any) -> dict[str, Any]:
+        self.__post_init__()
+        return {"p_path": self.path, "p_data": data,
+                "p_expected_source_epoch": self.source_epoch,
+                "p_expected_seq": self.seq,
+                "p_expected_deleted": self.deleted}
 
 
 class TypedMutationRPC:
@@ -405,6 +461,55 @@ class TypedMutationRPC:
         except (TypeError, ValueError):
             raise TypedMutationRPCError("invalid typed mutation receipt") from None
 
+    def read_document_for_update(self, path: str) -> DocumentMutationObservation:
+        """Read one bounded document with this client's exact authenticated JWT.
+
+        The two recovery cuts fence source-epoch replacement, not intervening
+        writes. The provider compares the returned row sequence at mutation
+        time. This read never publishes a local source or establishes authority.
+        """
+        validate_source_paths((path,))
+
+        def fence() -> RecoveryCut:
+            raw = self._call("ab_node_recovery_fence", {"p_root": self.root})
+            try:
+                if type(raw) is not dict:
+                    raise ValueError("invalid document source fence")
+                cut = RecoveryCut(**raw)
+                if cut.account_id != self.actor_id:
+                    raise ValueError("document source principal changed")
+                return cut
+            except (TypeError, ValueError):
+                raise TypedMutationRPCError("invalid document source fence") from None
+
+        before = fence()
+        raw = self._call("ab_node_docs_exact", {
+            "p_root": self.root, "p_paths": [path], "p_max_bytes": 8_388_608,
+        })
+        after = fence()
+        try:
+            if (before.source_epoch != after.source_epoch
+                    or after.cursor < before.cursor
+                    or after.minimum_cursor < before.minimum_cursor):
+                raise ValueError("document source epoch changed")
+            if type(raw) is not list or len(raw) > 1:
+                raise ValueError("invalid document response")
+            if not raw:
+                return DocumentMutationObservation(path, before.source_epoch, 0, False, None)
+            row = raw[0]
+            if (type(row) is not dict
+                    or set(row) != {"path", "seq", "data", "deleted", "batch_overflow"}
+                    or row["batch_overflow"] is not False or row["path"] != path
+                    or type(row["seq"]) is not int or row["seq"] < 1
+                    or type(row["deleted"]) is not bool
+                    or row["deleted"] and row["data"] is not None):
+                raise ValueError("invalid document response")
+            payload = None if row["deleted"] else _canonical(row["data"])
+            return DocumentMutationObservation(
+                path, before.source_epoch, row["seq"], row["deleted"], payload)
+        except (TypeError, ValueError, UnicodeError):
+            raise TypedMutationRPCError("invalid document observation") from None
+
     def resolve(self, expected: MutationReceiptExpectation) -> ProviderMutationReceipt:
         self._check_expectation(expected)
         if expected.provider_digest is None:
@@ -437,5 +542,5 @@ class TypedMutationRPC:
                 "p_provider_digest": expected.provider_digest}
 
 
-__all__ = ["PreparedMutation", "TypedMutationRPC", "TypedMutationRPCError",
+__all__ = ["DocumentMutationObservation", "PreparedMutation", "TypedMutationRPC", "TypedMutationRPCError",
            "prepare_mutation"]

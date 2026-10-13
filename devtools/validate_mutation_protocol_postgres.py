@@ -83,6 +83,15 @@ create table public.ab_docs (
   deleted boolean not null default false,
   primary key (root, path)
 );
+create sequence public.ab_docs_ver;
+alter table public.ab_docs add column seq bigint not null default 0;
+create function public.ab_docs_touch() returns trigger language plpgsql as $$
+begin
+  new.seq := nextval('public.ab_docs_ver');
+  return new;
+end $$;
+create trigger ab_docs_touch before insert or update on public.ab_docs
+  for each row execute function public.ab_docs_touch();
 create table public.ab_logs (
   id bigint generated always as identity primary key,
   root text not null,
@@ -2553,6 +2562,190 @@ def _validate_p1b_blob_manifest_lock(database_url: str) -> None:
         raise GateFailure("blob-key contention produced duplicate evidence")
 
 
+def _validate_conditional_documents(database_url: str) -> None:
+    root = 'typed-conditional-document'
+    actor = uuid4()
+    initial = _prepare_root(database_url, root, actor)
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, initial, uuid4())))
+    epoch = UUID(sealed['protocol_epoch'])
+    source = UUID(sealed['source_epoch'])
+
+    def call(path, seq, *, deleted=False, source_epoch=source, operation=None):
+        return ('select public.ab_mutation_doc_compare_put('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(operation or uuid4()))}::uuid, {_quote("c" * 64)}, '
+                f'{_quote(path)}, \'{{"cas":true}}\'::jsonb, '
+                f'{_quote(str(source_epoch))}::uuid, {seq}, '
+                f'{"true" if deleted else "false"})')
+
+    def run(sql):
+        return json.loads(_scalar(database_url, 'begin; set local role authenticated; '
+                                 + _claims(actor) + sql + '; commit;'))
+
+    def sequence(path):
+        return int(_scalar(database_url, 'select seq from public.ab_docs where root='
+                           f'{_quote(root)} and path={_quote(path)};'))
+
+    absent = call('doc.json', 0)
+    receipt = run(absent)
+    if receipt['result'] != {'path': 'doc.json', 'applied': True}:
+        raise GateFailure('conditional absent insert failed')
+    seq = sequence('doc.json')
+    conflict_id = uuid4()
+    conflict = call('doc.json', 0, operation=conflict_id)
+    conflict_receipt = run(conflict)
+    if conflict_receipt['result']['applied'] is not False or run(conflict) != conflict_receipt:
+        raise GateFailure('conditional conflict is not an exact terminal replay')
+    collision = _run(database_url, 'begin; set local role authenticated; '
+                     + _claims(actor) + call('doc.json', seq, operation=conflict_id)
+                     + '; commit;', expect_ok=False)
+    if 'collides with existing receipt' not in collision.stderr:
+        raise GateFailure('conditional provider digest did not bind observed version')
+    if run(call('doc.json', seq))['result']['applied'] is not True:
+        raise GateFailure('conditional existing replacement failed')
+    current = sequence('doc.json')
+    if current == seq or run(absent) != receipt or sequence('doc.json') != current:
+        raise GateFailure('old conditional receipt did not replay exactly')
+    if run(call('doc.json', seq))['result']['applied'] is not False:
+        raise GateFailure('conditional stale sequence overwrote newer value')
+    if run(call('doc.json', current, source_epoch=uuid4()))['result']['applied'] is not False:
+        raise GateFailure('conditional obsolete source epoch was applied')
+    run('select public.ab_mutation_doc_delete('
+        f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid, '
+        f'{_quote("d" * 64)}, \'doc.json\')')
+    tombstone = sequence('doc.json')
+    if run(call('doc.json', tombstone))['result']['applied'] is not False:
+        raise GateFailure('conditional replacement ignored tombstone state')
+    if run(call('doc.json', tombstone, deleted=True))['result']['applied'] is not True:
+        raise GateFailure('conditional tombstone replacement failed')
+
+    # A held unconditional write and a separate READ COMMITTED CAS backend.
+    # The blocked CAS must recheck after commit, for both a row and an absent key.
+    for mode in ('put', 'create', 'delete'):
+        path = mode + '.json'
+        seq = 0
+        if mode != 'create':
+            run(call(path, 0))
+            seq = sequence(path)
+        suffix = uuid4().hex[:10]
+        holder_name, waiter_name = 'cas-holder-' + suffix, 'cas-waiter-' + suffix
+        ready, done = 'cas-ready-' + suffix, 'cas-done-' + suffix
+        holder, waiter = _PsqlSession(database_url), _PsqlSession(database_url)
+        operation = uuid4()
+        cas_sql = call(path, seq, operation=operation)
+        old_sql = (f'select public.ab_mutation_doc_{mode}('
+                   f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                   f'{_quote(str(uuid4()))}::uuid, {_quote("e" * 64)}, {_quote(path)}'
+                   + ('' if mode == 'delete' else ', \'{"newer":true}\'::jsonb') + ')')
+        try:
+            holder.send(f'set application_name={_quote(holder_name)}; begin; '
+                        'set local role authenticated; ' + _claims(actor)
+                        + old_sql + f'; select {_quote(ready)};')
+            holder.wait_marker(ready)
+            waiter.send(f'set application_name={_quote(waiter_name)}; begin; '
+                        'set local role authenticated; ' + _claims(actor)
+                        + cas_sql + f'; commit; select {_quote(done)};')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                blocked = _scalar(database_url,
+                    'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                    'join pg_catalog.pg_stat_activity w on '
+                    'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                    f'where h.application_name={_quote(holder_name)} '
+                    f'and w.application_name={_quote(waiter_name)});')
+                if blocked == 't':
+                    break
+                time.sleep(0.025)
+            else:
+                raise GateFailure('conditional writer did not wait for existing ' + mode)
+            holder.send('commit;')
+            waiter.wait_marker(done)
+            holder.finish()
+            waiter.finish()
+        finally:
+            holder.abort()
+            waiter.abort()
+        if run(cas_sql)['result']['applied'] is not False:
+            raise GateFailure('conditional writer overwrote concurrent ' + mode)
+
+    # Receipt replay survives current membership removal; new work does not.
+    run('select public.ab_mutation_member_leave('
+        f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid, '
+        f'{_quote("f" * 64)})')
+    if run(absent) != receipt or run(conflict) != conflict_receipt:
+        raise GateFailure('conditional replay incorrectly required fresh membership')
+    denied = _run(database_url, 'begin; set local role authenticated; '
+                  + _claims(actor) + call('denied.json', 0) + '; commit;', expect_ok=False)
+    if 'conditional document put is unauthorized' not in denied.stderr:
+        raise GateFailure('conditional fresh write ignored membership removal')
+
+
+def _validate_receipt_retirement(database_url: str) -> None:
+    """Closure metadata survives removal, rotation replay, and skipped epochs."""
+    root, actor = 'receipt-retirement', uuid4()
+    legacy = _prepare_root(database_url, root, actor)
+    observation_sql = ("begin; set local role authenticated; " + _claims(actor)
+                       + f"select public.ab_mutation_epoch_state({_quote(root)}); commit;")
+    unavailable = _run(database_url, observation_sql, expect_ok=False)
+    if 'sealed mutation lifecycle is unavailable' not in unavailable.stderr:
+        raise GateFailure('unsealed lifecycle observation was accepted')
+    seal = json.loads(_scalar(database_url, _seal_sql(root, legacy, uuid4())))
+    epoch = UUID(seal['protocol_epoch'])
+    before = json.loads(_scalar(database_url, observation_sql))
+    if (before['generation'] != 0 or before['protocol_epoch'] != str(epoch)
+            or before['actor_id'] != str(actor) or before['sealed'] is not True
+            or set(before) != {'schema_version', 'root', 'actor_id', 'role',
+                               'lifecycle_id', 'protocol_epoch', 'generation', 'sealed'}):
+        raise GateFailure('initial lifecycle observation changed its bounded contract')
+    anonymous = _run(database_url, "begin; set local role anon; "
+                     + f"select public.ab_mutation_epoch_state({_quote(root)}); commit;", expect_ok=False)
+    if 'permission denied' not in anonymous.stderr:
+        raise GateFailure('anonymous caller read epoch metadata')
+    operation, client, provider = uuid4(), 'a' * 64, 'b' * 64
+    _run(database_url, 'begin; ' + _claims(actor)
+         + _begin_sql(root, epoch, operation, 'member_leave', client, provider)
+         + f"; delete from public.ab_members where root={_quote(root)}; "
+         + _finish_sql(root, epoch, operation, 'member_leave', client, provider, '{"left":true}')
+         + '; commit;')
+    rotation_id = uuid4()
+    rotation_sql = ("select public.ab_admin_rotate_mutation_epoch("
+                    f"{_quote(root)},{_quote(str(epoch))}::uuid,{_quote(str(rotation_id))}::uuid);")
+    refused = _run(database_url, rotation_sql, expect_ok=False)
+    if 'not fully acknowledged' not in refused.stderr:
+        raise GateFailure('rotation deleted an unacknowledged receipt')
+    _run(database_url, 'begin; set local role authenticated; ' + _claims(actor)
+         + _receipt_sql('ab_ack_mutation_receipt', root, epoch, operation, client, provider)
+         + '; commit;')
+    rotated = json.loads(_scalar(database_url, rotation_sql))
+    if json.loads(_scalar(database_url, rotation_sql)) != rotated:
+        raise GateFailure('rotation response-loss replay changed')
+    after = json.loads(_scalar(database_url, observation_sql))
+    if (after['generation'] != 1 or after['lifecycle_id'] != before['lifecycle_id']
+            or after['protocol_epoch'] != rotated['protocol_epoch']):
+        raise GateFailure('removed actor could not observe exact closed lineage')
+    # A second closure is enough; the client need not retain every transition.
+    second_rotation = ("select public.ab_admin_rotate_mutation_epoch("
+                       f"{_quote(root)},{_quote(after['protocol_epoch'])}::uuid,{_quote(str(uuid4()))}::uuid);")
+    _run(database_url, second_rotation)
+    later = json.loads(_scalar(database_url, observation_sql))
+    if later['generation'] != 2 or later['lifecycle_id'] != before['lifecycle_id']:
+        raise GateFailure('multiple closures lost monotonic lineage')
+    stale = _run(database_url, 'begin; ' + _claims(actor)
+                 + _begin_sql(root, epoch, operation, 'member_leave', client, provider)
+                 + '; commit;', expect_ok=False)
+    if 'epoch' not in stale.stderr:
+        raise GateFailure('retired operation could become a new provider effect')
+    _run(database_url, "update public.ab_mutation_roots set receipt_generation=9223372036854775807 "
+         f"where root={_quote(root)};")
+    exhausted = _run(database_url, "select public.ab_admin_rotate_mutation_epoch("
+                     f"{_quote(root)},{_quote(later['protocol_epoch'])}::uuid,{_quote(str(uuid4()))}::uuid);", expect_ok=False)
+    if 'generation exhausted' not in exhausted.stderr:
+        raise GateFailure('epoch counter wrapped at exhaustion')
+    final = json.loads(_scalar(database_url, observation_sql))
+    if final['protocol_epoch'] != later['protocol_epoch']:
+        raise GateFailure('failed exhausted rotation changed the current epoch')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2619,6 +2812,8 @@ def main() -> int:
     _validate_p1b_effect_path_lock(database_url)
     _validate_p1b_blob_manifest_rpc(database_url)
     _validate_p1b_blob_manifest_lock(database_url)
+    _validate_conditional_documents(database_url)
+    _validate_receipt_retirement(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
@@ -2644,6 +2839,10 @@ def main() -> int:
             "typed-blob-owner-object-id-size", "typed-blob-member-read",
             "typed-blob-update-denied", "typed-blob-object-replacement",
             "typed-blob-post-removal-replay", "typed-blob-key-lock",
+            "conditional-doc-applied-conflict-replay",
+            "conditional-doc-concurrent-put-create-delete",
+            "conditional-doc-tombstone-sourceepoch-membership",
+            "receipt-retirement-generation-ack-closure",
             "schema-rerun",
         ],
     }, sort_keys=True))

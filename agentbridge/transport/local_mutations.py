@@ -179,6 +179,32 @@ class LocalMutationTransport(Transport):
         if operation_id is not None:
             raise ValueError('typed mutation journal is not bound')
 
+    def write_state_action(self, chat, user, kind, arguments, *, signer, verifier):
+        """Persist a user-state action before observing or signing its attempt."""
+        from ..store.user_state_actions import UserStateActionQueue
+
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        result = UserStateActionQueue(writer.driver).write(
+            chat, user, kind, arguments, signer=signer, verifier=verifier)
+        self._bound_writer()
+        if result[1]:
+            self._typed_success()
+        return result
+
+    def write_latest_doc(self, path, build):
+        """Replace a per-device snapshot after its durable retry has settled."""
+        writer = self._bound_writer()
+        if writer is None:
+            document = build()
+            self.put_doc(path, document)
+            return document
+        document = writer.replace_document(path, build)
+        self._bound_writer()
+        self._typed_success()
+        return document
+
     def put_doc(self, path, data, *, operation_id=None):
         if self._journal_writer is not None:
             return self._typed_submit('doc_put', {'p_path': path, 'p_data': data}, operation_id)

@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import json
 import re
+from uuid import uuid4
 from dataclasses import dataclass, field, replace
 
 from ..node.admission import NodeCoordinatorRegistration
 from ..node.store import NodeStore
 from ..transport.mutation_protocol import _uuid
 from ..transport.mutation_receipts import ProviderMutationReceipt, decode_mutation_receipt
-from ..transport.typed_mutations import PreparedMutation
+from ..transport.typed_mutations import PreparedMutation, prepare_mutation
+from ..transport.receipt_retirement import OperationTicket, ProviderEpoch
 from . import local_source, source_selectors
-from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V5_ROOT_SCHEMA, _overlap
+from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V5_ROOT_SCHEMA, _V6_ROOT_SCHEMA, _overlap
 
 MAX_RECORDS = 4096
 MAX_BYTES = 64 * 1024 * 1024
@@ -27,6 +29,10 @@ _STATES = _ACTIVE | {'completed', 'acknowledged'}
 _SCHEMA = {
     'typed_operation_owner': 'CREATE TABLE typed_operation_owner(singleton INTEGER PRIMARY KEY CHECK(singleton=1),endpoint TEXT NOT NULL,root TEXT NOT NULL,actor_id TEXT NOT NULL,node_path TEXT NOT NULL,node_incarnation TEXT NOT NULL,node_identity_digest TEXT NOT NULL,coordinator_epoch TEXT NOT NULL)',
     'typed_operations': 'CREATE TABLE typed_operations(protocol_epoch TEXT NOT NULL,operation_id TEXT NOT NULL,token TEXT NOT NULL UNIQUE,state TEXT NOT NULL,request BLOB NOT NULL,receipt BLOB,selectors BLOB NOT NULL,PRIMARY KEY(protocol_epoch,operation_id))',
+}
+_LIFECYCLE_SCHEMA = {
+    'typed_operation_lifecycle': 'CREATE TABLE typed_operation_lifecycle(singleton INTEGER PRIMARY KEY CHECK(singleton=1),lifecycle_id TEXT NOT NULL,protocol_epoch TEXT NOT NULL,generation INTEGER NOT NULL CHECK(generation>=0))',
+    'typed_operation_tickets': 'CREATE TABLE typed_operation_tickets(protocol_epoch TEXT NOT NULL,operation_id TEXT NOT NULL,generation INTEGER NOT NULL CHECK(generation>=0),released INTEGER NOT NULL CHECK(released IN (0,1)),PRIMARY KEY(protocol_epoch,operation_id))',
 }
 _COLUMNS = 'protocol_epoch,operation_id,token,state,request,receipt,selectors'
 
@@ -99,6 +105,50 @@ class OperationRecord:
 def _tables_present(conn):
     rows = tuple(conn.execute("SELECT name FROM sqlite_master WHERE name IN (?,?)", tuple(_SCHEMA)))
     return len(rows)
+
+
+def _lifecycle(conn):
+    if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (6,):
+        return None
+    return conn.execute('SELECT lifecycle_id,protocol_epoch,generation FROM typed_operation_lifecycle WHERE singleton=1').fetchone()
+
+
+def _unfinished_sql(conn):
+    if _lifecycle(conn) is None:
+        return "state!='acknowledged'"
+    return ("(state!='acknowledged' OR EXISTS (SELECT 1 FROM typed_operation_tickets t "
+            'WHERE t.protocol_epoch=typed_operations.protocol_epoch '
+            'AND t.operation_id=typed_operations.operation_id AND t.released=0))')
+
+
+def _audit_lifecycle(conn):
+    present = tuple(conn.execute('SELECT name FROM sqlite_master WHERE name IN (?,?)', tuple(_LIFECYCLE_SCHEMA)))
+    required = conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() == (6,)
+    if not required:
+        if present:
+            _fail('unexpected_lifecycle')
+        return
+    for name, sql in _LIFECYCLE_SCHEMA.items():
+        if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
+            _fail('lifecycle_schema')
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?,?) LIMIT 1", tuple(_LIFECYCLE_SCHEMA)).fetchone():
+        _fail('lifecycle_trigger')
+    if conn.execute("SELECT 1 FROM typed_operation_lifecycle WHERE typeof(lifecycle_id)!='text' OR length(lifecycle_id)!=36 OR typeof(protocol_epoch)!='text' OR length(protocol_epoch)!=36 OR typeof(generation)!='integer' OR generation<0 LIMIT 1").fetchone():
+        _fail('lifecycle_invalid')
+    rows = conn.execute('SELECT lifecycle_id,protocol_epoch,generation FROM typed_operation_lifecycle LIMIT 2').fetchall()
+    if len(rows) != 1:
+        _fail('lifecycle_missing')
+    try:
+        _uuid(rows[0][0], 'provider lifecycle')
+        _uuid(rows[0][1], 'provider epoch')
+    except ValueError:
+        _fail('lifecycle_invalid')
+    if conn.execute('SELECT 1 FROM typed_operation_tickets LIMIT 1 OFFSET ?', (MAX_RECORDS,)).fetchone():
+        _fail('ticket_budget')
+    if conn.execute("SELECT 1 FROM typed_operation_tickets t LEFT JOIN typed_operations o USING(protocol_epoch,operation_id) WHERE o.operation_id IS NULL OR typeof(t.generation)!='integer' OR t.generation<0 OR t.generation>? OR typeof(t.released)!='integer' OR t.released NOT IN (0,1) OR ((t.protocol_epoch=?) != (t.generation=?)) OR (t.generation<? AND o.state!='acknowledged') OR (t.released=1 AND o.state NOT IN ('completed','acknowledged')) LIMIT 1", (rows[0][2], rows[0][1], rows[0][2], rows[0][2])).fetchone():
+        _fail('ticket_invalid')
+    from .user_state_actions import audit_actions
+    audit_actions(conn)
 
 
 def _owner(conn):
@@ -179,6 +229,9 @@ def audit_journal(conn, coordinator, *, required):
         _fail('record_invalid')
     if _bytes_used(conn) > MAX_BYTES:
         _fail('byte_budget')
+    # The lifecycle's action audit reads selector metadata. Prove the journal
+    # record/column limits before any leaf audit materializes those selectors.
+    _audit_lifecycle(conn)
     # Publication checks never deserialize replay payloads. Only at most 64
     # active selector sets are decoded, and exact requests/receipts are checked
     # when a journal operation targets their immutable epoch/operation key.
@@ -273,7 +326,7 @@ class OperationJournal:
                     conn.execute(sql)
                 conn.execute('INSERT INTO typed_operation_owner VALUES(1,?,?,?,?,?,?,?)', self._owner)
                 coordinator._advance_root_revision(conn)
-            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (5,):
+            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in ((5,), (6,)):
                 # Once legacy admission is disabled, every remaining ready cut
                 # must have originated in verified node publication. Retire all
                 # old cuts before committing that durable capability boundary.
@@ -337,6 +390,164 @@ class OperationJournal:
             self._check(conn)
             return self._find_operation(conn, operation_id)
 
+    def adopt_epoch(self, rpc) -> int:
+        """Fetch authenticated epoch evidence, then opt in or retire tickets.
+
+        Network I/O finishes before the root transaction begins. A caller cannot
+        substitute an externally supplied observation for the authenticated read.
+        """
+        from ..transport.receipt_retirement import observe_provider_epoch
+        from ..transport.typed_mutations import TypedMutationRPC
+
+        if type(rpc) is not TypedMutationRPC:
+            raise TypeError('invalid mutation epoch observer')
+        if (rpc.endpoint, rpc.root, rpc.actor_id) != (self.endpoint, self.root, self.actor_id):
+            _fail('epoch_owner_changed')
+        return self._adopt_epoch(observe_provider_epoch(rpc))
+
+    def _adopt_epoch(self, evidence: ProviderEpoch) -> int:
+        """Commit an observation from adopt_epoch; no network under this cut.
+
+        Only the authenticated observation adapter supplies this evidence in
+        production. Administrative closure proves that all older receipts were
+        acknowledged; it cannot resolve requests with no durable local receipt.
+        Existing opaque-ID records are never deleted. Returns deleted rows.
+        """
+        if type(evidence) is not ProviderEpoch:
+            raise TypeError('invalid provider epoch evidence')
+        evidence.__post_init__()
+        if (evidence.endpoint, evidence.root, evidence.actor_id) != (self.endpoint, self.root, self.actor_id):
+            _fail('epoch_owner_changed')
+        with self.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            self._check(conn)
+            previous = _lifecycle(conn)
+            if previous is None:
+                # Initial observation does not prove which historical epochs
+                # an old opaque request belongs to. Preserve that ambiguity.
+                if conn.execute("SELECT 1 FROM typed_operations WHERE protocol_epoch!=? AND state!='acknowledged' LIMIT 1", (evidence.protocol_epoch,)).fetchone():
+                    _fail('unresolved_epoch')
+                for sql in _LIFECYCLE_SCHEMA.values():
+                    conn.execute(sql)
+                from .user_state_actions import initialize_actions
+                initialize_actions(conn)
+                conn.execute('INSERT INTO typed_operation_lifecycle VALUES(1,?,?,?)',
+                             (evidence.lifecycle_id, evidence.protocol_epoch, evidence.generation))
+                conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_previous')
+                conn.execute(_V6_ROOT_SCHEMA)
+                conn.execute('INSERT INTO mutation_root SELECT singleton,identity,epoch,6,revision FROM mutation_root_previous')
+                conn.execute('DROP TABLE mutation_root_previous')
+                deleted = 0
+            else:
+                lifecycle_id, epoch, generation = previous
+                if evidence.lifecycle_id != lifecycle_id or evidence.generation < generation:
+                    _fail('epoch_regressed')
+                if evidence.generation == generation:
+                    if evidence.protocol_epoch != epoch:
+                        _fail('epoch_changed')
+                    return 0
+                if evidence.protocol_epoch == epoch:
+                    _fail('epoch_changed')
+                if conn.execute("SELECT 1 FROM typed_operations WHERE protocol_epoch=? AND state NOT IN ('completed','acknowledged') LIMIT 1", (epoch,)).fetchone():
+                    _fail('unresolved_epoch')
+                # ACK may commit remotely before its reply is lost. Rotation
+                # certifies ACK, but only a validated local completed receipt
+                # proves this client's source completion already committed.
+                for row in conn.execute('SELECT ' + _COLUMNS + " FROM typed_operations WHERE (protocol_epoch=? AND state='completed') OR EXISTS (SELECT 1 FROM typed_operation_tickets t WHERE t.protocol_epoch=typed_operations.protocol_epoch AND t.operation_id=typed_operations.operation_id AND t.released=1)", (epoch,)):
+                    _record(row, self.coordinator, self._owner)
+                conn.execute("UPDATE typed_operations SET state='acknowledged' WHERE protocol_epoch=? AND state='completed'", (epoch,))
+                deleted = conn.execute('DELETE FROM typed_operations WHERE (protocol_epoch,operation_id) IN (SELECT protocol_epoch,operation_id FROM typed_operation_tickets WHERE released=1)').rowcount
+                conn.execute('DELETE FROM typed_operation_tickets WHERE released=1')
+                conn.execute('UPDATE typed_operation_lifecycle SET protocol_epoch=?,generation=? WHERE singleton=1',
+                             (evidence.protocol_epoch, evidence.generation))
+            self.coordinator._advance_root_revision(conn)
+            self._check(conn)
+            return deleted
+
+    def allocate_ticket(self, kind: str, arguments: dict) -> OperationTicket:
+        """Allocate NEW logical work, durably saving request and intent.
+
+        The caller must persist this returned ticket in its durable work item
+        before dispatch. Never use allocation to retry an existing work item.
+        A crash before caller binding leaves a discoverable prepared operation;
+        production owners must make that binding recoverable before opting in.
+        """
+        return self._allocate_ticket(kind, arguments)
+
+    def allocate_action_ticket(self, action_id: str, expected_attempt: int,
+                               arguments: dict) -> OperationTicket:
+        """Bind a semantic action to its exact CAS attempt in the root commit."""
+        return self._allocate_ticket('doc_compare_put', arguments,
+                                     action=(action_id, expected_attempt))
+
+    def _allocate_ticket(self, kind, arguments, *, action=None):
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            current = _lifecycle(conn)
+            if current is None:
+                _fail('lifecycle_required')
+        request = prepare_mutation(self.root, current[1], str(uuid4()), self.actor_id,
+                                   kind, arguments)
+        self._prepare(request, application=True, ticket=True, action=action)
+        return OperationTicket(current[1], request.expectation.operation_id)
+
+    def get_ticket(self, ticket: OperationTicket) -> OperationRecord:
+        """Lookup only: retired or unknown work is never prepared again."""
+        if type(ticket) is not OperationTicket:
+            raise TypeError('invalid operation ticket')
+        ticket.__post_init__()
+        return self.get(ticket.protocol_epoch, ticket.operation_id)
+
+    def lifecycle_enabled(self) -> bool:
+        """Inspect the durable opt-in under the normal owner checks."""
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            return _lifecycle(conn) is not None
+
+    def operation_ticket(self, protocol_epoch: str, operation_id: str) -> OperationTicket | None:
+        """Return ticket classification without loading the request body."""
+        ticket = OperationTicket(protocol_epoch, operation_id)
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            if _lifecycle(conn) is None:
+                return None
+            found = conn.execute('SELECT 1 FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?',
+                                 (protocol_epoch, operation_id)).fetchone()
+            return ticket if found else None
+
+    def release_ticket(self, ticket: OperationTicket) -> bool:
+        """Record durable consumer settlement, pruning only a closed epoch.
+
+        The caller must first durably consume the exact terminal outcome. This
+        must never be called merely because a provider ACK succeeded. Returns
+        whether the closed record was deleted; current-epoch releases retain
+        replay evidence until authenticated closure. No network is performed.
+        """
+        if type(ticket) is not OperationTicket:
+            raise TypeError('invalid operation ticket')
+        ticket.__post_init__()
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            current = _lifecycle(conn)
+            if current is None:
+                _fail('lifecycle_required')
+            key = (ticket.protocol_epoch, ticket.operation_id)
+            if conn.execute("SELECT 1 FROM user_state_actions WHERE ticket_epoch=? AND ticket_operation=? AND state='linked' LIMIT 1", key).fetchone():
+                _fail('consumer_unsettled')
+            row = conn.execute('SELECT generation FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key).fetchone()
+            if row is None:
+                # Cleanup is idempotent after a committed prune. This is not
+                # evidence that the operation existed or succeeded.
+                return False
+            record = self._find(conn, *key)
+            if record.state not in {'completed', 'acknowledged'}:
+                _fail('ticket_uncompleted')
+            if row[0] < current[2]:
+                conn.execute('DELETE FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key)
+                conn.execute('DELETE FROM typed_operations WHERE protocol_epoch=? AND operation_id=?', key)
+                return True
+            conn.execute('UPDATE typed_operation_tickets SET released=1 WHERE protocol_epoch=? AND operation_id=?', key)
+            return False
+
     def prepare(self, request: PreparedMutation) -> OperationRecord:
         """Strict replay requires the original epoch and operation identity."""
         return self._prepare(request, application=False)
@@ -349,7 +560,8 @@ class OperationJournal:
         """
         return self._prepare(request, application=True)
 
-    def _prepare(self, request: PreparedMutation, *, application: bool) -> OperationRecord:
+    def _prepare(self, request: PreparedMutation, *, application: bool,
+                 ticket: bool = False, action=None) -> OperationRecord:
         changes = mutation_selectors(request)
         raw = request.request_json
         if len(raw) > MAX_REQUEST_BYTES:
@@ -367,6 +579,17 @@ class OperationJournal:
                 if existing.request.request_json != request.request_json:
                     _fail('request_changed')
                 return existing
+            lifecycle = _lifecycle(conn)
+            if lifecycle is not None:
+                if not ticket:
+                    _fail('ticket_required')
+                if request.expectation.protocol_epoch != lifecycle[1]:
+                    _fail('epoch_changed')
+            elif ticket:
+                _fail('lifecycle_required')
+            if action is not None:
+                from .user_state_actions import validate_action_allocation
+                validate_action_allocation(conn, *action, request)
             if application:
                 pending = conn.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,))
                 for kind, value in pending:
@@ -384,6 +607,12 @@ class OperationJournal:
             conn.execute('INSERT INTO typed_operations VALUES(?,?,?,?,?,NULL,?)',
                          (expected.protocol_epoch, expected.operation_id, token, 'prepared', raw,
                           _canonical([(item.kind, item.value) for item in changes])))
+            if ticket:
+                conn.execute('INSERT INTO typed_operation_tickets VALUES(?,?,?,0)',
+                             (expected.protocol_epoch, expected.operation_id, lifecycle[2]))
+            if action is not None:
+                from .user_state_actions import link_action_ticket
+                link_action_ticket(conn, *action, request)
             root._retire_nodes(conn, token)
             root._retire(conn, changes)
             root._advance_root_revision(conn)
@@ -414,8 +643,26 @@ class OperationJournal:
             cursor_sql = '' if after is None else ' AND (protocol_epoch,operation_id)>(?,?)'
             arguments = (limit,) if after is None else (*after, limit)
             return tuple(conn.execute(
-                "SELECT protocol_epoch,operation_id FROM typed_operations WHERE state!='acknowledged'"
+                "SELECT protocol_epoch,operation_id FROM typed_operations WHERE " + _unfinished_sql(conn)
                 + cursor_sql + ' ORDER BY protocol_epoch,operation_id LIMIT ?', arguments))
+
+    def pending_document_keys(self, path: str):
+        """Find unfinished exact-document writes without loading replay bodies.
+
+        Replacement owners must resume these keys before constructing a fresh
+        snapshot. Broader scopes remain protected by normal intent overlap.
+        """
+        changes = source_selectors.selectors((source_selectors.Selector('doc_exact', path),))
+        encoded = _canonical([(item.kind, item.value) for item in changes])
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            keys = tuple(conn.execute(
+                "SELECT protocol_epoch,operation_id FROM typed_operations "
+                "WHERE " + _unfinished_sql(conn) + " AND selectors=? "
+                'ORDER BY protocol_epoch,operation_id LIMIT ?', (encoded, MAX_PENDING + 1)))
+            if len(keys) > MAX_PENDING:
+                _fail('document_inventory_budget')
+            return keys
 
     def _transition(self, request, action, receipt=None):
         root = self.coordinator

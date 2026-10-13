@@ -148,7 +148,7 @@ def test_p1b_exact_actor_receipt_access_and_rotation_are_narrow():
     assert "delete from public.ab_mutation_receipts" in rotation
     rotation_tail = core[
         core.index("revoke all on function public.ab_admin_rotate_mutation_epoch"):
-        core.index("-- P1b document/log slice:")
+        core.index("-- Authenticated observation of receipt closure")
     ]
     assert "grant execute" not in rotation_tail
 
@@ -531,3 +531,45 @@ def test_schema_install_does_not_seal_existing_or_new_roots():
     )
     assert "on conflict (root) do nothing" in backfill
     assert "legacy_writes_enabled = false" not in backfill
+
+
+def test_conditional_document_put_binds_version_and_terminalizes_conflict():
+    body = _last_body(
+        'create or replace function public.ab_mutation_doc_compare_put(',
+        'revoke all on function public.ab_mutation_doc_compare_put(')
+    assert 'p_expected_source_epoch uuid, p_expected_seq bigint, p_expected_deleted boolean' in body
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    authority = body.index('v_member := private.ab_mutation_lock_actor')
+    source_lock = body.index("'agentbridge-change-ledger:'")
+    epoch = body.index('if v_source_epoch = p_expected_source_epoch then')
+    insert = body.index('on conflict (root, path) do nothing')
+    update = body.index('and d.seq = p_expected_seq and d.deleted = p_expected_deleted')
+    finish = body.index('return private.ab_mutation_finish')
+    assert replay < authority < source_lock < epoch < insert < update < finish
+    assert "'doc_compare_put', p_path, p_data," in body
+    assert 'p_expected_source_epoch, p_expected_seq, p_expected_deleted)' in body
+    assert "pg_catalog.jsonb_build_object('path', p_path, 'applied', v_applied)" in body
+    assert 'v_applied boolean := false' in body
+    assert "p_path like 'chats/%/runtime/effects/%'" in body
+    assert 'grant execute on function public.ab_mutation_doc_compare_put(' in SCHEMA
+
+
+def test_receipt_closure_metadata_is_bounded_and_not_membership_authority():
+    rotation = _body(
+        'create or replace function public.ab_admin_rotate_mutation_epoch(',
+        'revoke all on function public.ab_admin_rotate_mutation_epoch(',
+    )
+    assert rotation.index('receipt_generation = 9223372036854775807') < rotation.index('delete from public.ab_mutation_receipts')
+    assert 'receipt_generation = receipt_generation + 1' in rotation
+    assert 'add column if not exists receipt_lifecycle_id uuid not null' in SCHEMA
+    observation = _body(
+        'create or replace function public.ab_mutation_epoch_state(',
+        'revoke all on function public.ab_mutation_epoch_state(',
+    )
+    assert "auth.role() is distinct from 'authenticated'" in observation
+    assert 'auth.uid() is null' in observation
+    assert 'ab_root_ok' not in observation
+    assert 'not r.legacy_writes_enabled' in observation
+    assert 'ab_database_mutation_seals' in observation
+    assert 'ab_mutation_receipts' not in observation
+    assert 'ab_docs' not in observation and 'ab_members' not in observation

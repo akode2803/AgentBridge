@@ -390,6 +390,18 @@ class UserState:
             return {}  # fail-safe: a doc this user never signed doesn't exist
         return doc
 
+    def _typed_action(self, kind: str, args: dict) -> tuple[bool, tuple]:
+        """Hand a logical delta to the durable owner before any mirror read."""
+        if getattr(self.tx, '_journal_writer', None) is None:
+            return False, (None, False)
+        write = getattr(self.tx, 'write_state_action', None)
+        if not callable(write):
+            raise ValueError('typed state action writer is unavailable')
+        if self._signer is None or self._verifier is None:
+            raise ValueError('signed state action owner required')
+        return True, write(self.chat_id, self.user, kind, args,
+                           signer=self._signer, verifier=self._verifier)
+
     def _merge(self, **changes: Any) -> dict[str, Any]:
         with self._lock:
             state = self.signed_fields(self.get())
@@ -412,6 +424,11 @@ class UserState:
         if self._signer is None:
             return None
         with self._lock:
+            if getattr(self.tx, '_journal_writer', None) is not None:
+                # The reaction operation consumes this exact signed document
+                # as part of one logical action. Until both writes share a
+                # durable compound owner, a lone checkpoint would be unsafe.
+                raise NotImplementedError('typed state checkpoint requires compound reaction journal')
             from .events import state_signing_bytes
 
             fields = self.signed_fields(self.get())
@@ -427,6 +444,10 @@ class UserState:
     # ------------------------------------------------------------ read cursor
     def mark_read(self, up_to_ns: int) -> None:
         with self._lock:
+            bound, _ = self._typed_action('mark_read',
+                                          {'up_to_ns': up_to_ns, 'at': utcnow_iso()})
+            if bound:
+                return
             state = self.get()
             # Reopening an already-read room must not publish a new signed
             # state document: that write retires the local canonical source
@@ -455,6 +476,10 @@ class UserState:
         it's a real per-recipient receipt (not just presence). Returns whether
         the cursor actually moved (callers skip the write otherwise)."""
         with self._lock:
+            bound, result = self._typed_action('mark_delivered',
+                                                {'up_to_ns': up_to_ns, 'at': utcnow_iso()})
+            if bound:
+                return bool(result[1])
             cur = int(self.get().get("delivered_ns", 0))
             if up_to_ns <= cur:
                 return False
@@ -470,12 +495,18 @@ class UserState:
     # ------------------------------------------------------------------ stars
     def star(self, msg_ids: list[str]) -> None:
         with self._lock:
+            bound, _ = self._typed_action('star', {'msg_ids': list(msg_ids)})
+            if bound:
+                return
             state = self.get()
             starred = dict.fromkeys(list(state.get("starred", [])) + msg_ids)
             self._merge(starred=list(starred))
 
     def unstar(self, msg_ids: list[str]) -> None:
         with self._lock:
+            bound, _ = self._typed_action('unstar', {'msg_ids': list(msg_ids)})
+            if bound:
+                return
             drop = set(msg_ids)
             self._merge(starred=[m for m in self.get().get("starred", [])
                                  if m not in drop])
@@ -486,12 +517,18 @@ class UserState:
     # ------------------------------------------------------- hide / clear
     def hide(self, msg_ids: list[str]) -> None:
         with self._lock:
+            bound, _ = self._typed_action('hide', {'msg_ids': list(msg_ids)})
+            if bound:
+                return
             state = self.get()
             hidden = dict.fromkeys(list(state.get("hidden", [])) + msg_ids)
             self._merge(hidden=list(hidden))
 
     def unhide(self, msg_ids: list[str]) -> None:
         with self._lock:
+            bound, _ = self._typed_action('unhide', {'msg_ids': list(msg_ids)})
+            if bound:
+                return
             drop = set(msg_ids)
             self._merge(hidden=[m for m in self.get().get("hidden", [])
                                 if m not in drop])
@@ -499,6 +536,13 @@ class UserState:
     def clear(self, up_to_ns: int, *, keep_starred: bool = False,
               runtime_ids: tuple[str, ...] = ()) -> None:
         with self._lock:
+            bound, _ = self._typed_action('clear',
+                                          {'up_to_ns': up_to_ns,
+                                           'keep_starred': keep_starred,
+                                           'runtime_ids': list(runtime_ids),
+                                           'at': utcnow_iso()})
+            if bound:
+                return
             state = self.get()
             hidden_runtime = list(dict.fromkeys([
                 *state.get("hidden_runtime", []), *runtime_ids,
@@ -517,4 +561,8 @@ class UserState:
         sidebar overlays (all per-user, all merged)."""
         if name not in ("pinned", "archived", "deleted", "forced_unread", "mute"):
             raise ValueError(f"unknown state flag {name!r}")
+        with self._lock:
+            bound, _ = self._typed_action('set_flag', {'name': name, 'value': value})
+            if bound:
+                return
         self._merge(**{name: value})

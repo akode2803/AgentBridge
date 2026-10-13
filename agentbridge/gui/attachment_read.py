@@ -5,6 +5,7 @@ import hashlib
 import re
 import sqlite3
 
+from ..core.errors import ValidationError
 from ..mesh.attachments import attachment_path
 from ..mesh.page_operation import PageOperation
 from ..mesh.sealer import (E2EESealer, PlainSealer, observed_blob_epoch,
@@ -135,10 +136,13 @@ def read_attachment(app, mesh, token, chat_id, message_id, blob_id):
     chat = _part(chat_id)
     if type(message_id) is not str or not message_id:
         return _state('message_id_required', 'not_found'), None
-    path = attachment_path(chat, blob_id)
     error, preflight = _exact(app, mesh, token, chat, message_id, blob_id)
     if error:
         return error, None
+    try:
+        path = attachment_path(chat, blob_id, preflight)
+    except ValidationError:
+        return _state('file_storage_identity_changed', 'unavailable'), None
     # This can allocate the whole transport object; post-fetch admission is
     # honest about that API limitation and honors the existing upload ceiling.
     sealed = mesh.tx.get_blob(path)

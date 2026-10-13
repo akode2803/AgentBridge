@@ -36,6 +36,9 @@ CASES = [
                        "p_object_id": OBJECT, "p_sealed_bytes": 4096,
                        "p_sealed_sha256": "a" * 64,
                        "p_manifest_digest": "b" * 64}, {}),
+    ("doc_compare_put", {"p_path": "accounts/alice.json", "p_data": {"v": 1},
+                         "p_expected_source_epoch": OBJECT, "p_expected_seq": 3,
+                         "p_expected_deleted": False}, {"applied": True}),
 ]
 
 
@@ -525,3 +528,104 @@ def test_integer_beyond_postgresql_numeric_range_is_rejected(monkeypatch):
             module._bounded_json({'n': 10 ** 131072})
     finally:
         sys.set_int_max_str_digits(previous)
+
+
+def _source_cut():
+    return {'schema_version': 1, 'index_contract': 'root-manifest-v1',
+            'source_schema_version': 2, 'source_epoch': OBJECT,
+            'account_id': ACTOR, 'role': 'authenticated',
+            'minimum_cursor': 0, 'cursor': 4}
+
+
+@pytest.mark.parametrize('rows,seq,deleted,payload', [
+    ([], 0, False, None),
+    ([{'path': 'x.json', 'seq': 7, 'deleted': False,
+       'data': {'v': [1]}, 'batch_overflow': False}], 7, False, {'v': [1]}),
+    ([{'path': 'x.json', 'seq': 8, 'deleted': True,
+       'data': None, 'batch_overflow': False}], 8, True, None),
+])
+def test_conditional_document_read_is_pinned_bounded_and_detached(rows, seq, deleted, payload):
+    client = _Client()
+    client.on_execute = lambda name, parameters: (
+        _source_cut() if name == 'ab_node_recovery_fence' else rows)
+    rpc = TypedMutationRPC(_Provider(client), actor_id=ACTOR, root='team', endpoint=URL)
+    observed = rpc.read_document_for_update('x.json')
+    assert (observed.seq, observed.deleted, observed.payload) == (seq, deleted, payload)
+    assert observed.arguments({'new': 2}) == {
+        'p_path': 'x.json', 'p_data': {'new': 2},
+        'p_expected_source_epoch': OBJECT,
+        'p_expected_seq': seq, 'p_expected_deleted': deleted,
+    }
+    if payload is not None:
+        observed.payload['v'].append(2)
+        rows[0]['data']['v'].append(3)
+        assert observed.payload == {'v': [1]}
+    assert [name for name, _ in client.calls] == [
+        'ab_node_recovery_fence', 'ab_node_docs_exact', 'ab_node_recovery_fence']
+    assert client.calls[1][1] == {
+        'p_root': 'team', 'p_paths': ['x.json'], 'p_max_bytes': 8_388_608}
+
+
+@pytest.mark.parametrize('bad', [
+    None, {}, [{}],
+    [{'path': 'x.json', 'seq': 0, 'deleted': False, 'data': {}, 'batch_overflow': False}],
+    [{'path': 'x.json', 'seq': True, 'deleted': False, 'data': {}, 'batch_overflow': False}],
+    [{'path': 'other.json', 'seq': 1, 'deleted': False, 'data': {}, 'batch_overflow': False}],
+    [{'path': 'x.json', 'seq': 1, 'deleted': True, 'data': {}, 'batch_overflow': False}],
+    [{'path': None, 'seq': None, 'deleted': None, 'data': None, 'batch_overflow': True}],
+])
+def test_conditional_document_read_never_converts_invalid_data_to_absence(bad):
+    client = _Client()
+    client.on_execute = lambda name, parameters: (
+        _source_cut() if name == 'ab_node_recovery_fence' else bad)
+    rpc = TypedMutationRPC(_Provider(client), actor_id=ACTOR, root='team', endpoint=URL)
+    with pytest.raises(TypedMutationRPCError):
+        rpc.read_document_for_update('x.json')
+
+
+def test_conditional_document_read_rejects_epoch_principal_and_transport_changes():
+    for change in ('epoch', 'principal', 'network'):
+        client = _Client()
+        seen = 0
+        def respond(name, parameters):
+            nonlocal seen
+            if name == 'ab_node_docs_exact':
+                if change == 'network':
+                    raise OSError('lost response')
+                return []
+            seen += 1
+            cut = _source_cut()
+            if seen == 2:
+                cut['source_epoch' if change == 'epoch' else 'account_id'] = EPOCH
+            return cut
+        client.on_execute = respond
+        rpc = TypedMutationRPC(_Provider(client), actor_id=ACTOR, root='team', endpoint=URL)
+        with pytest.raises(TypedMutationRPCError):
+            rpc.read_document_for_update('x.json')
+
+
+def test_conditional_document_receipt_and_expected_version_are_strict():
+    arguments = {'p_path': 'x.json', 'p_data': {'new': True},
+                 'p_expected_source_epoch': OBJECT,
+                 'p_expected_seq': 7, 'p_expected_deleted': False}
+    request = prepare_mutation('team', EPOCH, OP, ACTOR, 'doc_compare_put', arguments)
+    client = _Client()
+    rpc = TypedMutationRPC(_Provider(client), actor_id=ACTOR, root='team', endpoint=URL)
+    for applied in (True, False):
+        client.result = _receipt(request, {'applied': applied})
+        assert dict(rpc.execute(request).result)['applied'] is applied
+    for applied in (0, 1, 'conflict', None):
+        client.result = _receipt(request, {'applied': applied})
+        with pytest.raises(TypedMutationRPCError):
+            rpc.execute(request)
+    for field, value in [('p_expected_seq', True), ('p_expected_seq', -1),
+                         ('p_expected_deleted', 0), ('p_expected_source_epoch', 'bad')]:
+        with pytest.raises(ValueError):
+            prepare_mutation('team', EPOCH, OP, ACTOR, 'doc_compare_put',
+                             {**arguments, field: value})
+    with pytest.raises(ValueError):
+        prepare_mutation('team', EPOCH, OP, ACTOR, 'doc_compare_put',
+                         {**arguments, 'p_expected_seq': 0, 'p_expected_deleted': True})
+    changed = prepare_mutation('team', EPOCH, OP, ACTOR, 'doc_compare_put',
+                               {**arguments, 'p_expected_seq': 8})
+    assert changed.expectation.client_digest != request.expectation.client_digest

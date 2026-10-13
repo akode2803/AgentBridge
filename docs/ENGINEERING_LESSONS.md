@@ -346,3 +346,29 @@ into the mirror: recovering an old accepted operation could overwrite newer data
 The regression covers warm-cache admission before journal setup, typed completion,
 failed legacy re-admission and restart. This was caught before application binding
 was enabled at startup; it is not evidence of a production incident.
+
+### Durable mutable writes need semantic ownership (2026-10-13)
+
+A fresh read followed by a signed document replacement still loses concurrent
+updates. Conditional replacement must compare the provider source epoch and exact
+row sequence/deleted state, and conflicts must be terminal receipted outcomes.
+For user actions, persisting only the attempted replacement is insufficient: a
+lost conflict reply followed by a different action can silently discard the first
+action. Persist its immutable semantic delta before reading/signing, and atomically
+link each conditional attempt to that delta. Bound retries per invocation rather
+than over the action lifetime, or ordinary contention permanently blocks its FIFO.
+
+Provider ACK is not application consumption. A closed provider epoch can prove a
+lost ACK succeeded, but local pruning still requires durable consumer settlement.
+Keep unreleased outcomes across rotations; reject releasing a linked semantic
+operation in the journal transaction itself. Generic snapshot recovery must not
+consume user-state action tickets. Result-dependent compound operations such as
+reaction/checkpoint publication need their own durable outcome binding before
+activation, even if simple state flags can safely retire after settlement.
+
+Attachment recovery must precede fresh send authorization. A manifest may commit
+before its reply is lost and before the sender is removed; treating that retry as
+a new send first strands an already committed operation. Recover exact retained
+manifest operations without new Storage access, then apply fresh authorization to
+any genuinely new message append. A successful upload or manifest is not proof of
+message publication, and staged-object cleanup remains a separate typed owner.

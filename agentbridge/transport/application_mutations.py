@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 from .journaled_mutations import JournaledMutations
 from .mutation_protocol import _uuid
@@ -75,6 +75,57 @@ class ApplicationMutationWriter:
                 or retained.arguments_json != request.arguments_json):
             raise ValueError("typed operation replay identity changed")
         return self.driver.resume(retained.expectation.protocol_epoch, operation_id)
+
+    def update_document(self, path: str, build):
+        """Recover, then compare-and-swap a freshly observed document.
+
+        The factory receives raw current data, never an authority verdict. It
+        must be a replaceable snapshot or a repeatable calculation. Durable
+        user actions use the separate semantic action queue. None means no change. Ambiguous attempts retain
+        exact bytes and must settle before the factory can run again.
+        """
+        validate_source_paths((path,))
+        parts = path.split('/')
+        if (len(parts) == 5 and parts[0] == 'chats'
+                and parts[2:4] == ['overlays', 'state']):
+            raise ValueError('user state requires a durable semantic action')
+        if not callable(build):
+            raise TypeError("document factory must be callable")
+        self.driver._check_owner()
+        journal = self.driver.journal
+        for epoch, operation in journal.pending_document_keys(path):
+            self.driver.resume(epoch, operation)
+            ticket = journal.operation_ticket(epoch, operation)
+            if ticket is not None:
+                journal.release_ticket(ticket)
+        for _ in range(3):
+            observed = self.driver.rpc.read_document_for_update(path)
+            current = observed.payload
+            payload = build(current)
+            if payload is None:
+                return current, False
+            ticket = None
+            if journal.lifecycle_enabled():
+                ticket = journal.allocate_ticket("doc_compare_put", observed.arguments(payload))
+                operation = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
+            else:
+                operation = self.submit("doc_compare_put", observed.arguments(payload),
+                                        operation_id=str(uuid4()))
+            applied = dict(operation.receipt.result)["applied"]
+            document = json.loads(operation.request.arguments_json)["p_data"]
+            # Snapshot work is discoverable by path. Once settled it may be
+            # superseded by the next freshly built snapshot; no external work
+            # item depends on retaining this result.
+            if ticket is not None:
+                journal.release_ticket(ticket)
+            if applied:
+                return document, True
+        raise RuntimeError("document changed repeatedly; retry the action")
+
+    def replace_document(self, path: str, build):
+        """Replace a device snapshot only after older operations settle."""
+        document, _changed = self.update_document(path, lambda _current: build())
+        return document
 
     def append_log(self, chat_id: str, log_name: str, record: dict):
         if type(record) is not dict:

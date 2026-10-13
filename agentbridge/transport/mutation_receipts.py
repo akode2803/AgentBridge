@@ -16,6 +16,7 @@ from .scoped_sources import _text, validate_source_cursor, validate_source_paths
 
 _RESULT_FIELDS = {
     "doc_put": ("path", "updated"),
+    "doc_compare_put": ("path", "applied"),
     "doc_create": ("path", "created"),
     "doc_delete": ("path", "deleted"),
     "log_append": ("chat_id", "log_name", "row_id"),
@@ -49,7 +50,7 @@ def _result_value(key: str, value: object, kind: str) -> None:
     if key in _TRUE_FIELDS:
         if value is not True:
             raise ValueError("invalid mutation success flag")
-    elif key == "deleted":
+    elif key in {"deleted", "applied"}:
         if type(value) is not bool:
             raise ValueError("invalid mutation deletion flag")
     elif key in {"row_id", "logs_deleted", "documents_tombstoned", "sealed_bytes"}:
