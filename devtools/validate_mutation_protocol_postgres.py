@@ -349,11 +349,12 @@ def _wait_for_lock_order(
     waiter: _PsqlSession,
     waiter_name: str,
     waiter_mode: str,
+    lock_prefix: str = "agentbridge-change-ledger:",
 ) -> None:
     deadline = time.monotonic() + 5
     root_key = (
         "pg_catalog.hashtextextended("
-        f"'agentbridge-change-ledger:' || {_quote(root)}, 0)")
+        f"{_quote(lock_prefix)} || {_quote(root)}, 0)")
     query = f"""
       select count(*)
       from pg_catalog.pg_locks held
@@ -583,6 +584,447 @@ def _validate_old_write_after_seal(database_url: str) -> None:
         writer.abort()
 
 
+def _claims(uid: UUID) -> str:
+    return (
+        f"set local \"request.jwt.claim.sub\" = {_quote(str(uid))}; "
+        "set local \"request.jwt.claim.role\" = 'authenticated'; "
+    )
+
+
+def _begin_sql(
+    root: str,
+    epoch: UUID,
+    operation_id: UUID,
+    kind: str,
+    client_digest: str,
+    provider_digest: str,
+) -> str:
+    return (
+        "select private.ab_mutation_begin("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(operation_id))}::uuid, {_quote(kind)}, "
+        f"{_quote(client_digest)}, {_quote(provider_digest)})"
+    )
+
+
+def _perform_begin_sql(
+    root: str,
+    epoch: UUID,
+    operation_id: UUID,
+    kind: str,
+    client_digest: str,
+    provider_digest: str,
+) -> str:
+    call = _begin_sql(
+        root, epoch, operation_id, kind, client_digest, provider_digest,
+    ).removeprefix("select ")
+    return f"do $ab$ begin perform {call}; end $ab$"
+
+
+def _finish_sql(
+    root: str,
+    epoch: UUID,
+    operation_id: UUID,
+    kind: str,
+    client_digest: str,
+    provider_digest: str,
+    result: str,
+) -> str:
+    return (
+        "select private.ab_mutation_finish("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(operation_id))}::uuid, {_quote(kind)}, "
+        f"{_quote(client_digest)}, {_quote(provider_digest)}, "
+        f"{_quote(result)}::jsonb)"
+    )
+
+
+def _receipt_sql(
+    function: str,
+    root: str,
+    epoch: UUID,
+    operation_id: UUID,
+    client_digest: str,
+    provider_digest: str,
+) -> str:
+    return (
+        f"select public.{function}("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(operation_id))}::uuid, "
+        f"{_quote(client_digest)}, {_quote(provider_digest)})"
+    )
+
+
+def _validate_p1b_core(database_url: str) -> None:
+    root = "typed-receipt-core"
+    actor = uuid4()
+    observer = uuid4()
+    legacy_epoch = _prepare_root(database_url, root, actor)
+    _run(
+        database_url,
+        "insert into public.ab_members(root, username, uid) values ("
+        f"{_quote(root)}, 'typed-observer', {_quote(str(observer))}::uuid);",
+    )
+    seal_id = uuid4()
+    seal = json.loads(_scalar(
+        database_url, _seal_sql(root, legacy_epoch, seal_id)))
+    epoch = UUID(seal["protocol_epoch"])
+
+    operation_id = uuid4()
+    client_digest = "b" * 64
+    provider_digest = "c" * 64
+    applied = json.loads(_scalar(
+        database_url,
+        "begin; " + _claims(actor)
+        + _perform_begin_sql(
+            root, epoch, operation_id, "doc_put",
+            client_digest, provider_digest,
+        )
+        + "; insert into public.ab_docs(root, path, data) values ("
+        f"{_quote(root)}, 'typed.json', '{{\"value\":1}}'::jsonb); "
+        + _finish_sql(
+            root, epoch, operation_id, "doc_put",
+            client_digest, provider_digest, '{"path":"typed.json"}',
+        )
+        + "; commit;",
+    ))
+    if applied["operation_id"] != str(operation_id):
+        raise GateFailure("typed mutation receipt lost its operation identity")
+
+    direct = _run(
+        database_url,
+        "insert into public.ab_docs(root, path, data) values ("
+        f"{_quote(root)}, 'direct.json', '{{}}'::jsonb);",
+        expect_ok=False,
+    )
+    if "legacy provider writes are sealed" not in direct.stderr:
+        raise GateFailure("sealed direct write bypassed the receipt-aware gate")
+
+    replay = json.loads(_scalar(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, operation_id, "doc_put",
+            client_digest, provider_digest,
+        )
+        + "; commit;",
+    ))
+    if replay.get("replay") is not True:
+        raise GateFailure("exact typed retry did not resolve its receipt")
+    collision = _run(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, operation_id, "doc_put",
+            "d" * 64, provider_digest,
+        )
+        + "; commit;",
+        expect_ok=False,
+    )
+    if "collides with existing receipt" not in collision.stderr:
+        raise GateFailure("typed operation collision was not rejected")
+
+    wrong_lane_id = uuid4()
+    wrong_lane = _run(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, wrong_lane_id, "doc_put",
+            client_digest, "e" * 64,
+        )
+        + "; insert into public.ab_logs(root, chat_id, log_name, line) values ("
+        f"{_quote(root)}, 'chat', 'writer', '{{}}'); commit;",
+        expect_ok=False,
+    )
+    if "legacy provider writes are sealed" not in wrong_lane.stderr:
+        raise GateFailure("typed receipt authorized the wrong source lane")
+    leaked = int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = {_quote(str(wrong_lane_id))}::uuid;",
+    ))
+    if leaked:
+        raise GateFailure("failed typed mutation retained an applying receipt")
+
+    receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _receipt_sql(
+            "ab_mutation_receipt", root, epoch, operation_id,
+            client_digest, provider_digest,
+        )
+        + "; commit;",
+    ))
+    if receipt["result"] != {"path": "typed.json"}:
+        raise GateFailure("exact receipt query returned the wrong result")
+    _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _receipt_sql(
+            "ab_ack_mutation_receipt", root, epoch, operation_id,
+            client_digest, provider_digest,
+        )
+        + "; commit;",
+    )
+
+    leave_id = uuid4()
+    leave_client = "f" * 64
+    leave_provider = "1" * 64
+    _run(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, leave_id, "member_leave",
+            leave_client, leave_provider,
+        )
+        + "; delete from public.ab_members where root = "
+        f"{_quote(root)} and uid = {_quote(str(actor))}::uuid; "
+        + _finish_sql(
+            root, epoch, leave_id, "member_leave",
+            leave_client, leave_provider, '{"left":true}',
+        )
+        + "; commit;",
+    )
+    post_leave = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _receipt_sql(
+            "ab_mutation_receipt", root, epoch, leave_id,
+            leave_client, leave_provider,
+        )
+        + "; commit;",
+    ))
+    if post_leave["result"] != {"left": True}:
+        raise GateFailure("membership loss stranded the terminal receipt")
+    post_leave_replay = json.loads(_scalar(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, leave_id, "member_leave",
+            leave_client, leave_provider,
+        )
+        + "; commit;",
+    ))
+    if post_leave_replay.get("replay") is not True:
+        raise GateFailure("membership loss stranded exact operation replay")
+    _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _receipt_sql(
+            "ab_ack_mutation_receipt", root, epoch, leave_id,
+            leave_client, leave_provider,
+        )
+        + "; commit;",
+    )
+
+    rotation_id = uuid4()
+    rotation = json.loads(_scalar(
+        database_url,
+        "select public.ab_admin_rotate_mutation_epoch("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(rotation_id))}::uuid);",
+    ))
+    rotated_epoch = UUID(rotation["protocol_epoch"])
+    replay_rotation = json.loads(_scalar(
+        database_url,
+        "select public.ab_admin_rotate_mutation_epoch("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(rotation_id))}::uuid);",
+    ))
+    if rotation != replay_rotation:
+        raise GateFailure("exact epoch rotation replay changed its receipt")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)};",
+    )):
+        raise GateFailure("epoch rotation retained acknowledged receipts")
+
+    state = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(observer)
+        + f"select public.ab_mutation_protocol_state({_quote(root)})::text; "
+        "commit;",
+    ))
+    if (state["schema_version"] != 2
+            or state["protocol_epoch"] != str(rotated_epoch)
+            or state["database_seal"]["protocol_epoch"] != str(epoch)):
+        raise GateFailure("rotated state rewrote or lost the historical seal")
+    historical_seal = json.loads(_scalar(
+        database_url, _seal_sql(root, legacy_epoch, seal_id)))
+    if historical_seal != seal:
+        raise GateFailure("rotation broke exact historical seal replay")
+    stale = _run(
+        database_url,
+        "begin; " + _claims(actor)
+        + _begin_sql(
+            root, epoch, uuid4(), "doc_put", client_digest, provider_digest,
+        )
+        + "; commit;",
+        expect_ok=False,
+    )
+    if "typed mutation epoch is stale" not in stale.stderr:
+        raise GateFailure("old-epoch retry survived receipt rotation")
+
+
+def _validate_p1b_concurrency_and_bounds(database_url: str) -> None:
+    # A typed transaction owns the epoch's shared lock before it can reach the
+    # source ledger.  Seal must wait there, without taking the later change
+    # lock, and then proceed after a rollback leaves no receipt/effect.
+    seal_root = "typed-before-seal"
+    seal_actor = uuid4()
+    legacy_epoch = _prepare_root(database_url, seal_root, seal_actor)
+    staged_id = uuid4()
+    suffix = uuid4().hex[:8]
+    typed_name = f"ab-typed-before-seal-{suffix}"
+    seal_name = f"ab-seal-after-typed-{suffix}"
+    typed_ready = f"typed-ready-{suffix}"
+    typed_done = f"typed-done-{suffix}"
+    seal_done = f"seal-done-{suffix}"
+    typed = _PsqlSession(database_url)
+    sealer = _PsqlSession(database_url)
+    try:
+        typed.send(
+            f"set application_name = {_quote(typed_name)}; begin; "
+            + _claims(seal_actor)
+            + _begin_sql(
+                seal_root, legacy_epoch, staged_id, "doc_put",
+                "2" * 64, "3" * 64,
+            )
+            + f"; select {_quote(typed_ready)};")
+        typed.wait_marker(typed_ready)
+        sealer.send(
+            f"set application_name = {_quote(seal_name)}; begin; "
+            + _seal_sql(seal_root, legacy_epoch, uuid4())
+            + f" select {_quote(seal_done)};")
+        _wait_for_lock_order(
+            database_url,
+            root=seal_root,
+            holder=typed,
+            holder_name=typed_name,
+            holder_mode="ShareLock",
+            waiter=sealer,
+            waiter_name=seal_name,
+            waiter_mode="ExclusiveLock",
+            lock_prefix="agentbridge-mutation-epoch:",
+        )
+        typed.send(f"rollback; select {_quote(typed_done)};")
+        typed.wait_marker(typed_done)
+        sealer.wait_marker(seal_done)
+        sealer.send("commit;")
+        typed.finish()
+        sealer.finish()
+    finally:
+        typed.abort()
+        sealer.abort()
+
+    # Two copies of one operation serialize on its exact operation lock.  The
+    # waiter resolves the first terminal receipt and no second effect appears.
+    root = "typed-duplicate"
+    actor = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+    operation_id = uuid4()
+    suffix = uuid4().hex[:8]
+    holder_name = f"ab-typed-holder-{suffix}"
+    waiter_name = f"ab-typed-waiter-{suffix}"
+    holder_ready = f"holder-ready-{suffix}"
+    holder_done = f"holder-done-{suffix}"
+    waiter_done = f"waiter-done-{suffix}"
+    holder = _PsqlSession(database_url)
+    waiter = _PsqlSession(database_url)
+    try:
+        holder.send(
+            f"set application_name = {_quote(holder_name)}; begin; "
+            + _claims(actor)
+            + _begin_sql(
+                root, epoch, operation_id, "doc_put", "4" * 64, "5" * 64,
+            )
+            + "; insert into public.ab_docs(root, path, data) values ("
+            f"{_quote(root)}, 'duplicate.json', '{{}}'::jsonb); "
+            f"select {_quote(holder_ready)};")
+        holder.wait_marker(holder_ready)
+        waiter.send(
+            f"set application_name = {_quote(waiter_name)}; begin; "
+            + _claims(actor)
+            + _begin_sql(
+                root, epoch, operation_id, "doc_put", "4" * 64, "5" * 64,
+            )
+            + f"; select {_quote(waiter_done)};")
+        _wait_for_lock_order(
+            database_url,
+            root=f"{root}:{epoch}:{operation_id}",
+            holder=holder,
+            holder_name=holder_name,
+            holder_mode="ExclusiveLock",
+            waiter=waiter,
+            waiter_name=waiter_name,
+            waiter_mode="ExclusiveLock",
+            lock_prefix="agentbridge-mutation-operation:",
+        )
+        holder.send(
+            _finish_sql(
+                root, epoch, operation_id, "doc_put", "4" * 64, "5" * 64,
+                '{"path":"duplicate.json"}',
+            )
+            + f"; commit; select {_quote(holder_done)};")
+        holder.wait_marker(holder_done)
+        waiter.wait_marker(waiter_done)
+        waiter.send("commit;")
+        holder.finish()
+        waiter.finish()
+    finally:
+        holder.abort()
+        waiter.abort()
+    counts = _scalar(
+        database_url,
+        "select ((select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = {_quote(str(operation_id))}::uuid)"
+        "::text || ':' || (select count(*) from public.ab_docs where root = "
+        f"{_quote(root)} and path = 'duplicate.json')::text);",
+    )
+    if counts != "1:1":
+        raise GateFailure("concurrent duplicate produced extra receipt/effect")
+
+    # A near-full epoch skips settled slots before locking.  One new operation
+    # should hold only epoch, operation and successful-slot advisory locks.
+    bounded_root = "typed-near-full"
+    bounded_actor = uuid4()
+    bounded_before = _prepare_root(database_url, bounded_root, bounded_actor)
+    bounded_seal = json.loads(_scalar(
+        database_url, _seal_sql(bounded_root, bounded_before, uuid4())))
+    bounded_epoch = UUID(bounded_seal["protocol_epoch"])
+    _run(
+        database_url,
+        "insert into public.ab_mutation_receipts("
+        "root,protocol_epoch,operation_id,actor_uid,operation_kind,"
+        "payload_digest,provider_digest,receipt_slot,receipt_state,"
+        "applying_xid,acknowledged_at,result) "
+        f"select {_quote(bounded_root)}, {_quote(str(bounded_epoch))}::uuid, "
+        "pg_catalog.gen_random_uuid(), "
+        f"{_quote(str(bounded_actor))}::uuid, 'doc_put', repeat('6',64), "
+        "repeat('7',64), slot, 'terminal', null, now(), '{}'::jsonb "
+        "from pg_catalog.generate_series(0,4094) slot;",
+        timeout=30,
+    )
+    advisory_locks = int(_scalar(
+        database_url,
+        "begin; " + _claims(bounded_actor)
+        + _perform_begin_sql(
+            bounded_root, bounded_epoch, uuid4(), "doc_put",
+            "8" * 64, "9" * 64,
+        )
+        + "; select count(*) from pg_catalog.pg_locks "
+        "where pid = pg_catalog.pg_backend_pid() and locktype = 'advisory'; "
+        "rollback;",
+    ))
+    if advisory_locks > 3:
+        raise GateFailure(
+            "near-full receipt allocation accumulated advisory locks")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -639,13 +1081,21 @@ def main() -> int:
     _validate_seal_replay(database_url)
     _validate_old_write_before_seal(database_url)
     _validate_old_write_after_seal(database_url)
+    _validate_p1b_core(database_url)
+    _validate_p1b_concurrency_and_bounds(database_url)
+    _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
-        "gate": "inactive-mutation-protocol-p1a",
+        "gate": "inactive-mutation-protocol-p1a-p1b-core",
         "result": "passed",
         "server_version": server_version,
         "server_version_num": server_version_num,
-        "schedules": ["legacy-before-seal", "legacy-after-seal"],
+        "schedules": [
+            "legacy-before-seal", "legacy-after-seal",
+            "typed-replay", "typed-member-leave", "typed-epoch-rotation",
+            "typed-before-seal", "typed-duplicate", "typed-near-full",
+            "schema-rerun",
+        ],
     }, sort_keys=True))
     return 0
 

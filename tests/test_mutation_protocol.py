@@ -55,6 +55,15 @@ def _sealed_state() -> dict:
     return state
 
 
+def _rotated_state() -> dict:
+    state = _sealed_state()
+    state.update({
+        "schema_version": 2,
+        "protocol_epoch": "12345678-1234-5678-9234-567812345674",
+    })
+    return state
+
+
 @pytest.fixture
 def tx():
     client = FakeClient()
@@ -86,6 +95,11 @@ def test_legacy_and_database_sealed_states_are_strict_value_objects(tx):
         ),
         False,
     )
+
+    tx._client.db["_mutation_protocol_state"] = _rotated_state()
+    rotated = tx.mutation_protocol_state()
+    assert rotated.schema_version == 2
+    assert rotated.protocol_epoch != rotated.database_seal.protocol_epoch
 
 
 def test_capability_is_cached_but_each_state_read_is_fresh(tx, monkeypatch):
@@ -125,6 +139,7 @@ def test_missing_or_non_member_capability_is_unavailable(tx):
     lambda state: state.update({"account_id": "not-a-uuid"}),
     lambda state: state.update({"role": "service_role"}),
     lambda state: state.update({"schema_version": True}),
+    lambda state: state.update({"schema_version": 3}),
     lambda state: state.update({"blob_writes_sealed": True}),
     lambda state: state.update({"legacy_writes_enabled": False}),
     lambda state: state.update({"database_seal": {"seal": True}}),
@@ -148,6 +163,28 @@ def test_state_wire_rejects_malformed_legacy_state(tx, mutation):
 def test_state_wire_rejects_malformed_database_seal(tx, mutation):
     state = _sealed_state()
     mutation(state["database_seal"])
+    tx._client.db["_mutation_protocol_state"] = state
+    with pytest.raises(TransportError, match="invalid mutation protocol state"):
+        tx.mutation_protocol_state()
+
+
+def test_state_wire_versions_bind_seal_epoch_to_current_generation(tx):
+    v1 = _sealed_state()
+    v1["protocol_epoch"] = "12345678-1234-5678-9234-567812345674"
+    tx._client.db["_mutation_protocol_state"] = v1
+    with pytest.raises(TransportError, match="invalid mutation protocol state"):
+        tx.mutation_protocol_state()
+
+    v2 = _rotated_state()
+    v2["protocol_epoch"] = v2["database_seal"]["protocol_epoch"]
+    tx._client.db["_mutation_protocol_state"] = v2
+    with pytest.raises(TransportError, match="invalid mutation protocol state"):
+        tx.mutation_protocol_state()
+
+
+def test_state_wire_rejects_legacy_mode_at_version_two(tx):
+    state = _legacy_state()
+    state["schema_version"] = 2
     tx._client.db["_mutation_protocol_state"] = state
     with pytest.raises(TransportError, match="invalid mutation protocol state"):
         tx.mutation_protocol_state()

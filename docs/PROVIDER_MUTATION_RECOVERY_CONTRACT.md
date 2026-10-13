@@ -239,6 +239,22 @@ production installation or PostgREST end-to-end acceptance.
 - Add the immutable staged-object and manifest proof before claiming coverage of
   blob-coupled operations.
 
+The detailed P1b design is in
+[PROVIDER_TYPED_MUTATION_RPC_PLAN.md](PROVIDER_TYPED_MUTATION_RPC_PLAN.md). It
+uses a same-transaction applying receipt as the trusted sealed-write context,
+provider-computed request digests in addition to the local digest, 4,096
+non-evicting receipt slots per epoch and rotation only after every terminal
+receipt is acknowledged. An old-epoch retry is rejected after atomic rotation,
+so pruning cannot recreate an acknowledged effect. The mutation-epoch lock must
+precede the existing change-ledger lock in both RPC and seal paths.
+
+The private P1b receipt/gate core is implemented and has disposable hosted
+PostgreSQL 17 acceptance in
+[PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md](PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md).
+It remains inactive: no typed source-mutation RPC, P1b readiness marker or
+Python mutation adapter activation has landed. PostgreSQL 16 concurrency CI is
+the next release gate for this slice.
+
 ### P2 — node mutation journal and typed adapter
 
 - Add the durable local operation record and bind outbox, presence, machine and

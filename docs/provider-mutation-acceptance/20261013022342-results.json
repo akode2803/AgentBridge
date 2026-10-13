@@ -1,0 +1,40 @@
+{
+  "project": {
+    "id": "riagjoluhcwjvmfchbzl",
+    "name": "AgentBridge Scratch",
+    "region": "ap-south-1",
+    "postgres": "17.11",
+    "production_touched": false
+  },
+  "migration": {
+    "version": "20261013022342",
+    "name": "agentbridge_p1b_core_slot_bound",
+    "source_bytes": 24766,
+    "source_sha256": "830326f37d5afee1d48c2cf0fb365c1537eb80af783e41270c2dc13cb19638c0"
+  },
+  "observations": {
+    "typed_doc_receipt_and_effect_atomic": true,
+    "exact_replay_returned_terminal_receipt": true,
+    "digest_collision_rejected": true,
+    "wrong_source_lane_rejected_and_rolled_back": true,
+    "sealed_direct_write_rejected": true,
+    "post_membership_receipt_read": true,
+    "post_membership_exact_replay": true,
+    "post_membership_acknowledgment": true,
+    "epoch_rotation_replay": true,
+    "historical_seal_replay_after_rotation": true,
+    "old_epoch_retry_rejected": true,
+    "near_full_receipt_count": 4095,
+    "near_full_allocator_advisory_locks": 3,
+    "performance_advisor_findings": 0
+  },
+  "boundaries": {
+    "typed_source_rpcs_installed": false,
+    "typed_readiness_marker_installed": false,
+    "python_mutation_adapter_activated": false,
+    "production_root_sealed": false,
+    "browser_postgrest_acceptance": false,
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "postgres16_concurrency_gate": "implemented_locally; CI pending"
+  }
+}

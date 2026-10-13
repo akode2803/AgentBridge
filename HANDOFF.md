@@ -1332,3 +1332,41 @@ in
 [docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md](docs/PROVIDER_MUTATION_SUPABASE_ACCEPTANCE.md).
 Next, specify and implement inactive P1b typed receipt RPCs with bounded receipt
 lifecycle; full-schema/PostgREST HTTP acceptance remains a later release gate.
+
+The P1b contract and private core are now implemented on
+`codex/provider-typed-mutation-contract`. The reviewed design defines immutable
+`(protocol_epoch, operation_id)` identity, provider-computed request digests,
+4,096 non-evicting receipt slots, exact-actor response recovery after membership
+loss and version-2 epoch rotation that preserves the immutable database seal.
+The SQL core adds no typed source-mutation RPC or readiness marker. It installs
+private begin/finish helpers, same-transaction receipt-aware source triggers,
+exact receipt read/ack endpoints and an admin-only acknowledged-epoch rotation.
+The slot allocator skips settled occupied rows before a nonblocking candidate
+lock and rolls back a race-lost inner block, so a near-full epoch does not retain
+thousands of advisory locks.
+
+Disposable Supabase PostgreSQL 17.11 acceptance used migration
+`20261013022342_agentbridge_p1b_core_slot_bound`. Typed document effect/replay,
+digest collision, wrong-lane and direct-write rejection, post-leave receipt
+read/replay/ack, rotation replay, immutable seal replay and stale-epoch rejection
+all behaved as contracted. With 4,095 occupied slots, allocation held exactly
+three advisory locks. The performance advisor remained clean; API grants are
+limited to exact authenticated receipt read/ack. Focused local schema/wire/
+transport tests pass, and Astra found no remaining P1/P2 after two corrections.
+Exact evidence is in
+[docs/PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md](docs/PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md).
+
+The executable PostgreSQL gate now adds real two-session typed-before-seal and
+concurrent-duplicate schedules, near-full lock-count coverage and populated
+schema reapplication. It still needs GitHub PostgreSQL 16 execution. Next:
+commit and open the stacked PR, obtain that CI evidence, then implement the
+inactive typed document/log RPC slice without activating the Python mutation
+adapter or sealing any production root.
+
+The focused mutation/schema/transport suite passes 108 tests. A full local
+`pytest -q` attempt reached 3,913 passes and 20 skips but is not a valid
+repository result: the managed sandbox denied loopback socket binds with
+`PermissionError: [Errno 1] Operation not permitted`, causing 95 downstream
+failures and 166 setup errors in server/local-node tests. Do not repeat that
+suite in this sandbox; use the normal Ubuntu and Windows jobs for the complete
+cross-platform gate.

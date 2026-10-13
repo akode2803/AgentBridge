@@ -12,6 +12,11 @@ def _body(start_text: str, end_text: str) -> str:
     return SCHEMA[start:SCHEMA.index(end_text, start)]
 
 
+def _last_body(start_text: str, end_text: str) -> str:
+    start = SCHEMA.rindex(start_text)
+    return SCHEMA[start:SCHEMA.index(end_text, start)]
+
+
 def test_mutation_protocol_tables_are_private_and_bounded():
     for table in (
             "ab_mutation_roots", "ab_database_mutation_seals",
@@ -31,7 +36,7 @@ def test_mutation_protocol_tables_are_private_and_bounded():
 
 
 def test_every_legacy_source_write_checks_gate_after_shared_root_lock():
-    gate = _body(
+    gate = _last_body(
         "create or replace function private.ab_mutation_legacy_gate()",
         "revoke all on function private.ab_mutation_legacy_gate()",
     )
@@ -39,7 +44,8 @@ def test_every_legacy_source_write_checks_gate_after_shared_root_lock():
     isolation = gate.index("current_setting('transaction_isolation')")
     lock = gate.index("pg_advisory_xact_lock_shared")
     state_create = gate.index("insert into public.ab_mutation_roots")
-    state_read = gate.index("select r.legacy_writes_enabled")
+    state_read = gate.index(
+        "select r.protocol_epoch, r.legacy_writes_enabled")
     rejection = gate.index("legacy provider writes are sealed")
     assert isolation < lock < state_create < state_read < rejection
     for table in ("ab_docs", "ab_logs", "ab_members"):
@@ -55,7 +61,7 @@ def test_every_legacy_source_write_checks_gate_after_shared_root_lock():
 
 
 def test_admin_seal_is_irreversible_idempotent_and_not_api_callable():
-    seal = _body(
+    seal = _last_body(
         "create or replace function "
         "public.ab_admin_seal_legacy_database_mutations(",
         "revoke all on function "
@@ -63,13 +69,15 @@ def test_admin_seal_is_irreversible_idempotent_and_not_api_callable():
     )
     assert "volatile security invoker" in seal
     isolation = seal.index("current_setting('transaction_isolation')")
-    lock = seal.index("pg_advisory_xact_lock(")
     root_read = seal.index("select r.* into strict v_root")
     replay_read = seal.index("select s.* into v_seal")
     source_cut = seal.index("from public.ab_change_epochs e")
     receipt = seal.index("insert into public.ab_database_mutation_seals")
     disable = seal.index("legacy_writes_enabled = false")
-    assert isolation < lock < root_read < replay_read < source_cut < receipt < disable
+    epoch_lock = seal.index("'agentbridge-mutation-epoch:'")
+    change_lock = seal.index("'agentbridge-change-ledger:'")
+    assert isolation < epoch_lock < change_lock < root_read < replay_read
+    assert replay_read < source_cut < receipt < disable
     assert "v_seal.seal_id is distinct from p_seal_id" in seal
     assert "v_seal.plan_digest is distinct from p_plan_digest" in seal
     assert "v_seal.sealed_from_epoch is distinct from p_expected_epoch" in seal
@@ -83,6 +91,83 @@ def test_admin_seal_is_irreversible_idempotent_and_not_api_callable():
     ]
     assert "authenticated, service_role" in grant_window
     assert "grant execute" not in grant_window
+
+
+def test_p1b_receipts_are_bounded_private_and_same_transaction_bound():
+    core = SCHEMA[SCHEMA.index(
+        "-- P1b core: bounded typed-mutation receipts") :]
+    assert "receipt_slot between 0 and 4095" in core
+    assert "ab_mutation_receipts_slot" in core
+    assert "ab_mutation_receipts_applying_xid" in core
+    assert "pg_try_advisory_xact_lock" in core
+    begin = _body(
+        "create or replace function private.ab_mutation_begin(",
+        "revoke all on function private.ab_mutation_begin(",
+    )
+    first_occupied = begin.index("if exists (", begin.index("for v_probe"))
+    try_lock = begin.index("pg_try_advisory_xact_lock", first_occupied)
+    second_occupied = begin.index("if exists (", try_lock)
+    release = begin.index("exception when unique_violation", second_occupied)
+    assert first_occupied < try_lock < second_occupied < release
+    assert "typed mutation receipt slots are contended" in core
+    assert "pg_current_xact_id()" in core
+    assert "private.ab_mutation_kind_permits" in core
+    assert "private.ab_mutation_receipt_json" in core
+    for signature in (
+        "private.ab_mutation_begin(\n  text,uuid,uuid,text,text,text)",
+        "private.ab_mutation_finish(\n  text,uuid,uuid,text,text,text,jsonb)",
+    ):
+        start = core.index("revoke all on function " + signature)
+        assert "authenticated, service_role" in core[start:start + 260]
+
+
+def test_p1b_exact_actor_receipt_access_and_rotation_are_narrow():
+    core = SCHEMA[SCHEMA.index(
+        "-- P1b core: bounded typed-mutation receipts") :]
+    receipt = _body(
+        "create or replace function public.ab_mutation_receipt(",
+        "revoke all on function public.ab_mutation_receipt(",
+    )
+    ack = _body(
+        "create or replace function public.ab_ack_mutation_receipt(",
+        "revoke all on function public.ab_ack_mutation_receipt(",
+    )
+    for function in (receipt, ack):
+        assert "v_actor uuid := auth.uid()" in function
+        assert "r.actor_uid = v_actor" in function
+        assert "ab_root_ok" not in function
+    assert "grant execute on function public.ab_mutation_receipt" in core
+    assert "grant execute on function public.ab_ack_mutation_receipt" in core
+    rotation = _body(
+        "create or replace function public.ab_admin_rotate_mutation_epoch(",
+        "revoke all on function public.ab_admin_rotate_mutation_epoch(",
+    )
+    assert "'agentbridge-mutation-epoch:'" in rotation
+    assert "r.acknowledged_at is null" in rotation
+    assert "protocol_version = 2" in rotation
+    assert "delete from public.ab_mutation_receipts" in rotation
+    rotation_tail = core[core.index(
+        "revoke all on function public.ab_admin_rotate_mutation_epoch") :]
+    assert "grant execute" not in rotation_tail
+
+
+def test_p1b_gate_allows_only_kind_specific_same_transaction_writes():
+    gate = _last_body(
+        "create or replace function private.ab_mutation_legacy_gate()",
+        "revoke all on function private.ab_mutation_legacy_gate()",
+    )
+    state = gate.index("select r.protocol_epoch, r.legacy_writes_enabled")
+    receipt = gate.index("r.applying_xid = pg_catalog.pg_current_xact_id()")
+    permission = gate.index("private.ab_mutation_kind_permits")
+    rejection = gate.index("legacy provider writes are sealed")
+    assert state < receipt < permission < rejection
+    permit = _body(
+        "create or replace function private.ab_mutation_kind_permits(",
+        "revoke all on function private.ab_mutation_kind_permits(",
+    )
+    assert "when 'doc_put'" in permit
+    assert "when 'doc_create'" in permit
+    assert "when 'member_leave'" in permit
 
 
 def test_state_probe_is_authorized_and_marker_is_installed_last():
