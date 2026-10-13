@@ -497,6 +497,8 @@ Remaining lifecycle owners require real durable sequencing, not only operation I
   wraps before dispatch. `on_members_added` needs a bounded durable cursor over
   historical epochs and conditional per-document updates, so partial fanout
   resumes without rewrapping or losing concurrent recipients.
+  (Implemented 2026-10-14, inactive: see PROVIDER_ADMISSION_CHECKPOINT.md
+  "Chat-key rotation owner".)
 - `delete_agent` and `delete_account` must retain dependent membership/lifecycle
   steps and keys until outcomes settle. Swallowed leave failures cannot justify
   deactivation or private-key deletion. Membership genesis/refolding and fresh

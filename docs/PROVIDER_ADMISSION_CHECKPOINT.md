@@ -261,6 +261,39 @@ inode it published. Elsewhere in the stack, duplicate attachment blob IDs are
 rejected before the outbox commit (the typed consumer would refuse the row
 forever) and their spools cancelled.
 
+## Chat-key rotation owner (inactive typed path, 2026-10-14)
+
+Under a bound writer `ChatKeyService` no longer uses `put_doc` (which raises
+without an operation identity). `rotate` and `on_member_left` publish a new
+epoch with `create_exact_doc`: the operation key derives from the unique epoch
+path, so the exact wraps are retained in the journal before dispatch. Before
+minting, earlier unsettled epoch creates for the chat are brought to their
+exact outcome; a created one is overlaid and reused by `ensure()` rather than
+replaced. Typed receipts do not refresh the mirror, so documents this process
+created or extended are overlaid until the mirror shows them (wraps are only
+ever added to an epoch, so the union is never stale); without it every send
+after a rotation would rotate again. Rotations in one process are serialized
+(the unbound path gets this too). The leaver's epoch caches no key and its
+retained request holds only the remaining members' wraps.
+
+History re-wrap (`send_history` on) is one `update_doc` CAS per epoch: the
+build reads my own wrap from the fresh provider document and adds only missing
+recipients, so a concurrent wrap survives a conflict and nothing is re-wrapped;
+an ambiguous attempt replays its exact bytes first. Progress lives in a Store
+row (`key_rewraps`: chat, newcomers with their `joined_ns`, last finished
+epoch). A resume wraps only newcomers who are still members with the same
+`joined_ns`, while history is still visible and I am still a member, so a
+newcomer who left (or was re-added) receives nothing more. `recover()` settles
+lost epoch creates and resumes rows. Limits: the row is written after the add
+events are queued (a crash in between loses history, never leaks it), rows use
+the Store's normal synchronization (same consequence), and legacy metadata
+without `joined_ns` gets no typed re-wrap. Evidence: tests/test_chat_key_owner.py
+(19 tests; each safety property fails a test when removed).
+
+Found while wiring it: under a bound writer `create_chat`'s genesis meta insert
+and `materialize`/`refold` meta writes raise, so chat creation and member
+add/remove fail before reaching the key step. The membership owner is next.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.

@@ -344,12 +344,12 @@ class LocalMutationTransport(Transport):
         self._typed_success()
         return None
 
-    def settle_exact_creates(self, prefix):
+    def settle_exact_creates(self, prefix, on_created=None):
         """Resume a bound writer's unfinished exact creates under ``prefix``."""
         writer = self._bound_writer()
         if writer is None:
             return 0
-        settled = writer.settle_exact_creates(prefix)
+        settled = writer.settle_exact_creates(prefix, on_created)
         self._bound_writer()
         if settled:
             self._typed_success()

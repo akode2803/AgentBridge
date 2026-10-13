@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import (
-    harness_scan_ack, log_position, membership_suffix, overlay_index,
+    harness_scan_ack, key_rewraps, log_position, membership_suffix, overlay_index,
     page_inputs, send_status, terminal_observation,
 )
 from .log_position import LogPosition
@@ -226,6 +226,7 @@ class Store:
         overlay_index.initialize(self._conn())
         shadow_slot.initialize(self._conn())
         sidebar_cache.initialize(self._conn())
+        key_rewraps.initialize(self._conn())
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -481,6 +482,20 @@ class Store:
         return harness_scan_ack.acknowledge(
             self._conn(), self.path, agent, expected,
         )
+
+    # Chat-key history re-wrapping progress (see key_rewraps).
+    def key_rewrap_add(self, chat_id: str, newcomers: dict[str, int]) -> key_rewraps.KeyRewrap:
+        return key_rewraps.add(self._conn(), chat_id, newcomers)
+
+    def key_rewraps_pending(self, *, limit: int = 64,
+                            after_id: int = 0) -> tuple[key_rewraps.KeyRewrap, ...]:
+        return key_rewraps.pending(self._conn(), limit=limit, after_id=after_id)
+
+    def key_rewrap_advance(self, row_id: int, epoch: int) -> None:
+        key_rewraps.advance(self._conn(), row_id, epoch)
+
+    def key_rewrap_finish(self, row_id: int) -> bool:
+        return key_rewraps.finish(self._conn(), row_id)
 
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:

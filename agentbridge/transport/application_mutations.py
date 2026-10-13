@@ -138,11 +138,12 @@ class ApplicationMutationWriter:
         journal.release_ticket(ticket)
         return record
 
-    def settle_exact_creates(self, prefix: str) -> int:
+    def settle_exact_creates(self, prefix: str, on_created=None) -> int:
         """Resume unfinished exact creates under ``prefix`` before new records.
 
         A retry may mint a different record after an ambiguous reply; the old
         attempt must still reach its exact outcome rather than linger.
+        ``on_created(path, data)`` learns each record the provider created.
         """
         journal = self.driver.journal
         settled, after = 0, None
@@ -150,14 +151,18 @@ class ApplicationMutationWriter:
             keys = journal.pending_keys(limit=64, after=after)
             for epoch, operation in keys:
                 request = journal.get(epoch, operation).request
-                if (request.expectation.kind != "doc_create" or not json.loads(
-                        request.arguments_json)["p_path"].startswith(prefix)):
+                arguments = json.loads(request.arguments_json)
+                if (request.expectation.kind != "doc_create"
+                        or not arguments["p_path"].startswith(prefix)):
                     continue
-                self.driver.resume(epoch, operation)
+                record = self.driver.resume(epoch, operation)
                 ticket = journal.operation_ticket(epoch, operation)
                 if ticket is not None:
                     journal.release_ticket(ticket)
                 settled += 1
+                if (on_created is not None
+                        and dict(record.receipt.result).get("created") is True):
+                    on_created(arguments["p_path"], arguments["p_data"])
             if len(keys) < 64:
                 return settled
             after = keys[-1]

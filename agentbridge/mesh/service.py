@@ -97,7 +97,8 @@ class Mesh:
         self.directory = Directory(self.tx, pins=self.key_pins, store=self.store)
         self.keystore = KeyStore(self.home)
         self._sign_bundle: bytes | None = None  # _sign_event's positive cache
-        self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user)
+        self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user,
+                                   store=self.store)
         # sealer resolution: explicit arg wins; else E2EE when asked, else plain
         if sealer is not None:
             self.sealer = sealer

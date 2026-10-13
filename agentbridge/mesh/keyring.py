@@ -10,12 +10,20 @@ Epoch model (docs/THREAT_MODEL.md):
 - adding with send_history=ON re-wraps every epoch I hold for the newcomer;
   with send_history=OFF membership rotation happens FIRST and the newcomer
   only ever sees the new epoch — the history gate is cryptographic.
+
+Under a bound typed writer, a new epoch is one exact create keyed by its path
+(its wraps retained before dispatch; an earlier unsettled epoch settles before
+another is minted), and a history re-wrap is one conditional update per epoch
+document, driven by a durable Store row bound to the newcomers' membership
+instances, so a crash resumes without re-wrapping or wrapping for anyone who
+has since left.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import hmac
 import os
@@ -30,7 +38,7 @@ from pathlib import Path
 
 from .. import crypto
 from ..core.config import DEFAULT_HOME
-from ..core.errors import CryptoError
+from ..core.errors import CryptoError, NotAMember
 from ..core.lock import _try_lock
 from ..core.models import ChatSnapshot
 from ..core.timekit import next_ns, utcnow_iso
@@ -446,15 +454,28 @@ class KeyStore:
 
 class ChatKeyService:
     def __init__(
-        self, tx: Transport, directory: Directory, keystore: KeyStore, user: str
+        self, tx: Transport, directory: Directory, keystore: KeyStore, user: str,
+        *, store=None,
     ) -> None:
         self.tx = tx
         self.directory = directory
         self.keystore = keystore
         self.user = user
+        self.store = store  # durable history re-wrap progress (bound writer)
         self._cache: dict[tuple[str, int], bytes] = {}  # (chat, epoch) -> key
         self._cache_lock = threading.RLock()
         self._epoch_owner = uuid.uuid4().hex
+        # Epoch documents this process created or extended through a bound
+        # typed writer. A receipt does not refresh the local mirror, so until
+        # the mirror shows them they are overlaid here; wraps are only ever
+        # added to an epoch, so the overlay can never hide a newer recipient.
+        self._published: dict[tuple[str, int], dict] = {}
+        self._rotation_lock = threading.RLock()
+
+    def _typed(self) -> bool:
+        from ..transport.local_mutations import LocalMutationTransport
+
+        return isinstance(self.tx, LocalMutationTransport) and self.tx._bound_writer() is not None
 
     # ------------------------------------------------------------- reading
     def projection_facts(self, chat_id: str, docs: dict) -> dict:
@@ -499,7 +520,30 @@ class ChatKeyService:
             doc = self.tx.get_doc(path)
             if isinstance(doc, dict) and isinstance(doc.get("epoch"), int):
                 out.append((doc["epoch"], doc))
+        with self._cache_lock:
+            published = [(epoch, doc) for (room, epoch), doc in self._published.items()
+                         if room == chat_id]
+        if published:
+            out = self._overlay(chat_id, dict(out), published)
         return sorted(out)
+
+    def _overlay(self, chat_id: str, listed: dict, published: list) -> list:
+        for epoch, doc in published:
+            seen = listed.get(epoch)
+            if seen is None:
+                listed[epoch] = copy.deepcopy(doc)
+                continue
+            wrapped = seen.get("wrapped") if isinstance(seen.get("wrapped"), dict) else {}
+            if ((seen.get("by"), seen.get("created")) != (doc.get("by"), doc.get("created"))
+                    or set(doc["wrapped"]) <= set(wrapped)):
+                # The mirror caught up (or shows another document): it wins,
+                # unless this entry was replaced meanwhile by a newer one.
+                with self._cache_lock:
+                    if self._published.get((chat_id, epoch)) is doc:
+                        del self._published[(chat_id, epoch)]
+                continue
+            listed[epoch] = {**seen, "wrapped": {**copy.deepcopy(doc["wrapped"]), **wrapped}}
+        return list(listed.items())
 
     def latest(self, chat_id: str) -> tuple[int, dict] | None:
         eps = self.epochs(chat_id)
@@ -510,7 +554,10 @@ class ChatKeyService:
             cached = self._cache.get((chat_id, epoch))
         if cached is not None:
             return cached
-        doc = self.tx.get_doc(P.keys(chat_id, epoch))
+        with self._cache_lock:
+            doc = copy.deepcopy(self._published.get((chat_id, epoch)))
+        if doc is None:
+            doc = self.tx.get_doc(P.keys(chat_id, epoch))
         wraps = doc.get("wrapped") if isinstance(doc, dict) else None
         wrapped = wraps.get(self.user) if isinstance(wraps, dict) else None
         if not isinstance(wrapped, dict) or not all(
@@ -538,21 +585,59 @@ class ChatKeyService:
                 wrapped[name] = crypto.wrap_key_for(acc.keys.agree_pub, key)
         return wrapped
 
+    def _settle_epochs(self, prefix: str) -> int:
+        """Bring earlier epoch creates whose replies were lost to their exact
+        outcome (retained wraps, never re-minted); created ones are overlaid
+        so they are usable before the mirror shows them."""
+        def created(path: str, doc) -> None:
+            parts = path.split("/")
+            if (len(parts) == 4 and parts[2] == "keys" and isinstance(doc, dict)
+                    and isinstance(doc.get("epoch"), int)
+                    and path == P.keys(parts[1], doc["epoch"])
+                    and isinstance(doc.get("wrapped"), dict)):
+                with self._cache_lock:
+                    self._published[(parts[1], doc["epoch"])] = copy.deepcopy(doc)
+
+        return self.tx.settle_exact_creates(prefix, created)
+
+    def _publish_epoch(self, chat_id: str, members: list[str], key: bytes) -> int:
+        """Publish one new epoch wrapping ``key`` for exactly ``members``."""
+        typed = self._typed()
+        if typed:
+            self._settle_epochs(f"chats/{chat_id}/keys/")
+        epoch = next_ns()
+        doc = {"epoch": epoch, "by": self.user, "created": utcnow_iso(),
+               "wrapped": self._wrap_for(members, key)}
+        if not typed:
+            self.tx.put_doc(P.keys(chat_id, epoch), doc)
+            return epoch
+        self.tx.create_exact_doc(P.keys(chat_id, epoch), doc)
+        with self._cache_lock:
+            self._published[(chat_id, epoch)] = copy.deepcopy(doc)
+        return epoch
+
     def rotate(self, chat_id: str, members: list[str]) -> tuple[int, bytes]:
         """New epoch wrapped for exactly ``members``. The actor must be one
         of them (you can't mint keys for rooms you're not in)."""
         if self.user not in members:
             raise CryptoError("cannot rotate keys for a chat you're not in")
-        epoch = next_ns()
         key = crypto.new_chat_key()
-        self.tx.put_doc(
-            P.keys(chat_id, epoch),
-            {"epoch": epoch, "by": self.user, "created": utcnow_iso(),
-             "wrapped": self._wrap_for(members, key)},
-        )
+        epoch = self._publish_epoch(chat_id, members, key)
         with self._cache_lock:
             self._cache[(chat_id, epoch)] = key
         return epoch, key
+
+    def _current(self, chat_id: str, snap: ChatSnapshot) -> tuple[int, bytes] | None:
+        current = self.latest(chat_id)
+        if current is None:
+            return None
+        epoch, doc = current
+        creator_ok = doc.get("by", "") in snap.members
+        if creator_ok and sorted(doc.get("wrapped", {})) == sorted(snap.members):
+            key = self.my_key(chat_id, epoch)
+            if key is not None:
+                return epoch, key
+        return None
 
     def ensure(self, chat_id: str, snap: ChatSnapshot) -> tuple[int, bytes]:
         """The self-heal: called before every seal. Rotates when there is no
@@ -562,17 +647,20 @@ class ChatKeyService:
         departed member's key is never trusted as current — a remaining
         member re-keys on the next post, neutralizing a key a leaver's client
         may have kept), or when I can't unwrap my copy (I'm newer than the
-        wrap)."""
-        current = self.latest(chat_id)
-        members = sorted(snap.members)
-        if current is not None:
-            epoch, doc = current
-            creator_ok = doc.get("by", "") in snap.members
-            if creator_ok and sorted(doc.get("wrapped", {})) == members:
-                key = self.my_key(chat_id, epoch)
-                if key is not None:
-                    return epoch, key
-        return self.rotate(chat_id, members)
+        wrap). Rotations in this process are serialized, so concurrent sends
+        mint one epoch, not one each."""
+        found = self._current(chat_id, snap)
+        if found is not None:
+            return found
+        with self._rotation_lock:
+            found = self._current(chat_id, snap)
+            if found is not None:
+                return found
+            if self._typed() and self._settle_epochs(f"chats/{chat_id}/keys/"):
+                found = self._current(chat_id, snap)
+                if found is not None:
+                    return found
+            return self.rotate(chat_id, sorted(snap.members))
 
     # ------------------------------------------------------ membership hooks
     def on_members_added(
@@ -583,6 +671,9 @@ class ChatKeyService:
         new epoch, so pre-join ciphertext stays sealed to them FOREVER."""
         if not snap.permissions.send_history:
             self.rotate(chat_id, sorted(snap.members))
+            return
+        if self._typed():
+            self._rewrap_history(chat_id, snap, newcomers)
             return
         for epoch, doc in self.epochs(chat_id):
             key = self.my_key(chat_id, epoch)
@@ -619,11 +710,95 @@ class ChatKeyService:
         members = sorted(n for n in snap.members if n != self.user)
         if not members:
             return
-        epoch = next_ns()
-        key = crypto.new_chat_key()
-        self.tx.put_doc(
-            P.keys(chat_id, epoch),
-            {"epoch": epoch, "by": self.user, "created": utcnow_iso(),
-             "wrapped": self._wrap_for(members, key)},
-        )
+        self._publish_epoch(chat_id, members, crypto.new_chat_key())
         # no self._cache write: a left chat leaves no key on this device
+
+    # ------------------------------------------- bound history re-wrapping
+    def _rewrap_history(self, chat_id: str, snap: ChatSnapshot,
+                        newcomers: list[str]) -> None:
+        """Re-wrap history for newcomers through a durable progress row."""
+        if self.store is None:
+            raise CryptoError("history re-wrapping needs this user's local store")
+        bound = {name: snap.members[name].joined_ns
+                 for name in newcomers if name in snap.members}
+        if bound:
+            self._resume_rewrap(self.store.key_rewrap_add(chat_id, bound), snap)
+
+    def _resume_rewrap(self, row, snap: ChatSnapshot) -> None:
+        # Only the exact membership instances the add created receive history,
+        # and only while history stays visible and I am still a member: a
+        # newcomer who left (even if re-added since) gets nothing more.
+        names = {}
+        if self.user in snap.members and snap.permissions.send_history:
+            names = {name: joined for name, joined in row.newcomers.items()
+                     if joined > 0 and name in snap.members
+                     and snap.members[name].joined_ns == joined}
+        if names:
+            for epoch, _doc in self.epochs(row.chat_id):
+                if epoch <= row.after_epoch:
+                    continue
+                self._rewrap_epoch(row.chat_id, epoch, names)
+                self.store.key_rewrap_advance(row.id, epoch)
+        self.store.key_rewrap_finish(row.id)
+
+    def _rewrap_epoch(self, chat_id: str, epoch: int, names: dict) -> None:
+        bundle = self.keystore.load(self.user)
+        pubs = {}
+        for name in names:
+            acc = self.directory.get(name)
+            if acc and acc.keys.agree_pub:
+                pubs[name] = acc.keys.agree_pub
+
+        def build(current):
+            # Repeatable over the fresh provider document: only recipients
+            # still missing are added, so a concurrent wrap is kept and an
+            # existing one is never redone. The key comes from my own wrap
+            # in this exact document, not from a cache.
+            if (not isinstance(current, dict) or current.get("epoch") != epoch
+                    or not isinstance(current.get("wrapped"), dict)):
+                return None
+            wrapped = current["wrapped"]
+            missing = {name: pub for name, pub in pubs.items() if name not in wrapped}
+            mine = wrapped.get(self.user)
+            if not missing or bundle is None or not isinstance(mine, dict):
+                return None
+            try:
+                key = crypto.unwrap_key_with(bundle, mine)
+            except (crypto.CryptoFail, TypeError, ValueError, KeyError):
+                return None
+            doc = copy.deepcopy(current)
+            for name, pub in missing.items():
+                doc["wrapped"][name] = crypto.wrap_key_for(pub, key)
+            return doc
+
+        document, changed = self.tx.update_doc(P.keys(chat_id, epoch), build)
+        if changed:
+            with self._cache_lock:
+                self._published[(chat_id, epoch)] = copy.deepcopy(document)
+
+    def recover(self, snapshot) -> int:
+        """Finish this user's interrupted key work under a bound writer.
+
+        Settles epoch creates whose replies were lost and resumes history
+        re-wraps against a fresh ``snapshot(chat_id)``. Returns the number of
+        items finished; a no-op without a bound writer.
+        """
+        if not self._typed():
+            return 0
+        done = self._settle_epochs("chats/")
+        if self.store is None:
+            return done
+        after = 0
+        while True:
+            rows = self.store.key_rewraps_pending(after_id=after)
+            for row in rows:
+                try:
+                    snap = snapshot(row.chat_id)
+                except NotAMember:
+                    self.store.key_rewrap_finish(row.id)
+                else:
+                    self._resume_rewrap(row, snap)
+                done += 1
+            if len(rows) < 64:
+                return done
+            after = rows[-1].id

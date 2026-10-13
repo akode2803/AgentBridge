@@ -71,15 +71,56 @@ moment it is made, so a large task list never lives only in conversation.
   writer; it needs the human identity owner's material path.
 - [D] **Fold `join` into in-app sign-up** (Aryan, 2026-10-14): deferred to the
   setup/account overhaul, which also retires `legacy/bridge.py`.
-- [ ] **Chat-key rotation owner** binding membership and key versions
-  (membership-bound wraps; private chat keys) — needed by leave/remove.
-- [ ] **Terminal flows under a bound writer**: delete agent/account need typed
-  leave/remove events plus the key-rotation owner.
+- [x] **Chat-key rotation owner** (Aryan, 2026-10-14; inactive, deterministic
+  tests). Bound `rotate`/`on_member_left` publish one exact create per epoch
+  (wraps retained before dispatch; an earlier lost epoch settles exactly and is
+  reused before another is minted); history re-wrap is one CAS per epoch,
+  driven by a Store row (`key_rewraps`) bound to each newcomer's `joined_ns`,
+  so a crash resumes without re-wrapping and nobody who left (or was re-added)
+  gets more history. A per-process overlay stops mirror lag from re-rotating;
+  rotations in a process are serialized. `ChatKeyService.recover()` finishes
+  interrupted work. Limits: the rewrap row is written after the add events are
+  queued (a crash between loses history for the newcomer, never leaks it);
+  legacy meta without `joined_ns` gets no typed history re-wrap. Reachable only
+  once the membership owner below lands. Evidence: tests/test_chat_key_owner.py.
+- [ ] **Membership genesis/materialization owner** (found 2026-10-14): under a
+  bound writer `create_chat`'s genesis meta insert and `materialize`/`refold`
+  meta writes raise (no operation identity; only `TransportError` is caught),
+  so chat creation and every member add/remove fail before the key step.
+  Needs a forward-only owner (genesis insert + meta snapshot replacement).
+- [ ] **Terminal flows under a bound writer**: leave, delete chat, delete
+  agent/account need typed terminal events plus their cleanup/refold owner
+  (keys are retained until outcomes settle; the key owner is done).
+- [ ] **Message overlays under a bound writer**: edits, redactions (delete for
+  everyone) and pins use plain `put_doc`/`delete_doc` (mesh/overlays.py) and
+  raise when bound. Classify: edits/redactions are immutable-ish records,
+  pins a conditional set.
+- [ ] **Reserved read acknowledgement**: `page_read_ack` uses
+  `put_reserved_doc`, which raises under a bound writer; bind finalization
+  provenance and the exact ticket in one root-to-node-to-Store cut (RPC plan).
 - [ ] **Keyless agent adoption** (minting keys) needs an identity owner; bound
   adoption refuses it today.
 - [ ] **Bound generic submits after lifecycle opt-in**: `put_doc`/`create_doc`/
   `delete_doc`/effects/`append_log` via `ApplicationMutationWriter.submit`
   refuse (`ticket_required`) until each writer's binding is recoverable.
+  Audit 2026-10-14: about 40 unguarded generic write sites (of 50 raw call
+  sites in 19 modules; the rest are legacy-only branches) raise when bound — beyond the items above: harness feed/peer/broker/controls/
+  permissions/eventio/runner, applink control, GUI typing status, janitor and
+  GUI chat delete, reaction/state reseal in mesh/service.py. Each needs a
+  class: immutable publication (`create_exact_doc`), replaceable snapshot
+  (`write_latest_doc`) or conditional update (`update_doc`/semantic action).
+  Ephemeral status (GUI typing, harness live feed) would spend receipt
+  capacity on every update (each typed write holds a receipt until epoch
+  rotation); decide whether it moves to Realtime broadcast/presence or another
+  non-receipt channel instead of the typed writer.
+- [ ] **Activation wiring**: nothing binds the typed writer in production yet.
+  At bind: drain pre-consumer outbox rows with the old owner, then run every
+  recovery sweep (identity owners, `ChatKeyService.recover`, state actions,
+  outbox owners, exact creates) before serving writes.
+- [ ] **Fleet upgrade before seal** (operational): the seal blocks legacy
+  writes for every role, so all GUIs and workers on every machine must run the
+  typed build before the root is sealed; production install + seal need
+  Aryan's explicit go-ahead.
 - [ ] **Identity owner UX**: surface `full`/`canonical_pending` agent and human
   creations and offer `abandon` (the dispatcher method exists: prepared/full
   owners only, exact unpublished key removed); a stale local pin conflict

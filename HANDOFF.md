@@ -1,5 +1,23 @@
 # Cloud source handoff
 
+## 2026-10-14 chat-key rotation owner
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound
+writer, chat-key epochs are exact creates (lost replies settle and are reused,
+never re-minted), history re-wraps are per-epoch CAS driven by a durable Store
+row bound to each newcomer's `joined_ns`, and an in-process overlay covers
+mirror lag. `ChatKeyService.recover()` finishes interrupted work; nothing calls
+it until activation wiring exists. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+"Chat-key rotation owner".
+
+Cutover audit (BACKLOG "Typed-writer migration ledger"): about 40 generic
+write sites still raise under a bound writer. First in line is the membership
+genesis/materialization owner (it blocks chat creation and member add/remove,
+and with them the key owner), then terminal flows, message overlays, read-ack
+reservations, harness/GUI write classification, account gaps, activation
+wiring with recovery sweeps, Scratch acceptance, stack consolidation and a
+fleet upgrade before the seal. No production schema change, activation or merge.
+
 ## 2026-10-14 typed human sign-up
 
 Branch `codex/provider-owner-admission` (PR #146 continues). Human sign-up now
