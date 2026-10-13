@@ -168,6 +168,13 @@ def test_divergent_request_and_foreign_owner_fail_without_intent(world):
 
 
 @pytest.mark.parametrize('kind,args,expected', [
+    ('reaction_pair', {'p_chat': 'room', 'p_user': 'alice',
+                       'p_state_data': {}, 'p_reaction_data': {},
+                       'p_expected_source_epoch': ACTOR,
+                       'p_expected_state_seq': 0, 'p_expected_state_deleted': False,
+                       'p_expected_reaction_seq': 0, 'p_expected_reaction_deleted': False},
+     (S('doc_exact', 'chats/room/overlays/reactions/alice.json'),
+      S('doc_exact', 'chats/room/overlays/state/alice.json'))),
     ('doc_delete', {'p_path': 'accounts/alice.json'}, (S('doc_exact', 'accounts/alice.json'),)),
     ('log_append', {'p_chat': 'room', 'p_log': 'nested/messages.jsonl', 'p_record': {'id': 'x'}}, (S('log_chat', 'room'),)),
     ('effect_transition', {'p_path': 'chats/room/runtime/effects/agent/id/claim.json', 'p_data': {}, 'p_grant_ask': {}, 'p_grant_decision': {}},

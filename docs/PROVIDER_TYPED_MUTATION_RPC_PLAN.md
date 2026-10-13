@@ -431,3 +431,90 @@ production prerequisites.
 - database advisors show only reviewed intentional security-definer endpoints;
 - PostgreSQL 16 CI and disposable Supabase PostgreSQL 17 acceptance both pass
   before any production installation.
+
+### Compound writes and outbox consumers (inactive follow-up)
+
+A state checkpoint followed by an independent reaction replacement cannot provide
+an atomic cross-device boundary. The `reaction_pair` family conditionally compares
+both exact source versions and writes both fixed per-user paths in one PostgreSQL
+transaction. A second-document conflict rolls back the first document and its
+source evidence before returning one terminal `applied=false` receipt. The same
+UserState FIFO retains the reaction delta and links one pair ticket atomically;
+every conflict recaptures both documents. Signed checkpoint bytes bind the
+positive reaction operation ID. Standalone checkpoint publication remains disabled
+on the bound path; notification breadcrumbs remain best effort after the pair.
+
+Format 7 introduces root-owned consumer slots for each exact registered Store,
+Store incarnation/source epoch, outbox sequence, row digest and publication leg.
+Each ticket and slot is allocated together; retries never mint new identities.
+Staged manifests precede the append. Typed outbox completion persists an exact
+lease-bound `sent` tombstone before consuming/releasing its root tickets. Consumed
+slots remain through Store deletion and are reaped only after that exact registered
+Store no longer contains the owner row. A restarted worker drains sent cleanup
+before new sends. Missing or stale rows never authorize allocation. Startup still
+does not enable this path. Fresh terminal delete/leave events remain unavailable
+until their cleanup/refold owner is migrated; snapshots never stand in for a
+committed typed receipt.
+
+Store cache-only writes retain NORMAL synchronization. All outbox enqueue variants
+and typed sent/finalize transitions use scoped FULL synchronization, since a
+power-loss rollback of a NORMAL sent commit after a separate durable root release
+would invalidate the ownership proof. Tests verify the pragma at commit boundaries;
+this is not an empirical power-cut test and depends on storage honoring flushes.
+
+Remaining lifecycle owners require real durable sequencing, not only operation IDs:
+
+- `accounts._publish_identity` currently deletes the public document and forgets
+  keys/pins on any publication or bootstrap exception. An ambiguous provider
+  commit must retain the matching private material; a later bootstrap failure
+  must not compensate an already published identity. `create_human`,
+  `create_agent` and `upgrade_login` must recover a durable owner before checking
+  name availability or generating keys, password salts, recovery codes and wraps.
+- `Accounts.adopt_agent` publishes new public keys before saving the matching
+  bundle. Stage and durably install that bundle first. Identity staging needs
+  owner-only, write-once, flushed private assets and idempotent
+  install-if-absent-or-identical behavior; a journal reference/fingerprint must
+  not replace the private asset or silently overwrite an existing identity.
+- `Directory.patch`, including password/profile/active-state changes, must retain
+  a semantic delta and compare the fresh raw source version. Whole-document
+  cached replacements can overwrite peer changes; retried callbacks must not
+  regenerate salts, signatures or wrapped material.
+- `lifecycle._write`, bootstrap and change owners must retain record IDs,
+  `previous_id` and exact signed bytes. A stored-record receipt does not prove
+  that the record won canonical chain selection; settle that semantic outcome
+  before allocating a replacement attempt.
+- `ChatKeyService.rotate` and `on_member_left` must retain key epochs and exact
+  wraps before dispatch. `on_members_added` needs a bounded durable cursor over
+  historical epochs and conditional per-document updates, so partial fanout
+  resumes without rewrapping or losing concurrent recipients.
+- `delete_agent` and `delete_account` must retain dependent membership/lifecycle
+  steps and keys until outcomes settle. Swallowed leave failures cannot justify
+  deactivation or private-key deletion. Membership genesis/refolding and fresh
+  terminal outbox events still need their own forward-only phase reducers.
+- Reserved read acknowledgement currently retains its callback/payload only in
+  process memory. Bind canonical finalization provenance, the semantic action
+  and its exact ticket in the same root-to-node-to-Store cut; enqueueing a fresh
+  action after the validated read cut would lose the viewed-state boundary.
+  Remaining harness writes need classification as immutable publication,
+  replacement snapshot or semantic conditional update before activation.
+
+Reuse the bounded root consumer-slot and atomic ticket-link mechanism with
+validated domain-specific phase reducers. A durable owner records the stable
+logical action, phase/ordinal, immutable inputs or private asset reference, linked
+attempt and settled outcome/release phase. Provider calls and arbitrary callbacks
+stay outside transaction cuts. Persist private material before public dispatch;
+advance only after recording the exact terminal outcome, and release the receipt
+only after the next consumer phase is durable. Where two provider documents must
+change atomically, a compound typed operation is required rather than sequential
+owner phases. Keys, recovery material and pins are never speculative rollback
+compensation for an ambiguous publication.
+
+Consumed outbox slots currently reap on the next allocation in the same registered
+Store, after its durable owner row is absent. A permanently retired Store can
+therefore leave consumed slots occupying the shared 4096-slot limit. Explicit
+post-delete reaping or a bounded registered-Store sweep is a remaining lifecycle
+capacity prerequisite; no timeout or receipt eviction substitutes for that proof.
+
+These are explicit activation blockers. Account/project migration acceptance,
+provider installation, fleet activation and PR consolidation remain separate from
+local implementation and CI. Historical opaque operations remain retained.

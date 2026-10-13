@@ -15,6 +15,7 @@ from uuid import UUID, uuid5
 
 from ..core.errors import TransportError, ValidationError
 from .application_mutations import ApplicationMutationWriter
+from .outbox_mutations import _payload as validated_outbox_payload
 from .supabase import BUCKET
 
 
@@ -142,10 +143,69 @@ class StagedAttachmentPublisher:
         self.writer.submit("blob_manifest", arguments, operation_id=operation_id)
         return True
 
+    @staticmethod
+    def _outbox_leg(store, item, chat_id: str, manifest: dict):
+        """Bind this manifest to one exact persisted append outbox row."""
+        from ..store.db import OutboxItem
+
+        if (type(item) is not OutboxItem or item.kind != 'append_log'
+                or not item.target.startswith(chat_id + '|')
+                or not item.target[len(chat_id) + 1:]):
+            raise ValidationError('staged attachment outbox owner changed')
+        try:
+            retained = validated_outbox_payload(item)
+            manifests = retained['attachments']
+        except (TypeError, ValueError, KeyError):
+            raise ValidationError('staged attachment outbox payload changed') from None
+        if sum(value == manifest for value in manifests) != 1:
+            raise ValidationError('staged attachment outbox manifest changed')
+        row = store.outbox_owner_row(item.seq)
+        if (row is None or row[1] != item.owner_digest
+                or row[2:] != (item.kind, item.target)):
+            raise ValidationError('staged attachment outbox owner changed')
+        return 'manifest:' + manifest['blob_id'], item.owner_digest, row[0]
+
+    def recover_outbox(self, store, item, chat_id: str, manifest: dict) -> bool:
+        """Lookup-only replay of the exact ticket linked to this outbox leg."""
+        _blob_id, _path, _operation_id, expected = self._identity(chat_id, manifest)
+        leg, digest, _state = self._outbox_leg(store, item, chat_id, manifest)
+        journal = self.writer.driver.journal
+        ticket = journal.get_outbox_leg(store, item.seq, leg, digest)
+        if ticket is None:
+            return False
+        retained = journal.get_ticket(ticket).request
+        arguments = json.loads(retained.arguments_json)
+        if (retained.expectation.kind != 'blob_manifest'
+                or set(arguments) != set(expected) | {'p_object_id'}
+                or any(arguments.get(key) != value for key, value in expected.items())):
+            raise ValidationError('staged attachment manifest changed')
+        self.writer.driver.resume(ticket.protocol_epoch, ticket.operation_id)
+        return True
+
+    def publish_outbox(self, store, item, chat_id: str,
+                       manifest: dict, spool: Path) -> None:
+        """Stage only fresh work, then allocate one atomic outbox ticket."""
+        blob_id, relative_path, _operation_id, expected = self._identity(chat_id, manifest)
+        leg, digest, state = self._outbox_leg(store, item, chat_id, manifest)
+        if self.recover_outbox(store, item, chat_id, manifest):
+            return
+        if state != 'pending':
+            raise ValidationError('staged attachment outbox is already sent')
+        arguments = self._stage(chat_id, manifest, spool, blob_id, relative_path, expected)
+        ticket = self.writer.driver.journal.allocate_outbox_ticket(
+            store, item.seq, leg, digest, 'blob_manifest', arguments)
+        self.writer.driver.resume(ticket.protocol_epoch, ticket.operation_id)
+
     def publish(self, chat_id: str, manifest: dict, spool: Path) -> None:
         blob_id, relative_path, operation_id, expected = self._identity(chat_id, manifest)
         if self.recover(chat_id, manifest):
             return
+
+        arguments = self._stage(chat_id, manifest, spool, blob_id, relative_path, expected)
+        self.writer.submit('blob_manifest', arguments, operation_id=operation_id)
+
+    def _stage(self, chat_id: str, manifest: dict, spool: Path,
+               blob_id: str, relative_path: str, expected: dict) -> dict:
 
         self._prepare_storage()
         path = f"{self.writer.root}/{relative_path}"
@@ -179,9 +239,7 @@ class StagedAttachmentPublisher:
                 or len(recovered) != manifest["sealed_bytes"]
                 or hashlib.sha256(recovered).hexdigest() != manifest["sealed_sha256"]):
             raise ValidationError("staged attachment bytes changed")
-        self.writer.submit("blob_manifest", {
-            **expected, "p_object_id": object_row[0],
-        }, operation_id=operation_id)
+        return {**expected, 'p_object_id': object_row[0]}
 
 
 __all__ = ["StagedAttachmentPublisher"]

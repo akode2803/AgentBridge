@@ -38,6 +38,7 @@ class OutboxWorker:
         success_hooks: dict[str, Hook] | None = None,
         dead_hooks: dict[str, Hook] | None = None,
         prune_hooks: dict[str, Hook] | None = None,
+        typed_owner: Any | None = None,
     ) -> None:
         self.store = store
         self.handlers = handlers
@@ -56,7 +57,20 @@ class OutboxWorker:
         self._dispatch_gate = threading.RLock()
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
+        self._typed_owner = None
         self.latency = sink_for_store(store)
+        if typed_owner is not None:
+            self.bind_typed_owner(typed_owner)
+
+    def bind_typed_owner(self, owner: Any) -> None:
+        """One-way opt-in after transport/journal ownership is established."""
+        if (owner is None or not callable(getattr(owner, 'dispatch', None))
+                or not callable(getattr(owner, 'release', None))):
+            raise TypeError('invalid typed outbox owner')
+        with self._dispatch_gate:
+            if self._typed_owner is not None:
+                raise ValueError('typed outbox owner is already bound')
+            self._typed_owner = owner
 
     # ---------------------------------------------------------------- control
     def start(self) -> None:
@@ -135,6 +149,18 @@ class OutboxWorker:
             return done
         for item in self.store.outbox_prune_dead():
             self._hook(self.prune_hooks, item)
+        # A Store-sent tombstone is the durable consumer settlement. It must
+        # release every linked journal leg before deletion or spool cleanup.
+        sent = self.store.outbox_sent_items()
+        if sent and self._typed_owner is None:
+            raise RuntimeError('typed outbox owner is unavailable')
+        for item in sent:
+            if stop is not None and (stop.is_set() or self._stop_requested.is_set()):
+                return done
+            with self._dispatch_gate:
+                if stop is not None and (stop.is_set() or self._stop_requested.is_set()):
+                    return done
+                done += self._finalize_typed(item)
         while True:
             if stop is not None and stop.is_set():
                 return done
@@ -159,6 +185,51 @@ class OutboxWorker:
                 if stop.is_set() or self._stop_requested.is_set():
                     return None
                 return self._dispatch(item)
+        with self._dispatch_gate:
+            if self._typed_owner is not None:
+                return self._dispatch_typed(item)
+            return self._dispatch_legacy(item)
+
+    def _dispatch_typed(self, item: OutboxItem) -> int:
+        source = item.payload if isinstance(item.payload, dict) else {}
+        payload = source.get('envelope') \
+            if isinstance(source.get('envelope'), dict) else source
+        trace_ref = str(payload.get('id') or '') if isinstance(payload, dict) else ''
+        started = delivery_trace.queue_clock()
+        try:
+            self._typed_owner.dispatch(item)
+        except Exception as exc:  # noqa: BLE001 — durable unknowns never go dead
+            delivery_trace.emit('transport_append', message=trace_ref,
+                                status='error', duration_ms=delivery_trace.elapsed_ms(started))
+            delay = min(self.base_delay * (2 ** min(item.attempts, 16)), self.max_delay)
+            delay *= 1 + random.uniform(0, 0.1)
+            self.store.outbox_retry_claim(item, f'{type(exc).__name__}: {exc}', delay)
+            delivery_trace.emit('outbox_retry', message=trace_ref,
+                                status='error', retry_ms=delay * 1000)
+            return 0
+        delivery_trace.emit('transport_append', message=trace_ref,
+                            outcome='completed', duration_ms=delivery_trace.elapsed_ms(started))
+        if not self.store.outbox_mark_sent(item):
+            # Another lease or a sent tombstone won. Its owner will resume the
+            # exact linked ticket; this stale worker must not publish success.
+            return 0
+        settled = OutboxItem(item.seq, item.kind, item.target, item.payload,
+                             item.attempts, 0, item.payload_json, 'sent')
+        return self._finalize_typed(settled)
+
+    def _finalize_typed(self, item: OutboxItem) -> int:
+        try:
+            self._typed_owner.release(item)
+            hook = self.success_hooks.get(item.kind)
+            if hook is not None:
+                hook(item.target, item.payload)
+            if not self.store.outbox_finalize_sent(item):
+                return 0
+        except Exception:  # noqa: BLE001 — sent tombstone retries on next flush
+            return 0
+        return 1
+
+    def _dispatch_legacy(self, item: OutboxItem) -> int:
         handler = self.handlers.get(item.kind)
         if handler is None:
             self.store.outbox_dead(item.seq, f"no handler for kind {item.kind!r}")

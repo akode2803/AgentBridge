@@ -372,3 +372,21 @@ a new send first strands an already committed operation. Recover exact retained
 manifest operations without new Storage access, then apply fresh authorization to
 any genuinely new message append. A successful upload or manifest is not proof of
 message publication, and staged-object cleanup remains a separate typed owner.
+
+### Compound publication and durable consumer proof (2026-10-13)
+
+Two recoverable operations are not one atomic operation. A separately published
+reaction checkpoint can become obsolete before the reaction commits on another
+device. Compare and publish both documents in one provider transaction, rolling
+back all source changes on either version conflict.
+
+Validate immutable logical actions against the provider's actual representation
+before enqueueing. Overlong reaction text and JSON NUL values previously entered
+the FIFO and failed on every retry, blocking unrelated read/star/hide changes.
+A retry budget cannot repair an input the provider can never represent.
+
+Cross-database ordering also depends on durability strength: a FULL root receipt
+release cannot safely depend on a NORMAL Store sent commit. Use FULL for durable
+outbox admission and settlement, retain sent cleanup evidence, and prove every
+expected publication leg before retiring its owner. Cache-only writes need not
+pay for that ownership guarantee.

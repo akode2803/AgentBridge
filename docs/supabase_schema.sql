@@ -2128,7 +2128,7 @@ create table if not exists public.ab_mutation_receipts (
   operation_id    uuid not null,
   actor_uid       uuid not null,
   operation_kind  text not null check (operation_kind in (
-    'doc_put','doc_compare_put','doc_create','doc_delete','log_append','effect_transition',
+    'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append','effect_transition',
     'chat_delete','member_claim','member_leave','blob_manifest'
   )),
   payload_digest  text not null check (payload_digest ~ '^[0-9a-f]{64}$'),
@@ -2482,6 +2482,8 @@ language sql immutable set search_path = pg_catalog as $$
       and p_operation in ('INSERT', 'UPDATE')
     when 'doc_compare_put' then p_table = 'ab_docs'
       and p_operation in ('INSERT', 'UPDATE')
+    when 'reaction_pair' then p_table = 'ab_docs'
+      and p_operation in ('INSERT', 'UPDATE')
     when 'doc_create' then p_table = 'ab_docs' and p_operation = 'INSERT'
     when 'doc_delete' then p_table = 'ab_docs'
       and p_operation in ('UPDATE', 'DELETE')
@@ -2538,7 +2540,7 @@ begin
      or pg_catalog.octet_length(p_root) > 1024
      or p_protocol_epoch is null or p_operation_id is null
      or p_operation_kind is null or p_operation_kind not in (
-       'doc_put','doc_compare_put','doc_create','doc_delete','log_append','effect_transition',
+       'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append','effect_transition',
        'chat_delete','member_claim','member_leave','blob_manifest'
      )
      or p_payload_digest is null
@@ -4136,7 +4138,7 @@ alter table public.ab_mutation_receipts
 alter table public.ab_mutation_receipts
   add constraint ab_mutation_receipts_operation_kind_check check (
     operation_kind in (
-      'doc_put','doc_compare_put','doc_create','doc_delete','log_append',
+      'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append',
       'effect_transition','chat_delete','member_claim','member_leave','blob_manifest'
     )
   );
@@ -4228,3 +4230,113 @@ revoke all on function public.ab_mutation_doc_compare_put(
   from public, anon, authenticated, service_role;
 grant execute on function public.ab_mutation_doc_compare_put(
   text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean) to authenticated;
+
+-- Inactive atomic reaction/checkpoint replacement. Both source versions are
+-- compared, and the inner subtransaction rolls back the first write if the
+-- second comparison loses. Sequence allocation gaps are harmless; neither
+-- source content nor source change evidence escapes a conflicting pair.
+create or replace function public.ab_mutation_reaction_pair(
+  p_root text, p_protocol_epoch uuid, p_operation_id uuid,
+  p_payload_digest text, p_chat text, p_user text,
+  p_state_data jsonb, p_reaction_data jsonb, p_expected_source_epoch uuid,
+  p_expected_state_seq bigint, p_expected_state_deleted boolean,
+  p_expected_reaction_seq bigint, p_expected_reaction_deleted boolean
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_member text;
+  v_provider_digest text;
+  v_begin jsonb;
+  v_source_epoch uuid;
+  v_paths text[];
+  v_data jsonb[];
+  v_seqs bigint[];
+  v_deleted boolean[];
+  v_index integer;
+  v_applied boolean := false;
+begin
+  if not private.ab_mutation_path_valid(p_chat, 1024, 1)
+     or not private.ab_mutation_path_valid(p_user, 1024, 1)
+     or p_state_data is null or p_reaction_data is null
+     or pg_catalog.jsonb_typeof(p_state_data) <> 'object'
+     or pg_catalog.jsonb_typeof(p_reaction_data) <> 'object'
+     or public.ab_source_json_bytes(p_state_data)
+        + public.ab_source_json_bytes(p_reaction_data) > 8355840
+     or p_expected_source_epoch is null
+     or p_expected_state_seq is null or p_expected_state_seq < 0
+     or p_expected_reaction_seq is null or p_expected_reaction_seq < 0
+     or p_expected_state_deleted is null or p_expected_reaction_deleted is null
+     or (p_expected_state_seq = 0 and p_expected_state_deleted)
+     or (p_expected_reaction_seq = 0 and p_expected_reaction_deleted) then
+    raise exception 'invalid reaction pair' using errcode = '22023';
+  end if;
+  v_provider_digest := private.ab_mutation_provider_digest(
+    pg_catalog.jsonb_build_array('reaction_pair', p_chat, p_user,
+      p_state_data, p_reaction_data, p_expected_source_epoch,
+      p_expected_state_seq, p_expected_state_deleted,
+      p_expected_reaction_seq, p_expected_reaction_deleted)
+  );
+  if not private.ab_mutation_root_sealed(p_root) then
+    raise exception 'typed mutation root is not sealed' using errcode = '55000';
+  end if;
+  v_begin := private.ab_mutation_begin(
+    p_root, p_protocol_epoch, p_operation_id, 'reaction_pair',
+    p_payload_digest, v_provider_digest
+  );
+  if (v_begin->>'replay')::boolean then
+    return v_begin->'receipt';
+  end if;
+  v_member := private.ab_mutation_lock_actor(p_root);
+  perform private.ab_mutation_lock_chat(p_root, p_chat, false);
+  if v_actor is null or v_member = '' or not public.ab_is_member(p_root, p_chat) then
+    raise exception 'reaction pair is unauthorized' using errcode = '42501';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  select e.epoch into v_source_epoch from public.ab_change_epochs e
+  where e.root = p_root and e.source_schema_version = 2;
+  -- Fixed lexical order across all pair writers prevents pair/pair deadlocks.
+  -- Ordinary single-document writes arbitrate through the same row/unique key.
+  v_paths := array[
+    'chats/' || p_chat || '/overlays/reactions/' || p_user || '.json',
+    'chats/' || p_chat || '/overlays/state/' || p_user || '.json'];
+  v_data := array[p_reaction_data, p_state_data];
+  v_seqs := array[p_expected_reaction_seq, p_expected_state_seq];
+  v_deleted := array[p_expected_reaction_deleted, p_expected_state_deleted];
+  if v_source_epoch = p_expected_source_epoch then
+    begin
+      for v_index in 1..2 loop
+        if v_seqs[v_index] = 0 then
+          insert into public.ab_docs(root, path, data, deleted)
+          values (p_root, v_paths[v_index], v_data[v_index], false)
+          on conflict (root, path) do nothing;
+        else
+          update public.ab_docs d set data = v_data[v_index], deleted = false
+          where d.root = p_root and d.path = v_paths[v_index]
+            and d.seq = v_seqs[v_index] and d.deleted = v_deleted[v_index];
+        end if;
+        if not found then
+          raise exception 'reaction pair comparison conflict' using errcode = 'P0R01';
+        end if;
+      end loop;
+      v_applied := true;
+    exception when sqlstate 'P0R01' then
+      v_applied := false;
+    end;
+  end if;
+  return private.ab_mutation_finish(
+    p_root, p_protocol_epoch, p_operation_id, 'reaction_pair',
+    p_payload_digest, v_provider_digest,
+    pg_catalog.jsonb_build_object('chat_id', p_chat, 'username', p_user,
+                                 'applied', v_applied)
+  );
+end
+$$;
+revoke all on function public.ab_mutation_reaction_pair(
+  text,uuid,uuid,text,text,text,jsonb,jsonb,uuid,bigint,boolean,bigint,boolean)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_mutation_reaction_pair(
+  text,uuid,uuid,text,text,text,jsonb,jsonb,uuid,bigint,boolean,bigint,boolean)
+  to authenticated;

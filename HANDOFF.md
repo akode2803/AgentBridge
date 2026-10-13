@@ -1,5 +1,42 @@
 # Cloud source handoff
 
+## 2026-10-13 compound reaction and outbox consumer checkpoint
+
+Active branch `codex/compound-write-owners`, based on PR144 `3ea0cca`.
+Implements one atomic conditional provider transaction for signed reaction/state
+checkpoint publication. The durable UserState queue retains the semantic reaction
+delta and one pair ticket; conflicts recapture both source versions. Independent
+review caught provider-inexpressible logical actions poisoning the FIFO; admission
+now validates provider JSON and reaction size before persisting work.
+
+Format7 root-owned outbox consumer slots atomically link each exact Store row and
+manifest/append leg to its ticket. Manifests must be acknowledged before append.
+The worker durably marks sent under the exact lease before consumer release,
+retains cleanup evidence, and never reallocates after sent/deletion. Consumed root
+slots survive Store cleanup crashes and are reaped after exact Store deletion on
+later allocation. Outbox enqueue and typed sent/finalize commits use scoped FULL
+sync; cache-only work retains NORMAL. Binding remains explicit and inactive.
+Fresh terminal delete/leave sends are rejected until their lifecycle owner is
+migrated; no snapshot shortcut substitutes for typed completion.
+
+Validation: combined gate363 passed; consumer/Store/GUI attachment gate86 passed,
+3 intentional skips; independent probes11 passed with no remaining actionable
+P1/P2. Two independent epoch-prune/stale-claim crash probes are now permanent
+regressions (owner test file4 passed). Changed Python Ruff and whitespace pass.
+PR144 PostgreSQL and Ubuntu are green; Windows still running at last inspection.
+New reaction-pair PostgreSQL concurrency schedules require the new PR CI; no local
+PostgreSQL or hosted acceptance is claimed. No provider/app/harness changes.
+
+Next: review new PR CI, then forward-only account/key/lifecycle owner migration.
+Account creation must preserve private material and exact payload through unknown
+outcomes, adoption must save keys before publishing them, account patches need
+semantic CAS, and lifecycle/key rotation must reuse persisted signed identities.
+Terminal cleanup and reserved finalization need durable outcome consumers too.
+See PROVIDER_TYPED_MUTATION_RPC_PLAN for audited call sites and post-delete GC
+capacity limitation. Complete authenticated disposable migration acceptance before
+production activation or PR stack consolidation. Project-to-project transfer stays
+backlogged; protect Platform QA2 and legacy/bridge.py.
+
 ## 2026-10-13 mutable owners / attachment sequencing checkpoint
 
 Active branch `codex/mutable-writer-sequencing`, parent PR143 now `c42fdd1`.

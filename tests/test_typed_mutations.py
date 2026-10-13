@@ -39,6 +39,12 @@ CASES = [
     ("doc_compare_put", {"p_path": "accounts/alice.json", "p_data": {"v": 1},
                          "p_expected_source_epoch": OBJECT, "p_expected_seq": 3,
                          "p_expected_deleted": False}, {"applied": True}),
+    ("reaction_pair", {"p_chat": "room", "p_user": "alice",
+                       "p_state_data": {"ns": 10}, "p_reaction_data": {"ns": 10},
+                       "p_expected_source_epoch": OBJECT,
+                       "p_expected_state_seq": 1, "p_expected_state_deleted": False,
+                       "p_expected_reaction_seq": 0, "p_expected_reaction_deleted": False},
+     {"applied": True}),
 ]
 
 
@@ -629,3 +635,43 @@ def test_conditional_document_receipt_and_expected_version_are_strict():
     changed = prepare_mutation('team', EPOCH, OP, ACTOR, 'doc_compare_put',
                                {**arguments, 'p_expected_seq': 8})
     assert changed.expectation.client_digest != request.expectation.client_digest
+
+
+@pytest.mark.parametrize("field,value", [
+    ("p_chat", "room/other"), ("p_user", "../alice"), ("p_user", ""),
+    ("p_state_data", []), ("p_reaction_data", None),
+    ("p_expected_state_seq", True), ("p_expected_reaction_seq", -1),
+    ("p_expected_state_deleted", 1), ("p_expected_reaction_deleted", True),
+    ("p_expected_source_epoch", "invalid"),
+])
+def test_reaction_pair_rejects_bad_versions_paths_and_payloads(field, value):
+    kind, args, _ = CASES[-1]
+    with pytest.raises(ValueError):
+        prepare_mutation("team", EPOCH, OP, ACTOR, kind, {**args, field: value})
+
+
+def test_reaction_pair_combined_provider_budget_precedes_journal(monkeypatch):
+    import agentbridge.transport.typed_mutations as module
+    kind, args, _ = CASES[-1]
+    monkeypatch.setattr(module, "_MAX_JSON_BYTES", 40)
+    args = {**args, "p_state_data": {"value": "a" * 8},
+            "p_reaction_data": {"value": "b" * 8}}
+    # Each JSONB object is 21 bytes; the compact encoding alone would fit.
+    with pytest.raises(ValueError, match="reaction pair exceeds provider limit"):
+        prepare_mutation("team", EPOCH, OP, ACTOR, kind, args)
+    args["p_reaction_data"] = {"value": "b" * 6}
+    prepare_mutation("team", EPOCH, OP, ACTOR, kind, args)
+
+
+def test_reaction_pair_conflict_is_exact_and_payloads_versions_bind_digest():
+    kind, args, _ = CASES[-1]
+    request = prepare_mutation("team", EPOCH, OP, ACTOR, kind, args)
+    client = _Client()
+    client.result = _receipt(request, {"applied": False})
+    rpc = TypedMutationRPC(_Provider(client), actor_id=ACTOR, root="team", endpoint=URL)
+    assert dict(rpc.execute(request).result)["applied"] is False
+    for field, value in [("p_state_data", {"ns": 11}), ("p_reaction_data", {"ns": 11}),
+                         ("p_expected_state_seq", 2), ("p_expected_reaction_seq", 2),
+                         ("p_expected_state_deleted", True), ("p_user", "bob")]:
+        changed = prepare_mutation("team", EPOCH, OP, ACTOR, kind, {**args, field: value})
+        assert changed.expectation.client_digest != request.expectation.client_digest

@@ -2680,6 +2680,175 @@ def _validate_conditional_documents(database_url: str) -> None:
         raise GateFailure('conditional fresh write ignored membership removal')
 
 
+def _validate_reaction_pairs(database_url: str) -> None:
+    """Real row/unique-key races must never expose half a checkpoint pair."""
+    root, actor, chat = 'typed-reaction-pair', uuid4(), 'room'
+    initial = _prepare_root(database_url, root, actor)
+    member = root + '-member'
+    _run(database_url, 'insert into public.ab_docs(root,path,data) values ('
+         f'{_quote(root)}, {_quote("chats/" + chat + "/meta.json")}, '
+         f'{_quote(json.dumps({"members": {member: {}}}))}::jsonb);')
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, initial, uuid4())))
+    epoch, source = UUID(sealed['protocol_epoch']), UUID(sealed['source_epoch'])
+
+    def path(user, document):
+        return f'chats/{chat}/overlays/{document}/{user}.json'
+
+    def call(user, state_seq=0, reaction_seq=0, *, state_deleted=False,
+             reaction_deleted=False, source_epoch=source, operation=None, value=1):
+        return ('select public.ab_mutation_reaction_pair('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(operation or uuid4()))}::uuid, {_quote("a" * 64)}, '
+                f'{_quote(chat)}, {_quote(user)}, '
+                f'{_quote(json.dumps({"state": value}))}::jsonb, '
+                f'{_quote(json.dumps({"reaction": value}))}::jsonb, '
+                f'{_quote(str(source_epoch))}::uuid, {state_seq}, '
+                f'{"true" if state_deleted else "false"}, {reaction_seq}, '
+                f'{"true" if reaction_deleted else "false"})')
+
+    def run(sql):
+        return json.loads(_scalar(database_url, 'begin; set local role authenticated; '
+                                 + _claims(actor) + sql + '; commit;'))
+
+    def snapshot(user):
+        return json.loads(_scalar(database_url,
+            "select coalesce(jsonb_object_agg(path,jsonb_build_object("
+            "'seq',seq,'deleted',deleted,'data',data)), '{}'::jsonb) "
+            f'from public.ab_docs where root={_quote(root)} and path in ('
+            f'{_quote(path(user, "state"))},{_quote(path(user, "reactions"))});'))
+
+    def versions(user):
+        rows = snapshot(user)
+        return tuple(rows.get(path(user, document), {}).get('seq', 0)
+                     for document in ('state', 'reactions'))
+
+    def ordinary(mode, document_path):
+        return (f'select public.ab_mutation_doc_{mode}('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(uuid4()))}::uuid, {_quote("b" * 64)}, '
+                + _quote(document_path)
+                + ('' if mode == 'delete' else ', \'{"newer":true}\'::jsonb') + ')')
+
+    exact = call('alice')
+    first = run(exact)
+    if first['result'] != {'chat_id': chat, 'username': 'alice', 'applied': True}:
+        raise GateFailure('reaction pair absent creation failed')
+    original = snapshot('alice')
+    if len(original) != 2 or run(exact) != first or snapshot('alice') != original:
+        raise GateFailure('reaction pair replay mutated either document')
+    state_seq, reaction_seq = versions('alice')
+    conflict = call('alice', state_seq + 1, reaction_seq, value=2)
+    conflict_receipt = run(conflict)
+    if (conflict_receipt['result']['applied'] is not False
+            or run(conflict) != conflict_receipt or snapshot('alice') != original):
+        raise GateFailure('second comparison did not roll back first pair update')
+    # The first insert, rather than only an update, must roll back as well.
+    run(ordinary('put', path('insert-rollback', 'state')))
+    before = snapshot('insert-rollback')
+    if (run(call('insert-rollback'))['result']['applied'] is not False
+            or snapshot('insert-rollback') != before):
+        raise GateFailure('second comparison left a newly inserted reaction row')
+    if (run(call('alice', state_seq, reaction_seq, source_epoch=uuid4()))['result']['applied']
+            or snapshot('alice') != original):
+        raise GateFailure('reaction pair crossed the observed source epoch')
+    collision = _run(database_url, 'begin; set local role authenticated; '
+                     + _claims(actor) + exact.replace('{"state": 1}', '{"state": 2}')
+                     + '; commit;', expect_ok=False)
+    if 'collides with existing receipt' not in collision.stderr:
+        raise GateFailure('reaction pair digest omitted checkpoint content')
+    # An outer abort removes both writes and the receipt, allowing exact retry.
+    abort_sql = call('abort')
+    _run(database_url, 'begin; set local role authenticated; ' + _claims(actor)
+         + abort_sql + '; rollback;')
+    if snapshot('abort') or not run(abort_sql)['result']['applied']:
+        raise GateFailure('aborted pair leaked writes or a terminal receipt')
+    # Tombstone versions cannot be mistaken for live rows.
+    for document in ('state', 'reactions'):
+        run(ordinary('delete', path('alice', document)))
+    state_seq, reaction_seq = versions('alice')
+    before = snapshot('alice')
+    if (run(call('alice', state_seq, reaction_seq))['result']['applied']
+            or snapshot('alice') != before):
+        raise GateFailure('reaction pair ignored observed deletion state')
+    if not run(call('alice', state_seq, reaction_seq,
+                    state_deleted=True, reaction_deleted=True))['result']['applied']:
+        raise GateFailure('reaction pair could not replace exact tombstones')
+
+    def contend(holder_sql, waiter_sql):
+        suffix = uuid4().hex[:10]
+        holder_name, waiter_name = 'pair-holder-' + suffix, 'pair-waiter-' + suffix
+        ready, done = 'pair-ready-' + suffix, 'pair-done-' + suffix
+        holder, waiter = _PsqlSession(database_url), _PsqlSession(database_url)
+        try:
+            holder.send(f'set application_name={_quote(holder_name)}; begin; '
+                        'set local role authenticated; ' + _claims(actor)
+                        + holder_sql + f'; select {_quote(ready)};')
+            holder.wait_marker(ready)
+            waiter.send(f'set application_name={_quote(waiter_name)}; begin; '
+                        'set local role authenticated; ' + _claims(actor)
+                        + waiter_sql + f'; commit; select {_quote(done)};')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                blocked = _scalar(database_url,
+                    'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                    'join pg_catalog.pg_stat_activity w on '
+                    'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                    f'where h.application_name={_quote(holder_name)} '
+                    f'and w.application_name={_quote(waiter_name)});')
+                if blocked == 't':
+                    break
+                time.sleep(0.025)
+            else:
+                raise GateFailure('reaction pair failed to reach the held row/key barrier')
+            holder.send('commit;')
+            waiter.wait_marker(done)
+            holder.finish()
+            waiter.finish()
+        finally:
+            holder.abort()
+            waiter.abort()
+        if run(waiter_sql)['result']['applied'] is not False:
+            raise GateFailure('reaction pair overwrote a concurrently replaced version')
+
+    for document in ('state', 'reactions'):
+        other = 'reactions' if document == 'state' else 'state'
+        for mode in ('put', 'create', 'delete'):
+            user = document + '-' + mode
+            if mode == 'create':
+                run(ordinary('put', path(user, other)))
+            else:
+                run(call(user))
+            before = snapshot(user)
+            state_seq, reaction_seq = versions(user)
+            waiter_sql = call(user, state_seq, reaction_seq, value=9)
+            contend(ordinary(mode, path(user, document)), waiter_sql)
+            after = snapshot(user)
+            if after[path(user, other)] != before[path(user, other)]:
+                raise GateFailure('losing pair changed its uncontended document')
+            if mode == 'delete' and not after[path(user, document)]['deleted']:
+                raise GateFailure('losing pair resurrected a concurrently deleted document')
+            if after[path(user, document)]['data'] != {'newer': True} and mode != 'delete':
+                raise GateFailure('losing pair changed the winning ordinary document')
+    run(call('pair-race'))
+    state_seq, reaction_seq = versions('pair-race')
+    winning = call('pair-race', state_seq, reaction_seq, value=7)
+    contend(winning, call('pair-race', state_seq, reaction_seq, value=9))
+    after = snapshot('pair-race')
+    if (after[path('pair-race', 'state')]['data'] != {'state': 7}
+            or after[path('pair-race', 'reactions')]['data'] != {'reaction': 7}):
+        raise GateFailure('pair/pair race exposed a mixed checkpoint')
+
+    run('select public.ab_mutation_member_leave('
+        f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid, '
+        f'{_quote("f" * 64)})')
+    if run(exact) != first or run(conflict) != conflict_receipt:
+        raise GateFailure('reaction pair replay incorrectly required fresh membership')
+    denied = _run(database_url, 'begin; set local role authenticated; '
+                  + _claims(actor) + call('denied') + '; commit;', expect_ok=False)
+    if 'reaction pair is unauthorized' not in denied.stderr:
+        raise GateFailure('fresh reaction pair ignored membership removal')
+
+
 def _validate_receipt_retirement(database_url: str) -> None:
     """Closure metadata survives removal, rotation replay, and skipped epochs."""
     root, actor = 'receipt-retirement', uuid4()
@@ -2813,6 +2982,7 @@ def main() -> int:
     _validate_p1b_blob_manifest_rpc(database_url)
     _validate_p1b_blob_manifest_lock(database_url)
     _validate_conditional_documents(database_url)
+    _validate_reaction_pairs(database_url)
     _validate_receipt_retirement(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
@@ -2842,6 +3012,9 @@ def main() -> int:
             "conditional-doc-applied-conflict-replay",
             "conditional-doc-concurrent-put-create-delete",
             "conditional-doc-tombstone-sourceepoch-membership",
+            "reaction-pair-exact-replay-and-atomic-rollback",
+            "reaction-pair-two-document-put-create-delete-races",
+            "reaction-pair-pair-race-and-membership-replay",
             "receipt-retirement-generation-ack-closure",
             "schema-rerun",
         ],

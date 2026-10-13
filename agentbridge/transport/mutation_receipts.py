@@ -17,6 +17,7 @@ from .scoped_sources import _text, validate_source_cursor, validate_source_paths
 _RESULT_FIELDS = {
     "doc_put": ("path", "updated"),
     "doc_compare_put": ("path", "applied"),
+    "reaction_pair": ("chat_id", "username", "applied"),
     "doc_create": ("path", "created"),
     "doc_delete": ("path", "deleted"),
     "log_append": ("chat_id", "log_name", "row_id"),
@@ -77,6 +78,10 @@ def _result_value(key: str, value: object, kind: str) -> None:
                 raise ValueError("invalid mutation username") from None
         else:
             _text(value, "mutation username", maximum=1024)
+            if kind == "reaction_pair":
+                validate_source_paths((value,))
+                if "/" in value:
+                    raise ValueError("invalid mutation reaction owner")
     else:
         validate_source_paths((value,))
         if key == "chat_id":

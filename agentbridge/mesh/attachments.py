@@ -121,7 +121,7 @@ class AttachmentDelivery:
         }
         return PreparedAttachment(chat_id=chat_id, manifest=manifest)
 
-    def upload(self, chat_id: str, manifest: dict) -> None:
+    def upload(self, chat_id: str, manifest: dict, *, outbox_item=None) -> None:
         item = self._validate(chat_id, manifest)
         writer = self._typed_writer()
         if item["v"] == 2 and writer is None:
@@ -131,7 +131,14 @@ class AttachmentDelivery:
         spool = self._spool(item["blob_id"])
         if writer is not None:
             from ..transport.staged_attachments import StagedAttachmentPublisher
-            StagedAttachmentPublisher(writer).publish(chat_id, item, spool)
+            publisher = StagedAttachmentPublisher(writer)
+            lifecycle_enabled = getattr(writer.driver.journal, 'lifecycle_enabled', None)
+            if callable(lifecycle_enabled) and lifecycle_enabled():
+                if outbox_item is None:
+                    raise ValidationError('typed attachment requires durable outbox owner')
+                publisher.publish_outbox(self.store, outbox_item, chat_id, item, spool)
+            else:
+                publisher.publish(chat_id, item, spool)
         else:
             try:
                 sealed = spool.read_bytes()
@@ -146,7 +153,7 @@ class AttachmentDelivery:
                 raise ValidationError("attachment spool failed verification")
             self.tx.put_blob(attachment_path(chat_id, item["blob_id"]), sealed)
 
-    def recover_published(self, chat_id: str, manifest: dict) -> bool:
+    def recover_published(self, chat_id: str, manifest: dict, *, outbox_item=None) -> bool:
         """Settle only an existing typed manifest before fresh-send checks."""
         item = self._validate(chat_id, manifest)
         if item["v"] == 1:
@@ -155,7 +162,13 @@ class AttachmentDelivery:
         if writer is None:
             raise ValidationError("typed attachment journal is unavailable")
         from ..transport.staged_attachments import StagedAttachmentPublisher
-        return StagedAttachmentPublisher(writer).recover(chat_id, item)
+        publisher = StagedAttachmentPublisher(writer)
+        lifecycle_enabled = getattr(writer.driver.journal, 'lifecycle_enabled', None)
+        if callable(lifecycle_enabled) and lifecycle_enabled():
+            if outbox_item is None:
+                raise ValidationError('typed attachment requires durable outbox owner')
+            return publisher.recover_outbox(self.store, outbox_item, chat_id, item)
+        return publisher.recover(chat_id, item)
 
     def _typed_writer(self):
         from ..transport.local_mutations import LocalMutationTransport

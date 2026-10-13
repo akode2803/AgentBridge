@@ -371,9 +371,21 @@ class MessagingService:
     def react(self, chat_id: str, msg_id: str, emoji: str | None) -> None:
         self._require_member(chat_id)
         state = self._state(chat_id)
-        operation = ChatOverlays(self.tx, chat_id).set_reaction(
-            self.user, msg_id, emoji, signer=self._sign_event,
-            state_checkpoint=state.checkpoint if emoji else None)
+        if getattr(self.tx, '_journal_writer', None) is not None:
+            from .reaction_documents import parse_v2
+
+            document, _changed = self.tx.write_state_action(
+                chat_id, self.user, 'reaction', {'message': msg_id, 'emoji': emoji or ''},
+                signer=self._sign_event, verifier=self._state_verifier(chat_id, self.user))
+            if document is None:
+                # A recovered, durably consumed pair needs no new notification.
+                return
+            _mapping, operations = parse_v2(document)
+            operation = operations[msg_id]
+        else:
+            operation = ChatOverlays(self.tx, chat_id).set_reaction(
+                self.user, msg_id, emoji, signer=self._sign_event,
+                state_checkpoint=state.checkpoint if emoji else None)
         # V50: a notification breadcrumb — the overlay doc above stays the
         # authoritative store, but overlay docs never ride the log, so
         # nothing downstream (sync bus → notifier → SSE/CLI hook) could see
@@ -750,8 +762,13 @@ class MessagingService:
         return None
 
     # ------------------------------------------------------- outbox handler
+    def typed_outbox_owner(self):
+        """Construct an explicit owner; startup does not bind it automatically."""
+        from ..transport.outbox_mutations import OutboxMutationOwner
+        return OutboxMutationOwner(self.tx, self.store, self.outbox_handlers()[OUTBOX_APPEND])
+
     def outbox_handlers(self) -> dict:
-        def append_log(target: str, payload: dict) -> None:
+        def append_log(target: str, payload: dict, *, _context=None) -> None:
             chat_id, _, log_name = target.partition("|")
             if not chat_id or not log_name:
                 raise ValidationError(f"malformed append target {target!r}")
@@ -767,7 +784,8 @@ class MessagingService:
             # before fresh-send authority checks or terminal shortcuts: a
             # removed sender can still have a committed, unacknowledged send.
             # The typed provider checks current authority for any new effect.
-            recover = getattr(self.tx, "recover_append_log", None)
+            append_owner = _context if _context is not None else self.tx
+            recover = getattr(append_owner, "recover_append_log", None)
             recovered = callable(recover) and recover(chat_id, log_name, envelope)
             if not recovered:
                 # A manifest may already have committed before a lost reply.
@@ -776,7 +794,8 @@ class MessagingService:
                 # stages bytes or prepares a new provider mutation.
                 if self.attachments is not None:
                     for manifest in self.attachments.manifests(payload):
-                        self.attachments.recover_published(chat_id, manifest)
+                        self.attachments.recover_published(
+                            chat_id, manifest, **({"outbox_item": _context.item} if _context else {}))
                 if kind == "message":
                     try:
                         self.require_send(chat_id, drain_before_terminal=True)
@@ -798,6 +817,8 @@ class MessagingService:
                     except Exception:  # noqa: BLE001 — optional speed path only
                         local_admission = None
                 elif kind == "info":
+                    if _context is not None and etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                        raise TransportError('terminal lifecycle outbox migration is not enabled')
                     if etype in {EV_DELETED, EV_MEMBER_LEFT}:
                         try:
                             # Local optimistic info rows are authoritative for
@@ -820,8 +841,9 @@ class MessagingService:
                             return  # append landed before a crash; state is applied
                 if self.attachments is not None:
                     for manifest in self.attachments.manifests(payload):
-                        self.attachments.upload(chat_id, manifest)
-                self.tx.append_log(chat_id, log_name, envelope)
+                        self.attachments.upload(
+                            chat_id, manifest, **({"outbox_item": _context.item} if _context else {}))
+                append_owner.append_log(chat_id, log_name, envelope)
             if kind == 'message':
                 delivery_trace.emit(
                     'local_append_completed', chat=chat_id,

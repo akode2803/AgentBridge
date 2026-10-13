@@ -21,6 +21,7 @@ CASES = [
     ("chat_delete", {"chat_id": "room"}, {"logs_deleted": 0, "documents_tombstoned": 1}),
     ("member_claim", {"username": "alice"}, {"claimed": True}),
     ("member_leave", {}, {"username": "alice", "left": True}),
+    ("reaction_pair", {"chat_id": "room", "username": "alice"}, {"applied": False}),
     ("blob_manifest", {"chat_id": "room", "blob_id": "blob-1",
                        "object_id": OBJECT, "sealed_bytes": 4096}, {}),
 ]
@@ -146,3 +147,9 @@ def test_leave_rejects_invalid_text_and_oversized_serialized_result(username):
     expected, raw = fixture("member_leave", {}, {"username": username, "left": True})
     with pytest.raises(ValueError):
         decode_mutation_receipt(raw, expected)
+
+
+@pytest.mark.parametrize("username", ["alice/other", "..", "a\\b"])
+def test_reaction_pair_owner_is_one_strict_path_component(username):
+    with pytest.raises(ValueError):
+        fixture("reaction_pair", {"chat_id": "room", "username": username}, {"applied": True})

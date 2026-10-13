@@ -27,6 +27,11 @@ _FAMILIES = {
     "doc_compare_put": ("ab_mutation_doc_compare_put",
                         ("p_path", "p_data", "p_expected_source_epoch",
                          "p_expected_seq", "p_expected_deleted"), ("path",)),
+    "reaction_pair": ("ab_mutation_reaction_pair",
+                      ("p_chat", "p_user", "p_state_data", "p_reaction_data",
+                       "p_expected_source_epoch", "p_expected_state_seq",
+                       "p_expected_state_deleted", "p_expected_reaction_seq",
+                       "p_expected_reaction_deleted"), ("chat_id", "username")),
     "doc_create": ("ab_mutation_doc_create", ("p_path", "p_data"), ("path",)),
     "doc_delete": ("ab_mutation_doc_delete", ("p_path",), ("path",)),
     "log_append": ("ab_mutation_log_append", ("p_chat", "p_log", "p_record"),
@@ -137,11 +142,13 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
     for name, value in arguments.items():
         if name in {"p_path", "p_log"}:
             validate_source_paths((value,))
-        elif name == "p_chat":
+        elif name in {"p_chat", "p_user"}:
             _chat(value)
         elif name in {"p_data", "p_record"}:
             _bounded_json(value, object_only=name == "p_record" or kind == "effect_transition",
                           log_record=name == "p_record")
+        elif name in {"p_state_data", "p_reaction_data"}:
+            _bounded_json(value, object_only=True)
         elif name in {"p_grant_ask", "p_grant_decision"}:
             if value is not None:
                 _bounded_json(value, object_only=True)
@@ -160,9 +167,9 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
             _uuid(value, "typed mutation object id")
         elif name == "p_expected_source_epoch":
             _uuid(value, "typed document source epoch")
-        elif name == "p_expected_seq":
+        elif name in {"p_expected_seq", "p_expected_state_seq", "p_expected_reaction_seq"}:
             validate_source_cursor(value, "typed document sequence")
-        elif name == "p_expected_deleted":
+        elif name in {"p_expected_deleted", "p_expected_state_deleted", "p_expected_reaction_deleted"}:
             if type(value) is not bool:
                 raise ValueError("invalid typed document deletion state")
         elif name == "p_sealed_bytes":
@@ -175,6 +182,13 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
     if kind == "doc_compare_put" and arguments["p_expected_seq"] == 0 \
             and arguments["p_expected_deleted"]:
         raise ValueError("absent typed document cannot be a tombstone")
+    if kind == "reaction_pair":
+        for document in ("state", "reaction"):
+            if arguments[f"p_expected_{document}_seq"] == 0 and arguments[f"p_expected_{document}_deleted"]:
+                raise ValueError("absent typed document cannot be a tombstone")
+        if sum(_jsonb_size(arguments[name])[0] for name in
+               ("p_state_data", "p_reaction_data")) > _MAX_JSON_BYTES:
+            raise ValueError("typed reaction pair exceeds provider limit")
     if kind == "effect_transition":
         path = arguments["p_path"]
         if _EFFECT_PATH.fullmatch(path) is None:
@@ -191,6 +205,8 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
 
 
 def _targets(kind: str, arguments: dict[str, Any]) -> tuple[tuple[str, str | int], ...]:
+    if kind == "reaction_pair":
+        return (("chat_id", arguments["p_chat"]), ("username", arguments["p_user"]))
     return tuple((target, arguments[_TARGET_ARGUMENTS[target]])
                  for target in _FAMILIES[kind][2])
 
