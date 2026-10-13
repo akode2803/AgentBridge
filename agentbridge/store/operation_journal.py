@@ -468,8 +468,13 @@ class OperationJournal:
                 if evidence.protocol_epoch == epoch:
                     _fail('epoch_changed')
                 if conn.execute('SELECT format FROM mutation_root').fetchone() == (9,):
-                    if conn.execute('SELECT 1 FROM typed_admission_owners WHERE protocol_epoch=? LIMIT 1', (epoch,)).fetchone():
+                    # Admitted owners settle and reap first (certify_closure
+                    # covers ACK replies lost across rotation); never-admitted
+                    # drafts are proven effect-free by this closure evidence.
+                    if conn.execute("SELECT 1 FROM typed_admission_owners WHERE protocol_epoch=? AND state='admitted' LIMIT 1", (epoch,)).fetchone():
                         _fail('admission_owner_unresolved_epoch')
+                    from .provider_admission_owner import rebase_closed_drafts
+                    rebase_closed_drafts(conn, self, epoch, evidence.protocol_epoch)
                 if conn.execute("SELECT 1 FROM typed_operations WHERE protocol_epoch=? AND state NOT IN ('completed','acknowledged') LIMIT 1", (epoch,)).fetchone():
                     _fail('unresolved_epoch')
                 # ACK may commit remotely before its reply is lost. Rotation

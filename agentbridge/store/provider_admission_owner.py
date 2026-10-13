@@ -23,7 +23,7 @@ from ..transport.provider_admission import (
     prepare_admission_plan,
 )
 from ..transport.typed_mutations import PreparedMutation
-from ..transport.receipt_retirement import OperationTicket
+from ..transport.receipt_retirement import OperationTicket, ProviderEpoch
 from . import local_source
 from .mutation_coordinator import ROOT_LOCK_TIMEOUT_S, _V9_ROOT_SCHEMA
 from .operation_journal import (
@@ -151,6 +151,12 @@ def audit_admissions(conn, *, required: bool) -> None:
         "OR a.endpoint!=o.endpoint LIMIT 1"
     ).fetchone():
         _fail("owner_changed")
+    # Adoption rebases drafts and refuses admitted owners of the closed epoch.
+    if conn.execute(
+        "SELECT 1 FROM typed_admission_owners a JOIN typed_operation_lifecycle c "
+        "ON c.singleton=1 WHERE a.protocol_epoch!=c.protocol_epoch LIMIT 1"
+    ).fetchone():
+        _fail("owner_epoch_changed")
     if conn.execute(
         "SELECT 1 FROM typed_admission_owners o WHERE "
         "(SELECT count(*) FROM typed_admission_legs l WHERE l.owner_id=o.owner_id) "
@@ -212,6 +218,116 @@ class AdmissionOwnerRecord:
 def _receipt_outcome(receipt) -> str:
     """Domain outcome of an exact receipt; only CAS receipts can conflict."""
     return "conflict" if dict(receipt.result).get("applied") is False else "applied"
+
+
+def _load(conn, journal: OperationJournal, owner_id: str) -> AdmissionOwnerRecord | None:
+    """Targeted exact validation of one owner's retained replay material."""
+    row = conn.execute(
+        "SELECT root,actor_id,protocol_epoch,endpoint,state,owner_kind,"
+        "private_payload,plan "
+        "FROM typed_admission_owners WHERE owner_id=?", (owner_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    root, actor, epoch, endpoint, state, owner_kind, private_payload, plan_json = row
+    if (root, actor, endpoint) != (
+        journal.root, journal.actor_id, journal.endpoint,
+    ) or state not in _STATES:
+        _fail("owner_changed")
+    rows = conn.execute(
+        "SELECT ordinal,protocol_epoch,operation_id,linked,cancel,outcome,request "
+        "FROM typed_admission_legs WHERE owner_id=? ORDER BY ordinal", (owner_id,)
+    ).fetchall()
+    try:
+        if not 1 <= len(rows) <= 1025:
+            raise ValueError("wrong admission leg count")
+        requests = tuple(PreparedMutation.from_request_json(row[6]) for row in rows)
+        for ordinal, (saved_ordinal, leg_epoch, operation, linked, cancel,
+                      outcome, _) in enumerate(rows):
+            e = requests[ordinal].expectation
+            if (saved_ordinal, leg_epoch, operation) != (
+                ordinal, epoch, e.operation_id,
+            ) or cancel not in _CANCEL or outcome not in _OUTCOMES | {None}:
+                raise ValueError("admission leg changed")
+            if linked:
+                existing = journal._find(conn, epoch, operation)
+                if existing is None or existing.request != requests[ordinal]:
+                    raise ValueError("admission ticket changed")
+                if conn.execute(
+                    "SELECT 1 FROM typed_operation_tickets WHERE protocol_epoch=? "
+                    "AND operation_id=?", (epoch, operation),
+                ).fetchone() is None:
+                    raise ValueError("admission ticket missing")
+                # The settled outcome must remain the retained receipt's.
+                if outcome is not None and (
+                        existing.state != "acknowledged"
+                        or _receipt_outcome(existing.receipt) != outcome):
+                    raise ValueError("admission outcome changed")
+        plan = prepare_admission_plan(owner_id, requests)
+        if plan.request_json != plan_json or plan.protocol_epoch != epoch:
+            raise ValueError("admission plan changed")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        _fail("material_changed")
+    return AdmissionOwnerRecord(
+        plan, requests, state, owner_kind, private_payload,
+        tuple(bool(row[3]) for row in rows),
+        tuple(row[4] for row in rows), tuple(row[5] for row in rows),
+    )
+
+
+def rebase_closed_drafts(conn, journal: OperationJournal, closed_epoch: str,
+                         protocol_epoch: str) -> int:
+    """Move never-admitted owners of a closed epoch into its authenticated successor.
+
+    Runs only inside the journal's adoption cut, after authenticated evidence of
+    a newer generation of the same lifecycle. Provider closure requires every
+    admitted leg to be settled by its actor, and only a locally committed
+    positive reply can link, dispatch, cancel or acknowledge a leg. A prepared,
+    full or ambiguous owner therefore was never admitted in the closed epoch:
+    it becomes a fresh ``prepared`` draft with the same owner and operation
+    identities, arguments and private material, never regenerated.
+    """
+    from json import loads
+
+    from ..transport.typed_mutations import prepare_mutation
+
+    owners = conn.execute(
+        "SELECT owner_id FROM typed_admission_owners WHERE protocol_epoch=? "
+        "ORDER BY owner_id", (closed_epoch,),
+    ).fetchall()
+    for (owner_id,) in owners:
+        record = _load(conn, journal, owner_id)
+        if record.state == "admitted":
+            _fail("owner_unresolved_epoch")
+        try:
+            rebased = tuple(
+                prepare_mutation(
+                    request.expectation.root, protocol_epoch,
+                    request.expectation.operation_id, request.expectation.actor_id,
+                    request.expectation.kind, loads(request.arguments_json))
+                for request in record.requests
+            )
+            if any(new.expectation.client_digest != old.expectation.client_digest
+                   for new, old in zip(rebased, record.requests)):
+                raise ValueError("rebased admission digest changed")
+            plan = prepare_admission_plan(owner_id, rebased)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            _fail("material_changed")
+        if conn.execute(
+            "UPDATE typed_admission_owners SET protocol_epoch=?,state='prepared',plan=? "
+            "WHERE owner_id=? AND protocol_epoch=? AND state!='admitted'",
+            (protocol_epoch, plan.request_json, owner_id, closed_epoch),
+        ).rowcount != 1:
+            _fail("owner_changed")
+        for ordinal, request in enumerate(rebased):
+            if conn.execute(
+                "UPDATE typed_admission_legs SET protocol_epoch=?,request=? "
+                "WHERE owner_id=? AND ordinal=? AND linked=0 AND cancel='none' "
+                "AND outcome IS NULL", (protocol_epoch, request.request_json,
+                                        owner_id, ordinal),
+            ).rowcount != 1:
+                _fail("leg_changed")
+    return len(owners)
 
 
 def link_admission_ticket(conn, owner_id: str, ordinal: int,
@@ -289,57 +405,7 @@ class ProviderAdmissionOwnerJournal:
             _fail("owner_changed")
 
     def _find(self, conn, owner_id: str) -> AdmissionOwnerRecord | None:
-        row = conn.execute(
-            "SELECT root,actor_id,protocol_epoch,endpoint,state,owner_kind,"
-            "private_payload,plan "
-            "FROM typed_admission_owners WHERE owner_id=?", (owner_id,)
-        ).fetchone()
-        if row is None:
-            return None
-        root, actor, epoch, endpoint, state, owner_kind, private_payload, plan_json = row
-        if (root, actor, endpoint) != (
-            self.journal.root, self.journal.actor_id, self.journal.endpoint,
-        ) or state not in _STATES:
-            _fail("owner_changed")
-        rows = conn.execute(
-            "SELECT ordinal,protocol_epoch,operation_id,linked,cancel,outcome,request "
-            "FROM typed_admission_legs WHERE owner_id=? ORDER BY ordinal", (owner_id,)
-        ).fetchall()
-        try:
-            if not 1 <= len(rows) <= 1025:
-                raise ValueError("wrong admission leg count")
-            requests = tuple(PreparedMutation.from_request_json(row[6]) for row in rows)
-            for ordinal, (saved_ordinal, leg_epoch, operation, linked, cancel,
-                          outcome, _) in enumerate(rows):
-                e = requests[ordinal].expectation
-                if (saved_ordinal, leg_epoch, operation) != (
-                    ordinal, epoch, e.operation_id,
-                ) or cancel not in _CANCEL or outcome not in _OUTCOMES | {None}:
-                    raise ValueError("admission leg changed")
-                if linked:
-                    existing = self.journal._find(conn, epoch, operation)
-                    if existing is None or existing.request != requests[ordinal]:
-                        raise ValueError("admission ticket changed")
-                    if conn.execute(
-                        "SELECT 1 FROM typed_operation_tickets WHERE protocol_epoch=? "
-                        "AND operation_id=?", (epoch, operation),
-                    ).fetchone() is None:
-                        raise ValueError("admission ticket missing")
-                    # The settled outcome must remain the retained receipt's.
-                    if outcome is not None and (
-                            existing.state != "acknowledged"
-                            or _receipt_outcome(existing.receipt) != outcome):
-                        raise ValueError("admission outcome changed")
-            plan = prepare_admission_plan(owner_id, requests)
-            if plan.request_json != plan_json or plan.protocol_epoch != epoch:
-                raise ValueError("admission plan changed")
-        except (TypeError, ValueError, UnicodeError, RecursionError):
-            _fail("material_changed")
-        return AdmissionOwnerRecord(
-            plan, requests, state, owner_kind, private_payload,
-            tuple(bool(row[3]) for row in rows),
-            tuple(row[4] for row in rows), tuple(row[5] for row in rows),
-        )
+        return _load(conn, self.journal, owner_id)
 
     def get(self, owner_id: str) -> AdmissionOwnerRecord | None:
         _uuid(owner_id, "admission owner")
@@ -610,6 +676,67 @@ class ProviderAdmissionOwnerJournal:
             self._check(conn)
             return outcome
 
+    def certify_closure(self) -> int:
+        """Apply authenticated epoch closure to admitted owners before adoption."""
+        from ..transport.receipt_retirement import observe_provider_epoch
+
+        return self._certify_closure(observe_provider_epoch(self.wire._rpc))
+
+    def _certify_closure(self, evidence: ProviderEpoch) -> int:
+        """Record the ACKs that closure proves, without adopting the new epoch.
+
+        Rotation requires every admitted leg's receipt or cancellation to be
+        acknowledged, so a newer generation of this lifecycle certifies ACKs
+        whose replies were lost. The provider rejects any later old-epoch ACK;
+        without this an owner could never settle or reap and would block
+        adoption forever. Other completed work is certified by adoption itself.
+        Only :meth:`certify_closure` supplies evidence in production. Returns
+        the number of certified legs.
+        """
+        if type(evidence) is not ProviderEpoch:
+            raise TypeError("invalid provider epoch evidence")
+        evidence.__post_init__()
+        if (evidence.endpoint, evidence.root, evidence.actor_id) != (
+            self.journal.endpoint, self.journal.root, self.journal.actor_id,
+        ):
+            _fail("epoch_owner_changed")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            self._check(conn)
+            lifecycle_id, epoch, generation = conn.execute(
+                "SELECT lifecycle_id,protocol_epoch,generation "
+                "FROM typed_operation_lifecycle WHERE singleton=1"
+            ).fetchone()
+            if evidence.lifecycle_id != lifecycle_id or evidence.generation < generation:
+                _fail("epoch_regressed")
+            if evidence.generation == generation:
+                if evidence.protocol_epoch != epoch:
+                    _fail("epoch_changed")
+                return 0
+            if evidence.protocol_epoch == epoch:
+                _fail("epoch_changed")
+            completed = conn.execute(
+                "SELECT t.protocol_epoch,t.operation_id FROM typed_admission_legs l "
+                "JOIN typed_operations t ON t.protocol_epoch=l.protocol_epoch "
+                "AND t.operation_id=l.operation_id "
+                "WHERE l.protocol_epoch=? AND l.linked=1 AND t.state='completed'",
+                (epoch,),
+            ).fetchall()
+            for key in completed:
+                self.journal._find(conn, *key)  # exact retained receipt
+            conn.executemany(
+                "UPDATE typed_operations SET state='acknowledged' "
+                "WHERE protocol_epoch=? AND operation_id=? AND state='completed'",
+                completed,
+            )
+            cancelled = conn.execute(
+                "UPDATE typed_admission_legs SET cancel='acknowledged' "
+                "WHERE protocol_epoch=? AND cancel='cancelled'", (epoch,),
+            ).rowcount
+            if completed or cancelled:
+                self.journal.coordinator._advance_root_revision(conn)
+            self._check(conn)
+            return len(completed) + cancelled
+
     def reap(self, owner_id: str) -> bool:
         """Delete a fully settled owner; returns False when already absent.
 
@@ -651,5 +778,5 @@ class ProviderAdmissionOwnerJournal:
 __all__ = [
     "AdmissionOwnerChanged", "AdmissionOwnerRecord",
     "ProviderAdmissionOwnerJournal", "audit_admissions", "reservation_capacity",
-    "link_admission_ticket",
+    "link_admission_ticket", "rebase_closed_drafts",
 ]

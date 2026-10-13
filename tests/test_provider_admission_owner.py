@@ -183,12 +183,14 @@ def test_full_reply_and_divergent_owner_never_dispatch(world):
 
 
 def test_same_operation_cannot_enter_old_journal_or_rotate_epoch(world):
-    owner, _ = _owner(world)
+    owner, client = _owner(world)
     requests = _requests()
-    owner.prepare(OWNER, requests)
+    record = owner.prepare(OWNER, requests)
     journal = world[-1]
     with pytest.raises(local_source.SourceChanged, match="admission_leg"):
         journal.prepare_operation(requests[0])
+    client.on_execute = lambda name, params: _reply(record.plan, "admitted")
+    owner.admit(OWNER)
     with pytest.raises(local_source.SourceChanged, match="admission_owner_unresolved_epoch"):
         journal._adopt_epoch(_epoch(1, NEXT))
 

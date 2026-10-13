@@ -110,12 +110,41 @@ proves replay, pending, unacknowledged-cancel and budget rejections. Members can
 still pin capacity by never settling; that matches the pre-existing receipt-ACK
 rule and remains an operator-eviction/lineage question for step 2 below.
 
+## Draft recovery and certification across epoch closure
+
+Provider rotation requires every admitted leg to be settled and acknowledged
+by its actor, and only a locally committed positive reply can link, dispatch,
+cancel or acknowledge a leg. Authenticated evidence of a newer generation of
+the same lifecycle therefore proves two things, now used locally:
+
+- A `prepared`, `full` or ambiguous (`admission_attempted`) owner was never
+  admitted in the closed epoch. Adoption rebases it atomically into the new
+  epoch as `prepared`, re-deriving each request with the same owner id,
+  operation ids, kinds, arguments and digests and the same private material
+  (no key, signature or timestamp is regenerated). A late reply for the old
+  plan fails `plan_changed`. Tampered draft material fails adoption closed.
+- ACKs whose replies were lost did commit. `certify_closure()` (authenticated
+  epoch read; no adoption) marks an admitted owner's `cancelled` legs
+  `acknowledged` and its linked `completed` journal rows `acknowledged`, so the
+  owner can settle and reap; the provider would now reject any old-epoch ACK.
+  Other completed work is still certified only by adoption itself.
+
+Admitted owners still block adoption until reaped. Every owner must now live in
+the lifecycle epoch (audited). This prospective rule applies only to admission
+owners; old generic `attempted` rows remain unresolved and are never rebased.
+Evidence: 10 tests in `tests/test_provider_admission_closure.py` (each draft
+state, late old-epoch reply, identity material, lost cancel ACK and lost receipt
+ACK across rotation, certification bounds, epoch audit, tampered draft) and
+deliberate-breakage checks of the certification, rebase state, attempt guard
+and binding guard, each caught. Combined gate: 273 passed.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.
-2. Settle effect-free full/ambiguous drafts across authenticated epoch closure.
-   Format 9 currently conservatively blocks epoch adoption while owners remain.
-   Never extend this recovery rule to old mutation-attempted rows.
+2. Done above: effect-free draft recovery across authenticated closure. Operator
+   eviction of legs a member never settles is deliberately not added: it is
+   pre-existing receipt-ACK parity, and eviction would need retained lineage so
+   evicted owners could still prove non-effect after rotation.
 3. Wire agent identity install, account-CAS outcome, bootstrap sequencing and
    canonical acceptance. Then migrate human/password/adoption, key rotation and
    membership-bound wrapping, and terminal cleanup phases. Retain keys through

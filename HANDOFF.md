@@ -17,10 +17,17 @@ not yet settled for closure and four claims per epoch. Evidence and limits:
 docs/PROVIDER_ADMISSION_CHECKPOINT.md. Local 262-test combined gate passed; the
 PostgreSQL gate for the new SQL bound runs in CI only (no local PostgreSQL).
 
-Next: effect-free full/ambiguous draft recovery across authenticated closure
-(including whether operators may evict unsettled legs with retained lineage),
-then the agent identity dispatcher, which is also the private-material consumer
-that lets identity owners reap. No production schema, activation or merge.
+Draft recovery across closure is also done: authenticated adoption rebases
+never-admitted owners (prepared/full/ambiguous) into the new epoch with the same
+identities and private material, and `certify_closure()` records cancel/receipt
+ACKs proven by rotation so admitted owners can still settle and reap. Combined
+admission gate: 273 passed.
+
+Next: the agent identity dispatcher (install exact keys, admit, account CAS,
+bootstrap only if applied, canonical acceptance), which is also the
+private-material consumer that lets identity owners reap. Operator eviction of
+never-settled member legs is deliberately deferred (pre-existing parity; needs
+retained lineage). No production schema, activation or merge.
 
 ## 2026-10-13 provider admission and private identity checkpoint
 
