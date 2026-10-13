@@ -166,6 +166,17 @@ document table the directory reads); deliberate breakage of conflict
 handling, pin ordering, canonical verification and key-retention proof was
 each caught. Identity/lifecycle/pin/admission gate: 350 passed.
 
+## Open prerequisite: generic writers under admission
+
+When `admission_required` is enabled, `private.ab_mutation_begin` rejects any
+typed mutation without a matching admitted leg. Today only admission owners
+obtain legs; generic tickets (`allocate_ticket`, `update_document`, state
+actions, outbox append/manifest owners, application submits) do not, so they
+would all fail after enablement. Each needs an admission-backed ticket (a
+one-leg owner, or the outbox owner's complete plan) whose leg consumption is
+barred on its existing domain record (sent row, settled action). This is a
+migration prerequisite alongside the remaining identity/key/terminal owners.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.
@@ -181,7 +192,12 @@ each caught. Identity/lifecycle/pin/admission gate: 350 passed.
    document. `name_taken` raises the usual taken error; `full` and
    `canonical_pending` raise a resumable error. The unbound legacy path is
    unchanged; `recover_agent_identities()` resumes owners of a bound writer.
-   Next: migrate human creation/password/adoption, key rotation and
+   Password change with a bound writer is one `update_document` CAS: salt,
+   hash and wrap are computed once, the swap re-verifies the old password
+   against the exact document it replaces (a concurrent change elsewhere
+   wins), the recovery wrap is untouched, and a lost reply is settled by exact
+   replay before the next swap. It inherits admission once generic writers do.
+   Next: migrate human creation/adoption, key rotation and
    membership-bound wrapping, and terminal cleanup phases. Retain keys through
    unknown outcomes. Distinguish pre-existing namespace weaknesses from new
    migration regressions.

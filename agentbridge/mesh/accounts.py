@@ -15,6 +15,7 @@ Model:
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import os
 import re
@@ -52,6 +53,29 @@ def _scrypt(password: str, salt: bytes) -> bytes:
 
 def valid_name(name: str) -> bool:
     return bool(_NAME_RE.match(name or "")) and name not in RESERVED_NAMES
+
+
+def _password_matches(doc, password: str) -> bool:
+    auth = (doc if isinstance(doc, dict) else {}).get("auth") or {}
+    algo = auth.get("algo")
+    try:
+        if algo == "scrypt":
+            salt = base64.b64decode(auth["salt"])
+            expected = base64.b64decode(auth["hash"])
+            return secrets.compare_digest(_scrypt(password, salt), expected)
+        if algo == "pbkdf2":
+            # migrated v1 record (hex salt/hash, sha256, iteration count);
+            # the login flow upgrades it to scrypt after a success
+            import hashlib
+
+            derived = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"),
+                bytes.fromhex(auth["salt"]), int(auth["iterations"]),
+            )
+            return secrets.compare_digest(derived, bytes.fromhex(auth["hash"]))
+    except (KeyError, ValueError, TypeError):
+        return False
+    return False
 
 
 def _identity_workflow(operation):
@@ -295,27 +319,7 @@ class AccountsService:
 
     # ----------------------------------------------------------------- auth
     def verify_password(self, name: str, password: str) -> bool:
-        doc = self.tx.get_doc(P.user(name))
-        auth = (doc or {}).get("auth") or {}
-        algo = auth.get("algo")
-        try:
-            if algo == "scrypt":
-                salt = base64.b64decode(auth["salt"])
-                expected = base64.b64decode(auth["hash"])
-                return secrets.compare_digest(_scrypt(password, salt), expected)
-            if algo == "pbkdf2":
-                # migrated v1 record (hex salt/hash, sha256, iteration count);
-                # the login flow upgrades it to scrypt after a success
-                import hashlib
-
-                derived = hashlib.pbkdf2_hmac(
-                    "sha256", password.encode("utf-8"),
-                    bytes.fromhex(auth["salt"]), int(auth["iterations"]),
-                )
-                return secrets.compare_digest(derived, bytes.fromhex(auth["hash"]))
-        except (KeyError, ValueError, TypeError):
-            return False
-        return False
+        return _password_matches(self.tx.get_doc(P.user(name)), password)
 
     def upgrade_login(self, name: str, password: str) -> str | None:
         """Bring a migrated v1 account up to v2 on its first successful
@@ -362,11 +366,51 @@ class AccountsService:
                     name, keys.get("sign_pub", ""), keys.get("agree_pub", ""))
         return code
 
-    @_identity_workflow
     def change_password(self, old: str, new: str) -> None:
         """Re-hash with a fresh salt AND re-wrap the identity bundle under
         the new password in the same operation (D5) — the recovery-code wrap
         is untouched, so the code keeps working."""
+        if self._typed_identity_writer() is not None:
+            return self._change_password_typed(old, new)
+        return self._change_password_legacy(old, new)
+
+    def _change_password_typed(self, old: str, new: str) -> None:
+        """One compare-and-swap of the account document through the bound
+        writer. Salt, hash and wrap are computed once, so every attempt (and
+        exact replay after an unknown outcome) carries identical material."""
+        if not self.verify_password(self.user, old):
+            raise PermissionDenied("current password is incorrect")
+        if len(new or "") < 6:
+            raise ValidationError("password must be at least 6 characters")
+        bundle = self.keystore.load(self.user)
+        if bundle is None:  # locked machine: unwrap with the old password
+            acc = self.directory.get(self.user)
+            wrapped = acc.keys.wrapped_priv if acc else None
+            if wrapped is not None:
+                bundle = crypto.unwrap_bundle(
+                    {"salt": wrapped.salt, "nonce": wrapped.nonce, "ct": wrapped.ct},
+                    old,
+                )
+                self.keystore.save(self.user, bundle)
+        salt = os.urandom(16)
+        auth = {"algo": "scrypt", "salt": _b64(salt), "hash": _b64(_scrypt(new, salt))}
+        rewrapped = crypto.wrap_bundle(bundle, new) if bundle is not None else None
+
+        def build(current):
+            # Bind the swap to the credential just verified, against the exact
+            # document it replaces: a concurrent change elsewhere must win.
+            if not _password_matches(current, old):
+                raise PermissionDenied("current password is incorrect")
+            doc = copy.deepcopy(current)
+            doc["auth"] = auth
+            if rewrapped is not None:
+                doc.setdefault("keys", {})["wrapped_priv"] = rewrapped
+            return doc
+
+        self.tx.update_doc(P.user(self.user), build)
+
+    @_identity_workflow
+    def _change_password_legacy(self, old: str, new: str) -> None:
         self._require_legacy_identity_owner()
         if not self.verify_password(self.user, old):
             raise PermissionDenied("current password is incorrect")

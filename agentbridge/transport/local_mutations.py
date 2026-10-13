@@ -249,6 +249,21 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return outcomes
 
+    def update_doc(self, path, build):
+        """Compare-and-swap a freshly observed document via the bound writer.
+
+        ``build(current)`` must be a repeatable calculation over raw current
+        data; it may run again after a conflict. Returns (document, changed).
+        """
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        document, changed = writer.update_document(path, build)
+        self._bound_writer()
+        if changed:
+            self._typed_success()
+        return document, changed
+
     def write_latest_doc(self, path, build):
         """Replace a per-device snapshot after its durable retry has settled."""
         writer = self._bound_writer()

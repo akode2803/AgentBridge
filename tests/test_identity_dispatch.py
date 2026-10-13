@@ -24,10 +24,13 @@ from agentbridge.mesh.identity_dispatch import (
 from agentbridge.mesh.keyring import KeyStore
 from agentbridge.mesh.pins import key_fingerprint
 from agentbridge.store import local_source
-from agentbridge.transport.typed_mutations import TypedMutationRPCError
+from agentbridge.transport.typed_mutations import TypedMutationRPCError, prepare_mutation
 
 world = base.world
 SOURCE = "99999999-9999-4999-8999-999999999999"
+COMPARE_RPC = prepare_mutation("mesh", base.EPOCH, base.EPOCH, base.ACTOR, "doc_compare_put", {
+    "p_path": "users/x.json", "p_data": {}, "p_expected_source_epoch": SOURCE,
+    "p_expected_seq": 0, "p_expected_deleted": False}).rpc_name
 
 
 class _Docs:
@@ -67,6 +70,7 @@ class _Provider(closure._Provider):
     def __init__(self, client, docs):
         super().__init__(client)
         self.docs, self.full, self.dropped, self.lose_ops = docs, False, set(), set()
+        self.seqs = {}
 
     def _handle(self, name, params):
         op = params.get("p_operation_id")
@@ -80,18 +84,29 @@ class _Provider(closure._Provider):
         if name == "ab_node_docs_exact":
             (path,) = params["p_paths"]
             value = self.docs.docs.get(path)
-            return [] if value is None else [{"path": path, "seq": 1, "data": value,
-                                              "deleted": False, "batch_overflow": False}]
+            return [] if value is None else [{"path": path, "seq": self.seqs.get(path, 1),
+                                              "data": value, "deleted": False,
+                                              "batch_overflow": False}]
         request = self.requests.get(op)
+        if request is None and name == COMPARE_RPC:
+            # A generic (non-admission) compare-and-swap ticket.
+            args = {k: v for k, v in params.items() if k not in (
+                "p_root", "p_protocol_epoch", "p_operation_id", "p_payload_digest")}
+            request = prepare_mutation(params["p_root"], params["p_protocol_epoch"], op,
+                                       base.ACTOR, "doc_compare_put", args)
+            self.requests[op] = request
         if (request is not None and request.expectation.kind == "doc_compare_put"
                 and name == request.rpc_name and op not in self.receipts and op not in self.cancelled
                 and not (self.rotated and params["p_protocol_epoch"] == base.EPOCH)):
             args = json.loads(request.arguments_json)
-            if args["p_path"] in self.docs.docs:
+            path = args["p_path"]
+            current = self.seqs.get(path, 1) if path in self.docs.docs else 0
+            if args["p_expected_seq"] != current:
                 self.conflicts.add(op)
             elif not any(args["p_path"] == d or args["p_path"].startswith(d + "/")
                          for d in self.dropped):
-                self.docs.docs[args["p_path"]] = args["p_data"]
+                self.docs.docs[path] = args["p_data"]
+                self.seqs[path] = current + 1
         reply = super()._handle(name, params)
         if op in self.lose_ops and name == getattr(request, "rpc_name", None):
             self.lose_ops.discard(op)
@@ -281,10 +296,9 @@ def test_owner_is_kept_when_the_keystore_no_longer_holds_the_exact_key(identity_
 
 @pytest.fixture
 def accounts(identity_world, monkeypatch):
-    from types import SimpleNamespace
-
     from agentbridge.mesh.accounts import AccountsService
     from agentbridge.store.provider_admission_owner import ProviderAdmissionOwnerJournal
+    from agentbridge.transport.application_mutations import ApplicationMutationWriter
     from agentbridge.transport.local_mutations import LocalMutationTransport
 
     dispatcher, provider, _, _, owner_bundle = identity_world
@@ -296,11 +310,13 @@ def accounts(identity_world, monkeypatch):
         return record
 
     monkeypatch.setattr(ProviderAdmissionOwnerJournal, "prepare", registered)
-    writer = SimpleNamespace(driver=dispatcher.driver)
+    writer = ApplicationMutationWriter(dispatcher.driver, base.EPOCH)
     successes = []
     monkeypatch.setattr(LocalMutationTransport, "_bound_writer", lambda self: writer)
     monkeypatch.setattr(LocalMutationTransport, "_typed_success",
                         lambda self: successes.append("hint"))
+    monkeypatch.setattr(LocalMutationTransport, "get_doc",
+                        lambda self, path: provider.docs.get_doc(path))
     service = object.__new__(AccountsService)
     service.tx = object.__new__(LocalMutationTransport)
     service.directory, service.keystore = dispatcher.directory, dispatcher.keystore

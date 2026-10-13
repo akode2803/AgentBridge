@@ -33,8 +33,17 @@ With a bound typed writer, AccountsService.create_agent now routes through it,
 resuming any pending owner for the name before minting (the owner is the
 durable pending-creation record); the unbound legacy path is unchanged.
 
-Next: the remaining human creation/password/adoption, key-rotation and terminal
-owners, then disposable migration acceptance and stack consolidation.
+Bound password change is now one exact CAS through update_document.
+
+Open prerequisite found this round: with admission_required enabled the
+provider rejects every typed write lacking an admitted leg, and generic writers
+(allocate_ticket, update_document, state actions, outbox owners, application
+submits) do not obtain one yet. See docs/PROVIDER_ADMISSION_CHECKPOINT.md.
+
+Next: admission-backed generic tickets (with consumption barred on each
+writer's existing domain record), human creation (claim owner then identity
+owner) and adoption, key-rotation and terminal owners, then disposable
+migration acceptance and stack consolidation.
 Operator eviction of never-settled member legs is deliberately deferred
 (pre-existing parity; needs retained lineage). No production schema, activation
 or merge.

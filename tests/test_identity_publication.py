@@ -95,7 +95,7 @@ def test_noncanonical_oversized_and_wrong_identity_inputs_rejected():
     ("create_human", ("bob", "password")),
     ("_create_agent_legacy", ("worker",)),  # bound create_agent uses its owner
     ("adopt_agent", ("worker",)),
-    ("change_password", ("old", "newpassword")),
+    ("_change_password_legacy", ("old", "newpassword")),  # bound uses update_doc
     ("_publish_identity", ("worker", {}, b"", "", "")),
 ])
 def test_bound_identity_calls_reject_before_private_or_provider_work(monkeypatch, method, args):
