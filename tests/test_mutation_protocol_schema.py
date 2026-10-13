@@ -190,7 +190,7 @@ def test_p1b_doc_log_rpcs_bind_normalized_requests_and_receipts():
         replay = body.index("if (v_begin->>'replay')::boolean")
         authority = min(
             value for value in (
-                body.find("public.ab_member", replay),
+                body.find("private.ab_mutation_lock_actor", replay),
                 body.find("public.ab_is_member", replay),
             ) if value >= 0
         )
@@ -209,6 +209,22 @@ def test_p1b_doc_log_rpcs_bind_normalized_requests_and_receipts():
             f"revoke all on function public.ab_mutation_{name}(") :]
         assert "from public, anon, authenticated, service_role" in tail[:320]
         assert f"grant execute on function public.ab_mutation_{name}(" in tail[:500]
+
+
+def test_p1b_room_authority_lock_orders_member_then_room_then_effect():
+    actor = _body(
+        "create or replace function private.ab_mutation_lock_actor(",
+        "revoke all on function private.ab_mutation_lock_actor(",
+    )
+    room = _body(
+        "create or replace function private.ab_mutation_lock_chat(",
+        "revoke all on function private.ab_mutation_lock_chat(",
+    )
+    assert "where m.root = p_root and m.uid = auth.uid()" in actor
+    assert "for key share" in actor
+    assert "pg_advisory_xact_lock(v_key)" in room
+    assert "pg_advisory_xact_lock_shared(v_key)" in room
+    assert "jsonb_build_array(p_root, p_chat)::text" in room
 
 
 def test_p1b_doc_log_authority_matches_existing_lanes():
@@ -231,15 +247,90 @@ def test_p1b_doc_log_authority_matches_existing_lanes():
     for body in (put, create, delete):
         assert "p_path like 'chats/%/runtime/effects/%'" in body
         assert "private.ab_mutation_path_valid(p_path, 4096, 32)" in body
+        assert body.index("private.ab_mutation_lock_actor(p_root)") < \
+            body.index("private.ab_mutation_lock_chat(")
+    assert "p_path = 'chats/' || v_chat || '/meta.json'" in put
+    assert "p_path = 'chats/' || v_chat || '/meta.json'" in create
+    assert "p_path = 'chats/' || v_chat || '/meta.json'" in delete
     assert "public.ab_is_member(p_root, v_chat)" in put
     assert "not coalesce((" in create
     assert "p_data->'members' ? v_member" in create
     assert "public.ab_can_read_chat(p_root, v_chat)" in delete
     assert "public.ab_is_member(p_root, p_chat)" in append
+    assert append.index("private.ab_mutation_lock_actor(p_root)") < \
+        append.index("private.ab_mutation_lock_chat(p_root, p_chat, false)") < \
+        append.index("public.ab_is_member(p_root, p_chat)")
     assert "returning id into v_row_id" in append
     assert "create or replace function public.ab_mutation_protocol_ready" not in \
         SCHEMA[SCHEMA.index(
             "-- P1b document/log slice: inactive receipt-bearing source mutation RPCs") :]
+
+
+def test_p1b_lifecycle_rpcs_bind_receipts_before_exact_effects():
+    section = SCHEMA[SCHEMA.index(
+        "-- P1b lifecycle slice: inactive receipt-bearing membership") :]
+    for name, kind in (
+            ("member_claim", "member_claim"),
+            ("member_leave", "member_leave"),
+            ("chat_delete", "chat_delete")):
+        body = _body(
+            f"create or replace function public.ab_mutation_{name}(",
+            f"revoke all on function public.ab_mutation_{name}(",
+        )
+        sealed = body.index("private.ab_mutation_root_sealed(")
+        begin = body.index("private.ab_mutation_begin(")
+        replay = body.index("if (v_begin->>'replay')::boolean")
+        effect = min(
+            value for value in (
+                body.find("insert into public.ab_members", replay),
+                body.find("delete from public.ab_members", replay),
+                body.find("delete from public.ab_logs", replay),
+            ) if value >= 0
+        )
+        finish = body.index("private.ab_mutation_finish(", effect)
+        assert sealed < begin < replay < effect < finish
+        assert f"'{kind}'" in body
+        assert "private.ab_mutation_provider_digest(" in body
+        tail = section[section.index(
+            f"revoke all on function public.ab_mutation_{name}(") :]
+        assert "from public, anon, authenticated, service_role" in tail[:320]
+        assert f"grant execute on function public.ab_mutation_{name}(" in tail[:500]
+
+
+def test_p1b_lifecycle_authority_is_self_bound_and_terminal_exact():
+    claim = _body(
+        "create or replace function public.ab_mutation_member_claim(",
+        "revoke all on function public.ab_mutation_member_claim(",
+    )
+    leave = _body(
+        "create or replace function public.ab_mutation_member_leave(",
+        "revoke all on function public.ab_mutation_member_leave(",
+    )
+    delete = _body(
+        "create or replace function public.ab_mutation_chat_delete(",
+        "revoke all on function public.ab_mutation_chat_delete(",
+    )
+    assert "values (p_root, p_username, v_actor)" in claim
+    assert "typed member claim conflicts with existing identity" in claim
+    assert "p_uid" not in claim
+    assert "where m.root = p_root and m.uid = v_actor" in leave
+    assert "for update" in leave
+    assert "p_uid" not in leave
+    assert "and not d.deleted" in delete
+    assert delete.index("private.ab_mutation_lock_actor(p_root)") < \
+        delete.index("private.ab_mutation_lock_chat(p_root, p_chat, true)") < \
+        delete.index("select d.data into v_meta")
+    assert "v_meta @> '{\"deleted\": true}'::jsonb" in delete
+    assert "v_meta->'members' is distinct from '{}'::jsonb" in delete
+    assert "jsonb_typeof(v_meta->'members') is distinct from 'object'" in delete
+    assert "jsonb_typeof(v_meta->'tenure') is distinct from 'object'" in delete
+    assert "v_meta->'tenure' ? v_member" in delete
+    assert "pg_catalog.left(d.path, pg_catalog.length(v_prefix)) = v_prefix" \
+        in delete
+    assert "d.path like" not in delete.lower()
+    assert "create or replace function public.ab_mutation_protocol_ready" not in \
+        SCHEMA[SCHEMA.index(
+            "-- P1b lifecycle slice: inactive receipt-bearing membership") :]
 
 
 def test_state_probe_is_authorized_and_marker_is_installed_last():

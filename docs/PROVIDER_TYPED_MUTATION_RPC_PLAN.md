@@ -1,8 +1,10 @@
 # Typed provider mutation RPC plan
 
-Status: P1b design for an inactive provider contract. It does not activate the
-local node as provider writer, seal a production root, clear any historical
-fence, or authorize a storage-object claim.
+Status: inactive P1b design with the receipt core, document/log and lifecycle
+sub-slices implemented. Effect transition, storage-manifest proof and the final
+readiness marker remain absent. This work does not activate the local node as
+provider writer, seal a production root, clear any historical fence, or
+authorize a storage-object claim.
 
 ## Required properties
 
@@ -57,20 +59,37 @@ the existing checked transition inside the same transaction.
 
 ## Lock order
 
-All typed RPCs acquire these locks in this order:
+Typed RPCs acquire the locks that apply to their family in this order:
 
 1. a shared transaction lock on `agentbridge-mutation-epoch:<root>`;
 2. an exclusive operation lock on root, epoch and operation ID;
 3. one receipt-slot lock while inserting a new receipt;
-4. the existing shared `agentbridge-change-ledger:<root>` lock through the
+4. the caller's exact current root-member row where current membership is an
+   authority prerequisite;
+5. a chat-scoped transaction advisory lock for room mutations: shared for
+   ordinary room documents/logs and exclusive for room metadata publication or
+   terminal cleanup;
+6. any exact target row lock needed by that operation, including terminal meta;
+7. the existing shared `agentbridge-change-ledger:<root>` lock through the
    source trigger.
+
+Authority that depends on current membership or room state is evaluated only
+after the corresponding member/room lock is held. `member_claim` has no current
+member row to lock; `member_leave` locks and removes only the caller's exact row.
+The shared/exclusive room lock serializes ordinary room writes against metadata
+transitions and cleanup. A room write admitted first finishes before terminal
+publication and is then consumed by cleanup. A writer arriving afterward waits,
+then observes terminal authority and fails. This ordering also prevents a
+concurrent member leave from invalidating authority between its check and the
+effect.
 
 The administrative seal must be amended to take the exclusive mutation-epoch
 lock **before** its existing exclusive change-ledger lock. Receipt-epoch
 rotation takes the exclusive mutation-epoch lock. This order lets independent
 mutations proceed concurrently while preventing both seal and rotation from
-passing an in-flight typed write. Reversing the first and fourth locks would
-deadlock a sealer against an RPC paused in the source trigger.
+passing an in-flight typed write. Acquiring the change-ledger lock before the
+mutation-epoch lock would deadlock a sealer against an RPC paused in the source
+trigger.
 
 ## Request binding and receipt wire
 
@@ -157,6 +176,10 @@ with retained receipts rather than silently rotate away test or future evidence.
 | `member_leave` | no caller-selected UID | delete only the caller's exact root member row |
 | `blob_manifest` | immutable staged-object identity, size/hash and signed/encrypted manifest | separate storage verification plus document/chat authority; no claim that database receipt seals object upload |
 
+Terminal chat cleanup is atomic with its receipt, but its deletes and
+tombstones scale with that room's stored rows. It is lifecycle/janitor work and
+must not run on chat-open, send or other latency-sensitive foreground paths.
+
 The table is an inventory, not permission to implement every family in one
 unreviewed function. P1b can land in reviewed sub-slices, but its readiness
 marker is installed only after every database family is present and the blob
@@ -177,13 +200,14 @@ or diagnostics.
 
 ## Delivery slices
 
-1. **P1b-core:** extend receipt rows, add bounded slot allocation, applying
+1. **P1b-core (implemented and hosted-accepted):** extend receipt rows, add bounded slot allocation, applying
    receipt helpers, gate admission, exact receipt query/ack, admin-only safe
    rotation and lock-order regressions. No public mutation marker yet.
-2. **P1b-doc/log:** add and execute-test document put/create/delete and log
+2. **P1b-doc/log (implemented and hosted-accepted):** add and execute-test document put/create/delete and log
    append RPCs, including concurrent duplicate and digest-mismatch schedules.
-3. **P1b-lifecycle:** add chat delete and self membership operations with exact
-   authority parity.
+3. **P1b-lifecycle (implemented and hosted-accepted):** add chat delete and self
+   membership operations with exact authority parity and room-terminal
+   serialization.
 4. **P1b-effects/storage:** wrap effect transitions; implement immutable staged
    object verification and manifest publication without claiming object/data
    atomicity.
@@ -202,6 +226,9 @@ or diagnostics.
 - seal and epoch rotation wait for admitted typed RPCs without deadlock;
 - a direct write queued behind the seal fails, while an admitted typed RPC after
   sealing succeeds only with its same-transaction applying receipt;
+- a paused admitted room writer holds the shared room lock, terminal metadata
+  waits on the exact exclusive room lock, and cleanup consumes the writer's row
+  after it commits;
 - receipt exhaustion is bounded and non-evicting;
 - acknowledgment cannot target another actor or digest;
 - exact replay and acknowledgment remain available to the original actor after

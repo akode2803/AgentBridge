@@ -1,0 +1,38 @@
+{
+  "limits": [
+    "Management SQL did not exercise concurrent sessions; the deterministic PostgreSQL gate owns the room-lock schedule.",
+    "Management SQL was not a browser/PostgREST HTTP invocation.",
+    "The minimal scratch scaffold does not reproduce the complete product change-ledger trigger stack.",
+    "No production project, application process, or harness was changed."
+  ],
+  "migration": {
+    "name": "agentbridge_p1b_room_lock_lifecycle_rpcs",
+    "statement_bytes": 17877,
+    "statement_sha256": "ef3599007152e351741a4179734996c55b429ad4f2a8a1d111d1f5e334d57f6c",
+    "version": "20261013033528"
+  },
+  "observations": {
+    "authenticated_lifecycle_execute_grants": 3,
+    "chat_delete_documents_tombstoned": 2,
+    "chat_delete_exact_replay": true,
+    "chat_delete_logs_deleted": 2,
+    "forbidden_lifecycle_execute_grants": 0,
+    "malformed_terminal_meta_denials": 4,
+    "member_claim_exact_replay": true,
+    "member_claim_fresh_existing_identity_sqlstate": "55000",
+    "member_claim_provider_collision_sqlstate": "55000",
+    "member_leave_exact_replay_after_membership_loss": true,
+    "member_leave_fresh_after_membership_loss_sqlstate": "42501",
+    "nonterminal_delete_sqlstate": "42501",
+    "outsider_terminal_delete_sqlstate": "42501",
+    "performance_advisor_findings": 0,
+    "rejected_receipts": 0,
+    "terminal_receipts": 3,
+    "wildcard_sibling_documents_live": 2,
+    "wildcard_sibling_logs_live": 1
+  },
+  "postgres_version": "17.11.0.003",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "region": "ap-south-1"
+}
