@@ -2192,6 +2192,25 @@ def _validate_p1b_effect_path_lock(database_url: str) -> None:
 
 
 def _validate_p1b_blob_manifest_rpc(database_url: str) -> None:
+    # Exercise casts on stored values, not just constants: SQL inlining and
+    # predicate reordering must not turn malformed metadata into an exception.
+    size_checks = _scalar(database_url, """
+        create temporary table ab_size_cases(metadata jsonb, expected bigint);
+        insert into ab_size_cases values
+          (null, null), ('null', null), ('{}', null), ('[]', null),
+          ('{"size":null}', null), ('{"size":true}', null),
+          ('{"size":{}}', null), ('{"size":[]}', null),
+          ('{"size":"garbage"}', null), ('{"size":"1e3"}', null),
+          ('{"size":"1.0"}', null), ('{"size":"-1"}', null),
+          ('{"size":"99999999999999999999999999999"}', null),
+          ('{"size":"0"}', null), ('{"size":52428801}', null),
+          ('{"size":1}', 1), ('{"size":"4096"}', 4096),
+          ('{"size":52428800}', 52428800);
+        select bool_and(private.ab_storage_object_size(metadata)
+                        is not distinct from expected) from ab_size_cases;
+    """)
+    if size_checks != "t":
+        raise GateFailure("Storage size metadata did not fail closed")
     root = "typed-blob"
     chat = "room"
     blob = "blob-primary"

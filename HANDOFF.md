@@ -1,5 +1,22 @@
 # Cloud source handoff
 
+## 2026-10-13 typed protocol review follow-up
+
+Automated project migration stays in the backlog. Active work remains typed
+mutation receipts and current PRs. PR140 head `1fd31ec` passed PostgreSQL 16 and
+Ubuntu; Windows was still running at inspection. Codex review found a size cast
+whose AND guard could be reordered. The product schema now uses nested CASE and
+the executable PostgreSQL gate covers 18 stored malformed/boundary metadata
+values. Historical applied scratch SQL is intentionally unchanged. The two
+stale HTTP-acceptance statuses are reconciled with the recorded classifier limit.
+Local schema/HTTP checks: 30 passed; Ruff and whitespace checks passed. The new
+SQL regression still requires replacement PostgreSQL CI. PR138's only Windows
+failure was a 10-second signup HTTP timeout in SQLite commit (4211 passed);
+the exact fixture passed locally in 1.56 seconds and only its failed job was
+retried. No timeout was widened and no runtime workaround was introduced.
+Next: strict inactive typed receipt Python wire, then durable journal wiring;
+do not activate writes or publish readiness from this checkpoint.
+
 ## 2026-10-13 migration-feature documentation checkpoint
 
 The retained AgentBridge Scratch scripts and results are now classified in

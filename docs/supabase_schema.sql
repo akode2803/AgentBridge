@@ -3792,8 +3792,11 @@ returns bigint
 language sql immutable set search_path = pg_catalog as $$
   select case
     when p_metadata->>'size' ~ '^[0-9]{1,8}$'
-     and (p_metadata->>'size')::numeric between 1 and 52428800
-    then (p_metadata->>'size')::bigint
+    then case
+      when (p_metadata->>'size')::bigint between 1 and 52428800
+      then (p_metadata->>'size')::bigint
+      else null
+    end
     else null
   end
 $$;
