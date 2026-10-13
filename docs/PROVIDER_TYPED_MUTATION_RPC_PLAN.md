@@ -528,3 +528,37 @@ capacity prerequisite; no timeout or receipt eviction substitutes for that proof
 These are explicit activation blockers. Account/project migration acceptance,
 provider installation, fleet activation and PR consolidation remain separate from
 local implementation and CI. Historical opaque operations remain retained.
+
+
+## 2026-10-13 local owner capacity and identity prerequisites
+
+Format8 reserves the complete exact outbox owner (all manifests plus append)
+before the first leg is allocated. Reservations cover consumer slots, journal
+records, canonical request bytes and maximum receipt bytes; unrelated generic
+operations cannot spend them. Old format7 partial owners must be adopted together
+or the upgrade rolls back. Before capacity admission, a bounded sweep checks all
+registered Stores and reaps only consumed slots whose exact Store row is gone.
+This supersedes the earlier same-Store-only cleanup limitation. It does not
+reserve the provider's shared receipt capacity.
+
+Pre-consumer stable-ID append and manifest operations require draining with the
+old owner before typed consumer activation. Both facade guards and root-cut
+reservation guards prohibit replacing them with fresh tickets. Log targets split
+at the first pipe, preserving valid machine aliases. Attachment count is checked
+before sealing/enqueue, and rejected prepared spools are cancelled.
+
+Account/agent deletion now stops on membership removal failures before later
+deactivation or key deletion. This is a safety correction, not the complete
+terminal owner. KeyStore.install_if_absent_or_identical is a separate inactive
+private-asset prerequisite: strict conflict/corruption handling, cross-process
+ownership, flushed create-only publication and idempotent retry. Account creation,
+adoption, password changes and key rotations still need durable logical owners;
+existing save/load behavior is unchanged and this API is not automatically wired.
+
+**Migration acceptance remains blocked** by the shared provider admission gap
+specified in PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md. Even a one-leg attempted
+write can receive an unrecorded full-ledger rejection, then become unrecoverable
+when the epoch rotates. Increasing budgets, regenerating IDs or treating epoch
+closure as an authority/outcome verdict is not a repair. Implement and validate
+effect-free recoverable admission (or equivalent durable exact negative evidence)
+before production writer activation and stack consolidation.

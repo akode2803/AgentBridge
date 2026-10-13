@@ -148,7 +148,7 @@ def test_exact_payload_digest_changes_with_persisted_json(store):
 def test_owner_context_rejects_missing_changed_and_stale_claims(store):
     store.outbox_add('append_log', 'room|alice@machine', {'id': 'm1'})
     item = store.outbox_claim_due()[0]
-    journal = SimpleNamespace(lifecycle_enabled=lambda: True)
+    journal = SimpleNamespace(lifecycle_enabled=lambda: True, get_operation=lambda _id: None)
     writer = SimpleNamespace(driver=SimpleNamespace(journal=journal))
     transport = SimpleNamespace(_bound_writer=lambda: writer)
     seen = []

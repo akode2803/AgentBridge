@@ -167,11 +167,13 @@ class StagedAttachmentPublisher:
 
     def recover_outbox(self, store, item, chat_id: str, manifest: dict) -> bool:
         """Lookup-only replay of the exact ticket linked to this outbox leg."""
-        _blob_id, _path, _operation_id, expected = self._identity(chat_id, manifest)
+        _blob_id, _path, operation_id, expected = self._identity(chat_id, manifest)
         leg, digest, _state = self._outbox_leg(store, item, chat_id, manifest)
         journal = self.writer.driver.journal
         ticket = journal.get_outbox_leg(store, item.seq, leg, digest)
         if ticket is None:
+            if journal.get_operation(operation_id) is not None:
+                raise ValidationError('drain pre-consumer manifest before typed outbox activation')
             return False
         retained = journal.get_ticket(ticket).request
         arguments = json.loads(retained.arguments_json)

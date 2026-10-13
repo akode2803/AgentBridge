@@ -6,6 +6,7 @@ import re
 
 from ..store.db import OutboxItem
 from .typed_mutations import prepare_mutation
+from .application_mutations import stable_append_id
 
 
 def _payload(item):
@@ -43,7 +44,18 @@ class OutboxMutationOwner:
             raise ValueError('outbox mutation writer changed')
         if type(item) is not OutboxItem or item.kind != 'append_log':
             raise ValueError('unsupported typed outbox owner')
-        _payload(item)
+        payload = _payload(item)
+        if state == 'pending':
+            chat, separator, log = item.target.partition('|')
+            if not separator:
+                raise ValueError('invalid outbox target')
+            envelope = payload.get('envelope', payload)
+            legacy = self.writer.driver.journal.get_operation(
+                stable_append_id(chat, log, envelope.get('id')))
+            if legacy is not None:
+                # Pre-consumer operations cannot be replaced by a fresh ticket.
+                # Drain them using the old owner before enabling this owner.
+                raise ValueError('drain pre-consumer append before typed outbox activation')
         row = self.store.outbox_owner_row(item.seq)
         if row != (state, item.owner_digest, item.kind, item.target):
             raise ValueError('outbox owner is no longer current')

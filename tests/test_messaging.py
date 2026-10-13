@@ -103,6 +103,31 @@ def test_attachment_spool_is_cancelled_when_local_commit_fails(world, monkeypatc
     assert ann.messages_for(CHAT) == []
 
 
+@pytest.mark.parametrize("direct_commit", [False, True])
+def test_attachment_leg_limit_rejects_before_local_outbox_commit_and_cancels_spool(
+        world, monkeypatch, direct_commit):
+    ann = world["ann"]
+    prepared = ann.prepare_attachment(CHAT, "too-many.txt", b"not queued")
+    spool = ann.attachments.root / prepared.record["id"]
+    assert spool.is_file()
+    monkeypatch.setattr(
+        ann.store, "cache_and_outbox_add",
+        lambda *_args, **_kwargs: pytest.fail("oversized attachment batch reached outbox"))
+    batch = [prepared] * 1025
+
+    with pytest.raises(ValidationError, match="too many attachments"):
+        if direct_commit:
+            ann.messaging.commit_envelope(
+                CHAT, ann.messaging.build_event(CHAT, {"type": "renamed"}),
+                attachments=batch)
+        else:
+            ann.post(CHAT, "oversized", attachments=batch)
+
+    assert not spool.exists()
+    assert ann.store.outbox_counts() == {}
+    assert ann.messages_for(CHAT) == []
+
+
 def test_attachment_cleanup_failure_does_not_block_local_append_settlement(
         world, monkeypatch):
     ann = world['ann']

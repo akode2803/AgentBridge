@@ -404,3 +404,22 @@ When introducing a staged attachment format, audit every canonical reader,
 including agent runner, CLI inbox and modular bridge. A successfully published
 manifest does not make a legacy hardcoded blob path valid. Resolve the signed
 file record and verify plaintext digest/size at each reader.
+
+## 2026-10-13 reserve completion capacity before partial effects
+
+A per-operation journal limit can deadlock a valid multi-leg owner: manifests
+consume every slot while their required append has no capacity, so no owner can
+settle and release. Reserve the complete owner plan, including replay bytes and
+receipt headroom; account for every registered Store. Validate structural limits
+before enqueue so permanent bad input cannot become an infinite retry barrier.
+
+Local reservations do not solve a shared provider budget. An attempted request
+with an unrecorded admission rejection cannot safely cross epoch closure. The
+provider needs recoverable admission or durable exact non-effect evidence before
+this migration can be accepted. Tests must cover capacity exhaustion and closure
+races as well as lost replies from successfully committed effects.
+
+Windows may abort a rejected HTTP request if the server closes with its small
+body unread. Use a byte/time-bounded discard, never read an unbounded declared
+body to make the response reliable. PR142's completed Windows failure exposed
+this on the node capture route; the repair preserves the rejection status.

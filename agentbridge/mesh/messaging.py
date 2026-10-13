@@ -41,6 +41,7 @@ from .sealer import E2EESealer, Sealer
 __all__ = ["ConversationProjection", "MessagingService", "OUTBOX_APPEND"]
 
 OUTBOX_APPEND = "append_log"  # outbox kind; target = "<chat_id>|<log_name>"
+MAX_OUTBOX_ATTACHMENTS = 1024  # exact typed consumer manifest-leg bound
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,12 @@ class MessagingService:
         return snap
 
     # ------------------------------------------------------------------ write
+    def _admit_attachment_count(self, prepared: list[PreparedAttachment]) -> None:
+        if len(prepared) > MAX_OUTBOX_ATTACHMENTS:
+            if self.attachments is not None:
+                self.attachments.cancel(prepared)
+            raise ValidationError("too many attachments for one message")
+
     def post(
         self,
         chat_id: str,
@@ -144,6 +151,7 @@ class MessagingService:
     ) -> Envelope:
         self.require_send(chat_id)
         prepared = list(attachments or [])
+        self._admit_attachment_count(prepared)
         for item in prepared:
             if not isinstance(item, PreparedAttachment) or item.chat_id != chat_id:
                 raise ValidationError("attachment was prepared for another chat")
@@ -266,6 +274,7 @@ class MessagingService:
         client_ref: str = "",
     ) -> None:
         """Optimistic local cache + durable outbox commit (the send guarantee)."""
+        self._admit_attachment_count(list(attachments or []))
         payload = env.to_dict()
         outbox_payload = payload
         if attachments:

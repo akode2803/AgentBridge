@@ -131,3 +131,37 @@ def test_stale_lease_and_new_worker_share_exact_ticket_without_duplicate_effect(
     assert not store.outbox_retry_claim(old, 'late failure', 1)
     assert store.outbox_mark_sent(current)
     assert OutboxWorker(store, {}, typed_owner=owner).flush_once() == 1
+
+
+@pytest.mark.parametrize('lost_reply', [False, True])
+def test_pre_consumer_append_cannot_be_reallocated(world, lost_reply):
+    _, _, store, _, journal = world
+    rpc = Provider()
+    writer = ApplicationMutationWriter(JournaledMutations(journal, rpc), cases.EPOCH)
+    envelope = {'id': 'pre-consumer', 'ns': 1}
+    store.outbox_add('append_log', 'room|alice.jsonl', envelope)
+    rpc.lose = lost_reply
+    if lost_reply:
+        with pytest.raises(OSError):
+            writer.append_log('room', 'alice.jsonl', envelope)
+    else:
+        writer.append_log('room', 'alice.jsonl', envelope)
+    rpc.lose = False
+    # Finish the old replay before adoption if its reply was lost; keep the
+    # durable outbox row to model a crash before Store cleanup.
+    assert writer.recover_append_log('room', 'alice.jsonl', envelope)
+    journal._adopt_epoch(ProviderEpoch(cases.ENDPOINT, 'mesh', cases.ACTOR,
+                         'cccccccc-cccc-4ccc-8ccc-cccccccccccc', cases.EPOCH, 0))
+    fresh = []
+    owner = OutboxMutationOwner(SimpleNamespace(_bound_writer=lambda: writer),
+                                store, lambda *_args, **_kwargs: fresh.append(1))
+    item = store.outbox_claim_due()[0]
+    with pytest.raises(ValueError, match='drain pre-consumer'):
+        owner.dispatch(item)
+    assert len(rpc.effects) == 1
+    assert not fresh
+    assert journal.get_outbox_leg(store, item.seq, 'append', item.owner_digest) is None
+    # Prior owner can still recover the exact committed append and drain its row.
+    assert owner.writer.recover_append_log('room', 'alice.jsonl', envelope)
+    store.outbox_done(item.seq)
+    assert len(rpc.effects) == 1

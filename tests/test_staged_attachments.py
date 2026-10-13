@@ -177,6 +177,9 @@ def test_outbox_manifest_ticket_replays_exact_request_without_storage(rig, tmp_p
                 self.request = None
                 self.allocations = []
 
+            def get_operation(self, _operation):
+                return None
+
             def get_outbox_leg(self, _store, got_seq, leg, digest):
                 assert (got_seq, leg, digest) == (
                     seq, 'manifest:' + prepared.record['id'], item.owner_digest)
@@ -551,3 +554,25 @@ def test_real_journal_restart_replays_staged_manifest_without_storage_io(
     assert len(effects) == 1
     assert len(receipts) == 1
     assert restarted_writer.driver.journal.get_operation(effects[0]).state == "acknowledged"
+
+
+def test_legacy_manifest_prevents_new_consumer_publication(rig, tmp_path, monkeypatch):
+    events, bucket, writer, _tx, _store, _sealer, delivery = rig
+    monkeypatch.setattr(delivery, '_typed_writer', lambda: writer)
+    prepared = delivery.prepare('room', 'legacy.txt', b'legacy bytes')
+    store = Store(tmp_path / 'legacy-owner.sqlite')
+    try:
+        store.outbox_add('append_log', 'room|alice@machine', {
+            'v': 1, 'envelope': {'id': 'legacy'}, 'attachments': [prepared.manifest]})
+        item = store.outbox_claim_due()[0]
+        publisher = staged_attachments.StagedAttachmentPublisher(writer)
+        publisher.publish('room', prepared.manifest, delivery._spool(prepared.record['id']))
+        before = list(bucket.calls)
+        writer.driver.journal.get_outbox_leg = lambda *_args: None
+        with pytest.raises(ValidationError, match='drain pre-consumer manifest'):
+            publisher.publish_outbox(store, item, 'room', prepared.manifest,
+                                     delivery._spool(prepared.record['id']))
+        assert bucket.calls == before
+        assert len(writer.submissions) == 1
+    finally:
+        store.close()

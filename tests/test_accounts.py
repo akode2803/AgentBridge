@@ -352,3 +352,26 @@ def test_claim_posts_owner_changed_departures(world):
     assert not [m for m in aryan.messages_for(kept.id)
                 if m.kind is MsgKind.INFO
                 and (m.event or {}).get("reason") == "owner_changed"]
+
+
+@pytest.mark.parametrize('subject', ['aryan', 'claude'])
+def test_deletion_preserves_identity_when_membership_removal_fails(world, monkeypatch, subject):
+    meshes, _ = world
+    mesh = meshes['aryan']
+    mesh.accounts.create_agent('claude')
+    mesh.create_chat('Failure boundary', members=['fable', 'claude'])
+    bundle = mesh.keystore.load(subject)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError('membership outcome unknown')
+
+    monkeypatch.setattr(mesh.membership, 'leave', unavailable)
+    monkeypatch.setattr(mesh.membership, 'remove_member', unavailable)
+    with pytest.raises(OSError, match='outcome unknown'):
+        if subject == 'aryan':
+            mesh.accounts.delete_account('aryan-pass')
+        else:
+            mesh.accounts.delete_agent(subject)
+    assert mesh.directory.get(subject).active
+    assert mesh.directory.get('claude').active
+    assert mesh.keystore.load(subject) == bundle
