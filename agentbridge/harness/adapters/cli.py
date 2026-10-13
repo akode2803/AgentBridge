@@ -34,6 +34,7 @@ from pathlib import Path
 from ...core.config import DEFAULT_HOME
 from ...core.errors import ValidationError
 from ...core.timekit import new_id, utcnow_iso
+from ...mesh.attachments import attachment_path
 from ..bridge import BridgeServer
 from ..broker import PermissionBroker
 from ..capabilities import compile_capability_ceiling
@@ -1008,14 +1009,17 @@ class CliResponder:
                     continue
                 try:
                     raw = self.mesh.tx.get_blob(
-                        f"chats/{delivery.chat_id}/files/{blob_id}")
+                        attachment_path(delivery.chat_id, blob_id, f))
                     if raw is None:
                         continue
                     data = self.mesh.sealer.open_blob(
                         delivery.chat_id, blob_id, raw)
                     if data is None or (
                             f.get("bytes") is not None
-                            and len(data) != f["bytes"]):
+                            and len(data) != f["bytes"]) or (
+                                f.get("sha256") is not None
+                                and hashlib.sha256(data).hexdigest()
+                                != f["sha256"]):
                         continue  # unopenable or still syncing
                     inbox.mkdir(exist_ok=True)
                     (inbox / name).write_bytes(data)

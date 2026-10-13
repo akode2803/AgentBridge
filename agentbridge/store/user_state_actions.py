@@ -8,6 +8,9 @@ No callback or provider I/O occurs while the coordinator transaction is held.
 from __future__ import annotations
 
 import json
+import hashlib
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -89,6 +92,23 @@ def _action_args(kind, args):
     # Reject provider-inexpressible logical work before it can occupy a FIFO.
     _bounded_json(args, object_only=True)
     return raw
+
+
+@dataclass(frozen=True)
+class PendingStateAction:
+    """Restart inventory contains no arguments, signed bytes or replay body."""
+    seq: int
+    action_id: str
+    chat: str
+    user: str
+    state: str
+
+
+@dataclass(frozen=True)
+class StateActionRecovery:
+    completed: int
+    failed: tuple[str, ...]
+    after_seq: int
 
 
 @dataclass(frozen=True)
@@ -323,6 +343,55 @@ class UserStateActionQueue:
                          (action_id, self.journal.actor_id, path, chat, user, kind, raw))
         return action_id
 
+    def pending_actions(self, user: str, *, limit: int = 64, after_seq: int = 0):
+        """Bounded metadata-only restart inventory for this exact owner."""
+        _component(user, 'user')
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise ValueError('invalid state action inventory limit')
+        if type(after_seq) is not int or not 0 <= after_seq <= 2**63 - 1:
+            raise ValueError('invalid state action inventory cursor')
+        with self.journal.coordinator._transaction() as conn:
+            self._check(conn)
+            return tuple(PendingStateAction(*row) for row in conn.execute(
+                'SELECT seq,action_id,chat,user,state FROM user_state_actions '
+                'WHERE actor_id=? AND user=? AND seq>? ORDER BY seq LIMIT ?',
+                (self.journal.actor_id, user, after_seq, limit)))
+
+    def recover_pending(self, user: str, owner, *, limit: int = 64, after_seq: int = 0):
+        """Recover existing actions without inventing another logical edit.
+
+        owner(chat, user) supplies fresh signing/verifying functions outside all
+        database cuts. Failed actions stay durable; bounded cursor progress lets
+        unrelated paths recover before the next pass retries those failures.
+        """
+        if not callable(owner):
+            raise ValueError('state action recovery owner required')
+        items = self.pending_actions(user, limit=limit, after_seq=after_seq)
+        completed, failed = 0, []
+        blocked_paths = set()
+        for item in items:
+            if (item.chat, item.user) in blocked_paths:
+                failed.append(item.action_id)
+                continue
+            try:
+                signer, verifier = owner(item.chat, item.user)
+                if not callable(signer) or not callable(verifier):
+                    raise ValueError('signed state action owner required')
+                if item.state == 'queued':
+                    from ..mesh.events import state_signing_bytes
+                    probe = {'ns': 1, 'sig': signer(state_signing_bytes(item.chat, item.user, 1, {}))}
+                    if verifier(probe) is not True:
+                        raise ValueError('signed state action recovery owner did not verify')
+                document, changed = self.run(item.chat, item.user, item.action_id,
+                                             signer=signer, verifier=verifier, missing_ok=True)
+                if document is not None or changed:
+                    completed += 1
+            except Exception:  # A durable action survives unavailable owner/provider.
+                blocked_paths.add((item.chat, item.user))
+                failed.append(item.action_id)
+        cursor = items[-1].seq if len(items) == limit else 0
+        return StateActionRecovery(completed, tuple(failed), cursor)
+
     def _head(self, path):
         with self.journal.coordinator._transaction() as conn:
             self._check(conn)
@@ -363,7 +432,50 @@ class UserStateActionQueue:
                 _fail('changed')
             conn.execute('DELETE FROM user_state_actions WHERE action_id=?', (action.action_id,))
 
-    def run(self, chat: str, user: str, action_id: str, *, signer, verifier):
+    @contextmanager
+    def _drain_owner(self, chat, user, *, wait=1.0):
+        from ..core.lock import SingleInstance
+        from ..node.security import private_directory, protect_path
+
+        _component(chat, 'chat')
+        _component(user, 'user')
+        # Separate from the coordinator transaction: network I/O must not hold
+        # the root database writer. Fixed stripes bound lock-file accumulation.
+        stripe = hashlib.sha256(P.state(chat, user).encode()).digest()[0]
+        directory = self.journal.coordinator.path.parent / 'action-drains'
+        private_directory(directory)
+        path = directory / str(stripe)
+        if path.is_symlink():
+            raise ValueError('state action lock cannot be a symlink')
+        lock = SingleInstance(path, fail_open=False)
+        deadline = time.monotonic() + wait
+        while not lock.acquire():
+            if time.monotonic() >= deadline:
+                raise RuntimeError('state action owner is busy; retry the action')
+            time.sleep(0.01)
+        try:
+            protect_path(path, directory=False)
+            yield
+        finally:
+            lock.release()
+
+    def run(self, chat: str, user: str, action_id: str, *, signer, verifier,
+            missing_ok=False):
+        """Recover under one OS-owned drainer; a stale inventory is harmless."""
+        with self._drain_owner(chat, user, wait=0.0 if missing_ok else 1.0):
+            _uuid(action_id, 'state action id')
+            with self.journal.coordinator._transaction() as conn:
+                self._check(conn)
+                found = conn.execute(
+                    'SELECT 1 FROM user_state_actions WHERE action_id=? AND path=?',
+                    (action_id, P.state(chat, user))).fetchone()
+                if found is None:
+                    if missing_ok:
+                        return None, False
+                    _fail('target_missing')
+            return self._run(chat, user, action_id, signer=signer, verifier=verifier)
+
+    def _run(self, chat: str, user: str, action_id: str, *, signer, verifier):
         """Drain older actions first, then this one; return its doc and change."""
         from ..mesh.state_actions import reduce_state_action, sign_state_action
 
@@ -475,9 +587,13 @@ class UserStateActionQueue:
             proven = False
         if not proven:
             raise ValueError('signed state action owner did not verify')
-        action_id = self.enqueue(chat, user, kind, args)
-        return self.run(chat, user, action_id, signer=signer, verifier=verifier)
+        # Acquire before admission: contention cannot leave a newly queued
+        # action behind a reported failure or let another drainer consume it.
+        with self._drain_owner(chat, user):
+            action_id = self.enqueue(chat, user, kind, args)
+            return self._run(chat, user, action_id, signer=signer, verifier=verifier)
 
 
-__all__ = ['UserStateActionQueue', 'StateAction', 'initialize_actions',
+__all__ = ['UserStateActionQueue', 'StateAction', 'PendingStateAction',
+           'StateActionRecovery', 'initialize_actions',
            'audit_actions', 'validate_action_allocation', 'link_action_ticket']

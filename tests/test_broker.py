@@ -4,6 +4,7 @@ the MCP channel end-to-end over real streamable-http."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -1328,6 +1329,44 @@ def test_context_and_files_parity_c(tmp_path, clouds):
             assert (ws / "inbox" / "notes.txt").read_bytes() == data
             miss = call_tool(url, "fetch_file", {"file_id": "f-nope"})
             assert "no such file" in miss
+    finally:
+        agent.close()
+        owner.close()
+
+
+def test_fetch_file_uses_signed_staged_storage_identity(tmp_path, clouds):
+    root = clouds.root(tmp_path / "staged-mesh")
+    home = tmp_path / "home"
+    owner = Mesh(clouds.bare(root), "aryan", "devbox", encrypt=True, home=home)
+    owner.accounts.create_human("aryan", "hunter2x")
+    owner.accounts.create_agent("helper")
+    agent = Mesh(clouds.bare(root), "helper", "devbox", encrypt=True, home=home)
+    try:
+        chat = owner.create_chat("Staged", members=["helper"])
+        blob_id = "f2-bridge.bin"
+        plain = b"signed staged bytes"
+        record = {"id": blob_id, "name": "bridge.bin", "bytes": len(plain),
+                  "sha256": hashlib.sha256(plain).hexdigest(), "storage_v": 2}
+        owner.post(chat.id, "please fetch this", files=[record])
+        # A same-ID legacy object is not the signed record's storage lane.
+        owner.tx.put_blob(
+            f"chats/{chat.id}/files/{blob_id}",
+            owner.sealer.seal_blob(chat.id, blob_id, b"wrong legacy object"))
+        owner.tx.put_blob(
+            f"blob-stage/{chat.id}/{blob_id}",
+            owner.sealer.seal_blob(chat.id, blob_id, plain))
+        owner.outbox.flush_once()
+        agent.sync.sync_once([chat.id])
+        broker = PermissionBroker(agent.tx, "helper", _legacy_test_lane=True)
+        workspace = tmp_path / "staged-inbox"
+        workspace.mkdir()
+        with BridgeServer(
+                broker, chat_id=chat.id, workspace=workspace, auto_allow=[],
+                approvals=[], ask_timeout_s=0.3, mesh=agent) as bridge:
+            assert json.loads(call_tool(bridge, "list_files", {}))[0]["file_id"] == blob_id
+            assert call_tool(bridge, "fetch_file", {"file_id": blob_id}) == (
+                "saved to inbox/bridge.bin")
+        assert (workspace / "inbox" / "bridge.bin").read_bytes() == plain
     finally:
         agent.close()
         owner.close()

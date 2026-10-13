@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import os
 import platform
 import re
@@ -41,6 +42,7 @@ from ..core.lock import SingleInstance as FleetInstance
 from ..core.models import ChatKind, UserKind
 from ..core.runstate import clear_beat, write_beat
 from ..mesh import authz
+from ..mesh.attachments import attachment_path
 from ..mesh.pin_storage import PinStoreUnavailable
 from ..core.timekit import utcnow_iso
 from ..mesh.sealer import E2EESealer
@@ -205,7 +207,7 @@ class AgentRunner:
         self.mesh.sync.on_chat_progress = self._prioritize_chat
         self._started_ns = time.time_ns()
         self._last_doc: tuple | None = None
-        self._blobs_ok: set[str] = set()  # sync-barrier verified blob ids
+        self._blobs_ok: set[tuple] = set()  # exact signed file identities
         # V62 per-chat stand-down reads, cached a few ticks (scan hits every
         # chat every poll): {chat_id: (paused, monotonic_read_at)}
         self._chat_pause: dict[str, tuple[bool, float]] = {}
@@ -997,19 +999,26 @@ class AgentRunner:
                 break
             for f in m.files or []:
                 blob_id, name = f.get("id"), f.get("name", "")
-                if not blob_id or blob_id in self._blobs_ok:
+                if not blob_id:
                     continue
                 try:
-                    raw = self.mesh.tx.get_blob(f"chats/{chat_id}/files/{blob_id}")
+                    path = attachment_path(chat_id, blob_id, f)
+                    identity = (path, f.get("sha256"), f.get("bytes"))
+                    if identity in self._blobs_ok:
+                        continue
+                    raw = self.mesh.tx.get_blob(path)
                     if raw is None:
                         return name or blob_id
                     data = self.mesh.sealer.open_blob(chat_id, blob_id, raw)
                     if data is None or (f.get("bytes") is not None
-                                        and len(data) != f["bytes"]):
+                                        and len(data) != f["bytes"]) or (
+                                            f.get("sha256") is not None
+                                            and hashlib.sha256(data).hexdigest()
+                                            != f["sha256"]):
                         return name or blob_id
                 except Exception:  # noqa: BLE001 — a blip = not fetchable yet
                     return name or blob_id
-                self._blobs_ok.add(blob_id)
+                self._blobs_ok.add(identity)
         return None
 
     def _log_perf(self, timings: RunTimings, group: WorkGroup,

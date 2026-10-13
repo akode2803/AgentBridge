@@ -379,6 +379,16 @@ bounded pending discovery as its durable owner slot. Semantic UserState actions
 use `allocate_action_ticket` to link the action and exact CAS ticket in the same
 root transaction, closing the caller-binding crash gap.
 
+Queued actions are also discoverable before any ticket exists. A bounded,
+metadata-only keyset inventory filters the exact actor and messaging user. The
+existing outbox worker runs a small recovery batch using the current session's
+signer/verifier only when a journal writer has already been explicitly bound;
+startup never installs that binding. Failed actions remain durable, and one
+failed path is attempted only once per pass. An OS-owned per-path drain lock
+serializes foreground writers and recovery across processes without holding a
+SQLite transaction during network calls; stale inventory entries cannot drain a
+newer action. Recovery does not require another user edit on the same path.
+
 ACK alone does **not** permit local pruning. The caller first durably consumes its
 exact outcome, then calls `release_ticket`. Current-epoch released tickets retain
 replay evidence until provider closure. Closed released tickets can be deleted;

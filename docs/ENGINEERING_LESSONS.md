@@ -390,3 +390,17 @@ release cannot safely depend on a NORMAL Store sent commit. Use FULL for durable
 outbox admission and settlement, retain sent cleanup evidence, and prove every
 expected publication leg before retiring its owner. Cache-only writes need not
 pay for that ownership guarantee.
+
+## 2026-10-13 durable admission requires a recovery entry point
+
+Persisting a semantic action before ticket allocation does not guarantee restart
+progress: the worker must inventory queued actions even when no later user edit
+or outbox message arrives. Recover bounded owner-filtered metadata using fresh
+signing, and serialize the complete drain across processes without retaining a
+SQLite write transaction through provider I/O. Stale inventory must not consume
+newer work. Test the pre-ticket crash and real process-lock release explicitly.
+
+When introducing a staged attachment format, audit every canonical reader,
+including agent runner, CLI inbox and modular bridge. A successfully published
+manifest does not make a legacy hardcoded blob path valid. Resolve the signed
+file record and verify plaintext digest/size at each reader.

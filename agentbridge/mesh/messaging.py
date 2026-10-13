@@ -762,6 +762,23 @@ class MessagingService:
         return None
 
     # ------------------------------------------------------- outbox handler
+    def recover_state_actions(self) -> int:
+        """Bounded existing-worker recovery using this session's exact signer."""
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if not isinstance(self.tx, LocalMutationTransport) or self.tx._bound_writer() is None:
+            return 0
+
+        def owner(chat, user):
+            if user != self.user:
+                raise ValueError('state action recovery user changed')
+            return self._sign_event, self._state_verifier(chat, user)
+
+        result = self.tx.recover_state_actions(
+            self.user, owner, limit=8, after_seq=getattr(self, '_state_recovery_after', 0))
+        self._state_recovery_after = result.after_seq
+        return result.completed
+
     def typed_outbox_owner(self):
         """Construct an explicit owner; startup does not bind it automatically."""
         from ..transport.outbox_mutations import OutboxMutationOwner

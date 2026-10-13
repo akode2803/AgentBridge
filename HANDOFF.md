@@ -1,5 +1,33 @@
 # Cloud source handoff
 
+## 2026-10-13 PR145 review repairs
+
+PR145 (`codex/compound-write-owners`) contains the compound reaction and outbox
+consumer slice below, plus repairs for PR144 Codex comments 4258221983,
+4258221992 and 4258222003. Queued semantic actions now have bounded metadata-only
+restart inventory, recovered by the existing worker only after explicit journal
+binding and fresh owner signing. A private OS lock stripe serializes each path's
+drain without holding SQLite across provider I/O; foreground contention fails
+before enqueue and background recovery does not wait. Stale inventory cannot
+consume a newer action. All modular harness attachment readers resolve the
+canonical signed v1/v2 record and verify digest/size before exposing plaintext.
+
+Final repair gate: 165 passed, 1 skipped (optional MCP unavailable). The retained
+real-process regression proves contention admits no action and process death
+releases ownership. Independent Astra review of recovery/ownership found no
+remaining actionable findings; nine scoped independent/integration probes passed.
+Earlier harness/adapter gate129 passed. Ruff and whitespace pass. PR145 head
+5928961 passed PostgreSQL CI, including new reaction-pair concurrency schedules;
+Ubuntu/Windows were still running at inspection. That CI evidence predates the
+repair commit; replacement current-head checks remain required. No hosted schema,
+production activation, restart, merge or deployment occurred.
+
+Next: address completed CI/review failures, then migrate forward-only account/key
+and terminal lifecycle owners with persisted private material and exact outcome
+consumers. Run disposable authenticated migration acceptance before activating
+writers or clearing the PR stack. The provider-independent compound/outbox work is
+implemented; the complete lifecycle migration and release are not complete.
+
 ## 2026-10-13 compound reaction and outbox consumer checkpoint
 
 Active branch `codex/compound-write-owners`, based on PR144 `3ea0cca`.

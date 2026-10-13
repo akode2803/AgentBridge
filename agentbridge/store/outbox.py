@@ -39,6 +39,7 @@ class OutboxWorker:
         dead_hooks: dict[str, Hook] | None = None,
         prune_hooks: dict[str, Hook] | None = None,
         typed_owner: Any | None = None,
+        recover_actions: Callable[[], int] | None = None,
     ) -> None:
         self.store = store
         self.handlers = handlers
@@ -57,6 +58,7 @@ class OutboxWorker:
         self._dispatch_gate = threading.RLock()
         self._stop_requested = threading.Event()
         self._thread: threading.Thread | None = None
+        self._recover_actions = recover_actions
         self._typed_owner = None
         self.latency = sink_for_store(store)
         if typed_owner is not None:
@@ -147,6 +149,11 @@ class OutboxWorker:
         done = 0
         if stop is not None and stop.is_set():
             return done
+        if self._recover_actions is not None:
+            with self._dispatch_gate:
+                if stop is not None and (stop.is_set() or self._stop_requested.is_set()):
+                    return done
+                self._recover_actions()
         for item in self.store.outbox_prune_dead():
             self._hook(self.prune_hooks, item)
         # A Store-sent tombstone is the durable consumer settlement. It must
