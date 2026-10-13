@@ -77,6 +77,21 @@ def _validate_provider_admission_races(database_url: str) -> None:
         return _scalar(database_url, 'select count(*) from public.ab_mutation_receipts '
                        f'where root={_quote(root)};')
 
+    def leave(root, epoch):
+        # Exercise real sealed-root membership removal, not a fixture DELETE
+        # which correctly fails the legacy-write trigger after seal.
+        owner = uuid4()
+        leg = {'operation_id': str(uuid4()), 'kind': 'member_leave',
+               'client_digest': 'b' * 64}
+        result(admit(root, epoch, owner, leg))
+        receipt = result('select public.ab_mutation_member_leave('
+                         f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                         f'{_quote(leg["operation_id"])}::uuid, '
+                         f'{_quote(leg["client_digest"])})')
+        _run(database_url, authenticated(_receipt_sql(
+            'ab_ack_mutation_receipt', root, epoch, UUID(leg['operation_id']),
+            receipt['client_digest'], receipt['provider_digest'])))
+
     def contend(holder_sql, waiter_sql, *, holder_admin=False,
                 waiter_admin=False, denied=None):
         suffix = uuid4().hex
@@ -135,7 +150,7 @@ def _validate_provider_admission_races(database_url: str) -> None:
     if executed['status'] != 'executed' or source_count(root) != '1' or receipt_count(root) != '1':
         raise GateFailure('execute-before-cancel lost its sole effect or fabricated cancellation')
     # Outcome recovery belongs to the original actor even after membership loss.
-    _run(database_url, f'delete from public.ab_members where root={_quote(root)};')
+    leave(root, epoch)
     if result(effect) != receipt or result(cancellation) != executed:
         raise GateFailure('removed actor could not replay committed admission outcome')
     if _scalar(database_url, authenticated(_receipt_sql(
@@ -152,7 +167,7 @@ def _validate_provider_admission_races(database_url: str) -> None:
     cancelled = result(cancellation)
     if cancelled['status'] != 'cancelled' or source_count(root) != '0' or receipt_count(root) != '0':
         raise GateFailure('cancel-before-execute produced an effect or mutation receipt')
-    _run(database_url, f'delete from public.ab_members where root={_quote(root)};')
+    leave(root, epoch)
     if result(cancellation) != cancelled:
         raise GateFailure('removed actor lost exact cancellation replay')
     # Rotation cannot cross an unacknowledged cancelled leg. Once the ACK
