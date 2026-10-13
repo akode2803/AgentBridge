@@ -714,7 +714,7 @@ class OperationJournal:
         require_consumed(conn, ticket)
         key = (ticket.protocol_epoch, ticket.operation_id)
         if conn.execute('SELECT format FROM mutation_root').fetchone() == (9,):
-            if conn.execute('SELECT 1 FROM typed_admission_legs WHERE protocol_epoch=? AND operation_id=? AND linked=1 AND consumed=0 LIMIT 1', key).fetchone():
+            if conn.execute('SELECT 1 FROM typed_admission_legs WHERE protocol_epoch=? AND operation_id=? AND linked=1 AND outcome IS NULL LIMIT 1', key).fetchone():
                 _fail('admission_owner_unconsumed')
         if conn.execute("SELECT 1 FROM user_state_actions WHERE ticket_epoch=? AND ticket_operation=? AND state='linked' LIMIT 1", key).fetchone():
             _fail('consumer_unsettled')
@@ -889,6 +889,24 @@ class OperationJournal:
         self._capacity(conn)  # linked reservation was transferred, not added
         return result
 
+    def _drop_cancelled(self, conn, request):
+        """Retire one admitted, unexecuted ticket inside the owner's root cut.
+
+        The admission owner calls this only with the provider's exact
+        ``cancelled`` reply for this leg, which forbids any later execution.
+        That reply, not a receipt, proves completion: once the unexecuted row
+        is removed, the intent finishes without receipt proof in this commit.
+        """
+        record = self._exact(conn, request)
+        key = (request.expectation.protocol_epoch, request.expectation.operation_id)
+        ticket = conn.execute('SELECT released FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key).fetchone()
+        if (record is None or record.receipt is not None
+                or record.state not in {'prepared', 'attempted'} or ticket != (0,)):
+            _fail('cancelled_operation_changed')
+        conn.execute('DELETE FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key)
+        conn.execute('DELETE FROM typed_operations WHERE protocol_epoch=? AND operation_id=?', key)
+        self.coordinator._finish_in_transaction(conn, record.intent)
+
     def get(self, protocol_epoch: str, operation_id: str) -> OperationRecord:
         _uuid(protocol_epoch, 'typed operation epoch')
         _uuid(operation_id, 'typed operation id')
@@ -944,6 +962,13 @@ class OperationJournal:
             state = record.state
             payload = None
             if action == 'attempted':
+                if (state in {'prepared', 'attempted'}
+                        and conn.execute('SELECT format FROM mutation_root').fetchone() == (9,)
+                        and conn.execute("SELECT 1 FROM typed_admission_legs WHERE protocol_epoch=? AND operation_id=? AND cancel='requested' LIMIT 1",
+                                         (request.expectation.protocol_epoch, request.expectation.operation_id)).fetchone()):
+                    # A durable cancellation request resolves first; only its
+                    # exact ``executed`` answer may reopen replay.
+                    _fail('admission_cancel_requested')
                 if state == 'prepared':
                     state = 'attempted'
             elif action == 'accepted':

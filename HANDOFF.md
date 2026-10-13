@@ -1,5 +1,27 @@
 # Cloud source handoff
 
+## 2026-10-13 admission cancellation, settlement and nonmember bound
+
+Claude Opus took over as lead engineer; the main checkout now holds
+`codex/provider-owner-admission` (the `/private/tmp/agentbridge-node-owner`
+worktree was removed after verifying it clean and pushed). PR #146 continues.
+
+Admitted owner legs now settle durably: `cancel` (request committed before the
+RPC; `cancelled` retires a linked unexecuted ticket atomically; `executed`
+recovers the exact receipt by replay), `acknowledge_cancel` after the durable
+cancelled outcome, `settle` deriving applied/conflict from the acknowledged
+receipt and releasing in the same commit, and `reap` of fully settled owners
+without private material. Format 9's leg schema was amended (never activated).
+The valid Codex P1 is fixed in SQL: unaffiliated principals hold one reservation
+not yet settled for closure and four claims per epoch. Evidence and limits:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md. Local 262-test combined gate passed; the
+PostgreSQL gate for the new SQL bound runs in CI only (no local PostgreSQL).
+
+Next: effect-free full/ambiguous draft recovery across authenticated closure
+(including whether operators may evict unsettled legs with retained lineage),
+then the agent identity dispatcher, which is also the private-material consumer
+that lets identity owners reap. No production schema, activation or merge.
+
 ## 2026-10-13 provider admission and private identity checkpoint
 
 Active branch `codex/provider-owner-admission`, PR #146 stacked on PR #145.

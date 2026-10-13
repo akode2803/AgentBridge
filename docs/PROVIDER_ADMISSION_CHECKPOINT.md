@@ -68,12 +68,51 @@ Two independent admission probes are retained in
 `tests/test_provider_admission_recovery.py`; those and the binding probe passed
 (3 checks).
 
+## Cancellation, settlement and owner reaping (2026-10-13, later)
+
+Format 9 was never activated by any runtime, so its leg table was amended before
+release rather than migrated: `consumed` is replaced by `cancel`
+(`none → requested → cancelled → acknowledged`, or `requested → executed`) and
+`outcome` (`applied`, `conflict`, `cancelled`).
+
+- `cancel()` commits `requested` before the RPC. That blocks ticket binding and
+  new journal attempts (`admission_cancel_requested`); an in-flight attempt may
+  still record its receipt. Only the provider's `cancelled` reply is no-effect
+  evidence: it atomically retires a linked unexecuted ticket, its intent and
+  node fence, and records the cancelled outcome. A local receipt contradicting
+  that reply fails closed. `executed` relinks only for exact replay, which the
+  provider serves before any authority check, so revoked members still recover
+  the exact receipt. Cancellation needs no fresh authority; it is the route for
+  linked operations whose authority was revoked.
+- `acknowledge_cancel()` requires the durable cancelled outcome first.
+- `settle()` derives `applied`/`conflict` from the receipt whose ACK the journal
+  recorded (never a caller value) and releases the ticket in the same commit.
+  The hot-path audit enforces outcome ⇔ release and ACK-before-outcome; targeted
+  lookup re-derives the outcome from the retained receipt.
+- `reap()` deletes only an admitted owner whose every leg is a released receipt
+  outcome or an acknowledged cancellation. An owner carrying private material is
+  refused until its domain consumer exists (identity dispatcher). Released
+  journal rows stay until authenticated epoch closure, so adoption then prunes
+  them; an unreaped owner still blocks adoption.
+- Evidence: 19 new tests in `tests/test_provider_admission_settlement.py` (exact
+  provider model, lost cancel/ACK replies, restart, revoked linked attempt,
+  executed recovery, contradiction, capacity, eight impossible states, and both
+  in-flight attempt/cancel interleavings, the latter repeated 25×). Combined
+  admission/journal/coordinator gate: 262 passed.
+
+Codex P1 on `e90506b` was valid: an authenticated nonmember could admit unlimited
+one-leg `member_claim` owners, exhaust every slot, then refuse to settle and
+block rotation. `ab_admit_mutation_owner` now restores pre-admission parity for
+unaffiliated principals: after exact replay, at most one reservation not yet
+settled for closure, and four claims per epoch. A pinned slot again costs one
+Auth account, as one unacknowledged direct claim did before. The PostgreSQL gate
+proves replay, pending, unacknowledged-cancel and budget rejections. Members can
+still pin capacity by never settling; that matches the pre-existing receipt-ACK
+rule and remains an operator-eviction/lineage question for step 2 below.
+
 ## Next
 
-1. Implement durable exact cancellation and owner settlement. An unused leg can
-   pin provider closure; an owner with an acknowledged effect still cannot be
-   discarded before its domain consumer is durably settled. Cancellation
-   `executed` must retrieve the exact receipt, never become a no-effect verdict.
+1. Done above: durable exact cancellation and owner settlement.
 2. Settle effect-free full/ambiguous drafts across authenticated epoch closure.
    Format 9 currently conservatively blocks epoch adoption while owners remain.
    Never extend this recovery rule to old mutation-attempted rows.

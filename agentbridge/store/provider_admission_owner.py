@@ -2,8 +2,13 @@
 
 The full replay requests commit before the effect-free admission RPC. A remote
 positive reply becomes local evidence only after a second root commit. Each
-ticket binding transfers one reserved leg in the root transaction. This module
-does not dispatch source mutations or settle admitted owner legs.
+ticket binding transfers one reserved leg in the root transaction.
+
+Every admitted leg ends in exactly one durable outcome before its owner may be
+reaped: ``applied``/``conflict`` derived from the journal's acknowledged
+receipt, or ``cancelled`` from the provider's exact cancellation reply. A
+cancellation intent commits before its RPC and blocks ticket binding and new
+journal attempts. This module does not dispatch source mutations.
 """
 
 from __future__ import annotations
@@ -14,7 +19,8 @@ from typing import Iterable
 
 from ..transport.mutation_protocol import _uuid
 from ..transport.provider_admission import (
-    AdmissionPlan, AdmissionResult, ProviderAdmission, prepare_admission_plan,
+    AdmissionPlan, AdmissionResult, CancellationResult, ProviderAdmission,
+    prepare_admission_plan,
 )
 from ..transport.typed_mutations import PreparedMutation
 from ..transport.receipt_retirement import OperationTicket
@@ -30,6 +36,10 @@ MAX_OWNER_BYTES = 16 * 1024 * 1024
 MAX_PRIVATE_PAYLOAD_BYTES = 256 * 1024
 _STATES = frozenset(("prepared", "admission_attempted", "full", "admitted"))
 _OWNER_KINDS = frozenset(("generic", "agent_identity_create"))
+# Provider cancellation protocol of one leg. ``requested`` is durable before the
+# RPC; ``executed`` routes recovery to the exact existing receipt.
+_CANCEL = frozenset(("none", "requested", "cancelled", "executed", "acknowledged"))
+_OUTCOMES = frozenset(("applied", "conflict", "cancelled"))
 _OWNER_SCHEMA = (
     "CREATE TABLE typed_admission_owners("
     "owner_id TEXT PRIMARY KEY,root TEXT NOT NULL,actor_id TEXT NOT NULL,"
@@ -40,8 +50,10 @@ _LEG_SCHEMA = (
     "CREATE TABLE typed_admission_legs("
     "owner_id TEXT NOT NULL,ordinal INTEGER NOT NULL,protocol_epoch TEXT NOT NULL,"
     "operation_id TEXT NOT NULL,linked INTEGER NOT NULL CHECK(linked IN (0,1)),"
-    "consumed INTEGER NOT NULL CHECK(consumed IN (0,1)),request BLOB NOT NULL,"
-    "PRIMARY KEY(owner_id,ordinal),UNIQUE(operation_id))"
+    "cancel TEXT NOT NULL CHECK(cancel IN "
+    "('none','requested','cancelled','executed','acknowledged')),"
+    "outcome TEXT CHECK(outcome IN ('applied','conflict','cancelled')),"
+    "request BLOB NOT NULL,PRIMARY KEY(owner_id,ordinal),UNIQUE(operation_id))"
 )
 _SCHEMA = {"typed_admission_owners": _OWNER_SCHEMA,
            "typed_admission_legs": _LEG_SCHEMA}
@@ -107,8 +119,16 @@ def audit_admissions(conn, *, required: bool) -> None:
         "typeof(protocol_epoch)!='text' OR length(protocol_epoch)!=36 OR "
         "typeof(operation_id)!='text' OR length(operation_id)!=36 OR "
         "typeof(linked)!='integer' OR linked NOT IN (0,1) OR "
-        "typeof(consumed)!='integer' OR consumed NOT IN (0,1) OR "
-        "(consumed=1 AND linked=0) OR "
+        "typeof(cancel)!='text' OR cancel NOT IN "
+        "('none','requested','cancelled','executed','acknowledged') OR "
+        "(outcome IS NOT NULL AND (typeof(outcome)!='text' OR outcome NOT IN "
+        "('applied','conflict','cancelled'))) OR "
+        # A verified provider cancellation is the only cancelled outcome, and
+        # it never coexists with a ticket. Receipt outcomes require one.
+        "(cancel IN ('cancelled','acknowledged'))!=(outcome IS 'cancelled') OR "
+        "(cancel IN ('cancelled','acknowledged') AND linked=1) OR "
+        "(outcome IN ('applied','conflict') AND "
+        "(linked=0 OR cancel NOT IN ('none','executed'))) OR "
         "typeof(request)!='blob' OR length(request)>? LIMIT 1",
         (MAX_REQUEST_BYTES,),
     ).fetchone():
@@ -119,6 +139,12 @@ def audit_admissions(conn, *, required: bool) -> None:
         "l.protocol_epoch!=o.protocol_epoch LIMIT 1"
     ).fetchone():
         _fail("orphan_leg")
+    if conn.execute(
+        "SELECT 1 FROM typed_admission_legs l JOIN typed_admission_owners o "
+        "ON o.owner_id=l.owner_id WHERE o.state!='admitted' AND "
+        "(l.linked=1 OR l.cancel!='none' OR l.outcome IS NOT NULL) LIMIT 1"
+    ).fetchone():
+        _fail("leg_state_changed")
     if conn.execute(
         "SELECT 1 FROM typed_admission_owners a JOIN typed_operation_owner o "
         "ON o.singleton=1 WHERE a.root!=o.root OR a.actor_id!=o.actor_id "
@@ -140,7 +166,10 @@ def audit_admissions(conn, *, required: bool) -> None:
         "ON t.protocol_epoch=l.protocol_epoch AND t.operation_id=l.operation_id "
         "LEFT JOIN typed_operation_tickets k "
         "ON k.protocol_epoch=l.protocol_epoch AND k.operation_id=l.operation_id "
-        "WHERE (l.linked=1 AND (t.operation_id IS NULL OR k.operation_id IS NULL)) OR "
+        "WHERE (l.linked=1 AND (t.operation_id IS NULL OR k.operation_id IS NULL "
+        # Settlement and release share one commit; an outcome needs local ACK.
+        "OR (l.outcome IS NULL)!=(k.released=0) "
+        "OR (l.outcome IS NOT NULL AND t.state!='acknowledged'))) OR "
         "(l.linked=0 AND (t.operation_id IS NOT NULL OR k.operation_id IS NOT NULL)) LIMIT 1"
     ).fetchone():
         _fail("leg_link_changed")
@@ -153,9 +182,12 @@ def reservation_capacity(conn) -> tuple[int, int]:
     """Future operation slots and retained replay bytes in format 9."""
     if conn.execute("SELECT format FROM mutation_root WHERE singleton=1").fetchone() != (9,):
         return (0, 0)
+    # An unlinked leg that can still link reserves its future journal copy. A
+    # cancelled leg retains only its own replay copy until the owner is reaped.
+    linkable = "(linked=0 AND cancel IN ('none','requested','executed'))"
     legs, requests = conn.execute(
-        "SELECT coalesce(sum(CASE WHEN linked=0 THEN 1 ELSE 0 END),0),"
-        "coalesce(sum(length(request)*(2-linked)),0) "
+        f"SELECT coalesce(sum(CASE WHEN {linkable} THEN 1 ELSE 0 END),0),"
+        f"coalesce(sum(length(request)*(CASE WHEN {linkable} THEN 2 ELSE 1 END)),0) "
         "FROM typed_admission_legs"
     ).fetchone()
     plans = conn.execute(
@@ -173,25 +205,34 @@ class AdmissionOwnerRecord:
     owner_kind: str
     private_payload: bytes = field(repr=False)
     linked: tuple[bool, ...]
+    cancel: tuple[str, ...]
+    outcome: tuple[str | None, ...]
+
+
+def _receipt_outcome(receipt) -> str:
+    """Domain outcome of an exact receipt; only CAS receipts can conflict."""
+    return "conflict" if dict(receipt.result).get("applied") is False else "applied"
 
 
 def link_admission_ticket(conn, owner_id: str, ordinal: int,
                           request: PreparedMutation) -> None:
     """SQL-only link inside OperationJournal's request+intent insertion cut."""
     row = conn.execute(
-        "SELECT o.state,o.protocol_epoch,l.operation_id,l.request,l.linked,l.consumed "
+        "SELECT o.state,o.protocol_epoch,l.operation_id,l.request,l.linked,"
+        "l.cancel IN ('none','executed'),l.outcome IS NULL "
         "FROM typed_admission_owners o JOIN typed_admission_legs l "
         "ON l.owner_id=o.owner_id WHERE o.owner_id=? AND l.ordinal=?",
         (owner_id, ordinal),
     ).fetchone()
     if (row is None or row != (
         "admitted", request.expectation.protocol_epoch,
-        request.expectation.operation_id, request.request_json, 0, 0,
+        request.expectation.operation_id, request.request_json, 0, 1, 1,
     )):
         _fail("ticket_link_changed")
     if conn.execute(
         "UPDATE typed_admission_legs SET linked=1 WHERE owner_id=? AND ordinal=? "
-        "AND linked=0 AND consumed=0", (owner_id, ordinal),
+        "AND linked=0 AND cancel IN ('none','executed') AND outcome IS NULL",
+        (owner_id, ordinal),
     ).rowcount != 1:
         _fail("ticket_link_changed")
 
@@ -261,21 +302,19 @@ class ProviderAdmissionOwnerJournal:
         ) or state not in _STATES:
             _fail("owner_changed")
         rows = conn.execute(
-            "SELECT ordinal,protocol_epoch,operation_id,linked,consumed,request "
+            "SELECT ordinal,protocol_epoch,operation_id,linked,cancel,outcome,request "
             "FROM typed_admission_legs WHERE owner_id=? ORDER BY ordinal", (owner_id,)
         ).fetchall()
         try:
             if not 1 <= len(rows) <= 1025:
                 raise ValueError("wrong admission leg count")
-            requests = tuple(
-                PreparedMutation.from_request_json(raw)
-                for ordinal, leg_epoch, operation, linked, consumed, raw in rows
-            )
-            for ordinal, (saved_ordinal, leg_epoch, operation, linked, consumed, _) in enumerate(rows):
+            requests = tuple(PreparedMutation.from_request_json(row[6]) for row in rows)
+            for ordinal, (saved_ordinal, leg_epoch, operation, linked, cancel,
+                          outcome, _) in enumerate(rows):
                 e = requests[ordinal].expectation
                 if (saved_ordinal, leg_epoch, operation) != (
                     ordinal, epoch, e.operation_id,
-                ):
+                ) or cancel not in _CANCEL or outcome not in _OUTCOMES | {None}:
                     raise ValueError("admission leg changed")
                 if linked:
                     existing = self.journal._find(conn, epoch, operation)
@@ -286,6 +325,11 @@ class ProviderAdmissionOwnerJournal:
                         "AND operation_id=?", (epoch, operation),
                     ).fetchone() is None:
                         raise ValueError("admission ticket missing")
+                    # The settled outcome must remain the retained receipt's.
+                    if outcome is not None and (
+                            existing.state != "acknowledged"
+                            or _receipt_outcome(existing.receipt) != outcome):
+                        raise ValueError("admission outcome changed")
             plan = prepare_admission_plan(owner_id, requests)
             if plan.request_json != plan_json or plan.protocol_epoch != epoch:
                 raise ValueError("admission plan changed")
@@ -294,6 +338,7 @@ class ProviderAdmissionOwnerJournal:
         return AdmissionOwnerRecord(
             plan, requests, state, owner_kind, private_payload,
             tuple(bool(row[3]) for row in rows),
+            tuple(row[4] for row in rows), tuple(row[5] for row in rows),
         )
 
     def get(self, owner_id: str) -> AdmissionOwnerRecord | None:
@@ -361,9 +406,9 @@ class ProviderAdmissionOwnerJournal:
             )
             for ordinal, (leg, raw) in enumerate(zip(plan.legs, raw_requests)):
                 conn.execute(
-                    "INSERT INTO typed_admission_legs VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO typed_admission_legs VALUES(?,?,?,?,?,?,?,?)",
                     (owner_id, ordinal, plan.protocol_epoch,
-                     leg.operation_id, 0, 0, raw),
+                     leg.operation_id, 0, "none", None, raw),
                 )
             self.journal.coordinator._advance_root_revision(conn)
             return self._find(conn, owner_id)
@@ -415,27 +460,192 @@ class ProviderAdmissionOwnerJournal:
                 return request
         return None
 
+    def _admitted_leg(self, conn, owner_id: str,
+                      operation_id: str) -> tuple[AdmissionOwnerRecord, int]:
+        self._check(conn)
+        record = self._find(conn, owner_id)
+        if record is None or record.state != "admitted":
+            _fail("positive_reply_required")
+        index = next((i for i, request in enumerate(record.requests)
+                      if request.expectation.operation_id == operation_id), None)
+        if index is None:
+            _fail("unknown_leg")
+        return record, index
+
+    def _set_leg(self, conn, owner_id: str, ordinal: int, expected: str,
+                 assignments: str, *values) -> None:
+        if conn.execute(
+            f"UPDATE typed_admission_legs SET {assignments} "
+            "WHERE owner_id=? AND ordinal=? AND cancel=?",
+            (*values, owner_id, ordinal, expected),
+        ).rowcount != 1:
+            _fail("leg_changed")
+        self.journal.coordinator._advance_root_revision(conn)
+
     def bind_ticket(self, owner_id: str,
                     operation_id: str) -> OperationTicket:
         """Atomically transfer a positive-admission leg to its exact ticket."""
         _uuid(owner_id, "admission owner")
         _uuid(operation_id, "admission operation")
         with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
-            self._check(conn)
-            record = self._find(conn, owner_id)
-            if record is None or record.state != "admitted":
-                _fail("positive_reply_required")
-            index = next((i for i, request in enumerate(record.requests)
-                          if request.expectation.operation_id == operation_id), None)
-            if index is None:
-                _fail("unknown_leg")
+            record, index = self._admitted_leg(conn, owner_id, operation_id)
             request = record.requests[index]
             if record.linked[index]:
                 return OperationTicket(
                     request.expectation.protocol_epoch, operation_id)
+            # A pending or verified cancellation forbids a new dispatch route.
+            # ``executed`` relinks only so exact replay can recover its receipt.
+            if record.cancel[index] not in ("none", "executed"):
+                _fail("leg_cancelling")
             self.journal._bind_admitted(conn, request, owner_id, index)
             return OperationTicket(
                 request.expectation.protocol_epoch, operation_id)
+
+    def cancel(self, owner_id: str, operation_id: str) -> CancellationResult:
+        """Durably request, then record the provider's exact cancellation answer.
+
+        The request commits before the RPC, so no ticket binding or new journal
+        attempt can race it. Only ``cancelled`` is no-effect evidence; it
+        atomically retires a linked unexecuted ticket and settles the leg.
+        ``executed`` must recover the exact existing receipt through the
+        journal's exact replay before :meth:`settle`. A lost reply leaves the
+        request durable; repeat this call. Fresh authority is not consulted:
+        cancelling an operation whose authority was revoked is the intended use.
+        """
+        _uuid(owner_id, "admission owner")
+        _uuid(operation_id, "admission operation")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            record, index = self._admitted_leg(conn, owner_id, operation_id)
+            state = record.cancel[index]
+            if state in ("cancelled", "acknowledged"):
+                return CancellationResult("cancelled")
+            if state == "executed":
+                return CancellationResult("executed")
+            if record.outcome[index] is not None:
+                _fail("leg_settled")
+            if state == "none":
+                if record.linked[index] and self.journal._find(
+                        conn, record.plan.protocol_epoch, operation_id).receipt is not None:
+                    # The exact outcome is already durable; finish that instead.
+                    _fail("leg_has_receipt")
+                self._set_leg(conn, owner_id, index, "none", "cancel='requested'")
+            # A retried request still asks the provider: an attempt already in
+            # flight may since have recorded a receipt, which the provider
+            # then reports as ``executed`` under its operation lock.
+        result = self.wire.cancel(record.plan, record.plan.legs[index])
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            current, index = self._admitted_leg(conn, owner_id, operation_id)
+            if current.plan != record.plan:
+                _fail("plan_changed")
+            state = current.cancel[index]
+            if state != "requested":
+                # A concurrent exact resolver already committed the answer.
+                accepted = (("cancelled", "acknowledged") if result.status == "cancelled"
+                            else ("executed",))
+                if state not in accepted:
+                    _fail("provider_reply_changed")
+                return result
+            if result.status == "executed":
+                self._set_leg(conn, owner_id, index, "requested", "cancel='executed'")
+            else:
+                if current.linked[index]:
+                    # The provider forbids any later execution of this exact
+                    # operation, so its unexecuted ticket and intent retire.
+                    self.journal._drop_cancelled(conn, current.requests[index])
+                self._set_leg(conn, owner_id, index, "requested",
+                              "linked=0,cancel='cancelled',outcome='cancelled'")
+            self._check(conn)
+            return result
+
+    def acknowledge_cancel(self, owner_id: str, operation_id: str) -> bool:
+        """ACK a cancellation only after its cancelled outcome is durable.
+
+        Provider closure may forget the leg once acknowledged, so the local
+        settlement must already exist. Repeating after a lost reply is exact.
+        """
+        _uuid(owner_id, "admission owner")
+        _uuid(operation_id, "admission operation")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            record, index = self._admitted_leg(conn, owner_id, operation_id)
+            if record.cancel[index] == "acknowledged":
+                return True
+            if record.cancel[index] != "cancelled":
+                _fail("cancellation_unsettled")
+        self.wire.acknowledge_cancel(record.plan, record.plan.legs[index])
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            current, index = self._admitted_leg(conn, owner_id, operation_id)
+            if current.plan != record.plan:
+                _fail("plan_changed")
+            if current.cancel[index] == "cancelled":
+                self._set_leg(conn, owner_id, index, "cancelled", "cancel='acknowledged'")
+            elif current.cancel[index] != "acknowledged":
+                _fail("leg_changed")
+        return True
+
+    def settle(self, owner_id: str, operation_id: str) -> str:
+        """Record a linked leg's exact outcome, then release its ticket.
+
+        The outcome derives from the receipt the journal retained and whose
+        provider ACK it recorded; the caller cannot supply it. Settlement and
+        release share one root commit. Returns ``applied`` or ``conflict``.
+        """
+        _uuid(owner_id, "admission owner")
+        _uuid(operation_id, "admission operation")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            record, index = self._admitted_leg(conn, owner_id, operation_id)
+            if not record.linked[index]:
+                _fail("leg_unlinked")
+            epoch = record.plan.protocol_epoch
+            linked = self.journal._find(conn, epoch, operation_id)
+            if linked.state != "acknowledged":
+                _fail("receipt_unacknowledged")
+            outcome = _receipt_outcome(linked.receipt)
+            saved = record.outcome[index]
+            if saved is None:
+                self._set_leg(conn, owner_id, index, record.cancel[index],
+                              "outcome=?", outcome)
+            elif saved != outcome:
+                _fail("outcome_changed")
+            self.journal._release_ticket(conn, OperationTicket(epoch, operation_id))
+            self._check(conn)
+            return outcome
+
+    def reap(self, owner_id: str) -> bool:
+        """Delete a fully settled owner; returns False when already absent.
+
+        Every leg must hold a released receipt outcome or an acknowledged
+        cancellation. Private material needs its own domain consumer, so an
+        owner that still carries it is never reaped here. Released journal
+        records stay until authenticated epoch closure, like other tickets.
+        """
+        _uuid(owner_id, "admission owner")
+        with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+            self._check(conn)
+            record = self._find(conn, owner_id)
+            if record is None:
+                return False
+            if record.state != "admitted":
+                _fail("owner_unsettled")
+            if record.private_payload:
+                _fail("private_material_unsettled")
+            epoch = record.plan.protocol_epoch
+            for request, linked, cancel, outcome in zip(
+                    record.requests, record.linked, record.cancel, record.outcome):
+                if linked:
+                    released = conn.execute(
+                        "SELECT released FROM typed_operation_tickets "
+                        "WHERE protocol_epoch=? AND operation_id=?",
+                        (epoch, request.expectation.operation_id),
+                    ).fetchone()
+                    if outcome not in ("applied", "conflict") or released != (1,):
+                        _fail("owner_unsettled")
+                elif cancel != "acknowledged":
+                    _fail("owner_unsettled")
+            conn.execute("DELETE FROM typed_admission_legs WHERE owner_id=?", (owner_id,))
+            conn.execute("DELETE FROM typed_admission_owners WHERE owner_id=?", (owner_id,))
+            self.journal.coordinator._advance_root_revision(conn)
+            self._check(conn)
+            return True
 
 
 __all__ = [

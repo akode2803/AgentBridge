@@ -75,6 +75,6 @@ def test_two_unknown_admission_replays_link_one_ticket(world):
     with sqlite3.connect(world[0].path) as conn:
         assert conn.execute("SELECT count(*) FROM typed_operations").fetchone() == (1,)
         assert conn.execute("SELECT count(*) FROM mutation_intents").fetchone() == (1,)
-        assert conn.execute("SELECT linked,consumed FROM typed_admission_legs").fetchall() == [
-            (1, 0)
-        ]
+        assert conn.execute(
+            "SELECT linked,cancel,outcome FROM typed_admission_legs"
+        ).fetchall() == [(1, "none", None)]
