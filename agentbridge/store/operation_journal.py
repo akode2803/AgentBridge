@@ -430,8 +430,11 @@ class OperationJournal:
 
         Only the authenticated observation adapter supplies this evidence in
         production. Administrative closure proves that all older receipts were
-        acknowledged; it cannot resolve requests with no durable local receipt.
-        Existing opaque-ID records are never deleted. Returns deleted rows.
+        acknowledged. Because this journal acknowledges only receipts it has
+        durably retained, a ticketed attempt with no receipt never executed and
+        is released to its consumer (Option B). Untracked opaque-ID records and
+        receipts never acknowledged still fail closed and are never deleted.
+        Returns deleted released rows.
         """
         if type(evidence) is not ProviderEpoch:
             raise TypeError('invalid provider epoch evidence')
@@ -475,8 +478,17 @@ class OperationJournal:
                         _fail('admission_owner_unresolved_epoch')
                     from .provider_admission_owner import rebase_closed_drafts
                     rebase_closed_drafts(conn, self, epoch, evidence.protocol_epoch)
-                if conn.execute("SELECT 1 FROM typed_operations WHERE protocol_epoch=? AND state NOT IN ('completed','acknowledged') LIMIT 1", (epoch,)).fetchone():
+                # An untracked (pre-ticket) attempt stays unknown, and a durable
+                # receipt that was never acknowledged contradicts closure. Only
+                # ticketed attempts without a receipt are proven unexecuted.
+                if conn.execute(
+                        "SELECT 1 FROM typed_operations o WHERE o.protocol_epoch=? "
+                        "AND o.state NOT IN ('completed','acknowledged') AND (o.state='accepted' "
+                        'OR NOT EXISTS (SELECT 1 FROM typed_operation_tickets t '
+                        'WHERE t.protocol_epoch=o.protocol_epoch AND t.operation_id=o.operation_id)) '
+                        'LIMIT 1', (epoch,)).fetchone():
                     _fail('unresolved_epoch')
+                self._retire_unexecuted(conn, epoch)
                 # ACK may commit remotely before its reply is lost. Rotation
                 # certifies ACK, but only a validated local completed receipt
                 # proves this client's source completion already committed.
@@ -928,15 +940,57 @@ class OperationJournal:
         That reply, not a receipt, proves completion: once the unexecuted row
         is removed, the intent finishes without receipt proof in this commit.
         """
-        record = self._exact(conn, request)
-        key = (request.expectation.protocol_epoch, request.expectation.operation_id)
+        self._drop_unexecuted(conn, self._exact(conn, request), 'cancelled_operation_changed')
+
+    def _drop_unexecuted(self, conn, record, reason):
+        """Remove one ticketed operation proven never to execute, with its intent."""
+        if record is None:
+            _fail(reason)
+        key = (record.request.expectation.protocol_epoch, record.request.expectation.operation_id)
         ticket = conn.execute('SELECT released FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key).fetchone()
-        if (record is None or record.receipt is not None
-                or record.state not in {'prepared', 'attempted'} or ticket != (0,)):
-            _fail('cancelled_operation_changed')
+        if (record.receipt is not None or record.state not in {'prepared', 'attempted'}
+                or ticket != (0,)):
+            _fail(reason)
         conn.execute('DELETE FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key)
         conn.execute('DELETE FROM typed_operations WHERE protocol_epoch=? AND operation_id=?', key)
         self.coordinator._finish_in_transaction(conn, record.intent)
+
+    def _retire_unexecuted(self, conn, epoch):
+        """Release every ticketed attempt of an authenticated closed epoch.
+
+        Rotation requires every receipt of that epoch to be terminal and
+        acknowledged. Only this journal acknowledges its operations, and only
+        after durably retaining their receipts. A ticketed operation of the
+        closed epoch with no receipt therefore never executed, and its stale
+        epoch forbids it ever executing. Each consumer re-runs in the new epoch:
+        a linked state action requeues for a fresh attempt and an outbox leg
+        relinks. The caller has already refused untracked opaque rows.
+        """
+        format_ = conn.execute('SELECT format FROM mutation_root').fetchone()
+        rows = conn.execute("SELECT protocol_epoch,operation_id FROM typed_operations "
+                            "WHERE protocol_epoch=? AND state IN ('prepared','attempted')",
+                            (epoch,)).fetchall()
+        for key in rows:
+            record = self._find(conn, *key)
+            conn.execute("UPDATE user_state_actions SET state='queued',attempt=attempt+1,"
+                         "ticket_epoch=NULL,ticket_operation=NULL "
+                         "WHERE ticket_epoch=? AND ticket_operation=? AND state='linked'", key)
+            if format_ in {(7,), (8,), (9,)}:
+                owner = conn.execute(
+                    'SELECT owner_kind,owner_path,owner_incarnation,owner_seq '
+                    'FROM typed_operation_consumers WHERE protocol_epoch=? '
+                    'AND operation_id=? AND consumed=0', key).fetchone()
+                conn.execute('DELETE FROM typed_operation_consumers WHERE protocol_epoch=? '
+                             'AND operation_id=? AND consumed=0', key)
+                if (owner is not None and format_ != (7,) and conn.execute(
+                        'SELECT 1 FROM typed_operation_consumers WHERE owner_kind=? '
+                        'AND owner_path=? AND owner_incarnation=? AND owner_seq=? LIMIT 1',
+                        owner).fetchone() is None):
+                    # Relinking reserves the complete owner again.
+                    conn.execute('DELETE FROM typed_outbox_reservations WHERE owner_kind=? '
+                                 'AND owner_path=? AND owner_incarnation=? AND owner_seq=?', owner)
+            self._drop_unexecuted(conn, record, 'unresolved_epoch')
+        return len(rows)
 
     def get(self, protocol_epoch: str, operation_id: str) -> OperationRecord:
         _uuid(protocol_epoch, 'typed operation epoch')

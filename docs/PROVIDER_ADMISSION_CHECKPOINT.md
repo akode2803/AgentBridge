@@ -166,33 +166,48 @@ document table the directory reads); deliberate breakage of conflict
 handling, pin ordering, canonical verification and key-retention proof was
 each caught. Identity/lifecycle/pin/admission gate: 350 passed.
 
-## Open prerequisite: generic writers under admission
+## Decision: Option B, admission optional per owner (Aryan, 2026-10-13)
 
-When `admission_required` is enabled, `private.ab_mutation_begin` rejects any
-typed mutation without a matching admitted leg. Today only admission owners
-obtain legs; generic tickets (`allocate_ticket`, `update_document`, state
-actions, outbox append/manifest owners, application submits) do not, so they
-would all fail after enablement. Separately, after lifecycle opt-in,
-`ApplicationMutationWriter.submit` deliberately refuses (`ticket_required`)
-until each writer's ticket binding is recoverable, so bound `put_doc`,
-`create_doc`, `delete_doc`, effect writes and `append_log` route only through
-their owners.
+Admission is kept for multi-leg and private-material owners (attachment
+messages, identity creation); single-leg writes take a free slot directly, so a
+message send keeps one provider round trip. Earlier rounds required admission
+for every write and stated that epoch closure is not an outcome verdict. That
+rationale was provider-only ("distinguish an absent operation from one whose
+receipt was acknowledged and deleted"); it never combined it with the client
+rule this journal already enforces, durable receipt before ACK. Together:
 
-Decision pending (Aryan). Option A: every generic ticket admits a one-leg (or
-whole outbox) owner first — complete, but one more provider round trip on
-every message send. Option B: keep admission for multi-leg/private owners and
-prove single-leg non-effect from closure instead. Rotation requires every
-receipt of the epoch to be terminal and acknowledged; only the actor can ACK,
-and this client ACKs only receipts it durably retains; sealing disables
-legacy writes. So a ticket created under that discipline with no local
-receipt in a closed epoch never executed, and its owner can retry in the new
-epoch. B must be version-marked so it never applies to old attempted rows
-(the handoff forbids that inference for them) and needs PostgreSQL schedules.
+- rotation requires every receipt of the epoch to be terminal and acknowledged;
+- only the actor can acknowledge, and only `JournaledMutations` does, after
+  `accept` durably retains the receipt; nothing computes a provider digest
+  locally; only rotation deletes receipts; sealing disables legacy writes;
+- so a *ticketed* attempt (created after lifecycle opt-in, under that rule)
+  with no local receipt in an authenticated closed epoch never executed, and
+  its stale epoch means it never can.
 
-Under option A each needs an admission-backed ticket (a
-one-leg owner, or the outbox owner's complete plan) whose leg consumption is
-barred on its existing domain record (sent row, settled action). This is a
-migration prerequisite alongside the remaining identity/key/terminal owners.
+Admission's own lost-reply recovery already rests on the same kind of
+argument, so B adds no new class of assumption (both rely on the local journal
+not rolling back). Untracked pre-ticket rows and receipts never acknowledged
+still fail closed and are never deleted.
+
+Provider (`394bebe`): an operation with a leg runs only through its exact
+uncancelled leg; one without takes a slot no owner reserved. Admission counts
+and avoids unadmitted receipts and refuses an operation that already executed.
+Admission holds the root mutex exclusive; unadmitted execution in an
+admission-enabled epoch holds it shared from its leg lookup through commit,
+so an operation is never both admitted and receipted unadmitted, and
+unadmitted writers never block each other (lock order epoch, operation,
+mutex). A full epoch counts reserved slots. PostgreSQL schedules cover both
+same-operation orderings, concurrent unadmitted writers and reserved slots
+surviving a fill to capacity (CI only; no local PostgreSQL).
+
+Local: authenticated adoption releases ticketed `prepared`/`attempted` rows of
+the closed epoch with their intents; a linked state action requeues with a new
+attempt and an outbox leg relinks (its reservations re-reserve when its last
+slot goes). Evidence: `tests/test_closure_resolution.py`, the updated
+capacity-boundary regression (the original stranded-append schedule now
+releases), and deliberate breakage of each rule. After lifecycle opt-in,
+`ApplicationMutationWriter.submit` still deliberately refuses
+(`ticket_required`) until each such writer's binding is recoverable.
 
 ## Next
 

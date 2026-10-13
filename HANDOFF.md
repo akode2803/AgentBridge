@@ -43,16 +43,16 @@ provider rejects every typed write lacking an admitted leg, and generic writers
 (allocate_ticket, update_document, state actions, outbox owners, application
 submits) do not obtain one yet. See docs/PROVIDER_ADMISSION_CHECKPOINT.md.
 
-Decision pending with Aryan (see checkpoint doc): option A (admit every
-generic ticket; +1 provider round trip per send) or option B (admission only
-for multi-leg/private owners; version-marked closure proof of non-effect for
-single-leg tickets). Terminal flows (delete agent/account) still need typed
-terminal membership events and a chat-key rotation owner binding membership
-and key versions.
+Option B chosen by Aryan: admission is optional per owner (multi-leg and
+private-material owners only). Provider SQL shares slots safely (`394bebe`);
+authenticated adoption releases ticketed attempts without receipts, proven
+unexecuted by closure plus durable-receipt-before-ACK, and requeues their
+consumers. Untracked opaque rows still fail closed. Rationale and evidence:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md. Terminal flows (delete agent/account)
+still need typed terminal membership events and a chat-key rotation owner.
 
-Next after the decision: generic writers per the chosen option, human creation
-(claim owner then identity owner), key-rotation and terminal owners, then
-disposable migration acceptance and stack consolidation.
+Next: human creation (claim, then identity owner), key-rotation and terminal
+owners, then disposable migration acceptance and stack consolidation.
 Operator eviction of never-settled member legs is deliberately deferred
 (pre-existing parity; needs retained lineage). No production schema, activation
 or merge.

@@ -562,3 +562,9 @@ when the epoch rotates. Increasing budgets, regenerating IDs or treating epoch
 closure as an authority/outcome verdict is not a repair. Implement and validate
 effect-free recoverable admission (or equivalent durable exact negative evidence)
 before production writer activation and stack consolidation.
+
+Refined 2026-10-13 (Option B, PROVIDER_ADMISSION_CHECKPOINT.md): closure alone
+is still not a verdict, but closure combined with this journal's enforced
+durable-receipt-before-ACK rule is exact non-effect evidence for *ticketed*
+attempts without a receipt. Admission remains for multi-leg/private owners;
+untracked opaque rows still fail closed.
