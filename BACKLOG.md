@@ -76,8 +76,16 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   including a 4,095-slot allocator probe that held only three advisory locks.
   Evidence is in
   [PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md](docs/PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md).
-  PostgreSQL 16 concurrency CI is pending; typed document/log RPCs are next and
-  no public P1b readiness marker or application activation exists yet.
+  PR136 carries that inactive core and starts PostgreSQL 16/platform CI. The
+  stacked document/log slice now implements authenticated put/create/delete and
+  append RPCs with provider-computed digests, same-transaction effects/receipts,
+  exact replay, current authority checks and a sealed-root prerequisite. Hosted
+  PostgreSQL 17 acceptance covered pre-seal denial, collision, replay,
+  tombstones, room denial, effect-lane denial and insert-only genesis; see
+  [PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md](docs/PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md).
+  PostgreSQL 16 execution is pending. No public P1b readiness marker or
+  application activation exists; lifecycle, effect and blob-manifest families
+  remain next.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

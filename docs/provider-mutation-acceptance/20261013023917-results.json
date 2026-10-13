@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "postgresql_version": "17.11",
+  "product_migration": {
+    "version": "20261013023917",
+    "name": "agentbridge_p1b_typed_doc_log_rpcs",
+    "statement_bytes": 10923,
+    "statement_sha256": "3ed6526a3e2abe91a1fd006199aeb7b353bef789430255020ec18aba6e80d3b2"
+  },
+  "scratch_prerequisite_migration": {
+    "version": "20261013024125",
+    "name": "agentbridge_p1b_doc_log_acceptance_scaffold",
+    "purpose": "Add the delta columns, source-size helpers, and membership helpers already present earlier in the product schema but absent from the minimal P1a scratch prelude."
+  },
+  "observations": {
+    "preseal_rpc_sqlstate": "55000",
+    "preseal_receipts": 0,
+    "doc_put_exact_replay_equal": true,
+    "doc_put_changed_provider_request_sqlstate": "55000",
+    "doc_put_collision_preserved_original": true,
+    "doc_create_room_member": true,
+    "doc_create_existing_sqlstate": "55000",
+    "doc_delete_tombstone": true,
+    "log_append_exact_replay_rows": 1,
+    "non_room_member_append_sqlstate": "42501",
+    "effect_lane_doc_put_sqlstate": "42501",
+    "genesis_without_members_sqlstate": "42501",
+    "genesis_json_null_sqlstate": "42501",
+    "genesis_with_creator_membership": true,
+    "rejected_operation_receipts": 0,
+    "terminal_receipts_for_primary_root": 4,
+    "authenticated_rpc_grants": 4,
+    "forbidden_rpc_grants": 0
+  },
+  "advisors": {
+    "performance_findings": 0,
+    "security_scope": "Only the four intentional authenticated SECURITY DEFINER typed RPC warnings are attributable to this product migration. Remaining notices belong to the deliberately minimal scratch scaffold or earlier protocol acceptance objects."
+  },
+  "limits": [
+    "Management SQL used real authenticated role and auth.uid claims, but did not exercise PostgREST HTTP.",
+    "The scratch prerequisite migration did not reproduce the full product change-ledger trigger stack, so hosted evidence does not claim source-event parity.",
+    "Concurrent duplicate and seal ordering remain the disposable PostgreSQL 16 CI gate."
+  ]
+}
