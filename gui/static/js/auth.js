@@ -185,7 +185,10 @@ function renderAuthPage(force = false) {
       }
       // D5: the recovery code is shown ONCE — at signup, and on the first v2
       // sign-in of a migrated account (identity keys freshly minted)
-      if (r.recovery_code) await showRecoveryCode(r.recovery_code);
+      if (r.recovery_code) {
+        await showRecoveryCode(r.recovery_code);
+        confirmRecoveryCodeSaved();
+      }
       if (!sessionMayApply(acceptedTicket)) return;
       closeAuthPage();
       V.renderChats(true);
@@ -243,6 +246,19 @@ function showRecoveryCode(code) {
     ack.addEventListener("change", () => { goBtn.disabled = !ack.checked; });
     goBtn.addEventListener("click", () => { closeModal(); resolve(); });
   });
+}
+
+// A typed sign-up keeps the code on this machine until the user confirms it
+// was saved; until then sign-in and a restored session show it again.
+function confirmRecoveryCodeSaved() {
+  api("/api/mesh/recovery_code_saved", {}).catch(() => { /* shown again later */ });
+}
+
+async function showPendingRecoveryCode() {
+  const r = await api("/api/mesh/recovery_code", {});
+  if (!r?.recovery_code) return;
+  await showRecoveryCode(r.recovery_code);
+  confirmRecoveryCodeSaved();
 }
 
 // ---- V111 app lock — the locked screen -------------------------------------
@@ -388,6 +404,7 @@ function closeLockPage() {
 
 V.renderAuthPage = renderAuthPage;
 V.closeAuthPage = closeAuthPage;
+V.showPendingRecoveryCode = showPendingRecoveryCode;
 V.renderLockPage = renderLockPage;
 V.closeLockPage = closeLockPage;
 V.renderConnectingPage = renderConnectingPage;

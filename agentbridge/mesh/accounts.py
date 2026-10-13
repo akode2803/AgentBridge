@@ -125,10 +125,100 @@ class AccountsService:
             )
 
     # ------------------------------------------------------------- creation
-    @_identity_workflow
     def create_human(self, name: str, password: str, *, display: str = "") -> tuple[Account, str]:
         """Returns (account, recovery_code). The recovery code is shown ONCE:
-        forgotten password + lost code = history unreadable (D5)."""
+        forgotten password + lost code = history unreadable (D5).
+
+        A bound typed writer routes through the durable identity owner, which
+        keeps the code until the GUI confirms it was saved
+        (``recovery_code_saved``); the legacy path is otherwise unchanged."""
+        if self._typed_identity_writer() is not None:
+            return self._create_human_typed(name, password, display=display)
+        return self._create_human_legacy(name, password, display=display)
+
+    def _create_human_typed(self, name: str, password: str, *,
+                            display: str) -> tuple[Account, str]:
+        from .identity_dispatch import CREATED, NAME_TAKEN
+        from .identity_publication import prepare_human_identity
+
+        self._require_valid_name(name)
+        if len(password or "") < 6:
+            raise ValidationError("password must be at least 6 characters")
+
+        def prepare(root: str, actor_id: str):
+            # Minted only when no durable owner for this name exists. The
+            # provider's absent-CAS, not this local view, decides the name.
+            if self.directory.handle_taken(name):
+                raise ValidationError(f"@{name} is taken")
+            return prepare_human_identity(
+                owner_id=str(uuid4()), root=root, actor_id=actor_id, name=name,
+                password=password, display=display)
+
+        outcome = self.tx.create_human_identity(
+            name, prepare, keystore=self.keystore, directory=self.directory,
+            resume_allowed=lambda account: _password_matches(account, password))
+        if outcome.state == CREATED:
+            # The exact published document; the mirror may not show it yet.
+            return Account.from_dict(outcome.account), outcome.recovery_code
+        if outcome.state == NAME_TAKEN:
+            resumed = self._published_signup(name, password)
+            if resumed is not None:
+                return resumed
+            raise ValidationError(f"@{name} is taken")
+        raise TransportError(
+            f"@{name} is still being created ({outcome.state.replace('_', ' ')}); "
+            "retrying resumes the same account")
+
+    def _published_signup(self, name: str, password: str) -> tuple[Account, str] | None:
+        """This machine's own sign-up, completed before its code was shown.
+
+        The owner is gone once the account is published, so a retried sign-up
+        sees the name taken. It is ours when the code held here recovers the
+        published account's key, which this keystore holds, and the password
+        matches; then the same code is shown again.
+        """
+        code = self.keystore.pending_recovery_code(name)
+        bundle = self.keystore.load(name) if code is not None else None
+        if bundle is None:
+            return None
+        doc = self.tx.get_doc(P.user(name))
+        if not _password_matches(doc, password) or not self._recovers(doc, code, bundle):
+            return None
+        return Account.from_dict(doc), code
+
+    @staticmethod
+    def _recovers(doc, code: str, bundle: bytes) -> bool:
+        wrap = ((doc if isinstance(doc, dict) else {}).get("keys") or {}).get("recovery")
+        try:
+            return crypto.unwrap_bundle(wrap, code) == bundle
+        except (crypto.CryptoFail, TypeError, AttributeError):
+            return False
+
+    def pending_recovery_code(self) -> str | None:
+        """A held one-time code the signed-in user has not confirmed saving.
+
+        Shown again until confirmed. A code that no longer recovers the
+        published account is stale and dropped; an unreadable account keeps it.
+        """
+        code = self.keystore.pending_recovery_code(self.user)
+        if code is None:
+            return None
+        doc = self.tx.get_doc(P.user(self.user))
+        bundle = self.keystore.load(self.user)
+        if not isinstance(doc, dict) or bundle is None:
+            return None
+        if not self._recovers(doc, code, bundle):
+            self.keystore.release_recovery_code(self.user)
+            return None
+        return code
+
+    def recovery_code_saved(self) -> bool:
+        """The user confirmed saving the code shown to them: forget it here."""
+        return self.keystore.release_recovery_code(self.user)
+
+    @_identity_workflow
+    def _create_human_legacy(self, name: str, password: str, *,
+                             display: str = "") -> tuple[Account, str]:
         self._require_legacy_identity_owner()
         self._require_free(name)
         if len(password or "") < 6:

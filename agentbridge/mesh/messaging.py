@@ -132,10 +132,22 @@ class MessagingService:
 
     # ------------------------------------------------------------------ write
     def _admit_attachment_count(self, prepared: list[PreparedAttachment]) -> None:
+        """Reject a batch the typed consumer can never deliver before it is
+        queued: a durable row it refuses would retry forever and block every
+        later send to that target."""
+        problem = ""
         if len(prepared) > MAX_OUTBOX_ATTACHMENTS:
+            problem = "too many attachments for one message"
+        else:
+            blobs = [item.manifest.get("blob_id") for item in prepared
+                     if isinstance(item, PreparedAttachment)
+                     and isinstance(item.manifest, dict)]
+            if len(blobs) != len(set(map(str, blobs))):
+                problem = "the same attachment is included more than once"
+        if problem:
             if self.attachments is not None:
                 self.attachments.cancel(prepared)
-            raise ValidationError("too many attachments for one message")
+            raise ValidationError(problem)
 
     def post(
         self,

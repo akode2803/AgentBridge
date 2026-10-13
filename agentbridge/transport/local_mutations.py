@@ -231,6 +231,23 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return outcome
 
+    def create_human_identity(self, name, prepare, *, resume_allowed, keystore,
+                              directory):
+        """Resume or mint one human sign-up through the bound typed owner."""
+        from ..mesh.identity_dispatch import CREATED, create_human_identity
+
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        outcome = create_human_identity(
+            self._identity_owners(writer), writer.driver, keystore, directory,
+            name, prepare, resume_allowed=resume_allowed)
+        if self._bound_writer() is not writer:
+            raise ValueError('human identity writer changed')
+        if outcome.state == CREATED:
+            self._typed_success()
+        return outcome
+
     def recover_agent_identities(self, *, keystore, directory):
         """Resume durable identity owners of a bound writer; never opts in."""
         from ..mesh.identity_dispatch import AgentIdentityDispatcher
@@ -241,8 +258,13 @@ class LocalMutationTransport(Transport):
             return ()
         owners = self._identity_owners(writer)
         dispatcher = AgentIdentityDispatcher(owners, writer.driver, keystore, directory)
-        outcomes = tuple(dispatcher.run(owner_id)
-                         for owner_id in owners.owner_ids(OWNER_KIND))
+        outcomes = []
+        for owner_id in owners.owner_ids(OWNER_KIND):
+            try:
+                outcomes.append(dispatcher.run(owner_id))
+            except KeyError:
+                continue  # settled and reaped by a concurrent creation
+        outcomes = tuple(outcomes)
         if self._bound_writer() is not writer:
             raise ValueError('agent identity writer changed')
         if outcomes:

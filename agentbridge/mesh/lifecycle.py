@@ -278,9 +278,6 @@ def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
     raise LifecycleUnavailable("retained lifecycle head changed repeatedly")
 
 
-MAX_CHAIN = 256
-
-
 def canonical_bootstrap_id(directory, subject: str, *, store=None) -> str | None:
     """Return the bootstrap id that begins ``subject``'s canonical chain.
 
@@ -288,9 +285,17 @@ def canonical_bootstrap_id(directory, subject: str, *, store=None) -> str | None
     a bootstrap may begin a chain, so this identifies which bootstrap the
     canonical state descends from, even after later accepted changes. Returns
     None without any lifecycle; unreadable or inconsistent evidence raises.
+    A chain has no length limit, so the walk is bounded by the subject's
+    listed records: a longer walk can only be a cycle or missing evidence.
     """
     current = resolve_lifecycle(directory, subject, store=store)
-    for _hop in range(MAX_CHAIN):
+    if current is None:
+        return None
+    try:
+        records = len(directory.tx.list_docs(lifecycle_prefix(subject)))
+    except OSError as exc:
+        raise LifecycleUnavailable("lifecycle inventory is unavailable") from exc
+    for _hop in range(records + 1):
         if current is None:
             return None
         if not current["previous_id"]:

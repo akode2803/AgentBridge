@@ -209,6 +209,58 @@ releases), and deliberate breakage of each rule. After lifecycle opt-in,
 `ApplicationMutationWriter.submit` still deliberately refuses
 (`ticket_required`) until each such writer's binding is recoverable.
 
+## Human sign-up (inactive typed path, 2026-10-14)
+
+`join` (and the owner's `seed`) claim a username on a sealed root through
+`ab_mutation_member_claim` (`transport/member_claim.py`); an unsealed root keeps
+the legacy insert. The operation key is derived from root, account and
+username, so every retry and every rerun of `join` replays one exact operation
+and its receipt is always recoverable for acknowledgment. There is no local
+journal ticket: the CLI owns none, the installed member credential fixes the
+account, and an unacknowledged receipt blocks rotation, so a rerun observes the
+epoch that holds it. A fresh operation refused with `55000` re-reads the epoch
+(rotation) and then this account's own row (already a member) before reporting
+the name taken. `TypedMutationRPCError.code` now carries a provider reply's
+SQLSTATE/PostgREST code (never the message); no code means an unknown outcome.
+`revoke` refuses under a seal before any change: eviction needs a typed
+operator flow.
+
+With a bound writer, `AccountsService.create_human` freezes a
+`human_identity_create` owner: bundle, scrypt record, password and recovery
+wraps, a self-signed bootstrap and the plaintext recovery code. The dispatcher
+is the agent one with human hooks: pin without marking verified; a lost name
+race removes exactly the never-published key (the real owner's later sign-in on
+this machine must unlock theirs); creation moves the code to the keystore's
+holder before reaping. Refinement of Aryan's 2026-10-14 decision: the code
+cannot wait for display inside the owner, because an admitted owner blocks
+epoch adoption, so it waits in the keystore holder (same protection as the key
+it recovers) until the GUI confirms it was saved. Sign-in and restored sessions
+show it again until then; a held code that no longer recovers the account is
+dropped. A pending owner resumes only for the same password. A retry after
+publication that finds its own held code and key shows the same code instead of
+"taken".
+
+Owner transactions now run with `PRAGMA secure_delete=ON`, and reap/abandon
+truncate the WAL. Without this, the project's SQLite build left reaped private
+payloads (agent bundles too) readable in freed pages; tests fail when either
+is removed. Evidence: `tests/test_member_claim.py`, `tests/test_human_identity.py`,
+sealed-root cases in `tests/test_supabase_admin.py`, and the held-code GUI test.
+
+Codex review follow-ups (same round). Identity creation for one name is
+serialized on this machine (`KeyStore.creating`: a thread lock plus a
+cross-process `.create-<name>.lock`), so finding a pending owner, reading the
+provider and freezing a new one is a single step and two callers can never
+freeze different keys for one name. `IdentityDispatcher.abandon` drops only a
+prepared or full owner, first removing the exact never-published key, and the
+journal refuses to drop private material it was not shown. The canonical
+lifecycle walk is bounded by the subject's listed records instead of a fixed
+256 hops, so a long valid chain resolves and a cycle still fails closed. Every
+key-file writer (`install`, `save`, `forget`, recovery-code hold and release)
+takes the reentrant cross-process install lock; install also verifies the
+inode it published. Elsewhere in the stack, duplicate attachment blob IDs are
+rejected before the outbox commit (the typed consumer would refuse the row
+forever) and their spools cancelled.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.
@@ -236,7 +288,7 @@ releases), and deliberate breakage of each rule. After lifecycle opt-in,
    rediscoverable, ticketed after lifecycle opt-in and released once
    acknowledged; lifecycle writes first settle earlier exact creates for that
    subject. Minting keys for a keyless agent still requires an identity owner.
-   Next: migrate human creation, key rotation and
+   Human creation is done above. Next: key rotation and
    membership-bound wrapping, and terminal cleanup phases. Retain keys through
    unknown outcomes. Distinguish pre-existing namespace weaknesses from new
    migration regressions.

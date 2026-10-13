@@ -1,5 +1,31 @@
 # Cloud source handoff
 
+## 2026-10-14 typed human sign-up
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Human sign-up now
+has its typed path, inactive like the rest until activation:
+
+- `supabase_admin join`/`seed` claim through `ab_mutation_member_claim` on a
+  sealed root (deterministic operation key; reruns replay exactly and finish
+  the ACK); unsealed roots keep the legacy insert; `revoke` refuses under a
+  seal before changing anything.
+- Bound `AccountsService.create_human` runs a `human_identity_create` owner
+  through the generalized identity dispatcher; the recovery code moves to the
+  keystore holder at publication and is released when the GUI confirms it was
+  saved (new `/api/mesh/recovery_code` and `/api/mesh/recovery_code_saved`;
+  sign-in and restored sessions re-show it).
+- Owner transactions use `secure_delete` and reap/abandon truncate the WAL:
+  reaped private payloads were previously recoverable from the root database.
+- Codex review fixes: per-name identity-creation lock, exact-key `abandon`,
+  inventory-bounded lifecycle walk, `KeyStore.save`/`forget` inside the
+  install lock, duplicate attachment blob IDs rejected before enqueue.
+
+Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Human sign-up". Ledger:
+BACKLOG.md "Typed-writer migration ledger" (new deferrals: sealed `revoke`,
+bound migrated-account login upgrade). Next: chat-key rotation owner, terminal
+flows, then disposable migration acceptance on Scratch and stack
+consolidation. No production schema change, activation or merge.
+
 ## 2026-10-13 admission cancellation, settlement and nonmember bound
 
 Claude Opus took over as lead engineer; the main checkout now holds

@@ -49,6 +49,31 @@ def test_signup_login_logout(rig):
     assert ok["ok"] and "recovery_code" not in ok  # keys already exist
 
 
+def test_held_recovery_code_is_shown_again_until_confirmed(rig):
+    """A typed sign-up keeps its code until the GUI confirms it was saved
+    (simulated here by holding the code the legacy sign-up returned)."""
+    code = rig.signup()["recovery_code"]
+    rig.app.mesh.keystore.hold_recovery_code("aryan", code)
+    # The sign-up response already showed it: a poll never fetches a copy.
+    assert rig.post("/api/mesh/recovery_code") == {"ok": True, "recovery_code": None}
+    assert rig.post("/api/mesh/logout", password="hexagon")["ok"]
+    assert "error" in rig.post("/api/mesh/recovery_code")      # signed out
+    again = rig.post("/api/mesh/login", username="aryan", password="hexagon")
+    assert again["ok"] and again["recovery_code"] == code
+    assert rig.post("/api/mesh/recovery_code")["recovery_code"] is None
+    # A restarted process restores the session and shows it once.
+    rig.app._recovery_offered.clear()
+    assert rig.post("/api/mesh/recovery_code")["recovery_code"] == code
+    assert rig.post("/api/mesh/recovery_code")["recovery_code"] is None
+    assert rig.post("/api/mesh/recovery_code_saved") == {"ok": True, "released": True}
+    rig.app._recovery_offered.clear()
+    assert rig.post("/api/mesh/recovery_code")["recovery_code"] is None
+    # A held code that no longer recovers the account is dropped, not shown.
+    rig.app.mesh.keystore.hold_recovery_code("aryan", "00000-00000-00000-00000")
+    assert rig.post("/api/mesh/recovery_code")["recovery_code"] is None
+    assert rig.app.mesh.keystore.pending_recovery_code("aryan") is None
+
+
 def test_login_refused_while_signed_in(rig):
     """V130 (V124's twin): login swapped the session — and claimed this
     machine's agents — needing only the CALLER's own credentials. Now it

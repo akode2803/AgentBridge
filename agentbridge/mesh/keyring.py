@@ -45,6 +45,12 @@ __all__ = ["KeyStore", "ChatKeyService"]
 # All cooperating KeyStore instances participate; external writers are observed
 # by bounded content reads, not excluded by this process-local lock.
 _KEYSTORE_LOCK = threading.RLock()
+# Per (keys directory, name) identity-creation locks: reentrant in a thread,
+# and each outermost holder also holds that name's cross-process file lock.
+_CREATION_LOCKS: dict[tuple[str, str], list] = {}
+# Per keys directory install-lock depth. Every holder also holds
+# _KEYSTORE_LOCK, so one thread at a time can nest without self-deadlock.
+_INSTALL_DEPTH: dict[str, int] = {}
 _INSTALL_NAME = re.compile(r"[a-z][a-z0-9_-]{1,31}\Z", re.ASCII)
 _MAX_KEY_FILE_BYTES = 64 * 1024
 
@@ -118,6 +124,31 @@ class KeyStore:
     def _path(self, name: str) -> Path:
         return self.dir / f"{name}.key"
 
+    @contextmanager
+    def _install_lock(self):
+        """Hold this directory's cross-process key-install lock.
+
+        Every writer of a key file (install, save, forget, recovery codes)
+        holds it, so no cooperating process can replace a key between another
+        writer's check and its publication. Reentrant within the keystore lock.
+        """
+        with _KEYSTORE_LOCK:
+            key = str(self.dir.resolve())
+            depth = _INSTALL_DEPTH.get(key, 0)
+            if depth:
+                _INSTALL_DEPTH[key] = depth + 1
+                try:
+                    yield
+                finally:
+                    _INSTALL_DEPTH[key] -= 1
+                return
+            with _private_install_lock(self.dir / ".identity-install.lock"):
+                _INSTALL_DEPTH[key] = 1
+                try:
+                    yield
+                finally:
+                    _INSTALL_DEPTH.pop(key, None)
+
     def install_if_absent_or_identical(self, name: str, bundle: bytes) -> bool:
         """Durably install one identity, or accept its exact prior installation.
 
@@ -135,7 +166,7 @@ class KeyStore:
             # The key directory itself may have been created this call. Flush
             # its entry before treating any contained key as durable.
             _sync_directory(self.dir.parent)
-            with _private_install_lock(self.dir / ".identity-install.lock"):
+            with self._install_lock():
                 try:
                     current = path.lstat()
                 except FileNotFoundError:
@@ -221,6 +252,10 @@ class KeyStore:
                     except FileExistsError as exc:
                         raise LocalSecurityError(
                             "identity key appeared during install") from exc
+                    staged, published = temp_path.lstat(), path.lstat()
+                    if ((staged.st_dev, staged.st_ino) !=
+                            (published.st_dev, published.st_ino)):
+                        raise LocalSecurityError("identity key changed during install")
                     temp_path.unlink()
                     tmp_name = ""
                     verify_private_path(path, directory=False)
@@ -254,8 +289,9 @@ class KeyStore:
             # atomic replace: load() upgrades legacy files in place, so a
             # concurrent reader must never see a half-written key file
             tmp = self._path(name).with_suffix(".key.tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, self._path(name))
+            with self._install_lock():
+                tmp.write_text(text, encoding="utf-8")
+                os.replace(tmp, self._path(name))
 
     def load(self, name: str, *, upgrade: bool = True) -> bytes | None:
         with _KEYSTORE_LOCK:
@@ -276,7 +312,136 @@ class KeyStore:
 
     def forget(self, name: str) -> None:
         with _KEYSTORE_LOCK:
-            self._path(name).unlink(missing_ok=True)
+            if not self.dir.is_dir():
+                return
+            with self._install_lock():
+                self._path(name).unlink(missing_ok=True)
+
+    @contextmanager
+    def creating(self, name: str):
+        """Serialize creating identity ``name`` on this machine.
+
+        Finding a pending creation, reading the provider and freezing a new
+        one must be one step, or two callers could each freeze different keys
+        for the same name. Reentrant within a thread; other threads and
+        processes wait (a busy file lock fails closed after its bound).
+        """
+        if type(name) is not str or not _INSTALL_NAME.fullmatch(name):
+            raise ValueError("invalid identity name")
+        with _KEYSTORE_LOCK:
+            private_directory(self.dir)
+            key = (str(self.dir.resolve()), name)
+            entry = _CREATION_LOCKS.setdefault(key, [threading.RLock(), 0])
+        with entry[0]:
+            if entry[1]:
+                entry[1] += 1
+                try:
+                    yield
+                finally:
+                    entry[1] -= 1
+                return
+            with _private_install_lock(self.dir / f".create-{name}.lock"):
+                entry[1] = 1
+                try:
+                    yield
+                finally:
+                    entry[1] = 0
+
+    def forget_if_identical(self, name: str, bundle: bytes) -> bool:
+        """Remove ``name``'s key only if it is exactly ``bundle``.
+
+        For a key proven never published; any other key stays untouched.
+        """
+        if type(name) is not str or not _INSTALL_NAME.fullmatch(name):
+            raise ValueError("invalid identity name")
+        if type(bundle) is not bytes or len(bundle) != 64:
+            raise ValueError("invalid identity bundle")
+        with _KEYSTORE_LOCK:
+            if not self.dir.is_dir():
+                return False
+            with self._install_lock():
+                current = self.load(name, upgrade=False)
+                if current is None or not hmac.compare_digest(current, bundle):
+                    return False
+                self._path(name).unlink()
+                _sync_directory(self.dir)
+                return True
+
+    # One-time recovery codes awaiting display. A typed sign-up publishes the
+    # account before the GUI can show its code, so the code is kept here, with
+    # the same protection as the key it recovers, until the user confirms it.
+    def _recovery_path(self, name: str) -> Path:
+        if type(name) is not str or not _INSTALL_NAME.fullmatch(name):
+            raise ValueError("invalid identity name")
+        return self.dir / f"{name}.recovery"
+
+    def hold_recovery_code(self, name: str, code: str) -> None:
+        """Durably keep ``code`` until released; the identical code is a no-op."""
+        path = self._recovery_path(name)
+        if type(code) is not str or not code or len(code) > 64:
+            raise ValueError("invalid recovery code")
+        with _KEYSTORE_LOCK:
+            private_directory(self.dir)
+            _sync_directory(self.dir.parent)
+            with self._install_lock():
+                held = self.pending_recovery_code(name)
+                if held is not None:
+                    if not hmac.compare_digest(held, code):
+                        raise ValueError("a different recovery code is held")
+                    return
+                raw = code.encode("utf-8")
+                wrapped = dpapi.protect(raw) if dpapi.available() else None
+                text = (self._WRAPPED + crypto.b64e(wrapped) if wrapped is not None
+                        else crypto.b64e(raw))
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=self.dir)
+                try:
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fd, 0o600)
+                    with os.fdopen(fd, "wb") as stream:
+                        fd = -1
+                        stream.write(text.encode("utf-8"))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    protect_path(Path(tmp_name), directory=False)
+                    os.replace(tmp_name, path)
+                    tmp_name = ""
+                    verify_private_path(path, directory=False)
+                    _sync_directory(self.dir)
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+                    if tmp_name:
+                        Path(tmp_name).unlink(missing_ok=True)
+
+    def pending_recovery_code(self, name: str) -> str | None:
+        path = self._recovery_path(name)
+        with _KEYSTORE_LOCK:
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except (FileNotFoundError, OSError):
+                return None
+            try:
+                if text.startswith(self._WRAPPED):
+                    raw = dpapi.unprotect(crypto.b64d(text[len(self._WRAPPED):]))
+                else:
+                    raw = crypto.b64d(text)
+                return raw.decode("utf-8") if raw else None
+            except (ValueError, OSError, UnicodeError):
+                return None
+
+    def release_recovery_code(self, name: str) -> bool:
+        """Forget a held code once shown; False when none was held."""
+        path = self._recovery_path(name)
+        with _KEYSTORE_LOCK:
+            if not self.dir.is_dir():
+                return False
+            with self._install_lock():
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    return False
+                _sync_directory(self.dir)
+                return True
 
 
 class ChatKeyService:

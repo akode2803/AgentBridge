@@ -210,8 +210,10 @@ def test_different_local_key_fails_before_any_provider_call(identity_world):
         dispatcher.run(artifact.owner_id)
     assert provider.calls == []
     assert dispatcher.owners.get(artifact.owner_id).state == "prepared"
-    assert dispatcher.owners.abandon(artifact.owner_id) is True
+    other = dispatcher.keystore.load("worker")
+    assert dispatcher.abandon(artifact.owner_id) is True
     assert dispatcher.owners.get(artifact.owner_id) is None
+    assert dispatcher.keystore.load("worker") == other  # never someone else's
 
 
 def test_full_admission_keeps_draft_until_rotation_then_creates(identity_world):
@@ -276,6 +278,35 @@ def test_canonical_bootstrap_survives_later_accepted_change(identity_world):
         lifecycle.resolve_lifecycle = original
     # Without its bootstrap no chain is valid, so nothing descends from ours.
     assert lifecycle.canonical_bootstrap_id(dispatcher.directory, "worker") is None
+
+
+def test_canonical_walk_follows_any_valid_chain_length(identity_world):
+    dispatcher, provider, artifact, record, owner_bundle = identity_world
+    dispatcher.run(artifact.owner_id)
+    first = artifact.bootstrap["record"]
+    previous = first
+    for step in range(300):  # Longer than any fixed hop budget once used.
+        ns = previous["ns"] + 1
+        change = {**previous, "id": f"life-{ns}-{step:08x}", "ns": ns,
+                  "action": "state", "previous_id": previous["id"]}
+        provider.docs.docs[f"lifecycle/worker/{change['id']}.json"] = {
+            "record": change, "sig": crypto.sign(owner_bundle, canonical_json_bytes(change)),
+            "subject_sig": ""}
+        previous = change
+    assert lifecycle.resolve_lifecycle(dispatcher.directory, "worker")["id"] == previous["id"]
+    assert lifecycle.canonical_bootstrap_id(dispatcher.directory, "worker") == first["id"]
+    # A cycle can never outrun the listed inventory.
+    loop = {**previous, "previous_id": previous["id"]}
+    original = lifecycle.resolve_lifecycle
+    try:
+        lifecycle.resolve_lifecycle = lambda *a, **k: loop
+        provider.docs.docs[f"lifecycle/worker/{previous['id']}.json"]["record"] = loop
+        provider.docs.docs[f"lifecycle/worker/{previous['id']}.json"]["sig"] = crypto.sign(
+            owner_bundle, canonical_json_bytes(loop))
+        with pytest.raises(lifecycle.LifecycleUnavailable, match="exceeds its bound"):
+            lifecycle.canonical_bootstrap_id(dispatcher.directory, "worker")
+    finally:
+        lifecycle.resolve_lifecycle = original
 
 
 def test_reap_requires_the_exact_retained_private_material(identity_world):

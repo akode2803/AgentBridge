@@ -59,8 +59,25 @@ _EFFECT_PATH = re.compile(
 _MAX_JSON_BYTES = 8_355_840
 
 
+_PROVIDER_CODE = re.compile(r"[0-9A-Z]{5}|PGRST[0-9]{3}")
+
+
 class TypedMutationRPCError(RuntimeError):
-    """A single typed RPC failed or its identity/response was unsafe."""
+    """A single typed RPC failed or its identity/response was unsafe.
+
+    ``code`` is the SQLSTATE or PostgREST code of a provider error reply, whose
+    request transaction rolled back. None means no such reply: the outcome of
+    the call is unknown, or the failure was local. Messages are never retained.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _provider_code(exc: BaseException) -> str | None:
+    code = getattr(exc, "code", None)
+    return code if type(code) is str and _PROVIDER_CODE.fullmatch(code) else None
 
 
 def _canonical(value: object) -> bytes:
@@ -453,9 +470,10 @@ class TypedMutationRPC:
             raw = builder.execute().data
         except TypedMutationRPCError:
             raise
-        except Exception:
+        except Exception as exc:
             self._check_identity()
-            raise TypedMutationRPCError("typed mutation RPC failed") from None
+            raise TypedMutationRPCError("typed mutation RPC failed",
+                                        code=_provider_code(exc)) from None
         self._check_identity()
         return raw
 

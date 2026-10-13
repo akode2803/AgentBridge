@@ -186,6 +186,25 @@ class MutationCoordinator:
                     if sidecar.exists() or sidecar.is_symlink():
                         raise
 
+    def truncate_wal(self):
+        """Best-effort: checkpoint and empty the WAL after private deletes.
+
+        Page images of deleted private material otherwise stay in the WAL
+        until it is reused. Busy readers leave it for a later truncation.
+        """
+        self._private_files()
+        try:
+            conn = sqlite3.connect(f'{self.path.as_uri()}?mode=rw', uri=True, timeout=1.0)
+        except sqlite3.Error:
+            return False
+        try:
+            busy, _log, _done = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+            return busy == 0
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+
     @contextmanager
     def _transaction(self, *, create=False, timeout_s=1.0):
         self._private_files(create=create)

@@ -128,6 +128,32 @@ def test_attachment_leg_limit_rejects_before_local_outbox_commit_and_cancels_spo
     assert ann.messages_for(CHAT) == []
 
 
+@pytest.mark.parametrize("direct_commit", [False, True])
+def test_duplicate_attachment_rejects_before_local_outbox_commit_and_cancels_spool(
+        world, monkeypatch, direct_commit):
+    ann = world["ann"]
+    prepared = ann.prepare_attachment(CHAT, "twice.txt", b"one blob")
+    other = ann.prepare_attachment(CHAT, "other.txt", b"another blob")
+    spools = [ann.attachments.root / item.record["id"] for item in (prepared, other)]
+    assert all(spool.is_file() for spool in spools)
+    monkeypatch.setattr(
+        ann.store, "cache_and_outbox_add",
+        lambda *_args, **_kwargs: pytest.fail("duplicate attachment reached outbox"))
+    batch = [prepared, other, prepared]
+
+    with pytest.raises(ValidationError, match="more than once"):
+        if direct_commit:
+            ann.messaging.commit_envelope(
+                CHAT, ann.messaging.build_event(CHAT, {"type": "renamed"}),
+                attachments=batch)
+        else:
+            ann.post(CHAT, "twice", attachments=batch)
+
+    assert not any(spool.exists() for spool in spools)
+    assert ann.store.outbox_counts() == {}
+    assert ann.messages_for(CHAT) == []
+
+
 def test_attachment_cleanup_failure_does_not_block_local_append_settlement(
         world, monkeypatch):
     ann = world['ann']

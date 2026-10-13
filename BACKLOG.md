@@ -20,12 +20,55 @@ moment it is made, so a large task list never lives only in conversation.
   writes skip admission; closure + durable-receipt-before-ACK proves ticketed
   unreceipted attempts unexecuted. `394bebe`/`b13ba66`; PostgreSQL gate and
   full local suite passed. Rationale: docs/PROVIDER_ADMISSION_CHECKPOINT.md.
-- [ ] **Human sign-up typed migration** (Aryan, 2026-10-14, next task):
-  `supabase_admin join` must claim via typed `ab_mutation_member_claim` (the
-  seal blocks its direct `ab_members` insert), journaled under a deterministic
-  key; `create_human` gets a human identity owner (account + self-signed
-  bootstrap). Decision: the plaintext recovery code is retained in the local
-  private owner payload until the account is published and shown, then wiped.
+- [x] **Human sign-up typed migration** (Aryan, 2026-10-14): `join`/`seed`
+  claim on a sealed root via typed `ab_mutation_member_claim` under a
+  deterministic key (root, account, username); every rerun replays it exactly
+  (no local journal ticket: the CLI owns none and an unacked receipt blocks
+  rotation). Bound `create_human` uses a `human_identity_create` owner
+  (account + self-signed bootstrap). Decision refinement: the recovery code
+  sits in the owner payload until publication, then in the keystore holder
+  (an admitted owner would block epoch adoption) until the GUI confirms it was
+  saved; sign-in and restored sessions re-show it. Owner deletes now use
+  `secure_delete` + WAL truncation (reaped payloads were readable before).
+  Rationale/evidence: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Human sign-up".
+- [x] **Codex review sweep, 2026-10-14** (rule: read Codex PR comments before
+  every round close). Fixed this round, each with a regression test that fails
+  without the fix: #146 4260628805 (P1: identity creation is serialized per
+  name, agent and human, by `KeyStore.creating` — thread RLock plus a
+  cross-process `.create-<name>.lock`), 4260628817 (dispatcher `abandon`
+  removes the exact never-published key, and the journal refuses to drop
+  private material it was not shown), 4260628829 (the canonical-chain walk is
+  bounded by the subject's listed records, not 256 hops); #145 4259098040
+  (`save`, `forget` and recovery-code release take the reentrant cross-process
+  install lock; install also verifies its published inode), 4259098049
+  (duplicate attachment blob IDs are rejected before enqueue and the spools
+  cancelled). Already resolved: #146 4259225793
+  (`225ee5b`; under Option B an unadmitted claim spends a slot only when a
+  membership commits, so it is bounded like any member's writes), earlier
+  #145/#144/#143/#142/#140 rounds, #133 (last review clean). Codex hit its
+  quota after #146 15:28Z, so `394bebe` onward is unreviewed by Codex.
+- [D] **#145 4259098058 stable append ID across typed owners**: unreachable
+  today (every `commit_envelope` caller mints a fresh envelope ID; messages are
+  PK-guarded in `local_send_status`); revisit if any caller re-commits one.
+- [ ] **#135 PostgreSQL gate coverage**: probe `ab_mutation_protocol_ready()`
+  under a bounded `statement_timeout`; a REPEATABLE READ writer against the
+  seal; seed legacy roots before installing the protocol (backfill); reject
+  seal replays with a different seal ID or plan digest. CI validates the gate.
+- [ ] **Watch: Windows WinError 10053 on rejected node POSTs** (Aryan asked
+  about #142's red Windows job, 2026-10-14). #142-#144 predate the
+  `_discard_rejected_body` fix (`12325b4`, on #145+), so the flake is expected
+  there and is cured by consolidating the stack. Remaining risk: `http.client`
+  sends headers and body in separate writes, so Nagle plus Windows delayed ACK
+  can hold the body longer than the 100 ms discard window; widen it (still
+  bounded by the 2 s socket timeout) if the error recurs on #145 or later.
+- [ ] **Supabase connector**: installed but `pending` in the 2026-10-14
+  session (no tools). Once connected it can run Scratch migration acceptance
+  (confirm before applying); never production; never the destructive gate.
+- [D] **`revoke` under a seal** (2026-10-14): refuses before any change;
+  eviction needs a typed operator flow (and the key-rotation owner).
+- [ ] **Bound migrated-account login upgrade**: `upgrade_login` (pbkdf2 →
+  scrypt, keys minted for a keyless v1 account) still refuses under a bound
+  writer; it needs the human identity owner's material path.
 - [D] **Fold `join` into in-app sign-up** (Aryan, 2026-10-14): deferred to the
   setup/account overhaul, which also retires `legacy/bridge.py`.
 - [ ] **Chat-key rotation owner** binding membership and key versions
@@ -37,9 +80,11 @@ moment it is made, so a large task list never lives only in conversation.
 - [ ] **Bound generic submits after lifecycle opt-in**: `put_doc`/`create_doc`/
   `delete_doc`/effects/`append_log` via `ApplicationMutationWriter.submit`
   refuse (`ticket_required`) until each writer's binding is recoverable.
-- [ ] **Identity owner UX**: surface `full`/`canonical_pending` agent creations
-  and offer `abandon`; a stale local pin conflict leaves a published agent
-  pending until resolved.
+- [ ] **Identity owner UX**: surface `full`/`canonical_pending` agent and human
+  creations and offer `abandon` (the dispatcher method exists: prepared/full
+  owners only, exact unpublished key removed); a stale local pin conflict
+  leaves a published identity pending until resolved. An unpublished human
+  draft keeps its recovery code in the owner payload until abandoned.
 - [D] **Operator eviction of never-settled member legs** (deferred 2026-10-13):
   pre-existing receipt-ACK parity; would need retained lineage.
 - [ ] Optional: typed `full` result from execute (UX only, not safety); measure

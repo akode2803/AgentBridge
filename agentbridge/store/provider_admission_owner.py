@@ -35,7 +35,9 @@ MAX_LEGS = 4096
 MAX_OWNER_BYTES = 16 * 1024 * 1024
 MAX_PRIVATE_PAYLOAD_BYTES = 256 * 1024
 _STATES = frozenset(("prepared", "admission_attempted", "full", "admitted"))
-_OWNER_KINDS = frozenset(("generic", "agent_identity_create"))
+_OWNER_KINDS = frozenset(("generic", "agent_identity_create", "human_identity_create"))
+# Kinds whose private payload is identity material and never empty.
+_IDENTITY_KINDS = frozenset(("agent_identity_create", "human_identity_create"))
 # Provider cancellation protocol of one leg. ``requested`` is durable before the
 # RPC; ``executed`` routes recovery to the exact existing receipt.
 _CANCEL = frozenset(("none", "requested", "cancelled", "executed", "acknowledged"))
@@ -106,9 +108,10 @@ def audit_admissions(conn, *, required: bool) -> None:
         "typeof(state)!='text' OR state NOT IN "
         "('prepared','admission_attempted','full','admitted') OR "
         "typeof(owner_kind)!='text' OR owner_kind NOT IN "
-        "('generic','agent_identity_create') OR "
+        "('generic','agent_identity_create','human_identity_create') OR "
         "typeof(private_payload)!='blob' OR length(private_payload)>262144 OR "
-        "(owner_kind='agent_identity_create' AND length(private_payload)=0) OR "
+        "(owner_kind IN ('agent_identity_create','human_identity_create') "
+        "AND length(private_payload)=0) OR "
         "typeof(plan)!='blob' OR length(plan)>524288 LIMIT 1"
     ).fetchone():
         _fail("owner_invalid")
@@ -291,6 +294,7 @@ def rebase_closed_drafts(conn, journal: OperationJournal, closed_epoch: str,
 
     from ..transport.typed_mutations import prepare_mutation
 
+    conn.execute("PRAGMA secure_delete=ON")  # rewrites private owner rows
     owners = conn.execute(
         "SELECT owner_id FROM typed_admission_owners WHERE protocol_epoch=? "
         "ORDER BY owner_id", (closed_epoch,),
@@ -393,6 +397,9 @@ class ProviderAdmissionOwnerJournal:
             journal._check(conn)
 
     def _check(self, conn) -> None:
+        # Owner rows carry private identity material. Freed copies (a delete,
+        # or a row rewritten by a state change) are zeroed, not left in pages.
+        conn.execute("PRAGMA secure_delete=ON")
         self.journal._check(conn)
         if conn.execute(
             "SELECT format FROM mutation_root WHERE singleton=1"
@@ -432,7 +439,7 @@ class ProviderAdmissionOwnerJournal:
             raise ValueError("invalid admission owner kind")
         if (type(private_payload) is not bytes
                 or len(private_payload) > MAX_PRIVATE_PAYLOAD_BYTES
-                or owner_kind == "agent_identity_create" and not private_payload):
+                or owner_kind in _IDENTITY_KINDS and not private_payload):
             raise ValueError("invalid admission private payload")
         prepared = tuple(islice(requests, 1026))
         plan = prepare_admission_plan(owner_id, prepared)
@@ -747,14 +754,19 @@ class ProviderAdmissionOwnerJournal:
             self._check(conn)
             return len(completed) + cancelled
 
-    def abandon(self, owner_id: str) -> bool:
+    def abandon(self, owner_id: str, *, private_payload: bytes = b"") -> bool:
         """Delete a draft the provider never admitted; False when absent.
 
         Only ``prepared`` (never sent) and ``full`` (the provider holds no
         reservation, and in-epoch occupancy never shrinks) qualify. An
         ambiguous owner must first resolve by exact replay or epoch closure.
+        Like ``reap``, an owner carrying private material is abandoned only by
+        its domain consumer, which passes the exact bytes after releasing what
+        it installed from them (an identity owner's unpublished key).
         """
         _uuid(owner_id, "admission owner")
+        if type(private_payload) is not bytes:
+            raise TypeError("invalid consumed private payload")
         with self.journal.coordinator._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
             self._check(conn)
             record = self._find(conn, owner_id)
@@ -762,11 +774,14 @@ class ProviderAdmissionOwnerJournal:
                 return False
             if record.state not in ("prepared", "full"):
                 _fail("owner_not_abandonable")
+            if record.private_payload != private_payload:
+                _fail("private_material_unsettled")
             conn.execute("DELETE FROM typed_admission_legs WHERE owner_id=?", (owner_id,))
             conn.execute("DELETE FROM typed_admission_owners WHERE owner_id=?", (owner_id,))
             self.journal.coordinator._advance_root_revision(conn)
             self._check(conn)
-            return True
+        self.journal.coordinator.truncate_wal()
+        return True
 
     def reap(self, owner_id: str, *, private_payload: bytes = b"") -> bool:
         """Delete a fully settled owner; returns False when already absent.
@@ -806,7 +821,8 @@ class ProviderAdmissionOwnerJournal:
             conn.execute("DELETE FROM typed_admission_owners WHERE owner_id=?", (owner_id,))
             self.journal.coordinator._advance_root_revision(conn)
             self._check(conn)
-            return True
+        self.journal.coordinator.truncate_wal()
+        return True
 
 
 __all__ = [

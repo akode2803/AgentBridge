@@ -139,6 +139,10 @@ class GuiApp:
         if callable(warm):
             warm()
         self._lock = threading.RLock()
+        # Users whose held recovery code was already handed out by this
+        # process (sign-up/sign-in responses or recovery_code_offer).
+        self._recovery_offered: set[str] = set()
+        self._recovery_lock = threading.Lock()
         self._sync_thread: threading.Thread | None = None
         self._node_activation_thread: threading.Thread | None = None
         self._teardown_mesh: Mesh | None = None
@@ -477,6 +481,9 @@ class GuiApp:
             except Exception:
                 mesh.close()  # release the half-built facade
                 raise
+            # Before the session is visible, so a poll cannot fetch a second
+            # copy while this response's copy is on screen.
+            self._note_recovery_offered(name)
             self._adopt(mesh)
             out = {"ok": True, "user": name, "recovery_code": code}
             if include_binding:
@@ -531,6 +538,14 @@ class GuiApp:
             raise ValidationError("Wrong username or password")
         # first v2 sign-in of a migrated account: scrypt + identity keys
         code = mesh.accounts.upgrade_login(name, password)
+        if not code:
+            try:
+                # a typed sign-up's code the user never confirmed saving
+                code = mesh.accounts.pending_recovery_code()
+            except Exception:  # noqa: BLE001 — never block sign-in on it
+                code = None
+        if code:
+            self._note_recovery_offered(name)
         if mesh.keystore.load(name) is None:
             mesh.accounts.unlock(password)  # new machine: unwrap + cache
         try:
@@ -548,6 +563,30 @@ class GuiApp:
             out["session_binding"] = (
                 session_read_binding(token) if token is not None else None)
         return out
+
+    def _note_recovery_offered(self, user: str) -> None:
+        with self._recovery_lock:
+            self._recovery_offered.add(user)
+
+    def recovery_code_offer(self, mesh) -> str | None:
+        """A held one-time recovery code, handed out at most once per process
+        for its user: a session restored before the user confirmed saving it
+        shows it again, but a fresh sign-up or sign-in already showed it."""
+        user = mesh.user
+        with self._recovery_lock:
+            if user in self._recovery_offered:
+                return None
+            self._recovery_offered.add(user)
+        try:
+            code = mesh.accounts.pending_recovery_code()
+        except Exception:
+            with self._recovery_lock:
+                self._recovery_offered.discard(user)
+            raise
+        if code is None:
+            with self._recovery_lock:
+                self._recovery_offered.discard(user)
+        return code
 
     def logout(self, password: str = "", *, include_binding: bool = False) -> dict:
         """V68: signing out requires the member's password. The machine-claim

@@ -218,3 +218,64 @@ def test_two_processes_cannot_install_different_bundles(tmp_path):
     assert [outcome[0] for outcome in outcomes].count("ok") == 1
     assert [outcome[0] for outcome in outcomes].count("ValueError") == 1
     assert KeyStore(tmp_path).load("alice") in (first, second)
+
+
+def test_install_rejects_key_replaced_after_publication(tmp_path, monkeypatch):
+    store = KeyStore(tmp_path)
+    competitor = crypto.generate_identity()
+    real_link = keyring.os.link
+
+    def replaced_after_link(src, dst, **kwargs):
+        real_link(src, dst, **kwargs)
+        # A non-cooperating writer replaces the key right after publication.
+        other = Path(dst).with_suffix(".other")
+        other.write_text(crypto.b64e(competitor), encoding="ascii")
+        os.replace(other, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(keyring.os, "link", replaced_after_link)
+        with pytest.raises(LocalSecurityError, match="changed during install"):
+            store.install_if_absent_or_identical("alice", crypto.generate_identity())
+    assert store.load("alice") == competitor
+
+
+def test_save_and_forget_wait_for_another_holder_of_the_install_lock(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as Pending
+
+    store = KeyStore(tmp_path)
+    first, second = crypto.generate_identity(), crypto.generate_identity()
+    assert store.install_if_absent_or_identical("alice", first) is True
+    key_file = store._path("alice")
+    # A separate open of the lock file contends like another process would.
+    # (Read the file directly: the waiting writer holds the in-process lock.)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        before = key_file.read_bytes()
+        with keyring._private_install_lock(store.dir / ".identity-install.lock"):
+            saving = pool.submit(store.save, "alice", second)
+            with pytest.raises(Pending):
+                saving.result(timeout=0.3)
+            assert key_file.read_bytes() == before
+        saving.result(timeout=5)
+        assert store.load("alice", upgrade=False) == second
+        before = key_file.read_bytes()
+        with keyring._private_install_lock(store.dir / ".identity-install.lock"):
+            forgetting = pool.submit(store.forget, "alice")
+            with pytest.raises(Pending):
+                forgetting.result(timeout=0.3)
+            assert key_file.read_bytes() == before
+        forgetting.result(timeout=5)
+    assert store.load("alice") is None
+
+
+def test_install_lock_is_reentrant_for_nested_key_writes(tmp_path):
+    store = KeyStore(tmp_path)
+    bundle = crypto.generate_identity()
+    assert store.install_if_absent_or_identical("alice", bundle) is True
+    with store._install_lock():
+        store.save("bob", bundle)
+        assert store.forget_if_identical("bob", bundle) is True
+        store.hold_recovery_code("alice", "CODE-1234")
+        assert store.release_recovery_code("alice") is True
+    assert keyring._INSTALL_DEPTH == {}
+    assert store.load("bob") is None
+    assert store.load("alice") == bundle
