@@ -39,6 +39,7 @@ _SCHEMA = {
     'mutation_scopes': 'CREATE TABLE mutation_scopes(token TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(token,kind,value))',
 }
 _V4_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=4')
+_V5_ROOT_SCHEMA = _SCHEMA['mutation_root'].replace('format=3', 'format=5')
 _V1_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
                    'CHECK(singleton=1),identity TEXT NOT NULL,epoch TEXT NOT NULL)')
 _V2_ROOT_SCHEMA = ('CREATE TABLE mutation_root(singleton INTEGER PRIMARY KEY '
@@ -80,6 +81,8 @@ class MutationRecoveryInventory:
 
 
 def _overlap(left, right):
+    if left.kind == 'root_all' or right.kind == 'root_all':
+        return True
     if left.kind == 'log_chat' or right.kind == 'log_chat':
         return left.kind == right.kind and left.value == right.value
     if left.kind == right.kind == 'doc_exact':
@@ -215,10 +218,11 @@ class MutationCoordinator:
         if conn.execute(f"SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN ({','.join('?' for _ in tables)}) LIMIT 1", tables).fetchone():
             raise owner.SourceChanged('unexpected_mutation_trigger')
         root_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='mutation_root'").fetchone()
-        journal_format = root_sql == (_V4_ROOT_SCHEMA,)
+        root_all_format = root_sql == (_V5_ROOT_SCHEMA,)
+        journal_format = root_all_format or root_sql == (_V4_ROOT_SCHEMA,)
         expected_schema = {**_SCHEMA, **_QUARANTINE_SCHEMA}
         if journal_format:
-            expected_schema['mutation_root'] = _V4_ROOT_SCHEMA
+            expected_schema['mutation_root'] = _V5_ROOT_SCHEMA if root_all_format else _V4_ROOT_SCHEMA
         for name, sql in expected_schema.items():
             if conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone() != (sql,):
                 raise owner.SourceChanged('mutation_schema_changed')
@@ -227,7 +231,7 @@ class MutationCoordinator:
         ).fetchone()
         if (row is None or row[0] != self.identity or type(row[1]) is not str or len(row[1]) != 32
                 or any(c not in '0123456789abcdef' for c in row[1])
-                or row[2] != (4 if journal_format else 3) or type(row[3]) is not int
+                or row[2] != (5 if root_all_format else 4 if journal_format else 3) or type(row[3]) is not int
                 or not 0 <= row[3] <= 2**63 - 1
                 or (hasattr(self, 'epoch') and row[1] != self.epoch)):
             raise owner.SourceChanged('mutation_root_changed')
@@ -239,7 +243,7 @@ class MutationCoordinator:
         if conn.execute('SELECT 1 FROM mutation_scopes LIMIT 1 OFFSET ?',
                         (MAX_PENDING * 8,)).fetchone():
             raise owner.SourceChanged('pending_selector_budget')
-        if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+        if conn.execute("SELECT 1 FROM mutation_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat','root_all') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 OR (kind='root_all' AND (?=0 OR value!='*')) LIMIT 1", (root_all_format,)).fetchone():
             raise owner.SourceChanged('invalid_pending_selector')
         # Preflight above bounds every field before fetching values. Audit
         # the same fresh cut in one bounded query rather than one per intent.
@@ -257,11 +261,15 @@ class MutationCoordinator:
             rows = grouped.get(token, ())
             if not 1 <= len(rows) <= 8:
                 raise owner.SourceChanged('pending_intent_scope_mismatch')
+            try:
+                scopes.selectors(tuple(scopes.Selector(*item) for item in rows), limit=8, allow_root=root_all_format)
+            except ValueError:
+                raise owner.SourceChanged('invalid_pending_selector') from None
             if _SENTINEL_TOKEN.fullmatch(token):
                 sentinels[token] = tuple(rows)
         if set(grouped) != {token for (token,) in tokens}:
             raise owner.SourceChanged('orphan_mutation_scope')
-        self._quarantine_audit(conn, sentinels)
+        self._quarantine_audit(conn, sentinels, allow_root=root_all_format)
         from .operation_journal import audit_journal
         audit_journal(conn, self, required=journal_format)
         return row[1]
@@ -284,7 +292,7 @@ class MutationCoordinator:
         return revision + 1
 
     @staticmethod
-    def _quarantine_audit(conn, sentinels):
+    def _quarantine_audit(conn, sentinels, *, allow_root=False):
         """Bounded archive audit: an archived token must retain its old fence."""
         if conn.execute('SELECT 1 FROM quarantine_intents LIMIT 1 OFFSET ?',
                         (MAX_QUARANTINED,)).fetchone():
@@ -294,7 +302,7 @@ class MutationCoordinator:
             raise owner.SourceChanged('quarantine_scope_budget')
         if conn.execute("SELECT 1 FROM quarantine_intents WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(sentinel)!='text' OR length(CAST(sentinel AS BLOB))>64 LIMIT 1").fetchone():
             raise owner.SourceChanged('invalid_quarantine_intent')
-        if conn.execute("SELECT 1 FROM quarantine_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 LIMIT 1").fetchone():
+        if conn.execute("SELECT 1 FROM quarantine_scopes WHERE typeof(token)!='text' OR length(CAST(token AS BLOB))>64 OR typeof(kind)!='text' OR kind NOT IN ('doc_exact','doc_prefix','log_chat','root_all') OR length(CAST(kind AS BLOB))>16 OR typeof(value)!='text' OR length(CAST(value AS BLOB))>4096 OR (kind='root_all' AND (?=0 OR value!='*')) LIMIT 1", (allow_root,)).fetchone():
             raise owner.SourceChanged('invalid_quarantine_scope')
         archived = conn.execute('SELECT token,sentinel FROM quarantine_intents LIMIT ?',
                                 (MAX_QUARANTINED + 1,)).fetchall()
@@ -756,6 +764,7 @@ class MutationCoordinator:
                     return
                 # The Store is root-specific. New coordinator registration must
                 # not inherit ready rows from a previous coordinator incarnation.
+                scopes.all_sources_in_transaction(conn)
                 invalid = conn.execute('SELECT 1 FROM local_sources WHERE typeof(revision)!=\'integer\' OR revision>=? OR revision<1 LIMIT 1', (owner.MAX,)).fetchone()
                 if invalid:
                     raise owner.SourceChanged('registration_revision_unavailable')
@@ -793,6 +802,9 @@ class MutationCoordinator:
         return result
 
     def _insert_intent(self, conn, changes):
+        if any(change.kind == 'root_all' for change in changes):
+            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (5,):
+                raise owner.SourceChanged('whole_root_mutation_requires_journal')
         for kind, value in conn.execute("SELECT s.kind,s.value FROM mutation_scopes s JOIN mutation_intents i ON i.token=s.token WHERE substr(i.token,1,1)='q' LIMIT ?", (MAX_PENDING * 8 + 1,)):
             blocked = scopes.selectors((scopes.Selector(kind, value),), limit=1)[0]
             if any(_overlap(blocked, change) for change in changes):
@@ -907,6 +919,28 @@ class MutationCoordinator:
         conn.execute('DELETE FROM mutation_scopes WHERE token=?', (token,))
         self._advance_root_revision(conn)
 
+    def capture_source(self, store, value):
+        """Register/capture a collection position without admitting readiness.
+
+        Node publishers need this before obtaining a detached node position.
+        There is no callback or yielded connection through which a legacy
+        collector could publish underneath the node-only admission guard.
+        """
+        store = SimpleNamespace(path=Path(store.path).resolve())
+        value = scopes._definition(value)
+        if json.loads(value.serialized)[0] != self.identity:
+            raise ValueError('definition belongs to another transport root')
+        with self._transaction() as root:
+            self._schema(root)
+            row = self._registered_store(root, str(store.path))
+            with owner._writer(store) as conn:
+                self._check_store(conn, store, *row)
+                position = scopes.register_in_transaction(conn, store, value)
+            self._require_no_pending(root, value)
+            if position.writes_pending:
+                raise owner.SourceChanged('source_mutation_pending')
+            return position
+
     @contextmanager
     def publication_gate(self, store, value, *, node_position=None):
         """Serialize registration/admission with mutation start/finish.
@@ -943,6 +977,9 @@ class MutationCoordinator:
                 self._check_store(conn, store, *row)
                 scopes.register_in_transaction(conn, store, value)
             self._require_no_pending(root, value)
+            if (node_position is None
+                    and root.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() == (5,)):
+                raise owner.SourceChanged('node_publication_required')
             if node_position is None:
                 yield
             else:

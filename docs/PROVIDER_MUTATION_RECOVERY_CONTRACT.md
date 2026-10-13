@@ -284,10 +284,14 @@ Storage metadata cast repair passed its PostgreSQL 16 gate in run
   log, effect, chat-cleanup and blob-manifest operations, authenticates the actual
   RPC principal, and recovers response/ACK loss without replacing the operation
   identity. See [the wire and journal contract](PROVIDER_TYPED_MUTATION_RPC_PLAN.md#inactive-authenticated-driver-and-durable-operation-journal).
-- Add whole-root membership retirement, then bind outbox, presence, machine and
-  lifecycle writes to stable journal operation identities. These call sites
-  still use the existing write lane; the inactive driver does not constitute a
-  completed writer migration.
+- Whole-root membership retirement and explicit keyed application binding are
+  implemented. The outbox recovers retained appends before fresh-send checks,
+  preserving operation identity across restart and epoch changes. Startup does
+  not enable binding yet.
+- Bind presence, machine, overlay, reserved finalization and lifecycle writes to
+  durable operation identities; integrate attachment byte/manifest sequencing.
+  These remaining callers still use the existing lane. The opt-in writer does
+  not constitute a completed migration.
 - Exercise the complete typed driver against authenticated disposable provider
   resources before enabling capability-gated application wiring.
 - Ensure overlapping retries resume the same operation instead of minting new

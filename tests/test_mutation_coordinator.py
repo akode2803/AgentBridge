@@ -450,3 +450,20 @@ def test_pending_log_fences_selected_room_not_unrelated_room(tmp_path):
         assert _publish(root, store, selected, 3).ready
     finally:
         store.close()
+
+
+def test_legacy_coordinator_rejects_whole_root_mutation_before_invalidation(tmp_path):
+    root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
+    with pytest.raises(local_source.SourceChanged, match='whole_root_mutation_requires_journal'):
+        root.begin((S('root_all', '*'),))
+    with root._transaction() as conn:
+        assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (0,)
+
+
+def test_legacy_coordinator_rejects_injected_whole_root_scope(tmp_path):
+    root = MutationCoordinator(tmp_path / 'home', 'mesh-root')
+    intent = root.begin((S('log_chat', 'room'),))
+    with sqlite3.connect(root.path) as conn:
+        conn.execute("UPDATE mutation_scopes SET kind='root_all',value='*'")
+    with pytest.raises(local_source.SourceChanged, match='invalid_pending_selector'):
+        root.complete(intent)

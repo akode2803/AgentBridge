@@ -327,3 +327,22 @@ native save/load coverage elsewhere. Split POSIX FIFO cases from portable byte
 and Unicode checks; do not skip the whole input-boundary test on Windows.
 PR22 CI35152436074 exposed five test failures from these two assumptions; no
 production behavior was changed to satisfy the fixtures.
+
+## 2026-10-13: completing a write does not make a mirror fresh
+
+Independent review of the inactive application journal integration reproduced a
+stale-ready failure with the real cache and LocalInputRuntime: admit old room
+metadata, complete a typed update, then run ingestion before the mirror refresh.
+The local intent had correctly retired readiness, but completing it allowed the
+unchanged mirror to become ready again. Wake hints and node registration alone
+were insufficient; auxiliary and presence collectors also retain mirror paths.
+
+Journal format 5 now retires pre-existing Store cuts on upgrade and permanently
+requires a verified node position for publication. Collection has a separate
+callback-free capture API, so node publishers can obtain their starting position
+without reopening mirror admission. Ordinary canonical finalization remains
+compatible with node-published inputs. Never fix this by inserting replay payloads
+into the mirror: recovering an old accepted operation could overwrite newer data.
+The regression covers warm-cache admission before journal setup, typed completion,
+failed legacy re-admission and restart. This was caught before application binding
+was enabled at startup; it is not evidence of a production incident.

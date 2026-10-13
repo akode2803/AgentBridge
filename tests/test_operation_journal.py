@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import threading
 import uuid
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from agentbridge.node import NodeStore, ReplicaIdentity
+from agentbridge.node.admission import NodeCaptureRequest, NodeInputBatch, NodeLogRequest
 from agentbridge.node import security
 from agentbridge.store import local_source, source_selectors
 from agentbridge.store import operation_journal as module
@@ -85,7 +87,7 @@ def test_exact_replay_survives_restart_without_another_intent(world):
     assert _reload(world).prepare(restored.request) == prepared
     with root._transaction() as conn:
         assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (1,)
-        assert conn.execute('SELECT format FROM mutation_root').fetchone() == (4,)
+        assert conn.execute('SELECT format FROM mutation_root').fetchone() == (5,)
     assert 'private' not in repr(prepared)
 
 
@@ -178,11 +180,11 @@ def test_selectors_are_derived_from_complete_request(world, kind, args, expected
 
 
 @pytest.mark.parametrize('kind,args', [('member_leave', {}), ('member_claim', {'p_username': 'alice'})])
-def test_member_mutations_are_rejected_without_whole_root_retirement(world, kind, args):
-    with pytest.raises(ValueError, match='whole-root retirement'):
-        world[-1].prepare(_request(kind=kind, arguments=args))
+def test_member_mutations_derive_a_whole_root_fence(world, kind, args):
+    record = world[-1].prepare(_request(kind=kind, arguments=args))
+    assert record.intent.selectors == (S('root_all', '*'),)
     with world[0]._transaction() as conn:
-        assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (0,)
+        assert conn.execute('SELECT kind,value FROM mutation_scopes').fetchall() == [('root_all', '*')]
 
 
 def test_capacity_keeps_terminal_records_and_reserves_receipt_space(world, monkeypatch):
@@ -433,3 +435,290 @@ def test_existing_database_symlink_is_rejected_before_sqlite_open(tmp_path):
     with pytest.raises(security.LocalSecurityError, match='symlink'):
         MutationCoordinator(tmp_path / 'home', 'mesh')
     assert saved.read_bytes() == before
+
+
+def _member_receipt(request):
+    expected = request.expectation
+    raw = {name: getattr(expected, name) for name in (
+        'root', 'protocol_epoch', 'operation_id', 'actor_id', 'kind', 'client_digest')}
+    result = {'username': 'alice', 'claimed' if expected.kind == 'member_claim' else 'left': True}
+    raw.update(schema_version=2, provider_digest='d' * 64, result=result)
+    return decode_mutation_receipt(raw, expected)
+
+
+@pytest.mark.parametrize('kind,args', [('member_leave', {}), ('member_claim', {'p_username': 'alice'})])
+def test_membership_fences_all_stores_and_new_sources_until_receipt_completion(world, tmp_path, kind, args):
+    root, node, first, first_definition, journal = world
+    second = Store(tmp_path / 'second.sqlite')
+    newcomer = Store(tmp_path / 'newcomer.sqlite')
+    try:
+        for store in (second, newcomer):
+            local_source.initialize(store)
+            source_selectors.initialize(store)
+        root.register_store(second)
+        generation = node.begin_candidate(created_ns=1)
+        node.seal_candidate(generation, NodeInputBatch(), observed_ns=1)
+        node.admit_candidate(generation)
+        position = node.finalization_position(node.capture(NodeCaptureRequest(
+            log_requests=(NodeLogRequest('elsewhere', 'alice'),))))
+        definitions = [first_definition]
+        for selector in (S('doc_exact', 'accounts/bob.json'), S('log_chat', 'elsewhere')):
+            definition = source_selectors.definition(root.identity, (selector,), build=selector.kind)
+            definitions.append(definition)
+            with root.publication_gate(second, definition, node_position=position):
+                local_source.publish(second, local_source.capture(second, definition.source), {'value': 1}, observed_ns=1)
+        unregistered = 'legacy-unregistered'
+        local_source.publish(second, local_source.capture(second, unregistered), {'value': 2}, observed_ns=2)
+        before = local_source.capture(second, unregistered)
+        request = _request(kind=kind, arguments=args)
+        prepared = journal.prepare(request)
+        assert prepared.intent.selectors == (S('root_all', '*'),)
+        assert not local_source.capture(first, first_definition.source).ready
+        for definition in definitions[1:]:
+            assert not local_source.capture(second, definition.source).ready
+        assert not local_source.capture(second, unregistered).ready
+        assert local_source.capture(second, unregistered).revision == before.revision + 1
+        root.register_store(newcomer)
+        new_definition = source_selectors.definition(root.identity, (S('log_chat', 'brand-new'),))
+        for store, definition in ((first, first_definition), (second, definitions[-1]), (newcomer, new_definition)):
+            with pytest.raises(local_source.SourceChanged, match='source_mutation_pending'):
+                with root.publication_gate(store, definition):
+                    pytest.fail('whole-root pending publication escaped')
+        assert _reload(world).prepare(request) == prepared
+        journal.mark_attempted(request)
+        journal.accept(request, _member_receipt(request))
+        assert journal.complete(request).state == 'completed'
+        assert not local_source.capture(first, first_definition.source).ready
+        assert not local_source.capture(second, unregistered).ready
+        assert local_source.capture(second, unregistered).revision == before.revision + 2
+        assert not local_source.capture(newcomer, new_definition.source).ready
+        with sqlite3.connect(node.path) as conn:
+            assert conn.execute('SELECT state FROM node_mutation_fences').fetchall() == [('completed',)]
+        # Success never permits a legacy mirror to restore readiness.
+        with pytest.raises(local_source.SourceChanged, match='node_publication_required'):
+            with root.publication_gate(newcomer, new_definition):
+                pytest.fail('legacy publication after membership completion')
+        assert not local_source.capture(newcomer, new_definition.source).ready
+    finally:
+        second.close()
+        newcomer.close()
+
+
+@pytest.mark.parametrize('failure', ['budget', 'revision'])
+def test_membership_prepare_fails_before_provider_with_partial_node_fence(world, monkeypatch, failure):
+    root, node, store, definition, journal = world
+    if failure == 'budget':
+        monkeypatch.setattr(source_selectors, 'MAX_SOURCES', 1)
+        local_source.publish(store, local_source.capture(store, 'extra-unregistered'), {'value': 1}, observed_ns=1)
+        match = 'fanout_budget'
+    else:
+        store._conn().execute('UPDATE local_sources SET revision=? WHERE source=?', (local_source.MAX, definition.source))
+        store._conn().commit()
+        match = 'revision_unavailable'
+    with pytest.raises(local_source.SourceChanged, match=match):
+        journal.prepare(_request(kind='member_leave', arguments={}))
+    with root._transaction() as conn:
+        assert conn.execute('SELECT count(*) FROM mutation_intents').fetchone() == (0,)
+        assert conn.execute('SELECT count(*) FROM typed_operations').fetchone() == (0,)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute('SELECT state FROM node_mutation_fences').fetchall() == [('active',)]
+
+
+def test_membership_ambiguous_attempt_survives_restart_and_blocks_every_scope(world):
+    root, _, store, _, journal = world
+    request = _request(kind='member_leave', arguments={})
+    journal.prepare(request)
+    journal.mark_attempted(request)
+    assert _reload(world).get_operation(request.expectation.operation_id).state == 'attempted'
+    definition = source_selectors.definition(root.identity, (S('doc_exact', 'unrelated.json'),))
+    with pytest.raises(local_source.SourceChanged, match='source_mutation_pending'):
+        with root.publication_gate(store, definition):
+            pytest.fail('ambiguous membership allowed publication')
+    with pytest.raises(local_source.SourceChanged, match='receipt_required'):
+        journal.complete(request)
+
+
+def test_membership_completion_retry_after_node_commit_and_root_rollback(world, monkeypatch):
+    root, node, _, _, journal = world
+    request = _request(kind='member_leave', arguments={})
+    journal.prepare(request)
+    journal.mark_attempted(request)
+    journal.accept(request, _member_receipt(request))
+    original = root._retire
+    def fail(conn, changes):
+        raise RuntimeError('after node commit')
+    monkeypatch.setattr(root, '_retire', fail)
+    with pytest.raises(RuntimeError, match='after node commit'):
+        journal.complete(request)
+    with sqlite3.connect(node.path) as conn:
+        assert conn.execute('SELECT state FROM node_mutation_fences').fetchall() == [('completed',)]
+    assert _reload(world).get_operation(request.expectation.operation_id).state == 'accepted'
+    monkeypatch.setattr(root, '_retire', original)
+    assert journal.complete(request).state == 'completed'
+
+
+def test_journal_four_to_five_upgrade_preserves_epoch_and_advances_retirement_revision(world):
+    root, node, _, _, journal = world
+    request = _request()
+    record = journal.prepare(request)
+    with sqlite3.connect(root.path) as conn:
+        row = conn.execute('SELECT identity,epoch,revision FROM mutation_root').fetchone()
+        conn.execute('ALTER TABLE mutation_root RENAME TO root_v5')
+        conn.execute(coordinator_module._V4_ROOT_SCHEMA)
+        conn.execute('INSERT INTO mutation_root VALUES(1,?,?,4,?)', row)
+        conn.execute('DROP TABLE root_v5')
+    reopened_root = MutationCoordinator(root.path.parent.parent, root.identity)
+    with reopened_root._transaction() as conn:
+        assert conn.execute('SELECT format FROM mutation_root').fetchone() == (4,)
+    upgraded = OperationJournal(reopened_root, node, actor_id=ACTOR)
+    assert upgraded.get_operation(request.expectation.operation_id) == record
+    with reopened_root._transaction() as conn:
+        assert conn.execute('SELECT identity,epoch,revision FROM mutation_root').fetchone() == (*row[:2], row[2] + 1)
+        assert conn.execute('SELECT format FROM mutation_root').fetchone() == (5,)
+
+
+@pytest.mark.parametrize('value', ['all', '**', '', '*/room'])
+def test_mutated_root_scope_fails_closed(world, value):
+    root, _, _, _, journal = world
+    request = _request(kind='member_leave', arguments={})
+    journal.prepare(request)
+    with sqlite3.connect(root.path) as conn:
+        conn.execute('UPDATE mutation_scopes SET value=?', (value,))
+    with pytest.raises(local_source.SourceChanged, match='invalid_pending_selector'):
+        journal.mark_attempted(request)
+
+
+def test_explicit_application_key_retains_original_epoch(world):
+    journal = world[-1]
+    first = _request()
+    original = journal.prepare_operation(first)
+    next_epoch = prepare_mutation('mesh', str(uuid.uuid4()), first.expectation.operation_id, ACTOR,
+                                 'doc_put', {'p_path': 'chats/room/meta.json', 'p_data': {'private': 'content'}})
+    assert journal.prepare_operation(next_epoch) == original
+    assert journal.get_operation(first.expectation.operation_id) == original
+    assert _reload(world).get_operation(first.expectation.operation_id) == original
+    assert journal.get_operation(str(uuid.uuid4())) is None
+    changed = prepare_mutation('mesh', next_epoch.expectation.protocol_epoch, first.expectation.operation_id, ACTOR,
+                              'doc_put', {'p_path': 'chats/room/meta.json', 'p_data': {'different': True}})
+    with pytest.raises(local_source.SourceChanged, match='request_changed'):
+        journal.prepare_operation(changed)
+
+
+def test_application_operations_cannot_overtake_overlapping_intents(world):
+    journal = world[-1]
+    first = _request()
+    journal.prepare_operation(first)
+    journal.mark_attempted(first)
+    assert journal.prepare_operation(first).state == 'attempted'
+    with pytest.raises(local_source.SourceChanged, match='overlapping_intent'):
+        journal.prepare_operation(_request(2))
+    unrelated = _request(3, arguments={'p_path': 'accounts/bob.json', 'p_data': {}})
+    assert journal.prepare_operation(unrelated).state == 'prepared'
+    with pytest.raises(local_source.SourceChanged, match='overlapping_intent'):
+        journal.prepare_operation(_request(4, kind='member_leave', arguments={}))
+    journal.mark_attempted(unrelated)
+    journal.accept(unrelated, _receipt(unrelated))
+    journal.complete(unrelated)
+    journal.accept(first, _receipt(first))
+    journal.complete(first)
+    member = _request(4, kind='member_leave', arguments={})
+    assert journal.prepare_operation(member).state == 'prepared'
+    with pytest.raises(local_source.SourceChanged, match='overlapping_intent'):
+        journal.prepare_operation(_request(5, arguments={'p_path': 'entirely/new.json', 'p_data': {}}))
+
+
+def test_application_operation_respects_legacy_pending_intent(world):
+    root, _, _, _, journal = world
+    intent = root.begin((S('doc_prefix', 'chats/room'),))
+    with pytest.raises(local_source.SourceChanged, match='overlapping_intent'):
+        journal.prepare_operation(_request())
+    root.complete(intent)
+    assert journal.prepare_operation(_request()).state == 'prepared'
+
+
+def test_strict_preparation_scopes_operation_id_by_epoch(world):
+    journal = world[-1]
+    first = _request()
+    second = prepare_mutation('mesh', str(uuid.uuid4()), first.expectation.operation_id, ACTOR,
+                              'doc_put', {'p_path': 'another.json', 'p_data': {'new': True}})
+    first_record = journal.prepare(first)
+    second_record = journal.prepare(second)
+    assert first_record.intent.token != second_record.intent.token
+    restored = _reload(world)
+    assert restored.prepare(first) == first_record
+    assert restored.prepare(second) == second_record
+    assert restored.get(EPOCH, first.expectation.operation_id) == first_record
+    assert restored.get(second.expectation.protocol_epoch, second.expectation.operation_id) == second_record
+    with pytest.raises(local_source.SourceChanged, match='duplicate_operation_id'):
+        restored.get_operation(first.expectation.operation_id)
+    with pytest.raises(local_source.SourceChanged, match='duplicate_operation_id'):
+        restored.prepare_operation(first)
+
+
+def test_node_publication_and_normal_page_capture_survive_journal_upgrade_and_restart(tmp_path):
+    from agentbridge.mesh.local_page_source import LocalPageSource
+    from agentbridge.mesh.node_input_publisher import NodeInputPublisher
+    from agentbridge.node.admission import NodeDocument, NodeLogRow
+    from agentbridge.node.client import LocalNodeClient
+    from agentbridge.node.server import LocalNodeServer
+    from agentbridge.store.source_publication import SourcePublisher
+
+    identity = ReplicaIdentity(ENDPOINT, 'supabase://mesh', ACTOR, 'machine')
+    transport = SupabaseTransport('mesh', env={'SUPABASE_URL': ENDPOINT}, client=object())
+    root = MutationCoordinator(tmp_path / 'home', root_identity(transport))
+    store = Store(tmp_path / 'client.sqlite')
+    server = LocalNodeServer(tmp_path / 'service', identity).start()
+    try:
+        root.register_node(server.store)
+        generation = server.store.begin_candidate(created_ns=1)
+        server.store.seal_candidate(generation, NodeInputBatch(
+            documents=(NodeDocument('chats/room/meta.json', 1, False,
+                                    b'{"members":{"alice":true}}'),),
+            log_rows=(NodeLogRow(1, 'room', 'alice@machine', json.dumps({
+                'id': 'first', 'ns': 1, 'from': 'alice', 'kind': 'message',
+                'text': 'node-observed',
+            }).encode()),), documents_mode='replace', logs_mode='replace',
+        ), observed_ns=1)
+        server.store.admit_candidate(generation)
+        client = LocalNodeClient(tmp_path / 'service', identity)
+        publisher = NodeInputPublisher(root, store, client)
+        reader = LocalPageSource(root, store, 'room')
+        legacy = SourcePublisher(root, store, reader.definition)
+        legacy.publish(legacy.capture(), {'chats/room/meta.json': {'legacy': True}}, observed_ns=1)
+        old = reader.capture()
+        assert old.source.ready and old.node_position is None
+
+        OperationJournal(root, server.store, actor_id=ACTOR)
+        assert not local_source.capture(store, reader.definition.source).ready
+        with pytest.raises(local_source.SourceChanged, match='source_not_ready'):
+            with reader.finalization(old):
+                pytest.fail('pre-upgrade legacy cut finalized')
+        captured = legacy.capture()  # Collection is permitted; admission is not.
+        assert not captured.source.ready
+        with pytest.raises(local_source.SourceChanged, match='node_publication_required'):
+            legacy.publish(captured, {'chats/room/meta.json': {'legacy': True}}, observed_ns=2)
+
+        result = publisher.publish('room')
+        assert result.state == 'published'
+        current = reader.capture()  # This real read path supplies no node_position.
+        assert current.source.ready and current.node_position.admitted_generation == generation
+        with reader.finalization(current):
+            pass
+        authority = reader.capture_authority(current)
+        assert authority.documents.decoded_records() == [
+            ('chats/room/meta.json', {'members': {'alice': True}}, False)]
+
+        reopened = MutationCoordinator(tmp_path / 'home', root.identity)
+        OperationJournal(reopened, server.store, actor_id=ACTOR)
+        restored_reader = LocalPageSource(reopened, store, 'room')
+        assert restored_reader.capture() == current
+        with restored_reader.finalization(current):
+            pass
+        assert NodeInputPublisher(reopened, store, client).publish('room').state == 'unchanged'
+        with pytest.raises(local_source.SourceChanged, match='node_publication_required'):
+            with reopened.publication_gate(store, restored_reader.definition):
+                pytest.fail('restarted legacy publisher admitted')
+        assert restored_reader.capture() == current
+    finally:
+        server.stop()
+        store.close()
