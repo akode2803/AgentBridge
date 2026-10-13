@@ -246,3 +246,57 @@ def test_initialize_does_not_repair_partial_selector_schema(store):
     store._conn().commit()
     with pytest.raises(local_source.SourceChanged, match="selector_schema_changed"):
         source_selectors.initialize(store)
+
+
+@pytest.mark.parametrize('value', ['', '/', '**', 'all', '*/chat', None, 1])
+def test_whole_root_scope_requires_canonical_wildcard(value):
+    with pytest.raises(ValueError, match='whole-root'):
+        source_selectors.selectors((S('root_all', value),), limit=8)
+
+
+def test_whole_root_scope_is_mutation_only_and_cannot_mix_with_narrow_scopes():
+    root = S('root_all', '*')
+    assert source_selectors.selectors((root,)) == (root,)
+    with pytest.raises(ValueError, match='whole-root'):
+        source_selectors.definition('root', (root,))
+    with pytest.raises(ValueError, match='stand alone'):
+        source_selectors.selectors((root, S('doc_exact', 'x.json')))
+
+
+def test_whole_root_retirement_includes_unregistered_sources(store):
+    document = source_selectors.definition('root', (S('doc_exact', 'accounts/alice.json'),))
+    log = source_selectors.definition('root', (S('log_chat', 'unrelated'),))
+    registered = _register(store, document, log)
+    positions = {item.source: local_source.publish(store, position, {'value': 1}, observed_ns=1)
+                 for item, position in zip((document, log), registered)}
+    name = 'legacy-unregistered-source'
+    positions[name] = local_source.publish(store, local_source.capture(store, name), {'value': 2}, observed_ns=2)
+    assert _matching(store, S('root_all', '*')) == tuple(sorted(positions))
+    with local_source._writer(store) as conn:
+        assert source_selectors.retire_in_transaction(conn, store, (S('root_all', '*'),)) == 3
+    for name, before in positions.items():
+        after = local_source.capture(store, name)
+        assert not after.ready and after.revision == before.revision + 1
+        assert after.raw == before.raw
+
+
+def test_whole_root_matching_rejects_excess_sources_before_reading_ids(store, monkeypatch):
+    monkeypatch.setattr(source_selectors, 'MAX_SOURCES', 2)
+    for index in range(3):
+        name = f'unregistered-{index}'
+        local_source.publish(store, local_source.capture(store, name), {'value': index}, observed_ns=1)
+    with pytest.raises(local_source.SourceChanged, match='fanout_budget'):
+        _matching(store, S('root_all', '*'))
+    assert all(local_source.capture(store, f'unregistered-{index}').ready for index in range(3))
+
+
+def test_whole_root_retirement_rolls_back_on_unregistered_revision_exhaustion(store):
+    for name in ('first', 'last'):
+        local_source.publish(store, local_source.capture(store, name), {'value': 1}, observed_ns=1)
+    before = local_source.capture(store, 'first')
+    store._conn().execute('UPDATE local_sources SET revision=? WHERE source=?', (local_source.MAX, 'last'))
+    store._conn().commit()
+    with pytest.raises(local_source.SourceChanged, match='revision_unavailable'):
+        with local_source._writer(store) as conn:
+            source_selectors.retire_in_transaction(conn, store, (S('root_all', '*'),))
+    assert local_source.capture(store, 'first') == before

@@ -249,7 +249,7 @@ never generate another identity or bind the request to a new epoch. Receipt
 acknowledgment remains unavailable until the exact outcome is durable locally.
 
 This decoder is an implementation prerequisite, not a readiness claim. The
-inactive adapter and journal below use it; application writers remain unchanged.
+adapter and journal below use it; application binding remains explicitly opt-in.
 
 ### Inactive authenticated driver and durable operation journal
 
@@ -267,10 +267,20 @@ authority checks.
 SQLite database, bound to endpoint/root/actor and the registered node's exact
 identity/incarnation. Its format upgrade makes older coordinators fail closed.
 Preparation records the request and mutation intent in one root transaction,
-retiring affected node/Store inputs before any provider call. Seven scoped
-families are supported. Member claim/leave preparation is deliberately rejected
-until whole-root Store invalidation and publication exclusion are implemented;
-the wire supporting these RPCs is not sufficient to activate them.
+retiring affected node/Store inputs before any provider call. All nine families
+are supported: member claim/leave use a mutation-only whole-root selector that
+retires every local source, including sources without a registered definition.
+Store fanout is bounded and preflighted before mutation. Source definitions cannot
+use the whole-root mutation selector.
+
+Format 5 also permanently closes mirror-based admission. The upgrade retires
+all previously ready Store sources while excluding root mutations; afterward,
+publication requires a verified node position. A receipt or a mirror wake cannot
+make pre-write mirror documents ready. Read-only collection remains separate
+from admission, and ordinary canonical readers continue to consume coherent
+node-published Store inputs. Reopening format 5 does not retire those verified
+publications again. This rule covers auxiliary/presence collectors that can
+otherwise survive the main chat reader's node handoff.
 
 The driver in `transport/journaled_mutations.py` advances:
 
@@ -291,11 +301,47 @@ Epoch retirement/pruning needs a separate proven protocol; no age-based cleanup
 or ambiguous-operation cancellation is included. Ordinary coordinator completion
 and quarantine cannot consume typed intents without their journal proof.
 
-This slice is inactive: no readiness marker, GUI/harness/outbox writer switch,
-provider seal, production schema deployment or historical-fence recovery is
-performed. Capability negotiation, whole-root membership mutations, call-site
-operation identity, recovery scheduling and fleet cutover remain required before
-production activation.
+### Application operation identity and first writer integration
+
+`ApplicationMutationWriter` binds each caller-supplied UUID to exact replay bytes.
+Lookup spans protocol epochs: an existing operation retains its original epoch,
+while changing its payload is rejected. New operations cannot overtake an
+unresolved overlapping local intent. Disjoint operations remain independent.
+Distinct A -> B -> A document writes require three explicit operation IDs; a
+payload hash is not a semantic operation identity.
+
+Log append identity derives from chat, log and immutable envelope ID. The durable
+outbox checks for retained operations before fresh-send membership checks or
+terminal-chat shortcuts, so a committed send can finish receipt recovery after
+the sender loses access. The provider still checks current authority before a
+new effect. Response/ACK loss, restart and epoch changes retain the exact ID.
+
+`LocalMutationTransport.bind_journal()` explicitly binds one authenticated owner.
+It joins against legacy write admission; a delayed legacy write cannot cross the
+binding boundary. Typed success emits hints only and never stamps retained replay
+payloads into the mirror. Unkeyed document writes, reserved writes, blobs and
+unsupported operations reject when bound rather than using legacy fallback.
+
+No application startup enables this binding yet. Presence, machines, overlays,
+reserved finalization writes, attachment upload/manifest sequencing and lifecycle
+owners still need durable call-site identities and recovery integration. Capability
+negotiation, authenticated disposable driver acceptance, recovery scheduling,
+provider seal, historical-fence recovery and fleet cutover remain required before
+production activation. This checkpoint does not publish a readiness marker or
+change the production schema.
+
+Next writer batches must preserve domain semantics rather than generating a new
+UUID on every retry. Presence needs to finish the retained heartbeat before
+creating its next timestamped payload; periodic beats must not exhaust the
+non-evicting 4,096-record journal (at a 30-second cadence this is about 34 hours
+before accounting for other writes). Receipt retirement/epoch rotation therefore
+remains a production prerequisite. Overlay read-modify-write operations must
+retain the signed payload across retries, then recapture current per-user state
+before preparing the next distinct change. Reserved canonical writes need to
+co-publish their operation identity in the existing finalization cut. Attachments
+must retain staging-object identity and exact manifest bytes before retrying
+publication. None of these callers may convert a rejected unkeyed write into an
+uncoordinated direct provider write.
 
 ### Protocol schedules
 

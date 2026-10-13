@@ -25,6 +25,9 @@ class LocalMutationTransport(Transport):
         self._provider_guard = threading.RLock()
         self._provider_principal = None
         self._provider_revision = None
+        self._journal_writer = None
+        self._journal_binding = None
+        self._legacy_writes = 0
 
     @property
     def scheme(self):
@@ -81,7 +84,7 @@ class LocalMutationTransport(Transport):
         if name in ('root', 'cache_key', 'subscribe_changes', 'warm', 'warm_async',
                     'refresh_now', 'set_interactive', 'mirror_status', 'latency_lane',
                     'realtime_status', 'transfer_stats', 'hint_now', 'wake_local',
-                    'purge_deleted_docs'):
+                    ):
             return getattr(self._transport, name)
         raise AttributeError(name)
 
@@ -105,38 +108,120 @@ class LocalMutationTransport(Transport):
     def mirror_changes_since(self, request):
         return self._transport.mirror_changes_since(request)
 
-    def _mutate(self, changes, operation):
-        intent = self._coordinator.begin(changes)
-        # Exceptions intentionally retain the durable intent. A later retry's
-        # success cannot clear this older operation's ambiguous outcome.
-        result = operation()
-        self._coordinator.complete(intent)
-        return result
+    def _legacy_write(self, operation):
+        """Admit a legacy write atomically against one-way journal binding."""
+        with self._provider_guard:
+            if self._journal_writer is not None:
+                raise ValueError('typed mutation journal is bound')
+            self._legacy_writes += 1
+        try:
+            return operation()
+        finally:
+            with self._provider_guard:
+                self._legacy_writes -= 1
 
-    def put_doc(self, path, data):
+    def _mutate(self, changes, operation):
+        def admitted():
+            intent = self._coordinator.begin(changes)
+            # Exceptions intentionally retain the durable intent. A later
+            # success cannot clear this older operation's ambiguous outcome.
+            result = operation()
+            self._coordinator.complete(intent)
+            return result
+        return self._legacy_write(admitted)
+
+    def _bound_writer(self):
+        writer = self._journal_writer
+        if writer is None:
+            return None
+        binding = self._journal_binding
+        if binding is None:
+            raise ValueError('local mutation journal binding changed')
+        driver, journal, rpc, root, actor, endpoint, epoch = binding
+        if (writer.driver is not driver or driver.journal is not journal
+                or driver.rpc is not rpc or journal.coordinator is not self._coordinator
+                or (writer.root, writer.actor_id, writer.endpoint,
+                    writer.protocol_epoch) != (root, actor, endpoint, epoch)
+                or (journal.root, journal.actor_id, journal.endpoint)
+                != (root, actor, endpoint)
+                or (rpc.root, rpc.actor_id, rpc.endpoint)
+                != (root, actor, endpoint)):
+            raise ValueError('local mutation journal binding changed')
+        driver._check_owner()
+        self._assert_provider_identity()
+        provider = self._identity_owner()
+        if rpc._provider is not provider:
+            raise ValueError('local mutation journal provider changed')
+        rpc._check_identity()
+        return writer
+
+    def _typed_success(self):
+        # Typed receipts establish the write, but never establish a fresh
+        # local mirror value. Ask the normal bounded mirror path to refresh.
+        provider = self._identity_owner()
+        for method in (provider.wake_local, provider.hint_now):
+            try:
+                method()
+            except Exception:
+                pass  # Best-effort hints cannot downgrade a durable receipt.
+
+    def _typed_submit(self, kind, arguments, operation_id):
+        writer = self._bound_writer()
+        if operation_id is None:
+            raise ValueError('typed mutation requires an operation id')
+        writer.submit(kind, arguments, operation_id=operation_id)
+        self._bound_writer()
+        self._typed_success()
+        return None
+
+    @staticmethod
+    def _reject_unbound_key(operation_id):
+        if operation_id is not None:
+            raise ValueError('typed mutation journal is not bound')
+
+    def put_doc(self, path, data, *, operation_id=None):
+        if self._journal_writer is not None:
+            return self._typed_submit('doc_put', {'p_path': path, 'p_data': data}, operation_id)
+        self._reject_unbound_key(operation_id)
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.put_doc(path, data))
 
     def put_reserved_doc(self, path, data, reservation):
         """Finish an exact document write reserved in a canonical local cut."""
+        if self._journal_writer is not None:
+            raise NotImplementedError('reserved document writes need typed journal admission')
         from ..store.mutation_reservation import FinalizationMutation
         if (type(reservation) is not FinalizationMutation
                 or reservation.coordinator is not self._coordinator
                 or reservation.changes != (Selector('doc_exact', path),)):
             raise ValueError('foreign document reservation')
-        return reservation.execute(lambda: self._transport.put_doc(path, data))
+        return self._legacy_write(
+            lambda: reservation.execute(lambda: self._transport.put_doc(path, data)))
 
-    def create_doc(self, path, data):
+    def create_doc(self, path, data, *, operation_id=None):
+        if self._journal_writer is not None:
+            return self._typed_submit('doc_create', {'p_path': path, 'p_data': data}, operation_id)
+        self._reject_unbound_key(operation_id)
         # Delegate directly; base create_doc may call its own put_doc, but it
         # must not create a second outer intent.
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.create_doc(path, data))
 
-    def delete_doc(self, path):
+    def delete_doc(self, path, *, operation_id=None):
+        if self._journal_writer is not None:
+            return self._typed_submit('doc_delete', {'p_path': path}, operation_id)
+        self._reject_unbound_key(operation_id)
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.delete_doc(path))
 
-    def create_effect_doc(self, path, data, *, ask_envelope=None, decision_envelope=None):
+    def create_effect_doc(self, path, data, *, ask_envelope=None, decision_envelope=None,
+                          operation_id=None):
+        if self._journal_writer is not None:
+            return self._typed_submit('effect_transition', {
+                'p_path': path, 'p_data': data, 'p_grant_ask': ask_envelope,
+                'p_grant_decision': decision_envelope,
+            }, operation_id)
+        self._reject_unbound_key(operation_id)
         if type(path) is not str:
             raise ValueError('invalid effect path')
         changes = [Selector('doc_exact', path)]
@@ -149,10 +234,29 @@ class LocalMutationTransport(Transport):
             path, data, ask_envelope=ask_envelope, decision_envelope=decision_envelope))
 
     def append_log(self, chat_id, log_name, record):
+        writer = self._bound_writer()
+        if writer is not None:
+            writer.append_log(chat_id, log_name, record)
+            self._bound_writer()
+            self._typed_success()
+            return None
         return self._mutate((Selector('log_chat', chat_id),),
                             lambda: self._transport.append_log(chat_id, log_name, record))
 
-    def delete_chat(self, chat_id):
+    def recover_append_log(self, chat_id, log_name, record):
+        writer = self._bound_writer()
+        if writer is None:
+            return False
+        found = writer.recover_append_log(chat_id, log_name, record)
+        self._bound_writer()
+        if found:
+            self._typed_success()
+        return found
+
+    def delete_chat(self, chat_id, *, operation_id=None):
+        if self._journal_writer is not None:
+            return self._typed_submit('chat_delete', {'p_chat': chat_id}, operation_id)
+        self._reject_unbound_key(operation_id)
         # The log selector validates the chat identity before any external call.
         if type(chat_id) is not str:
             raise ValueError('invalid chat identity')
@@ -253,6 +357,34 @@ class LocalMutationTransport(Transport):
                 raise ValueError('local mutation owner principal changed')
             self._provider_principal = principal
             self._provider_revision = after
+
+    def bind_journal(self, writer):
+        """Opt into one exact authenticated typed writer, never implicitly."""
+        from .application_mutations import ApplicationMutationWriter
+        if type(writer) is not ApplicationMutationWriter:
+            raise TypeError('invalid application mutation writer')
+        with self._provider_guard:
+            if self._journal_writer is not None:
+                raise ValueError('typed mutation journal is already bound')
+            if self._legacy_writes:
+                raise ValueError('legacy mutation write is in flight')
+            self._assert_provider_identity()
+            provider = self._identity_owner()
+            endpoint, root = provider_location(self._transport)
+            rpc = writer.driver.rpc
+            if (writer.driver.journal.coordinator is not self._coordinator
+                    or rpc._provider is not provider
+                    or (writer.endpoint, writer.root, writer.actor_id)
+                    != (endpoint, root, rpc.actor_id)
+                    or (rpc.endpoint, rpc.root) != (endpoint, root)
+                    or (self._provider_principal is not None
+                        and self._provider_principal != writer.actor_id)):
+                raise ValueError('typed mutation journal owner mismatch')
+            rpc._check_identity()
+            self._journal_binding = (writer.driver, writer.driver.journal, rpc,
+                                     writer.root, writer.actor_id, writer.endpoint,
+                                     writer.protocol_epoch)
+            self._journal_writer = writer
 
     def _provider_read(self, operation):
         """Return provider data only when one pinned location bounds the call."""
@@ -403,9 +535,13 @@ class LocalMutationTransport(Transport):
         return tuple(changes)
 
     def put_blob(self, path, data):
+        if self._journal_writer is not None:
+            raise NotImplementedError('blob writes need typed journal admission')
         return self._mutate(self._blob_changes(path), lambda: self._transport.put_blob(path, data))
 
     def put_blob_from(self, local_src, path):
+        if self._journal_writer is not None:
+            raise NotImplementedError('blob writes need typed journal admission')
         return self._mutate(self._blob_changes(path), lambda: self._transport.put_blob_from(local_src, path))
 
     def get_blob(self, path):
@@ -415,7 +551,15 @@ class LocalMutationTransport(Transport):
         return self._transport.blob_size(path)
 
     def delete_blob(self, path):
+        if self._journal_writer is not None:
+            raise NotImplementedError('blob writes need typed journal admission')
         return self._mutate(self._blob_changes(path), lambda: self._transport.delete_blob(path))
+
+    def purge_deleted_docs(self, older_than_days=30.0):
+        if self._journal_writer is not None:
+            raise NotImplementedError('purge needs typed journal admission')
+        return self._legacy_write(
+            lambda: self._transport.purge_deleted_docs(older_than_days))
 
     def local_path(self, path):
         return self._transport.local_path(path)

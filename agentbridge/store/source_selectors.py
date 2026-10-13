@@ -13,7 +13,7 @@ from . import document_observation as docs, local_source as owner
 
 MAX_SOURCES = 1024
 MAX_SELECTORS = 256
-_KINDS = ('doc_exact', 'doc_prefix', 'log_chat')
+_KINDS = ('doc_exact', 'doc_prefix', 'log_chat', 'root_all')
 _SCHEMA = {
     'local_source_definitions': 'CREATE TABLE local_source_definitions(source TEXT PRIMARY KEY,definition TEXT NOT NULL)',
     'local_source_selectors': 'CREATE TABLE local_source_selectors(source TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(source,kind,value))',
@@ -34,7 +34,7 @@ class Definition:
     selectors: tuple[Selector, ...]
 
 
-def selectors(values, *, limit=MAX_SELECTORS):
+def selectors(values, *, limit=MAX_SELECTORS, allow_root=True):
     if type(values) is not tuple or not 1 <= len(values) <= limit:
         raise ValueError('invalid selector count')
     copied = set()
@@ -45,6 +45,9 @@ def selectors(values, *, limit=MAX_SELECTORS):
         kind, value = item.kind, item.value
         if type(kind) is not str or kind not in _KINDS:
             raise ValueError('invalid selector kind')
+        if kind == 'root_all':
+            if not allow_root or type(value) is not str or value != '*':
+                raise ValueError('invalid whole-root selector')
         value = docs._validate_document_path(value)
         if len(value.split('/')) > 32 or (kind == 'log_chat' and '/' in value):
             raise ValueError('invalid selector depth')
@@ -52,6 +55,8 @@ def selectors(values, *, limit=MAX_SELECTORS):
         if used > 64 * 1024:
             raise ValueError('selector byte budget')
         copied.add(Selector(kind, value))
+    if any(item.kind == 'root_all' for item in copied) and len(copied) != 1:
+        raise ValueError('whole-root selector must stand alone')
     return tuple(sorted(copied))
 
 
@@ -59,7 +64,7 @@ def definition(root_identity, values, *, build='phase1-v1'):
     if (type(root_identity) is not str or not root_identity or len(root_identity) > 4096
             or type(build) is not str or not build or len(build) > 128):
         raise ValueError('invalid source identity')
-    copied = selectors(values)
+    copied = selectors(values, allow_root=False)
     serialized = json.dumps([root_identity, build, [(s.kind, s.value) for s in copied]],
                             ensure_ascii=False, separators=(',', ':'))
     if len(serialized.encode()) > 64 * 1024:
@@ -74,7 +79,7 @@ def _definition(value):
     source, serialized, selected = value.source, value.serialized, value.selectors
     if type(source) is not str or len(source) > 128 or len(serialized.encode()) > 65536:
         raise ValueError('invalid definition binding')
-    selected = selectors(selected)
+    selected = selectors(selected, allow_root=False)
     decoded = json.loads(serialized)
     if type(decoded) is not list or len(decoded) != 3 or type(decoded[2]) is not list or len(decoded[2]) > MAX_SELECTORS:
         raise ValueError('invalid serialized definition')
@@ -166,6 +171,8 @@ def matching_in_transaction(conn, changes):
         raise ValueError('selector matching requires a transaction')
     changes = selectors(changes, limit=8)
     _schema(conn)
+    if changes == (Selector('root_all', '*'),):
+        return all_sources_in_transaction(conn)
     found = set()
     for change in changes:
         if change.kind == 'log_chat':
@@ -188,6 +195,24 @@ def matching_in_transaction(conn, changes):
         if len(found) > MAX_SOURCES:
             raise owner.SourceChanged('mutation_source_fanout_budget')
     return tuple(sorted(found))
+
+
+def all_sources_in_transaction(conn):
+    """Bound every physical local source, including unregistered coverage."""
+    if not conn.in_transaction:
+        raise ValueError('whole-root matching requires a transaction')
+    owner._schema(conn)
+    if conn.execute('SELECT 1 FROM local_sources LIMIT 1 OFFSET ?',
+                    (MAX_SOURCES,)).fetchone():
+        raise owner.SourceChanged('mutation_source_fanout_budget')
+    if conn.execute("SELECT 1 FROM local_sources WHERE typeof(source)!='text' OR length(CAST(source AS BLOB))>? LIMIT 1",
+                    (docs.MAX_SOURCE_ID_BYTES,)).fetchone():
+        raise owner.SourceChanged('invalid_mutation_source')
+    try:
+        return tuple(docs._validate_source_id(row[0]) for row in conn.execute(
+            'SELECT source FROM local_sources ORDER BY source LIMIT ?', (MAX_SOURCES + 1,)))
+    except (TypeError, ValueError, UnicodeError):
+        raise owner.SourceChanged('invalid_mutation_source') from None
 
 
 def retire_in_transaction(conn, store, changes):

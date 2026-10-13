@@ -760,54 +760,61 @@ class MessagingService:
             if not isinstance(envelope, dict) or not envelope.get("id"):
                 raise ValidationError("malformed envelope payload")
             kind = envelope.get("kind", "message")
+            event = envelope.get("event") or {}
+            etype = event.get("type") if isinstance(event, dict) else ""
             local_admission = None
-            if kind == "message":
-                try:
-                    self.require_send(chat_id, drain_before_terminal=True)
-                except PermissionDenied as exc:
-                    # A terminally deleted/left chat must not be recreated by
-                    # an old ordinary send. Info events still carry the leave/
-                    # delete mutation that made the chat terminal.
+            # A retained operation owns immutable replay bytes. Recover it
+            # before fresh-send authority checks or terminal shortcuts: a
+            # removed sender can still have a committed, unacknowledged send.
+            # The typed provider checks current authority for any new effect.
+            recover = getattr(self.tx, "recover_append_log", None)
+            recovered = callable(recover) and recover(chat_id, log_name, envelope)
+            if not recovered:
+                if kind == "message":
                     try:
-                        snap = self.snapshot(chat_id)
-                    except PermissionDenied:
-                        raise ValidationError(
-                            "chat is no longer sendable") from exc
-                    if (snap.is_member(self.user)
-                            or not self._local_terminal_follows(target, envelope)):
-                        raise ValidationError(
-                            "chat is no longer sendable") from exc
-                try:
-                    local_admission = self._prepare_local_append(chat_id, envelope)
-                except Exception:  # noqa: BLE001 — optional speed path only
-                    local_admission = None
-            elif kind == "info":
-                event = envelope.get("event") or {}
-                etype = event.get("type") if isinstance(event, dict) else ""
-                if etype in {EV_DELETED, EV_MEMBER_LEFT}:
-                    try:
-                        # Local optimistic info rows are authoritative for
-                        # access, but cannot prove this outbox append already
-                        # reached the transport after a crash.
-                        snap = self._materialized_snapshot(chat_id)
+                        self.require_send(chat_id, drain_before_terminal=True)
                     except PermissionDenied as exc:
-                        # A warm mirror that still lists the room but cannot
-                        # currently read its meta is uncertain, not proof of
-                        # physical reclamation. Preserve the durable retry.
-                        if chat_id in self.tx.list_chat_ids():
-                            raise TransportError(
-                                "terminal chat metadata is temporarily unavailable"
-                            ) from exc
-                        raise ValidationError(
-                            "terminal chat no longer exists") from exc
-                    if ((etype == EV_DELETED and snap.deleted)
-                            or (etype == EV_MEMBER_LEFT
-                                and not snap.is_member(self.user))):
-                        return  # append landed before a crash; state is applied
-            if self.attachments is not None:
-                for manifest in self.attachments.manifests(payload):
-                    self.attachments.upload(chat_id, manifest)
-            self.tx.append_log(chat_id, log_name, envelope)
+                        # A terminally deleted/left chat must not be recreated by
+                        # an old ordinary send. Info events still carry the leave/
+                        # delete mutation that made the chat terminal.
+                        try:
+                            snap = self.snapshot(chat_id)
+                        except PermissionDenied:
+                            raise ValidationError(
+                                "chat is no longer sendable") from exc
+                        if (snap.is_member(self.user)
+                                or not self._local_terminal_follows(target, envelope)):
+                            raise ValidationError(
+                                "chat is no longer sendable") from exc
+                    try:
+                        local_admission = self._prepare_local_append(chat_id, envelope)
+                    except Exception:  # noqa: BLE001 — optional speed path only
+                        local_admission = None
+                elif kind == "info":
+                    if etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                        try:
+                            # Local optimistic info rows are authoritative for
+                            # access, but cannot prove this outbox append already
+                            # reached the transport after a crash.
+                            snap = self._materialized_snapshot(chat_id)
+                        except PermissionDenied as exc:
+                            # A warm mirror that still lists the room but cannot
+                            # currently read its meta is uncertain, not proof of
+                            # physical reclamation. Preserve the durable retry.
+                            if chat_id in self.tx.list_chat_ids():
+                                raise TransportError(
+                                    "terminal chat metadata is temporarily unavailable"
+                                ) from exc
+                            raise ValidationError(
+                                "terminal chat no longer exists") from exc
+                        if ((etype == EV_DELETED and snap.deleted)
+                                or (etype == EV_MEMBER_LEFT
+                                    and not snap.is_member(self.user))):
+                            return  # append landed before a crash; state is applied
+                if self.attachments is not None:
+                    for manifest in self.attachments.manifests(payload):
+                        self.attachments.upload(chat_id, manifest)
+                self.tx.append_log(chat_id, log_name, envelope)
             if kind == 'message':
                 delivery_trace.emit(
                     'local_append_completed', chat=chat_id,

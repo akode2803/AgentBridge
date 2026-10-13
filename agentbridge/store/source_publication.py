@@ -29,12 +29,9 @@ class SourcePublisher:
 
     def capture(self):
         """Register before collection; an overlapping pending writer forbids it."""
-        with self.coordinator.publication_gate(self.store, self.definition):
-            position = owner.capture(self.store, self.definition.source)
-            if position.writes_pending:
-                raise owner.SourceChanged('source_mutation_pending')
-            return CollectionPosition(str(self.coordinator.path), self.coordinator.epoch,
-                                      self.definition, position)
+        position = self.coordinator.capture_source(self.store, self.definition)
+        return CollectionPosition(str(self.coordinator.path), self.coordinator.epoch,
+                                  self.definition, position)
 
     def _expected(self, value):
         if type(value) is not CollectionPosition:

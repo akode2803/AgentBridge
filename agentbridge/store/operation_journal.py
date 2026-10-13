@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..node.admission import NodeCoordinatorRegistration
 from ..node.store import NodeStore
@@ -16,7 +16,7 @@ from ..transport.mutation_protocol import _uuid
 from ..transport.mutation_receipts import ProviderMutationReceipt, decode_mutation_receipt
 from ..transport.typed_mutations import PreparedMutation
 from . import local_source, source_selectors
-from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V4_ROOT_SCHEMA
+from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V5_ROOT_SCHEMA, _overlap
 
 MAX_RECORDS = 4096
 MAX_BYTES = 64 * 1024 * 1024
@@ -66,8 +66,10 @@ def mutation_selectors(request: PreparedMutation):
         # A manifest can change attachment availability throughout the room.
         changes = (S('doc_prefix', 'chats/' + args['p_chat']),
                    S('log_chat', args['p_chat']))
+    elif kind in {'member_claim', 'member_leave'}:
+        changes = (S('root_all', '*'),)
     else:
-        raise ValueError('member mutations require whole-root retirement')
+        raise ValueError('unsupported mutation family')
     return source_selectors.selectors(tuple(changes), limit=8)
 
 
@@ -175,6 +177,8 @@ def audit_journal(conn, coordinator, *, required):
         _fail('record_budget')
     if conn.execute("SELECT 1 FROM typed_operations WHERE typeof(protocol_epoch)!='text' OR length(protocol_epoch)!=36 OR typeof(operation_id)!='text' OR length(operation_id)!=36 OR typeof(token)!='text' OR length(token)!=64 OR typeof(state)!='text' OR length(state)>16 OR typeof(selectors)!='blob' OR length(selectors)>32768 OR typeof(request)!='blob' OR length(request)>? OR (receipt IS NOT NULL AND (typeof(receipt)!='blob' OR length(receipt)>?)) LIMIT 1", (MAX_REQUEST_BYTES, MAX_RECEIPT_BYTES)).fetchone():
         _fail('record_invalid')
+    if conn.execute('SELECT 1 FROM typed_operations GROUP BY operation_id HAVING count(*)>1 LIMIT 1').fetchone():
+        _fail('duplicate_operation_id')
     if _bytes_used(conn) > MAX_BYTES:
         _fail('byte_budget')
     # Publication checks never deserialize replay payloads. Only at most 64
@@ -270,11 +274,17 @@ class OperationJournal:
                 for sql in _SCHEMA.values():
                     conn.execute(sql)
                 conn.execute('INSERT INTO typed_operation_owner VALUES(1,?,?,?,?,?,?,?)', self._owner)
-                conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_v3')
-                conn.execute(_V4_ROOT_SCHEMA)
-                conn.execute('INSERT INTO mutation_root SELECT singleton,identity,epoch,4,revision FROM mutation_root_v3')
-                conn.execute('DROP TABLE mutation_root_v3')
                 coordinator._advance_root_revision(conn)
+            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (5,):
+                # Once legacy admission is disabled, every remaining ready cut
+                # must have originated in verified node publication. Retire all
+                # old cuts before committing that durable capability boundary.
+                coordinator._retire(conn, (source_selectors.Selector('root_all', '*'),))
+                coordinator._advance_root_revision(conn)
+                conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_previous')
+                conn.execute(_V5_ROOT_SCHEMA)
+                conn.execute('INSERT INTO mutation_root SELECT singleton,identity,epoch,5,revision FROM mutation_root_previous')
+                conn.execute('DROP TABLE mutation_root_previous')
             self._check(conn)
 
     @property
@@ -315,7 +325,33 @@ class OperationJournal:
             _fail('request_changed')
         return record
 
+    def _find_operation(self, conn, operation_id):
+        rows = conn.execute('SELECT protocol_epoch FROM typed_operations WHERE operation_id=? LIMIT 2',
+                            (operation_id,)).fetchall()
+        if len(rows) > 1:
+            _fail('duplicate_operation_id')
+        return None if not rows else self._find(conn, rows[0][0], operation_id)
+
+    def get_operation(self, operation_id: str) -> OperationRecord | None:
+        """Find a durable application key before acquiring new-send authority."""
+        _uuid(operation_id, 'typed operation id')
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            return self._find_operation(conn, operation_id)
+
     def prepare(self, request: PreparedMutation) -> OperationRecord:
+        """Strict replay requires the original epoch and operation identity."""
+        return self._prepare(request, application=False)
+
+    def prepare_operation(self, request: PreparedMutation) -> OperationRecord:
+        """Bind an explicit application key once, retaining its original epoch.
+
+        New application keys cannot overtake any overlapping unresolved intent.
+        Existing exact keys may resume even after the provider epoch changes.
+        """
+        return self._prepare(request, application=True)
+
+    def _prepare(self, request: PreparedMutation, *, application: bool) -> OperationRecord:
         changes = mutation_selectors(request)
         raw = request.request_json
         if len(raw) > MAX_REQUEST_BYTES:
@@ -323,9 +359,21 @@ class OperationJournal:
         root = self.coordinator
         with root._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
             self._check(conn)
-            existing = self._exact(conn, request)
+            self._exact(conn, request)  # Validate the caller's bound root/actor.
+            existing = self._find_operation(conn, request.expectation.operation_id)
             if existing is not None:
+                if application:
+                    request = PreparedMutation(
+                        replace(request.expectation, protocol_epoch=existing.request.expectation.protocol_epoch),
+                        request.arguments_json)
+                if existing.request.request_json != request.request_json:
+                    _fail('request_changed')
                 return existing
+            if application:
+                pending = conn.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,))
+                for kind, value in pending:
+                    if any(_overlap(source_selectors.Selector(kind, value), change) for change in changes):
+                        _fail('overlapping_intent')
             if conn.execute('SELECT count(*) FROM typed_operations').fetchone()[0] >= MAX_RECORDS:
                 _fail('record_budget')
             # Reserve one maximum-sized receipt per new operation, so a full

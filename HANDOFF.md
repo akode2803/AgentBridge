@@ -1,5 +1,50 @@
 # Cloud source handoff
 
+## 2026-10-13 whole-root fencing and application journal integration
+
+Active branch: `codex/journal-application-writes`, based on PR142 repair
+`f7cbde1`. Implements whole-root member claim/leave retirement, keyed application
+operations and explicit `LocalMutationTransport.bind_journal()`. All nine typed
+families can be journaled. Application keys retain their original epoch and exact
+payload; new overlapping operations wait behind unresolved intents. Outbox append
+recovery runs before fresh-send membership checks or terminal shortcuts, preserving
+committed work across response loss, ACK loss, restart and membership removal.
+Binding excludes in-flight/delayed legacy writes. Unsupported and unkeyed writes
+fail closed once bound. No startup code enables the binding yet.
+
+Independent review reproduced an important stale-ready composition failure:
+completing a typed operation allowed LocalInputRuntime to republish unchanged
+mirror data. Format 5 now retires all existing Store readiness during upgrade
+and permanently requires verified node positions for publication. Collection uses
+a separate callback-free capture API; actual node publication, normal page capture,
+finalization and restart remain usable. The real warm-cache reproduction is a
+permanent regression. See ENGINEERING_LESSONS and the typed protocol plan.
+
+Evidence: final combined journal/application/fence/outbox gate 255 passed;
+source-publication/legacy identity/completion/quarantine compatibility 75 passed;
+independent Astra node-publisher/upgrade/mirror gate 17 passed with disposable
+localhost access. Changed Python Ruff and whitespace checks pass. Astra found no
+remaining actionable P1/P2. Parent endpoint/JSONB/instrumentation repair previously
+passed 115 tests. These are local and independent-review results, not CI or release.
+
+CI inspected: PR138, PR139 and PR141 are now green on both platforms. PR140's
+PostgreSQL and Ubuntu gates pass, Windows remains running. PR142 replacement
+Ubuntu/Windows checks on `f7cbde1` remain running. Older failed heads #116/#119/
+#121/#125 remain part of the historical stack; repairs are recorded in later
+children, so consolidation must verify cumulative ancestry rather than rerun
+unchanged obsolete gates.
+
+Next: inspect new CI/reviews, then durable mutable-write identities for presence,
+machines, overlays and lifecycle owners; reserved finalization integration;
+attachment staging/manifest sequencing; authenticated disposable full-driver
+acceptance and capability-gated activation. The non-evicting 4,096-operation
+journal also needs safe epoch/receipt retirement before periodic presence uses it
+(30-second beats alone fill it in about 34 hours). Do not generate fresh identities
+or timestamps for ambiguous retries. After migration acceptance, land the verified
+dependency chain and close superseded PRs without discarding unique work. Automated
+project-to-project migration remains separate/backlogged. No provider changes,
+merge, deployment, app/harness restart or production writer activation this round.
+
 ## 2026-10-13 PR142 review and CI correction
 
 PR142's Ubuntu failure was four transaction-instrumentation fixtures that mocked
