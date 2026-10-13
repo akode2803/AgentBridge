@@ -268,8 +268,13 @@ holds the actor account and room authority through the existing semantic
 transition, serializes each exact effect path, and treats the original receipt
 as the only response-loss replay contract.
 It remains inactive: no P1b readiness marker or Python mutation adapter
-activation has landed. Blob-manifest proof plus current-head PostgreSQL 16 CI
-remain outstanding.
+activation has landed. The typed blob-manifest slice is implemented with
+disposable Supabase PostgreSQL 17 SQL/RLS acceptance in
+[PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md](PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md).
+Real Storage HTTP acceptance passed. Exact bounded provider logs reconcile the
+original class-only denials; the tightened client has local regression coverage
+but was not rerun live. PostgreSQL 16 CI passed for head `1fd31ec`; the subsequent
+Storage metadata cast repair requires its own gate. Readiness remains absent.
 
 ### P2 — node mutation journal and typed adapter
 

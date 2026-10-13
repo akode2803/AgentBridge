@@ -1,5 +1,93 @@
 # Cloud source handoff
 
+## 2026-10-13 typed protocol review follow-up
+
+Automated project migration stays in the backlog. Active work remains typed
+mutation receipts and current PRs. PR140 head `1fd31ec` passed PostgreSQL 16 and
+Ubuntu; Windows was still running at inspection. Codex review found a size cast
+whose AND guard could be reordered. The product schema now uses nested CASE and
+the executable PostgreSQL gate covers 18 stored malformed/boundary metadata
+values. Historical applied scratch SQL is intentionally unchanged. The two
+stale HTTP-acceptance statuses are reconciled with the recorded classifier limit.
+Local schema/HTTP checks: 30 passed; Ruff and whitespace checks passed. The new
+SQL regression still requires replacement PostgreSQL CI. PR138's only Windows
+failure was a 10-second signup HTTP timeout in SQLite commit (4211 passed);
+the exact fixture passed locally in 1.56 seconds and only its failed job was
+retried. No timeout was widened and no runtime workaround was introduced.
+Next: strict inactive typed receipt Python wire, then durable journal wiring;
+do not activate writes or publish readiness from this checkpoint.
+
+## 2026-10-13 migration-feature documentation checkpoint
+
+The retained AgentBridge Scratch scripts and results are now classified in
+[docs/SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
+The document records the exact scratch validation sequence, explains which
+files are reusable gates versus scratch-only or superseded evidence, and designs
+an automated in-app project-to-project migration engine around an immutable
+plan, secret-free journal, supported Auth/Storage transfer, durable source
+writer fence, canonical source/target verification and single cutover receipt.
+The GUI supplies authorization, durable progress/resume and the final cutover
+choice; no person or AI runs the retained scripts as the product workflow. The
+feature is recorded near the active provider work in `BACKLOG.md`. This remains
+documentation only: no provider, runtime, credential, app or harness state was
+changed, and the current typed blob-manifest checkpoint below remains the active
+implementation/review task.
+
+## 2026-10-13 typed blob-manifest checkpoint
+
+PR #140 (`codex/provider-typed-blob-manifest`) is stacked on PR #139 at parent
+`e2247a3`; the typed blob implementation checkpoint before the documentation
+commit above is `0ea72f5`.
+The final inactive P1b mutation family now adds a private immutable manifest,
+an exact owner/object-ID/size receipt RPC and a `blob-stage` Storage-policy
+carve-out. Existing permissive policies are replaced so they cannot OR-admit
+the staged lane. Unpublished reads are uploader/current-member only; published
+reads require an exact manifest plus current/history chat authority; replacement
+identities fail closed. The provider does not claim to hash Storage bytes or make
+upload and manifest publication atomic.
+
+The focused local checkpoint passes 263 tests plus Ruff, Python compilation and
+whitespace checks. Independent Astra review ran 44 focused tests and found no
+P1/P2 in the clean-install slice. Client-wire review then found that the first
+scratch draft used internal `storage.objects.version`, which the supported
+client does not expose as an identity contract. The corrected product schema
+uses API-visible `storage.objects.id`. Scratch migration `20261013080407` drops
+the old overloads and column and installs the UUID signatures; a review finding
+also made it refuse upgrade while either draft manifests or receipts remain.
+Hosted SQL/RLS acceptance covered owner-only unpublished visibility,
+member-only published visibility, outsider denial, exact replay, wrong-ID
+rejection without a receipt, update denial and replacement-ID fail-closed
+behavior. The performance advisor remains clean. Exact migration, cleanup,
+verification and acceptance scripts are retained with their hashes in
+`docs/provider-mutation-acceptance/`; full evidence and explicit limits are in
+[docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md](docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md).
+
+Real Storage HTTP acceptance now passes. Two generated `example.com` users were
+auto-confirmed in AgentBridge Scratch and authenticated through the public API;
+their API UUIDs matched the dashboard rows. On fresh sealed root
+`typed-blob-http-20261013081948`, the exact two-phase client proved create-only
+upload/recovery, stable API-visible object ID, owner byte/SHA-256 round trip,
+second-member pre-publication denial, exact manifest replay, second-member
+post-publication read, upsert/move denial and exact Storage API cleanup. Final
+SQL verification saw zero object rows, one immutable manifest and one terminal
+receipt. Exact setup/verification SQL and the sanitized result are retained as
+`docs/provider-mutation-acceptance/20261013081948-http-*`. Astra found that the
+first client result's class-only denials could hide a transient failure; the
+exact five-second Storage log window proves `404 NoSuchKey`,
+`409 KeyAlreadyExists`, `403 AccessDenied`, `404 NoSuchKey` and HTTP-200 cleanup.
+The validator now requires those per-operation status/code pairs and ten pure
+regressions reject 429/5xx/unrelated failures. Generated passwords were already
+destroyed, so the tightened client was not rerun live; the bounded provider log
+is the reconciliation evidence for this run. No credential, token or API key
+entered the repository. The two disposable Auth users still exist.
+Astra's follow-up found the evidence P2 closed and no remaining actionable P1/P2;
+all 30 HTTP-classifier/schema tests passed independently. The combined focused
+gate passes 263 tests. PR #140 is open; its PostgreSQL 16 CI remains the exact
+holder/waiter gate and has not yet been accepted as completion evidence. No
+readiness marker or Python activation exists.
+Production project `eakewaaqbilmtswbbxix` and the local app/harness remain
+untouched and shut down.
+
 Delivery diagnostics, Supabase-only transport, mandatory bound GUI paging and
 PR34 attachment reconciliation are implemented and independently reviewed.
 The complete offline suite passed 3071 tests with 15 expected skips; Ruff and

@@ -42,6 +42,7 @@ SAFE_DATABASE = re.compile(
 BOOTSTRAP_SQL: Final = r"""
 create schema if not exists auth;
 create schema if not exists private;
+create schema if not exists storage;
 
 do $$ begin
   create role anon nologin;
@@ -106,8 +107,24 @@ create table public.ab_change_events (
   id bigint generated always as identity primary key,
   root text not null
 );
+create table storage.objects (
+  id uuid primary key default gen_random_uuid(),
+  bucket_id text not null,
+  name text not null,
+  owner_id text,
+  metadata jsonb,
+  version text,
+  archived_at timestamptz,
+  is_delete_marker boolean not null default false,
+  is_versioned boolean not null default false,
+  unique (bucket_id, name)
+);
 
 alter table public.ab_members enable row level security;
+alter table storage.objects enable row level security;
+grant usage on schema storage to authenticated, service_role;
+grant select, insert, update, delete on table storage.objects
+  to authenticated, service_role;
 create or replace function public.ab_source_json_bytes(p_value jsonb)
 returns integer language sql immutable strict set search_path = pg_catalog as $$
   select pg_catalog.octet_length(
@@ -718,6 +735,28 @@ def _finish_sql(
         f"{_quote(str(operation_id))}::uuid, {_quote(kind)}, "
         f"{_quote(client_digest)}, {_quote(provider_digest)}, "
         f"{_quote(result)}::jsonb)"
+    )
+
+
+def _blob_manifest_sql(
+    root: str,
+    epoch: UUID,
+    operation_id: UUID,
+    payload_digest: str,
+    chat: str,
+    blob: str,
+    object_id: UUID,
+    sealed_bytes: int,
+    sealed_sha256: str,
+    manifest_digest: str,
+) -> str:
+    return (
+        "select public.ab_mutation_blob_manifest("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(operation_id))}::uuid, {_quote(payload_digest)}, "
+        f"{_quote(chat)}, {_quote(blob)}, {_quote(str(object_id))}::uuid, "
+        f"{sealed_bytes}, {_quote(sealed_sha256)}, "
+        f"{_quote(manifest_digest)})"
     )
 
 
@@ -2152,6 +2191,368 @@ def _validate_p1b_effect_path_lock(database_url: str) -> None:
         raise GateFailure("effect path contention produced duplicate evidence")
 
 
+def _validate_p1b_blob_manifest_rpc(database_url: str) -> None:
+    # Exercise casts on stored values, not just constants: SQL inlining and
+    # predicate reordering must not turn malformed metadata into an exception.
+    size_checks = _scalar(database_url, """
+        create temporary table ab_size_cases(metadata jsonb, expected bigint);
+        insert into ab_size_cases values
+          (null, null), ('null', null), ('{}', null), ('[]', null),
+          ('{"size":null}', null), ('{"size":true}', null),
+          ('{"size":{}}', null), ('{"size":[]}', null),
+          ('{"size":"garbage"}', null), ('{"size":"1e3"}', null),
+          ('{"size":"1.0"}', null), ('{"size":"-1"}', null),
+          ('{"size":"99999999999999999999999999999"}', null),
+          ('{"size":"0"}', null), ('{"size":52428801}', null),
+          ('{"size":1}', 1), ('{"size":"4096"}', 4096),
+          ('{"size":52428800}', 52428800);
+        select bool_and(private.ab_storage_object_size(metadata)
+                        is not distinct from expected) from ab_size_cases;
+    """)
+    if size_checks != "t":
+        raise GateFailure("Storage size metadata did not fail closed")
+    root = "typed-blob"
+    chat = "room"
+    blob = "blob-primary"
+    object_id = uuid4()
+    size = 37
+    actor = uuid4()
+    reader = uuid4()
+    outsider = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    actor_name = root + "-member"
+    reader_name = root + "-reader"
+    outsider_name = root + "-outsider"
+    _run(
+        database_url,
+        "insert into public.ab_members(root,username,uid) values ("
+        f"{_quote(root)}, {_quote(reader_name)}, {_quote(str(reader))}::uuid), ("
+        f"{_quote(root)}, {_quote(outsider_name)}, {_quote(str(outsider))}::uuid);"
+        " insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'chats/{chat}/meta.json', "
+        "pg_catalog.jsonb_build_object('members',"
+        f"pg_catalog.jsonb_build_object({_quote(actor_name)},'{{}}'::jsonb,"
+        f"{_quote(reader_name)},'{{}}'::jsonb)), false);",
+    )
+
+    object_name = f"{root}/blob-stage/{chat}/{blob}"
+    _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "insert into storage.objects("
+        "id,bucket_id,name,owner_id,metadata,version) values ("
+        f"{_quote(str(object_id))}::uuid, 'ab-mesh', {_quote(object_name)}, "
+        f"{_quote(str(actor))}, '{{\"size\":{size}}}'::jsonb, 'fixture'); "
+        "commit;",
+    )
+    denied_upload = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(outsider)
+        + "insert into storage.objects("
+        "id,bucket_id,name,owner_id,metadata,version) values ("
+        f"{_quote(str(uuid4()))}::uuid, 'ab-mesh', "
+        f"{_quote(root + '/blob-stage/' + chat + '/outsider')}, "
+        f"{_quote(str(outsider))}, '{{\"size\":9}}'::jsonb, 'v1'); commit;",
+        expect_ok=False,
+    )
+    if "row-level security" not in denied_upload.stderr.lower():
+        raise GateFailure("non-room member uploaded a staged object")
+
+    def visible(uid: UUID, name: str = object_name) -> int:
+        return int(_scalar(
+            database_url,
+            "begin; set local role authenticated; " + _claims(uid)
+            + "select count(*) from storage.objects where bucket_id='ab-mesh' "
+            f"and name={_quote(name)}; commit;",
+        ))
+
+    if visible(actor) != 1 or visible(reader) != 0 or visible(outsider) != 0:
+        raise GateFailure("unpublished staged-object visibility is not owner-only")
+
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+    operation_id = uuid4()
+    client_digest = "1" * 64
+    sealed_sha256 = "2" * 64
+    manifest_digest = "3" * 64
+    call = _blob_manifest_sql(
+        root, epoch, operation_id, client_digest, chat, blob, object_id, size,
+        sealed_sha256, manifest_digest,
+    )
+    receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call + "; commit;",
+    ))
+    replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call + "; commit;",
+    ))
+    if replay != receipt or receipt["result"] != {
+            "blob_id": blob, "chat_id": chat,
+            "object_id": str(object_id), "sealed_bytes": size}:
+        raise GateFailure("typed blob manifest exact replay changed")
+
+    collision = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _blob_manifest_sql(
+            root, epoch, operation_id, client_digest, chat, blob, object_id,
+            size, "4" * 64, manifest_digest,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "collides with existing receipt" not in collision.stderr:
+        raise GateFailure("blob operation digest collision was accepted")
+
+    duplicate_id = uuid4()
+    duplicate = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _blob_manifest_sql(
+            root, epoch, duplicate_id, "5" * 64, chat, blob, object_id,
+            size, sealed_sha256, manifest_digest,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "typed blob manifest already exists" not in duplicate.stderr:
+        raise GateFailure("fresh duplicate blob manifest was accepted")
+
+    wrong_owner_id = uuid4()
+    right_id = uuid4()
+    wrong_size_id = uuid4()
+    wrong_cases = (
+        ("wrong-owner", reader, wrong_owner_id, 11, wrong_owner_id, 11),
+        ("wrong-id", actor, right_id, 12, uuid4(), 12),
+        ("wrong-size", actor, wrong_size_id, 13, wrong_size_id, 14),
+    )
+    rejected_ids: list[UUID] = [duplicate_id]
+    for index, (candidate, owner, stored_id, stored_size,
+                requested_id, requested_size) in enumerate(wrong_cases):
+        _run(
+            database_url,
+            "insert into storage.objects("
+            "id,bucket_id,name,owner_id,metadata,version) values ("
+            f"{_quote(str(stored_id))}::uuid, 'ab-mesh', "
+            f"{_quote(root + '/blob-stage/' + chat + '/' + candidate)}, "
+            f"{_quote(str(owner))}, '{{\"size\":{stored_size}}}'::jsonb, "
+            "'fixture');",
+        )
+        rejected_id = uuid4()
+        rejected_ids.append(rejected_id)
+        rejected = _run(
+            database_url,
+            "begin; set local role authenticated; " + _claims(actor)
+            + _blob_manifest_sql(
+                root, epoch, rejected_id, str(6 + index) * 64,
+                chat, candidate, requested_id, requested_size,
+                sealed_sha256, manifest_digest,
+            ) + "; commit;",
+            expect_ok=False,
+        )
+        if "typed blob manifest object is unavailable" not in rejected.stderr:
+            raise GateFailure(f"{candidate} Storage mismatch was accepted")
+
+    if visible(actor) != 1 or visible(reader) != 1 or visible(outsider) != 0:
+        raise GateFailure("published staged-object visibility is not room-bound")
+    updated = int(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "with changed as (update storage.objects set version='forbidden' "
+        f"where bucket_id='ab-mesh' and name={_quote(object_name)} returning 1) "
+        "select count(*) from changed; commit;",
+    ))
+    if updated:
+        raise GateFailure("authenticated staged-object update was admitted")
+
+    replacement_id = uuid4()
+    _run(
+        database_url,
+        "delete from storage.objects where bucket_id='ab-mesh' and name="
+        f"{_quote(object_name)}; insert into storage.objects("
+        "id,bucket_id,name,owner_id,metadata,version) values ("
+        f"{_quote(str(replacement_id))}::uuid, 'ab-mesh', "
+        f"{_quote(object_name)}, {_quote(str(actor))}, "
+        f"'{{\"size\":{size}}}'::jsonb, 'replacement');",
+    )
+    if visible(actor) != 0 or visible(reader) != 0:
+        raise GateFailure("replacement object matched an older manifest")
+
+    pending_blob = "after-removal"
+    pending_object_id = uuid4()
+    _run(
+        database_url,
+        "insert into storage.objects("
+        "id,bucket_id,name,owner_id,metadata,version) values ("
+        f"{_quote(str(pending_object_id))}::uuid, 'ab-mesh', "
+        f"{_quote(root + '/blob-stage/' + chat + '/' + pending_blob)}, "
+        f"{_quote(str(actor))}, '{{\"size\":15}}'::jsonb, 'v-pending');",
+    )
+    remove_id = uuid4()
+    removed_meta = {"members": {reader_name: {}}}
+    _scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(remove_id))}::uuid, {_quote('9' * 64)}, "
+        f"'chats/{chat}/meta.json', {_jsonb(removed_meta)}); commit;",
+    )
+    replay_after_removal = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call + "; commit;",
+    ))
+    if replay_after_removal != receipt:
+        raise GateFailure("blob receipt replay failed after room removal")
+    denied_id = uuid4()
+    rejected_ids.append(denied_id)
+    denied = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + _blob_manifest_sql(
+            root, epoch, denied_id, "a" * 64, chat, pending_blob,
+            pending_object_id, 15, sealed_sha256, manifest_digest,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "typed blob manifest is unauthorized" not in denied.stderr:
+        raise GateFailure("removed room member published a fresh blob manifest")
+    rejected_values = ",".join(
+        f"{_quote(str(value))}::uuid" for value in rejected_ids)
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id in ({rejected_values});",
+    )):
+        raise GateFailure("rejected blob operations retained receipts")
+
+
+def _validate_p1b_blob_manifest_lock(database_url: str) -> None:
+    root = "typed-blob-lock"
+    chat = "room"
+    blob = "same-blob"
+    object_id = uuid4()
+    size = 23
+    actor = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    member = root + "-member"
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'chats/{chat}/meta.json', "
+        "pg_catalog.jsonb_build_object('members',"
+        f"pg_catalog.jsonb_build_object({_quote(member)},'{{}}'::jsonb)), false);"
+        " insert into storage.objects("
+        "id,bucket_id,name,owner_id,metadata,version) values ("
+        f"{_quote(str(object_id))}::uuid, 'ab-mesh', "
+        f"{_quote(root + '/blob-stage/' + chat + '/' + blob)}, "
+        f"{_quote(str(actor))}, '{{\"size\":{size}}}'::jsonb, "
+        "'fixture');",
+    )
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+    holder_id = uuid4()
+    waiter_id = uuid4()
+    holder_client = "b" * 64
+    sealed_sha256 = "c" * 64
+    manifest_digest = "d" * 64
+    provider_digest = _scalar(
+        database_url,
+        "select private.ab_mutation_provider_digest("
+        "pg_catalog.jsonb_build_array('blob_manifest',"
+        f"{_quote(chat)}, {_quote(blob)}, {_quote(str(object_id))}::uuid, {size}, "
+        f"{_quote(sealed_sha256)}, {_quote(manifest_digest)}));",
+    )
+    suffix = uuid4().hex[:8]
+    holder_name = f"ab-blob-holder-{suffix}"
+    waiter_name = f"ab-blob-waiter-{suffix}"
+    holder_ready = f"blob-holder-ready-{suffix}"
+    holder_done = f"blob-holder-done-{suffix}"
+    lock_key = (
+        "pg_catalog.hashtextextended("
+        "'agentbridge-blob-manifest:' || "
+        "pg_catalog.jsonb_build_array("
+        f"{_quote(root)}, {_quote(chat)}, {_quote(blob)})::text, 0)"
+    )
+    holder = _PsqlSession(database_url)
+    waiter = _PsqlSession(database_url)
+    try:
+        holder.send(
+            f"set application_name = {_quote(holder_name)}; begin; "
+            + _claims(actor)
+            + _begin_sql(
+                root, epoch, holder_id, "blob_manifest",
+                holder_client, provider_digest,
+            )
+            + f"; select private.ab_mutation_lock_actor({_quote(root)}); "
+            + "select private.ab_mutation_lock_chat("
+            + f"{_quote(root)}, {_quote(chat)}, false); "
+            + f"select pg_catalog.pg_advisory_xact_lock({lock_key}); "
+            + f"select {_quote(holder_ready)};"
+        )
+        holder.wait_marker(holder_ready)
+        waiter.send(
+            f"set application_name = {_quote(waiter_name)}; begin; "
+            + _claims(actor)
+            + _blob_manifest_sql(
+                root, epoch, waiter_id, "e" * 64, chat, blob, object_id,
+                size, sealed_sha256, manifest_digest,
+            ) + "; commit;"
+        )
+        _wait_for_lock_order(
+            database_url,
+            root=root,
+            holder=holder,
+            holder_name=holder_name,
+            holder_mode="ExclusiveLock",
+            waiter=waiter,
+            waiter_name=waiter_name,
+            waiter_mode="ExclusiveLock",
+            lock_key_sql=lock_key,
+        )
+        result = json.dumps({
+            "blob_id": blob, "chat_id": chat,
+            "object_id": str(object_id), "sealed_bytes": size,
+        }, separators=(",", ":"), sort_keys=True)
+        holder.send(
+            "insert into public.ab_blob_manifests("
+            "root,protocol_epoch,operation_id,chat_id,blob_id,actor_uid,"
+            "object_id,sealed_bytes,sealed_sha256,manifest_digest) values ("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(holder_id))}::uuid, {_quote(chat)}, {_quote(blob)}, "
+            f"{_quote(str(actor))}::uuid, {_quote(str(object_id))}::uuid, {size}, "
+            f"{_quote(sealed_sha256)}, {_quote(manifest_digest)}); "
+            + _finish_sql(
+                root, epoch, holder_id, "blob_manifest",
+                holder_client, provider_digest, result,
+            )
+            + f"; commit; select {_quote(holder_done)};"
+        )
+        holder.wait_marker(holder_done)
+        holder.finish()
+        waiter_error = waiter.finish(expect_ok=False)
+        if "typed blob manifest already exists" not in waiter_error:
+            raise GateFailure("blob-key waiter did not reject committed winner")
+    finally:
+        holder.abort()
+        waiter.abort()
+
+    counts = _scalar(
+        database_url,
+        "select ((select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)})::text || ':' || "
+        "(select count(*) from public.ab_blob_manifests where root = "
+        f"{_quote(root)} and chat_id={_quote(chat)} and blob_id={_quote(blob)})"
+        "::text);",
+    )
+    if counts != "1:1":
+        raise GateFailure("blob-key contention produced duplicate evidence")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2216,10 +2617,12 @@ def main() -> int:
     _validate_p1b_room_terminal_lock(database_url)
     _validate_p1b_effect_rpc(database_url)
     _validate_p1b_effect_path_lock(database_url)
+    _validate_p1b_blob_manifest_rpc(database_url)
+    _validate_p1b_blob_manifest_lock(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
-        "gate": "inactive-mutation-protocol-p1a-p1b-effect",
+        "gate": "inactive-mutation-protocol-p1a-p1b-blob-manifest",
         "result": "passed",
         "server_version": server_version,
         "server_version_num": server_version_num,
@@ -2235,6 +2638,12 @@ def main() -> int:
             "typed-effect-claim", "typed-effect-state-chain",
             "typed-effect-fresh-duplicate", "typed-effect-post-removal-replay",
             "typed-effect-path-lock",
+            "typed-blob-owner-upload", "typed-blob-owner-only-unpublished",
+            "typed-blob-manifest", "typed-blob-replay",
+            "typed-blob-digest-collision", "typed-blob-fresh-duplicate",
+            "typed-blob-owner-object-id-size", "typed-blob-member-read",
+            "typed-blob-update-denied", "typed-blob-object-replacement",
+            "typed-blob-post-removal-replay", "typed-blob-key-lock",
             "schema-rerun",
         ],
     }, sort_keys=True))

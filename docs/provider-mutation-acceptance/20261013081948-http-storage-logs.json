@@ -1,0 +1,18 @@
+{
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "window_start": "2026-10-13T08:20:22Z",
+  "window_end": "2026-10-13T08:20:27Z",
+  "requests": [
+    {"timestamp":"2026-10-13T08:20:22.537000","operation":"storage.object.list","method":"POST","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:22.860000","operation":"object.get_authenticated_info","method":"GET","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:22.967000","operation":"storage.object.get_authenticated","method":"GET","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:23.582000","operation":"object.get_authenticated_info","method":"GET","response_status":400,"error_status":404,"error_code":"NoSuchKey","actor_uid":"427f340f-e266-4424-9c5f-82088c1ab76c"},
+    {"timestamp":"2026-10-13T08:20:23.762000","operation":"storage.object.upload","method":"POST","response_status":400,"error_status":409,"error_code":"KeyAlreadyExists","actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:24.354000","operation":"storage.object.list","method":"POST","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:25.610000","operation":"object.get_authenticated_info","method":"GET","response_status":200,"actor_uid":"427f340f-e266-4424-9c5f-82088c1ab76c"},
+    {"timestamp":"2026-10-13T08:20:25.818000","operation":"storage.object.upload","method":"POST","response_status":400,"error_status":403,"error_code":"AccessDenied","actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:25.965000","operation":"storage.object.move","method":"POST","response_status":400,"error_status":404,"error_code":"NoSuchKey","actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:26.122000","operation":"storage.object.list","method":"POST","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"},
+    {"timestamp":"2026-10-13T08:20:26.315000","operation":"storage.object.delete_many","method":"DELETE","response_status":200,"actor_uid":"bcae492c-0493-4aae-b18a-bec122b5cf34"}
+  ]
+}

@@ -101,9 +101,53 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   evidence, sealed legacy denial and exact replay after room removal; see
   [PROVIDER_TYPED_EFFECT_ACCEPTANCE.md](docs/PROVIDER_TYPED_EFFECT_ACCEPTANCE.md).
   Astra's follow-up found no remaining P1/P2 after the disposable gate installed
-  the exact pre-existing R142 source dependency. Blob-manifest proof remains the
-  final missing mutation family before the readiness marker and inactive Python
-  wire.
+  the exact pre-existing R142 source dependency. The final inactive mutation
+  family now publishes immutable staged-blob manifests with exact authenticated
+  owner, API-visible Storage object ID and bounded-size evidence. Hosted PostgreSQL 17
+  acceptance covered owner-only unpublished visibility, room-member published
+  visibility, outsider denial, exact replay, collision/fresh-duplicate and
+  owner/object-ID/size rejection, update denial, replacement-ID fail-closed
+  behavior and post-removal replay; see
+  [PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md](docs/PROVIDER_TYPED_BLOB_MANIFEST_ACCEPTANCE.md).
+  Real Storage HTTP acceptance now passes with two auto-confirmed disposable
+  principals: create-only upload/recovery, byte/hash round trip, pre-publication
+  denial, exact publication replay, post-publication second-member read,
+  upsert/move denial and exact API cleanup all held. Sanitized evidence and the
+  exact setup/verification SQL are retained under
+  `docs/provider-mutation-acceptance/`. Independent review tightened the client
+  from exception-class checks to exact per-operation status/code checks; the
+  exact five-second provider log reconciles the original run, and ten pure
+  regressions reject transient or unrelated errors. Current-head PostgreSQL 16
+  CI remains open. Install no readiness marker before that passes; the inactive
+  Python wire follows.
+
+- [ ] **Supabase project-to-project migration and controlled cutover** (Aryan,
+  2026-10-13). Build this as an automated feature inside AgentBridge, not an
+  operator/AI-run migration procedure. After the user authorizes source and
+  target access and chooses final cutover, an in-app coordinator owns every
+  phase, durable retry, restart resume, verification, configuration change and
+  recovery action. Drive it from Settings with progress and actionable paused
+  states; an optional test CLI may only be a thin client of the same engine.
+  Use an immutable plan and append-only secret-free journal. Inventory and
+  verify database schema,
+  extensions, grants/RLS and project settings; move relational data with an
+  exact final delta; migrate Auth identities through supported interfaces with
+  stable UUIDs or an audited complete UID mapping; and move Storage bytes
+  through the supported API/S3 path with target object-ID, size and digest
+  verification. Reuse the retained provider-mutation SQL/HTTP evidence as
+  acceptance fixtures rather than treating it as a replay bundle. Fence every
+  source writer and drain/account for pending intents before a provider-issued
+  final cut; Realtime quietness, caches, timestamps and transport frontiers are
+  not completeness or authority. Keep the target quarantined until canonical
+  source/target results and authenticated behavior match, then switch exactly
+  once with a durable readiness/cutover receipt. Before activation the source
+  remains usable; after target writes begin, rollback requires a reviewed
+  reverse migration. Detailed phases, failure semantics, script inventory and
+  acceptance matrix are in
+  [SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
+  Implement after the typed mutation protocol supplies the durable writer
+  fence/cut evidence. A migration is not complete while success depends on a
+  person or AI running the retained scripts in sequence.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

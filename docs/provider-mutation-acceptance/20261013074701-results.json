@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "status": "superseded_scratch_draft",
+  "superseded_by": "20261013080407",
+  "superseded_reason": "internal storage.objects.version is not a supported client-visible identity contract",
+  "observed_at": "2026-10-13T07:51:08Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "region": "ap-south-1",
+  "postgresql_version": "17.11",
+  "migration": {
+    "version": "20261013074701",
+    "name": "agentbridge_p1b_typed_blob_manifest_rpc",
+    "statement_bytes": 13375,
+    "statement_sha256": "e8fc9e5eda1afdeee08e001236c0f61e47b3bf5dfd2496f8c81b35f6cb498a9a"
+  },
+  "hosted_sql_observations": {
+    "authenticated_owner_staged_insert": true,
+    "unpublished_owner_visible": true,
+    "unpublished_room_member_hidden": true,
+    "unpublished_outsider_hidden": true,
+    "manifest_and_receipt_atomic": true,
+    "exact_replay_stable": true,
+    "provider_digest_collision_rejected": true,
+    "fresh_duplicate_rejected": true,
+    "wrong_owner_rejected": true,
+    "wrong_version_rejected": true,
+    "wrong_size_rejected": true,
+    "published_room_member_visible": true,
+    "published_outsider_hidden": true,
+    "authenticated_stage_update_rows": 0,
+    "replacement_version_owner_visible_rows": 0,
+    "replacement_version_member_visible_rows": 0,
+    "post_removal_exact_replay_stable": true,
+    "post_removal_fresh_operation_rejected": true,
+    "manifest_rows": 1,
+    "blob_receipts": 1,
+    "rejected_receipts": 0,
+    "authenticated_execute_grants": 1,
+    "forbidden_execute_grants": 0,
+    "storage_policies": 4
+  },
+  "advisors": {
+    "performance_findings": 0,
+    "new_security_findings": [
+      "intentional private manifest table has RLS and no policies",
+      "intentional authenticated security-definer mutation RPC",
+      "intentional authenticated security-definer Storage policy predicate"
+    ],
+    "scaffold_findings_remain": true
+  },
+  "limits": {
+    "real_storage_api_exercised": false,
+    "object_bytes_uploaded": false,
+    "provider_computed_hash_proved": false,
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}
