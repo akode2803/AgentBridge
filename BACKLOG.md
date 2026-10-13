@@ -92,8 +92,18 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   [PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md](docs/PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md).
   Astra's follow-up found no remaining P1/P2 after the null-shape and delayed-
   writer corrections. PostgreSQL 16 execution is pending. No public P1b
-  readiness marker or application activation exists; effect transition and
-  blob-manifest proof remain next.
+  readiness marker or application activation exists. The next stacked slice
+  wraps the existing R142 effect validator/writer in exact typed receipt
+  identity, holds agent ownership and room authority through the transition,
+  and serializes fresh operations on the exact effect path. Disposable hosted
+  PostgreSQL 17 acceptance covered claim/grant atomicity, state ordering,
+  provider-digest collision, fresh duplicate denial, pre-existing grant
+  evidence, sealed legacy denial and exact replay after room removal; see
+  [PROVIDER_TYPED_EFFECT_ACCEPTANCE.md](docs/PROVIDER_TYPED_EFFECT_ACCEPTANCE.md).
+  Astra's follow-up found no remaining P1/P2 after the disposable gate installed
+  the exact pre-existing R142 source dependency. Blob-manifest proof remains the
+  final missing mutation family before the readiness marker and inactive Python
+  wire.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

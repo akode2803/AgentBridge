@@ -1447,3 +1447,48 @@ PostgreSQL 16/platform evidence, then implement the inactive typed effect
 transition separately from storage. The blob-manifest boundary follows as its
 own reviewed slice because staged object upload cannot be atomic with the
 database receipt. Install no readiness marker until both families are complete.
+
+PR 138 is open at head `be0ce82`, stacked on PR 137. Its current-head
+PostgreSQL 16, Ubuntu and Windows gates started; no completion is inferred from
+that running snapshot. PR 137 had PostgreSQL and Ubuntu green with Windows still
+running. PR 136 had PostgreSQL and Windows green; its isolated unrelated Ubuntu
+canonical-page failure was rerun without changing protocol code. Do not poll
+these continuously; inspect completed exact-head evidence when work next resumes.
+
+The next stacked branch, `codex/provider-typed-effect-rpc`, now implements the
+inactive typed effect-transition wrapper. It preserves the existing R142
+semantic validator/writer while adding sealed-root operation identity, provider
+request binding, exact receipt replay, stable root-member/room/agent authority,
+and an exclusive exact effect-path lock. A fresh operation for an existing path
+fails instead of receiving another receipt for R142's legacy identical-document
+retry. The wrapper verifies the exact target after R142 returns, so pre-existing
+matching grant documents cannot fabricate a successful claim.
+
+Disposable Supabase PostgreSQL 17.11 accepted exact product migration
+`20261013034911_agentbridge_p1b_typed_effect_transition_rpc`. The minimal scratch
+scaffold lacked the older R142 dependency that the full product schema already
+owns; scratch-only migration
+`20261013034958_agentbridge_p1b_effect_acceptance_r142_prerequisite` installed
+the exact source section. Hosted authenticated-role checks covered claim/grant
+atomicity, exact replay, provider-digest collision, fresh duplicate denial,
+state predecessor order, pre-existing grant evidence, sealed legacy rejection,
+and exact replay plus fresh denial after room removal. Rejected operations left
+no receipts or partial effects; the performance advisor was clean. Evidence and
+limits are in
+[docs/PROVIDER_TYPED_EFFECT_ACCEPTANCE.md](docs/PROVIDER_TYPED_EFFECT_ACCEPTANCE.md).
+
+The disposable PostgreSQL gate now installs that exact R142 source before the
+inactive protocol and adds sequential effect checks plus an exact advisory-lock
+holder/waiter schedule. Static schema checks, Ruff, compile and whitespace
+checks pass. Independent Astra review found the missing dependency, then no
+remaining P1/P2 after correction; its narrow follow-up also found no P1/P2 in
+the contention schedule. PostgreSQL 16 CI remains required after publication.
+
+The broader effect checkpoint passes 248 tests across the protocol, local
+mutation, node-fence and Supabase transport surfaces. Ruff, Python compilation
+and whitespace checks also pass. Next: commit and open the effect slice on PR
+138, then design the storage boundary as a separate reviewed slice. Storage
+must use immutable staged-object identity, byte size and digest evidence before
+publishing the database manifest; it must not claim object upload and database
+receipt are one atomic transaction. The P1b readiness marker and inactive Python
+wire remain last.

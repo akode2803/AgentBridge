@@ -1,0 +1,45 @@
+{
+  "limits": [
+    "Management SQL did not exercise concurrent sessions; the disposable PostgreSQL gate owns exact lock schedules.",
+    "Management SQL was not a browser/PostgREST HTTP invocation.",
+    "The minimal scratch scaffold does not reproduce the complete product change-ledger trigger stack.",
+    "No production project, application process, or harness was changed."
+  ],
+  "migration": {
+    "name": "agentbridge_p1b_typed_effect_transition_rpc",
+    "statement_bytes": 8262,
+    "statement_sha256": "7ed0e4a1170573705e667c6e2c21be9ebb0f895d39d63a4119eb69b9e3f8bb04",
+    "version": "20261013034911"
+  },
+  "observations": {
+    "authenticated_execute_grants": 1,
+    "claim_documents": 3,
+    "claim_exact_replay": true,
+    "direct_legacy_effects": 0,
+    "direct_legacy_sqlstate": "55000",
+    "fresh_duplicate_receipts": 0,
+    "fresh_duplicate_sqlstate": "55000",
+    "missing_predecessor_sqlstate": "55000",
+    "performance_advisor_findings": 0,
+    "post_removal_exact_replay": true,
+    "post_removal_fresh_receipts": 0,
+    "post_removal_fresh_sqlstate": "42501",
+    "preexisting_grant_partial_effects": 0,
+    "preexisting_grant_receipts": 0,
+    "preexisting_grant_sqlstate": "55000",
+    "provider_digest_collision_sqlstate": "55000",
+    "state_chain_documents": 2,
+    "state_chain_receipts": 2,
+    "unauthorized_execute_grants": 0
+  },
+  "postgres_version": "17.11.0.003",
+  "prerequisite": {
+    "name": "agentbridge_p1b_effect_acceptance_r142_prerequisite",
+    "source_bytes": 5218,
+    "source_sha256": "2e8a211817ba4a6cf5ffecdf17c7707135044dd7819f6fd16db5386adcaf09fe",
+    "version": "20261013034958"
+  },
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "region": "ap-south-1"
+}

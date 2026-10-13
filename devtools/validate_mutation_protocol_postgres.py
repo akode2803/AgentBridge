@@ -32,6 +32,10 @@ PROTOCOL_MARKER: Final = (
     "-- ---------------------------------------------------------------------------\n"
     "-- Inactive receipt-bearing mutation protocol (v1)."
 )
+EFFECT_MARKER: Final = (
+    "-- R142: versioned, authenticated append-only effect transitions."
+)
+EFFECT_END_MARKER: Final = "-- ab_logs: members only, both ways;"
 SAFE_DATABASE = re.compile(
     r"^agentbridge_mutation_test(?:_[A-Za-z0-9][A-Za-z0-9_-]*)?$")
 
@@ -365,6 +369,12 @@ def _quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _jsonb(value: object) -> str:
+    return _quote(json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )) + "::jsonb"
+
+
 def _protocol_sql() -> str:
     source = SCHEMA_PATH.read_text(encoding="utf-8")
     try:
@@ -372,6 +382,16 @@ def _protocol_sql() -> str:
     except ValueError as exc:
         raise GateFailure("mutation protocol marker is missing") from exc
     return source[start:]
+
+
+def _effect_sql() -> str:
+    source = SCHEMA_PATH.read_text(encoding="utf-8")
+    try:
+        start = source.index(EFFECT_MARKER)
+        end = source.index(EFFECT_END_MARKER, start)
+    except ValueError as exc:
+        raise GateFailure("R142 effect transition source is missing") from exc
+    return source[start:end]
 
 
 def _prepare_root(database_url: str, root: str, uid: UUID) -> UUID:
@@ -1765,6 +1785,373 @@ def _validate_p1b_room_terminal_lock(database_url: str) -> None:
         raise GateFailure("room writer survived terminal cleanup")
 
 
+def _validate_p1b_effect_rpc(database_url: str) -> None:
+    root = "typed-effect"
+    actor = uuid4()
+    outsider = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    member = root + "-member"
+    effect_actor = "helper"
+    chat = "room"
+    ask = {"header": {
+        "kind": "permission_ask", "sender": effect_actor,
+        "recipient": member, "agent": effect_actor, "chat_id": chat,
+    }}
+    decision = {"header": {
+        "kind": "permission_decision", "sender": member,
+        "recipient": effect_actor, "agent": effect_actor, "chat_id": chat,
+    }}
+
+    def effect_path(call: str, filename: str) -> str:
+        return f"chats/{chat}/runtime/effects/run/{call}/{filename}"
+
+    def effect_doc(call: str, state: str) -> dict[str, object]:
+        return {
+            "meta": {
+                "kind": "effect", "actor": effect_actor,
+                "signer": effect_actor, "chat_id": chat,
+                "run_id": "run", "root_run_id": "run", "call_id": call,
+            },
+            "state": state,
+        }
+
+    conflict_base = effect_path("conflict", "claim.json").rsplit("/", 1)[0]
+    _run(
+        database_url,
+        "insert into public.ab_members(root,username,uid) values ("
+        f"{_quote(root)}, 'typed-effect-outsider', "
+        f"{_quote(str(outsider))}::uuid); "
+        "insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'users/{effect_actor}.json', "
+        "pg_catalog.jsonb_build_object("
+        "'kind','agent','active',true,'agent',"
+        f"pg_catalog.jsonb_build_object('owner',{_quote(member)})), false), ("
+        f"{_quote(root)}, 'chats/{chat}/meta.json', "
+        "pg_catalog.jsonb_build_object('members',"
+        f"pg_catalog.jsonb_build_object({_quote(member)},'{{}}'::jsonb,"
+        f"{_quote(effect_actor)},'{{}}'::jsonb)), false), ("
+        f"{_quote(root)}, {_quote(conflict_base + '/grant-ask.json')}, "
+        f"{_jsonb(ask)}, false), ("
+        f"{_quote(root)}, {_quote(conflict_base + '/grant-decision.json')}, "
+        f"{_jsonb(decision)}, false);",
+    )
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+
+    def call_sql(
+        operation_id: UUID,
+        digest: str,
+        path: str,
+        data: object,
+        *,
+        grant_ask: object | None = None,
+        grant_decision: object | None = None,
+    ) -> str:
+        return (
+            "select public.ab_mutation_effect_transition("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(operation_id))}::uuid, {_quote(digest)}, "
+            f"{_quote(path)}, {_jsonb(data)}, "
+            f"{_jsonb(grant_ask) if grant_ask is not None else 'null'}, "
+            f"{_jsonb(grant_decision) if grant_decision is not None else 'null'})"
+        )
+
+    claim_path = effect_path("call", "claim.json")
+    claim_doc = effect_doc("call", "prepared")
+    claim_id = uuid4()
+    claim_digest = "1" * 64
+    claim_call = call_sql(
+        claim_id, claim_digest, claim_path, claim_doc,
+        grant_ask=ask, grant_decision=decision,
+    )
+    claim_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + claim_call + "; commit;",
+    ))
+    claim_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + claim_call + "; commit;",
+    ))
+    if claim_receipt != claim_replay or claim_receipt["result"] != {
+            "path": claim_path, "transitioned": True}:
+        raise GateFailure("typed effect claim replay changed its receipt")
+    base = claim_path.rsplit("/", 1)[0]
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_docs where root = "
+        f"{_quote(root)} and path in ("
+        f"{_quote(claim_path)}, {_quote(base + '/grant-ask.json')}, "
+        f"{_quote(base + '/grant-decision.json')}) and not deleted;",
+    )) != 3:
+        raise GateFailure("typed effect claim lost its atomic grant evidence")
+
+    collision = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(
+            claim_id, claim_digest, claim_path,
+            effect_doc("call", "changed"),
+            grant_ask=ask, grant_decision=decision,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "collides with existing receipt" not in collision.stderr:
+        raise GateFailure("typed effect digest did not bind the exact request")
+
+    duplicate_id = uuid4()
+    duplicate = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(
+            duplicate_id, "2" * 64, claim_path, claim_doc,
+            grant_ask=ask, grant_decision=decision,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "typed effect transition already exists" not in duplicate.stderr:
+        raise GateFailure("fresh effect operation accepted an existing path")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(duplicate_id))}::uuid;",
+    )):
+        raise GateFailure("fresh duplicate effect retained a receipt")
+
+    missing_id = uuid4()
+    missing = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(
+            missing_id, "3" * 64,
+            effect_path("missing", "state-3.json"),
+            effect_doc("missing", "committed"),
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "predecessor is unavailable" not in missing.stderr:
+        raise GateFailure("typed effect skipped its exact predecessor")
+
+    state2_id = uuid4()
+    state2_path = effect_path("call", "state-2.json")
+    state2_doc = effect_doc("call", "executing")
+    state2 = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(state2_id, "4" * 64, state2_path, state2_doc)
+        + "; commit;",
+    ))
+    state3_id = uuid4()
+    state3_path = effect_path("call", "state-3.json")
+    state3_doc = effect_doc("call", "committed")
+    state3_call = call_sql(state3_id, "5" * 64, state3_path, state3_doc)
+    state3 = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + state3_call + "; commit;",
+    ))
+    if state2["result"].get("path") != state2_path \
+            or state3["result"].get("path") != state3_path:
+        raise GateFailure("typed effect state chain returned the wrong path")
+
+    conflict_id = uuid4()
+    conflict = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(
+            conflict_id, "6" * 64,
+            effect_path("conflict", "claim.json"),
+            effect_doc("conflict", "prepared"),
+            grant_ask=ask, grant_decision=decision,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "did not commit exact effect" not in conflict.stderr:
+        raise GateFailure("pre-existing grant evidence fabricated an effect")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_docs where root = "
+        f"{_quote(root)} and path = "
+        f"{_quote(effect_path('conflict', 'claim.json'))};",
+    )):
+        raise GateFailure("conflicting grant evidence left a partial effect")
+
+    direct = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_effect_transition("
+        f"{_quote(root)}, {_quote(effect_path('direct', 'claim.json'))}, "
+        f"{_jsonb(effect_doc('direct', 'prepared'))}, "
+        f"{_jsonb(ask)}, {_jsonb(decision)}); commit;",
+        expect_ok=False,
+    )
+    if "legacy provider writes are sealed" not in direct.stderr:
+        raise GateFailure("legacy effect endpoint bypassed the sealed root")
+
+    meta_id = uuid4()
+    meta = {"members": {effect_actor: {}}}
+    _scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(meta_id))}::uuid, {_quote('7' * 64)}, "
+        f"'chats/{chat}/meta.json', {_jsonb(meta)}); commit;",
+    )
+    replay_after_removal = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + state3_call + "; commit;",
+    ))
+    if replay_after_removal != state3:
+        raise GateFailure("exact effect replay failed after room removal")
+    denied_id = uuid4()
+    denied = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + call_sql(
+            denied_id, "8" * 64,
+            effect_path("denied", "claim.json"),
+            effect_doc("denied", "prepared"),
+            grant_ask=ask, grant_decision=decision,
+        ) + "; commit;",
+        expect_ok=False,
+    )
+    if "typed effect transition is unauthorized" not in denied.stderr:
+        raise GateFailure("removed room member started a fresh effect")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id in ("
+        f"{_quote(str(missing_id))}::uuid, "
+        f"{_quote(str(conflict_id))}::uuid, "
+        f"{_quote(str(denied_id))}::uuid);",
+    )):
+        raise GateFailure("rejected typed effect retained a receipt")
+
+
+def _validate_p1b_effect_path_lock(database_url: str) -> None:
+    root = "typed-effect-lock"
+    actor = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    member = root + "-member"
+    path = "chats/room/runtime/effects/run/call/claim.json"
+    data = {"meta": {
+        "kind": "effect", "actor": "helper", "signer": "helper",
+        "chat_id": "room", "run_id": "run", "root_run_id": "run",
+        "call_id": "call",
+    }, "state": "prepared"}
+    ask = {"header": {
+        "kind": "permission_ask", "sender": "helper",
+        "recipient": member, "agent": "helper", "chat_id": "room",
+    }}
+    decision = {"header": {
+        "kind": "permission_decision", "sender": member,
+        "recipient": "helper", "agent": "helper", "chat_id": "room",
+    }}
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'users/helper.json', "
+        "pg_catalog.jsonb_build_object("
+        "'kind','agent','active',true,'agent',"
+        f"pg_catalog.jsonb_build_object('owner',{_quote(member)})), false), ("
+        f"{_quote(root)}, 'chats/room/meta.json', "
+        "pg_catalog.jsonb_build_object('members',"
+        f"pg_catalog.jsonb_build_object({_quote(member)},'{{}}'::jsonb,"
+        "'helper','{}'::jsonb)), false);",
+    )
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+    holder_id = uuid4()
+    waiter_id = uuid4()
+    holder_client = "9" * 64
+    holder_provider = "a" * 64
+    suffix = uuid4().hex[:8]
+    holder_name = f"ab-effect-holder-{suffix}"
+    waiter_name = f"ab-effect-waiter-{suffix}"
+    holder_ready = f"effect-holder-ready-{suffix}"
+    holder_done = f"effect-holder-done-{suffix}"
+    lock_key = (
+        "pg_catalog.hashtextextended("
+        "'agentbridge-effect-transition:' || "
+        "pg_catalog.jsonb_build_array("
+        f"{_quote(root)}, {_quote(path)})::text, 0)"
+    )
+    holder = _PsqlSession(database_url)
+    waiter = _PsqlSession(database_url)
+    try:
+        holder.send(
+            f"set application_name = {_quote(holder_name)}; begin; "
+            + _claims(actor)
+            + _begin_sql(
+                root, epoch, holder_id, "effect_transition",
+                holder_client, holder_provider,
+            )
+            + f"; select private.ab_mutation_lock_actor({_quote(root)}); "
+            + "select private.ab_mutation_lock_chat("
+            + f"{_quote(root)}, 'room', false); "
+            + f"select pg_catalog.pg_advisory_xact_lock({lock_key}); "
+            + f"select {_quote(holder_ready)};"
+        )
+        holder.wait_marker(holder_ready)
+        waiter.send(
+            f"set application_name = {_quote(waiter_name)}; begin; "
+            + _claims(actor)
+            + "select public.ab_mutation_effect_transition("
+            + f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            + f"{_quote(str(waiter_id))}::uuid, {_quote('b' * 64)}, "
+            + f"{_quote(path)}, {_jsonb(data)}, {_jsonb(ask)}, "
+            + f"{_jsonb(decision)}); commit;"
+        )
+        _wait_for_lock_order(
+            database_url,
+            root=root,
+            holder=holder,
+            holder_name=holder_name,
+            holder_mode="ExclusiveLock",
+            waiter=waiter,
+            waiter_name=waiter_name,
+            waiter_mode="ExclusiveLock",
+            lock_key_sql=lock_key,
+        )
+        holder.send(
+            "select public.ab_effect_transition("
+            f"{_quote(root)}, {_quote(path)}, {_jsonb(data)}, "
+            f"{_jsonb(ask)}, {_jsonb(decision)}); "
+            "select private.ab_mutation_finish("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(holder_id))}::uuid, 'effect_transition', "
+            f"{_quote(holder_client)}, {_quote(holder_provider)}, "
+            "pg_catalog.jsonb_build_object("
+            f"'path',{_quote(path)},'transitioned',true)); "
+            f"commit; select {_quote(holder_done)};"
+        )
+        holder.wait_marker(holder_done)
+        holder.finish()
+        waiter_error = waiter.finish(expect_ok=False)
+        if "typed effect transition already exists" not in waiter_error:
+            raise GateFailure(
+                "effect path waiter did not reject the committed winner")
+    finally:
+        holder.abort()
+        waiter.abort()
+
+    counts = _scalar(
+        database_url,
+        "select ((select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)})::text || ':' || "
+        "(select count(*) from public.ab_docs where root = "
+        f"{_quote(root)} and path = {_quote(path)})::text);",
+    )
+    if counts != "1:1":
+        raise GateFailure("effect path contention produced duplicate evidence")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1816,6 +2203,7 @@ def main() -> int:
         database_url, "show server_version_num;"))
 
     _run(database_url, BOOTSTRAP_SQL, timeout=30)
+    _run(database_url, _effect_sql(), timeout=30)
     _run(database_url, _protocol_sql(), timeout=30)
     _validate_state_and_grants(database_url)
     _validate_seal_replay(database_url)
@@ -1826,10 +2214,12 @@ def main() -> int:
     _validate_p1b_doc_log_rpcs(database_url)
     _validate_p1b_lifecycle_rpcs(database_url)
     _validate_p1b_room_terminal_lock(database_url)
+    _validate_p1b_effect_rpc(database_url)
+    _validate_p1b_effect_path_lock(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
-        "gate": "inactive-mutation-protocol-p1a-p1b-lifecycle",
+        "gate": "inactive-mutation-protocol-p1a-p1b-effect",
         "result": "passed",
         "server_version": server_version,
         "server_version_num": server_version_num,
@@ -1842,6 +2232,9 @@ def main() -> int:
             "typed-member-claim", "typed-member-leave",
             "typed-terminal-chat-delete", "typed-chat-delete-exact-prefix",
             "typed-room-terminal-lock",
+            "typed-effect-claim", "typed-effect-state-chain",
+            "typed-effect-fresh-duplicate", "typed-effect-post-removal-replay",
+            "typed-effect-path-lock",
             "schema-rerun",
         ],
     }, sort_keys=True))

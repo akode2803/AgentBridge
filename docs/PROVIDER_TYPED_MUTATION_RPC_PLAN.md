@@ -1,7 +1,7 @@
 # Typed provider mutation RPC plan
 
-Status: inactive P1b design with the receipt core, document/log and lifecycle
-sub-slices implemented. Effect transition, storage-manifest proof and the final
+Status: inactive P1b design with the receipt core, document/log, lifecycle and
+effect-transition sub-slices implemented. Storage-manifest proof and the final
 readiness marker remain absent. This work does not activate the local node as
 provider writer, seal a production root, clear any historical fence, or
 authorize a storage-object claim.
@@ -69,8 +69,10 @@ Typed RPCs acquire the locks that apply to their family in this order:
 5. a chat-scoped transaction advisory lock for room mutations: shared for
    ordinary room documents/logs and exclusive for room metadata publication or
    terminal cleanup;
-6. any exact target row lock needed by that operation, including terminal meta;
-7. the existing shared `agentbridge-change-ledger:<root>` lock through the
+6. any operation-family lock, including the exclusive exact effect-path lock;
+7. mutable authority/target row locks needed by that operation, including an
+   effect actor's account document or terminal meta;
+8. the existing shared `agentbridge-change-ledger:<root>` lock through the
    source trigger.
 
 Authority that depends on current membership or room state is evaluated only
@@ -200,18 +202,22 @@ or diagnostics.
 
 ## Delivery slices
 
-1. **P1b-core (implemented and hosted-accepted):** extend receipt rows, add bounded slot allocation, applying
+1. **P1b-core (implemented and hosted-accepted):** extend receipt rows, add
+   bounded slot allocation, applying
    receipt helpers, gate admission, exact receipt query/ack, admin-only safe
    rotation and lock-order regressions. No public mutation marker yet.
-2. **P1b-doc/log (implemented and hosted-accepted):** add and execute-test document put/create/delete and log
+2. **P1b-doc/log (implemented and hosted-accepted):** add and execute-test
+   document put/create/delete and log
    append RPCs, including concurrent duplicate and digest-mismatch schedules.
 3. **P1b-lifecycle (implemented and hosted-accepted):** add chat delete and self
    membership operations with exact authority parity and room-terminal
    serialization.
-4. **P1b-effects/storage:** wrap effect transitions; implement immutable staged
-   object verification and manifest publication without claiming object/data
-   atomicity.
-5. Install the P1b readiness marker last. Add the strict inactive Python wire,
+4. **P1b-effects (implemented and hosted-accepted):** wrap the existing effect
+   validator/writer with receipt identity, stable authority and an exact
+   effect-path lock; reject a fresh operation for existing effect evidence.
+5. **P1b-storage:** implement immutable staged object verification and manifest
+   publication without claiming object/data atomicity.
+6. Install the P1b readiness marker last. Add the strict inactive Python wire,
    but keep the local mutation adapter on legacy writes until P2 has a durable
    local operation journal.
 
@@ -229,6 +235,9 @@ or diagnostics.
 - a paused admitted room writer holds the shared room lock, terminal metadata
   waits on the exact exclusive room lock, and cleanup consumes the writer's row
   after it commits;
+- two fresh effect operations for one path serialize on the exact path lock;
+  only the winner writes/receipts, while response-loss recovery uses the
+  winner's exact operation receipt;
 - receipt exhaustion is bounded and non-evicting;
 - acknowledgment cannot target another actor or digest;
 - exact replay and acknowledgment remain available to the original actor after

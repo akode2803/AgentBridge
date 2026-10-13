@@ -333,6 +333,45 @@ def test_p1b_lifecycle_authority_is_self_bound_and_terminal_exact():
             "-- P1b lifecycle slice: inactive receipt-bearing membership") :]
 
 
+def test_p1b_effect_rpc_binds_exact_request_and_receipt():
+    body = _body(
+        "create or replace function public.ab_mutation_effect_transition(",
+        "revoke all on function public.ab_mutation_effect_transition(",
+    )
+    sealed = body.index("private.ab_mutation_root_sealed(")
+    begin = body.index("private.ab_mutation_begin(")
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    actor = body.index("private.ab_mutation_lock_actor(p_root)", replay)
+    room = body.index("private.ab_mutation_lock_chat(p_root, v_chat, false)")
+    exact = body.index("'agentbridge-effect-transition:'")
+    actor_doc = body.index("'users/' || v_effect_actor || '.json'")
+    fresh = body.index("typed effect transition already exists")
+    transition = body.index("public.ab_effect_transition(", fresh)
+    verify = body.index("v_existing is distinct from p_data", transition)
+    finish = body.index("private.ab_mutation_finish(", verify)
+    assert sealed < begin < replay < actor < room < exact < actor_doc
+    assert actor_doc < fresh < transition < verify < finish
+    assert "'effect_transition'" in body
+    assert "private.ab_mutation_provider_digest(" in body
+    assert "p_grant_ask, p_grant_decision" in body
+    assert "public.ab_source_json_bytes(p_grant_ask)" in body
+    assert "public.ab_source_json_bytes(p_grant_decision)" in body
+    assert "for share" in body
+
+
+def test_p1b_effect_rpc_is_narrow_and_does_not_advertise_readiness():
+    section = SCHEMA[SCHEMA.index("-- P1b effect slice:") :]
+    revoke = section.index(
+        "revoke all on function public.ab_mutation_effect_transition(")
+    tail = section[revoke:revoke + 620]
+    assert "from public, anon, authenticated, service_role" in tail
+    assert "grant execute on function public.ab_mutation_effect_transition(" \
+        in tail
+    assert "to authenticated" in tail
+    assert "create or replace function public.ab_mutation_protocol_ready" \
+        not in section
+
+
 def test_state_probe_is_authorized_and_marker_is_installed_last():
     state = _body(
         "create or replace function public.ab_mutation_protocol_state",

@@ -261,9 +261,15 @@ Current root-member rows are held through authority-dependent effects. Ordinary
 room writes take a shared room lock; room-meta publication and terminal cleanup
 take it exclusively, so cleanup cannot pass an admitted writer and leave a
 post-terminal row behind.
+The effect-transition wrapper is implemented and has disposable hosted
+acceptance in
+[PROVIDER_TYPED_EFFECT_ACCEPTANCE.md](PROVIDER_TYPED_EFFECT_ACCEPTANCE.md). It
+holds the actor account and room authority through the existing semantic
+transition, serializes each exact effect path, and treats the original receipt
+as the only response-loss replay contract.
 It remains inactive: no P1b readiness marker or Python mutation adapter
-activation has landed. Effect and blob-manifest families plus current-head
-PostgreSQL 16 CI remain outstanding.
+activation has landed. Blob-manifest proof plus current-head PostgreSQL 16 CI
+remain outstanding.
 
 ### P2 — node mutation journal and typed adapter
 
