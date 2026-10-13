@@ -176,7 +176,20 @@ would all fail after enablement. Separately, after lifecycle opt-in,
 `ApplicationMutationWriter.submit` deliberately refuses (`ticket_required`)
 until each writer's ticket binding is recoverable, so bound `put_doc`,
 `create_doc`, `delete_doc`, effect writes and `append_log` route only through
-their owners. Each needs an admission-backed ticket (a
+their owners.
+
+Decision pending (Aryan). Option A: every generic ticket admits a one-leg (or
+whole outbox) owner first — complete, but one more provider round trip on
+every message send. Option B: keep admission for multi-leg/private owners and
+prove single-leg non-effect from closure instead. Rotation requires every
+receipt of the epoch to be terminal and acknowledged; only the actor can ACK,
+and this client ACKs only receipts it durably retains; sealing disables
+legacy writes. So a ticket created under that discipline with no local
+receipt in a closed epoch never executed, and its owner can retry in the new
+epoch. B must be version-marked so it never applies to old attempted rows
+(the handoff forbids that inference for them) and needs PostgreSQL schedules.
+
+Under option A each needs an admission-backed ticket (a
 one-leg owner, or the outbox owner's complete plan) whose leg consumption is
 barred on its existing domain record (sent row, settled action). This is a
 migration prerequisite alongside the remaining identity/key/terminal owners.
