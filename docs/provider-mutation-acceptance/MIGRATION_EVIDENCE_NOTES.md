@@ -4,6 +4,13 @@ These files preserve the exact SQL and observations from the disposable
 AgentBridge Scratch upgrade. They are also a starting point for a future
 project-to-project migration feature.
 
+The complete proposed feature, script classification, cutover contract and
+implementation sequence are in the
+[Supabase project-to-project migration plan](../SUPABASE_PROJECT_MIGRATION_PLAN.md).
+The files in this directory are immutable evidence attachments, not a single
+replay bundle: several depend on scratch-only prerequisites and one is a
+superseded draft retained deliberately.
+
 ## Evidence layout
 
 - Keep every applied migration immutable under its actual provider ledger

@@ -1,9 +1,24 @@
 # Cloud source handoff
 
+## 2026-10-13 migration-feature documentation checkpoint
+
+The retained AgentBridge Scratch scripts and results are now classified in
+[docs/SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
+The document records the exact scratch validation sequence, explains which
+files are reusable gates versus scratch-only or superseded evidence, and designs
+a future resumable project-to-project migration around an immutable plan,
+secret-free journal, supported Auth/Storage transfer, durable source writer
+fence, canonical source/target verification and single cutover receipt. The
+feature is recorded near the active provider work in `BACKLOG.md`. This is
+documentation only: no provider, runtime, credential, app or harness state was
+changed, and the current typed blob-manifest checkpoint below remains the active
+implementation/review task.
+
 ## 2026-10-13 typed blob-manifest checkpoint
 
 PR #140 (`codex/provider-typed-blob-manifest`) is stacked on PR #139 at parent
-`e2247a3`; its current head is `0ea72f5`.
+`e2247a3`; the typed blob implementation checkpoint before the documentation
+commit above is `0ea72f5`.
 The final inactive P1b mutation family now adds a private immutable manifest,
 an exact owner/object-ID/size receipt RPC and a `blob-stage` Storage-policy
 carve-out. Existing permissive policies are replaced so they cannot OR-admit

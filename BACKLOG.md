@@ -121,6 +121,27 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   CI remains open. Install no readiness marker before that passes; the inactive
   Python wire follows.
 
+- [ ] **Supabase project-to-project migration and controlled cutover** (Aryan,
+  2026-10-13). Build a resumable migration feature around an immutable plan and
+  append-only secret-free journal. Inventory and verify database schema,
+  extensions, grants/RLS and project settings; move relational data with an
+  exact final delta; migrate Auth identities through supported interfaces with
+  stable UUIDs or an audited complete UID mapping; and move Storage bytes
+  through the supported API/S3 path with target object-ID, size and digest
+  verification. Reuse the retained provider-mutation SQL/HTTP evidence as
+  acceptance fixtures rather than treating it as a replay bundle. Fence every
+  source writer and drain/account for pending intents before a provider-issued
+  final cut; Realtime quietness, caches, timestamps and transport frontiers are
+  not completeness or authority. Keep the target quarantined until canonical
+  source/target results and authenticated behavior match, then switch exactly
+  once with a durable readiness/cutover receipt. Before activation the source
+  remains usable; after target writes begin, rollback requires a reviewed
+  reverse migration. Detailed phases, failure semantics, script inventory and
+  acceptance matrix are in
+  [SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
+  Implement after the typed mutation protocol supplies the durable writer
+  fence/cut evidence; keep operator UI behind rehearsed CLI semantics.
+
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady
   state: after the first minute, three fenced rooms remained on a fixed
