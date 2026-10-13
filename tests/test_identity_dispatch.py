@@ -31,6 +31,8 @@ SOURCE = "99999999-9999-4999-8999-999999999999"
 COMPARE_RPC = prepare_mutation("mesh", base.EPOCH, base.EPOCH, base.ACTOR, "doc_compare_put", {
     "p_path": "users/x.json", "p_data": {}, "p_expected_source_epoch": SOURCE,
     "p_expected_seq": 0, "p_expected_deleted": False}).rpc_name
+CREATE_RPC = prepare_mutation("mesh", base.EPOCH, base.EPOCH, base.ACTOR, "doc_create", {
+    "p_path": "users/x.json", "p_data": {}}).rpc_name
 
 
 class _Docs:
@@ -88,6 +90,15 @@ class _Provider(closure._Provider):
                                               "data": value, "deleted": False,
                                               "batch_overflow": False}]
         request = self.requests.get(op)
+        if request is None and name == CREATE_RPC and op not in self.receipts:
+            args = {k: v for k, v in params.items() if k not in (
+                "p_root", "p_protocol_epoch", "p_operation_id", "p_payload_digest")}
+            request = prepare_mutation(params["p_root"], params["p_protocol_epoch"], op,
+                                       base.ACTOR, "doc_create", args)
+            self.requests[op] = request
+            if args["p_path"] in self.docs.docs:
+                raise RuntimeError("typed document create conflicts with existing row")
+            self.docs.docs[args["p_path"]] = args["p_data"]
         if request is None and name == COMPARE_RPC:
             # A generic (non-admission) compare-and-swap ticket.
             args = {k: v for k, v in params.items() if k not in (

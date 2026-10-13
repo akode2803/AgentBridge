@@ -33,7 +33,10 @@ With a bound typed writer, AccountsService.create_agent now routes through it,
 resuming any pending owner for the name before minting (the owner is the
 durable pending-creation record); the unbound legacy path is unchanged.
 
-Bound password change is now one exact CAS through update_document.
+Bound password change is one exact CAS through update_document; bound account
+patches (all profile setters) and keyed agent adoption now work too, with
+lifecycle records created exactly under path-derived keys and settled before
+the subject's head is extended.
 
 Open prerequisite found this round: with admission_required enabled the
 provider rejects every typed write lacking an admitted leg, and generic writers

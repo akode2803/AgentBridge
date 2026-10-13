@@ -172,7 +172,11 @@ When `admission_required` is enabled, `private.ab_mutation_begin` rejects any
 typed mutation without a matching admitted leg. Today only admission owners
 obtain legs; generic tickets (`allocate_ticket`, `update_document`, state
 actions, outbox append/manifest owners, application submits) do not, so they
-would all fail after enablement. Each needs an admission-backed ticket (a
+would all fail after enablement. Separately, after lifecycle opt-in,
+`ApplicationMutationWriter.submit` deliberately refuses (`ticket_required`)
+until each writer's ticket binding is recoverable, so bound `put_doc`,
+`create_doc`, `delete_doc`, effect writes and `append_log` route only through
+their owners. Each needs an admission-backed ticket (a
 one-leg owner, or the outbox owner's complete plan) whose leg consumption is
 barred on its existing domain record (sent row, settled action). This is a
 migration prerequisite alongside the remaining identity/key/terminal owners.
@@ -197,7 +201,14 @@ migration prerequisite alongside the remaining identity/key/terminal owners.
    against the exact document it replaces (a concurrent change elsewhere
    wins), the recovery wrap is untouched, and a lost reply is settled by exact
    replay before the next swap. It inherits admission once generic writers do.
-   Next: migrate human creation/adoption, key rotation and
+   Account patches (`Directory.patch`, so every profile setter) and agent
+   adoption also work bound: patches are `update_document` CAS with the
+   exact resulting document returned; lifecycle records use
+   `create_exact_doc`, keyed by their unique path so an ambiguous attempt is
+   rediscoverable, ticketed after lifecycle opt-in and released once
+   acknowledged; lifecycle writes first settle earlier exact creates for that
+   subject. Minting keys for a keyless agent still requires an identity owner.
+   Next: migrate human creation, key rotation and
    membership-bound wrapping, and terminal cleanup phases. Retain keys through
    unknown outcomes. Distinguish pre-existing namespace weaknesses from new
    migration regressions.

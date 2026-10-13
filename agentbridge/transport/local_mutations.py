@@ -304,6 +304,35 @@ class LocalMutationTransport(Transport):
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.create_doc(path, data))
 
+    def create_exact_doc(self, path, data):
+        """Create an immutable, uniquely named record.
+
+        Under a bound writer the operation id derives from the path, so an
+        exact retry of the same record replays its retained attempt instead of
+        issuing a second write. A changed payload for that path fails closed.
+        """
+        writer = self._bound_writer()
+        if writer is None:
+            return self.create_doc(path, data)
+        from uuid import NAMESPACE_URL, uuid5
+
+        writer.create_exact(path, data, operation_id=str(
+            uuid5(NAMESPACE_URL, 'agentbridge-exact-create:' + path)))
+        self._bound_writer()
+        self._typed_success()
+        return None
+
+    def settle_exact_creates(self, prefix):
+        """Resume a bound writer's unfinished exact creates under ``prefix``."""
+        writer = self._bound_writer()
+        if writer is None:
+            return 0
+        settled = writer.settle_exact_creates(prefix)
+        self._bound_writer()
+        if settled:
+            self._typed_success()
+        return settled
+
     def delete_doc(self, path, *, operation_id=None):
         if self._journal_writer is not None:
             return self._typed_submit('doc_delete', {'p_path': path}, operation_id)

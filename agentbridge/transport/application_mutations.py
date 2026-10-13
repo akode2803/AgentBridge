@@ -122,6 +122,46 @@ class ApplicationMutationWriter:
                 return document, True
         raise RuntimeError("document changed repeatedly; retry the action")
 
+    def create_exact(self, path: str, data, *, operation_id: str):
+        """Create one immutable record under a key derived from its path.
+
+        After lifecycle opt-in the record's receipt is its whole outcome, so
+        the ticket is released once acknowledged. Before opt-in this is an
+        ordinary keyed submit.
+        """
+        arguments = {"p_path": path, "p_data": data}
+        journal = self.driver.journal
+        if not journal.lifecycle_enabled():
+            return self.submit("doc_create", arguments, operation_id=operation_id)
+        ticket = journal.allocate_keyed_ticket("doc_create", arguments, operation_id)
+        record = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
+        journal.release_ticket(ticket)
+        return record
+
+    def settle_exact_creates(self, prefix: str) -> int:
+        """Resume unfinished exact creates under ``prefix`` before new records.
+
+        A retry may mint a different record after an ambiguous reply; the old
+        attempt must still reach its exact outcome rather than linger.
+        """
+        journal = self.driver.journal
+        settled, after = 0, None
+        while True:
+            keys = journal.pending_keys(limit=64, after=after)
+            for epoch, operation in keys:
+                request = journal.get(epoch, operation).request
+                if (request.expectation.kind != "doc_create" or not json.loads(
+                        request.arguments_json)["p_path"].startswith(prefix)):
+                    continue
+                self.driver.resume(epoch, operation)
+                ticket = journal.operation_ticket(epoch, operation)
+                if ticket is not None:
+                    journal.release_ticket(ticket)
+                settled += 1
+            if len(keys) < 64:
+                return settled
+            after = keys[-1]
+
     def replace_document(self, path: str, build):
         """Replace a device snapshot only after older operations settle."""
         document, _changed = self.update_document(path, lambda _current: build())

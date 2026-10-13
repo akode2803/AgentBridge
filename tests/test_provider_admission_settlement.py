@@ -42,6 +42,8 @@ def _raw_receipt(request, *, applied=True):
         result["updated"] = True
     if e.kind == "doc_compare_put":
         result["applied"] = applied
+    if e.kind == "doc_create":
+        result["created"] = True
     raw = {name: getattr(e, name) for name in (
         "root", "protocol_epoch", "operation_id", "actor_id", "kind", "client_digest")}
     raw.update(schema_version=2, provider_digest="c" * 64, result=result)

@@ -501,6 +501,25 @@ class OperationJournal:
         """
         return self._allocate_ticket(kind, arguments)
 
+    def allocate_keyed_ticket(self, kind: str, arguments: dict,
+                              operation_id: str) -> OperationTicket:
+        """Allocate, or find exactly, work under a caller-rediscoverable key.
+
+        The key must be derivable again after a crash (for example from a
+        unique immutable path), which is what makes the binding recoverable.
+        An existing key with a different payload fails closed.
+        """
+        _uuid(operation_id, 'typed operation id')
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            current = _lifecycle(conn)
+            if current is None:
+                _fail('lifecycle_required')
+        request = prepare_mutation(self.root, current[1], operation_id, self.actor_id,
+                                   kind, arguments)
+        record = self._prepare(request, application=True, ticket=True)
+        return OperationTicket(record.request.expectation.protocol_epoch, operation_id)
+
     def allocate_action_ticket(self, action_id: str, expected_attempt: int,
                                arguments: dict, *, kind='doc_compare_put') -> OperationTicket:
         """Bind a semantic action to its exact CAS attempt in the root commit."""

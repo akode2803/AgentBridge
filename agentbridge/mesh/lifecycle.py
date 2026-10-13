@@ -324,11 +324,22 @@ def _write(directory, keystore, record: dict, *, subject_proof: bool) -> dict:
         subject_sig = crypto.sign(bundle, signed)
     doc = {"record": record, "sig": crypto.sign(actor_bundle, signed),
            "subject_sig": subject_sig}
-    directory.tx.create_doc(_path(record["subject"], record["id"]), doc)
+    # A bound typed writer keys this immutable record by its unique path.
+    create = getattr(directory.tx, "create_exact_doc", directory.tx.create_doc)
+    create(_path(record["subject"], record["id"]), doc)
     return record
 
 
+def _settle_records(directory, subject: str) -> None:
+    # An earlier ambiguous record write must reach its exact outcome before
+    # this subject's head is read and extended again.
+    settle = getattr(directory.tx, "settle_exact_creates", None)
+    if settle is not None:
+        settle(lifecycle_prefix(subject) + "/")
+
+
 def ensure_bootstrap(directory, keystore, subject: str, *, actor: str) -> dict:
+    _settle_records(directory, subject)
     current = resolve_lifecycle(directory, subject, store=directory.store)
     if current is not None:
         return current
@@ -353,6 +364,7 @@ def publish_change(directory, keystore, subject: str, *, actor: str,
                    action: str, active: bool | None = None,
                    owner: str | None = None, machine: str | None = None,
                    deactivated: str | None = None) -> dict:
+    _settle_records(directory, subject)
     current = resolve_lifecycle(directory, subject, store=directory.store)
     if current is None:
         current = ensure_bootstrap(directory, keystore, subject, actor=actor)
