@@ -254,8 +254,15 @@ PostgreSQL 17 acceptance in
 The document put/create/delete and log append RPC sub-slice is also implemented
 and has disposable hosted acceptance in
 [PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md](PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md).
+The self membership and terminal chat-cleanup slice is implemented and has
+disposable hosted acceptance in
+[PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md](PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md).
+Current root-member rows are held through authority-dependent effects. Ordinary
+room writes take a shared room lock; room-meta publication and terminal cleanup
+take it exclusively, so cleanup cannot pass an admitted writer and leave a
+post-terminal row behind.
 It remains inactive: no P1b readiness marker or Python mutation adapter
-activation has landed. Lifecycle, effect and blob-manifest families plus
+activation has landed. Effect and blob-manifest families plus current-head
 PostgreSQL 16 CI remain outstanding.
 
 ### P2 — node mutation journal and typed adapter

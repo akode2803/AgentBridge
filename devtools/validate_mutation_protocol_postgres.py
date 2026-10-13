@@ -411,9 +411,10 @@ def _wait_for_lock_order(
     waiter_name: str,
     waiter_mode: str,
     lock_prefix: str = "agentbridge-change-ledger:",
+    lock_key_sql: str | None = None,
 ) -> None:
     deadline = time.monotonic() + 5
-    root_key = (
+    root_key = lock_key_sql or (
         "pg_catalog.hashtextextended("
         f"{_quote(lock_prefix)} || {_quote(root)}, 0)")
     query = f"""
@@ -1322,6 +1323,448 @@ def _validate_p1b_doc_log_rpcs(database_url: str) -> None:
         raise GateFailure("typed chat genesis lost its insert-only exception")
 
 
+def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
+    root = "typed-lifecycle"
+    owner = uuid4()
+    outsider = uuid4()
+    claimant = uuid4()
+    before = _prepare_root(database_url, root, owner)
+    owner_name = root + "-member"
+    outsider_name = root + "-outsider"
+    _run(
+        database_url,
+        "insert into public.ab_members(root, username, uid) values ("
+        f"{_quote(root)}, {_quote(outsider_name)}, "
+        f"{_quote(str(outsider))}::uuid);",
+    )
+
+    preseal_id = uuid4()
+    preseal = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(before))}::uuid, "
+        f"{_quote(str(preseal_id))}::uuid, {_quote('4' * 64)}, "
+        "'preseal-claimant'); commit;",
+        expect_ok=False,
+    )
+    if "typed mutation root is not sealed" not in preseal.stderr:
+        raise GateFailure("member claim admitted before root seal")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = {_quote(str(preseal_id))}::uuid;",
+    )):
+        raise GateFailure("pre-seal member claim retained a receipt")
+
+    chat = "room%_x"
+    sibling = "roomAAx"
+    denied_chat = "outsider-terminal"
+    live_chat = "not-terminal"
+    malformed_chats = (
+        "terminal-missing-members",
+        "terminal-null-members",
+        "terminal-list-members",
+        "terminal-null-tenure",
+    )
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data,deleted) values "
+        f"({_quote(root)}, {_quote(f'chats/{chat}/meta.json')}, "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '{}'::jsonb, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, {_quote(f'chats/{chat}/note.json')}, "
+        "'{\"note\":true}'::jsonb, false), "
+        f"({_quote(root)}, {_quote(f'chats/{sibling}/meta.json')}, "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '{}'::jsonb, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, {_quote(f'chats/{sibling}/note.json')}, "
+        "'{\"note\":\"sibling\"}'::jsonb, false), "
+        f"({_quote(root)}, {_quote(f'chats/{denied_chat}/meta.json')}, "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '{}'::jsonb, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, {_quote(f'chats/{live_chat}/meta.json')}, "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', false, 'members', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '{{}}'::jsonb), "
+        "'tenure', pg_catalog.jsonb_build_object("
+        f"{_quote(owner_name)}, '[]'::jsonb)), false), "
+        f"({_quote(root)}, 'chats/terminal-missing-members/meta.json', "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, 'chats/terminal-null-members/meta.json', "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', null, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, 'chats/terminal-list-members/meta.json', "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '[]'::jsonb, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(owner_name)}, '[]'::jsonb)), "
+        "false), "
+        f"({_quote(root)}, 'chats/terminal-null-tenure/meta.json', "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '{}'::jsonb, 'tenure', null), false); "
+        "insert into public.ab_logs(root,chat_id,log_name,line) values "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
+        f"({_quote(root)}, {_quote(sibling)}, 'writer', '{{}}');",
+    )
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+
+    claim_id = uuid4()
+    claim_digest = "5" * 64
+    claim_call = (
+        "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(claim_id))}::uuid, {_quote(claim_digest)}, "
+        "'typed-new-member')"
+    )
+    claim_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + claim_call + "; commit;",
+    ))
+    claim_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + claim_call + "; commit;",
+    ))
+    if claim_receipt != claim_replay or claim_receipt["result"] != {
+            "claimed": True, "username": "typed-new-member"}:
+        raise GateFailure("typed member claim replay changed its receipt")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_members where root = "
+        f"{_quote(root)} and uid = {_quote(str(claimant))}::uuid;",
+    )) != 1:
+        raise GateFailure("typed member claim did not create one self row")
+
+    collision = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(claim_id))}::uuid, {_quote(claim_digest)}, "
+        "'changed-member'); commit;",
+        expect_ok=False,
+    )
+    if "collides with existing receipt" not in collision.stderr:
+        raise GateFailure("member claim provider digest did not bind username")
+    duplicate_id = uuid4()
+    duplicate = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(duplicate_id))}::uuid, {_quote('6' * 64)}, "
+        "'typed-new-member'); commit;",
+        expect_ok=False,
+    )
+    if "conflicts with existing identity" not in duplicate.stderr:
+        raise GateFailure("fresh member operation reused existing identity")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(duplicate_id))}::uuid;",
+    )):
+        raise GateFailure("conflicting member claim retained a receipt")
+
+    leave_id = uuid4()
+    leave_digest = "7" * 64
+    leave_call = (
+        "select public.ab_mutation_member_leave("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(leave_id))}::uuid, {_quote(leave_digest)})"
+    )
+    leave_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + leave_call + "; commit;",
+    ))
+    leave_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + leave_call + "; commit;",
+    ))
+    if leave_receipt != leave_replay or leave_receipt["result"] != {
+            "left": True, "username": "typed-new-member"}:
+        raise GateFailure("member leave did not replay after membership loss")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_members where root = "
+        f"{_quote(root)} and uid = {_quote(str(claimant))}::uuid;",
+    )):
+        raise GateFailure("typed member leave did not remove exact self row")
+    second_leave_id = uuid4()
+    second_leave = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(claimant)
+        + "select public.ab_mutation_member_leave("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(second_leave_id))}::uuid, {_quote('8' * 64)}); commit;",
+        expect_ok=False,
+    )
+    if "typed member leave is unauthorized" not in second_leave.stderr:
+        raise GateFailure("nonmember started a fresh member leave")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(second_leave_id))}::uuid;",
+    )):
+        raise GateFailure("unauthorized member leave retained a receipt")
+
+    delete_id = uuid4()
+    delete_digest = "9" * 64
+    delete_call = (
+        "select public.ab_mutation_chat_delete("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(delete_id))}::uuid, {_quote(delete_digest)}, "
+        f"{_quote(chat)})"
+    )
+    delete_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(owner)
+        + delete_call + "; commit;",
+    ))
+    delete_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(owner)
+        + delete_call + "; commit;",
+    ))
+    expected_delete = {
+        "chat_id": chat, "documents_tombstoned": 2, "logs_deleted": 2,
+    }
+    if delete_receipt != delete_replay \
+            or delete_receipt["result"] != expected_delete:
+        raise GateFailure("terminal chat delete replay changed its receipt")
+    target_state = _scalar(
+        database_url,
+        "select (count(*) = 2 and bool_and(deleted and data = '{}'::jsonb))"
+        "::text from public.ab_docs where root = "
+        f"{_quote(root)} and pg_catalog.left(path, "
+        f"pg_catalog.length({_quote(f'chats/{chat}/')})) = "
+        f"{_quote(f'chats/{chat}/')};",
+    )
+    sibling_state = _scalar(
+        database_url,
+        "select (count(*) = 2 and bool_and(not deleted))::text "
+        "from public.ab_docs where root = "
+        f"{_quote(root)} and pg_catalog.left(path, "
+        f"pg_catalog.length({_quote(f'chats/{sibling}/')})) = "
+        f"{_quote(f'chats/{sibling}/')};",
+    )
+    log_state = _scalar(
+        database_url,
+        "select ((count(*) filter (where chat_id = " + _quote(chat)
+        + ")) = 0 and (count(*) filter (where chat_id = "
+        + _quote(sibling) + ")) = 1)::text from public.ab_logs where root = "
+        + _quote(root) + ";",
+    )
+    if target_state != "true" or sibling_state != "true" or log_state != "true":
+        raise GateFailure("chat delete crossed its exact room subtree")
+
+    denied_delete_id = uuid4()
+    denied_delete = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(outsider)
+        + "select public.ab_mutation_chat_delete("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(denied_delete_id))}::uuid, {_quote('a' * 64)}, "
+        f"{_quote(denied_chat)}); commit;",
+        expect_ok=False,
+    )
+    if "typed chat delete is unauthorized" not in denied_delete.stderr:
+        raise GateFailure("chat deletion ignored exact terminal tenure")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(denied_delete_id))}::uuid;",
+    )):
+        raise GateFailure("unauthorized chat delete retained a receipt")
+
+    live_delete_id = uuid4()
+    live_delete = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(owner)
+        + "select public.ab_mutation_chat_delete("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(live_delete_id))}::uuid, {_quote('b' * 64)}, "
+        f"{_quote(live_chat)}); commit;",
+        expect_ok=False,
+    )
+    if "typed chat delete is unauthorized" not in live_delete.stderr:
+        raise GateFailure("chat delete accepted a nonterminal room")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(live_delete_id))}::uuid;",
+    )):
+        raise GateFailure("nonterminal chat delete retained a receipt")
+
+    for malformed_chat in malformed_chats:
+        malformed_id = uuid4()
+        malformed = _run(
+            database_url,
+            "begin; set local role authenticated; " + _claims(owner)
+            + "select public.ab_mutation_chat_delete("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(malformed_id))}::uuid, {_quote('c' * 64)}, "
+            f"{_quote(malformed_chat)}); commit;",
+            expect_ok=False,
+        )
+        if "typed chat delete is unauthorized" not in malformed.stderr:
+            raise GateFailure("chat delete accepted malformed terminal meta")
+        if int(_scalar(
+            database_url,
+            "select count(*) from public.ab_mutation_receipts where root = "
+            f"{_quote(root)} and operation_id = "
+            f"{_quote(str(malformed_id))}::uuid;",
+        )):
+            raise GateFailure("malformed terminal delete retained a receipt")
+
+
+def _validate_p1b_room_terminal_lock(database_url: str) -> None:
+    root = "typed-room-terminal-lock"
+    chat = "room"
+    actor = uuid4()
+    actor_name = root + "-member"
+    before = _prepare_root(database_url, root, actor)
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'chats/room/meta.json', "
+        "pg_catalog.jsonb_build_object("
+        "'deleted', false, 'members', "
+        f"pg_catalog.jsonb_build_object({_quote(actor_name)}, '{{}}'::jsonb), "
+        "'tenure', pg_catalog.jsonb_build_object("
+        f"{_quote(actor_name)}, '[]'::jsonb)), false), ("
+        f"{_quote(root)}, 'chats/room/note.json', '{{}}'::jsonb, false);",
+    )
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+
+    writer_id = uuid4()
+    terminal_id = uuid4()
+    suffix = uuid4().hex[:8]
+    writer_name = f"ab-room-writer-{suffix}"
+    terminal_name = f"ab-room-terminal-{suffix}"
+    writer_ready = f"room-writer-ready-{suffix}"
+    writer_done = f"room-writer-done-{suffix}"
+    terminal_done = f"room-terminal-done-{suffix}"
+    provider_expr = (
+        "private.ab_mutation_provider_digest("
+        "pg_catalog.jsonb_build_array("
+        "'log_append', 'room', 'writer', '{}'::jsonb))"
+    )
+    terminal_data = (
+        "pg_catalog.jsonb_build_object("
+        "'deleted', true, 'members', '{}'::jsonb, 'tenure', "
+        f"pg_catalog.jsonb_build_object({_quote(actor_name)}, '[]'::jsonb))"
+    )
+    writer = _PsqlSession(database_url)
+    terminal = _PsqlSession(database_url)
+    try:
+        writer.send(
+            f"set application_name = {_quote(writer_name)}; begin; "
+            + _claims(actor)
+            + "select private.ab_mutation_begin("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(writer_id))}::uuid, 'log_append', "
+            f"{_quote('d' * 64)}, {provider_expr}); "
+            f"select private.ab_mutation_lock_actor({_quote(root)}); "
+            "select private.ab_mutation_lock_chat("
+            f"{_quote(root)}, {_quote(chat)}, false); "
+            "do $ab$ begin if not public.ab_is_member("
+            f"{_quote(root)}, {_quote(chat)}) then "
+            "raise exception 'writer authority missing'; end if; end $ab$; "
+            f"select {_quote(writer_ready)};"
+        )
+        writer.wait_marker(writer_ready)
+        terminal.send(
+            f"set application_name = {_quote(terminal_name)}; begin; "
+            "set local role authenticated; " + _claims(actor)
+            + "select public.ab_mutation_doc_put("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(terminal_id))}::uuid, {_quote('e' * 64)}, "
+            "'chats/room/meta.json', " + terminal_data + "); "
+            f"commit; select {_quote(terminal_done)};"
+        )
+        room_key = (
+            "pg_catalog.hashtextextended("
+            "'agentbridge-chat-mutation:' || "
+            f"pg_catalog.jsonb_build_array({_quote(root)}, {_quote(chat)})"
+            "::text, 0)"
+        )
+        _wait_for_lock_order(
+            database_url,
+            root=root,
+            holder=writer,
+            holder_name=writer_name,
+            holder_mode="ShareLock",
+            waiter=terminal,
+            waiter_name=terminal_name,
+            waiter_mode="ExclusiveLock",
+            lock_key_sql=room_key,
+        )
+        writer.send(
+            "insert into public.ab_logs(root,chat_id,log_name,line) values ("
+            f"{_quote(root)}, {_quote(chat)}, 'writer', '{{}}'); "
+            "select private.ab_mutation_finish("
+            f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+            f"{_quote(str(writer_id))}::uuid, 'log_append', "
+            f"{_quote('d' * 64)}, {provider_expr}, "
+            "pg_catalog.jsonb_build_object('row_id', 1)); "
+            f"commit; select {_quote(writer_done)};"
+        )
+        writer.wait_marker(writer_done)
+        terminal.wait_marker(terminal_done)
+        writer.finish()
+        terminal.finish()
+    finally:
+        writer.abort()
+        terminal.abort()
+
+    terminal_state = _scalar(
+        database_url,
+        "select (data @> '{\"deleted\":true,\"members\":{}}'::jsonb)"
+        "::text from public.ab_docs where root = "
+        f"{_quote(root)} and path = 'chats/room/meta.json';",
+    )
+    if terminal_state != "true":
+        raise GateFailure("terminal meta did not publish after room writer")
+    cleanup = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_chat_delete("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(uuid4()))}::uuid, {_quote('f' * 64)}, 'room'); commit;",
+    ))
+    if cleanup["result"].get("logs_deleted") != 1:
+        raise GateFailure("terminal cleanup missed the admitted room writer")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_logs where root = "
+        f"{_quote(root)} and chat_id = 'room';",
+    )):
+        raise GateFailure("room writer survived terminal cleanup")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1381,10 +1824,12 @@ def main() -> int:
     _validate_p1b_core(database_url)
     _validate_p1b_concurrency_and_bounds(database_url)
     _validate_p1b_doc_log_rpcs(database_url)
+    _validate_p1b_lifecycle_rpcs(database_url)
+    _validate_p1b_room_terminal_lock(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
-        "gate": "inactive-mutation-protocol-p1a-p1b-doc-log",
+        "gate": "inactive-mutation-protocol-p1a-p1b-lifecycle",
         "result": "passed",
         "server_version": server_version,
         "server_version_num": server_version_num,
@@ -1394,6 +1839,9 @@ def main() -> int:
             "typed-before-seal", "typed-duplicate", "typed-near-full",
             "typed-doc-put", "typed-doc-create", "typed-doc-delete",
             "typed-log-append", "typed-chat-genesis",
+            "typed-member-claim", "typed-member-leave",
+            "typed-terminal-chat-delete", "typed-chat-delete-exact-prefix",
+            "typed-room-terminal-lock",
             "schema-rerun",
         ],
     }, sort_keys=True))

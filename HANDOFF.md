@@ -1410,3 +1410,40 @@ pre-seal receipt denial-of-service path; Astra's follow-up was clean. Next:
 commit and open this stacked slice, obtain its expanded PostgreSQL 16 CI, then
 implement the inactive lifecycle RPCs before effects/storage and the final P1b
 readiness marker.
+
+The inactive lifecycle slice is now source-complete on
+`codex/provider-typed-lifecycle-rpcs`. It adds receipt-bearing self member claim
+and leave plus exact terminal chat cleanup. Fresh claims bind the requested
+username to `auth.uid()` and reject an already-existing identity; exact leave
+receipts remain replayable after the row is removed. Chat cleanup requires an
+untombstoned terminal meta with `deleted=true`, an exact empty members object
+and the actor in tenure, then deletes that room's logs and tombstones only its
+exact document prefix in the same transaction as the receipt.
+
+Independent review found two material ordering/shape gaps before publication.
+Null-safe terminal checks now reject missing, null and list-valued members plus
+null tenure. Current actor rows are locked before authority-dependent effects,
+ordinary room writes use a shared chat lock, and meta publication/terminal
+cleanup use the matching exclusive lock. A writer already admitted therefore
+commits before terminal publication and is consumed by cleanup; a later writer
+observes terminal authority and fails. Astra's follow-up found no remaining
+P1/P2 after those corrections.
+
+Disposable Supabase PostgreSQL 17.11 accepted exact product migration
+`20261013033528_agentbridge_p1b_room_lock_lifecycle_rpcs` on the AgentBridge
+Scratch project. Authenticated role/auth claims exercised claim/leave/delete,
+exact replay, digest collision, post-leave recovery, unauthorized and malformed
+terminal denial, and an adversarial `room%_x` ID without touching sibling
+`roomAAx`. Rejected operations retained no receipts; the performance advisor
+was clean. Exact evidence is in
+[docs/PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md](docs/PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md).
+The management connector cannot prove simultaneous hosted sessions, so the
+paused writer/exclusive cleanup schedule belongs to the disposable PostgreSQL
+gate. The focused local gate passes 171 tests; Ruff, compile and whitespace
+checks pass. No production project, app or harness was changed.
+
+Next: commit and open this slice stacked on PR 137, obtain current-head
+PostgreSQL 16/platform evidence, then implement the inactive typed effect
+transition separately from storage. The blob-manifest boundary follows as its
+own reviewed slice because staged object upload cannot be atomic with the
+database receipt. Install no readiness marker until both families are complete.

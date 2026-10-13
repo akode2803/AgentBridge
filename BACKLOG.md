@@ -83,9 +83,17 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   PostgreSQL 17 acceptance covered pre-seal denial, collision, replay,
   tombstones, room denial, effect-lane denial and insert-only genesis; see
   [PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md](docs/PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md).
-  PostgreSQL 16 execution is pending. No public P1b readiness marker or
-  application activation exists; lifecycle, effect and blob-manifest families
-  remain next.
+  The next stacked slice adds self claim/leave and terminal chat-cleanup RPCs.
+  It holds current member authority through the effect and serializes ordinary
+  room writes against metadata/terminal cleanup with shared/exclusive room
+  locks. Disposable hosted PostgreSQL 17 acceptance covered exact replay after
+  membership loss, collision and denial behavior, null-safe terminal metadata,
+  wildcard chat IDs and sibling isolation; see
+  [PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md](docs/PROVIDER_TYPED_LIFECYCLE_ACCEPTANCE.md).
+  Astra's follow-up found no remaining P1/P2 after the null-shape and delayed-
+  writer corrections. PostgreSQL 16 execution is pending. No public P1b
+  readiness marker or application activation exists; effect transition and
+  blob-manifest proof remain next.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady
