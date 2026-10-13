@@ -251,9 +251,12 @@ precede the existing change-ledger lock in both RPC and seal paths.
 The private P1b receipt/gate core is implemented and has disposable hosted
 PostgreSQL 17 acceptance in
 [PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md](PROVIDER_TYPED_MUTATION_CORE_ACCEPTANCE.md).
-It remains inactive: no typed source-mutation RPC, P1b readiness marker or
-Python mutation adapter activation has landed. PostgreSQL 16 concurrency CI is
-the next release gate for this slice.
+The document put/create/delete and log append RPC sub-slice is also implemented
+and has disposable hosted acceptance in
+[PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md](PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md).
+It remains inactive: no P1b readiness marker or Python mutation adapter
+activation has landed. Lifecycle, effect and blob-manifest families plus
+PostgreSQL 16 CI remain outstanding.
 
 ### P2 — node mutation journal and typed adapter
 

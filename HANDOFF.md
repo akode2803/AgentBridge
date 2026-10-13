@@ -1370,3 +1370,43 @@ repository result: the managed sandbox denied loopback socket binds with
 failures and 166 setup errors in server/local-node tests. Do not repeat that
 suite in this sandbox; use the normal Ubuntu and Windows jobs for the complete
 cross-platform gate.
+
+PR 136 is open at head `2c2f95c`, stacked on PR 135. Its PostgreSQL, Ubuntu and
+Windows jobs started against the inactive receipt core; do not infer completion
+until those exact-head jobs finish. The next branch,
+`codex/provider-typed-doc-log-rpcs`, adds only the inactive authenticated
+document put/create/delete and log append RPCs. Each function requires an
+already sealed root, computes a provider SHA-256 over normalized typed
+arguments, resolves exact replay before current authority, and commits the
+effect with its terminal receipt. There is still no P1b readiness marker or
+Python activation.
+
+The PR 136 PostgreSQL 16 gate passed. Its Ubuntu full suite reported one
+`test_chat_page_preserves_canonical_wire_parity_without_full_projection`
+pending/page assertion after 4,222 passes, although the same job's dedicated
+four-test canonical-composer gate passed earlier. The protocol files do not
+touch that runtime path, and the managed local sandbox cannot rerun the socket-
+binding fixture. Treat this as an isolated ordering/flakiness candidate pending
+an exact-head failed-job rerun after the still-running Windows job completes;
+do not invent a protocol-code repair from that evidence.
+
+Disposable Supabase PostgreSQL 17.11 accepted exact product migration
+`20261013023917_agentbridge_p1b_typed_doc_log_rpcs`. A separate scratch-only
+prerequisite migration supplied the delta columns and source/membership helpers
+that the minimal P1a prelude omitted but the full product schema already owns.
+Pre-seal calls, changed-request collisions, non-room append, effect-lane writes,
+invalid genesis and create conflicts failed without retaining receipts. Exact
+put/log replay produced one effect; delete preserved a tombstone; creator-bound
+genesis succeeded. Four authenticated RPC grants and zero public/anon/service
+grants were observed. Performance advisors were clean. The scratch scaffold did
+not reproduce the full change-ledger triggers, and management SQL was not a
+PostgREST HTTP test. Exact evidence and limits are in
+[docs/PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md](docs/PROVIDER_TYPED_DOC_LOG_ACCEPTANCE.md).
+
+Focused schema/wire tests pass 34 tests; Ruff and whitespace checks pass. Astra
+found and drove fixes for nullable genesis authorization and the disposable
+bootstrap, then found no remaining P1/P2. Lead review additionally closed the
+pre-seal receipt denial-of-service path; Astra's follow-up was clean. Next:
+commit and open this stacked slice, obtain its expanded PostgreSQL 16 CI, then
+implement the inactive lifecycle RPCs before effects/storage and the final P1b
+readiness marker.

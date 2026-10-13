@@ -146,8 +146,10 @@ def test_p1b_exact_actor_receipt_access_and_rotation_are_narrow():
     assert "r.acknowledged_at is null" in rotation
     assert "protocol_version = 2" in rotation
     assert "delete from public.ab_mutation_receipts" in rotation
-    rotation_tail = core[core.index(
-        "revoke all on function public.ab_admin_rotate_mutation_epoch") :]
+    rotation_tail = core[
+        core.index("revoke all on function public.ab_admin_rotate_mutation_epoch"):
+        core.index("-- P1b document/log slice:")
+    ]
     assert "grant execute" not in rotation_tail
 
 
@@ -168,6 +170,76 @@ def test_p1b_gate_allows_only_kind_specific_same_transaction_writes():
     assert "when 'doc_put'" in permit
     assert "when 'doc_create'" in permit
     assert "when 'member_leave'" in permit
+
+
+def test_p1b_doc_log_rpcs_bind_normalized_requests_and_receipts():
+    section = SCHEMA[SCHEMA.index(
+        "-- P1b document/log slice: inactive receipt-bearing source mutation RPCs") :]
+    assert "pg_catalog.sha256(" in section
+    for name, kind in (
+            ("doc_put", "doc_put"),
+            ("doc_create", "doc_create"),
+            ("doc_delete", "doc_delete"),
+            ("log_append", "log_append")):
+        body = _body(
+            f"create or replace function public.ab_mutation_{name}(",
+            f"revoke all on function public.ab_mutation_{name}(",
+        )
+        begin = body.index("private.ab_mutation_begin(")
+        sealed = body.index("private.ab_mutation_root_sealed(")
+        replay = body.index("if (v_begin->>'replay')::boolean")
+        authority = min(
+            value for value in (
+                body.find("public.ab_member", replay),
+                body.find("public.ab_is_member", replay),
+            ) if value >= 0
+        )
+        effect = min(
+            value for value in (
+                body.find("insert into public.ab_docs", authority),
+                body.find("update public.ab_docs", authority),
+                body.find("insert into public.ab_logs", authority),
+            ) if value >= 0
+        )
+        finish = body.index("private.ab_mutation_finish(", effect)
+        assert sealed < begin < replay < authority < effect < finish
+        assert f"'{kind}'" in body
+        assert "private.ab_mutation_provider_digest(" in body
+        tail = section[section.index(
+            f"revoke all on function public.ab_mutation_{name}(") :]
+        assert "from public, anon, authenticated, service_role" in tail[:320]
+        assert f"grant execute on function public.ab_mutation_{name}(" in tail[:500]
+
+
+def test_p1b_doc_log_authority_matches_existing_lanes():
+    put = _body(
+        "create or replace function public.ab_mutation_doc_put(",
+        "revoke all on function public.ab_mutation_doc_put(",
+    )
+    create = _body(
+        "create or replace function public.ab_mutation_doc_create(",
+        "revoke all on function public.ab_mutation_doc_create(",
+    )
+    delete = _body(
+        "create or replace function public.ab_mutation_doc_delete(",
+        "revoke all on function public.ab_mutation_doc_delete(",
+    )
+    append = _body(
+        "create or replace function public.ab_mutation_log_append(",
+        "revoke all on function public.ab_mutation_log_append(",
+    )
+    for body in (put, create, delete):
+        assert "p_path like 'chats/%/runtime/effects/%'" in body
+        assert "private.ab_mutation_path_valid(p_path, 4096, 32)" in body
+    assert "public.ab_is_member(p_root, v_chat)" in put
+    assert "not coalesce((" in create
+    assert "p_data->'members' ? v_member" in create
+    assert "public.ab_can_read_chat(p_root, v_chat)" in delete
+    assert "public.ab_is_member(p_root, p_chat)" in append
+    assert "returning id into v_row_id" in append
+    assert "create or replace function public.ab_mutation_protocol_ready" not in \
+        SCHEMA[SCHEMA.index(
+            "-- P1b document/log slice: inactive receipt-bearing source mutation RPCs") :]
 
 
 def test_state_probe_is_authorized_and_marker_is_installed_last():

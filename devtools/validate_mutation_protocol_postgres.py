@@ -36,8 +36,6 @@ SAFE_DATABASE = re.compile(
     r"^agentbridge_mutation_test(?:_[A-Za-z0-9][A-Za-z0-9_-]*)?$")
 
 BOOTSTRAP_SQL: Final = r"""
-create extension if not exists pgcrypto;
-
 create schema if not exists auth;
 create schema if not exists private;
 
@@ -77,6 +75,7 @@ create table public.ab_docs (
   root text not null,
   path text not null,
   data jsonb not null,
+  deleted boolean not null default false,
   primary key (root, path)
 );
 create table public.ab_logs (
@@ -105,6 +104,36 @@ create table public.ab_change_events (
 );
 
 alter table public.ab_members enable row level security;
+create or replace function public.ab_source_json_bytes(p_value jsonb)
+returns integer language sql immutable strict set search_path = pg_catalog as $$
+  select pg_catalog.octet_length(
+    pg_catalog.convert_to(p_value::text, 'UTF8')
+  )::integer
+$$;
+create or replace function public.ab_source_text_bytes(p_value text)
+returns integer language sql immutable strict set search_path = pg_catalog as $$
+  select pg_catalog.octet_length(
+    pg_catalog.convert_to(pg_catalog.to_json(p_value)::text, 'UTF8')
+  )::integer
+$$;
+alter table public.ab_docs add column source_bytes integer
+  generated always as (public.ab_source_json_bytes(data)) stored;
+alter table public.ab_logs add column source_bytes integer
+  generated always as (public.ab_source_text_bytes(line)) stored;
+alter table public.ab_docs add constraint ab_docs_node_source_size check (
+  source_bytes between 0 and 8355840
+);
+alter table public.ab_logs add constraint ab_logs_node_source_size check (
+  source_bytes between 0 and 8355840
+);
+
+create or replace function public.ab_member(p_root text) returns text
+language sql stable security definer set search_path = pg_catalog as $$
+  select coalesce((
+    select m.username from public.ab_members m
+    where m.root = p_root and m.uid = auth.uid()
+  ), '')
+$$;
 create or replace function public.ab_root_ok(p_root text) returns boolean
 language sql stable security definer set search_path = pg_catalog as $$
   select exists (
@@ -114,6 +143,38 @@ language sql stable security definer set search_path = pg_catalog as $$
 $$;
 revoke all on function public.ab_root_ok(text) from public;
 grant execute on function public.ab_root_ok(text) to authenticated;
+
+create or replace function public.ab_chat_of(p_path text) returns text
+language sql immutable set search_path = pg_catalog as $$
+  select case when p_path like 'chats/%'
+              then pg_catalog.split_part(p_path, '/', 2) else '' end
+$$;
+create or replace function public.ab_is_member(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = pg_catalog as $$
+  select exists (
+    select 1 from public.ab_docs m
+    where m.root = p_root
+      and m.path = 'chats/' || p_chat || '/meta.json'
+      and m.data->'members' ? public.ab_member(p_root)
+  )
+$$;
+create or replace function public.ab_can_read_chat(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = pg_catalog as $$
+  select exists (
+    select 1 from public.ab_docs m
+    where m.root = p_root
+      and m.path = 'chats/' || p_chat || '/meta.json'
+      and (
+        m.data->'members' ? public.ab_member(p_root)
+        or (
+          m.data @> '{"deleted": true}'::jsonb
+          and m.data->'tenure' ? public.ab_member(p_root)
+        )
+      )
+  )
+$$;
 """
 
 
@@ -1025,6 +1086,242 @@ def _validate_p1b_concurrency_and_bounds(database_url: str) -> None:
             "near-full receipt allocation accumulated advisory locks")
 
 
+def _validate_p1b_doc_log_rpcs(database_url: str) -> None:
+    root = "typed-doc-log"
+    actor = uuid4()
+    outsider = uuid4()
+    before = _prepare_root(database_url, root, actor)
+    actor_name = root + "-member"
+    _run(
+        database_url,
+        "insert into public.ab_members(root, username, uid) values ("
+        f"{_quote(root)}, 'typed-doc-log-outsider', "
+        f"{_quote(str(outsider))}::uuid); "
+        "insert into public.ab_docs(root,path,data,deleted) values ("
+        f"{_quote(root)}, 'chats/room/meta.json', "
+        f"pg_catalog.jsonb_build_object('members', "
+        f"pg_catalog.jsonb_build_object({_quote(actor_name)}, "
+        "'{}'::jsonb)), false);",
+    )
+    preseal_id = uuid4()
+    preseal = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(before))}::uuid, "
+        f"{_quote(str(preseal_id))}::uuid, {_quote('9' * 64)}, "
+        "'preseal.json', '{}'::jsonb); commit;",
+        expect_ok=False,
+    )
+    if "typed mutation root is not sealed" not in preseal.stderr:
+        raise GateFailure("public typed RPC admitted an operation before sealing")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = {_quote(str(preseal_id))}::uuid;",
+    )):
+        raise GateFailure("pre-seal typed RPC retained a receipt")
+    sealed = json.loads(_scalar(
+        database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed["protocol_epoch"])
+
+    put_id = uuid4()
+    put_digest = "a" * 64
+    put_call = (
+        "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(put_id))}::uuid, {_quote(put_digest)}, "
+        "'global.json', '{\"value\":1}'::jsonb)"
+    )
+    put_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + put_call + "; commit;",
+    ))
+    put_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + put_call + "; commit;",
+    ))
+    if put_receipt != put_replay or put_receipt["result"] != {
+            "path": "global.json", "updated": True}:
+        raise GateFailure("typed document put replay changed its receipt")
+    put_collision = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(put_id))}::uuid, {_quote(put_digest)}, "
+        "'global.json', '{\"value\":2}'::jsonb); commit;",
+        expect_ok=False,
+    )
+    if "collides with existing receipt" not in put_collision.stderr:
+        raise GateFailure("provider-computed document digest did not bind data")
+    stored = _scalar(
+        database_url,
+        "select data::text from public.ab_docs where root = "
+        f"{_quote(root)} and path = 'global.json';",
+    )
+    if json.loads(stored) != {"value": 1}:
+        raise GateFailure("colliding document retry changed source state")
+
+    create_id = uuid4()
+    create_digest = "b" * 64
+    create_call = (
+        "select public.ab_mutation_doc_create("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(create_id))}::uuid, {_quote(create_digest)}, "
+        "'chats/room/note.json', '{\"note\":true}'::jsonb)"
+    )
+    created = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + create_call + "; commit;",
+    ))
+    if created["result"].get("created") is not True:
+        raise GateFailure("typed document create did not report its effect")
+    conflict_id = uuid4()
+    conflict = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_create("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(conflict_id))}::uuid, {_quote('c' * 64)}, "
+        "'chats/room/note.json', '{\"note\":true}'::jsonb); commit;",
+        expect_ok=False,
+    )
+    if "typed document already exists" not in conflict.stderr:
+        raise GateFailure("new document-create operation reused an existing row")
+    leaked_conflict = int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(conflict_id))}::uuid;",
+    ))
+    if leaked_conflict:
+        raise GateFailure("failed document create retained an applying receipt")
+
+    delete_id = uuid4()
+    deleted = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_delete("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(delete_id))}::uuid, {_quote('d' * 64)}, "
+        "'chats/room/note.json'); commit;",
+    ))
+    if deleted["result"].get("deleted") is not True:
+        raise GateFailure("typed document delete did not report its tombstone")
+    tombstone = _scalar(
+        database_url,
+        "select (deleted and data = '{}'::jsonb)::text from public.ab_docs "
+        f"where root = {_quote(root)} and path = 'chats/room/note.json';",
+    )
+    if tombstone != "true":
+        raise GateFailure("typed document delete did not preserve delta semantics")
+
+    log_id = uuid4()
+    log_digest = "e" * 64
+    log_call = (
+        "select public.ab_mutation_log_append("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(log_id))}::uuid, {_quote(log_digest)}, "
+        "'room', 'writer', '{\"message\":\"hello\"}'::jsonb)"
+    )
+    log_receipt = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + log_call + "; commit;",
+    ))
+    log_replay = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + log_call + "; commit;",
+    ))
+    log_count = int(_scalar(
+        database_url,
+        "select count(*) from public.ab_logs where root = "
+        f"{_quote(root)} and chat_id = 'room' and log_name = 'writer';",
+    ))
+    if log_receipt != log_replay or log_count != 1:
+        raise GateFailure("typed log replay appended more than one source row")
+
+    denied_id = uuid4()
+    denied = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(outsider)
+        + "select public.ab_mutation_log_append("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(denied_id))}::uuid, {_quote('f' * 64)}, "
+        "'room', 'outsider', '{\"message\":\"no\"}'::jsonb); commit;",
+        expect_ok=False,
+    )
+    if "typed log append is unauthorized" not in denied.stderr:
+        raise GateFailure("non-room member appended through the typed RPC")
+    denied_count = int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = {_quote(str(denied_id))}::uuid;",
+    ))
+    if denied_count:
+        raise GateFailure("unauthorized typed append retained a receipt")
+
+    effect_denied = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(actor)
+        + "select public.ab_mutation_doc_put("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(uuid4()))}::uuid, {_quote('1' * 64)}, "
+        "'chats/room/runtime/effects/run/call/state-2.json', "
+        "'{}'::jsonb); commit;",
+        expect_ok=False,
+    )
+    if "typed document put is unauthorized" not in effect_denied.stderr:
+        raise GateFailure("generic typed document RPC entered the effect lane")
+
+    genesis_root = "typed-doc-genesis"
+    genesis_actor = uuid4()
+    genesis_before = _prepare_root(database_url, genesis_root, genesis_actor)
+    genesis_seal = json.loads(_scalar(
+        database_url, _seal_sql(genesis_root, genesis_before, uuid4())))
+    genesis_epoch = UUID(genesis_seal["protocol_epoch"])
+    genesis_name = genesis_root + "-member"
+    for invalid_data in ("'{}'::jsonb", "'null'::jsonb"):
+        invalid_id = uuid4()
+        invalid_genesis = _run(
+            database_url,
+            "begin; set local role authenticated; " + _claims(genesis_actor)
+            + "select public.ab_mutation_doc_create("
+            f"{_quote(genesis_root)}, {_quote(str(genesis_epoch))}::uuid, "
+            f"{_quote(str(invalid_id))}::uuid, {_quote('3' * 64)}, "
+            f"'chats/new-room/meta.json', {invalid_data}); commit;",
+            expect_ok=False,
+        )
+        if "typed document create is unauthorized" not in invalid_genesis.stderr:
+            raise GateFailure(
+                "typed chat genesis accepted data without creator membership")
+        if int(_scalar(
+            database_url,
+            "select count(*) from public.ab_mutation_receipts where root = "
+            f"{_quote(genesis_root)} and operation_id = "
+            f"{_quote(str(invalid_id))}::uuid;",
+        )):
+            raise GateFailure("rejected chat genesis retained a receipt")
+    genesis = json.loads(_scalar(
+        database_url,
+        "begin; set local role authenticated; " + _claims(genesis_actor)
+        + "select public.ab_mutation_doc_create("
+        f"{_quote(genesis_root)}, {_quote(str(genesis_epoch))}::uuid, "
+        f"{_quote(str(uuid4()))}::uuid, {_quote('2' * 64)}, "
+        "'chats/new-room/meta.json', "
+        "pg_catalog.jsonb_build_object('members', "
+        f"pg_catalog.jsonb_build_object({_quote(genesis_name)}, "
+        "'{}'::jsonb))); commit;",
+    ))
+    if genesis["result"].get("created") is not True:
+        raise GateFailure("typed chat genesis lost its insert-only exception")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1083,10 +1380,11 @@ def main() -> int:
     _validate_old_write_after_seal(database_url)
     _validate_p1b_core(database_url)
     _validate_p1b_concurrency_and_bounds(database_url)
+    _validate_p1b_doc_log_rpcs(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
-        "gate": "inactive-mutation-protocol-p1a-p1b-core",
+        "gate": "inactive-mutation-protocol-p1a-p1b-doc-log",
         "result": "passed",
         "server_version": server_version,
         "server_version_num": server_version_num,
@@ -1094,6 +1392,8 @@ def main() -> int:
             "legacy-before-seal", "legacy-after-seal",
             "typed-replay", "typed-member-leave", "typed-epoch-rotation",
             "typed-before-seal", "typed-duplicate", "typed-near-full",
+            "typed-doc-put", "typed-doc-create", "typed-doc-delete",
+            "typed-log-append", "typed-chat-genesis",
             "schema-rerun",
         ],
     }, sort_keys=True))
