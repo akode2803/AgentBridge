@@ -1,15 +1,20 @@
 # Supabase project-to-project migration plan
 
-Status: future feature; design and retained evidence only. AgentBridge does not
-yet provide a general project migrator. Nothing in this document authorizes a
-production export, target activation or credential change.
+Status: future in-product feature; design and retained evidence only.
+AgentBridge does not yet provide the migration engine described here. The
+finished feature must automate the entire transfer and recovery protocol; this
+document is not an operator runbook. Nothing in it authorizes a production
+export, target activation or credential change.
 
 ## Goal and safety boundary
 
 Move an AgentBridge deployment from one Supabase project to another while
 preserving identities, database state, Storage objects and canonical chat
 semantics. The migration must be resumable and auditable, and must keep exactly
-one writable project at cutover.
+one writable project at cutover. After the user authorizes source and target
+access, AgentBridge owns discovery, planning, copying, retries, resume,
+verification, fencing, cutover and recovery. A human or AI must not execute the
+SQL files or coordinate the phases manually.
 
 The source remains authoritative until an explicit cutover gate succeeds. A
 cache, Realtime event, mirror frontier, wall-clock quiet period, row count or
@@ -18,6 +23,80 @@ data, identity, object and canonical-result verification. Before target
 activation, an ambiguous or failed operation leaves the target quarantined and
 the source active. After the target accepts writes, returning to the source is a
 reverse migration, not a configuration rollback.
+
+## Product feature contract
+
+### User experience
+
+Expose **Move AgentBridge to another Supabase project** under connection/storage
+settings. The flow should:
+
+1. Explain what will move, expected downtime and the rollback boundary.
+2. Use the already configured source. Ask the user to connect an existing empty
+   target, or authorize AgentBridge to create one in a selected organization.
+3. Prefer short-lived Supabase OAuth authorization with the narrow Management
+   API scopes needed by the selected operation. Support a scoped personal access
+   token as an advanced fallback. Store neither token in the migration journal.
+4. Preflight both projects and present blockers before making changes.
+5. Start the bulk transfer in the background while the source remains usable.
+   Show phase, bounded progress, bytes/rows/objects transferred, retry state and
+   the last successfully verified checkpoint.
+6. Pause automatically when authorization expires or either project becomes
+   unhealthy. Resume safely after the user reconnects access or restarts the
+   app; never ask the user to rerun SQL or reconstruct a command.
+7. Request one explicit final-cutover action after the bulk copy is caught up.
+   AgentBridge then enters maintenance, fences writers, applies the final delta,
+   verifies the target and changes configuration itself.
+8. Reopen on the target and show an observation/rollback-status panel. Source
+   retirement remains a separate later action.
+
+The app may request credentials or provider authorization because it cannot
+invent access. Supplying access and choosing when to cut over are product
+decisions; running the migration steps is AgentBridge's responsibility.
+
+### Migration engine ownership
+
+Implement one headless migration engine inside AgentBridge and drive it from the
+GUI. An optional development CLI may call the same API for deterministic tests,
+but no production behavior may exist only in a shell script. Keep the engine in
+owning migration modules rather than the GUI or `legacy/bridge.py`:
+
+- a coordinator/state machine owns phase transitions and cancellation;
+- a durable local migration store owns immutable plans, append-only journal
+  entries, encrypted credential references and resumable work queues;
+- a Supabase control-plane adapter inventories or creates projects and copies
+  supported service configuration through the Management API;
+- database, Auth and Storage workers perform bounded, idempotent transfers;
+- the provider mutation owner supplies the source writer fence and final cut;
+- a verifier compares target structure, bytes, identities and canonical views;
+- a cutover owner writes readiness evidence and atomically replaces the active
+  connection only after verification; and
+- the GUI subscribes to engine progress and never infers phase completion from
+  disappearance of a loader or a quiet Realtime channel.
+
+Use an explicit durable state machine such as `draft`, `preflight`,
+`target_preparing`, `bulk_copy`, `awaiting_cutover`, `fencing`, `final_delta`,
+`verifying`, `activating`, `observing`, `complete`, `paused`, `failed_before_cut`
+and `recovery_required_after_cut`. Transitions use compare-and-swap generation
+checks so two app processes cannot own the same migration. Cancellation before
+the writer fence leaves the source active; after fencing it becomes a recovery
+operation and cannot silently discard target work.
+
+### Access and project creation
+
+The minimum supported flow attaches an empty destination project. With approved
+Management API OAuth/PAT scope, AgentBridge can also create the destination,
+wait for it to become healthy, read its connection details, configure Auth,
+Storage, Realtime and Data API settings, and provision the narrowly scoped keys
+needed by the migration workers. Project creation, billing or organization
+policy may still require a provider-side user decision; the engine must surface
+that as a resumable authorization state rather than hand the remaining protocol
+back to the user.
+
+Secrets live in the operating-system credential store or isolated process
+memory. The journal contains opaque credential-reference IDs, provider token
+expiry and granted scopes, never token/key/password values. Logs, diagnostics
+and support bundles must apply the same rule.
 
 ## What the current scratch work actually did
 
@@ -103,7 +182,8 @@ outside the plan, journal and repository.
 
 ## Missing capabilities
 
-Before this becomes a user-facing feature, AgentBridge still needs:
+Before this becomes a user-facing feature, the AgentBridge migration engine
+must implement:
 
 - read-only source inventory and compatibility checks;
 - a versioned migration plan and resumable local journal;
@@ -165,6 +245,9 @@ logical references such as membership UIDs.
 
 ## Proposed execution phases
 
+The coordinator performs every phase below. The UI reports durable engine state;
+it does not ask the user to execute the phase.
+
 ### 0. Discover and refuse unsafe plans
 
 Read source and target versions, ledger, extensions, schemas, policies, grants,
@@ -176,11 +259,13 @@ and a human-readable dry-run report.
 
 ### 1. Prepare a quarantined target
 
-Create or select an empty disposable target. Apply schema through supported
-migration tooling, then run exact structural and grant/RLS verification. Copy
-manual project settings deliberately. Keep all AgentBridge target writers and
-readiness markers disabled. Never point an app or harness at the target merely
-because DDL succeeded.
+Create through the Management API or attach an empty target selected in the UI.
+Apply schema through an internal, credential-safe provider runner, then run
+exact structural and grant/RLS verification. Inventory and reproduce supported
+project settings automatically; surface only settings the provider API cannot
+apply as explicit compatibility blockers or provider authorization steps. Keep
+all AgentBridge target writers and readiness markers disabled. Never point an
+app or harness at the target merely because DDL succeeded.
 
 ### 2. Copy stable bulk data while the source is live
 
@@ -200,12 +285,12 @@ are not assumed to authenticate against the target.
 
 ### 4. Fence writers and capture the final cut
 
-Enter a visible maintenance state. Stop or fence every app, harness, local-node
-publisher, outbox worker and administrative mutation path for the source. Drain
-or durably account for outstanding intents. Capture a provider-issued cut under
-the reviewed mutation protocol/lock, including the precise migration epoch,
-receipts and final durable source position. Realtime quietness and a sleep
-interval are not cut evidence.
+The coordinator enters a visible maintenance state and fences every app,
+harness, local-node publisher, outbox worker and administrative mutation path
+for the source. It drains or durably accounts for outstanding intents and
+captures a provider-issued cut under the reviewed mutation protocol/lock,
+including the precise migration epoch, receipts and final durable source
+position. Realtime quietness and a sleep interval are not cut evidence.
 
 ### 5. Apply the final delta and verify
 
@@ -251,6 +336,9 @@ operation after the evidence has been reviewed.
 
 The feature is not complete until disposable rehearsals prove:
 
+- a user can complete source authorization, target creation/attachment,
+  transfer, restart-resume and cutover entirely through AgentBridge without
+  running an external command or editing a migration artifact;
 - empty target, partially completed target and interrupted-resume schedules;
 - schema, extension, function, policy, grant and RLS equivalence;
 - deterministic row counts/digests and delayed-final-delta capture;
@@ -265,24 +353,30 @@ The feature is not complete until disposable rehearsals prove:
 
 ## Suggested implementation sequence
 
-1. Read-only `migration inventory` and immutable plan generator.
-2. Target preflight/schema planner with exact structural verifier.
+1. Durable in-app migration state machine, plan/journal store and read-only
+   source/target inventory.
+2. Target authorization/creation, preflight and exact schema/configuration
+   planner.
 3. Resumable relational bulk copier and deterministic digest verifier.
 4. Resumable Storage copier over the supported API/S3 interface.
 5. Auth importer/UID mapper and reference audit.
 6. Source writer fence, outbox drain and provider-issued cut receipt.
 7. Canonical source/target verifier and target readiness receipt.
 8. Atomic configuration cutover, observation and reverse-migration tooling.
-9. GUI/operator workflow only after the command-line protocol is rehearsed.
+9. Settings UI, progress/resume surfaces and actionable recovery messages built
+   over the same engine API; an optional test CLI remains a thin client.
 
 Each slice should stay inactive until its disposable tests, independent review
 and CI pass. The provider mutation protocol should supply the writer-fence and
-cut evidence rather than inventing a second quietness-based protocol.
+cut evidence rather than inventing a second quietness-based protocol. The
+feature is incomplete if successful migration still depends on a person or AI
+running the retained scripts in the correct order.
 
 ## Supabase references
 
 - [Backup and Restore using the CLI](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore)
 - [Restore a Dashboard backup to a new project](https://supabase.com/docs/guides/platform/migrating-within-supabase/dashboard-restore)
+- [Management API authentication and project automation](https://supabase.com/docs/reference/api/introduction)
 - [Storage S3 compatibility](https://supabase.com/docs/guides/storage/s3/compatibility)
 - [Auth migration example and password-hash considerations](https://supabase.com/docs/guides/platform/migrating-to-supabase/auth0)
 
@@ -290,12 +384,13 @@ These references describe provider mechanisms. AgentBridge still owns the
 writer fence, identity/reference verification, canonical comparison, readiness
 receipt and cutover failure semantics above.
 
-### Provider backup primitives to wrap, not expose directly
+### Engine-owned provider primitives
 
 The official CLI flow currently starts with separate role, schema and data
-dumps. A future implementation should run the equivalent operations through a
-credential-safe process wrapper, capture tool versions and hashes, and never
-echo either connection string:
+dumps. These commands are implementation references for the engine. AgentBridge
+should run the equivalent operations through a credential-safe subprocess or
+library adapter, capture tool versions and hashes, and never echo either
+connection string:
 
 ```sh
 supabase db dump --db-url "$SOURCE_DATABASE_URL" -f roles.sql --role-only
@@ -306,11 +401,13 @@ supabase db dump --db-url "$SOURCE_DATABASE_URL" -f data.sql \
   -x "storage.vector_indexes"
 ```
 
-These commands are a provider starting point, not an AgentBridge cutover
-script. They do not by themselves transfer Storage bytes, reproduce all project
-settings, fence live writers, establish a final delta, verify identity mapping
-or prove canonical equivalence. The feature should generate temporary artifacts
-with restrictive permissions, hash them into the journal and remove them only
-under an explicit retention policy. It must also preserve the Supabase migration
-ledger separately and use the provider's single-transaction, stop-on-error
-restore form only against the quarantined target.
+These commands are provider primitives, not a user procedure or an AgentBridge
+cutover script. The engine owns invocation, error classification, retries,
+temporary files and cleanup. They do not by themselves transfer Storage bytes,
+reproduce all project settings, fence live writers, establish a final delta,
+verify identity mapping or prove canonical equivalence. The engine generates
+temporary artifacts with restrictive permissions, hashes them into the journal
+and removes them only under an explicit retention policy. It must also preserve
+the Supabase migration ledger separately and use the provider's
+single-transaction, stop-on-error restore form only against the quarantined
+target.

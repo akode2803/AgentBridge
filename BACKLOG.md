@@ -122,8 +122,14 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   Python wire follows.
 
 - [ ] **Supabase project-to-project migration and controlled cutover** (Aryan,
-  2026-10-13). Build a resumable migration feature around an immutable plan and
-  append-only secret-free journal. Inventory and verify database schema,
+  2026-10-13). Build this as an automated feature inside AgentBridge, not an
+  operator/AI-run migration procedure. After the user authorizes source and
+  target access and chooses final cutover, an in-app coordinator owns every
+  phase, durable retry, restart resume, verification, configuration change and
+  recovery action. Drive it from Settings with progress and actionable paused
+  states; an optional test CLI may only be a thin client of the same engine.
+  Use an immutable plan and append-only secret-free journal. Inventory and
+  verify database schema,
   extensions, grants/RLS and project settings; move relational data with an
   exact final delta; migrate Auth identities through supported interfaces with
   stable UUIDs or an audited complete UID mapping; and move Storage bytes
@@ -140,7 +146,8 @@ contract. Refactoring must not obscure latency evidence or weaken authority.
   acceptance matrix are in
   [SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
   Implement after the typed mutation protocol supplies the durable writer
-  fence/cut evidence; keep operator UI behind rehearsed CLI semantics.
+  fence/cut evidence. A migration is not complete while success depends on a
+  person or AI running the retained scripts in sequence.
 
 - [~] **Bound steady-state reconciliation behind durable mutation fences.**
   The merged v0.24.306 app separated startup mirror convergence from steady

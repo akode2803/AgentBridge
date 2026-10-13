@@ -6,10 +6,12 @@ The retained AgentBridge Scratch scripts and results are now classified in
 [docs/SUPABASE_PROJECT_MIGRATION_PLAN.md](docs/SUPABASE_PROJECT_MIGRATION_PLAN.md).
 The document records the exact scratch validation sequence, explains which
 files are reusable gates versus scratch-only or superseded evidence, and designs
-a future resumable project-to-project migration around an immutable plan,
-secret-free journal, supported Auth/Storage transfer, durable source writer
-fence, canonical source/target verification and single cutover receipt. The
-feature is recorded near the active provider work in `BACKLOG.md`. This is
+an automated in-app project-to-project migration engine around an immutable
+plan, secret-free journal, supported Auth/Storage transfer, durable source
+writer fence, canonical source/target verification and single cutover receipt.
+The GUI supplies authorization, durable progress/resume and the final cutover
+choice; no person or AI runs the retained scripts as the product workflow. The
+feature is recorded near the active provider work in `BACKLOG.md`. This remains
 documentation only: no provider, runtime, credential, app or harness state was
 changed, and the current typed blob-manifest checkpoint below remains the active
 implementation/review task.
