@@ -4538,6 +4538,29 @@ begin
      and not (v_count = 1 and p_plan->0->>'kind' = 'member_claim') then
     raise exception 'mutation admission requires root membership' using errcode = '42501';
   end if;
+  -- An unaffiliated principal must pin no more capacity than one direct claim
+  -- could before admission existed: one reservation not yet settled for epoch
+  -- closure at a time, and a small claim total per epoch. Without this, one
+  -- Auth account could reserve every slot and block rotation indefinitely.
+  -- The admission mutex serializes this check with every other admission.
+  if v_member is null or v_member = '' then
+    if exists (select 1 from public.ab_mutation_admission_legs l
+        join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+        left join public.ab_mutation_receipts r on r.root = l.root
+          and r.protocol_epoch = l.protocol_epoch and r.operation_id = l.operation_id
+        where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+          and g.actor_uid = v_actor
+          and not (l.cancelled and l.cancel_acknowledged)
+          and not (r.receipt_state = 'terminal' and r.acknowledged_at is not null)) then
+      raise exception 'unaffiliated mutation admission is already pending' using errcode = '55000';
+    end if;
+    if (select pg_catalog.count(*) from public.ab_mutation_admission_legs l
+        join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+        where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+          and g.actor_uid = v_actor and l.operation_kind = 'member_claim') >= 4 then
+      raise exception 'unaffiliated mutation admission budget exhausted' using errcode = '54000';
+    end if;
+  end if;
   if exists (select 1 from public.ab_mutation_admission_legs l
       where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = any(v_ids)) then
     raise exception 'mutation admission operation collision' using errcode = '55000';

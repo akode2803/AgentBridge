@@ -3003,6 +3003,28 @@ def _validate_provider_admission(database_url: str) -> None:
     if claimed['result'] != {'username': 'admission-new-member', 'claimed': True}:
         raise GateFailure('admission broke authenticated new-member claim')
 
+    # An unaffiliated principal holds one reservation not yet settled for
+    # closure and four claims per epoch, never the shared slot pool.
+    actor = uuid4()
+    pending_owner, pending_plan = uuid4(), [leg('member_claim')]
+    pending = json.loads(authenticated(admit(pending_owner, pending_plan)))
+    if json.loads(authenticated(admit(pending_owner, pending_plan))) != pending:
+        raise GateFailure('unaffiliated admission bound blocked exact owner replay')
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)
+    authenticated(cancel(pending_owner, pending_plan[0]))
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)  # unacknowledged
+    authenticated(cancel(pending_owner, pending_plan[0], ack=True))
+    for _ in range(3):
+        claim_owner, claim_plan = uuid4(), [leg('member_claim')]
+        if json.loads(authenticated(admit(claim_owner, claim_plan)))['status'] != 'admitted':
+            raise GateFailure('settled unaffiliated reservation blocked a new claim')
+        authenticated(cancel(claim_owner, claim_plan[0]))
+        authenticated(cancel(claim_owner, claim_plan[0], ack=True))
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)
+    if _scalar(database_url, 'select count(*) from public.ab_mutation_admission_groups '
+               f'where root={_quote(root)} and actor_uid={_quote(str(actor))}::uuid;') != '4':
+        raise GateFailure('unaffiliated admission exceeded its per-epoch claim budget')
+
     # Whole owner capacity survives unrelated clients filling every other slot.
     root = 'provider-admission-full'
     actor, other_actor = uuid4(), uuid4()

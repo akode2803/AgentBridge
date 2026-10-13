@@ -643,6 +643,14 @@ def test_admission_plan_is_bounded_exact_and_replayed_before_fresh_authority():
     assert admit.index('v_plan is distinct from p_plan') < admit.index('ab_mutation_lock_actor')
     assert 'v_group.actor_uid is distinct from v_actor' in admit
     assert "v_count = 1 and p_plan->0->>'kind' = 'member_claim'" in admit
+    # Unaffiliated reservations are bounded before capacity is evaluated, and
+    # only after exact replay, which must stay available to the same owner.
+    pending = admit.index('unaffiliated mutation admission is already pending')
+    budget = admit.index('unaffiliated mutation admission budget exhausted')
+    assert admit.index('v_plan is distinct from p_plan') < pending < budget
+    assert budget < admit.index('v_occupied + v_count > 4096')
+    assert 'not (l.cancelled and l.cancel_acknowledged)' in admit
+    assert "l.operation_kind = 'member_claim') >= 4" in admit
     assert admit.index("'status', 'full'") < admit.index('insert into public.ab_mutation_admission_groups')
     assert 'v_occupied + v_count > 4096' in admit
     assert 'pg_try_advisory_xact_lock' not in admit
