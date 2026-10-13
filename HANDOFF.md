@@ -1,5 +1,20 @@
 # Cloud source handoff
 
+## 2026-10-13 PR142 review and CI correction
+
+PR142's Ubuntu failure was four transaction-instrumentation fixtures that mocked
+SQLite without creating the now-required private database file. The fixture now
+establishes the real protected directory/file before observing the mocked
+transaction. Production privacy checks remain intact. Codex review additionally
+found raw/canonical endpoint mismatch and compact-JSON size undercounting. The
+adapter now canonicalizes both configured and actual SDK destinations and checks
+PostgreSQL-equivalent JSONB whitespace/numeric expansion plus log-string escaping
+before a request can be journaled. NUL/nonstring-key and numeric-range boundaries
+are rejected. The focused receipt/adapter/instrumentation gate passes115 tests,
+including actual installed SDK mocked HTTP URL variants; Ruff/diff checks pass.
+Whole-root/application integration continues on the dependent branch; its edits
+are not part of this parent repair. Replacement CI remains required.
+
 ## 2026-10-13 durable typed journal checkpoint
 
 Active branch: `codex/provider-operation-journal`, based on PR141 `1c164ff`.

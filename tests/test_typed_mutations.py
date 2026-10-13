@@ -359,7 +359,8 @@ def test_legacy_postgrest_builder_gets_explicit_pinned_header():
     assert rpc.execute(request).identity.provider_digest == "c" * 64
 
 
-def test_installed_supabase_sdk_pins_http_authorization_and_decodes_receipt():
+@pytest.mark.parametrize("sdk_endpoint", [URL, "https://EXAMPLE.supabase.co:443/"])
+def test_installed_supabase_sdk_pins_http_authorization_and_decodes_receipt(sdk_endpoint):
     httpx = pytest.importorskip("httpx")
     supabase = pytest.importorskip("supabase")
     request = prepare_mutation("team", EPOCH, OP, ACTOR, "member_leave", {})
@@ -389,7 +390,7 @@ def test_installed_supabase_sdk_pins_http_authorization_and_decodes_receipt():
         options_kwargs["httpx_client"] = http_client
     options = supabase.ClientOptions(**options_kwargs)
     client = supabase.create_client(
-        URL, "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.signature", options,
+        sdk_endpoint, "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.signature", options,
     )
     holder["client"] = client
     client.auth.get_session = lambda: session
@@ -405,7 +406,7 @@ def test_installed_supabase_sdk_pins_http_authorization_and_decodes_receipt():
         client.postgrest.session._transport = mock_transport
     from agentbridge.transport.supabase import SupabaseTransport
 
-    provider = SupabaseTransport("team", env={"SUPABASE_URL": URL}, client=client)
+    provider = SupabaseTransport("team", env={"SUPABASE_URL": sdk_endpoint}, client=client)
     provider.auth_mode = "member:alice"
     rpc = TypedMutationRPC(provider, actor_id=ACTOR, root="team", endpoint=URL)
     receipt = rpc.execute(request)
@@ -425,3 +426,102 @@ def test_installed_supabase_sdk_pins_http_authorization_and_decodes_receipt():
     if replacement_headers is None:
         replacement_headers = client.postgrest.session.headers
     assert replacement_headers.get("Authorization") == "Bearer token-2"
+
+
+@pytest.mark.parametrize('endpoint', [
+    'https://EXAMPLE.supabase.co/', 'https://example.supabase.co:443',
+    'HTTPS://EXAMPLE.supabase.co:443/',
+])
+def test_equivalent_provider_endpoints_bind_to_canonical_node(endpoint):
+    client = _Client()
+    client.base_url = endpoint.rstrip('/') + '/rest/v1/'
+    provider = _Provider(client)
+    provider._env['SUPABASE_URL'] = endpoint
+    rpc = TypedMutationRPC(provider, actor_id=ACTOR, root='team', endpoint=URL)
+    request = prepare_mutation('team', EPOCH, OP, ACTOR, 'member_leave', {})
+    client.result = _receipt(request, {'username': 'alice', 'left': True})
+    assert rpc.endpoint == URL
+    assert rpc.execute(request).identity.actor_id == ACTOR
+
+
+@pytest.mark.parametrize('suffix', ['/rest/v10', '/rest/v1?redirect=other',
+                                     '/rest/v1#fragment', '/other/rest/v1'])
+def test_normalization_does_not_accept_other_dispatch_paths(suffix):
+    client = _Client()
+    client.base_url = URL + suffix
+    with pytest.raises(TypedMutationRPCError, match='authorization'):
+        TypedMutationRPC(_Provider(client), actor_id=ACTOR, root='team', endpoint=URL)
+
+
+@pytest.mark.parametrize('value,provider_text', [
+    ({'a': 1, 'b': [True, None, 'é']}, '{"a": 1, "b": [true, null, "é"]}'),
+    ({'n': 1e20}, '{"n": 100000000000000000000}'),
+    ({'n': 1e-7}, '{"n": 0.0000001}'),
+    ({'n': -1.25e-7}, '{"n": -0.000000125}'),
+    ({'n': 1.0}, '{"n": 1.0}'),
+    ({'s': '"\\\n\t'}, '{"s": "\\"\\\\\\n\\t"}'),
+])
+def test_jsonb_budget_matches_provider_spacing_numbers_and_log_escaping(value, provider_text):
+    from agentbridge.transport.typed_mutations import _jsonb_size
+    size, escapes = _jsonb_size(value)
+    assert size == len(provider_text.encode('utf-8'))
+    assert size + escapes + 2 == len(json.dumps(provider_text, ensure_ascii=False).encode('utf-8'))
+
+
+@pytest.mark.parametrize('kind,value', [
+    ('doc_put', {str(i): i for i in range(50)}),
+    ('doc_put', {'numbers': [1e20, 1e-7, -1.25e-7] * 20}),
+    ('log_append', {'quoted': '"\\' * 100}),
+])
+def test_provider_boundary_rejects_before_prepared_request(kind, value, monkeypatch):
+    from agentbridge.transport import typed_mutations as module
+    size, escapes = module._jsonb_size(value)
+    provider_size = size + escapes + 2 if kind == 'log_append' else size
+    assert len(module._canonical(value)) < provider_size
+    args = ({'p_path': 'a.json', 'p_data': value} if kind == 'doc_put' else
+            {'p_chat': 'room', 'p_log': 'chat.jsonl', 'p_record': value})
+    monkeypatch.setattr(module, '_MAX_JSON_BYTES', provider_size)
+    assert prepare_mutation('team', EPOCH, OP, ACTOR, kind, args)
+    monkeypatch.setattr(module, '_MAX_JSON_BYTES', provider_size - 1)
+    with pytest.raises(ValueError, match='provider limit'):
+        prepare_mutation('team', EPOCH, OP, ACTOR, kind, args)
+
+
+def test_real_log_limit_counts_json_encoded_line():
+    from agentbridge.transport import typed_mutations as module
+    # Each literal quote requires two bytes in jsonb::text and four in the
+    # JSON string representation of the stored line.
+    overhead, escaped = module._jsonb_size({'s': ''})
+    count = (module._MAX_JSON_BYTES - overhead - escaped - 2) // 4
+    value = {'s': '"' * count}
+    module._bounded_json(value, object_only=True, log_record=True)
+    value['s'] += '"'
+    assert len(module._canonical(value)) < module._MAX_JSON_BYTES
+    with pytest.raises(ValueError, match='provider limit'):
+        module._bounded_json(value, object_only=True, log_record=True)
+
+
+def test_numeric_bound_expands_extreme_finite_floats_and_rejects_jsonb_nul():
+    from agentbridge.transport import typed_mutations as module
+    assert module._jsonb_size(1e308)[0] == 309
+    assert module._jsonb_size(5e-324)[0] == 326
+    # PostgreSQL may suppress the sign of numeric negative zero; retaining it
+    # is a conservative upper bound, not an underestimate.
+    assert module._jsonb_size(-0.0)[0] >= len('0.0')
+    for value in ({'s': '\x00'}, {'\x00': 'value'}):
+        with pytest.raises(ValueError, match='invalid typed mutation JSON'):
+            module._bounded_json(value)
+
+
+def test_integer_beyond_postgresql_numeric_range_is_rejected(monkeypatch):
+    import sys
+    from agentbridge.transport import typed_mutations as module
+
+    # Applications may disable Python's usual 4300-digit conversion guard.
+    previous = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        with pytest.raises(ValueError, match='invalid typed mutation JSON'):
+            module._bounded_json({'n': 10 ** 131072})
+    finally:
+        sys.set_int_max_str_digits(previous)

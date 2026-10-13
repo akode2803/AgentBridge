@@ -84,6 +84,13 @@ def test_acquisition_commit_rollback_close_order_and_failure(monkeypatch, tmp_pa
     monkeypatch.setattr(root_module.sqlite3, 'connect', lambda *a, **k: Connection())
     owner = MutationCoordinator.__new__(MutationCoordinator)
     owner.path = tmp_path / 'unused-disposable.sqlite'
+    if target == 'root':
+        # This test replaces SQLite to observe transaction ordering; retain
+        # the real private-file prerequisite now checked before opening it.
+        from agentbridge.node.security import private_directory, protect_path
+        private_directory(tmp_path)
+        owner.path.touch(mode=0o600)
+        protect_path(owner.path, directory=False)
     context = owner._transaction() if target == 'root' else local_source._writer(owner)
     capture, token = phases.begin()
     try:

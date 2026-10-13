@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from .mutation_protocol import _DIGEST, _root, _uuid
@@ -61,11 +62,61 @@ def _canonical(value: object) -> bytes:
         raise ValueError("invalid typed mutation JSON") from None
 
 
-def _bounded_json(value: object, *, object_only: bool = False) -> None:
+def _jsonb_size(value: object) -> tuple[int, int]:
+    """Bound jsonb::text bytes and its quote/backslash escaping overhead.
+
+    PostgreSQL prints a space after JSON separators and expands numeric
+    exponents using decimal arithmetic. Decimal reads the exact JSON number
+    token sent by Python, so this never estimates from binary-float precision.
+    Object ordering does not affect either count. Negative zero's optional
+    sign only makes this bound conservative.
+    """
+    if type(value) is dict:
+        parts = []
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("typed mutation JSON object keys must be strings")
+            parts.extend((_jsonb_size(key), _jsonb_size(item)))
+        return (2 + max(0, len(value) - 1) * 2 + len(value) * 2
+                + sum(size for size, _ in parts),
+                sum(escaped for _, escaped in parts))
+    if type(value) in (list, tuple):
+        parts = [_jsonb_size(item) for item in value]
+        return (2 + max(0, len(value) - 1) * 2
+                + sum(size for size, _ in parts),
+                sum(escaped for _, escaped in parts))
+    if type(value) is float:
+        text = format(Decimal(json.dumps(value, allow_nan=False)), "f")
+    elif value is None or type(value) in (str, int, bool):
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    else:
+        raise ValueError("invalid typed mutation JSON scalar")
+    # JSONB uses PostgreSQL numeric: at most 131072 integral digits. Python
+    # normally has a stricter conversion limit, but callers can disable it.
+    if type(value) is int and len(text.lstrip("-")) > 131072:
+        raise ValueError("typed mutation integer exceeds provider numeric range")
+    if type(value) is str and "\x00" in value:
+        raise ValueError("typed mutation JSON cannot contain NUL")
+    return len(text.encode("utf-8")), text.count('"') + text.count("\\")
+
+
+def _bounded_json(value: object, *, object_only: bool = False,
+                  log_record: bool = False) -> None:
     if value is None or object_only and type(value) is not dict:
         raise ValueError("invalid typed mutation JSON value")
+    # Check the compact request first, including cycles and invalid scalars.
     if len(_canonical(value)) > _MAX_JSON_BYTES:
         raise ValueError("typed mutation JSON exceeds limit")
+    try:
+        size, escaped = _jsonb_size(value)
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ValueError("invalid typed mutation JSON") from None
+    # Logs store p_record::text, then ab_source_text_bytes JSON-encodes that
+    # complete line again. Documents use ab_source_json_bytes directly.
+    if log_record:
+        size += escaped + 2
+    if size > _MAX_JSON_BYTES:
+        raise ValueError("typed mutation JSON exceeds provider limit")
 
 
 def _chat(value: object) -> None:
@@ -85,7 +136,8 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
         elif name == "p_chat":
             _chat(value)
         elif name in {"p_data", "p_record"}:
-            _bounded_json(value, object_only=name == "p_record" or kind == "effect_transition")
+            _bounded_json(value, object_only=name == "p_record" or kind == "effect_transition",
+                          log_record=name == "p_record")
         elif name in {"p_grant_ask", "p_grant_decision"}:
             if value is not None:
                 _bounded_json(value, object_only=True)
@@ -216,6 +268,15 @@ def prepare_mutation(root: str, protocol_epoch: str, operation_id: str,
     return PreparedMutation(expected, frozen_arguments)
 
 
+def _provider_endpoint(value: object) -> str | None:
+    from ..node.protocol import canonical_endpoint
+
+    try:
+        return canonical_endpoint(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class TypedMutationRPC:
     """One pinned authenticated provider client; no fallback or retry path."""
 
@@ -223,13 +284,14 @@ class TypedMutationRPC:
                  endpoint: str) -> None:
         _uuid(actor_id, "typed mutation actor")
         _root(root)
-        if type(endpoint) is not str or not endpoint:
-            raise ValueError("invalid typed mutation endpoint")
+        from ..node.protocol import canonical_endpoint
+
+        endpoint = canonical_endpoint(endpoint)
         revision = provider.prepare_node_identity()
         client = provider._sb()
         if (type(revision) is not int or provider.node_identity_revision() != revision
                 or provider._client is not client or provider.root != root
-                or provider._env.get("SUPABASE_URL") != endpoint
+                or _provider_endpoint(provider._env.get("SUPABASE_URL")) != endpoint
                 or not provider.auth_mode.startswith("member:")):
             raise TypedMutationRPCError("typed mutation identity is unavailable")
         self._provider = provider
@@ -252,8 +314,8 @@ class TypedMutationRPC:
         # this JWT even if another thread changes the client's session later.
         try:
             self._postgrest = client.postgrest
-            if (str(self._postgrest_base_url()).rstrip("/")
-                    != endpoint.rstrip("/") + "/rest/v1"
+            if (_provider_endpoint(str(self._postgrest_base_url()))
+                    != endpoint + "/rest/v1"
                     or self._postgrest_headers().get("Authorization")
                     != f"Bearer {self._access_token}"):
                 raise ValueError("wrong typed mutation authorization")
@@ -289,7 +351,9 @@ class TypedMutationRPC:
         p = self._provider
         if (p.node_identity_revision() != self._revision
                 or p._client is not self._client or p.root != self.root
-                or p._env.get("SUPABASE_URL") != self.endpoint
+                or _provider_endpoint(p._env.get("SUPABASE_URL")) != self.endpoint
+                or _provider_endpoint(str(self._postgrest_base_url()))
+                != self.endpoint + "/rest/v1"
                 or not p.auth_mode.startswith("member:")
                 or self._session_token() != self._access_token
                 or self._postgrest_headers().get("Authorization")
