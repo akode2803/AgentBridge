@@ -494,3 +494,20 @@ def test_journal_upgrade_blocks_old_mirror_readiness_before_and_after_typed_writ
         assert not local_source.capture(store, reader.definition.source).ready
     finally:
         store.close()
+
+
+def test_journal_binding_pins_source_reads_before_node_principal_binding(world):
+    _client, provider, _coordinator, _journal, writer, proxy = world
+    principal = [ACTOR]
+    calls = []
+    provider.recovery_fence = lambda: SimpleNamespace(account_id=principal[0])
+    provider.source_documents = lambda paths, **kwargs: calls.append(paths) or "source"
+    assert proxy._provider_principal is None
+    proxy.bind_journal(writer)
+    assert proxy._provider_principal == ACTOR
+    assert proxy._provider_revision == writer.driver.rpc._revision
+    assert proxy.source_documents(("users/alice.json",), max_bytes=1024) == "source"
+    principal[0] = NEXT_OP
+    with pytest.raises(ValueError, match="principal changed"):
+        proxy.source_documents(("users/alice.json",), max_bytes=1024)
+    assert len(calls) == 1

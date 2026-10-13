@@ -381,6 +381,11 @@ class LocalMutationTransport(Transport):
                         and self._provider_principal != writer.actor_id)):
                 raise ValueError('typed mutation journal owner mismatch')
             rpc._check_identity()
+            # The RPC has authenticated this actor and pinned this revision.
+            # Source reads must inherit the same binding even if node startup
+            # has not called bind_provider_principal() separately.
+            self._provider_principal = writer.actor_id
+            self._provider_revision = rpc._revision
             self._journal_binding = (writer.driver, writer.driver.journal, rpc,
                                      writer.root, writer.actor_id, writer.endpoint,
                                      writer.protocol_epoch)

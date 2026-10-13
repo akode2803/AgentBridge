@@ -177,8 +177,6 @@ def audit_journal(conn, coordinator, *, required):
         _fail('record_budget')
     if conn.execute("SELECT 1 FROM typed_operations WHERE typeof(protocol_epoch)!='text' OR length(protocol_epoch)!=36 OR typeof(operation_id)!='text' OR length(operation_id)!=36 OR typeof(token)!='text' OR length(token)!=64 OR typeof(state)!='text' OR length(state)>16 OR typeof(selectors)!='blob' OR length(selectors)>32768 OR typeof(request)!='blob' OR length(request)>? OR (receipt IS NOT NULL AND (typeof(receipt)!='blob' OR length(receipt)>?)) LIMIT 1", (MAX_REQUEST_BYTES, MAX_RECEIPT_BYTES)).fetchone():
         _fail('record_invalid')
-    if conn.execute('SELECT 1 FROM typed_operations GROUP BY operation_id HAVING count(*)>1 LIMIT 1').fetchone():
-        _fail('duplicate_operation_id')
     if _bytes_used(conn) > MAX_BYTES:
         _fail('byte_budget')
     # Publication checks never deserialize replay payloads. Only at most 64
@@ -359,8 +357,8 @@ class OperationJournal:
         root = self.coordinator
         with root._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
             self._check(conn)
-            self._exact(conn, request)  # Validate the caller's bound root/actor.
-            existing = self._find_operation(conn, request.expectation.operation_id)
+            exact = self._exact(conn, request)  # Validate the caller's bound root/actor.
+            existing = self._find_operation(conn, request.expectation.operation_id) if application else exact
             if existing is not None:
                 if application:
                     request = PreparedMutation(

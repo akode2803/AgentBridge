@@ -588,7 +588,7 @@ def test_mutated_root_scope_fails_closed(world, value):
         journal.mark_attempted(request)
 
 
-def test_explicit_application_key_retains_original_epoch_but_strict_prepare_rejects_reuse(world):
+def test_explicit_application_key_retains_original_epoch(world):
     journal = world[-1]
     first = _request()
     original = journal.prepare_operation(first)
@@ -598,8 +598,6 @@ def test_explicit_application_key_retains_original_epoch_but_strict_prepare_reje
     assert journal.get_operation(first.expectation.operation_id) == original
     assert _reload(world).get_operation(first.expectation.operation_id) == original
     assert journal.get_operation(str(uuid.uuid4())) is None
-    with pytest.raises(local_source.SourceChanged, match='request_changed'):
-        journal.prepare(next_epoch)
     changed = prepare_mutation('mesh', next_epoch.expectation.protocol_epoch, first.expectation.operation_id, ACTOR,
                               'doc_put', {'p_path': 'chats/room/meta.json', 'p_data': {'different': True}})
     with pytest.raises(local_source.SourceChanged, match='request_changed'):
@@ -638,16 +636,23 @@ def test_application_operation_respects_legacy_pending_intent(world):
     assert journal.prepare_operation(_request()).state == 'prepared'
 
 
-def test_duplicate_application_key_across_epochs_is_audit_failure(world):
-    root, _, _, _, journal = world
-    request = _request()
-    journal.prepare(request)
-    with sqlite3.connect(root.path) as conn:
-        row = conn.execute('SELECT protocol_epoch,operation_id,token,state,request,receipt,selectors FROM typed_operations').fetchone()
-        conn.execute('INSERT INTO typed_operations VALUES(?,?,?,?,?,?,?)',
-                     (str(uuid.uuid4()), row[1], 'f' * 64, *row[3:]))
+def test_strict_preparation_scopes_operation_id_by_epoch(world):
+    journal = world[-1]
+    first = _request()
+    second = prepare_mutation('mesh', str(uuid.uuid4()), first.expectation.operation_id, ACTOR,
+                              'doc_put', {'p_path': 'another.json', 'p_data': {'new': True}})
+    first_record = journal.prepare(first)
+    second_record = journal.prepare(second)
+    assert first_record.intent.token != second_record.intent.token
+    restored = _reload(world)
+    assert restored.prepare(first) == first_record
+    assert restored.prepare(second) == second_record
+    assert restored.get(EPOCH, first.expectation.operation_id) == first_record
+    assert restored.get(second.expectation.protocol_epoch, second.expectation.operation_id) == second_record
     with pytest.raises(local_source.SourceChanged, match='duplicate_operation_id'):
-        journal.get_operation(request.expectation.operation_id)
+        restored.get_operation(first.expectation.operation_id)
+    with pytest.raises(local_source.SourceChanged, match='duplicate_operation_id'):
+        restored.prepare_operation(first)
 
 
 def test_node_publication_and_normal_page_capture_survive_journal_upgrade_and_restart(tmp_path):
