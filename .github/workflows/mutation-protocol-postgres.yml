@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/mutation-protocol-postgres.yml
       - devtools/validate_mutation_protocol_postgres.py
+      - devtools/provider_admission_race_gate.py
       - docs/supabase_schema.sql
 
 jobs:

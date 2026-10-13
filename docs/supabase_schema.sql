@@ -2522,6 +2522,46 @@ $$;
 revoke all on function private.ab_mutation_receipt_json(
   public.ab_mutation_receipts) from public, anon, authenticated, service_role;
 
+-- Prospective owner admission is explicitly disabled until an operator gates a
+-- sealed empty epoch. Every admitted leg holds one receipt slot until rotation;
+-- cancellation never frees capacity early or changes the terminal receipt wire.
+alter table public.ab_mutation_roots
+  add column if not exists admission_required boolean not null default false;
+create table if not exists public.ab_mutation_admission_groups (
+  root text not null references public.ab_mutation_roots(root),
+  protocol_epoch uuid not null,
+  owner_id uuid not null,
+  actor_uid uuid not null,
+  primary key (root, protocol_epoch, owner_id)
+);
+create table if not exists public.ab_mutation_admission_legs (
+  root text not null,
+  protocol_epoch uuid not null,
+  owner_id uuid not null,
+  operation_id uuid not null,
+  ordinal integer not null check (ordinal between 1 and 1025),
+  operation_kind text not null check (operation_kind in (
+    'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append',
+    'effect_transition','chat_delete','member_claim','member_leave','blob_manifest')),
+  client_digest text not null check (client_digest ~ '^[0-9a-f]{64}$'),
+  receipt_slot integer not null check (receipt_slot between 0 and 4095),
+  cancelled boolean not null default false,
+  cancel_acknowledged boolean not null default false,
+  check (not cancel_acknowledged or cancelled),
+  primary key (root, protocol_epoch, operation_id),
+  unique (root, protocol_epoch, receipt_slot),
+  unique (root, protocol_epoch, owner_id, ordinal),
+  foreign key (root, protocol_epoch, owner_id)
+    references public.ab_mutation_admission_groups(root, protocol_epoch, owner_id)
+    on delete cascade
+);
+alter table public.ab_mutation_admission_groups enable row level security;
+alter table public.ab_mutation_admission_legs enable row level security;
+revoke all on table public.ab_mutation_admission_groups
+  from public, anon, authenticated, service_role;
+revoke all on table public.ab_mutation_admission_legs
+  from public, anon, authenticated, service_role;
+
 create or replace function private.ab_mutation_begin(
   p_root text, p_protocol_epoch uuid, p_operation_id uuid,
   p_operation_kind text, p_payload_digest text, p_provider_digest text
@@ -2535,6 +2575,7 @@ declare
   v_slot integer;
   v_probe integer;
   v_count integer;
+  v_leg record;
 begin
   if p_root is null or p_root = ''
      or pg_catalog.octet_length(p_root) > 1024
@@ -2590,6 +2631,24 @@ begin
       'replay', true,
       'receipt', private.ab_mutation_receipt_json(v_receipt)
     );
+  end if;
+
+  if v_root.admission_required then
+    select l.*, g.actor_uid into v_leg from public.ab_mutation_admission_legs l
+      join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = p_operation_id;
+    if not found or v_leg.actor_uid is distinct from v_actor
+       or v_leg.operation_kind is distinct from p_operation_kind
+       or v_leg.client_digest is distinct from p_payload_digest or v_leg.cancelled then
+      raise exception 'typed mutation requires matching uncancelled admission' using errcode = '55000';
+    end if;
+    insert into public.ab_mutation_receipts(root, protocol_epoch, operation_id, actor_uid,
+      operation_kind, payload_digest, provider_digest, receipt_slot, receipt_state, applying_xid, result)
+    values (p_root, p_protocol_epoch, p_operation_id, v_actor, p_operation_kind,
+      p_payload_digest, p_provider_digest, v_leg.receipt_slot, 'applying',
+      pg_catalog.pg_current_xact_id(), '{}'::jsonb) returning * into v_receipt;
+    return pg_catalog.jsonb_build_object('replay', false,
+      'receipt', private.ab_mutation_receipt_json(v_receipt));
   end if;
 
   v_base := (pg_catalog.hashtextextended(p_operation_id::text, 0) & 4095)::integer;
@@ -2980,11 +3039,24 @@ begin
     raise exception 'mutation receipts are not fully acknowledged'
       using errcode = '55000';
   end if;
+  if exists (select 1 from public.ab_mutation_admission_legs l
+      join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+      left join public.ab_mutation_receipts r on r.root=l.root
+        and r.protocol_epoch=l.protocol_epoch and r.operation_id=l.operation_id
+      where l.root=p_root and l.protocol_epoch=p_expected_epoch
+        and ((l.cancelled and l.cancel_acknowledged and r.operation_id is null)
+          or (not l.cancelled and r.receipt_state='terminal' and r.acknowledged_at is not null
+            and r.actor_uid=g.actor_uid and r.operation_kind=l.operation_kind
+            and r.payload_digest=l.client_digest and r.receipt_slot=l.receipt_slot)) is not true) then
+    raise exception 'mutation admission legs are not settled and acknowledged' using errcode = '55000';
+  end if;
   if v_root.receipt_generation = 9223372036854775807 then
     raise exception 'mutation epoch generation exhausted' using errcode = '54000';
   end if;
   delete from public.ab_mutation_receipts r
   where r.root = p_root and r.protocol_epoch = p_expected_epoch;
+  delete from public.ab_mutation_admission_groups g
+    where g.root = p_root and g.protocol_epoch = p_expected_epoch;
   v_next_epoch := pg_catalog.gen_random_uuid();
   update public.ab_mutation_roots
   set previous_protocol_epoch = p_expected_epoch,
@@ -4340,3 +4412,252 @@ revoke all on function public.ab_mutation_reaction_pair(
 grant execute on function public.ab_mutation_reaction_pair(
   text,uuid,uuid,text,text,text,jsonb,jsonb,uuid,bigint,boolean,bigint,boolean)
   to authenticated;
+
+-- Effect-free immutable owner admission. Epoch lock always precedes the root
+-- admission mutex. Execution/cancellation use epoch then operation lock and
+-- never acquire the admission mutex, so the lock order cannot invert.
+create or replace function public.ab_admin_enable_mutation_admission(
+  p_root text, p_expected_epoch uuid
+) returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog as $$
+declare
+  v_root public.ab_mutation_roots%rowtype;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_expected_epoch is null
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid admission enable request' using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  select r.* into v_root from public.ab_mutation_roots r where r.root = p_root for update;
+  if v_root.root is null or v_root.protocol_epoch is distinct from p_expected_epoch
+     or v_root.legacy_writes_enabled
+     or not exists (select 1 from public.ab_database_mutation_seals s where s.root = p_root) then
+    raise exception 'admission enable precondition changed' using errcode = '55000';
+  end if;
+  if not v_root.admission_required then
+    if exists (select 1 from public.ab_mutation_receipts r where r.root = p_root)
+       or exists (select 1 from public.ab_mutation_admission_groups g where g.root = p_root)
+       or exists (select 1 from public.ab_mutation_admission_legs l where l.root = p_root) then
+      raise exception 'admission requires an empty receipt epoch' using errcode = '55000';
+    end if;
+    update public.ab_mutation_roots set admission_required = true where root = p_root;
+  end if;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'protocol_epoch', p_expected_epoch, 'admission_required', true);
+end
+$$;
+revoke all on function public.ab_admin_enable_mutation_admission(text,uuid)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.ab_admit_mutation_owner(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_plan jsonb
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_root public.ab_mutation_roots%rowtype;
+  v_group public.ab_mutation_admission_groups%rowtype;
+  v_item jsonb;
+  v_plan jsonb;
+  v_ids uuid[] := array[]::uuid[];
+  v_id uuid;
+  v_count integer;
+  v_occupied integer;
+  v_ordinal integer := 0;
+  v_slots integer[];
+  v_member text;
+begin
+  if v_actor is null or auth.role() is distinct from 'authenticated'
+     or p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_protocol_epoch is null or p_owner_id is null
+     or p_plan is null or pg_catalog.jsonb_typeof(p_plan) <> 'array'
+     or pg_catalog.octet_length(p_plan::text) > 524288
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid mutation admission request' using errcode = '22023';
+  end if;
+  v_count := pg_catalog.jsonb_array_length(p_plan);
+  if v_count < 1 or v_count > 1025 then
+    raise exception 'invalid admission plan count' using errcode = '22023';
+  end if;
+  for v_item in select value from pg_catalog.jsonb_array_elements(p_plan) loop
+    if pg_catalog.jsonb_typeof(v_item) <> 'object'
+       or not (v_item ?& array['operation_id','kind','client_digest'])
+       or (v_item - array['operation_id','kind','client_digest']) <> '{}'::jsonb
+       or pg_catalog.jsonb_typeof(v_item->'operation_id') <> 'string'
+       or pg_catalog.jsonb_typeof(v_item->'kind') <> 'string'
+       or pg_catalog.jsonb_typeof(v_item->'client_digest') <> 'string'
+       or (v_item->>'kind') not in (
+         'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append',
+         'effect_transition','chat_delete','member_claim','member_leave','blob_manifest')
+       or (v_item->>'client_digest') !~ '^[0-9a-f]{64}$' then
+      raise exception 'invalid admission plan leg' using errcode = '22023';
+    end if;
+    begin
+      v_id := (v_item->>'operation_id')::uuid;
+    exception when invalid_text_representation then
+      raise exception 'invalid admission operation id' using errcode = '22023';
+    end;
+    if v_id::text is distinct from (v_item->>'operation_id') or v_id = any(v_ids) then
+      raise exception 'noncanonical or repeated admission operation id' using errcode = '22023';
+    end if;
+    v_ids := pg_catalog.array_append(v_ids, v_id);
+  end loop;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  select r.* into v_root from public.ab_mutation_roots r where r.root = p_root;
+  if v_root.root is null or v_root.protocol_epoch is distinct from p_protocol_epoch
+     or not v_root.admission_required or v_root.legacy_writes_enabled then
+    raise exception 'mutation admission epoch unavailable' using errcode = '55000';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-mutation-admission:' || p_root, 0));
+  select g.* into v_group from public.ab_mutation_admission_groups g
+    where g.root = p_root and g.protocol_epoch = p_protocol_epoch and g.owner_id = p_owner_id;
+  if found then
+    select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'operation_id', l.operation_id, 'kind', l.operation_kind, 'client_digest', l.client_digest)
+        order by l.ordinal) into v_plan
+      from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.owner_id = p_owner_id;
+    if v_group.actor_uid is distinct from v_actor or v_plan is distinct from p_plan then
+      raise exception 'mutation admission owner collision' using errcode = '55000';
+    end if;
+    return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+      'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+      'status', 'admitted', 'plan', v_plan);
+  end if;
+  -- Fresh admission is authorization, but exact admitted replay is not: it
+  -- remains available to the original actor after root membership removal.
+  v_member := private.ab_mutation_lock_actor(p_root);
+  -- A nonmember may reserve exactly the existing authenticated member-claim
+  -- operation; this adds no source authority and preserves the join RPC's
+  -- current authorization/uniqueness checks at execution. No mixed plan.
+  if (v_member is null or v_member = '')
+     and not (v_count = 1 and p_plan->0->>'kind' = 'member_claim') then
+    raise exception 'mutation admission requires root membership' using errcode = '42501';
+  end if;
+  if exists (select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = any(v_ids)) then
+    raise exception 'mutation admission operation collision' using errcode = '55000';
+  end if;
+  select pg_catalog.count(*) into v_occupied from public.ab_mutation_admission_legs l
+    where l.root = p_root and l.protocol_epoch = p_protocol_epoch;
+  if v_occupied + v_count > 4096 then
+    -- No control row is needed: no source effect is eligible without positive
+    -- durable admission. Slots, including cancelled legs, never free in-epoch.
+    return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+      'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+      'status', 'full', 'plan', p_plan);
+  end if;
+  select pg_catalog.array_agg(candidate order by candidate) into v_slots from (
+    select slot as candidate from pg_catalog.generate_series(0,4095) as slot
+    where not exists (select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.receipt_slot = slot)
+    order by slot limit v_count
+  ) free_slots;
+  insert into public.ab_mutation_admission_groups(root, protocol_epoch, owner_id, actor_uid)
+    values (p_root, p_protocol_epoch, p_owner_id, v_actor);
+  for v_item in select value from pg_catalog.jsonb_array_elements(p_plan) loop
+    v_ordinal := v_ordinal + 1;
+    insert into public.ab_mutation_admission_legs(root, protocol_epoch, owner_id,
+      operation_id, ordinal, operation_kind, client_digest, receipt_slot)
+    values (p_root, p_protocol_epoch, p_owner_id, (v_item->>'operation_id')::uuid,
+      v_ordinal, v_item->>'kind', v_item->>'client_digest', v_slots[v_ordinal]);
+  end loop;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+    'status', 'admitted', 'plan', p_plan);
+end
+$$;
+revoke all on function public.ab_admit_mutation_owner(text,uuid,uuid,jsonb)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_admit_mutation_owner(text,uuid,uuid,jsonb) to authenticated;
+
+-- Shared exact cancellation resolver. It updates an existing leg, never
+-- allocates a control slot, and serializes with _begin on the operation lock.
+create or replace function private.ab_mutation_admission_cancel(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text, p_acknowledge boolean
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_leg public.ab_mutation_admission_legs%rowtype;
+  v_status text;
+begin
+  if v_actor is null or auth.role() is distinct from 'authenticated'
+     or p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_protocol_epoch is null or p_owner_id is null or p_operation_id is null
+     or p_kind is null or p_client_digest is null
+     or p_client_digest !~ '^[0-9a-f]{64}$' or p_acknowledge is null
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid admission cancellation request' using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  if not exists (select 1 from public.ab_mutation_roots r where r.root = p_root
+      and r.protocol_epoch = p_protocol_epoch and r.admission_required and not r.legacy_writes_enabled) then
+    raise exception 'mutation admission epoch unavailable' using errcode = '55000';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'agentbridge-mutation-operation:' || p_root || ':' || p_protocol_epoch::text || ':' || p_operation_id::text, 0));
+  select l.* into v_leg from public.ab_mutation_admission_legs l
+    join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+    where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.owner_id = p_owner_id
+      and l.operation_id = p_operation_id and g.actor_uid = v_actor;
+  if not found or v_leg.operation_kind is distinct from p_kind
+     or v_leg.client_digest is distinct from p_client_digest then
+    raise exception 'mutation admission leg unavailable' using errcode = '55000';
+  end if;
+  if p_acknowledge then
+    if not v_leg.cancelled then
+      raise exception 'mutation admission leg is not cancelled' using errcode = '55000';
+    end if;
+    update public.ab_mutation_admission_legs set cancel_acknowledged = true
+      where root = p_root and protocol_epoch = p_protocol_epoch and operation_id = p_operation_id;
+    v_status := 'cancelled';
+  elsif exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.operation_id = p_operation_id) then
+    v_status := 'executed';
+  else
+    update public.ab_mutation_admission_legs set cancelled = true
+      where root = p_root and protocol_epoch = p_protocol_epoch and operation_id = p_operation_id;
+    v_status := 'cancelled';
+  end if;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+    'operation_id', p_operation_id, 'kind', p_kind, 'client_digest', p_client_digest,
+    'status', v_status);
+end
+$$;
+revoke all on function private.ab_mutation_admission_cancel(text,uuid,uuid,uuid,text,text,boolean)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.ab_cancel_mutation_admission(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text
+) returns jsonb
+language sql volatile security definer set search_path = pg_catalog as $$
+  select private.ab_mutation_admission_cancel(p_root,p_protocol_epoch,p_owner_id,
+    p_operation_id,p_kind,p_client_digest,false)
+$$;
+revoke all on function public.ab_cancel_mutation_admission(text,uuid,uuid,uuid,text,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_cancel_mutation_admission(text,uuid,uuid,uuid,text,text) to authenticated;
+
+create or replace function public.ab_ack_mutation_admission_cancel(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text
+) returns boolean
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+begin
+  perform private.ab_mutation_admission_cancel(p_root,p_protocol_epoch,p_owner_id,
+    p_operation_id,p_kind,p_client_digest,true);
+  return true;
+end
+$$;
+revoke all on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid,uuid,text,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid,uuid,text,text) to authenticated;

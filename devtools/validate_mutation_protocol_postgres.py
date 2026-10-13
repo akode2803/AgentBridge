@@ -2915,6 +2915,125 @@ def _validate_receipt_retirement(database_url: str) -> None:
         raise GateFailure('failed exhausted rotation changed the current epoch')
 
 
+def _validate_provider_admission(database_url: str) -> None:
+    """Prospective admission reserves capacity and pins outcomes through closure."""
+    root, actor = 'provider-admission', uuid4()
+    before = _prepare_root(database_url, root, actor)
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed['protocol_epoch'])
+    _run(database_url, f"select public.ab_admin_enable_mutation_admission({_quote(root)}, {_quote(str(epoch))}::uuid);")
+
+    def authenticated(sql, *, ok=True):
+        statement = 'begin; set local role authenticated; ' + _claims(actor) + sql + '; commit;'
+        return _scalar(database_url, statement) if ok else _run(database_url, statement, expect_ok=False)
+
+    def admit(owner, plan):
+        return ('select public.ab_admit_mutation_owner('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(owner))}::uuid, '
+                f'{_quote(json.dumps(plan))}::jsonb)')
+
+    def leg(kind='doc_put'):
+        return {'operation_id': str(uuid4()), 'kind': kind, 'client_digest': 'a' * 64}
+
+    def cancel(owner, item, *, ack=False):
+        name = 'ab_ack_mutation_admission_cancel' if ack else 'ab_cancel_mutation_admission'
+        return (f'select public.{name}({_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(owner))}::uuid, {_quote(item["operation_id"])}::uuid, '
+                f'{_quote(item["kind"])}, {_quote(item["client_digest"])})')
+
+    def put(item, path):
+        return ('select public.ab_mutation_doc_put('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(item["operation_id"])}::uuid, '
+                f'{_quote(item["client_digest"])}, {_quote(path)}, \'{{}}\'::jsonb)')
+
+    def ack(receipt):
+        return _receipt_sql('ab_ack_mutation_receipt', root, epoch,
+                            UUID(receipt['operation_id']), receipt['client_digest'], receipt['provider_digest'])
+
+    owner = uuid4()
+    plan = [leg(), leg(), leg('member_leave')]
+    admitted = json.loads(authenticated(admit(owner, plan)))
+    expected = dict(schema_version=1, root=root, actor_id=str(actor), protocol_epoch=str(epoch),
+                    owner_id=str(owner), status='admitted', plan=plan)
+    if admitted != expected or json.loads(authenticated(admit(owner, plan))) != expected:
+        raise GateFailure('admission lost-response replay changed immutable plan')
+    altered = [dict(item) for item in plan]
+    altered[0]['client_digest'] = 'b' * 64
+    authenticated(admit(owner, altered), ok=False)
+    authenticated(put(leg(), 'unadmitted.json'), ok=False)
+    first = json.loads(authenticated(put(plan[0], 'admitted.json')))
+    if json.loads(authenticated(cancel(owner, plan[0])))['status'] != 'executed':
+        raise GateFailure('cancellation fabricated non-effect after committed write')
+    cancelled = json.loads(authenticated(cancel(owner, plan[1])))
+    if cancelled['status'] != 'cancelled' or json.loads(authenticated(cancel(owner, plan[1]))) != cancelled:
+        raise GateFailure('cancellation replay lost exact no-effect outcome')
+    authenticated(put(plan[1], 'cancelled.json'), ok=False)
+    rotation = (f'select public.ab_admin_rotate_mutation_epoch({_quote(root)}, '
+                f'{_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid);')
+    _run(database_url, rotation, expect_ok=False)
+    authenticated(ack(first))
+    authenticated(cancel(owner, plan[1], ack=True))
+    _run(database_url, rotation, expect_ok=False)  # Unused membership leg pins epoch.
+    member = plan[2]
+    left = json.loads(authenticated('select public.ab_mutation_member_leave('
+                      f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                      f'{_quote(member["operation_id"])}::uuid, {_quote(member["client_digest"])})'))
+    if json.loads(authenticated(admit(owner, plan))) != expected:
+        raise GateFailure('admission replay incorrectly required current membership')
+    authenticated(admit(uuid4(), [leg()]), ok=False)
+    authenticated(ack(left))
+    _run(database_url, rotation)
+    authenticated(put(plan[0], 'admitted.json'), ok=False)
+    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path in ('unadmitted.json','cancelled.json');") != '0':
+        raise GateFailure('unadmitted or cancelled mutation changed source')
+
+    # A new authenticated principal can reserve its one claim, but not source
+    # writes before membership exists.
+    actor = uuid4()
+    epoch = UUID(json.loads(_scalar(database_url,
+        'begin; set local role authenticated; ' + _claims(actor)
+        + f"select public.ab_mutation_epoch_state({_quote(root)}); commit;"))['protocol_epoch'])
+    claim_owner, claim_plan = uuid4(), [leg('member_claim')]
+    authenticated(admit(uuid4(), [leg()]), ok=False)
+    authenticated(admit(claim_owner, claim_plan))
+    claim = claim_plan[0]
+    claimed = json.loads(authenticated('select public.ab_mutation_member_claim('
+        f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(claim["operation_id"])}::uuid, '
+        f"{_quote(claim['client_digest'])}, 'admission-new-member')"))
+    if claimed['result'] != {'username': 'admission-new-member', 'claimed': True}:
+        raise GateFailure('admission broke authenticated new-member claim')
+
+    # Whole owner capacity survives unrelated clients filling every other slot.
+    root = 'provider-admission-full'
+    actor, other_actor = uuid4(), uuid4()
+    before = _prepare_root(database_url, root, actor)
+    _run(database_url, 'insert into public.ab_members(root,username,uid) values ('
+         f"{_quote(root)}, 'capacity-peer', {_quote(str(other_actor))}::uuid);")
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed['protocol_epoch'])
+    _run(database_url, f"select public.ab_admin_enable_mutation_admission({_quote(root)}, {_quote(str(epoch))}::uuid);")
+    owner, plan = uuid4(), [leg(), leg()]
+    authenticated(admit(owner, plan))
+    primary_actor, actor = actor, other_actor
+    for size in (1024, 1024, 1024, 1022):
+        result = json.loads(authenticated(admit(uuid4(), [leg() for _ in range(size)])))
+        if result['status'] != 'admitted':
+            raise GateFailure('provider rejected available owner reservation capacity')
+    actor = primary_actor
+    waiting_owner, waiting_plan = uuid4(), [leg()]
+    full = json.loads(authenticated(admit(waiting_owner, waiting_plan)))
+    if full['status'] != 'full' or json.loads(authenticated(admit(waiting_owner, waiting_plan))) != full:
+        raise GateFailure('full admission was not an effect-free repeatable result')
+    receipt = json.loads(authenticated(put(plan[0], 'reserved-last-slot.json')))
+    authenticated(ack(receipt))
+    if json.loads(authenticated(admit(owner, plan)))['status'] != 'admitted':
+        raise GateFailure('full ledger lost prior owner reservation')
+    authenticated(cancel(owner, plan[1]))
+    authenticated(cancel(owner, plan[1], ack=True))
+    if json.loads(authenticated(admit(waiting_owner, waiting_plan)))['status'] != 'full':
+        raise GateFailure('cancelled slot reused before epoch closure')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2984,6 +3103,12 @@ def main() -> int:
     _validate_conditional_documents(database_url)
     _validate_reaction_pairs(database_url)
     _validate_receipt_retirement(database_url)
+    _validate_provider_admission(database_url)
+    if __package__:
+        from devtools.provider_admission_race_gate import _validate_provider_admission_races
+    else:
+        from provider_admission_race_gate import _validate_provider_admission_races
+    _validate_provider_admission_races(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
@@ -3016,6 +3141,10 @@ def main() -> int:
             "reaction-pair-two-document-put-create-delete-races",
             "reaction-pair-pair-race-and-membership-replay",
             "receipt-retirement-generation-ack-closure",
+            "provider-admission-full-owner-reservation",
+            "provider-admission-replay-cancellation-closure",
+            "provider-admission-execute-cancel-lock-order",
+            "provider-admission-rotation-lock-order",
             "schema-rerun",
         ],
     }, sort_keys=True))

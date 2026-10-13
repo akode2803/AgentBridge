@@ -600,3 +600,87 @@ def test_reaction_pair_rolls_back_both_documents_and_retains_conflict_receipt():
     grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_reaction_pair('):]
     assert 'from public, anon, authenticated, service_role' in grant
     assert 'to authenticated' in grant
+
+
+def test_owner_admission_tables_bound_slots_and_keep_receipt_wire_separate():
+    for table in ('ab_mutation_admission_groups', 'ab_mutation_admission_legs'):
+        assert f'create table if not exists public.{table}' in SCHEMA
+        assert f'alter table public.{table} enable row level security' in SCHEMA
+        assert f'revoke all on table public.{table}' in SCHEMA
+    legs = _body('create table if not exists public.ab_mutation_admission_legs',
+                 'alter table public.ab_mutation_admission_groups enable')
+    assert 'receipt_slot between 0 and 4095' in legs
+    assert 'ordinal between 1 and 1025' in legs
+    assert 'unique (root, protocol_epoch, receipt_slot)' in legs
+    assert 'primary key (root, protocol_epoch, operation_id)' in legs
+    assert 'check (not cancel_acknowledged or cancelled)' in legs
+    assert 'on delete cascade' in legs
+    assert 'admission_required boolean not null default false' in SCHEMA
+
+
+def test_admission_enable_requires_explicit_empty_sealed_epoch():
+    enable = _body('create or replace function public.ab_admin_enable_mutation_admission(',
+                   'revoke all on function public.ab_admin_enable_mutation_admission(')
+    assert 'security invoker' in enable
+    assert 'pg_advisory_xact_lock(' in enable
+    assert 'ab_database_mutation_seals' in enable
+    assert 'admission requires an empty receipt epoch' in enable
+    assert 'ab_mutation_receipts' in enable and 'ab_mutation_admission_groups' in enable
+    assert 'admission_required = true' in enable
+    assert 'admission_required = false' not in SCHEMA
+    assert 'grant execute on function public.ab_admin_enable_mutation_admission' not in SCHEMA
+
+
+def test_admission_plan_is_bounded_exact_and_replayed_before_fresh_authority():
+    admit = _body('create or replace function public.ab_admit_mutation_owner(',
+                  'revoke all on function public.ab_admit_mutation_owner(')
+    assert 'v_count < 1 or v_count > 1025' in admit
+    assert 'octet_length(p_plan::text) > 524288' in admit
+    assert "v_item - array['operation_id','kind','client_digest']" in admit
+    assert "v_id::text is distinct from (v_item->>'operation_id')" in admit
+    assert 'v_id = any(v_ids)' in admit
+    assert admit.index("'agentbridge-mutation-epoch:'") < admit.index("'agentbridge-mutation-admission:'")
+    assert admit.index('v_plan is distinct from p_plan') < admit.index('ab_mutation_lock_actor')
+    assert 'v_group.actor_uid is distinct from v_actor' in admit
+    assert "v_count = 1 and p_plan->0->>'kind' = 'member_claim'" in admit
+    assert admit.index("'status', 'full'") < admit.index('insert into public.ab_mutation_admission_groups')
+    assert 'v_occupied + v_count > 4096' in admit
+    assert 'pg_try_advisory_xact_lock' not in admit
+
+
+def test_gated_begin_uses_exact_admission_slot_without_changing_terminal_replay():
+    begin = _body('create or replace function private.ab_mutation_begin(',
+                  'revoke all on function private.ab_mutation_begin(')
+    assert begin.index("'replay', true") < begin.index('if v_root.admission_required then')
+    gated = begin[begin.index('if v_root.admission_required then'):begin.index('  v_base :=')]
+    for expected in ('v_leg.actor_uid is distinct from v_actor',
+                     'v_leg.operation_kind is distinct from p_operation_kind',
+                     'v_leg.client_digest is distinct from p_payload_digest',
+                     'v_leg.cancelled', "v_leg.receipt_slot, 'applying'"):
+        assert expected in gated
+    assert 'pg_advisory_xact_lock' not in gated  # reuses the existing operation lock
+
+
+def test_cancel_is_exact_no_effect_control_and_ack_requires_cancellation():
+    cancel = _body('create or replace function private.ab_mutation_admission_cancel(',
+                   'revoke all on function private.ab_mutation_admission_cancel(')
+    assert cancel.index("'agentbridge-mutation-epoch:'") < cancel.index("'agentbridge-mutation-operation:'")
+    assert 'g.actor_uid = v_actor' in cancel
+    assert 'l.owner_id = p_owner_id' in cancel
+    assert 'v_leg.operation_kind is distinct from p_kind' in cancel
+    assert 'v_leg.client_digest is distinct from p_client_digest' in cancel
+    assert "if not v_leg.cancelled then" in cancel
+    assert "v_status := 'executed'" in cancel and "v_status := 'cancelled'" in cancel
+    assert 'insert into' not in cancel and 'delete from' not in cancel
+    assert 'ab_mutation_lock_actor' not in cancel
+
+
+def test_rotation_requires_acknowledged_effect_or_acknowledged_no_effect_for_every_leg():
+    rotate = _body('create or replace function public.ab_admin_rotate_mutation_epoch(',
+                   'revoke all on function public.ab_admin_rotate_mutation_epoch(')
+    assert 'l.cancelled and l.cancel_acknowledged and r.operation_id is null' in rotate
+    assert "not l.cancelled and r.receipt_state='terminal' and r.acknowledged_at is not null" in rotate
+    assert 'is not true' in rotate  # a missing receipt must block, not SQL NULL-skip
+    assert 'r.actor_uid=g.actor_uid' in rotate and 'r.payload_digest=l.client_digest' in rotate
+    assert rotate.index('mutation admission legs are not settled') < rotate.index('delete from public.ab_mutation_admission_groups')
+    assert rotate.index('delete from public.ab_mutation_receipts') < rotate.index('delete from public.ab_mutation_admission_groups')

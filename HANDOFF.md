@@ -1,5 +1,15 @@
 # Cloud source handoff
 
+## 2026-10-13 recoverable provider admission foundation
+
+Prospective SQL admission/cancellation and strict Python wire are implemented,
+with 118 focused tests passing and rollback-only authenticated Scratch acceptance.
+Exact executed SQL is retained. No Scratch schema or fixture remains applied.
+See docs/PROVIDER_ADMISSION_CHECKPOINT.md for evidence and missing local-owner
+integration. Two-session PostgreSQL CI remains required. New PR145 terminal
+pre-enqueue and unsupported-runtime-outbox review findings are being repaired.
+No activation, production change or merge is authorized by this checkpoint.
+
 ## 2026-10-13 local capacity and lifecycle safety checkpoint
 
 Current branch `codex/compound-write-owners`, extending PR #145. The current local
