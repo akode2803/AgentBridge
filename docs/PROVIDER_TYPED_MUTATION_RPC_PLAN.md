@@ -228,6 +228,33 @@ or diagnostics.
 
 ## Validation
 
+### Inactive Python receipt boundary
+
+`agentbridge/transport/mutation_receipts.py` decodes all nine terminal result
+families without exposing an RPC or activating a writer. The caller supplies an
+immutable expectation from its pending operation: exact root, pinned actor,
+protocol epoch, operation ID, kind, client digest and family-specific targets.
+The decoder rejects unknown/missing fields, bool-as-integer values, malformed
+identities, mismatched targets and results outside the provider's bounds. The
+returned receipt owns immutable scalar tuples, so later response mutation cannot
+alter retained evidence. Provider digests are opaque; Python does not recreate
+PostgreSQL JSONB hashing.
+
+On an initial reply the provider digest is not yet known and is captured from
+the validated receipt. On subsequent resolution it must match the retained
+digest. If the first reply is lost, the receipt-read RPC cannot be called yet:
+it requires both digests. The future adapter must replay the identical typed
+request with the original epoch/operation ID to recover its receipt. It must
+never generate another identity or bind the request to a new epoch. Receipt
+acknowledgment remains unavailable until the exact outcome is durable locally.
+
+This decoder is an implementation prerequisite, not a readiness claim. It has
+no runtime callers. Capability negotiation, authenticated transport pinning,
+durable operation preparation/replay, receipt persistence/acknowledgment and
+coordinator retirement remain separate work.
+
+### Protocol schedules
+
 - exact replay returns one receipt and one semantic effect under concurrent
   duplicate calls;
 - same operation ID with another epoch, kind, client digest or provider digest
