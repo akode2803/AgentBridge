@@ -29,6 +29,7 @@ never as a crashed run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import threading
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from ..core.models import MsgKind
 from ..core.timekit import new_id
+from ..mesh.attachments import attachment_path
 from .broker import PermissionBroker
 from .capabilities import BRIDGE_CAPABILITIES, validate_bridge_tools
 from .runtime.effects import EffectLedger
@@ -47,6 +49,19 @@ __all__ = ["BridgeServer"]
 _START_TIMEOUT_S = 15.0
 MAX_CREATES_PER_RUN = 2
 MAX_TIMERS_PER_RUN = 5
+
+
+def _fetch_file_bytes(mesh, chat: str, file_id: str, record: dict) -> bytes | None:
+    """Read only the storage identity named by a visible signed file record."""
+    raw = mesh.tx.get_blob(attachment_path(chat, file_id, record))
+    data = mesh.sealer.open_blob(chat, file_id, raw) if raw is not None else None
+    if data is None or (record.get("bytes") is not None
+                        and len(data) != record["bytes"]) or (
+                            record.get("sha256") is not None
+                            and hashlib.sha256(data).hexdigest()
+                            != record["sha256"]):
+        return None
+    return data
 
 
 class _BearerAuthApp:
@@ -431,11 +446,8 @@ class BridgeServer:
                             rec = f
                 if rec is None:
                     return "no such file in this chat — list_files shows ids"
-                raw = mesh.tx.get_blob(f"chats/{chat}/files/{file_id}")
-                data = mesh.sealer.open_blob(chat, file_id, raw) \
-                    if raw is not None else None
-                if data is None or (rec.get("bytes") is not None
-                                    and len(data) != rec["bytes"]):
+                data = _fetch_file_bytes(mesh, chat, file_id, rec)
+                if data is None:
                     return ("that file hasn't finished syncing to this "
                             "machine yet — try again in a bit")
                 inbox = self.workspace / "inbox"

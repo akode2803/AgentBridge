@@ -1,11 +1,111 @@
 # Cloud source handoff
 
+## 2026-10-13 local capacity and lifecycle safety checkpoint
+
+Current branch `codex/compound-write-owners`, extending PR #145. The current local
+patch repairs all five new Codex findings: pre-consumer append/manifest migration
+guards, first-pipe target parsing, cross-Store consumed-slot cleanup, pre-enqueue
+attachment-count admission, and complete-owner capacity reservation. Format 8
+reserves records, replay bytes, receipt headroom and every manifest/append slot
+before partial effects. Generic work cannot steal reserved capacity. Format 7
+partial owners are adopted atomically or the upgrade fails without losing work.
+
+Account and agent deletion now propagates membership-removal failure before
+deactivation/key destruction. KeyStore has an inactive no-clobber durable install
+prerequisite; account creation/adoption/key rotation are NOT migrated yet. PR #142
+Windows failed on a small rejected POST closing with unread bytes (WinError10053);
+the node server now discards only small bodies within a 100 ms deadline before
+rejection. No production activation, schema change, restart or merge.
+
+Validation so far: combined gate: 253 passed with one stale test double, corrected
+and affected 14 tests passed; final journal/consumer/recovery/key gate: 146 passed.
+Node HTTP/rejection: 31 passed; account: 18 passed; staged/outbox: 23 passed. Independent
+Astra review found no remaining capacity findings after 23 scoped tests, including
+two retained epoch/rollback probes. Its existing-key inode-fsync finding was
+repaired; the final key-install file passes 10 tests.
+
+CRITICAL NEXT PREREQUISITE: shared provider receipt capacity/epoch closure needs
+effect-free recoverable admission (or durable exact non-effect evidence). Even a
+one-leg attempted request can get an unrecorded full-ledger rejection then be
+stranded by epoch rotation. Do NOT activate or consolidate the stack yet. Exact
+schedule and prospective design: docs/PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md;
+retained local regression: tests/test_provider_capacity_boundary.py. This is a
+confirmed protocol blocker, not a reason to increase limits or regenerate IDs.
+After this checkpoint, implement admission, remaining
+durable account/key/terminal phase owners, disposable authenticated migration
+acceptance and only then clear the PR stack.
+
+## 2026-10-13 PR #145 review repairs
+
+PR #145 (`codex/compound-write-owners`) contains the compound reaction and outbox
+consumer slice below, plus repairs for PR144 Codex comments 4258221983,
+4258221992 and 4258222003. Queued semantic actions now have bounded metadata-only
+restart inventory, recovered by the existing worker only after explicit journal
+binding and fresh owner signing. A private OS lock stripe serializes each path's
+drain without holding SQLite across provider I/O; foreground contention fails
+before enqueue and background recovery does not wait. Stale inventory cannot
+consume a newer action. All modular harness attachment readers resolve the
+canonical signed v1/v2 record and verify digest/size before exposing plaintext.
+
+Final repair gate: 165 passed, 1 skipped (optional MCP unavailable). The retained
+real-process regression proves contention admits no action and process death
+releases ownership. Independent Astra review of recovery/ownership found no
+remaining actionable findings; nine scoped independent/integration probes passed.
+Earlier harness/adapter gate129 passed. Ruff and whitespace pass. PR #145 head
+5928961 passed PostgreSQL CI, including new reaction-pair concurrency schedules;
+Ubuntu/Windows were still running at inspection. That CI evidence predates the
+repair commit; replacement current-head checks remain required. No hosted schema,
+production activation, restart, merge or deployment occurred.
+
+Next: address completed CI/review failures, then migrate forward-only account/key
+and terminal lifecycle owners with persisted private material and exact outcome
+consumers. Run disposable authenticated migration acceptance before activating
+writers or clearing the PR stack. The provider-independent compound/outbox work is
+implemented; the complete lifecycle migration and release are not complete.
+
+## 2026-10-13 compound reaction and outbox consumer checkpoint
+
+Active branch `codex/compound-write-owners`, based on PR144 `3ea0cca`.
+Implements one atomic conditional provider transaction for signed reaction/state
+checkpoint publication. The durable UserState queue retains the semantic reaction
+delta and one pair ticket; conflicts recapture both source versions. Independent
+review caught provider-inexpressible logical actions poisoning the FIFO; admission
+now validates provider JSON and reaction size before persisting work.
+
+Format 7 root-owned outbox consumer slots atomically link each exact Store row and
+manifest/append leg to its ticket. Manifests must be acknowledged before append.
+The worker durably marks sent under the exact lease before consumer release,
+retains cleanup evidence, and never reallocates after sent/deletion. Consumed root
+slots survive Store cleanup crashes and are reaped after exact Store deletion on
+later allocation. Outbox enqueue and typed sent/finalize commits use scoped FULL
+sync; cache-only work retains NORMAL. Binding remains explicit and inactive.
+Fresh terminal delete/leave sends are rejected until their lifecycle owner is
+migrated; no snapshot shortcut substitutes for typed completion.
+
+Validation: combined gate363 passed; consumer/Store/GUI attachment gate86 passed,
+3 intentional skips; independent probes11 passed with no remaining actionable
+P1/P2. Two independent epoch-prune/stale-claim crash probes are now permanent
+regressions (owner test file4 passed). Changed Python Ruff and whitespace pass.
+PR144 PostgreSQL and Ubuntu are green; Windows still running at last inspection.
+New reaction-pair PostgreSQL concurrency schedules require the new PR CI; no local
+PostgreSQL or hosted acceptance is claimed. No provider/app/harness changes.
+
+Next: review new PR CI, then forward-only account/key/lifecycle owner migration.
+Account creation must preserve private material and exact payload through unknown
+outcomes, adoption must save keys before publishing them, account patches need
+semantic CAS, and lifecycle/key rotation must reuse persisted signed identities.
+Terminal cleanup and reserved finalization need durable outcome consumers too.
+See PROVIDER_TYPED_MUTATION_RPC_PLAN for audited call sites and post-delete GC
+capacity limitation. Complete authenticated disposable migration acceptance before
+production activation or PR stack consolidation. Project-to-project transfer stays
+backlogged; protect Platform QA2 and legacy/bridge.py.
+
 ## 2026-10-13 mutable owners / attachment sequencing checkpoint
 
 Active branch `codex/mutable-writer-sequencing`, parent PR143 now `c42fdd1`.
 That committed/pushed parent repair pins the provider principal during journal
 binding and preserves strict epoch-scoped operation IDs; both Codex findings
-are covered by focused regressions. PR142 Ubuntu passes and Windows remains
+are covered by focused regressions. PR #142 Ubuntu passes and Windows remains
 running; PR143 replacement checks remain running at the latest inspection.
 
 The current slice adds conditional document writes with terminal CAS
@@ -41,7 +141,7 @@ PR stack only after migration acceptance, preserving each unique dependency.
 
 ## 2026-10-13 whole-root fencing and application journal integration
 
-Active branch: `codex/journal-application-writes`, based on PR142 repair
+Active branch: `codex/journal-application-writes`, based on PR #142 repair
 `f7cbde1`. Implements whole-root member claim/leave retirement, keyed application
 operations and explicit `LocalMutationTransport.bind_journal()`. All nine typed
 families can be journaled. Application keys retain their original epoch and exact
@@ -67,7 +167,7 @@ remaining actionable P1/P2. Parent endpoint/JSONB/instrumentation repair previou
 passed 115 tests. These are local and independent-review results, not CI or release.
 
 CI inspected: PR138, PR139 and PR141 are now green on both platforms. PR140's
-PostgreSQL and Ubuntu gates pass, Windows remains running. PR142 replacement
+PostgreSQL and Ubuntu gates pass, Windows remains running. PR #142 replacement
 Ubuntu/Windows checks on `f7cbde1` remain running. Older failed heads #116/#119/
 #121/#125 remain part of the historical stack; repairs are recorded in later
 children, so consolidation must verify cumulative ancestry rather than rerun
@@ -84,9 +184,9 @@ dependency chain and close superseded PRs without discarding unique work. Automa
 project-to-project migration remains separate/backlogged. No provider changes,
 merge, deployment, app/harness restart or production writer activation this round.
 
-## 2026-10-13 PR142 review and CI correction
+## 2026-10-13 PR #142 review and CI correction
 
-PR142's Ubuntu failure was four transaction-instrumentation fixtures that mocked
+PR #142's Ubuntu failure was four transaction-instrumentation fixtures that mocked
 SQLite without creating the now-required private database file. The fixture now
 establishes the real protected directory/file before observing the mocked
 transaction. Production privacy checks remain intact. Codex review additionally

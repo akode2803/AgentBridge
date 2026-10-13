@@ -527,10 +527,9 @@ class AccountsService:
         self._writable_target(agent)  # owner gate
         for snap in self.membership.chats_for():  # agent rooms ⊆ owner rooms
             if snap.kind is ChatKind.GROUP and agent in snap.members:
-                try:
-                    self.membership.remove_member(snap.id, agent)
-                except Exception:  # noqa: BLE001 — deletion must not wedge
-                    continue
+                # A failed or ambiguous leave cannot justify destroying the
+                # private keys required to recover that membership operation.
+                self.membership.remove_member(snap.id, agent)
         at = utcnow_iso()
         self.ensure_lifecycle(agent)
         from .lifecycle import publish_change
@@ -552,10 +551,8 @@ class AccountsService:
             raise PermissionDenied("password is incorrect")
         for snap in self.membership.chats_for():
             if snap.kind is ChatKind.GROUP:
-                try:
-                    self.membership.leave(snap.id)
-                except Exception:  # noqa: BLE001 — deletion must not wedge
-                    continue
+                # Preserve active identity and keys until every leave settles.
+                self.membership.leave(snap.id)
         at = utcnow_iso()
         from .lifecycle import publish_change
 

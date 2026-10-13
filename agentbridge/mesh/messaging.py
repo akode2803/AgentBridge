@@ -41,6 +41,7 @@ from .sealer import E2EESealer, Sealer
 __all__ = ["ConversationProjection", "MessagingService", "OUTBOX_APPEND"]
 
 OUTBOX_APPEND = "append_log"  # outbox kind; target = "<chat_id>|<log_name>"
+MAX_OUTBOX_ATTACHMENTS = 1024  # exact typed consumer manifest-leg bound
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,12 @@ class MessagingService:
         return snap
 
     # ------------------------------------------------------------------ write
+    def _admit_attachment_count(self, prepared: list[PreparedAttachment]) -> None:
+        if len(prepared) > MAX_OUTBOX_ATTACHMENTS:
+            if self.attachments is not None:
+                self.attachments.cancel(prepared)
+            raise ValidationError("too many attachments for one message")
+
     def post(
         self,
         chat_id: str,
@@ -144,6 +151,7 @@ class MessagingService:
     ) -> Envelope:
         self.require_send(chat_id)
         prepared = list(attachments or [])
+        self._admit_attachment_count(prepared)
         for item in prepared:
             if not isinstance(item, PreparedAttachment) or item.chat_id != chat_id:
                 raise ValidationError("attachment was prepared for another chat")
@@ -255,10 +263,17 @@ class MessagingService:
         return env
 
     def post_event(self, chat_id: str, event: dict) -> Envelope:
+        self._require_event_supported(event)
         self._require_member(chat_id)
         env = self.build_event(chat_id, event)
         self.commit_envelope(chat_id, env)
         return env
+
+    def _require_event_supported(self, event: dict) -> None:
+        if (getattr(self.tx, '_journal_writer', None) is not None
+                and isinstance(event, dict)
+                and event.get('type') in {EV_DELETED, EV_MEMBER_LEFT}):
+            raise TransportError('terminal lifecycle outbox migration is not enabled')
 
     def commit_envelope(
         self, chat_id: str, env: Envelope,
@@ -267,6 +282,9 @@ class MessagingService:
     ) -> None:
         """Optimistic local cache + durable outbox commit (the send guarantee)."""
         payload = env.to_dict()
+        if payload.get('kind') == MsgKind.INFO.value:
+            self._require_event_supported(payload.get('event'))
+        self._admit_attachment_count(list(attachments or []))
         outbox_payload = payload
         if attachments:
             outbox_payload = {
@@ -371,9 +389,21 @@ class MessagingService:
     def react(self, chat_id: str, msg_id: str, emoji: str | None) -> None:
         self._require_member(chat_id)
         state = self._state(chat_id)
-        operation = ChatOverlays(self.tx, chat_id).set_reaction(
-            self.user, msg_id, emoji, signer=self._sign_event,
-            state_checkpoint=state.checkpoint if emoji else None)
+        if getattr(self.tx, '_journal_writer', None) is not None:
+            from .reaction_documents import parse_v2
+
+            document, _changed = self.tx.write_state_action(
+                chat_id, self.user, 'reaction', {'message': msg_id, 'emoji': emoji or ''},
+                signer=self._sign_event, verifier=self._state_verifier(chat_id, self.user))
+            if document is None:
+                # A recovered, durably consumed pair needs no new notification.
+                return
+            _mapping, operations = parse_v2(document)
+            operation = operations[msg_id]
+        else:
+            operation = ChatOverlays(self.tx, chat_id).set_reaction(
+                self.user, msg_id, emoji, signer=self._sign_event,
+                state_checkpoint=state.checkpoint if emoji else None)
         # V50: a notification breadcrumb — the overlay doc above stays the
         # authoritative store, but overlay docs never ride the log, so
         # nothing downstream (sync bus → notifier → SSE/CLI hook) could see
@@ -750,8 +780,30 @@ class MessagingService:
         return None
 
     # ------------------------------------------------------- outbox handler
+    def recover_state_actions(self) -> int:
+        """Bounded existing-worker recovery using this session's exact signer."""
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if not isinstance(self.tx, LocalMutationTransport) or self.tx._bound_writer() is None:
+            return 0
+
+        def owner(chat, user):
+            if user != self.user:
+                raise ValueError('state action recovery user changed')
+            return self._sign_event, self._state_verifier(chat, user)
+
+        result = self.tx.recover_state_actions(
+            self.user, owner, limit=8, after_seq=getattr(self, '_state_recovery_after', 0))
+        self._state_recovery_after = result.after_seq
+        return result.completed
+
+    def typed_outbox_owner(self):
+        """Construct an explicit owner; startup does not bind it automatically."""
+        from ..transport.outbox_mutations import OutboxMutationOwner
+        return OutboxMutationOwner(self.tx, self.store, self.outbox_handlers()[OUTBOX_APPEND])
+
     def outbox_handlers(self) -> dict:
-        def append_log(target: str, payload: dict) -> None:
+        def append_log(target: str, payload: dict, *, _context=None) -> None:
             chat_id, _, log_name = target.partition("|")
             if not chat_id or not log_name:
                 raise ValidationError(f"malformed append target {target!r}")
@@ -767,7 +819,8 @@ class MessagingService:
             # before fresh-send authority checks or terminal shortcuts: a
             # removed sender can still have a committed, unacknowledged send.
             # The typed provider checks current authority for any new effect.
-            recover = getattr(self.tx, "recover_append_log", None)
+            append_owner = _context if _context is not None else self.tx
+            recover = getattr(append_owner, "recover_append_log", None)
             recovered = callable(recover) and recover(chat_id, log_name, envelope)
             if not recovered:
                 # A manifest may already have committed before a lost reply.
@@ -776,7 +829,8 @@ class MessagingService:
                 # stages bytes or prepares a new provider mutation.
                 if self.attachments is not None:
                     for manifest in self.attachments.manifests(payload):
-                        self.attachments.recover_published(chat_id, manifest)
+                        self.attachments.recover_published(
+                            chat_id, manifest, **({"outbox_item": _context.item} if _context else {}))
                 if kind == "message":
                     try:
                         self.require_send(chat_id, drain_before_terminal=True)
@@ -798,6 +852,8 @@ class MessagingService:
                     except Exception:  # noqa: BLE001 — optional speed path only
                         local_admission = None
                 elif kind == "info":
+                    if _context is not None and etype in {EV_DELETED, EV_MEMBER_LEFT}:
+                        raise TransportError('terminal lifecycle outbox migration is not enabled')
                     if etype in {EV_DELETED, EV_MEMBER_LEFT}:
                         try:
                             # Local optimistic info rows are authoritative for
@@ -820,8 +876,9 @@ class MessagingService:
                             return  # append landed before a crash; state is applied
                 if self.attachments is not None:
                     for manifest in self.attachments.manifests(payload):
-                        self.attachments.upload(chat_id, manifest)
-                self.tx.append_log(chat_id, log_name, envelope)
+                        self.attachments.upload(
+                            chat_id, manifest, **({"outbox_item": _context.item} if _context else {}))
+                append_owner.append_log(chat_id, log_name, envelope)
             if kind == 'message':
                 delivery_trace.emit(
                     'local_append_completed', chat=chat_id,

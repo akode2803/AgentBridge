@@ -6,6 +6,7 @@ offline backing with E2EE enabled; a scripted Responder replaces the adapters.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import threading
 from concurrent.futures import Future
@@ -21,6 +22,8 @@ from agentbridge.harness import (
     split_reply,
 )
 from agentbridge.harness.adapters.codex_compat import BridgeCompatibilityError
+from agentbridge.harness.adapters.cli import CliResponder
+from agentbridge.harness.bridge import _fetch_file_bytes
 from agentbridge.harness.triggers import Candidate
 from agentbridge.harness.recovery import prepare_outbox
 from agentbridge.harness.runtime.controls import (
@@ -2003,6 +2006,91 @@ def test_attachment_sync_barrier_defers_until_blob_lands(hrig):
 
     assert len(responder.calls) == 1
     assert len(agent_msgs(hrig.owner, snap.id)) == 1
+
+
+def test_signed_staged_attachment_is_ready_and_staged_from_v2_path(hrig, tmp_path):
+    snap = hrig.owner.create_chat("StagedFile", members=["helper"])
+    blob_id = "f2-report.bin"
+    plain = b"hello"
+    record = {"id": blob_id, "name": "report.bin", "bytes": len(plain),
+              "sha256": hashlib.sha256(plain).hexdigest(), "storage_v": 2}
+    hrig.owner.post(snap.id, "@helper read this", files=[record])
+    runner = hrig.make_runner(Scripted())
+    ripple(hrig, runner, snap.id)
+    transcript = runner.mesh.messages_for(snap.id)
+    assert transcript[-1].files == [record]  # verified decrypted envelope
+    assert runner._blob_syncing(snap.id, transcript) == "report.bin"
+
+    # A legacy-path object with the same blob ID must not satisfy v2 reads.
+    hrig.owner.tx.put_blob(
+        f"chats/{snap.id}/files/{blob_id}",
+        hrig.owner.sealer.seal_blob(snap.id, blob_id, b"wrong"))
+    assert runner._blob_syncing(snap.id, transcript) == "report.bin"
+    hrig.owner.tx.put_blob(
+        f"blob-stage/{snap.id}/{blob_id}",
+        hrig.owner.sealer.seal_blob(snap.id, blob_id, b"wrong"))
+    assert runner._blob_syncing(snap.id, transcript) == "report.bin"
+    assert _fetch_file_bytes(runner.mesh, snap.id, blob_id,
+                             transcript[-1].files[0]) is None
+    hrig.owner.tx.put_blob(
+        f"blob-stage/{snap.id}/{blob_id}",
+        hrig.owner.sealer.seal_blob(snap.id, blob_id, plain))
+    assert runner._blob_syncing(snap.id, transcript) is None
+    assert _fetch_file_bytes(runner.mesh, snap.id, blob_id,
+                             transcript[-1].files[0]) == plain
+
+    workdir = tmp_path / "cli-workdir"
+    workdir.mkdir()
+    delivery = SimpleNamespace(chat_id=snap.id, transcript=transcript)
+    staged = CliResponder._stage_inbox(
+        SimpleNamespace(mesh=runner.mesh), delivery, workdir)
+    assert staged == {"report.bin": "inbox/report.bin"}
+    assert (workdir / "inbox" / "report.bin").read_bytes() == plain
+
+    legacy_id = "f-legacy.bin"
+    legacy = {"id": legacy_id, "name": "legacy.bin", "bytes": len(plain),
+              "sha256": hashlib.sha256(plain).hexdigest()}
+    hrig.owner.post(snap.id, "@helper read the older file", files=[legacy])
+    hrig.owner.tx.put_blob(
+        f"chats/{snap.id}/files/{legacy_id}",
+        hrig.owner.sealer.seal_blob(snap.id, legacy_id, plain))
+    ripple(hrig, runner, snap.id)
+    transcript = runner.mesh.messages_for(snap.id)
+    assert runner._blob_syncing(snap.id, transcript) is None
+    assert _fetch_file_bytes(runner.mesh, snap.id, legacy_id,
+                             transcript[-1].files[0]) == plain
+    second_workdir = tmp_path / "cli-both-paths"
+    second_workdir.mkdir()
+    staged = CliResponder._stage_inbox(
+        SimpleNamespace(mesh=runner.mesh),
+        SimpleNamespace(chat_id=snap.id, transcript=transcript), second_workdir)
+    assert staged == {"report.bin": "inbox/report.bin",
+                      "legacy.bin": "inbox/legacy.bin"}
+
+
+def test_inconsistent_signed_staged_record_never_reads_legacy_blob(hrig, tmp_path):
+    snap = hrig.owner.create_chat("InvalidStagedFile", members=["helper"])
+    blob_id = "f2-invalid.bin"
+    plain = b"hello"
+    record = {"id": blob_id, "name": "invalid.bin", "bytes": len(plain),
+              "sha256": hashlib.sha256(plain).hexdigest()}  # missing storage_v
+    hrig.owner.post(snap.id, "@helper read this", files=[record])
+    hrig.owner.tx.put_blob(
+        f"chats/{snap.id}/files/{blob_id}",
+        hrig.owner.sealer.seal_blob(snap.id, blob_id, plain))
+    runner = hrig.make_runner(Scripted())
+    ripple(hrig, runner, snap.id)
+    transcript = runner.mesh.messages_for(snap.id)
+    assert transcript[-1].files == [record]
+    assert runner._blob_syncing(snap.id, transcript) == "invalid.bin"
+    with pytest.raises(ValidationError, match="storage identity mismatch"):
+        _fetch_file_bytes(runner.mesh, snap.id, blob_id, transcript[-1].files[0])
+    workdir = tmp_path / "invalid-cli-workdir"
+    workdir.mkdir()
+    staged = CliResponder._stage_inbox(
+        SimpleNamespace(mesh=runner.mesh),
+        SimpleNamespace(chat_id=snap.id, transcript=transcript), workdir)
+    assert staged == {} and not (workdir / "inbox").exists()
 
 
 def test_attachment_barrier_grace_expires(hrig, monkeypatch):

@@ -8,6 +8,9 @@ No callback or provider I/O occurs while the coordinator transaction is held.
 from __future__ import annotations
 
 import json
+import hashlib
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -15,7 +18,7 @@ from ..mesh.paths import P
 from ..transport.mutation_protocol import _uuid
 from ..transport.receipt_retirement import OperationTicket
 from ..transport.scoped_sources import validate_source_paths
-from ..transport.typed_mutations import PreparedMutation
+from ..transport.typed_mutations import PreparedMutation, _bounded_json
 from . import local_source
 
 MAX_ACTIONS = 256
@@ -58,6 +61,7 @@ def _action_args(kind, args):
         'hide': {'msg_ids'}, 'unhide': {'msg_ids'},
         'clear': {'up_to_ns', 'keep_starred', 'runtime_ids', 'at'},
         'set_flag': {'name', 'value'},
+        'reaction': {'message', 'emoji'},
     }
     if kind not in shapes or set(args) != shapes[kind]:
         raise ValueError('invalid state action arguments')
@@ -74,12 +78,37 @@ def _action_args(kind, args):
                 or any(type(item) is not str or not item or len(item.encode('utf-8')) > 1024
                        for item in values)):
             raise ValueError('invalid state action ids')
+    if kind == 'reaction':
+        if (type(args['message']) is not str or not args['message']
+                or len(args['message'].encode('utf-8')) > 1024
+                or type(args['emoji']) is not str
+                or len(args['emoji'].encode('utf-8')) > 128):
+            raise ValueError('invalid reaction action')
     if kind == 'set_flag' and (type(args['name']) is not str or args['name'] not in _FLAGS):
         raise ValueError('invalid state action flag')
     raw = _canonical(args)
     if len(raw) > MAX_ACTION_BYTES:
         raise ValueError('state action exceeds limit')
+    # Reject provider-inexpressible logical work before it can occupy a FIFO.
+    _bounded_json(args, object_only=True)
     return raw
+
+
+@dataclass(frozen=True)
+class PendingStateAction:
+    """Restart inventory contains no arguments, signed bytes or replay body."""
+    seq: int
+    action_id: str
+    chat: str
+    user: str
+    state: str
+
+
+@dataclass(frozen=True)
+class StateActionRecovery:
+    completed: int
+    failed: tuple[str, ...]
+    after_seq: int
 
 
 @dataclass(frozen=True)
@@ -192,7 +221,7 @@ def audit_actions(conn):
                     or type(seq) is not int or seq < 1
                     or type(attempt) is not int or attempt < 0
                     or kind not in {'mark_read', 'mark_delivered', 'star', 'unstar',
-                                    'hide', 'unhide', 'clear', 'set_flag'}
+                                    'hide', 'unhide', 'clear', 'set_flag', 'reaction'}
                     or state not in _STATES
                     or ((ticket_epoch is None) != (ticket_operation is None))
                     or ((state == 'queued') != (ticket_epoch is None))):
@@ -205,13 +234,14 @@ def audit_actions(conn):
     # Do not deserialize retained replay bodies on every coordinator gate.
     # A linked action must still point to an unreleased ticket and its exact
     # immutable document selector; targeted resume checks the full request.
-    for path, selectors, ticket in conn.execute(
-            "SELECT a.path,o.selectors,t.released FROM user_state_actions a "
+    for path, chat, user, kind, selectors, ticket in conn.execute(
+            "SELECT a.path,a.chat,a.user,a.kind,o.selectors,t.released FROM user_state_actions a "
             "LEFT JOIN typed_operations o ON o.protocol_epoch=a.ticket_epoch "
             "AND o.operation_id=a.ticket_operation "
             "LEFT JOIN typed_operation_tickets t ON t.protocol_epoch=a.ticket_epoch "
             "AND t.operation_id=a.ticket_operation WHERE a.state='linked'"):
-        expected = _canonical([['doc_exact', path]])
+        paths = [path, P.reactions(chat, user)] if kind == 'reaction' else [path]
+        expected = _canonical([['doc_exact', item] for item in sorted(paths)])
         if selectors != expected or ticket != 0:
             _fail('linked_ticket_invalid')
 
@@ -226,11 +256,22 @@ def _action_for(conn, action_id, actor):
 
 def _validate_request(action: StateAction, request: PreparedMutation):
     request.__post_init__()
-    if (request.expectation.kind != 'doc_compare_put'
-            or request.expectation.actor_id != action.actor_id
-            or request.expectation.targets != (('path', action.path),)
-            or json.loads(request.arguments_json)['p_path'] != action.path):
+    if action.kind == 'reaction':
+        arguments = json.loads(request.arguments_json)
+        valid = (request.expectation.kind == 'reaction_pair'
+                 and dict(request.expectation.targets) == {'chat_id': action.chat, 'username': action.user}
+                 and arguments['p_chat'] == action.chat and arguments['p_user'] == action.user)
+    else:
+        valid = (request.expectation.kind == 'doc_compare_put'
+                 and request.expectation.targets == (('path', action.path),)
+                 and json.loads(request.arguments_json)['p_path'] == action.path)
+    if not valid or request.expectation.actor_id != action.actor_id:
         raise ValueError('state action ticket target changed')
+
+
+def _result_document(action, request):
+    arguments = json.loads(request.arguments_json)
+    return arguments['p_reaction_data' if action.kind == 'reaction' else 'p_data']
 
 
 def validate_action_allocation(conn, action_id, expected_attempt, request: PreparedMutation):
@@ -282,7 +323,7 @@ class UserStateActionQueue:
             _fail('owner_changed')
         self.driver._check_owner()
         journal._check(conn)
-        if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (6,):
+        if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(6,), (7,), (8,)}:
             _fail('lifecycle_required')
 
     def enqueue(self, chat: str, user: str, kind: str, args: dict) -> str:
@@ -301,6 +342,55 @@ class UserStateActionQueue:
                          'VALUES(?,?,?,?,?,?,?,0,\'queued\')',
                          (action_id, self.journal.actor_id, path, chat, user, kind, raw))
         return action_id
+
+    def pending_actions(self, user: str, *, limit: int = 64, after_seq: int = 0):
+        """Bounded metadata-only restart inventory for this exact owner."""
+        _component(user, 'user')
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise ValueError('invalid state action inventory limit')
+        if type(after_seq) is not int or not 0 <= after_seq <= 2**63 - 1:
+            raise ValueError('invalid state action inventory cursor')
+        with self.journal.coordinator._transaction() as conn:
+            self._check(conn)
+            return tuple(PendingStateAction(*row) for row in conn.execute(
+                'SELECT seq,action_id,chat,user,state FROM user_state_actions '
+                'WHERE actor_id=? AND user=? AND seq>? ORDER BY seq LIMIT ?',
+                (self.journal.actor_id, user, after_seq, limit)))
+
+    def recover_pending(self, user: str, owner, *, limit: int = 64, after_seq: int = 0):
+        """Recover existing actions without inventing another logical edit.
+
+        owner(chat, user) supplies fresh signing/verifying functions outside all
+        database cuts. Failed actions stay durable; bounded cursor progress lets
+        unrelated paths recover before the next pass retries those failures.
+        """
+        if not callable(owner):
+            raise ValueError('state action recovery owner required')
+        items = self.pending_actions(user, limit=limit, after_seq=after_seq)
+        completed, failed = 0, []
+        blocked_paths = set()
+        for item in items:
+            if (item.chat, item.user) in blocked_paths:
+                failed.append(item.action_id)
+                continue
+            try:
+                signer, verifier = owner(item.chat, item.user)
+                if not callable(signer) or not callable(verifier):
+                    raise ValueError('signed state action owner required')
+                if item.state == 'queued':
+                    from ..mesh.events import state_signing_bytes
+                    probe = {'ns': 1, 'sig': signer(state_signing_bytes(item.chat, item.user, 1, {}))}
+                    if verifier(probe) is not True:
+                        raise ValueError('signed state action recovery owner did not verify')
+                document, changed = self.run(item.chat, item.user, item.action_id,
+                                             signer=signer, verifier=verifier, missing_ok=True)
+                if document is not None or changed:
+                    completed += 1
+            except Exception:  # A durable action survives unavailable owner/provider.
+                blocked_paths.add((item.chat, item.user))
+                failed.append(item.action_id)
+        cursor = items[-1].seq if len(items) == limit else 0
+        return StateActionRecovery(completed, tuple(failed), cursor)
 
     def _head(self, path):
         with self.journal.coordinator._transaction() as conn:
@@ -342,7 +432,50 @@ class UserStateActionQueue:
                 _fail('changed')
             conn.execute('DELETE FROM user_state_actions WHERE action_id=?', (action.action_id,))
 
-    def run(self, chat: str, user: str, action_id: str, *, signer, verifier):
+    @contextmanager
+    def _drain_owner(self, chat, user, *, wait=1.0):
+        from ..core.lock import SingleInstance
+        from ..node.security import private_directory, protect_path
+
+        _component(chat, 'chat')
+        _component(user, 'user')
+        # Separate from the coordinator transaction: network I/O must not hold
+        # the root database writer. Fixed stripes bound lock-file accumulation.
+        stripe = hashlib.sha256(P.state(chat, user).encode()).digest()[0]
+        directory = self.journal.coordinator.path.parent / 'action-drains'
+        private_directory(directory)
+        path = directory / str(stripe)
+        if path.is_symlink():
+            raise ValueError('state action lock cannot be a symlink')
+        lock = SingleInstance(path, fail_open=False)
+        deadline = time.monotonic() + wait
+        while not lock.acquire():
+            if time.monotonic() >= deadline:
+                raise RuntimeError('state action owner is busy; retry the action')
+            time.sleep(0.01)
+        try:
+            protect_path(path, directory=False)
+            yield
+        finally:
+            lock.release()
+
+    def run(self, chat: str, user: str, action_id: str, *, signer, verifier,
+            missing_ok=False):
+        """Recover under one OS-owned drainer; a stale inventory is harmless."""
+        with self._drain_owner(chat, user, wait=0.0 if missing_ok else 1.0):
+            _uuid(action_id, 'state action id')
+            with self.journal.coordinator._transaction() as conn:
+                self._check(conn)
+                found = conn.execute(
+                    'SELECT 1 FROM user_state_actions WHERE action_id=? AND path=?',
+                    (action_id, P.state(chat, user))).fetchone()
+                if found is None:
+                    if missing_ok:
+                        return None, False
+                    _fail('target_missing')
+            return self._run(chat, user, action_id, signer=signer, verifier=verifier)
+
+    def _run(self, chat: str, user: str, action_id: str, *, signer, verifier):
         """Drain older actions first, then this one; return its doc and change."""
         from ..mesh.state_actions import reduce_state_action, sign_state_action
 
@@ -363,13 +496,13 @@ class UserStateActionQueue:
                 retained = self.journal.get(action.ticket_epoch, action.ticket_operation)
                 _validate_request(action, retained.request)
                 record = self.driver.resume(action.ticket_epoch, action.ticket_operation)
-                if record.receipt is None or record.request.expectation.kind != 'doc_compare_put':
+                if record.receipt is None:
                     _fail('outcome_invalid')
                 applied = dict(record.receipt.result)['applied']
                 if type(applied) is not bool:
                     _fail('outcome_invalid')
                 if target and applied:
-                    document = json.loads(record.request.arguments_json)['p_data']
+                    document = _result_document(action, record.request)
                     changed = True
                 if not applied:
                     conflicts[action.action_id] = conflicts.get(action.action_id, 0) + 1
@@ -387,7 +520,7 @@ class UserStateActionQueue:
                         retained = None  # already released/pruned after settlement
                     if retained is not None:
                         _validate_request(action, retained.request)
-                        document = json.loads(retained.request.arguments_json)['p_data']
+                        document = _result_document(action, retained.request)
                 self.journal.release_ticket(action.ticket)
                 self._finish(action)
                 if target and action.state == 'applied':
@@ -402,6 +535,25 @@ class UserStateActionQueue:
             except (TypeError, ValueError, OverflowError):
                 verified = False
             current = current if verified else {}
+            if action.kind == 'reaction':
+                from ..mesh.compound_reactions import build_reaction_pair
+
+                reaction = self.driver.rpc.read_document_for_update(P.reactions(chat, user))
+                if observed.source_epoch != reaction.source_epoch:
+                    raise RuntimeError('reaction source epoch changed; retry the action')
+                checkpoint, document = build_reaction_pair(
+                    chat, user, action.args['message'], action.args['emoji'],
+                    current, reaction.payload, signer=signer, verifier=verifier)
+                self.journal.allocate_action_ticket(action.action_id, action.attempt, {
+                    'p_chat': chat, 'p_user': user,
+                    'p_state_data': checkpoint, 'p_reaction_data': document,
+                    'p_expected_source_epoch': observed.source_epoch,
+                    'p_expected_state_seq': observed.seq,
+                    'p_expected_state_deleted': observed.deleted,
+                    'p_expected_reaction_seq': reaction.seq,
+                    'p_expected_reaction_deleted': reaction.deleted,
+                }, kind='reaction_pair')
+                continue
             fields = reduce_state_action(current, action.kind, action.args)
             if fields is None:
                 if target:
@@ -435,9 +587,13 @@ class UserStateActionQueue:
             proven = False
         if not proven:
             raise ValueError('signed state action owner did not verify')
-        action_id = self.enqueue(chat, user, kind, args)
-        return self.run(chat, user, action_id, signer=signer, verifier=verifier)
+        # Acquire before admission: contention cannot leave a newly queued
+        # action behind a reported failure or let another drainer consume it.
+        with self._drain_owner(chat, user):
+            action_id = self.enqueue(chat, user, kind, args)
+            return self._run(chat, user, action_id, signer=signer, verifier=verifier)
 
 
-__all__ = ['UserStateActionQueue', 'StateAction', 'initialize_actions',
+__all__ = ['UserStateActionQueue', 'StateAction', 'PendingStateAction',
+           'StateActionRecovery', 'initialize_actions',
            'audit_actions', 'validate_action_allocation', 'link_action_ticket']

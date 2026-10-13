@@ -379,6 +379,16 @@ bounded pending discovery as its durable owner slot. Semantic UserState actions
 use `allocate_action_ticket` to link the action and exact CAS ticket in the same
 root transaction, closing the caller-binding crash gap.
 
+Queued actions are also discoverable before any ticket exists. A bounded,
+metadata-only keyset inventory filters the exact actor and messaging user. The
+existing outbox worker runs a small recovery batch using the current session's
+signer/verifier only when a journal writer has already been explicitly bound;
+startup never installs that binding. Failed actions remain durable, and one
+failed path is attempted only once per pass. An OS-owned per-path drain lock
+serializes foreground writers and recovery across processes without holding a
+SQLite transaction during network calls; stale inventory entries cannot drain a
+newer action. Recovery does not require another user edit on the same path.
+
 ACK alone does **not** permit local pruning. The caller first durably consumes its
 exact outcome, then calls `release_ticket`. Current-epoch released tickets retain
 replay evidence until provider closure. Closed released tickets can be deleted;
@@ -431,3 +441,124 @@ production prerequisites.
 - database advisors show only reviewed intentional security-definer endpoints;
 - PostgreSQL 16 CI and disposable Supabase PostgreSQL 17 acceptance both pass
   before any production installation.
+
+### Compound writes and outbox consumers (inactive follow-up)
+
+A state checkpoint followed by an independent reaction replacement cannot provide
+an atomic cross-device boundary. The `reaction_pair` family conditionally compares
+both exact source versions and writes both fixed per-user paths in one PostgreSQL
+transaction. A second-document conflict rolls back the first document and its
+source evidence before returning one terminal `applied=false` receipt. The same
+UserState FIFO retains the reaction delta and links one pair ticket atomically;
+every conflict recaptures both documents. Signed checkpoint bytes bind the
+positive reaction operation ID. Standalone checkpoint publication remains disabled
+on the bound path; notification breadcrumbs remain best effort after the pair.
+
+Format 7 introduces root-owned consumer slots for each exact registered Store,
+Store incarnation/source epoch, outbox sequence, row digest and publication leg.
+Each ticket and slot is allocated together; retries never mint new identities.
+Staged manifests precede the append. Typed outbox completion persists an exact
+lease-bound `sent` tombstone before consuming/releasing its root tickets. Consumed
+slots remain through Store deletion and are reaped only after that exact registered
+Store no longer contains the owner row. A restarted worker drains sent cleanup
+before new sends. Missing or stale rows never authorize allocation. Startup still
+does not enable this path. Fresh terminal delete/leave events remain unavailable
+until their cleanup/refold owner is migrated; snapshots never stand in for a
+committed typed receipt.
+
+Store cache-only writes retain NORMAL synchronization. All outbox enqueue variants
+and typed sent/finalize transitions use scoped FULL synchronization, since a
+power-loss rollback of a NORMAL sent commit after a separate durable root release
+would invalidate the ownership proof. Tests verify the pragma at commit boundaries;
+this is not an empirical power-cut test and depends on storage honoring flushes.
+
+Remaining lifecycle owners require real durable sequencing, not only operation IDs:
+
+- `accounts._publish_identity` currently deletes the public document and forgets
+  keys/pins on any publication or bootstrap exception. An ambiguous provider
+  commit must retain the matching private material; a later bootstrap failure
+  must not compensate an already published identity. `create_human`,
+  `create_agent` and `upgrade_login` must recover a durable owner before checking
+  name availability or generating keys, password salts, recovery codes and wraps.
+- `Accounts.adopt_agent` publishes new public keys before saving the matching
+  bundle. Stage and durably install that bundle first. Identity staging needs
+  owner-only, write-once, flushed private assets and idempotent
+  install-if-absent-or-identical behavior; a journal reference/fingerprint must
+  not replace the private asset or silently overwrite an existing identity.
+- `Directory.patch`, including password/profile/active-state changes, must retain
+  a semantic delta and compare the fresh raw source version. Whole-document
+  cached replacements can overwrite peer changes; retried callbacks must not
+  regenerate salts, signatures or wrapped material.
+- `lifecycle._write`, bootstrap and change owners must retain record IDs,
+  `previous_id` and exact signed bytes. A stored-record receipt does not prove
+  that the record won canonical chain selection; settle that semantic outcome
+  before allocating a replacement attempt.
+- `ChatKeyService.rotate` and `on_member_left` must retain key epochs and exact
+  wraps before dispatch. `on_members_added` needs a bounded durable cursor over
+  historical epochs and conditional per-document updates, so partial fanout
+  resumes without rewrapping or losing concurrent recipients.
+- `delete_agent` and `delete_account` must retain dependent membership/lifecycle
+  steps and keys until outcomes settle. Swallowed leave failures cannot justify
+  deactivation or private-key deletion. Membership genesis/refolding and fresh
+  terminal outbox events still need their own forward-only phase reducers.
+- Reserved read acknowledgement currently retains its callback/payload only in
+  process memory. Bind canonical finalization provenance, the semantic action
+  and its exact ticket in the same root-to-node-to-Store cut; enqueueing a fresh
+  action after the validated read cut would lose the viewed-state boundary.
+  Remaining harness writes need classification as immutable publication,
+  replacement snapshot or semantic conditional update before activation.
+
+Reuse the bounded root consumer-slot and atomic ticket-link mechanism with
+validated domain-specific phase reducers. A durable owner records the stable
+logical action, phase/ordinal, immutable inputs or private asset reference, linked
+attempt and settled outcome/release phase. Provider calls and arbitrary callbacks
+stay outside transaction cuts. Persist private material before public dispatch;
+advance only after recording the exact terminal outcome, and release the receipt
+only after the next consumer phase is durable. Where two provider documents must
+change atomically, a compound typed operation is required rather than sequential
+owner phases. Keys, recovery material and pins are never speculative rollback
+compensation for an ambiguous publication.
+
+Consumed outbox slots currently reap on the next allocation in the same registered
+Store, after its durable owner row is absent. A permanently retired Store can
+therefore leave consumed slots occupying the shared 4096-slot limit. Explicit
+post-delete reaping or a bounded registered-Store sweep is a remaining lifecycle
+capacity prerequisite; no timeout or receipt eviction substitutes for that proof.
+
+These are explicit activation blockers. Account/project migration acceptance,
+provider installation, fleet activation and PR consolidation remain separate from
+local implementation and CI. Historical opaque operations remain retained.
+
+
+## 2026-10-13 local owner capacity and identity prerequisites
+
+Format8 reserves the complete exact outbox owner (all manifests plus append)
+before the first leg is allocated. Reservations cover consumer slots, journal
+records, canonical request bytes and maximum receipt bytes; unrelated generic
+operations cannot spend them. Old format7 partial owners must be adopted together
+or the upgrade rolls back. Before capacity admission, a bounded sweep checks all
+registered Stores and reaps only consumed slots whose exact Store row is gone.
+This supersedes the earlier same-Store-only cleanup limitation. It does not
+reserve the provider's shared receipt capacity.
+
+Pre-consumer stable-ID append and manifest operations require draining with the
+old owner before typed consumer activation. Both facade guards and root-cut
+reservation guards prohibit replacing them with fresh tickets. Log targets split
+at the first pipe, preserving valid machine aliases. Attachment count is checked
+before sealing/enqueue, and rejected prepared spools are cancelled.
+
+Account/agent deletion now stops on membership removal failures before later
+deactivation or key deletion. This is a safety correction, not the complete
+terminal owner. KeyStore.install_if_absent_or_identical is a separate inactive
+private-asset prerequisite: strict conflict/corruption handling, cross-process
+ownership, flushed create-only publication and idempotent retry. Account creation,
+adoption, password changes and key rotations still need durable logical owners;
+existing save/load behavior is unchanged and this API is not automatically wired.
+
+**Migration acceptance remains blocked** by the shared provider admission gap
+specified in PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md. Even a one-leg attempted
+write can receive an unrecorded full-ledger rejection, then become unrecoverable
+when the epoch rotates. Increasing budgets, regenerating IDs or treating epoch
+closure as an authority/outcome verdict is not a repair. Implement and validate
+effect-free recoverable admission (or equivalent durable exact negative evidence)
+before production writer activation and stack consolidation.

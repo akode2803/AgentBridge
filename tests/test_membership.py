@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agentbridge.core.errors import NotAMember, PermissionDenied, ValidationError
+from agentbridge.core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from agentbridge.core.models import ChatKind, ChatSnapshot, Role, UserKind
 from agentbridge.mesh import events
 from agentbridge.mesh.paths import P
@@ -59,6 +59,22 @@ def test_create_group_creator_is_admin(world):
     # genesis pill is in the creator's transcript immediately (optimistic)
     pills = aryan.messages_for(snap.id)
     assert pills[0].event["type"] == "created"
+
+
+@pytest.mark.parametrize('action', ['leave', 'delete_chat'])
+def test_bound_terminal_action_has_no_cascade_or_local_effects(world, monkeypatch, action):
+    mesh = world['aryan']
+    snap = mesh.create_chat('Terminal boundary', members=['fable', 'claude'])
+    ripple(mesh, snap.id)
+    before = mesh.store.messages(snap.id)
+    metadata = mesh.tx.get_doc(P.meta(snap.id))
+    monkeypatch.setattr(mesh.messaging.tx, '_journal_writer', object(), raising=False)
+    with pytest.raises(TransportError, match='terminal lifecycle'):
+        getattr(mesh.membership, action)(snap.id)
+    assert mesh.store.messages(snap.id) == before
+    assert mesh.store.outbox_counts() == {}
+    assert mesh.tx.get_doc(P.meta(snap.id)) == metadata
+    assert set(mesh.snapshot(snap.id).members) == {'aryan', 'fable', 'claude'}
 
 
 def test_empty_group_name_falls_back(world):

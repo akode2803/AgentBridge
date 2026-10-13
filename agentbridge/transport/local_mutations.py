@@ -193,6 +193,21 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return result
 
+    def recover_state_actions(self, user, owner, *, limit=64, after_seq=0):
+        """Recover only a previously bound writer; startup never opts it in."""
+        from ..store.user_state_actions import UserStateActionQueue, StateActionRecovery
+
+        writer = self._bound_writer()
+        if writer is None:
+            return StateActionRecovery(0, (), 0)
+        result = UserStateActionQueue(writer.driver).recover_pending(
+            user, owner, limit=limit, after_seq=after_seq)
+        if self._bound_writer() is not writer:
+            raise ValueError('state action recovery writer changed')
+        if result.completed:
+            self._typed_success()
+        return result
+
     def write_latest_doc(self, path, build):
         """Replace a per-device snapshot after its durable retry has settled."""
         writer = self._bound_writer()

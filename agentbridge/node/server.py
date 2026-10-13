@@ -38,6 +38,37 @@ REQUEST_DEADLINE_S = 2.0
 RECOVERY_SHUTDOWN_TIMEOUT_S = 5.0
 
 
+def _discard_rejected_body(handler) -> None:
+    """Let small already-sent requests receive rejection without a TCP reset."""
+    if getattr(handler, '_body_read_started', False):
+        return
+    if handler.headers.get('Transfer-Encoding') is not None:
+        return
+    try:
+        length = int(handler.headers.get('Content-Length', '0'))
+    except (ValueError, TypeError):
+        return
+    if not 0 < length <= 64 * 1024:
+        return
+    handler._body_read_started = True
+    previous_timeout = handler.connection.gettimeout()
+    deadline = time.monotonic() + 0.1
+    try:
+        while length:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            handler.connection.settimeout(left)
+            chunk = handler.rfile.read1(min(length, 64 * 1024))
+            if not chunk:
+                break
+            length -= len(chunk)
+    except OSError:
+        pass
+    finally:
+        handler.connection.settimeout(previous_timeout)
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     # POSIX rebinding after an orderly stop must not wait for accepted loopback
@@ -284,6 +315,8 @@ class LocalNodeServer:
             def _reply(self, status: int, value: dict | None = None, *,
                        max_bytes: int | None = None) -> None:
                 self.close_connection = True
+                if status >= 400:
+                    _discard_rejected_body(self)
                 try:
                     if max_bytes is None:
                         body = encode_json(value or {"error": "request_rejected"})
@@ -368,6 +401,7 @@ class LocalNodeServer:
                 if length <= 0 or self.headers.get_content_type() != "application/json":
                     self._reply(400)
                     return None
+                self._body_read_started = True
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     self._reply(400)

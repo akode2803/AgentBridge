@@ -87,7 +87,7 @@ class ApplicationMutationWriter:
         validate_source_paths((path,))
         parts = path.split('/')
         if (len(parts) == 5 and parts[0] == 'chats'
-                and parts[2:4] == ['overlays', 'state']):
+                and parts[2] == 'overlays' and parts[3] in {'state', 'reactions'}):
             raise ValueError('user state requires a durable semantic action')
         if not callable(build):
             raise TypeError("document factory must be callable")

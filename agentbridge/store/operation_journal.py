@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from uuid import uuid4
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 
 from ..node.admission import NodeCoordinatorRegistration
@@ -18,7 +19,7 @@ from ..transport.mutation_receipts import ProviderMutationReceipt, decode_mutati
 from ..transport.typed_mutations import PreparedMutation, prepare_mutation
 from ..transport.receipt_retirement import OperationTicket, ProviderEpoch
 from . import local_source, source_selectors
-from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V5_ROOT_SCHEMA, _V6_ROOT_SCHEMA, _overlap
+from .mutation_coordinator import MutationCoordinator, MutationIntent, MAX_PENDING, ROOT_LOCK_TIMEOUT_S, _V5_ROOT_SCHEMA, _V6_ROOT_SCHEMA, _V8_ROOT_SCHEMA, _overlap
 
 MAX_RECORDS = 4096
 MAX_BYTES = 64 * 1024 * 1024
@@ -56,6 +57,10 @@ def mutation_selectors(request: PreparedMutation):
     S = source_selectors.Selector
     if kind.startswith('doc_'):
         changes = (S('doc_exact', args['p_path']),)
+    elif kind == 'reaction_pair':
+        prefix = 'chats/' + args['p_chat'] + '/overlays/'
+        changes = (S('doc_exact', prefix + 'state/' + args['p_user'] + '.json'),
+                   S('doc_exact', prefix + 'reactions/' + args['p_user'] + '.json'))
     elif kind == 'log_append':
         changes = (S('log_chat', args['p_chat']),)
     elif kind == 'effect_transition':
@@ -108,7 +113,7 @@ def _tables_present(conn):
 
 
 def _lifecycle(conn):
-    if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() != (6,):
+    if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in ((6,), (7,), (8,)):
         return None
     return conn.execute('SELECT lifecycle_id,protocol_epoch,generation FROM typed_operation_lifecycle WHERE singleton=1').fetchone()
 
@@ -123,7 +128,7 @@ def _unfinished_sql(conn):
 
 def _audit_lifecycle(conn):
     present = tuple(conn.execute('SELECT name FROM sqlite_master WHERE name IN (?,?)', tuple(_LIFECYCLE_SCHEMA)))
-    required = conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() == (6,)
+    required = conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() in ((6,), (7,), (8,))
     if not required:
         if present:
             _fail('unexpected_lifecycle')
@@ -149,6 +154,8 @@ def _audit_lifecycle(conn):
         _fail('ticket_invalid')
     from .user_state_actions import audit_actions
     audit_actions(conn)
+    from .operation_consumers import audit_consumers
+    audit_consumers(conn, required=conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() in {(7,), (8,)})
 
 
 def _owner(conn):
@@ -326,7 +333,7 @@ class OperationJournal:
                     conn.execute(sql)
                 conn.execute('INSERT INTO typed_operation_owner VALUES(1,?,?,?,?,?,?,?)', self._owner)
                 coordinator._advance_root_revision(conn)
-            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in ((5,), (6,)):
+            if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in ((5,), (6,), (7,), (8,)):
                 # Once legacy admission is disabled, every remaining ready cut
                 # must have originated in verified node publication. Retire all
                 # old cuts before committing that durable capability boundary.
@@ -474,12 +481,13 @@ class OperationJournal:
         return self._allocate_ticket(kind, arguments)
 
     def allocate_action_ticket(self, action_id: str, expected_attempt: int,
-                               arguments: dict) -> OperationTicket:
+                               arguments: dict, *, kind='doc_compare_put') -> OperationTicket:
         """Bind a semantic action to its exact CAS attempt in the root commit."""
-        return self._allocate_ticket('doc_compare_put', arguments,
-                                     action=(action_id, expected_attempt))
+        if kind not in {'doc_compare_put', 'reaction_pair'}:
+            raise ValueError('unsupported action mutation kind')
+        return self._allocate_ticket(kind, arguments, action=(action_id, expected_attempt))
 
-    def _allocate_ticket(self, kind, arguments, *, action=None):
+    def _allocate_ticket(self, kind, arguments, *, action=None, outbox=None):
         with self.coordinator._transaction() as conn:
             self._check(conn)
             current = _lifecycle(conn)
@@ -487,8 +495,157 @@ class OperationJournal:
                 _fail('lifecycle_required')
         request = prepare_mutation(self.root, current[1], str(uuid4()), self.actor_id,
                                    kind, arguments)
-        self._prepare(request, application=True, ticket=True, action=action)
-        return OperationTicket(current[1], request.expectation.operation_id)
+        record = self._prepare(request, application=True, ticket=True, action=action, outbox=outbox)
+        return OperationTicket(record.request.expectation.protocol_epoch, record.request.expectation.operation_id)
+
+    def _reap_outbox_consumers(self, conn):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from .operation_consumers import reap_deleted_owners
+
+        if conn.execute('SELECT format FROM mutation_root').fetchone() not in {(7,), (8,)}:
+            return 0
+        before = conn.execute('SELECT count(*) FROM typed_operation_consumers').fetchone()[0]
+        paths = {row[0] for row in conn.execute('SELECT DISTINCT owner_path FROM typed_operation_consumers WHERE consumed=1')}
+        for path, incarnation, epoch in self.coordinator._stores(conn):
+            if path not in paths:
+                continue
+            store = SimpleNamespace(path=Path(path))
+            with local_source._writer(store) as store_conn:
+                self.coordinator._check_store(store_conn, store, incarnation, epoch)
+                reap_deleted_owners(conn, store_conn, ('outbox', path, incarnation))
+        return before - conn.execute('SELECT count(*) FROM typed_operation_consumers').fetchone()[0]
+
+    def reap_outbox_consumers(self):
+        """Bounded cross-Store cleanup after durable exact sent-row deletion."""
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            return self._reap_outbox_consumers(conn)
+
+    def _install_consumers(self, conn):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from .operation_consumers import SCHEMA, RESERVATION_SCHEMA, reserve_owner
+        from .db import outbox_owner_row
+
+        version = conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone()
+        if version == (8,):
+            return
+        if version not in {(6,), (7,)}:
+            _fail('lifecycle_required')
+        if version == (6,):
+            conn.execute(SCHEMA)
+        else:
+            self._reap_outbox_consumers(conn)
+        conn.execute(RESERVATION_SCHEMA)
+        conn.execute('ALTER TABLE mutation_root RENAME TO mutation_root_previous')
+        conn.execute(_V8_ROOT_SCHEMA)
+        conn.execute('INSERT INTO mutation_root SELECT singleton,identity,epoch,8,revision FROM mutation_root_previous')
+        conn.execute('DROP TABLE mutation_root_previous')
+        # Old format7 owners are adopted together; never let unrelated new work
+        # consume capacity needed by their remaining legs. A failed upgrade
+        # rolls back without erasing or releasing any prior evidence.
+        read_bytes = 0
+        for path, incarnation, epoch in self.coordinator._stores(conn):
+            rows = conn.execute('SELECT DISTINCT owner_seq,digest FROM typed_operation_consumers WHERE owner_path=?', (path,)).fetchall()
+            if not rows:
+                continue
+            store = SimpleNamespace(path=Path(path))
+            with local_source._writer(store) as store_conn:
+                self.coordinator._check_store(store_conn, store, incarnation, epoch)
+                for seq, digest in rows:
+                    row = outbox_owner_row(store_conn, seq)
+                    if row is None or row[1] != digest or row[2] != 'append_log' or '|' not in row[3]:
+                        _fail('outbox_upgrade_owner_changed')
+                    read_bytes += store_conn.execute('SELECT length(CAST(payload AS BLOB)) FROM outbox WHERE seq=?', (seq,)).fetchone()[0]
+                    if read_bytes > MAX_BYTES:
+                        _fail('outbox_upgrade_budget')
+                    key = ('outbox', path, incarnation, epoch, seq, 'append', digest)
+                    reserve_owner(conn, store_conn, key, tuple(row[3].split('|', 1)), self)
+        self._capacity(conn)
+
+    def _capacity(self, conn, *, extra_bytes=0, extra_records=0):
+        from .operation_consumers import reservation_capacity
+        records, size = reservation_capacity(conn)
+        if conn.execute('SELECT count(*) FROM typed_operations').fetchone()[0] + records + extra_records > MAX_RECORDS:
+            _fail('record_budget')
+        pending = conn.execute('SELECT count(*) FROM typed_operations WHERE receipt IS NULL').fetchone()[0]
+        if _bytes_used(conn) + size + extra_bytes + (pending + records + extra_records) * MAX_RECEIPT_BYTES > MAX_BYTES:
+            _fail('byte_budget')
+
+    def get_outbox_leg(self, store, seq, leg, digest):
+        """Lookup an immutable Store-owned leg; never allocate on recovery."""
+        from .operation_consumers import check_key, validate_owner, find_slot
+        check_key(store, seq, leg, digest)
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            with local_source._writer(store) as store_conn:
+                key, state, _ = validate_owner(self.coordinator, conn, store_conn,
+                                               store, seq, leg, digest, states={'pending', 'sent'})
+                if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(7,), (8,)}:
+                    return None
+                slot = find_slot(conn, key)
+                if slot is None:
+                    return None
+                if state == 'pending' and slot[1]:
+                    _fail('outbox_already_consumed')
+                return slot[0]
+
+    def allocate_outbox_ticket(self, store, seq, leg, digest, kind, arguments):
+        """Atomically bind a pending durable row to its exact provider attempt."""
+        from .operation_consumers import check_key
+        check_key(store, seq, leg, digest)
+        return self._allocate_ticket(kind, arguments, outbox=(store, seq, leg, digest))
+
+    def consume_outbox_leg(self, store, seq, leg, digest):
+        """A durable sent row permits release of its retained exact leg."""
+        from .operation_consumers import check_key, validate_owner, find_slot
+        check_key(store, seq, leg, digest)
+        with ExitStack() as held:
+            with self.coordinator._transaction() as conn:
+                self._check(conn)
+                store_conn = held.enter_context(local_source._writer(store))
+                key, _, _ = validate_owner(self.coordinator, conn, store_conn,
+                                           store, seq, leg, digest, states={'sent'})
+                if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(7,), (8,)}:
+                    _fail('consumer_schema_required')
+                slot = find_slot(conn, key)
+                if slot is None:
+                    _fail('outbox_missing_leg')
+                ticket, consumed = slot
+                if not consumed:
+                    record = self._find(conn, ticket.protocol_epoch, ticket.operation_id)
+                    if record is None or record.state != 'acknowledged':
+                        _fail('outbox_unacknowledged')
+                    conn.execute('UPDATE typed_operation_consumers SET consumed=1 WHERE protocol_epoch=? AND operation_id=?',
+                                 (ticket.protocol_epoch, ticket.operation_id))
+                self._release_ticket(conn, ticket)
+                return ticket
+
+    def finish_outbox(self, store, seq, digest):
+        """Verify settled slots; retain proof until the sent row is deleted."""
+        from .operation_consumers import check_key, validate_owner, owner_payload
+        check_key(store, seq, 'append', digest)
+        with ExitStack() as held:
+            with self.coordinator._transaction() as conn:
+                self._check(conn)
+                store_conn = held.enter_context(local_source._writer(store))
+                key, _, _ = validate_owner(self.coordinator, conn, store_conn,
+                                           store, seq, 'append', digest, states={'sent'})
+                if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(7,), (8,)}:
+                    _fail('consumer_schema_required')
+                owner = (key[0], key[1], key[2], seq)
+                _, manifests = owner_payload(store_conn, seq)
+                expected_legs = {'append'} | {'manifest:' + blob for blob in manifests}
+                actual_legs = {row[0] for row in conn.execute('SELECT leg FROM typed_operation_consumers WHERE owner_kind=? AND owner_path=? AND owner_incarnation=? AND owner_seq=?', owner)}
+                if actual_legs != expected_legs:
+                    _fail('outbox_missing_leg')
+                rows = conn.execute('SELECT c.owner_epoch,c.digest,c.consumed,t.released FROM typed_operation_consumers c LEFT JOIN typed_operation_tickets t USING(protocol_epoch,operation_id) WHERE c.owner_kind=? AND c.owner_path=? AND c.owner_incarnation=? AND c.owner_seq=?', owner)
+                for epoch, saved_digest, consumed, released in rows:
+                    if (epoch, saved_digest) != (key[3], digest) or not consumed or released not in (None, 1):
+                        _fail('outbox_unsettled')
+                # A crash before Store deletion must still find exact completion
+                # evidence. Later allocation reaps these rows only after deletion.
 
     def get_ticket(self, ticket: OperationTicket) -> OperationRecord:
         """Lookup only: retired or unknown work is never prepared again."""
@@ -527,26 +684,31 @@ class OperationJournal:
         ticket.__post_init__()
         with self.coordinator._transaction() as conn:
             self._check(conn)
-            current = _lifecycle(conn)
-            if current is None:
-                _fail('lifecycle_required')
-            key = (ticket.protocol_epoch, ticket.operation_id)
-            if conn.execute("SELECT 1 FROM user_state_actions WHERE ticket_epoch=? AND ticket_operation=? AND state='linked' LIMIT 1", key).fetchone():
-                _fail('consumer_unsettled')
-            row = conn.execute('SELECT generation FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key).fetchone()
-            if row is None:
-                # Cleanup is idempotent after a committed prune. This is not
-                # evidence that the operation existed or succeeded.
-                return False
-            record = self._find(conn, *key)
-            if record.state not in {'completed', 'acknowledged'}:
-                _fail('ticket_uncompleted')
-            if row[0] < current[2]:
-                conn.execute('DELETE FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key)
-                conn.execute('DELETE FROM typed_operations WHERE protocol_epoch=? AND operation_id=?', key)
-                return True
-            conn.execute('UPDATE typed_operation_tickets SET released=1 WHERE protocol_epoch=? AND operation_id=?', key)
+            return self._release_ticket(conn, ticket)
+
+    def _release_ticket(self, conn, ticket):
+        current = _lifecycle(conn)
+        if current is None:
+            _fail('lifecycle_required')
+        from .operation_consumers import require_consumed
+        require_consumed(conn, ticket)
+        key = (ticket.protocol_epoch, ticket.operation_id)
+        if conn.execute("SELECT 1 FROM user_state_actions WHERE ticket_epoch=? AND ticket_operation=? AND state='linked' LIMIT 1", key).fetchone():
+            _fail('consumer_unsettled')
+        row = conn.execute('SELECT generation FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key).fetchone()
+        if row is None:
+            # Cleanup is idempotent after a committed prune. This is not
+            # evidence that the operation existed or succeeded.
             return False
+        record = self._find(conn, *key)
+        if record.state not in {'completed', 'acknowledged'}:
+            _fail('ticket_uncompleted')
+        if row[0] < current[2]:
+            conn.execute('DELETE FROM typed_operation_tickets WHERE protocol_epoch=? AND operation_id=?', key)
+            conn.execute('DELETE FROM typed_operations WHERE protocol_epoch=? AND operation_id=?', key)
+            return True
+        conn.execute('UPDATE typed_operation_tickets SET released=1 WHERE protocol_epoch=? AND operation_id=?', key)
+        return False
 
     def prepare(self, request: PreparedMutation) -> OperationRecord:
         """Strict replay requires the original epoch and operation identity."""
@@ -561,62 +723,97 @@ class OperationJournal:
         return self._prepare(request, application=True)
 
     def _prepare(self, request: PreparedMutation, *, application: bool,
-                 ticket: bool = False, action=None) -> OperationRecord:
+                 ticket: bool = False, action=None, outbox=None) -> OperationRecord:
         changes = mutation_selectors(request)
         raw = request.request_json
         if len(raw) > MAX_REQUEST_BYTES:
             raise ValueError('typed operation request exceeds limit')
         root = self.coordinator
-        with root._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
-            self._check(conn)
-            exact = self._exact(conn, request)  # Validate the caller's bound root/actor.
-            existing = self._find_operation(conn, request.expectation.operation_id) if application else exact
-            if existing is not None:
+        with ExitStack() as held:
+            with root._transaction(timeout_s=ROOT_LOCK_TIMEOUT_S) as conn:
+                self._check(conn)
+                outbox_key = None
+                if outbox is not None:
+                    from .operation_consumers import validate_owner, validate_payload, find_slot, reserve_owner
+                    self._install_consumers(conn)
+                    self._reap_outbox_consumers(conn)
+                    store, seq, leg, digest = outbox
+                    with local_source._writer(store) as store_conn:
+                        outbox_key, _, target = validate_owner(root, conn, store_conn, *outbox, states={'pending'})
+                        validate_payload(store_conn, seq, outbox_key, target, request)
+                        reserve_owner(conn, store_conn, outbox_key, target, self)
+                    slot = find_slot(conn, outbox_key)
+                    if slot is not None:
+                        original = self._find(conn, slot[0].protocol_epoch, slot[0].operation_id)
+                        candidate = prepare_mutation(self.root, slot[0].protocol_epoch,
+                                                     slot[0].operation_id, self.actor_id,
+                                                     request.expectation.kind, json.loads(request.arguments_json))
+                        if slot[1] or original is None or original.request != candidate:
+                            _fail('outbox_request_changed')
+                        store_conn = held.enter_context(local_source._writer(store))
+                        validate_owner(root, conn, store_conn, *outbox, states={'pending'})
+                        return original
+                    from .operation_consumers import require_preceding_manifests
+                    with local_source._writer(store) as store_conn:
+                        validate_owner(root, conn, store_conn, *outbox, states={'pending'})
+                        require_preceding_manifests(conn, store_conn, outbox_key)
+                exact = self._exact(conn, request)  # Validate the caller's bound root/actor.
+                existing = self._find_operation(conn, request.expectation.operation_id) if application else exact
+                if existing is not None:
+                    if application:
+                        request = PreparedMutation(
+                            replace(request.expectation, protocol_epoch=existing.request.expectation.protocol_epoch),
+                            request.arguments_json)
+                    if existing.request.request_json != request.request_json:
+                        _fail('request_changed')
+                    return existing
+                if conn.execute('SELECT format FROM mutation_root').fetchone() == (7,):
+                    self._install_consumers(conn)
+                lifecycle = _lifecycle(conn)
+                if lifecycle is not None:
+                    if not ticket:
+                        _fail('ticket_required')
+                    if request.expectation.protocol_epoch != lifecycle[1]:
+                        _fail('epoch_changed')
+                elif ticket:
+                    _fail('lifecycle_required')
+                if action is not None:
+                    from .user_state_actions import validate_action_allocation
+                    validate_action_allocation(conn, *action, request)
                 if application:
-                    request = PreparedMutation(
-                        replace(request.expectation, protocol_epoch=existing.request.expectation.protocol_epoch),
-                        request.arguments_json)
-                if existing.request.request_json != request.request_json:
-                    _fail('request_changed')
-                return existing
-            lifecycle = _lifecycle(conn)
-            if lifecycle is not None:
-                if not ticket:
-                    _fail('ticket_required')
-                if request.expectation.protocol_epoch != lifecycle[1]:
-                    _fail('epoch_changed')
-            elif ticket:
-                _fail('lifecycle_required')
-            if action is not None:
-                from .user_state_actions import validate_action_allocation
-                validate_action_allocation(conn, *action, request)
-            if application:
-                pending = conn.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,))
-                for kind, value in pending:
-                    if any(_overlap(source_selectors.Selector(kind, value), change) for change in changes):
-                        _fail('overlapping_intent')
-            if conn.execute('SELECT count(*) FROM typed_operations').fetchone()[0] >= MAX_RECORDS:
-                _fail('record_budget')
-            # Reserve one maximum-sized receipt per new operation, so a full
-            # request budget can never prevent retaining a successful outcome.
-            reserved = conn.execute('SELECT count(*) FROM typed_operations WHERE receipt IS NULL').fetchone()[0]
-            if _bytes_used(conn) + len(raw) + (reserved + 1) * MAX_RECEIPT_BYTES > MAX_BYTES:
-                _fail('byte_budget')
-            token = root._insert_intent(conn, changes)
-            expected = request.expectation
-            conn.execute('INSERT INTO typed_operations VALUES(?,?,?,?,?,NULL,?)',
-                         (expected.protocol_epoch, expected.operation_id, token, 'prepared', raw,
-                          _canonical([(item.kind, item.value) for item in changes])))
-            if ticket:
-                conn.execute('INSERT INTO typed_operation_tickets VALUES(?,?,?,0)',
-                             (expected.protocol_epoch, expected.operation_id, lifecycle[2]))
-            if action is not None:
-                from .user_state_actions import link_action_ticket
-                link_action_ticket(conn, *action, request)
-            root._retire_nodes(conn, token)
-            root._retire(conn, changes)
-            root._advance_root_revision(conn)
-            result = self._find(conn, expected.protocol_epoch, expected.operation_id)
+                    pending = conn.execute('SELECT kind,value FROM mutation_scopes LIMIT ?', (MAX_PENDING * 8 + 1,))
+                    for kind, value in pending:
+                        if any(_overlap(source_selectors.Selector(kind, value), change) for change in changes):
+                            _fail('overlapping_intent')
+                if outbox is None:
+                    from .operation_consumers import require_no_reserved_legacy_append
+                    require_no_reserved_legacy_append(conn, request)
+                    self._capacity(conn, extra_bytes=len(raw), extra_records=1)
+                else:
+                    self._capacity(conn)
+                token = root._insert_intent(conn, changes)
+                expected = request.expectation
+                conn.execute('INSERT INTO typed_operations VALUES(?,?,?,?,?,NULL,?)',
+                             (expected.protocol_epoch, expected.operation_id, token, 'prepared', raw,
+                              _canonical([(item.kind, item.value) for item in changes])))
+                if ticket:
+                    conn.execute('INSERT INTO typed_operation_tickets VALUES(?,?,?,0)',
+                                 (expected.protocol_epoch, expected.operation_id, lifecycle[2]))
+                if action is not None:
+                    from .user_state_actions import link_action_ticket
+                    link_action_ticket(conn, *action, request)
+                if outbox_key is not None:
+                    from .operation_consumers import insert_slot
+                    insert_slot(conn, outbox_key, request)
+                root._retire_nodes(conn, token)
+                root._retire(conn, changes)
+                root._advance_root_revision(conn)
+                result = self._find(conn, expected.protocol_epoch, expected.operation_id)
+                if outbox is not None:
+                    # Hold the final Store writer through the root commit. No
+                    # node locks or provider callbacks are acquired after this.
+                    store_conn = held.enter_context(local_source._writer(store))
+                    validate_owner(root, conn, store_conn, *outbox, states={'pending'})
         return result
 
     def get(self, protocol_epoch: str, operation_id: str) -> OperationRecord:

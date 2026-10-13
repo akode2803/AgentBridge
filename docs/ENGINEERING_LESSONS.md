@@ -372,3 +372,54 @@ a new send first strands an already committed operation. Recover exact retained
 manifest operations without new Storage access, then apply fresh authorization to
 any genuinely new message append. A successful upload or manifest is not proof of
 message publication, and staged-object cleanup remains a separate typed owner.
+
+### Compound publication and durable consumer proof (2026-10-13)
+
+Two recoverable operations are not one atomic operation. A separately published
+reaction checkpoint can become obsolete before the reaction commits on another
+device. Compare and publish both documents in one provider transaction, rolling
+back all source changes on either version conflict.
+
+Validate immutable logical actions against the provider's actual representation
+before enqueueing. Overlong reaction text and JSON NUL values previously entered
+the FIFO and failed on every retry, blocking unrelated read/star/hide changes.
+A retry budget cannot repair an input the provider can never represent.
+
+Cross-database ordering also depends on durability strength: a FULL root receipt
+release cannot safely depend on a NORMAL Store sent commit. Use FULL for durable
+outbox admission and settlement, retain sent cleanup evidence, and prove every
+expected publication leg before retiring its owner. Cache-only writes need not
+pay for that ownership guarantee.
+
+## 2026-10-13 durable admission requires a recovery entry point
+
+Persisting a semantic action before ticket allocation does not guarantee restart
+progress: the worker must inventory queued actions even when no later user edit
+or outbox message arrives. Recover bounded owner-filtered metadata using fresh
+signing, and serialize the complete drain across processes without retaining a
+SQLite write transaction through provider I/O. Stale inventory must not consume
+newer work. Test the pre-ticket crash and real process-lock release explicitly.
+
+When introducing a staged attachment format, audit every canonical reader,
+including agent runner, CLI inbox and modular bridge. A successfully published
+manifest does not make a legacy hardcoded blob path valid. Resolve the signed
+file record and verify plaintext digest/size at each reader.
+
+## 2026-10-13 reserve completion capacity before partial effects
+
+A per-operation journal limit can deadlock a valid multi-leg owner: manifests
+consume every slot while their required append has no capacity, so no owner can
+settle and release. Reserve the complete owner plan, including replay bytes and
+receipt headroom; account for every registered Store. Validate structural limits
+before enqueue so permanent bad input cannot become an infinite retry barrier.
+
+Local reservations do not solve a shared provider budget. An attempted request
+with an unrecorded admission rejection cannot safely cross epoch closure. The
+provider needs recoverable admission or durable exact non-effect evidence before
+this migration can be accepted. Tests must cover capacity exhaustion and closure
+races as well as lost replies from successfully committed effects.
+
+Windows may abort a rejected HTTP request if the server closes with its small
+body unread. Use a byte/time-bounded discard, never read an unbounded declared
+body to make the response reliable. PR142's completed Windows failure exposed
+this on the node capture route; the repair preserves the rejection status.

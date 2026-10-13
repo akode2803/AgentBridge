@@ -573,3 +573,30 @@ def test_receipt_closure_metadata_is_bounded_and_not_membership_authority():
     assert 'ab_database_mutation_seals' in observation
     assert 'ab_mutation_receipts' not in observation
     assert 'ab_docs' not in observation and 'ab_members' not in observation
+
+
+def test_reaction_pair_rolls_back_both_documents_and_retains_conflict_receipt():
+    body = _last_body(
+        'create or replace function public.ab_mutation_reaction_pair(',
+        'revoke all on function public.ab_mutation_reaction_pair(')
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    authority = body.index('v_member := private.ab_mutation_lock_actor')
+    source_lock = body.index("'agentbridge-change-ledger:'")
+    epoch = body.index('if v_source_epoch = p_expected_source_epoch then')
+    subtransaction = body.index('    begin', epoch)
+    writes = body.index('for v_index in 1..2 loop')
+    conflict = body.index("using errcode = 'P0R01'")
+    rollback = body.index("exception when sqlstate 'P0R01' then")
+    finish = body.index('return private.ab_mutation_finish')
+    assert replay < authority < source_lock < epoch < subtransaction < writes < conflict < rollback < finish
+    assert body.index("'/overlays/reactions/'") < body.index("'/overlays/state/'")
+    assert 'and d.seq = v_seqs[v_index] and d.deleted = v_deleted[v_index]' in body
+    assert 'on conflict (root, path) do nothing' in body
+    assert "'chat_id', p_chat, 'username', p_user" in body
+    assert 'public.ab_source_json_bytes(p_state_data)' in body
+    assert '+ public.ab_source_json_bytes(p_reaction_data) > 8355840' in body
+    assert 'p_expected_state_seq, p_expected_state_deleted,' in body
+    assert 'p_expected_reaction_seq, p_expected_reaction_deleted)' in body
+    grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_reaction_pair('):]
+    assert 'from public, anon, authenticated, service_role' in grant
+    assert 'to authenticated' in grant

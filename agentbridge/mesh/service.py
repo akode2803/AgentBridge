@@ -148,7 +148,8 @@ class Mesh:
             self.store, self.messaging.outbox_handlers(),
             success_hooks=self.messaging.outbox_success_hooks(),
             dead_hooks=self.messaging.outbox_dead_hooks(),
-            prune_hooks=self.messaging.outbox_prune_hooks())
+            prune_hooks=self.messaging.outbox_prune_hooks(),
+            recover_actions=self.messaging.recover_state_actions)
         self.bus = EventBus()
         subscribe_changes = getattr(self.tx, "subscribe_changes", None)
         self._mirror_unsubscribe = (

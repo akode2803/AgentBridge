@@ -13,9 +13,11 @@ from __future__ import annotations
 from ..core import delivery_trace
 
 import json
+import hashlib
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -130,6 +132,54 @@ class OutboxItem:
     payload: dict[str, Any]
     attempts: int
     lease_ns: int = 0
+    payload_json: str = ""
+    state: str = "pending"
+
+    @property
+    def owner_digest(self) -> str:
+        if type(self.payload_json) is not str or not self.payload_json:
+            raise ValueError("outbox item lacks exact persisted payload")
+        return outbox_owner_digest(self.kind, self.target, self.payload_json)
+
+
+_MAX_TYPED_OUTBOX_PAYLOAD = 8_388_608
+
+
+def outbox_owner_digest(kind: str, target: str, payload_json: str) -> str:
+    """Hash exact Store row identity; decoded JSON is never replay authority."""
+    if any(type(value) is not str for value in (kind, target, payload_json)):
+        raise ValueError("invalid outbox owner row")
+    encoded = json.dumps([kind, target, payload_json], ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def outbox_owner_row(conn: sqlite3.Connection, seq: int) -> tuple[str, str, str, str] | None:
+    """Bounded SQL-only evidence for coordinator root-to-Store cuts.
+
+    Returns (state, exact-row digest, kind, target). A missing row is not an
+    invitation to mint a replacement operation.
+    """
+    if type(seq) is not int or seq < 1:
+        raise ValueError("invalid outbox sequence")
+    shape = conn.execute(
+        "SELECT typeof(kind),length(CAST(kind AS BLOB)),"
+        "typeof(target),length(CAST(target AS BLOB)),"
+        "typeof(payload),length(CAST(payload AS BLOB)),"
+        "typeof(state),length(CAST(state AS BLOB)) "
+        "FROM outbox WHERE seq=?", (seq,)).fetchone()
+    if shape is None:
+        return None
+    if (shape[0] != 'text' or not 1 <= shape[1] <= 64
+            or shape[2] != 'text' or not 1 <= shape[3] <= 4096
+            or shape[4] != 'text' or not 1 <= shape[5] <= _MAX_TYPED_OUTBOX_PAYLOAD
+            or shape[6] != 'text' or not 1 <= shape[7] <= 16):
+        raise ValueError("invalid outbox owner row")
+    kind, target, payload_json, state = conn.execute(
+        'SELECT kind,target,payload,state FROM outbox WHERE seq=?', (seq,)).fetchone()
+    if state not in {'pending', 'sent'}:
+        raise ValueError("outbox owner row is not live")
+    return state, outbox_owner_digest(kind, target, payload_json), kind, target
 
 
 class Store:
@@ -186,6 +236,35 @@ class Store:
             conn.execute("PRAGMA busy_timeout=5000")
             self._local.conn = conn
         return conn
+
+    @contextmanager
+    def _outbox_transaction(self):
+        """Commit outbox ownership and settlement with a durable WAL sync.
+
+        SQLite WAL NORMAL does not promise a power-loss durable commit. Outbox
+        rows and typed sent tombstones gate release of a separately durable
+        root ticket, so these specific Store commits use FULL. SQLite still
+        depends on the host filesystem and storage honoring flush requests.
+        """
+        conn = self._conn()
+        if conn.in_transaction:
+            raise RuntimeError('outbox transaction cannot nest')
+        previous = conn.execute('PRAGMA synchronous').fetchone()[0]
+        if previous != 2:
+            conn.execute('PRAGMA synchronous=FULL')
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            if previous != 2:
+                conn.execute(f'PRAGMA synchronous={previous}')
 
     def close(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -630,7 +709,7 @@ class Store:
     def outbox_add(self, kind: str, target: str, payload: dict[str, Any]) -> int:
         """Enqueue BEFORE any send attempt — commit here is what makes a send
         crash-safe. Returns the queue sequence number."""
-        with self._conn() as c:
+        with self._outbox_transaction() as c:
             cur = c.execute(
                 "INSERT INTO outbox(kind,target,payload,created_ns) VALUES(?,?,?,?)",
                 (kind, target, json.dumps(payload, ensure_ascii=False), time.time_ns()),
@@ -648,7 +727,7 @@ class Store:
         rid, ns = record.get("id"), record.get("ns")
         if not rid or not isinstance(ns, int):
             raise ValueError("message record needs id and integer ns")
-        with self._conn() as c:
+        with self._outbox_transaction() as c:
             observed = int(
                 observed_ns if observed_ns is not None else time.time_ns())
             observed_tick = int(
@@ -681,7 +760,7 @@ class Store:
         payload: dict[str, Any],
     ) -> int:
         """Atomically persist local recovery state and its remote send intent."""
-        with self._conn() as c:
+        with self._outbox_transaction() as c:
             c.execute(
                 "INSERT INTO docs(path,payload,fetched_ns) VALUES(?,?,?)"
                 " ON CONFLICT(path) DO UPDATE SET payload=excluded.payload,"
@@ -700,7 +779,7 @@ class Store:
         rows: list[tuple[str, str, dict[str, Any]]],
     ) -> list[int]:
         """Atomically persist related recovery maps and remote send intents."""
-        with self._conn() as c:
+        with self._outbox_transaction() as c:
             fetched_ns = time.time_ns()
             for path, data in docs.items():
                 c.execute(
@@ -739,7 +818,7 @@ class Store:
                 "SELECT o.seq,o.kind,o.target,o.payload,o.attempts FROM outbox o"
                 " WHERE o.state='pending' AND o.next_ns<=? AND o.lease_ns<=?"
                 " AND NOT EXISTS (SELECT 1 FROM outbox earlier"
-                " WHERE earlier.state='pending' AND earlier.target=o.target"
+                " WHERE earlier.state IN ('pending','sent') AND earlier.target=o.target"
                 " AND earlier.seq<o.seq) ORDER BY o.seq LIMIT ?",
                 (now, now, limit),
             ).fetchall()
@@ -751,8 +830,68 @@ class Store:
                 if claimed:
                     items.append(OutboxItem(
                         seq, kind, target, json.loads(payload), attempts, lease_until,
+                        payload, 'pending',
                     ))
         return items
+
+    def outbox_owner_row(self, seq: int):
+        return outbox_owner_row(self._conn(), seq)
+
+    def outbox_sent_items(self, *, limit: int = 50) -> list[OutboxItem]:
+        """Discover typed sends settled locally but not fully released."""
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("invalid sent outbox inventory limit")
+        rows = self._conn().execute(
+            "SELECT seq,kind,target,payload,attempts FROM outbox "
+            "WHERE state='sent' ORDER BY seq LIMIT ?", (limit,)).fetchall()
+        result = []
+        for seq, kind, target, raw, attempts in rows:
+            if outbox_owner_row(self._conn(), seq) is None:
+                raise ValueError("sent outbox row disappeared")
+            result.append(OutboxItem(seq, kind, target, json.loads(raw), attempts,
+                                     0, raw, 'sent'))
+        return result
+
+    def outbox_mark_sent(self, item: OutboxItem) -> bool:
+        """Persist provider-terminal consumer state under this exact lease."""
+        if (type(item) is not OutboxItem or item.state != 'pending'
+                or type(item.lease_ns) is not int or item.lease_ns <= 0):
+            raise ValueError("invalid typed outbox claim")
+        with self._outbox_transaction() as c:
+            changed = c.execute(
+                "UPDATE outbox SET state='sent',lease_ns=0 WHERE seq=? "
+                "AND state='pending' AND lease_ns=? AND kind=? AND target=? AND payload=?",
+                (item.seq, item.lease_ns, item.kind, item.target, item.payload_json),
+            ).rowcount
+            if changed:
+                c.execute("UPDATE local_send_status SET state='sent',accepted_ns=? "
+                          "WHERE outbox_seq=?", (time.time_ns(), item.seq))
+            return changed == 1
+
+    def outbox_finalize_sent(self, item: OutboxItem) -> bool:
+        """Remove only a retained sent tombstone after journal release."""
+        if type(item) is not OutboxItem or item.state != 'sent':
+            raise ValueError("invalid sent outbox item")
+        with self._outbox_transaction() as c:
+            return bool(c.execute(
+                "DELETE FROM outbox WHERE seq=? AND state='sent' AND kind=? "
+                "AND target=? AND payload=?",
+                (item.seq, item.kind, item.target, item.payload_json),
+            ).rowcount)
+
+    def outbox_retry_claim(self, item: OutboxItem, error: str,
+                           delay_s: float) -> bool:
+        """A stale typed worker cannot clear a newer worker's lease."""
+        if type(item) is not OutboxItem or item.state != 'pending' or item.lease_ns <= 0:
+            raise ValueError("invalid typed outbox claim")
+        with self._conn() as c:
+            return bool(c.execute(
+                "UPDATE outbox SET attempts=attempts+1,next_ns=?,lease_ns=0,"
+                "last_error=? WHERE seq=? AND state='pending' AND lease_ns=? "
+                "AND kind=? AND target=? AND payload=?",
+                (time.time_ns() + int(delay_s * 1e9), error[:500], item.seq,
+                 item.lease_ns, item.kind, item.target, item.payload_json),
+            ).rowcount)
 
     def outbox_release_claim(self, item: OutboxItem) -> bool:
         """Release this worker's exact unprocessed lease after revocation."""

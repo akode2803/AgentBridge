@@ -122,6 +122,111 @@ def _bounded_reaction_state(
     return best
 
 
+def build_reaction_document(chat_id: str, user: str, msg_id: str,
+                            emoji: str | None, old, *, signer=None,
+                            state_checkpoint=None, minimum_ns: int = 1):
+    """Build exact signed reaction bytes without reading or writing transport."""
+    from .events import reaction_signing_bytes, reaction_v2_signing_bytes
+
+    authenticated_old = signer is None
+    if is_v2_candidate(old):
+        try:
+            mapping, operations = parse_v2(old)
+            existing = operation_signature(old)
+        except ValueError:
+            mapping, operations, existing = {}, {}, ''
+            authenticated_old = False
+        if signer is not None:
+            try:
+                data = reaction_v2_signing_bytes(chat_id, user, old)
+            except ValueError:
+                expected = None
+            else:
+                expected = signer(data)
+            if expected and (not existing or existing != expected):
+                # A shared transport can replace this user's document.
+                # Never make a forged or unsigned v2 value a persistent
+                # write blocker, or launder its mapping/operation IDs.
+                mapping, operations = {}, {}
+                authenticated_old = False
+            elif expected:
+                authenticated_old = True
+            else:
+                # Keyless/plaintext operation preserves display mapping,
+                # but cannot authenticate timing or operation identities.
+                operations = {}
+                authenticated_old = False
+        if not existing or old.get('ops_origin') == 'resealed':
+            # A fresh local action must not promote unproven historical
+            # operation IDs into a native document.
+            operations = {}
+    else:
+        mapping, operations = reaction_map(old), {}
+        if type(old) is not dict:
+            authenticated_old = False
+        if signer is not None:
+            legacy = old if type(old) is dict else {}
+            legacy_sig = legacy.get('sig')
+            try:
+                legacy_data = reaction_signing_bytes(
+                    chat_id, user, int(legacy.get('ns', 0)), mapping)
+            except (TypeError, ValueError, OverflowError):
+                expected = None
+            else:
+                expected = signer(legacy_data)
+            if expected and (type(legacy_sig) is not str
+                             or not legacy_sig or legacy_sig != expected):
+                mapping = {}
+                authenticated_old = False
+            elif expected:
+                authenticated_old = True
+            else:
+                authenticated_old = False
+    previous = operations.get(msg_id)
+    ns = max(next_ns(), minimum_ns)
+    if authenticated_old and type(old) is dict and type(old.get('ns')) is int:
+        ns = max(ns, old['ns'] + 1)
+    if ns > MAX_NS:
+        raise OverflowError('reaction operation namespace exhausted')
+    checkpoint = state_checkpoint(ns) if state_checkpoint is not None else None
+    operation_id = (state_bound_operation_id(ns, checkpoint)
+                    if checkpoint is not None else new_id('rx', ns))
+    operation = ReactionOperation(operation_id, ns, emoji or '',
+                                  previous.id if previous is not None else None)
+    if emoji:
+        mapping[msg_id] = emoji
+    else:
+        mapping.pop(msg_id, None)
+    operations[msg_id] = operation
+    while len(operations) > MAX_LATEST_OPERATIONS:
+        oldest = min(operations, key=lambda target: (operations[target].ns, target))
+        del operations[oldest]
+    mapping, operations = _bounded_reaction_state(
+        mapping, operations, msg_id, ns,
+    )
+    doc = {'schema': 2, 'v': mapping, 'ops_origin': 'native', 'ops': {
+        target: value.to_dict() for target, value in operations.items()
+    }, 'ns': ns, 'sig': '', 'ops_sig': ''}
+    if signer:
+        doc['sig'] = signer(reaction_signing_bytes(
+            chat_id, user, ns, mapping))
+        doc['ops_sig'] = signer(reaction_v2_signing_bytes(
+            chat_id, user, doc))
+        # Do not publish half a compatibility pair if key availability
+        # changes between the two bounded signing calls. Retry the whole
+        # pair once: the v2 proof binds the compatibility signature, so a
+        # proof minted across two key-availability states is not a coherent
+        # document. A second transition leaves the prior overlay intact.
+        if bool(doc['sig']) != bool(doc['ops_sig']):
+            doc['sig'] = signer(reaction_signing_bytes(
+                chat_id, user, ns, mapping))
+            doc['ops_sig'] = signer(reaction_v2_signing_bytes(
+                chat_id, user, doc))
+            if bool(doc['sig']) != bool(doc['ops_sig']):
+                raise RuntimeError('reaction signing key changed during write')
+    return doc, operation
+
+
 class ChatOverlays:
     """Chat-level overlay reader/writer for ONE chat."""
 
@@ -208,106 +313,10 @@ class ChatOverlays:
         ``signer`` is the
         identity's ``(bytes) -> sig`` callable; readers on an E2EE mesh ignore
         files whose signature doesn't verify."""
-        from .events import reaction_signing_bytes, reaction_v2_signing_bytes
-
         path = P.reactions(self.chat_id, user)
-        old = self.tx.get_doc(path, default={})
-        authenticated_old = signer is None
-        if is_v2_candidate(old):
-            try:
-                mapping, operations = parse_v2(old)
-                existing = operation_signature(old)
-            except ValueError:
-                mapping, operations, existing = {}, {}, ''
-                authenticated_old = False
-            if signer is not None:
-                try:
-                    data = reaction_v2_signing_bytes(self.chat_id, user, old)
-                except ValueError:
-                    expected = None
-                else:
-                    expected = signer(data)
-                if expected and (not existing or existing != expected):
-                    # A shared transport can replace this user's document.
-                    # Never make a forged or unsigned v2 value a persistent
-                    # write blocker, or launder its mapping/operation IDs.
-                    mapping, operations = {}, {}
-                    authenticated_old = False
-                elif expected:
-                    authenticated_old = True
-                else:
-                    # Keyless/plaintext operation preserves display mapping,
-                    # but cannot authenticate timing or operation identities.
-                    operations = {}
-                    authenticated_old = False
-            if not existing or old.get('ops_origin') == 'resealed':
-                # A fresh local action must not promote unproven historical
-                # operation IDs into a native document.
-                operations = {}
-        else:
-            mapping, operations = reaction_map(old), {}
-            if type(old) is not dict:
-                authenticated_old = False
-            if signer is not None:
-                legacy = old if type(old) is dict else {}
-                legacy_sig = legacy.get('sig')
-                try:
-                    legacy_data = reaction_signing_bytes(
-                        self.chat_id, user, int(legacy.get('ns', 0)), mapping)
-                except (TypeError, ValueError, OverflowError):
-                    expected = None
-                else:
-                    expected = signer(legacy_data)
-                if expected and (type(legacy_sig) is not str
-                                 or not legacy_sig or legacy_sig != expected):
-                    mapping = {}
-                    authenticated_old = False
-                elif expected:
-                    authenticated_old = True
-                else:
-                    authenticated_old = False
-        previous = operations.get(msg_id)
-        ns = next_ns()
-        if authenticated_old and type(old) is dict and type(old.get('ns')) is int:
-            ns = max(ns, old['ns'] + 1)
-        if ns > MAX_NS:
-            raise OverflowError('reaction operation namespace exhausted')
-        checkpoint = state_checkpoint(ns) if state_checkpoint is not None else None
-        operation_id = (state_bound_operation_id(ns, checkpoint)
-                        if checkpoint is not None else new_id('rx', ns))
-        operation = ReactionOperation(operation_id, ns, emoji or '',
-                                      previous.id if previous is not None else None)
-        if emoji:
-            mapping[msg_id] = emoji
-        else:
-            mapping.pop(msg_id, None)
-        operations[msg_id] = operation
-        while len(operations) > MAX_LATEST_OPERATIONS:
-            oldest = min(operations, key=lambda target: (operations[target].ns, target))
-            del operations[oldest]
-        mapping, operations = _bounded_reaction_state(
-            mapping, operations, msg_id, ns,
-        )
-        doc = {'schema': 2, 'v': mapping, 'ops_origin': 'native', 'ops': {
-            target: value.to_dict() for target, value in operations.items()
-        }, 'ns': ns, 'sig': '', 'ops_sig': ''}
-        if signer:
-            doc['sig'] = signer(reaction_signing_bytes(
-                self.chat_id, user, ns, mapping))
-            doc['ops_sig'] = signer(reaction_v2_signing_bytes(
-                self.chat_id, user, doc))
-            # Do not publish half a compatibility pair if key availability
-            # changes between the two bounded signing calls. Retry the whole
-            # pair once: the v2 proof binds the compatibility signature, so a
-            # proof minted across two key-availability states is not a coherent
-            # document. A second transition leaves the prior overlay intact.
-            if bool(doc['sig']) != bool(doc['ops_sig']):
-                doc['sig'] = signer(reaction_signing_bytes(
-                    self.chat_id, user, ns, mapping))
-                doc['ops_sig'] = signer(reaction_v2_signing_bytes(
-                    self.chat_id, user, doc))
-                if bool(doc['sig']) != bool(doc['ops_sig']):
-                    raise RuntimeError('reaction signing key changed during write')
+        doc, operation = build_reaction_document(
+            self.chat_id, user, msg_id, emoji, self.tx.get_doc(path, default={}),
+            signer=signer, state_checkpoint=state_checkpoint)
         self.tx.put_doc(path, doc)
         return operation
 

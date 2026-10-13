@@ -279,6 +279,8 @@ class MembershipService:
         return healed
 
     def leave(self, chat_id: str, *, reason: str = "") -> ChatSnapshot:
+        # Refuse the whole action before queuing any cascading agent removals.
+        self.messaging._require_event_supported({'type': events.EV_MEMBER_LEFT})
         # R56 (V37): record the owned agents the heal will cascade out with
         # me — posted BEFORE my own departure (a member may still write).
         snap = self.messaging.snapshot(chat_id)
@@ -373,6 +375,7 @@ class MembershipService:
         """Group deletion for everyone — admin-only, TERMINAL in the fold
         (members empty afterwards, so every read and write refuses). Bodies
         stay on disk until a future janitor round reclaims them."""
+        self.messaging._require_event_supported({'type': events.EV_DELETED})
         snap = self.messaging.snapshot(chat_id)
         if snap.kind is not ChatKind.GROUP:
             raise ValidationError("only groups can be deleted for everyone")

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import test_operation_journal as journal_cases
 
 from agentbridge.core.errors import PermissionDenied, ValidationError
 from agentbridge.gui import attachment_read
@@ -16,12 +18,16 @@ from agentbridge.mesh.messaging import MessagingService, OUTBOX_APPEND
 from agentbridge.node import NodeStore, ReplicaIdentity
 from agentbridge.store.mutation_coordinator import MutationCoordinator
 from agentbridge.store.operation_journal import OperationJournal
+from agentbridge.store.db import Store
+from agentbridge.transport.receipt_retirement import OperationTicket
 from agentbridge.transport.application_mutations import ApplicationMutationWriter
 from agentbridge.transport.journaled_mutations import JournaledMutations
 from agentbridge.transport.local_mutations import root_identity
 from agentbridge.transport.supabase import SupabaseTransport
 from agentbridge.transport import staged_attachments
 from agentbridge.transport.typed_mutations import TypedMutationRPC, TypedMutationRPCError
+
+world = journal_cases.world
 
 
 class _Bucket:
@@ -150,6 +156,157 @@ def test_v1_unbound_path_and_v2_signed_staged_path(rig, monkeypatch):
     with pytest.raises(ValidationError, match="identity mismatch"):
         attachment_path("room", second.record["id"], {"id": second.record["id"]})
     assert len(tx.blobs) == 1
+
+
+def test_outbox_manifest_ticket_replays_exact_request_without_storage(rig, tmp_path, monkeypatch):
+    events, bucket, writer, _tx, _store, _sealer, delivery = rig
+    monkeypatch.setattr(delivery, '_typed_writer', lambda: writer)
+    prepared = delivery.prepare('room', 'replay.txt', b'one payload')
+    payload = {'v': 1, 'envelope': {'id': 'm1', 'kind': 'message'},
+               'attachments': [prepared.manifest]}
+    store = Store(tmp_path / 'owner.sqlite')
+    try:
+        seq = store.outbox_add('append_log', 'room|alice@machine', payload)
+        item = store.outbox_claim_due()[0]
+        assert item.seq == seq
+        ticket = OperationTicket('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                                 'cccccccc-cccc-4ccc-8ccc-cccccccccccc')
+
+        class Journal:
+            def __init__(self):
+                self.request = None
+                self.allocations = []
+
+            def get_operation(self, _operation):
+                return None
+
+            def get_outbox_leg(self, _store, got_seq, leg, digest):
+                assert (got_seq, leg, digest) == (
+                    seq, 'manifest:' + prepared.record['id'], item.owner_digest)
+                return ticket if self.request is not None else None
+
+            def allocate_outbox_ticket(self, _store, got_seq, leg, digest, kind, args):
+                assert (got_seq, leg, digest, kind) == (
+                    seq, 'manifest:' + prepared.record['id'], item.owner_digest,
+                    'blob_manifest')
+                self.allocations.append(dict(args))
+                self.request = SimpleNamespace(
+                    expectation=SimpleNamespace(kind=kind),
+                    arguments_json=json.dumps(args).encode())
+                return ticket
+
+            def get_ticket(self, got_ticket):
+                assert got_ticket == ticket
+                return SimpleNamespace(request=self.request)
+
+        journal = Journal()
+        resumed = []
+        writer.driver.journal = journal
+        writer.driver.resume = lambda epoch, operation: resumed.append((epoch, operation))
+        publisher = staged_attachments.StagedAttachmentPublisher(writer)
+        publisher.publish_outbox(store, item, 'room', prepared.manifest,
+                                 delivery._spool(prepared.record['id']))
+        assert events == ['stage']
+        assert len(journal.allocations) == 1
+        assert resumed == [(ticket.protocol_epoch, ticket.operation_id)]
+        storage_calls = list(bucket.calls)
+        publisher.recover_outbox(store, item, 'room', prepared.manifest)
+        assert bucket.calls == storage_calls
+        assert len(journal.allocations) == 1
+        assert resumed == [(ticket.protocol_epoch, ticket.operation_id)] * 2
+        changed = {**prepared.manifest, 'sealed_sha256': '0' * 64}
+        with pytest.raises(ValidationError, match='outbox manifest changed'):
+            publisher.recover_outbox(store, item, 'room', changed)
+        assert len(journal.allocations) == 1
+    finally:
+        store.close()
+
+
+def test_direct_outbox_manifest_rejects_malformed_wrapper_before_storage(
+        rig, tmp_path, monkeypatch):
+    _events, bucket, writer, _tx, _store, _sealer, delivery = rig
+    monkeypatch.setattr(delivery, '_typed_writer', lambda: writer)
+    prepared = delivery.prepare('room', 'invalid.txt', b'one payload')
+    store = Store(tmp_path / 'malformed-owner.sqlite')
+    try:
+        store.outbox_add('append_log', 'room|alice@machine', {
+            'v': 0, 'envelope': {'id': 'm1'},
+            'attachments': [prepared.manifest]})
+        item = store.outbox_claim_due()[0]
+        publisher = staged_attachments.StagedAttachmentPublisher(writer)
+        with pytest.raises(ValidationError, match='outbox payload changed'):
+            publisher.publish_outbox(
+                store, item, 'room', prepared.manifest,
+                delivery._spool(prepared.record['id']))
+        assert not bucket.calls and not writer.submissions
+    finally:
+        store.close()
+
+
+def test_real_outbox_manifest_ticket_replays_without_restaging(world, tmp_path):
+    from agentbridge.transport.mutation_receipts import decode_mutation_receipt
+    from agentbridge.transport.receipt_retirement import ProviderEpoch
+
+    _coordinator, _node, store, _identity, journal = world
+    journal._adopt_epoch(ProviderEpoch(
+        journal_cases.ENDPOINT, 'mesh', journal_cases.ACTOR,
+        'cccccccc-cccc-4ccc-8ccc-cccccccccccc', journal_cases.EPOCH, 0))
+    events = []
+    bucket = _Bucket(events)
+
+    class Provider:
+        endpoint, root, actor_id = journal_cases.ENDPOINT, 'mesh', journal_cases.ACTOR
+        _access_token = 'token-1'
+
+        def __init__(self):
+            self._client = SimpleNamespace(
+                storage=SimpleNamespace(from_=lambda _name: bucket))
+            self.effects = {}
+
+        def _check_identity(self):
+            return None
+
+        def execute(self, request):
+            expectation = request.expectation
+            key = expectation.protocol_epoch, expectation.operation_id
+            if key not in self.effects:
+                raw = {name: getattr(expectation, name) for name in (
+                    'root', 'protocol_epoch', 'operation_id', 'actor_id',
+                    'kind', 'client_digest')}
+                raw.update(schema_version=2, provider_digest='c' * 64,
+                           result=dict(expectation.targets))
+                self.effects[key] = decode_mutation_receipt(raw, expectation)
+            return self.effects[key]
+
+        def acknowledge(self, _receipt):
+            return True
+
+    provider = Provider()
+    writer = ApplicationMutationWriter(
+        JournaledMutations(journal, provider), journal_cases.EPOCH)
+    publisher = staged_attachments.StagedAttachmentPublisher(writer)
+    sealed = b'sealed attachment bytes'
+    blob_id = 'f2-stable-attachment'
+    manifest = {
+        'v': 2, 'blob_id': blob_id, 'sealed_bytes': len(sealed),
+        'sealed_sha256': hashlib.sha256(sealed).hexdigest(),
+        'record': {'id': blob_id, 'storage_v': 2, 'bytes': 5,
+                   'sha256': 'a' * 64},
+    }
+    spool = tmp_path / blob_id
+    spool.write_bytes(sealed)
+    seq = store.outbox_add('append_log', 'room|alice@machine', {
+        'v': 1, 'envelope': {'id': 'm1'}, 'attachments': [manifest]})
+    item = store.outbox_claim_due()[0]
+    assert item.seq == seq
+    publisher.publish_outbox(store, item, 'room', manifest, spool)
+    first_calls = list(bucket.calls)
+    assert events == ['stage'] and len(provider.effects) == 1
+    assert journal.get_outbox_leg(
+        store, seq, 'manifest:' + blob_id, item.owner_digest) is not None
+    publisher.recover_outbox(store, item, 'room', manifest)
+    assert bucket.calls == first_calls
+    assert len(provider.effects) == 1
 
 
 def test_staged_upload_manifest_then_outbox_append(rig, monkeypatch):
@@ -397,3 +554,25 @@ def test_real_journal_restart_replays_staged_manifest_without_storage_io(
     assert len(effects) == 1
     assert len(receipts) == 1
     assert restarted_writer.driver.journal.get_operation(effects[0]).state == "acknowledged"
+
+
+def test_legacy_manifest_prevents_new_consumer_publication(rig, tmp_path, monkeypatch):
+    events, bucket, writer, _tx, _store, _sealer, delivery = rig
+    monkeypatch.setattr(delivery, '_typed_writer', lambda: writer)
+    prepared = delivery.prepare('room', 'legacy.txt', b'legacy bytes')
+    store = Store(tmp_path / 'legacy-owner.sqlite')
+    try:
+        store.outbox_add('append_log', 'room|alice@machine', {
+            'v': 1, 'envelope': {'id': 'legacy'}, 'attachments': [prepared.manifest]})
+        item = store.outbox_claim_due()[0]
+        publisher = staged_attachments.StagedAttachmentPublisher(writer)
+        publisher.publish('room', prepared.manifest, delivery._spool(prepared.record['id']))
+        before = list(bucket.calls)
+        writer.driver.journal.get_outbox_leg = lambda *_args: None
+        with pytest.raises(ValidationError, match='drain pre-consumer manifest'):
+            publisher.publish_outbox(store, item, 'room', prepared.manifest,
+                                     delivery._spool(prepared.record['id']))
+        assert bucket.calls == before
+        assert len(writer.submissions) == 1
+    finally:
+        store.close()

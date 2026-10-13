@@ -302,3 +302,57 @@ def test_wrong_signer_never_occupies_action_fifo(world):
     with sqlite3.connect(coordinator.path) as conn:
         assert conn.execute('SELECT count(*) FROM user_state_actions').fetchone() == (0,)
     assert not provider.requests
+
+
+def test_competing_drainer_waits_before_enqueue_and_preserves_both_actions(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from agentbridge.core.lock import SingleInstance
+
+    coordinator, provider, reopen = world
+    first_read, allow_read, contention = Event(), Event(), Event()
+    original_read = provider.read_document_for_update
+    original_acquire = SingleInstance.acquire
+
+    def read(path):
+        if not first_read.is_set():
+            first_read.set()
+            assert allow_read.wait(5)
+        return original_read(path)
+
+    def acquire(lock):
+        result = original_acquire(lock)
+        if not result:
+            contention.set()
+        return result
+
+    provider.read_document_for_update = read
+    monkeypatch.setattr(SingleInstance, 'acquire', acquire)
+    first, second = reopen(), reopen()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(_write, first, 'star', {'msg_ids': ['a']})
+        assert first_read.wait(5)
+        b = pool.submit(_write, second, 'hide', {'msg_ids': ['b']})
+        try:
+            assert contention.wait(5)
+            with sqlite3.connect(coordinator.path) as conn:
+                assert conn.execute('SELECT count(*) FROM user_state_actions').fetchone() == (1,)
+        finally:
+            allow_read.set()
+        assert a.result(timeout=5)[1] and b.result(timeout=5)[1]
+    assert provider.documents[PATH][1]['starred'] == ['a']
+    assert provider.documents[PATH][1]['hidden'] == ['b']
+
+
+def test_stale_inventory_does_not_consume_newer_action(world):
+    _, provider, reopen = world
+    queue = reopen()
+    old = queue.enqueue(CHAT, USER, 'star', {'msg_ids': ['old']})
+    queue.run(CHAT, USER, old, signer=signer, verifier=verifier)
+    queue.enqueue(CHAT, USER, 'hide', {'msg_ids': ['new']})
+    before = len(provider.effects)
+    assert queue.run(CHAT, USER, old, signer=signer, verifier=verifier,
+                     missing_ok=True) == (None, False)
+    with pytest.raises(local_source.SourceChanged, match='target_missing'):
+        queue.run(CHAT, USER, old, signer=signer, verifier=verifier)
+    assert len(provider.effects) == before

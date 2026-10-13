@@ -39,7 +39,7 @@ class Provider:
         if self.read_error:
             raise OSError('provider unavailable')
         seq, value = self.documents.get(path, (0, None))
-        raw = None if not seq else json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        raw = None if not seq else json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
         return DocumentMutationObservation(path, SOURCE, seq, False, raw)
 
     def execute(self, request):
