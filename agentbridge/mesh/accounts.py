@@ -20,11 +20,12 @@ import os
 import re
 import secrets
 from functools import wraps
+from uuid import uuid4
 
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from .. import crypto
-from ..core.errors import PermissionDenied, ValidationError
+from ..core.errors import PermissionDenied, TransportError, ValidationError
 from ..core.models import Account, ChatKind, UserKind
 from ..core.timekit import utcnow_iso
 from ..transport.base import Transport
@@ -132,7 +133,13 @@ class AccountsService:
         )
         return Account.from_dict(doc), recovery_code
 
-    @_identity_workflow
+    def _typed_identity_writer(self):
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if isinstance(self.tx, LocalMutationTransport):
+            return self.tx._bound_writer()
+        return None
+
     def create_agent(
         self,
         name: str,
@@ -141,7 +148,58 @@ class AccountsService:
         harness: dict | None = None,
     ) -> Account:
         """Create an agent ON THIS MACHINE, owned by the signed-in human
-        (machine-login ownership). Agents never get an auth record."""
+        (machine-login ownership). Agents never get an auth record.
+
+        A bound typed writer routes through the durable identity owner; the
+        legacy path otherwise stays unchanged (binding is one-way)."""
+        if self._typed_identity_writer() is not None:
+            return self._create_agent_typed(name, display=display, harness=harness)
+        return self._create_agent_legacy(name, display=display, harness=harness)
+
+    def _create_agent_typed(self, name: str, *, display: str,
+                            harness: dict | None) -> Account:
+        from .identity_dispatch import CREATED, NAME_TAKEN
+        from .identity_publication import prepare_agent_identity
+
+        owner = self.user
+        acc = self.directory.get(owner)
+        if acc is None or acc.kind is not UserKind.HUMAN:
+            raise PermissionDenied("only a signed-in member can create agents")
+        self._require_valid_name(name)
+
+        def prepare(root: str, actor_id: str):
+            # Minted only when no durable owner for this name exists. The
+            # provider's absent-CAS, not this local view, decides the name.
+            if self.directory.handle_taken(name):
+                raise ValidationError(f"@{name} is taken")
+            owner_bundle = self.keystore.load(owner)
+            if not owner_bundle:
+                raise PermissionDenied(f"@{owner}'s identity key is unavailable here")
+            return prepare_agent_identity(
+                owner_id=str(uuid4()), root=root, actor_id=actor_id, name=name,
+                owner=owner, machine=self.machine, owner_bundle=owner_bundle,
+                owner_sign_pub=acc.keys.sign_pub, display=display,
+                owner_display=acc.display, harness=harness)
+
+        outcome = self.tx.create_agent_identity(
+            name, prepare, keystore=self.keystore, directory=self.directory)
+        if outcome.state == CREATED:
+            # The exact published document; the mirror may not show it yet.
+            return Account.from_dict(outcome.account)
+        if outcome.state == NAME_TAKEN:
+            raise ValidationError(f"@{name} is taken")
+        raise TransportError(
+            f"@{name} is still being created ({outcome.state.replace('_', ' ')}); "
+            "retrying resumes the same identity")
+
+    @_identity_workflow
+    def _create_agent_legacy(
+        self,
+        name: str,
+        *,
+        display: str = "",
+        harness: dict | None = None,
+    ) -> Account:
         self._require_legacy_identity_owner()
         owner = self.user
         acc = self.directory.get(owner)
@@ -223,12 +281,15 @@ class AccountsService:
                 pins.forget(name)
             raise
 
-    def _require_free(self, name: str) -> None:
+    def _require_valid_name(self, name: str) -> None:
         if not valid_name(name):
             raise ValidationError(
                 "names are 2-32 chars: lowercase letters, digits, _ or -, "
                 "starting with a letter (reserved words excluded)"
             )
+
+    def _require_free(self, name: str) -> None:
+        self._require_valid_name(name)
         if self.directory.handle_taken(name):
             raise ValidationError(f"@{name} is taken")
 

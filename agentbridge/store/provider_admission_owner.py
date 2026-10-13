@@ -407,6 +407,16 @@ class ProviderAdmissionOwnerJournal:
     def _find(self, conn, owner_id: str) -> AdmissionOwnerRecord | None:
         return _load(conn, self.journal, owner_id)
 
+    def owner_ids(self, owner_kind: str) -> tuple[str, ...]:
+        """Bounded restart inventory of one kind, without loading material."""
+        if type(owner_kind) is not str or owner_kind not in _OWNER_KINDS:
+            raise ValueError("invalid admission owner kind")
+        with self.journal.coordinator._transaction() as conn:
+            self._check(conn)
+            return tuple(row[0] for row in conn.execute(
+                "SELECT owner_id FROM typed_admission_owners WHERE owner_kind=? "
+                "ORDER BY owner_id LIMIT ?", (owner_kind, MAX_OWNERS)))
+
     def get(self, owner_id: str) -> AdmissionOwnerRecord | None:
         _uuid(owner_id, "admission owner")
         with self.journal.coordinator._transaction() as conn:

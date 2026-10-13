@@ -173,11 +173,17 @@ each caught. Identity/lifecycle/pin/admission gate: 350 passed.
    eviction of legs a member never settles is deliberately not added: it is
    pre-existing receipt-ACK parity, and eviction would need retained lineage so
    evicted owners could still prove non-effect after rotation.
-3. Done above: inactive agent identity dispatcher. Next: route
-   `AccountsService.create_agent` through it behind the bound typed writer
-   (with a durable pending-creation record for the UI), then migrate
-   human/password/adoption, key rotation and membership-bound wrapping, and
-   terminal cleanup phases. Retain keys through unknown outcomes. Distinguish
-   pre-existing namespace weaknesses from new migration regressions.
+3. Done above: inactive agent identity dispatcher, and `create_agent` routing.
+   With a bound typed writer, `AccountsService.create_agent` resumes any
+   durable owner for that name before minting (the admission owner is the
+   durable pending-creation record), freezes only after a fresh authenticated
+   read shows the account path absent, and returns the exact published
+   document. `name_taken` raises the usual taken error; `full` and
+   `canonical_pending` raise a resumable error. The unbound legacy path is
+   unchanged; `recover_agent_identities()` resumes owners of a bound writer.
+   Next: migrate human creation/password/adoption, key rotation and
+   membership-bound wrapping, and terminal cleanup phases. Retain keys through
+   unknown outcomes. Distinguish pre-existing namespace weaknesses from new
+   migration regressions.
 4. Complete disposable authenticated migration acceptance, then release and
    consolidate the PR stack. Production remains untouched and activation gated.

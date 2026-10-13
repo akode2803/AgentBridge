@@ -27,6 +27,7 @@ from agentbridge.store import local_source
 from agentbridge.transport.typed_mutations import TypedMutationRPCError
 
 world = base.world
+SOURCE = "99999999-9999-4999-8999-999999999999"
 
 
 class _Docs:
@@ -71,6 +72,16 @@ class _Provider(closure._Provider):
         op = params.get("p_operation_id")
         if name == "ab_admit_mutation_owner" and self.full:
             return cases._reply(self.plans[params["p_owner_id"]], "full")
+        if name == "ab_node_recovery_fence":
+            return {"schema_version": 1, "index_contract": "root-manifest-v1",
+                    "source_schema_version": 2, "source_epoch": SOURCE,
+                    "account_id": base.ACTOR, "role": "authenticated",
+                    "minimum_cursor": 0, "cursor": 1}
+        if name == "ab_node_docs_exact":
+            (path,) = params["p_paths"]
+            value = self.docs.docs.get(path)
+            return [] if value is None else [{"path": path, "seq": 1, "data": value,
+                                              "deleted": False, "batch_overflow": False}]
         request = self.requests.get(op)
         if (request is not None and request.expectation.kind == "doc_compare_put"
                 and name == request.rpc_name and op not in self.receipts and op not in self.cancelled
@@ -78,7 +89,8 @@ class _Provider(closure._Provider):
             args = json.loads(request.arguments_json)
             if args["p_path"] in self.docs.docs:
                 self.conflicts.add(op)
-            elif args["p_path"] not in self.dropped:
+            elif not any(args["p_path"] == d or args["p_path"].startswith(d + "/")
+                         for d in self.dropped):
                 self.docs.docs[args["p_path"]] = args["p_data"]
         reply = super()._handle(name, params)
         if op in self.lose_ops and name == getattr(request, "rpc_name", None):
@@ -265,3 +277,82 @@ def test_owner_is_kept_when_the_keystore_no_longer_holds_the_exact_key(identity_
     kept = dispatcher.owners.get(artifact.owner_id)
     assert kept.private_payload == artifact.private_payload
     assert kept.outcome == ("applied", "applied")
+
+
+@pytest.fixture
+def accounts(identity_world, monkeypatch):
+    from types import SimpleNamespace
+
+    from agentbridge.mesh.accounts import AccountsService
+    from agentbridge.store.provider_admission_owner import ProviderAdmissionOwnerJournal
+    from agentbridge.transport.local_mutations import LocalMutationTransport
+
+    dispatcher, provider, _, _, owner_bundle = identity_world
+    original = ProviderAdmissionOwnerJournal.prepare
+
+    def registered(self, *args, **kwargs):
+        record = original(self, *args, **kwargs)
+        provider.owner(record)
+        return record
+
+    monkeypatch.setattr(ProviderAdmissionOwnerJournal, "prepare", registered)
+    writer = SimpleNamespace(driver=dispatcher.driver)
+    successes = []
+    monkeypatch.setattr(LocalMutationTransport, "_bound_writer", lambda self: writer)
+    monkeypatch.setattr(LocalMutationTransport, "_typed_success",
+                        lambda self: successes.append("hint"))
+    service = object.__new__(AccountsService)
+    service.tx = object.__new__(LocalMutationTransport)
+    service.directory, service.keystore = dispatcher.directory, dispatcher.keystore
+    service.user, service.machine = "alice", "laptop"
+    service.keystore.install_if_absent_or_identical("alice", owner_bundle)
+    return service, provider, successes
+
+
+def _pending_artifact(service, name):
+    owners = service.tx._identity_owners(service.tx._bound_writer())
+    for owner_id in owners.owner_ids(identity.OWNER_KIND):
+        artifact = identity.recover_agent_identity(owners, owner_id)
+        if artifact.account["name"] == name:
+            return artifact
+    return None
+
+
+def test_bound_create_agent_publishes_through_the_durable_owner(accounts):
+    service, provider, successes = accounts
+    account = service.create_agent("helper", display="Helper", harness={"adapter": "none"})
+    assert (account.name, account.kind.value, account.display) == ("helper", "agent", "Helper")
+    assert provider.docs.docs["users/helper.json"]["agent"] == {
+        "owner": "alice", "machine": "laptop", "harness": {"adapter": "none"}}
+    assert lifecycle.canonical_bootstrap_id(service.directory, "helper") is not None
+    assert service.keystore.load("helper") is not None
+    assert _pending_artifact(service, "helper") is None
+    assert successes == ["hint"]
+
+
+def test_bound_create_agent_retry_resumes_without_minting(accounts, monkeypatch):
+    from agentbridge.core.errors import TransportError
+
+    service, provider, _ = accounts
+    provider.dropped.add("lifecycle/helper")
+    with pytest.raises(TransportError, match="still being created"):
+        service.create_agent("helper")
+    pending = _pending_artifact(service, "helper")
+    assert service.keystore.load("helper") == pending.bundle
+    path, bootstrap = pending.documents()[1]
+    provider.dropped.clear()
+    provider.docs.docs[path] = bootstrap
+    monkeypatch.setattr(crypto, "generate_identity",
+                        lambda: pytest.fail("a retry minted a new identity"))
+    assert service.create_agent("helper").keys.sign_pub == pending.account["keys"]["sign_pub"]
+    assert _pending_artifact(service, "helper") is None
+
+
+def test_bound_create_agent_taken_name_freezes_nothing(accounts):
+    service, provider, _ = accounts
+    provider.docs.docs["users/helper.json"] = {"name": "helper", "kind": "human"}
+    admissions = sum(1 for name, _ in provider.calls if name == "ab_admit_mutation_owner")
+    with pytest.raises(ValidationError, match="taken"):
+        service.create_agent("helper")
+    assert _pending_artifact(service, "helper") is None
+    assert sum(1 for name, _ in provider.calls if name == "ab_admit_mutation_owner") == admissions

@@ -11,11 +11,14 @@ compensation, key deletion or AccountsService activation here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core.errors import ValidationError
-from .identity_publication import recover_agent_identity
+from .identity_publication import (
+    OWNER_KIND, freeze_agent_identity, recover_agent_identity,
+)
 from .lifecycle import canonical_bootstrap_id
+from .paths import P
 from .pins import key_fingerprint
 
 CREATED = "created"
@@ -38,6 +41,7 @@ class IdentityOutcome:
 
     state: str
     name: str
+    account: dict | None = field(default=None, compare=False)
 
 
 class AgentIdentityDispatcher:
@@ -59,7 +63,7 @@ class AgentIdentityDispatcher:
         self.keystore.install_if_absent_or_identical(name, artifact.bundle)
         if self.owners.get(owner_id).state != "admitted":
             if self.owners.admit(owner_id).status == "full":
-                return IdentityOutcome(FULL, name)
+                return IdentityOutcome(FULL, name, artifact.account)
         if self._outcome(owner_id, _ACCOUNT) == "conflict":
             self._retire_unused_bootstrap(owner_id)
             return self._finish(owner_id, artifact, NAME_TAKEN)
@@ -70,7 +74,7 @@ class AgentIdentityDispatcher:
         bootstrap_id = artifact.bootstrap["record"]["id"]
         if canonical_bootstrap_id(self.directory, name,
                                   store=self.directory.store) != bootstrap_id:
-            return IdentityOutcome(CANONICAL_PENDING, name)
+            return IdentityOutcome(CANONICAL_PENDING, name, artifact.account)
         return self._finish(owner_id, artifact, CREATED)
 
     def _outcome(self, owner_id: str, index: int) -> str:
@@ -112,10 +116,38 @@ class AgentIdentityDispatcher:
         if self.keystore.load(name) != artifact.bundle:
             raise IdentityDispatchError("identity key is no longer retained")
         self.owners.reap(owner_id, private_payload=artifact.private_payload)
-        return IdentityOutcome(state, name)
+        return IdentityOutcome(state, name, artifact.account)
+
+
+def create_agent_identity(owners, driver, keystore, directory, name: str,
+                          prepare) -> IdentityOutcome:
+    """Resume a pending owner for ``name``; otherwise mint, freeze and run one.
+
+    ``prepare(root, actor_id)`` mints new material and runs only when no
+    durable owner for this name exists, so a retry never replaces frozen keys.
+    A fresh authenticated read must show the account path absent before any
+    owner is frozen; a taken name then consumes no provider capacity.
+    """
+    dispatcher = AgentIdentityDispatcher(owners, driver, keystore, directory)
+    for owner_id in owners.owner_ids(OWNER_KIND):
+        if recover_agent_identity(owners, owner_id).account["name"] == name:
+            return dispatcher.run(owner_id)
+    observed = driver.rpc.read_document_for_update(P.user(name))
+    if observed.seq != 0 or observed.deleted:
+        return IdentityOutcome(NAME_TAKEN, name)
+    epoch = driver.journal.protocol_epoch()
+    if epoch is None:
+        raise ValueError("typed mutation lifecycle is required")
+    artifact = prepare(driver.journal.root, driver.journal.actor_id)
+    if artifact.account["name"] != name:
+        raise ValueError("prepared identity name mismatch")
+    freeze_agent_identity(owners, artifact, protocol_epoch=epoch,
+                          source_epoch=observed.source_epoch)
+    return dispatcher.run(artifact.owner_id)
 
 
 __all__ = [
     "AgentIdentityDispatcher", "CANONICAL_PENDING", "CREATED", "FULL",
     "IdentityDispatchError", "IdentityOutcome", "NAME_TAKEN",
+    "create_agent_identity",
 ]

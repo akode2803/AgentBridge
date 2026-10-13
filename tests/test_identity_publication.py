@@ -93,7 +93,7 @@ def test_noncanonical_oversized_and_wrong_identity_inputs_rejected():
 
 @pytest.mark.parametrize("method,args", [
     ("create_human", ("bob", "password")),
-    ("create_agent", ("worker",)),
+    ("_create_agent_legacy", ("worker",)),  # bound create_agent uses its owner
     ("adopt_agent", ("worker",)),
     ("change_password", ("old", "newpassword")),
     ("_publish_identity", ("worker", {}, b"", "", "")),

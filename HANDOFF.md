@@ -29,9 +29,12 @@ only after the account applied, canonical-lifecycle descent check, and reap
 after proving the keystore holds the exact key. Taken names cancel the unused
 bootstrap and keep the key unpinned. Gate: 350 passed.
 
-Next: route AccountsService.create_agent through the dispatcher behind the
-bound typed writer (with a durable pending-creation record), then the remaining
-human/password/adoption, key and terminal owners, then migration acceptance.
+With a bound typed writer, AccountsService.create_agent now routes through it,
+resuming any pending owner for the name before minting (the owner is the
+durable pending-creation record); the unbound legacy path is unchanged.
+
+Next: the remaining human creation/password/adoption, key-rotation and terminal
+owners, then disposable migration acceptance and stack consolidation.
 Operator eviction of never-settled member legs is deliberately deferred
 (pre-existing parity; needs retained lineage). No production schema, activation
 or merge.

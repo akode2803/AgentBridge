@@ -208,6 +208,47 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return result
 
+    def _identity_owners(self, writer):
+        from ..store.provider_admission_owner import ProviderAdmissionOwnerJournal
+        from .provider_admission import ProviderAdmission
+
+        return ProviderAdmissionOwnerJournal(
+            writer.driver.journal, ProviderAdmission(writer.driver.rpc))
+
+    def create_agent_identity(self, name, prepare, *, keystore, directory):
+        """Resume or mint one agent identity through the bound typed owner."""
+        from ..mesh.identity_dispatch import CREATED, create_agent_identity
+
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        outcome = create_agent_identity(
+            self._identity_owners(writer), writer.driver, keystore, directory,
+            name, prepare)
+        if self._bound_writer() is not writer:
+            raise ValueError('agent identity writer changed')
+        if outcome.state == CREATED:
+            self._typed_success()
+        return outcome
+
+    def recover_agent_identities(self, *, keystore, directory):
+        """Resume durable identity owners of a bound writer; never opts in."""
+        from ..mesh.identity_dispatch import AgentIdentityDispatcher
+        from ..mesh.identity_publication import OWNER_KIND
+
+        writer = self._bound_writer()
+        if writer is None:
+            return ()
+        owners = self._identity_owners(writer)
+        dispatcher = AgentIdentityDispatcher(owners, writer.driver, keystore, directory)
+        outcomes = tuple(dispatcher.run(owner_id)
+                         for owner_id in owners.owner_ids(OWNER_KIND))
+        if self._bound_writer() is not writer:
+            raise ValueError('agent identity writer changed')
+        if outcomes:
+            self._typed_success()
+        return outcomes
+
     def write_latest_doc(self, path, build):
         """Replace a per-device snapshot after its durable retry has settled."""
         writer = self._bound_writer()

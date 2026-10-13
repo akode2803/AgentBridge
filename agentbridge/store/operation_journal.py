@@ -685,6 +685,13 @@ class OperationJournal:
             self._check(conn)
             return _lifecycle(conn) is not None
 
+    def protocol_epoch(self) -> str | None:
+        """The adopted provider epoch new tickets must use, if opted in."""
+        with self.coordinator._transaction() as conn:
+            self._check(conn)
+            current = _lifecycle(conn)
+            return None if current is None else current[1]
+
     def operation_ticket(self, protocol_epoch: str, operation_id: str) -> OperationTicket | None:
         """Return ticket classification without loading the request body."""
         ticket = OperationTicket(protocol_epoch, operation_id)
