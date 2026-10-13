@@ -292,3 +292,13 @@ def test_read_delivered_and_clear_reducers_match_legacy_fields(monkeypatch):
     reduced = reduce_state_action(reduced, 'clear', {
         'up_to_ns': 9, 'keep_starred': True, 'runtime_ids': ['new', 'old'], 'at': 'fixed'})
     assert reduced == tx.document
+
+
+def test_wrong_signer_never_occupies_action_fifo(world):
+    coordinator, provider, reopen = world
+    with pytest.raises(ValueError, match='owner did not verify'):
+        reopen().write(CHAT, USER, 'star', {'msg_ids': ['x']},
+                       signer=lambda _data: 'wrong', verifier=verifier)
+    with sqlite3.connect(coordinator.path) as conn:
+        assert conn.execute('SELECT count(*) FROM user_state_actions').fetchone() == (0,)
+    assert not provider.requests

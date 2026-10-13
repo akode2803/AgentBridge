@@ -421,6 +421,9 @@ class UserStateActionQueue:
     def write(self, chat: str, user: str, kind: str, args: dict, *, signer, verifier):
         if not callable(signer) or not callable(verifier):
             raise ValueError('signed state action owner required')
+        _component(chat, 'chat')
+        _component(user, 'user')
+        _action_args(kind, args)
         # Prove the supplied signer is accepted by this exact state owner's
         # verifier before a new durable action can occupy the FIFO. Replaying
         # an already-linked operation remains independent of this fresh proof.
