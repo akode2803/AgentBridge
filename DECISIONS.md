@@ -9,6 +9,43 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 
 ## Typed-writer migration (2026-10-13 onward)
 
+### D-020 Foundation for 1,000 users (open, for discussion)
+- **Goal (Aryan, 2026-10-14):** an architecture that holds to about 1,000
+  users on paid Supabase without a third rewrite. Simple, scalable, secure,
+  minimal latency, and easy to follow for people and models. Decisions
+  follow discussion, not this note.
+- **Analysis:** docs/FOUNDATION_REVIEW.md compares each load-bearing choice
+  with Signal, Telegram and (where closer) Matrix, with a load model and
+  Supabase quota maths.
+- **Proposals, none taken** (revised after an independent review):
+  - P1: receipts per (actor, device), with a resolve fence, idempotent ack,
+    time-ordered ids and 24 h retention. They replace the shared 4,096-slot
+    pool and its rotation, which block activation: one unacknowledged
+    receipt blocks rotation forever, and one member can fill the pool. Each
+    of the six other jobs epoch closure does needs a named replacement.
+  - P2: one private Realtime topic per user, with server fan-out to chat
+    members, which replaces the root-wide public `ab-<root>` poke and the
+    per-tick root scan. It comes after P4.
+  - P3: an `ab_signal` RPC for typing, the live feed and presence (a small
+    pulled table), which revises D-009.
+  - P4: membership in rows checked in SQL (D-014), per-recipient key wraps,
+    Telegram-style read marks in large groups, and a group-size cap.
+  - P5: final refusals end outbox retries.
+  - P6: never free a username (closes a pre-existing hole: the next claimer
+    inherits chat access), plus root-owner eviction and bans (D-013).
+  - P7: commit-ordered cursors now (closes pre-existing skipped rows); a
+    per-chat server sequence for order later.
+  - P8: pg_cron housekeeping (Aryan's idea), with Storage purges through an
+    Edge Function.
+  - P9: invite tokens and per-root limits before strangers get the
+    bootstrap.
+  - P10: a root incarnation id so a backup restore cannot mislead clients.
+- **Why now:** nothing typed is activated and production holds no typed
+  data. After activation, P1, P10 and the wrap layout become migrations on
+  every user's machine.
+- **Revisit:** when Aryan has read the review; each proposal then gets a
+  design note and an independent review before code.
+
 ### D-019 Leave and delete without making the user wait (open, Aryan deciding)
 - **Today (D-017):** under a bound writer a leave or delete-for-everyone
   first delivers my queued sends to that chat, then makes one provider
@@ -271,9 +308,19 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   member keeps seeing a chat's typing until their token refresh (default
   one hour; can be shortened). There is no history, which is fine for these.
   The Python client supports `private: True`.
-- **Recommendation:** Realtime for typing and the live feed; Realtime
-  Presence for online state, with `last_seen_ns` written only when it
-  advances. This matches Signal (typing indicators are encrypted messages
+- **Revised 2026-10-14 (D-020 P2/P3):** with the 1,000-user target, the
+  per-chat topics and Realtime Presence below would not scale. Presence
+  pushes every join and leave to everyone in the channel, and a connection
+  holds at most 100 channels. The newer suggestion is one private topic per
+  user, an `ab_signal` RPC that fans out to current members (so removed
+  members stop at once), and presence as a small table read for what is on
+  screen. Quota: typing is about 7.7 million Realtime messages a month at
+  1,000 users, roughly $19 a month on Pro (docs/FOUNDATION_REVIEW.md F3).
+  Presence floors also feed Delivered ticks, so moving presence must keep
+  their meaning.
+- **Recommendation (first version, superseded by the revision above):**
+  Realtime for typing and the live feed; Realtime Presence for online
+  state, with `last_seen_ns` written only when it advances. This matches Signal (typing indicators are encrypted messages
   flagged online-only, ephemeral) and Telegram (`setTyping` is a transient
   update clients drop after 6 s).
 - **Revisit:** before activation (BACKLOG "Bound generic submits").

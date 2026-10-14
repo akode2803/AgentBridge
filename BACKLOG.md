@@ -61,6 +61,10 @@ moment it is made, so a large task list never lives only in conversation.
   sends headers and body in separate writes, so Nagle plus Windows delayed ACK
   can hold the body longer than the 100 ms discard window; widen it (still
   bounded by the 2 s socket timeout) if the error recurs on #145 or later.
+  Separate flake (2026-10-14, #146 on docs-only `36a70b6`):
+  `test_manager_retained_agent_tool_returns_once_without_room_post` missed
+  its 10 s claim wait on an overloaded Windows runner (no thread raised; the
+  previous run passed). Its waits are now 30 s (`a00a531`).
 - [x] **Supabase connector** (connected 2026-10-14 after Aryan restarted the
   app): lists both projects. Aryan allowed applying schema to Scratch freely
   (2026-10-14). Scratch now carries the branch protocol through
@@ -196,14 +200,58 @@ moment it is made, so a large task list never lives only in conversation.
   repo (`docs/provider-mutation-acceptance/20261013081948-http-notes.md`),
   then run one command; Claude adds a `listing` mode to
   `devtools/validate_blob_storage_http.py` and sets up the root by SQL. The
-  database half (`storage.search` as an emulated member in a rolled-back
-  block) needs no session and can run first.
+  database half passed on Scratch (2026-10-14, rolled back, residue 0). The
+  janitor's walk through `storage.search` under RLS found every object: 152
+  in a live room over 5 pages including nested folders, and 121 plus 3
+  staged objects for a deleted room's final member. A member who left
+  earlier and a root member outside the room saw none. Evidence:
+  docs/provider-mutation-acceptance/20261014-storage-listing-*. Still open:
+  the HTTP layer and batched remove, which need the session above.
 - [ ] **Architecture comparison with Signal and Telegram** (Aryan,
   2026-10-14): check that the architecture holds as users join without
   another rewrite. Compare delivery and idempotency, multi-device state,
   group authority (D-014), eviction and bans (D-013), ephemeral signals
   (D-009), social-graph exposure (D-018) and leave/delete UX (D-019); list
-  each gap with the cost of closing it now versus later.
+  each gap with the cost of closing it now versus later. Aryan's target
+  (2026-10-14): about 1,000 users on paid Supabase; simple, scalable,
+  secure, minimal latency; no third rewrite; decisions only after
+  discussion. Analysis written: docs/FOUNDATION_REVIEW.md (F1–F10, proposals
+  P1–P10, load model, Supabase quota maths); DECISIONS.md D-020. An
+  independent Claude review found 11 problems (a P6 hole, open sign-up, P1
+  gaps, root-wide scans and locks, cursor gaps, N² read marks, closure's
+  other roles, backups); each was verified in code and folded in. Open:
+  Aryan's decisions.
+- [ ] **Usernames are reusable, and the next claimer inherits chat access**
+  (security, pre-existing, found by review 2026-10-14). Chat ACLs match
+  usernames in `meta.members`. `ab_mutation_member_claim` lets any signed-in
+  account claim an unclaimed name, and root-level `member_leave` deletes the
+  `ab_members` row. The next claimer then reads every chat that still lists
+  the name (including deleted rooms' `final_members`) and can rewrite its
+  meta. Fix (FOUNDATION_REVIEW P6): never free a name; mark the row revoked
+  and check that flag in `ab_member`, or key ACLs on uid.
+- [ ] **Delta cursors can skip late commits** (correctness, pre-existing,
+  review 2026-10-14). `get_docs_delta` reads `seq > cursor` and logs
+  `id > cursor`, but both are assigned before commit, so a slower transaction
+  lands below a cursor a reader already passed and is missed until the 6 h
+  reconcile. Fix (P7): commit-ordered frontier via the row's transaction id
+  and `pg_snapshot_xmin`; it also replaces the change ledger's root-wide
+  exclusive page lock.
+- [ ] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
+  with the publishable key can send pokes that make every process pull. Make
+  it private now (Realtime authorization; "Allow public access" off), ahead
+  of P2's per-user topics.
+- [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
+  `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
+  so cost grows with total history. Replace it with membership changes on
+  the user's topic (P2 after P4).
+- [ ] **Open sign-up with the bootstrap** (review 2026-10-14; deliberate for
+  friends, SECURITY_RLS.md): anyone with URL, publishable key and root can
+  create unlimited accounts, defeating per-account limits. Before strangers
+  join: invite tokens checked in the claim RPC, per-root limits, optional
+  CAPTCHA (P9).
+- [ ] **Backups and restore** (review 2026-10-14): a restore rewinds ids,
+  sequences and receipts under live clients. Add a root incarnation id that
+  feeds, cursors and resolve check (P10); decide before activation.
 - [ ] **Receipt epoch rotation** (activation blocker, found 2026-10-14):
   every typed write holds one of 4,096 root-wide receipt slots until
   `ab_admin_rotate_mutation_epoch`, which no API role may call (database
@@ -211,7 +259,42 @@ moment it is made, so a large task list never lives only in conversation.
   it, so a busy root stops writing ("epoch is full") within hours to days.
   Decide who rotates and when, keep ephemeral traffic off receipts (D-009),
   and handle the attempted-without-receipt case
-  (docs/PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md).
+  (docs/PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md). Aryan (2026-10-14)
+  suggested pg_cron. Cron runs as the owner, so it can call the rotation,
+  but the rotation still fails while any client's receipt is
+  unacknowledged. At 1,000 users the pool lasts about an hour, and one
+  member can fill it alone; one receipt never acknowledged (a dead device)
+  blocks rotation forever. Proposed instead: receipts per (actor, device)
+  with a resolve fence, idempotent ack, time-ordered ids and 24 h retention
+  (docs/FOUNDATION_REVIEW.md F1/P1, which lists the six other jobs epoch
+  closure does today that each need a replacement).
+- [ ] **Root-wide wake-up channel** (found 2026-10-14,
+  docs/FOUNDATION_REVIEW.md F2): every write pokes `ab-<root>`, and every
+  process in the root pulls a delta, so Realtime messages and queries grow
+  roughly with users². Proposed: one private topic per user, with the server
+  fanning out to chat members (`realtime.send` from a trigger). Needed before
+  about 50 active users.
+- [ ] **Typing quota and removed members** (Aryan, 2026-10-14): he wants
+  the Realtime free-limit maths before choosing Realtime for typing, and
+  noted a removed member keeps seeing the room's typing (the client can
+  hide it). Calculated in docs/FOUNDATION_REVIEW.md F3: about 7.7 million
+  messages a month at 1,000 users (about $19 a month on Pro); server
+  fan-out at send time (P3) stops removed members at once.
+- [ ] **Server-side housekeeping via pg_cron** (Aryan, 2026-10-14): run
+  receipt purges, tombstone purges, purged chats' manifests and presence
+  expiry on the server instead of a client janitor. Storage folders go
+  through an Edge Function via `pg_net` (deleting `storage.objects` rows
+  orphans the files). docs/FOUNDATION_REVIEW.md F8/P8.
+- [ ] **Big groups ship O(members) docs to every member**
+  (docs/FOUNDATION_REVIEW.md F4, 2026-10-14): `meta.json`, each key-epoch
+  doc (one wrap per member, every epoch rewritten on a history add) and
+  read-state docs. Decide a group-size cap. For large groups: membership
+  rows and per-recipient wraps.
+- [ ] **Server-assigned chat order** (docs/FOUNDATION_REVIEW.md F6/P7,
+  2026-10-14): `ns` is the sender's clock. Decide now whether new cursors
+  use a per-chat server sequence; build later.
+- [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
+  folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.
 - [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,
   found 2026-10-14): any root member may read `status/typing_*` (chat id)
   and `status/<agent>_live.json` (chat id plus tool-step activity lines),
