@@ -298,9 +298,11 @@ moment it is made, so a large task list never lives only in conversation.
   Direction (FOUNDATION_REVIEW F11/P11, option D): TypeScript for every
   human client and later the harness; React Native on phones; Tauri on
   desktop (Linux is a must; Electron rejected for slow start-up). First: a
-  protocol spec with golden vectors, then a 1–2 week spike (encoding, crypto
-  and fold passing the vectors; Tauri start-up and memory on macOS, Windows
-  and Linux). Trap: `ns` exceeds JS safe integers, so use BigInt.
+  protocol spec with golden vectors, then a 2–3 week spike comparing
+  TypeScript + React Native/Tauri with Dart + Flutter (Aryan, 2026-10-15):
+  both ports pass the vectors; the same screen in both on macOS, Windows,
+  Linux and a phone; cold start, warm start and memory measured. Trap: `ns`
+  exceeds JS safe integers, so use BigInt.
 - [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
   folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.
 - [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,

@@ -40,7 +40,7 @@ mattering. F1, F5, F6, F9 and F10 do not depend on root size.
 | F8 | Housekeeping | Server-side jobs | Clients run the janitor | Gap | With P1 (pg_cron) |
 | F9 | Sign-up and abuse | Phone-number accounts, server rate limits | Anyone with the bootstrap (URL, publishable key, root) can create unlimited accounts | Fine for friends; **breaks** at 1,000 users | Before strangers join |
 | F10 | Backups and restore | — | A restore rewinds ids, sequences and receipts under live clients | Gap | Before activation |
-| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Direction D (TypeScript everywhere, Tauri desktop); spec and spike first |
+| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Direction D (one client language everywhere); TypeScript + Tauri vs Flutter decided by a spike |
 | — | Encryption, multi-device | Signal per-device keys; Matrix room keys rotated on leave, key backup | Per-chat key epochs rotated on leave, re-wrap for newcomers, account key bundle on each device, signed state events | **Holds** (Matrix-like) | — |
 | — | Social graph (D-018) | Signal hides it; Telegram sees it | Server sees membership and timing, never content | **Holds** at Telegram/Matrix level | — |
 
@@ -485,6 +485,32 @@ SQLite, notifications, tray and updates. It is also the closest match to
 today's app, which already renders in an Edge web view. Watch for WebKit
 quirks on macOS and Linux.
 
+**Alternative: Flutter (Aryan asked, 2026-10-15).** Flutter is the strongest
+rival to React Native plus Tauri on these constraints, and is still open.
+- **Its strengths:**
+  - One toolkit for iOS, Android, Windows, macOS and Linux, all first-class
+    (Canonical builds Ubuntu's installer with it), with no web view and no
+    Tauri.
+  - Fast start-up: ahead-of-time native code and its own renderer, no browser
+    engine.
+  - Identical rendering on every platform, so no WebKit quirks.
+  - An official Supabase SDK.
+- **Its costs:**
+  - The core is in Dart, not TypeScript. Keeping one language for clients and
+    the harness then means a Dart harness. That is possible (Dart runs CLI
+    tools and servers), but the official MCP SDKs are TypeScript and Python;
+    the Dart ones are community-maintained.
+  - Less-proven crypto: a pure-Dart `cryptography` package (less vetted than
+    `@noble`), or libsodium bindings (`sodium_libs`) with native builds on
+    every platform.
+  - Fewer people, and less model fluency, than TypeScript and React.
+  - Self-drawn controls: desktop text selection, menus and keyboard handling
+    can feel slightly off.
+- **Verdict:** as a UI toolkit for phone plus three desktops with fast start,
+  Flutter wins. As one platform shared by clients and agents, TypeScript
+  wins, on crypto maturity, the MCP SDKs and model fluency. Leaning
+  TypeScript, decided by the spike below.
+
 **What to settle before any of it.** Two independent implementations (Python
 and TypeScript, until the harness moves) must agree byte for byte: canonical
 JSON, signature inputs, key wraps, chat id commitments, the fold's ordering
@@ -496,16 +522,21 @@ client is written against it.
 
 **P11.**
 1. A protocol spec with golden test vectors exported from Python.
-2. A 1–2 week spike: port encoding, crypto and the fold to TypeScript until
-   they pass the vectors, and build a minimal sidebar and chat screen in Tauri
-   on macOS, Windows and Linux. Measure cold start, warm start and memory
-   against a target such as under 1 second cold.
-3. If the spike holds: the TypeScript core, then the React Native UI for
-   phone and desktop (Tauri), while today's app keeps working until parity.
-   Then the harness.
+2. A 2–3 week spike comparing the two stacks on equal terms:
+   - port encoding, crypto and the fold to both TypeScript and Dart, until
+     each passes the same Python vectors;
+   - build the same minimal sidebar and chat screen in Tauri with React
+     Native Web and in Flutter, on macOS, Windows and Linux (and a phone);
+   - measure cold start, warm start and memory against a target such as
+     under 1 second cold, and note how the port felt in each language
+     (crypto libraries, BigInt `ns` handling, tooling).
+   Choose the stack on those results.
+3. Then the chosen core and UI (TypeScript with React Native and Tauri, or
+   Dart with Flutter) for phone and desktop, while today's app keeps working
+   until parity. Then the harness, in the same language.
 4. Relax the dependency rule: well-maintained, widely used libraries are
-   allowed where they replace custom code (React, React Native, Expo, Tauri,
-   `@noble`, supabase-js). Crypto stays audited libraries only.
+   allowed where they replace custom code (React, React Native, Expo, Tauri or
+   Flutter, `@noble`, supabase-js). Crypto stays audited libraries only.
 
 ## What already matches mature apps (keep)
 
@@ -565,7 +596,7 @@ transport, which docs/SUPABASE_ONLY_REMOVAL_PLAN.md retired.
    invites** before strangers join, **P6 eviction and bans**.
 6. **P7's server order per chat.** Decide the direction now, build later.
 7. **P11 TypeScript everywhere:** the protocol spec and test vectors
-   alongside P1/P4/P7, the Tauri spike, the TypeScript core, the React Native
+   alongside P1/P4/P7, the Tauri-vs-Flutter spike, the chosen core, the React Native
    UI for phone and desktop, then the harness.
 
 ## Sources

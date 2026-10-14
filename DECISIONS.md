@@ -43,7 +43,9 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   - P11 (2026-10-15): TypeScript for every human client, then the harness
     (option D, Aryan's stated direction). React Native on the phone; Tauri on
     the desktop (Linux required, Electron start-up rejected). Gated by a
-    protocol spec with test vectors and a 1–2 week spike measuring start-up.
+    protocol spec with test vectors and a 2–3 week spike that also builds
+    the client in Flutter (Dart), so the stack is chosen on measured
+    start-up, memory and porting experience.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.
