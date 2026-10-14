@@ -9,6 +9,39 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 
 ## Typed-writer migration (2026-10-13 onward)
 
+### D-019 Leave and delete without making the user wait (open, Aryan deciding)
+- **Today (D-017):** under a bound writer a leave or delete-for-everyone
+  first delivers my queued sends to that chat, then makes one provider
+  call. Online with an empty queue that is one round trip. With sends still
+  queued (offline, provider down) it refuses with "still sending; try again".
+  The wait is real only on that path. Leaving first would make those sends
+  fail for good, since a former member cannot append.
+- **Aryan's idea (2026-10-14):** hide the chat at once and leave in the
+  background once the sends are delivered. The known risk is a "ghost":
+  another of my devices keeps showing the chat.
+- **Suggested shape (not built):** make the leave the last item in the
+  chat's ordered outbox. One click durably records a leave intent in the
+  Store and marks the chat `leaving` in my per-user overlay
+  (`state/<user>.json`). That overlay is a provider doc all my devices
+  merge, so they hide it too. That removes the ghost once the overlay lands.
+  The existing outbox cycle delivers the earlier sends, then runs the
+  `meta_append` leave. This device stops syncing and notifying for a
+  `leaving` chat. "Cancel leaving" works until the swap is sent. A leave
+  cannot be refused for a lasting reason (groups only, already gone counts as
+  done), so a pending leave only waits for the network. Delete-for-everyone
+  would follow the same pattern but keep its confirmation dialog. If the
+  admin is demoted first, a lasting refusal un-hides the chat with a notice.
+- **What stays visible:** until the swap lands, others still see me as a
+  member, and new key epochs still include me. That is the same as any
+  offline member. Sends queued on another device's Store fail after the leave
+  and need the typed outbox dead-letter (BACKLOG) to show "not sent: you
+  left".
+- **Path not suggested:** folding pending sends into the leave RPC (one
+  transaction). It is atomic, but it couples outbox receipts to membership
+  receipts.
+- **Cost:** moderate (a Store intent kind, an overlay flag, the outbox
+  ordering rule, UI state).
+
 ### D-018 A deleted group belongs to its final members (taken, 2026-10-14)
 - **Decision:** the delete-for-everyone fold records `final_members` (the
   members at the moment of deletion) before it empties `members`. Only those
@@ -157,14 +190,32 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   login, which locks the account out of every chat).
 - **Path (Aryan):** the app runs only on Aryan's machine plus one friend who
   uses it occasionally; her account can be deleted or she upgrades before
-  the seal.
-- **Revisit:** if the mesh grows or someone must be evicted after sealing
-  (needs a typed operator flow plus key rotation in their chats).
+  the seal. Aryan accepted this for the current scale (2026-10-14), but the
+  architecture must hold as users join (BACKLOG "Architecture comparison").
+- **What is and is not possible (clarified 2026-10-14):** only the CLI is
+  blocked, not the owner. Production is not sealed, so `revoke` works today.
+  After the seal the project owner can still delete the account in the
+  dashboard (Authentication > Users). The account can then never sign in or
+  refresh again. An access token it already holds keeps working until it
+  expires (one hour by default), because the database still finds its
+  `ab_members` row. The leftover row also keeps the username taken and the
+  name in the directory and in its chats' member lists. `revoke` cannot
+  remove that row under the seal for two reasons. The seal refuses direct
+  writes from every role, the service key included. And every typed write
+  needs a signed-in actor (`auth.uid()`) to own its receipt, which the
+  service key does not have. A SQL-editor bypass of the gate is possible
+  but writes outside the receipt guarantees the seal exists for.
+- **Fix when needed:** a typed eviction RPC run by a root-owner account (a
+  near copy of `member_leave` keyed by username), which cuts access
+  instantly. Remaining clients would then drop evicted accounts from their
+  chats and rotate keys (the larger part).
+- **Revisit:** if the mesh grows or someone must be evicted after sealing.
 
 ### D-012 Fleet upgrade before seal (taken, 2026-10-14)
 - **Decision:** sealing blocks legacy writes for every client, so every GUI
   and worker must run the typed build first. In practice: Aryan's machine,
-  and the friend's account is deleted or upgraded.
+  and the friend's account is deleted or upgraded. Aryan accepted this for
+  the current scale (2026-10-14).
 - **Revisit:** at seal time; production install and seal need Aryan's go-ahead.
 
 ### D-011 Chat-key history re-wrap limits (taken, 2026-10-14)
@@ -188,6 +239,43 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 - **Question:** GUI typing indicators and the harness live feed would spend a
   provider receipt on every update under the typed writer. Move them to
   Supabase Realtime broadcast/presence, or keep them typed?
+- **What they are (2026-10-14):**
+  - Typing: the composer posts every 3 s while text is entered;
+    `status/typing_<user>.json` holds user, chat id and time; readers show
+    it for 12 s.
+  - Live feed: `status/<agent>_live.json`, written at most every 1.5 s per
+    run step plus a 15 s heartbeat; it holds the chat id, turns and the
+    last activity lines (tool-step summaries).
+  - Presence (same class): `presence/<user>@<machine>.json`, every 45 s per
+    running client on Supabase. Its `last_seen_ns` also drives Delivered
+    ticks, so that part is not ephemeral.
+- **Why typed is the wrong lane:** each typed write holds one of 4,096
+  receipt slots shared by the whole root. Only an epoch rotation frees them,
+  and today only the database owner can run one, once every receipt is
+  acknowledged (BACKLOG "Receipt epoch rotation"). Ten clients beating
+  presence fill an epoch in about five hours before any message is sent.
+  A lost or doubled typing ping is harmless, so receipts buy nothing.
+- **Options:**
+  - Keep them typed: not viable at those rates.
+  - Exempt these paths from the seal: a small SQL change, but it breaks
+    "every sealed write has a receipt".
+  - Supabase Realtime: Broadcast for typing and the live feed, Presence for
+    online state, on private per-chat topics. RLS on `realtime.messages`
+    reuses `ab_can_read_chat`. That means no database writes, and a direct
+    push instead of write-then-poll. It also closes a leak that exists today:
+    `status/` is readable by every root member, so non-members can see chat
+    ids and agents' activity lines.
+- **Costs of Realtime:** private channels need "Allow public access" off,
+  so the existing public `ab-<root>` hint channel must move to private too.
+  Realtime checks authorization at join and on a new JWT, so a removed
+  member keeps seeing a chat's typing until their token refresh (default
+  one hour; can be shortened). There is no history, which is fine for these.
+  The Python client supports `private: True`.
+- **Recommendation:** Realtime for typing and the live feed; Realtime
+  Presence for online state, with `last_seen_ns` written only when it
+  advances. This matches Signal (typing indicators are encrypted messages
+  flagged online-only, ephemeral) and Telegram (`setTyping` is a transient
+  update clients drop after 6 s).
 - **Revisit:** before activation (BACKLOG "Bound generic submits").
 
 ### D-008 Code review without Codex (taken, 2026-10-14)

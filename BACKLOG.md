@@ -82,7 +82,9 @@ moment it is made, so a large task list never lives only in conversation.
   `MembershipService.recover` is per row); per-chat paths stay fail-closed.
   A refused key-epoch create replays harmlessly (fresh ns epoch numbers).
 - [D] **`revoke` under a seal** (2026-10-14): refuses before any change;
-  eviction needs a typed operator flow (and the key-rotation owner).
+  eviction needs a typed operator flow (and the key-rotation owner). Until
+  then, deleting the auth user in the dashboard locks the account out once
+  its access token expires; the `ab_members` row stays (DECISIONS.md D-013).
 - [ ] **Bound migrated-account login upgrade**: `upgrade_login` (pbkdf2 →
   scrypt, keys minted for a keyless v1 account) still refuses under a bound
   writer; it needs the human identity owner's material path.
@@ -187,6 +189,37 @@ moment it is made, so a large task list never lives only in conversation.
   remove. Needs an authenticated Scratch test session (Aryan's; Claude does
   not create accounts). The janitor already lists its three folders by
   name, so a Storage that hides sub-folder rows only misses unexpected ones.
+  Confirmed 2026-10-14: the Supabase connector has no Storage object tools
+  (its optional storage group only lists buckets and edits their config).
+  Steps for Aryan: create two auto-confirmed users in Scratch's dashboard,
+  put the six `AGENTBRIDGE_SCRATCH_*` values in a mode-600 file outside the
+  repo (`docs/provider-mutation-acceptance/20261013081948-http-notes.md`),
+  then run one command; Claude adds a `listing` mode to
+  `devtools/validate_blob_storage_http.py` and sets up the root by SQL. The
+  database half (`storage.search` as an emulated member in a rolled-back
+  block) needs no session and can run first.
+- [ ] **Architecture comparison with Signal and Telegram** (Aryan,
+  2026-10-14): check that the architecture holds as users join without
+  another rewrite. Compare delivery and idempotency, multi-device state,
+  group authority (D-014), eviction and bans (D-013), ephemeral signals
+  (D-009), social-graph exposure (D-018) and leave/delete UX (D-019); list
+  each gap with the cost of closing it now versus later.
+- [ ] **Receipt epoch rotation** (activation blocker, found 2026-10-14):
+  every typed write holds one of 4,096 root-wide receipt slots until
+  `ab_admin_rotate_mutation_epoch`, which no API role may call (database
+  owner only) and which needs every receipt acknowledged. Nothing schedules
+  it, so a busy root stops writing ("epoch is full") within hours to days.
+  Decide who rotates and when, keep ephemeral traffic off receipts (D-009),
+  and handle the attempted-without-receipt case
+  (docs/PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md).
+- [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,
+  found 2026-10-14): any root member may read `status/typing_*` (chat id)
+  and `status/<agent>_live.json` (chat id plus tool-step activity lines),
+  although the GUI only shows a chat's own. Moving them to private per-chat
+  Realtime topics (D-009) fixes it; otherwise move the docs under
+  `chats/<id>/`.
+- [D] **Optimistic leave and delete** (Aryan, 2026-10-14): Aryan is deciding;
+  the suggested shape is in DECISIONS.md D-019.
 - [ ] **Derivable exact-create keys** (review, 2026-10-14; pre-existing,
   accepted at this scale): `exact_create_id` is a uuid5 of the path, and
   receipts are keyed across actors, so any root member can take another
