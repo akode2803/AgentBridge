@@ -40,7 +40,7 @@ def _raw_receipt(request, *, applied=True):
     result = dict(e.targets)
     if e.kind == "doc_put":
         result["updated"] = True
-    if e.kind == "doc_compare_put":
+    if e.kind in ("doc_compare_put", "meta_append"):
         result["applied"] = applied
     if e.kind == "doc_create":
         result["created"] = True

@@ -501,7 +501,10 @@ class Store:
     # Membership events waiting on their meta.json CAS (see membership_actions).
     def membership_action_add(self, chat_id: str, operation_id: str,
                               envelopes) -> membership_actions.MembershipAction:
-        return membership_actions.add(self._conn(), chat_id, operation_id, envelopes)
+        """Durably (FULL) record an attempt before the journal prepares it, so
+        a journal operation never outlives the row that can settle it."""
+        with self._outbox_transaction() as c:
+            return membership_actions.add(c, chat_id, operation_id, envelopes)
 
     def membership_actions_pending(
         self, *, chat_id: str | None = None, limit: int = 64, after_id: int = 0,
@@ -513,17 +516,26 @@ class Store:
         return membership_actions.discard(self._conn(), row_id)
 
     def membership_action_commit(
-        self, action: membership_actions.MembershipAction, target: str,
-        *, observed_clock: str = "",
-    ) -> list[int]:
-        """Atomically cache and enqueue an action's envelopes and drop its row."""
+        self, action: membership_actions.MembershipAction,
+        *, target: str | None = None, observed_clock: str = "",
+    ) -> None:
+        """Cache an applied action's envelopes and drop its row, atomically.
+
+        A meta swap appended them to the provider log itself (``target`` is
+        None); a genesis also enqueues them for ``target``. The commit is
+        durable (FULL) because the action's journal ticket is released next."""
         with self._outbox_transaction() as c:
             membership_actions.take(c, action)
             observed, tick = time.time_ns(), time.perf_counter_ns()
-            return [self._cache_and_outbox_insert(
-                c, action.chat_id, env, "append_log", target, env,
-                observed=observed, observed_tick=tick, observed_clock=observed_clock)
-                for env in action.envelopes]
+            for env in action.envelopes:
+                if target is None:
+                    self._cache_insert(c, action.chat_id, env, observed=observed,
+                                       observed_tick=tick, observed_clock=observed_clock)
+                else:
+                    self._cache_and_outbox_insert(
+                        c, action.chat_id, env, "append_log", target, env,
+                        observed=observed, observed_tick=tick,
+                        observed_clock=observed_clock)
 
     def forget_chat(self, chat_id: str) -> None:
         with self._conn() as c:
@@ -776,8 +788,7 @@ class Store:
                 observed_clock=observed_clock, client_ref=client_ref)
 
     @staticmethod
-    def _cache_and_outbox_insert(c, chat_id, record, kind, target, outbox_payload, *,
-                                 observed, observed_tick, observed_clock, client_ref=""):
+    def _cache_insert(c, chat_id, record, *, observed, observed_tick, observed_clock):
         rid, ns = record.get("id"), record.get("ns")
         if not rid or not isinstance(ns, int):
             raise ValueError("message record needs id and integer ns")
@@ -790,6 +801,13 @@ class Store:
              json.dumps(record, ensure_ascii=False), observed, observed_tick,
              str(observed_clock or "")[:80]),
         )
+
+    @staticmethod
+    def _cache_and_outbox_insert(c, chat_id, record, kind, target, outbox_payload, *,
+                                 observed, observed_tick, observed_clock, client_ref=""):
+        Store._cache_insert(c, chat_id, record, observed=observed,
+                            observed_tick=observed_tick, observed_clock=observed_clock)
+        rid = record.get("id")
         cur = c.execute(
             "INSERT INTO outbox(kind,target,payload,created_ns) VALUES(?,?,?,?)",
             (kind, target, json.dumps(outbox_payload, ensure_ascii=False),
@@ -965,6 +983,23 @@ class Store:
                 " last_error=? WHERE seq=?",
                 (time.time_ns() + int(delay_s * 1e9), error[:500], seq),
             )
+
+    def outbox_expedite(self, prefix: str) -> int:
+        """Make unleased pending rows whose target starts with ``prefix``
+        due now (skip backoff)."""
+        with self._conn() as c:
+            return c.execute(
+                "UPDATE outbox SET next_ns=0 WHERE substr(target, 1, ?)=?"
+                " AND state='pending' AND lease_ns<=?",
+                (len(prefix), prefix, time.time_ns())).rowcount
+
+    def outbox_pending_count(self, prefix: str) -> int:
+        """Rows whose target starts with ``prefix`` that have not reached
+        the provider yet."""
+        (count,) = self._conn().execute(
+            "SELECT count(*) FROM outbox WHERE substr(target, 1, ?)=?"
+            " AND state='pending'", (len(prefix), prefix)).fetchone()
+        return int(count)
 
     def outbox_dead(self, seq: int, error: str) -> None:
         """Only for structurally unprocessable items (unknown kind, malformed

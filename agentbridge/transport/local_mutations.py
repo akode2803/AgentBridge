@@ -271,17 +271,19 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return outcomes
 
-    def update_doc(self, path, build, *, operation_for=None):
+    def update_doc(self, path, build, *, operation_for=None, log=None):
         """Compare-and-swap a freshly observed document via the bound writer.
 
         ``build(current)`` must be a repeatable calculation over raw current
         data; it may run again after a conflict. Returns (document, changed).
-        ``operation_for`` names each attempt (see the writer).
+        ``operation_for`` names each attempt and ``log`` makes a chat meta
+        swap append its records atomically (see the writer).
         """
         writer = self._bound_writer()
         if writer is None:
             raise ValueError('typed mutation journal is not bound')
-        document, changed = writer.update_document(path, build, operation_for=operation_for)
+        document, changed = writer.update_document(
+            path, build, operation_for=operation_for, log=log)
         self._bound_writer()
         if changed:
             self._typed_success()
@@ -363,15 +365,6 @@ class LocalMutationTransport(Transport):
             raise ValueError('typed mutation journal is not bound')
         writer.release_operation(operation_id)
         self._bound_writer()
-
-    def attempt_superseded(self, operation_id):
-        """Whether a refused keyed compare-and-swap can never apply."""
-        writer = self._bound_writer()
-        if writer is None:
-            raise ValueError('typed mutation journal is not bound')
-        superseded = writer.attempt_superseded(operation_id)
-        self._bound_writer()
-        return superseded
 
     def exact_create_id(self, path):
         """The operation id ``create_exact_doc`` uses for ``path``."""

@@ -174,6 +174,17 @@ def test_add_members_respects_permission_level(world):
     aryan.add_members(snap.id, ["sudhir"])  # admin still can
 
 
+def test_unbound_removal_of_someone_already_gone_still_refuses(world):
+    """``missing_ok`` belongs to the bound writer; the unbound path is
+    unchanged (no meta write, no rotation)."""
+    aryan = world["aryan"]
+    snap = aryan.create_chat("Gone", members=["fable"])
+    before = len(aryan.messages_for(snap.id))
+    with pytest.raises(ValidationError, match="not a member"):
+        aryan.membership.remove_member(snap.id, "sudhir", missing_ok=True)
+    assert len(aryan.messages_for(snap.id)) == before
+
+
 def test_remove_member_cascades_ownerless_agent(world):
     aryan = world["aryan"]
     snap = aryan.create_chat("Cascade", members=["coco"])  # pulls fable

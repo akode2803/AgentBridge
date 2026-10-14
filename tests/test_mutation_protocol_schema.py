@@ -602,6 +602,56 @@ def test_reaction_pair_rolls_back_both_documents_and_retains_conflict_receipt():
     assert 'to authenticated' in grant
 
 
+def test_meta_append_swaps_meta_and_appends_records_atomically():
+    body = _last_body(
+        'create or replace function public.ab_mutation_meta_append(',
+        'revoke all on function public.ab_mutation_meta_append(')
+    validate = body.index("raise exception 'invalid meta append'")
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    actor = body.index('v_member := private.ab_mutation_lock_actor')
+    chat_lock = body.index('perform private.ab_mutation_lock_chat(p_root, p_chat, true)')
+    observed = body.index('select d.data, d.seq, d.deleted into v_meta, v_seq, v_deleted')
+    tenure = body.index("not coalesce(v_meta->'members' ? v_member\n"
+                        "                     or v_meta->'tenure' ? v_member, false)")
+    source_lock = body.index("'agentbridge-change-ledger:'")
+    compare = body.index('if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq')
+    authority = body.index('if not public.ab_is_member(p_root, p_chat) then')
+    update = body.index('and d.seq = p_expected_seq and d.deleted = p_expected_deleted')
+    applied = body.index('if v_applied then')
+    append = body.index('insert into public.ab_logs(root, chat_id, log_name, line)')
+    finish = body.index('return private.ab_mutation_finish')
+    # Tenure earns the terminal answer for a version that moved on (a race
+    # lost to one's own removal settles); only a current member of the exact
+    # pre-swap version may swap; records land only with an applied swap.
+    assert validate < replay < actor < chat_lock < observed < tenure < source_lock
+    assert source_lock < compare < authority < update < applied < append < finish
+    assert "v_member = '' or v_meta is null" in body
+    assert body.count("raise exception 'meta append is unauthorized'") == 2
+    assert "d.path = 'chats/' || p_chat || '/meta.json'" in body
+    assert 'on conflict' not in body and 'insert into public.ab_docs' not in body
+    assert 'p_expected_seq < 1' in body
+    assert 'p_expected_deleted is distinct from false' in body
+    assert 'jsonb_array_length(p_records) not between 1 and 256' in body
+    assert 'with ordinality r(value, ordinal)' in body and 'order by r.ordinal' in body
+    assert 'v_bytes > 8355840' in body
+    assert "'meta_append', p_chat, p_data," in body
+    assert 'p_log, p_records)' in body
+    assert "'chat_id', p_chat, 'log_name', p_log," in body
+    permits = _last_body('create or replace function private.ab_mutation_kind_permits(',
+                         'revoke all on function private.ab_mutation_kind_permits(')
+    clause = permits[permits.index("when 'meta_append'"):permits.index("when 'doc_create'")]
+    assert "p_table = 'ab_docs' and p_operation = 'UPDATE'" in clause
+    assert "p_table = 'ab_logs' and p_operation = 'INSERT'" in clause
+    assert "'DELETE'" not in clause and "ab_members" not in clause
+    for kinds in (SCHEMA[SCHEMA.index('create or replace function private.ab_mutation_begin('):],
+                  SCHEMA[SCHEMA.rindex('add constraint ab_mutation_receipts_operation_kind_check'):],
+                  SCHEMA[SCHEMA.rindex('add constraint ab_mutation_admission_legs_operation_kind_check'):]):
+        assert "'meta_append'" in kinds[:1200]
+    grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_meta_append('):]
+    assert 'from public, anon, authenticated, service_role' in grant
+    assert 'to authenticated' in grant
+
+
 def test_owner_admission_tables_bound_slots_and_keep_receipt_wire_separate():
     for table in ('ab_mutation_admission_groups', 'ab_mutation_admission_legs'):
         assert f'create table if not exists public.{table}' in SCHEMA

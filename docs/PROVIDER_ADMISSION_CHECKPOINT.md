@@ -314,24 +314,28 @@ Bound writer:
    whatever their ns: the swap orders them, not wall clocks) and requires the
    primary ones to take effect (events everyone's fold would reject never
    reach the ACL). The watermark moves strictly forward (`max(W + 1, newest
-   minted ns)`), so it also versions the document. Events reach the outbox
-   only after the swap applied. Membership `joined_ns` is the adder's own
-   clock; no process clock is changed.
+   minted ns)`), so it also versions the document. The provider appends the
+   events to the actor's own log in the same transaction as the swap (meta
+   append, see "Terminal flows" below; the first version queued them in the
+   outbox after the swap). Membership `joined_ns` is the adder's own clock; no
+   process clock is changed.
 2. **Durable bridge.** Before each attempt is dispatched a Store row
-   (`membership_actions`: chat, operation id, envelopes) is written, and the
-   CAS uses an operation id derived from the first envelope id. Applied: one
-   Store transaction caches and enqueues the envelopes and deletes the row, and
-   only then is the attempt's journal ticket released (an epoch closure prunes
+   (`membership_actions`: chat, operation id, envelopes) is committed with a
+   full sync, and the swap uses an operation id derived from the first
+   envelope id. Applied: one Store transaction caches the envelopes (the
+   provider already logged them) and deletes the row, and only then is the
+   attempt's journal ticket released (an epoch closure prunes
    released records, so a ticket released earlier could lose the receipt
    before a crashed row is settled). A conflicted attempt's row is dropped and
    its ticket released before the rebuild (also when all three attempts lose).
    Interrupted rows settle by exact journal lookup: applied, the events are
    logged and the key steps the caller never reached run (bound to the exact
-   `joined_ns`, and only when the current view agrees); not applied or never
-   prepared, the row is dropped; refused by the provider with a document that
-   has since moved on, it can never apply (versions never repeat) and is
-   dropped. Anything else stays: the next action on that chat settles it first
-   (fail closed), `recover()` skips it and finishes the rest.
+   `joined_ns`, and only when the current view agrees; skipped when I am no
+   longer a member); not applied, never prepared, or proven unexecuted by an
+   epoch closure, the row is dropped. A refused attempt stays (its journal
+   operation still holds the chat, and the row is how it is replayed, e.g. to
+   `applied=false` once I am re-added): the next action on that chat settles
+   it first (fail closed), `recover()` skips it and finishes the rest.
 3. **Genesis.** Same row, keyed by the meta path's exact-create id, then
    `create_exact_doc` and the genesis event. DM and self-chat creation settle
    pending geneses and hold the owner's lock across the dedupe scan and the
@@ -339,7 +343,8 @@ Bound writer:
 4. **Mirror lag.** Typed receipts do not refresh the mirror, so meta this
    process wrote is served (snapshot and chat listing) until the mirror shows
    that version or newer, for at most 120 s (a chat the mirror never shows may
-   have been denied meanwhile).
+   have been denied meanwhile). A version that no longer lists me has no time
+   limit, so a room I left cannot come back while the mirror lags.
 5. **refold** under a bound writer only backfills missing `tenure` (its one
    automatic use, pre-R25 metas); it never replaces members, roles or settings
    from a local fold that may lack another writer's log.
@@ -351,8 +356,9 @@ Limits: actions are serialized per `MembershipService` (one lock across
 chats, including network I/O; membership actions are rare). Another process
 whose mirror holds a newer watermark than an event's ns shows that change only
 once its mirror refreshes (seconds); events from legacy writers before the
-seal are outside the CAS order (drain and fleet upgrade first). `recover()`
-has no caller until activation wiring, which runs it before
+seal are outside the CAS order (drain and fleet upgrade first). The outbox
+cycle runs `sweep()` (a throttled `recover()`, at most once a minute while
+something cannot settle); activation wiring also runs `recover()` before
 `ChatKeyService.recover`. Group/profile photo uploads still need a typed blob
 path (`set_avatar` refuses before any event). A crash between consuming a row
 and releasing its ticket leaves one acknowledged record held until rotation.
@@ -371,8 +377,86 @@ the key-owner recovery changes) fails a test every time.
 
 Not changed here (DECISIONS.md D-014): the provider lets any current member
 replace meta.json, so admin rules are enforced by every honest client's fold,
-not by PostgreSQL. Leave and delete-for-everyone stay refused under a bound
-writer (terminal flows) and must follow the same meta-first rule.
+not by PostgreSQL.
+
+## Terminal flows (inactive typed path, 2026-10-14)
+
+Meta first plus the outbox could not express leave or delete-for-everyone:
+once the swap applies the actor is no longer a member, so the provider refuses
+the append of the very event that records it. Logging first would bring back
+signed events the ACL never reflects. So the provider gained one RPC and every
+typed membership action except genesis moved to it (DECISIONS.md D-017).
+
+1. **`ab_mutation_meta_append`** (docs/supabase_schema.sql, tail): the
+   conditional `meta.json` swap (`expected_seq >= 1`, never a tombstone, never
+   a create) and 1..256 records appended to one log in array order, in one
+   transaction, under actor key-share, exclusive chat and shared ledger
+   locks (the `doc_compare_put` order). Replay precedes authority as in every
+   family. Then the version is compared before membership: anyone in the
+   chat's tenure (current or former member) gets the terminal `applied=false`
+   for a version that moved on, so an action that lost a race to its own
+   removal or to the group's deletion settles; only a current member of the
+   exact pre-swap version may swap (`ab_is_member`); anyone else is refused.
+   It grants nothing a member could not already do with `doc_compare_put`
+   plus `log_append`. Receipt result `{chat_id, log_name, applied}`.
+2. **Client wire.** `update_document(path, build, log=(chat, log_name))`:
+   `build` returns `(meta, records)`; journal selectors are the exact meta path
+   and the chat's logs, so the overlap guard refuses an action while a send to
+   that chat is in flight (shown as "this chat is busy; try again in a
+   moment"). Records are the exact JSON the provider stores.
+3. **Leave** (groups only): first settle the chat's earlier actions (an
+   unsettled one would make the drain's sends overlap it; a retry after a
+   lost reply whose leave applied is then done), then deliver every queued
+   send of mine to the chat in this Store, from any device log and even in
+   backoff (refuse while any remain, since afterwards the provider refuses
+   them for good), then one meta append: my agents' cascade removals, then my
+   `member_left`. No leaver-minted key rotation (R69): after the swap I cannot
+   write a key doc, and `ensure()` re-keys on the next send by a remaining
+   member. Account deletion passes `missing_ok`.
+4. **Delete for everyone** (admins, groups): the same settle and drain (a
+   retried delete that applied is done), then one meta append of
+   `chat_deleted` (members empty afterwards). Attachments wait for the
+   janitor, since blob deletes are not typed yet.
+5. **Delete agent/account** keep their order (each removal or leave settles
+   before deactivation and key deletion) and treat an already-gone membership
+   as done (bound writer only); an already-gone agent triggers no rotation.
+6. **Sweep.** The outbox worker's cycle runs `MembershipService.sweep()`
+   while holding its dispatch gate, so the sweep never waits for a running
+   action (non-blocking lock; that action settles its own chat first), makes
+   at most 16 provider settles, retries a row that could not settle only
+   after 60 s (per row, so one stuck chat holds back no other) and never
+   raises into the cycle.
+
+Limits (BACKLOG): the typed outbox retries refused appends forever (sends
+queued after the drain by another thread, other members' queued sends);
+janitor and blob reclamation are not typed; an agent transferred to a new
+owner stays in rooms the owner is not in; former members can read a deleted
+group's plaintext info events (D-018, pre-existing).
+
+Evidence: tests/test_membership_owner.py (leave lands with its event, lost
+leave recovered and retried, refused swap kept until a replay resolves it,
+leave waits for undeliverable sends, busy mapping, sweep backoff, overlay
+outlives the TTL); the PostgreSQL gate's meta-append schedule (CI); and a
+hosted Scratch acceptance (docs/provider-mutation-acceptance/20261014061026-*:
+invalid requests, stale version and source epoch, outsiders, atomic leave in
+array order, digest binding, replay after losing membership, delete for
+everyone, anon refused; rolled back), then the version-first correction
+(`20261014064104-*`: races lost to one's own leave or to the deletion answer
+`applied=false`; a root member never in the chat is refused). Independent
+Claude review of the design and first draft: a refused, superseded row was
+dropped while its journal operation still held the chat (chat blocked for
+good), the row was not durable before dispatch, pre-leave sends could be
+stranded, and smaller gaps. A second review of the implementation: an action
+that lost a race to its own removal or to the deletion was refused rather
+than answered (row and journal operation held until closure, one of 64
+global intents each), the sweep could stall the outbox thread behind a
+running action and one stuck row delayed every other, an unsettled earlier
+action made the pre-leave drain fail, and a retried delete raised. All fixed
+with tests. A mutation pass removed each of 34 safety properties one at a
+time (drain, settle-first, retry, cascade order, authority plans, missing_ok
+scope, sweep lock/limit/backoff/guard/wiring, busy mapping, overlay, cache-only
+commit, journal selectors, wire bounds, FULL sync, account deletion wiring);
+a test fails for every one.
 
 ## Next
 
@@ -401,8 +485,8 @@ writer (terminal flows) and must follow the same meta-first rule.
    rediscoverable, ticketed after lifecycle opt-in and released once
    acknowledged; lifecycle writes first settle earlier exact creates for that
    subject. Minting keys for a keyless agent still requires an identity owner.
-   Human creation is done above. Next: key rotation and
-   membership-bound wrapping, and terminal cleanup phases. Retain keys through
+   Human creation is done above, then key rotation, membership-bound
+   wrapping and the terminal flows. Next: terminal cleanup (janitor, blobs). Retain keys through
    unknown outcomes. Distinguish pre-existing namespace weaknesses from new
    migration regressions.
 4. Complete disposable authenticated migration acceptance, then release and

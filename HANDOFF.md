@@ -1,5 +1,46 @@
 # Cloud source handoff
 
+## 2026-10-14 terminal flows (meta append)
+
+Branch `codex/provider-owner-admission` (PR #146 continues). New provider RPC
+`ab_mutation_meta_append`: the conditional `meta.json` swap and the actor's
+signed events, appended to the actor's log in one transaction under pre-swap
+authority. Every typed membership action except genesis now uses it, which
+lets leave (groups; agents cascade first) and delete-for-everyone (admins)
+work under a bound writer: both first deliver this device's queued sends to
+the chat and refuse while any remain; no leaver-minted rotation; attachments
+wait for the janitor. Delete agent/account treat an already-gone membership as
+done. A refused action keeps its Store row until a receipt or closure; the
+outbox cycle sweeps leftovers (`MembershipService.sweep`, 60 s backoff); the
+overlap with an in-flight send reads "this chat is busy". The RPC compares
+the version before membership: anyone in the chat's tenure gets
+`applied=false` for a version that moved on (a race lost to one's own removal
+or the deletion settles); only a current member may swap. Leave/delete settle
+the chat's earlier actions first and drain every queued send of mine; the
+sweep never blocks the outbox thread, is capped and backs off per row.
+Unbound path unchanged. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+"Terminal flows"; DECISIONS.md D-016..D-018.
+
+Scratch (Aryan allowed applying schema freely, 2026-10-14) now carries the
+branch protocol through `agentbridge_p1b_meta_append_rpc`, plus a Scratch-only
+`ab_docs_touch` version trigger its scaffold lacked (every doc sat at seq 0, so
+no compare RPC could match). Hosted acceptance of the meta append passed in one
+rolled-back DO block; exact SQL, hashes and observations in
+docs/provider-mutation-acceptance/20261014*. It also caught non-hex digests in
+the new CI gate schedule (fixed). The version-first correction is
+`agentbridge_p1b_meta_append_tenure_answer`, accepted the same way
+(`20261014064104-*`). Two independent Claude reviews (design, then
+implementation) each found a chat-wedging HIGH plus smaller gaps; all fixed
+with tests.
+
+New BACKLOG items: typed outbox retries refused appends forever; janitor/blob
+deletion under typed; agent ownership transfer under typed; member-controlled
+`materialized_ns` overflow; `p_log` actor binding; `ab_docs_touch`
+search_path; activation gates (provider has meta append; drain legacy terminal
+rows); release completed meta-append tickets that lost their row. Next: message overlays, read-ack reservation, avatar blobs, harness/GUI
+write classification, janitor/blobs, activation wiring. No production schema
+change, activation or merge.
+
 ## 2026-10-14 membership owner (meta first)
 
 Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound

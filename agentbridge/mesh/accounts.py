@@ -785,7 +785,8 @@ class AccountsService:
             if snap.kind is ChatKind.GROUP and agent in snap.members:
                 # A failed or ambiguous leave cannot justify destroying the
                 # private keys required to recover that membership operation.
-                self.membership.remove_member(snap.id, agent)
+                # A target the fresh meta no longer lists is already done.
+                self.membership.remove_member(snap.id, agent, missing_ok=True)
         at = utcnow_iso()
         self.ensure_lifecycle(agent)
         from .lifecycle import publish_change
@@ -808,7 +809,7 @@ class AccountsService:
         for snap in self.membership.chats_for():
             if snap.kind is ChatKind.GROUP:
                 # Preserve active identity and keys until every leave settles.
-                self.membership.leave(snap.id)
+                self.membership.leave(snap.id, missing_ok=True)
         at = utcnow_iso()
         from .lifecycle import publish_change
 

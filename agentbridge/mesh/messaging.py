@@ -137,7 +137,12 @@ class MessagingService:
         entry = self._written.get(chat_id)
         if entry is None:
             return None
-        if time.monotonic() - entry[1] > WRITTEN_TTL_S:
+        # Only a write that keeps me a member expires. One that ended my
+        # membership (leave, delete) stays until the mirror shows that version
+        # or newer: a mirror that cannot refresh must not bring the room back.
+        members = entry[0].get("members")
+        if (isinstance(members, dict) and self.user in members
+                and time.monotonic() - entry[1] > WRITTEN_TTL_S):
             self._written.pop(chat_id, None)
             return None
         return entry[0]
@@ -321,17 +326,25 @@ class MessagingService:
         self.commit_envelope(chat_id, env)
         return env
 
-    def commit_action(self, action) -> None:
-        """Log a membership action's envelopes now that its meta write applied:
-        cache, enqueue and drop the Store row in one transaction."""
-        for env in action.envelopes:
-            self._require_event_supported(env.get("event"))
+    def commit_action(self, action, *, genesis: bool = False) -> None:
+        """Show a membership action's envelopes now that its meta write
+        applied: cache them and drop the Store row in one transaction. A meta
+        swap already appended them to the provider log; a genesis (an exact
+        create) still enqueues its event, as its creator stays a member."""
+        if genesis:
+            for env in action.envelopes:
+                self._require_event_supported(env.get("event"))
         self.store.membership_action_commit(
-            action, f"{action.chat_id}|{P.log_name(self.user, self.machine)}",
-            observed_clock=clock_id())
+            action, observed_clock=clock_id(),
+            target=f"{action.chat_id}|{self.membership_log()}" if genesis else None)
         for env in action.envelopes:
             self.latency.observe("local_commit", env["id"], at_ns=time.time_ns())
-        self._notify_outbox()
+        if genesis:
+            self._notify_outbox()
+
+    def membership_log(self) -> str:
+        """The log this writer's membership events are appended to."""
+        return P.log_name(self.user, self.machine)
 
     def _require_event_supported(self, event: dict) -> None:
         if (getattr(self.tx, '_journal_writer', None) is not None

@@ -61,6 +61,9 @@ def mutation_selectors(request: PreparedMutation):
         prefix = 'chats/' + args['p_chat'] + '/overlays/'
         changes = (S('doc_exact', prefix + 'state/' + args['p_user'] + '.json'),
                    S('doc_exact', prefix + 'reactions/' + args['p_user'] + '.json'))
+    elif kind == 'meta_append':
+        changes = (S('doc_exact', 'chats/' + args['p_chat'] + '/meta.json'),
+                   S('log_chat', args['p_chat']))
     elif kind == 'log_append':
         changes = (S('log_chat', args['p_chat']),)
     elif kind == 'effect_transition':

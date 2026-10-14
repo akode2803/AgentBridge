@@ -102,13 +102,14 @@ def add(conn: sqlite3.Connection, chat_id: str, operation_id: str,
     chat_id, operation_id = _chat(chat_id), _operation(operation_id)
     envelopes = _envelopes(envelopes)
     encoded = _encode(envelopes)
-    with conn:
-        (count,) = conn.execute("SELECT count(*) FROM membership_actions").fetchone()
-        if count >= MAX_PENDING:
-            raise OverflowError("too many unsettled membership actions")
-        row_id = conn.execute(
-            "INSERT INTO membership_actions(chat_id,operation_id,envelopes) VALUES(?,?,?)",
-            (chat_id, operation_id, encoded)).lastrowid
+    # Inside the caller's transaction: the row must be durable before the
+    # attempt it names is prepared in the journal.
+    (count,) = conn.execute("SELECT count(*) FROM membership_actions").fetchone()
+    if count >= MAX_PENDING:
+        raise OverflowError("too many unsettled membership actions")
+    row_id = conn.execute(
+        "INSERT INTO membership_actions(chat_id,operation_id,envelopes) VALUES(?,?,?)",
+        (chat_id, operation_id, encoded)).lastrowid
     return MembershipAction(row_id, chat_id, operation_id, envelopes)
 
 

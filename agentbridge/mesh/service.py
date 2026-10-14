@@ -150,7 +150,8 @@ class Mesh:
             success_hooks=self.messaging.outbox_success_hooks(),
             dead_hooks=self.messaging.outbox_dead_hooks(),
             prune_hooks=self.messaging.outbox_prune_hooks(),
-            recover_actions=self.messaging.recover_state_actions)
+            recover_actions=lambda: (self.messaging.recover_state_actions()
+                                     + self.membership.sweep()))
         self.bus = EventBus()
         subscribe_changes = getattr(self.tx, "subscribe_changes", None)
         self._mirror_unsubscribe = (
@@ -462,6 +463,10 @@ class Mesh:
 
         if self.keystore.load(agent) is None:
             return  # no keys = no signed goodbye; the heal cascades silently
+        if self.membership._typed():
+            # The provider would check this session's (the owner's) membership,
+            # not the agent's; the heal drops the agent at the next swap.
+            return
         scoped = Mesh(
             self.tx, agent, self.machine, home=self.home,
             encrypt=isinstance(self.sealer, E2EESealer),

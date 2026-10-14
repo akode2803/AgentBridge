@@ -2680,6 +2680,167 @@ def _validate_conditional_documents(database_url: str) -> None:
         raise GateFailure('conditional fresh write ignored membership removal')
 
 
+def _validate_meta_append(database_url: str) -> None:
+    """A membership swap and its events commit together, under pre-swap authority."""
+    root, actor, chat = 'typed-meta-append', uuid4(), 'room'
+    member, log = root + '-member', root + '-member|m1'
+    meta_path = f'chats/{chat}/meta.json'
+    initial = _prepare_root(database_url, root, actor)
+    stranger = uuid4()  # a root member who was never in the chat
+    _run(database_url, 'insert into public.ab_members(root, username, uid) values ('
+         f'{_quote(root)}, {_quote(root + "-stranger")}, {_quote(str(stranger))});')
+    _run(database_url, 'insert into public.ab_docs(root,path,data) values ('
+         f'{_quote(root)}, {_quote(meta_path)}, '
+         f'{_jsonb({"members": {member: {}, "peer": {}}})});')
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, initial, uuid4())))
+    epoch, source = UUID(sealed['protocol_epoch']), UUID(sealed['source_epoch'])
+
+    def record(n):
+        return {'id': f'e{n}', 'ns': n, 'kind': 'info', 'event': {'type': 'member_left'}}
+
+    def call(seq, members, records, *, operation=None, source_epoch=source,
+             deleted=False, extra=None):
+        return ('select public.ab_mutation_meta_append('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(operation or uuid4()))}::uuid, {_quote("d" * 64)}, '
+                f'{_quote(chat)}, {_jsonb({"members": members, **(extra or {})})}, '
+                f'{_quote(str(source_epoch))}::uuid, {seq}, '
+                f'{"true" if deleted else "false"}, {_quote(log)}, '
+                f'{_quote(json.dumps(records))}::jsonb)')
+
+    def run(sql, uid=actor):
+        return json.loads(_scalar(database_url, 'begin; set local role authenticated; '
+                                 + _claims(uid) + sql + '; commit;'))
+
+    def refused(sql, uid=actor):
+        return _run(database_url, 'begin; set local role authenticated; '
+                    + _claims(uid) + sql + '; commit;', expect_ok=False).stderr
+
+    def state():
+        return json.loads(_scalar(database_url,
+            "select jsonb_build_object('seq', d.seq, 'data', d.data, 'lines', "
+            "coalesce((select jsonb_agg(l.line::jsonb order by l.id) from public.ab_logs l "
+            f"where l.root={_quote(root)} and l.chat_id={_quote(chat)}), '[]'::jsonb)) "
+            f"from public.ab_docs d where d.root={_quote(root)} and d.path={_quote(meta_path)};"))
+
+    start = state()
+    seq = start['seq']
+    for bad in (call(0, {}, [record(1)]), call(seq, {}, []),
+                call(seq, {}, [record(1)], deleted=True),
+                call(seq, {}, [record(1), 'not-an-object']),
+                call(seq, {}, [record(n) for n in range(257)])):
+        if 'invalid meta append' not in refused(bad) or state() != start:
+            raise GateFailure('meta append accepted an invalid request')
+    # A stale version or source epoch changes nothing and replays exactly.
+    stale = call(seq + 1, {}, [record(1)])
+    stale_receipt = run(stale)
+    if (stale_receipt['result'] != {'chat_id': chat, 'log_name': log, 'applied': False}
+            or run(stale) != stale_receipt or state() != start):
+        raise GateFailure('stale meta append wrote or did not replay')
+    if run(call(seq, {}, [record(1)], source_epoch=uuid4()))['result']['applied'] \
+            or state() != start:
+        raise GateFailure('meta append crossed the observed source epoch')
+    # An aborted transaction leaves neither half nor a receipt.
+    aborted = call(seq, {'peer': {}}, [record(1)])
+    _run(database_url, 'begin; set local role authenticated; ' + _claims(actor)
+         + aborted + '; rollback;')
+    if state() != start:
+        raise GateFailure('aborted meta append leaked a write')
+    # A root member who was never in the chat gets no answer, even for a
+    # version that moved on.
+    if 'meta append is unauthorized' not in refused(call(seq + 1, {}, [record(1)]),
+                                                    uid=stranger):
+        raise GateFailure('meta append answered a principal outside the chat')
+    # The member leaves: meta and both records land together, in order. The
+    # fold keeps the leaver in tenure.
+    operation = uuid4()
+    tenure = {member: [[1, 3]], 'peer': [[1]]}
+    leave = call(seq, {'peer': {}}, [record(2), record(3)], operation=operation,
+                 extra={'tenure': tenure})
+    receipt = run(leave)
+    after = state()
+    if (receipt['result'] != {'chat_id': chat, 'log_name': log, 'applied': True}
+            or after['data'] != {'members': {'peer': {}}, 'tenure': tenure}
+            or after['seq'] == seq or after['lines'] != [record(2), record(3)]):
+        raise GateFailure('meta append did not swap and append atomically')
+    collision = refused(call(seq, {'peer': {}}, [record(2)], operation=operation))
+    if 'collides with existing receipt' not in collision:
+        raise GateFailure('meta append digest omitted its records')
+    # Replay precedes authority: the former member recovers the exact receipt
+    # without a second append; fresh work is refused.
+    if run(leave) != receipt or run(stale) != stale_receipt or state() != after:
+        raise GateFailure('meta append replay required membership or re-appended')
+    if 'meta append is unauthorized' not in refused(
+            call(after['seq'], {'peer': {}, member: {}}, [record(4)])):
+        raise GateFailure('a former member could still swap the meta')
+    # An attempt that lost a race to the leaver's own departure settles: the
+    # version moved on and the leaver is in tenure, so applied=false.
+    lost = run(call(seq, {'peer': {}, member: {}}, [record(5)]))
+    if (lost['result'] != {'chat_id': chat, 'log_name': log, 'applied': False}
+            or state() != after):
+        raise GateFailure('a race lost to removal did not settle as applied=false')
+
+    # A concurrent swap holding the exclusive chat lock: the waiting append
+    # rechecks the version after the holder commits and appends nothing.
+    root2, actor2 = 'typed-meta-append-race', uuid4()
+    member2 = root2 + '-member'
+    initial2 = _prepare_root(database_url, root2, actor2)
+    _run(database_url, 'insert into public.ab_docs(root,path,data) values ('
+         f'{_quote(root2)}, {_quote(meta_path)}, {_jsonb({"members": {member2: {}}})});')
+    sealed2 = json.loads(_scalar(database_url, _seal_sql(root2, initial2, uuid4())))
+    epoch2, source2 = UUID(sealed2['protocol_epoch']), UUID(sealed2['source_epoch'])
+    seq2 = int(_scalar(database_url, 'select seq from public.ab_docs where root='
+                       f'{_quote(root2)} and path={_quote(meta_path)};'))
+    holder_sql = ('select public.ab_mutation_doc_compare_put('
+                  f'{_quote(root2)}, {_quote(str(epoch2))}::uuid, '
+                  f'{_quote(str(uuid4()))}::uuid, {_quote("a" * 64)}, {_quote(meta_path)}, '
+                  f'{_jsonb({"members": {member2: {}, "late": {}}})}, '
+                  f'{_quote(str(source2))}::uuid, {seq2}, false)')
+    waiter_sql = ('select public.ab_mutation_meta_append('
+                  f'{_quote(root2)}, {_quote(str(epoch2))}::uuid, '
+                  f'{_quote(str(uuid4()))}::uuid, {_quote("b" * 64)}, {_quote(chat)}, '
+                  f'{_jsonb({"members": {}})}, {_quote(str(source2))}::uuid, {seq2}, false, '
+                  f'{_quote(member2 + "|m1")}, {_quote(json.dumps([record(9)]))}::jsonb)')
+    suffix = uuid4().hex[:10]
+    holder_name, waiter_name = 'meta-holder-' + suffix, 'meta-waiter-' + suffix
+    ready, done = 'meta-ready-' + suffix, 'meta-done-' + suffix
+    holder, waiter = _PsqlSession(database_url), _PsqlSession(database_url)
+    try:
+        holder.send(f'set application_name={_quote(holder_name)}; begin; '
+                    'set local role authenticated; ' + _claims(actor2)
+                    + holder_sql + f'; select {_quote(ready)};')
+        holder.wait_marker(ready)
+        waiter.send(f'set application_name={_quote(waiter_name)}; begin; '
+                    'set local role authenticated; ' + _claims(actor2)
+                    + waiter_sql + f'; commit; select {_quote(done)};')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            blocked = _scalar(database_url,
+                'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                'join pg_catalog.pg_stat_activity w on '
+                'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                f'where h.application_name={_quote(holder_name)} '
+                f'and w.application_name={_quote(waiter_name)});')
+            if blocked == 't':
+                break
+            time.sleep(0.025)
+        else:
+            raise GateFailure('meta append did not wait for a concurrent meta swap')
+        holder.send('commit;')
+        waiter.wait_marker(done)
+        holder.finish()
+        waiter.finish()
+    finally:
+        holder.abort()
+        waiter.abort()
+    lines = _scalar(database_url, 'select count(*) from public.ab_logs where root='
+                    f'{_quote(root2)};')
+    members = _scalar(database_url, "select data->'members' ? 'late' from public.ab_docs "
+                      f'where root={_quote(root2)} and path={_quote(meta_path)};')
+    if lines != '0' or members != 't':
+        raise GateFailure('meta append overwrote a concurrent swap or appended anyway')
+
+
 def _validate_reaction_pairs(database_url: str) -> None:
     """Real row/unique-key races must never expose half a checkpoint pair."""
     root, actor, chat = 'typed-reaction-pair', uuid4(), 'room'
@@ -3144,6 +3305,7 @@ def main() -> int:
     _validate_p1b_blob_manifest_lock(database_url)
     _validate_conditional_documents(database_url)
     _validate_reaction_pairs(database_url)
+    _validate_meta_append(database_url)
     _validate_receipt_retirement(database_url)
     _validate_provider_admission(database_url)
     if __package__:
@@ -3182,6 +3344,7 @@ def main() -> int:
             "reaction-pair-exact-replay-and-atomic-rollback",
             "reaction-pair-two-document-put-create-delete-races",
             "reaction-pair-pair-race-and-membership-replay",
+            "meta-append-atomic-swap-replay-and-race",
             "receipt-retirement-generation-ack-closure",
             "provider-admission-full-owner-reservation",
             "provider-admission-replay-cancellation-closure",

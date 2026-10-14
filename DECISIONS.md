@@ -9,6 +9,54 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 
 ## Typed-writer migration (2026-10-13 onward)
 
+### D-018 Former members can read a deleted group's plaintext events (deferred, pre-existing)
+- **State:** for a chat deleted for everyone, `ab_can_read_chat` admits every
+  name in the chat's tenure, including people who left or were removed long
+  before. They can read its plaintext info events (joins, renames, removals);
+  message bodies stay sealed under chat keys they no longer receive.
+- **Why deferred:** pre-existing, needed so the janitor and members can
+  reclaim storage; the mesh is Aryan plus one friend.
+- **Revisit:** with the janitor/blob typed round (BACKLOG), or before inviting
+  anyone you do not fully trust. Fix: admit only the tenure open at deletion.
+
+### D-017 Typed membership writes are one atomic meta append (taken, 2026-10-14)
+- **Decision:** under a bound writer every membership action except genesis
+  is one `ab_mutation_meta_append`: the conditional `meta.json` swap and the
+  actor's signed events, appended to the actor's own log in array order, in
+  one PostgreSQL transaction. Authority is the pre-swap meta, so a member who
+  leaves, or the admin who deletes the group, records the event that ends
+  their own access. Genesis stays an exact create plus outbox. The version
+  is compared before membership: anyone in the chat's tenure (a current or
+  former member) gets `applied=false` for a version that moved on, so an
+  action that lost a race to its own removal or to the group's deletion
+  settles instead of holding its journal operation; only a current member
+  of the exact version may swap.
+- **Why:** meta-first plus outbox (D-015) could not log a terminal event (by
+  the time the outbox drains the actor is no longer a member) and left a
+  removed actor's queued pills retrying forever. Logging first brings back
+  signed events the ACL never reflects. The RPC grants nothing a member could
+  not already do with `doc_compare_put` plus `log_append` (D-014 unchanged).
+- **Leave and delete-for-everyone:** first settle the chat's earlier actions
+  (a retry after a lost reply that already applied is then done), deliver
+  every queued send of mine to the chat in this Store (any device log, even
+  in backoff) and refuse ("still sending; try again") while any remain. No
+  R69 leaver-minted key rotation: after the swap the leaver can no longer
+  write a key doc, and `ensure()` re-keys on the next send by a remaining
+  member whenever the newest epoch's wraps or creator disagree with the
+  members. Attachments wait for the janitor (blob deletes are not typed yet).
+  Deleting an agent or an account treats an already-gone membership as done.
+- **Accepted cost:** a former member can learn that a chat's meta changed
+  since a version they saw (the `applied=false` answer); members' content
+  and the current meta stay unreadable to them.
+- **Accepted limits (BACKLOG):** an agent transferred to a new owner is not
+  removed from rooms the new owner is not in (the old departure ran with the
+  owner's session and the provider refuses it); a send queued by another
+  thread between the drain and the swap retries forever (typed outbox has no
+  dead-letter for refused appends).
+- **Evidence:** Scratch acceptance `docs/provider-mutation-acceptance/20261014061026-*`.
+- **Revisit:** if a chat is ever wedged by a pending action.
+- **Cost to reverse:** moderate (one RPC and the owner's write path).
+
 ### D-016 Refused typed operations stay pending until epoch closure (taken, 2026-10-14)
 - **State:** a provider error reply rolls the attempt back but does not prove
   a later replay will not execute, so the journal keeps the operation and
@@ -20,6 +68,17 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   rotation or membership action still fails closed on its unsettled earlier
   attempt. No local "drop" of refused work: only a provider answer that it
   will never execute could justify that.
+- **Membership rows:** a refused meta append's Store row also stays until
+  its operation gets a receipt or a closure proves it never executed. The
+  first draft dropped a refused row whose meta had moved on while its
+  journal operation still held the chat, which blocked that chat for good
+  (review finding, fixed). The second review showed the commonest refusal,
+  an action that lost a race to my own removal or to the group's deletion,
+  is deterministic; the provider now answers it with `applied=false` (D-017),
+  so a refusal is left only for a meta that never listed me or an
+  unreachable provider. The outbox cycle's `MembershipService.sweep` retries
+  each such row at most once a minute, never waits for a running action and
+  makes at most 16 provider settles per cycle.
 - **Revisit:** if a deterministic refusal (invalid payload) ever pins a chat;
   then a provider "never executes" proof is needed.
 
@@ -28,9 +87,9 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   `meta.json`, which re-checks authority on the fresh provider copy and
   applies the newly signed events on top of it whatever their ns (the swap
   chain, not wall clocks, orders membership); the watermark only moves
-  forward. Events reach the log only after the swap applied. A Store row
-  bridges a crash between the swap and the outbox. The unbound path is
-  unchanged.
+  forward. The events reach the log in the same provider transaction as the
+  swap (D-017; first shipped as swap-then-outbox); a Store row names the exact
+  attempt for a crash or lost reply. The unbound path is unchanged.
 - **Why:** the old order (events, then last-writer-wins meta) loses concurrent
   changes and can leave a "removed" pill whose removal never reached the ACL.
 - **Path not taken:** a Lamport ns floor (mint events above the watermark).
@@ -82,7 +141,9 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 - **Decision:** typed receipts do not refresh the local mirror, so chat-key
   epochs and meta this process wrote (D-015; versioned by its watermark) are
   overlaid in memory until the mirror shows them, instead of writing through
-  to the mirror. The meta overlay expires after 120 s.
+  to the mirror. The meta overlay expires after 120 s, except a version that
+  no longer lists me (I left or was removed): it stays until the mirror shows
+  it or a newer one, so a room I left cannot come back.
 - **Why:** a write-through cannot know whether the mirror copy is newer.
 - **Revisit:** if a general read-your-writes layer is built.
 
@@ -100,9 +161,10 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 - **Revisit:** if another reviewer becomes available.
 
 ### D-007 Supabase connector scope (taken, 2026-10-14)
-- **Decision:** the connector reaches both projects. Read-only queries on
-  AgentBridge Scratch are fine; applying migrations there needs Aryan's
-  confirmation each time; production (`eakewaaqbilmtswbbxix`) is not touched.
+- **Decision:** the connector reaches both projects. AgentBridge Scratch is
+  disposable: queries are fine and, since Aryan's go-ahead later on
+  2026-10-14, so is applying schema there. Production
+  (`eakewaaqbilmtswbbxix`) is not touched.
 
 ### D-006 Windows rejected-POST discard window is 100 ms (taken, 2026-10-14)
 - **Revisit:** if WinError 10053 recurs on PR #145 or later; widen it (still

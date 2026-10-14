@@ -62,11 +62,11 @@ moment it is made, so a large task list never lives only in conversation.
   can hold the body longer than the 100 ms discard window; widen it (still
   bounded by the 2 s socket timeout) if the error recurs on #145 or later.
 - [x] **Supabase connector** (connected 2026-10-14 after Aryan restarted the
-  app): lists both projects; read-only queries on Scratch work. Scratch has
-  migrations through `agentbridge_p1b_blob_manifest_object_id_correction`
-  (12 typed RPCs; the branch schema adds `doc_compare_put`, `reaction_pair`,
-  `epoch_state` and later pieces), so acceptance needs the current schema
-  applied first: confirm with Aryan before applying; never production; never
+  app): lists both projects. Aryan allowed applying schema to Scratch freely
+  (2026-10-14). Scratch now carries the branch protocol through
+  `agentbridge_p1b_meta_append_rpc` plus a Scratch-only prerequisite (the
+  `ab_docs_touch` version trigger its scaffold lacked); evidence and exact
+  SQL: docs/provider-mutation-acceptance/20261014*. Never production; never
   the destructive gate.
 - [ ] **Decisions log** (Aryan, 2026-10-14): DECISIONS.md lists every choice
   that may need revisiting with the path taken; update it as decisions land.
@@ -105,7 +105,8 @@ moment it is made, so a large task list never lives only in conversation.
   (add/remove members, grant/revoke admin, rename, description, permissions,
   clear avatar) is one `meta.json` CAS whose build re-checks authority on the
   fresh provider meta and applies the newly signed events on top in swap
-  order; events are logged only after the swap applied, bridged by a
+  order; the events are appended in the same provider transaction (the meta
+  append, D-017, which replaced the first swap-then-outbox version), with a
   `membership_actions` Store row keyed to the exact attempt (ticket held until
   the row is consumed). Genesis is an exact create; written meta is served
   until the mirror shows it. `MembershipService.recover()` finishes
@@ -117,11 +118,67 @@ moment it is made, so a large task list never lives only in conversation.
 - [ ] **Avatar uploads under a bound writer**: `put_blob` raises when bound, so
   group photos (`set_avatar`, refused before any event) and profile photos
   (`accounts.py`) need a typed blob path like attachments' manifest.
-- [ ] **Terminal flows under a bound writer**: leave, delete chat, delete
-  agent/account need typed terminal events plus their cleanup/refold owner
-  (keys are retained until outcomes settle; the key owner is done). They must
-  follow the membership owner's meta-first rule (event minted inside the meta
-  CAS above its watermark), or readers will skip them.
+- [x] **Terminal flows under a bound writer** (Aryan, 2026-10-14; inactive,
+  deterministic tests plus hosted Scratch acceptance). New RPC
+  `ab_mutation_meta_append` (meta swap plus the actor's events in one
+  transaction, pre-swap authority) now carries every typed membership action
+  except genesis, which lets a leaver or a deleting admin record the event
+  that ends their access. Leave (groups only, agents cascade first) and
+  delete-for-everyone (admins) first deliver this device's queued sends to
+  the chat, refusing while any remain; no leaver-minted rotation; attachments
+  wait for the janitor. Delete agent/account treat an already-gone membership
+  as done. The RPC compares the version before membership, so an action
+  that lost a race to its own removal or the group's deletion gets
+  `applied=false` (for anyone in tenure) and settles. A refused action keeps
+  its Store row until a receipt or closure (an earlier draft dropped it and
+  wedged the chat); the outbox cycle sweeps them (`MembershipService.sweep`:
+  per-row 60 s backoff, never waits for a running action, at most 16 settles,
+  never raises). Leave/delete settle the chat's earlier actions before
+  draining every queued send of mine (any device log, even in backoff); a
+  retried leave or delete whose earlier attempt applied is done. A journal
+  overlap with an in-flight send reads "this chat is busy". Two independent
+  Claude reviews (design, then implementation) found two chat-wedging HIGHs
+  and smaller gaps, all fixed with tests. DECISIONS.md D-016..D-018.
+  Evidence: tests/test_membership_owner.py (34 mutants, each killed),
+  docs/provider-mutation-acceptance/20261014061026-* and 20261014064104-*.
+- [ ] **Release completed meta-append tickets without a row** (review,
+  2026-10-14): a crash after `commit_action` consumed the Store row but
+  before `release_operation` leaves that acknowledged operation held until
+  an epoch rotation (the chat is not blocked). Recovery could release
+  completed `meta_append` operations that have no row.
+- [ ] **Typed outbox: refused appends retry forever** (review, 2026-10-14):
+  `_dispatch_typed` treats every provider refusal as transient. After a leave,
+  removal or delete, a send queued by another thread between the drain and
+  the swap, another member's queued sends, a manifest leg, or (rarely) a
+  genesis append whose creator was removed first, keep retrying with the
+  clock icon; a row that can never be delivered also blocks that chat's
+  leave (and so account deletion) with "still sending". Dead-letter
+  ticketless rows on a membership refusal and mark `local_send_status`
+  failed; consider a "discard unsent" choice in the leave dialog.
+- [ ] **Janitor and blob deletion under a bound writer** (review, 2026-10-14):
+  blob deletes are not typed, so a typed delete-for-everyone leaves its
+  attachments (and `blob-stage/<chat>/` objects, whose deletes need current
+  membership) for the janitor. Under typed the janitor should trust
+  `meta.deleted` instead of an ns-ordered refold (which can reject a delete
+  that was valid in swap order), then purge via `ab_mutation_chat_delete`.
+  Also D-018 (former members can read a deleted group's info events).
+- [ ] **Agent ownership transfer under a bound writer**: `_depart_owner_changed`
+  is skipped when bound (it ran with the owner's session, which the provider
+  refuses where the owner is not a member), and `_heal` runs only on
+  created/removed/left/revoked events, not on `apply_own`. A transferred agent
+  stays a member (and in the key wraps) of rooms its new owner is not in until
+  someone removes it. Fix: heal inside the meta append (with cascade pills) or
+  a typed departure by the agent's own session.
+- [ ] **Member-controlled `materialized_ns` overflow** (pre-existing): a meta
+  watermark of 2^63 or more makes `state_events_after` raise OverflowError.
+  `_snapshots` now skips that chat, but `_fresh` still raises, so nobody can
+  leave it. Validate or clamp on read.
+- [ ] **Hardening: bind `p_log` to the actor** (review, 2026-10-14): meta
+  append and `log_append` accept any log name in a chat the actor is in.
+  Require the actor's own `<name>|` prefix in SQL.
+- [ ] **Hardening: `ab_docs_touch` search_path** (Scratch advisor,
+  2026-10-14): the clean-install trigger function has a mutable search_path;
+  pin it to `pg_catalog, public` in the schema.
 - [ ] **Message overlays under a bound writer**: edits, redactions (delete for
   everyone) and pins use plain `put_doc`/`delete_doc` (mesh/overlays.py) and
   raise when bound. Classify: edits/redactions are immutable-ish records,
@@ -145,10 +202,13 @@ moment it is made, so a large task list never lives only in conversation.
   rotation); decide whether it moves to Realtime broadcast/presence or another
   non-receipt channel instead of the typed writer.
 - [ ] **Activation wiring**: nothing binds the typed writer in production yet.
-  At bind: drain pre-consumer outbox rows with the old owner, then run every
-  recovery sweep (identity owners, `MembershipService.recover` then
-  `ChatKeyService.recover`, state actions, outbox owners, exact creates)
-  before serving writes.
+  At bind: drain pre-consumer outbox rows with the old owner (including any
+  legacy terminal leave/delete rows, which the typed handler refuses forever),
+  then run every recovery sweep (identity owners, `MembershipService.recover`
+  then `ChatKeyService.recover`, state actions, outbox owners, exact creates)
+  before serving writes. Gate binding on the provider having
+  `ab_mutation_meta_append`: a PGRST202 reply would hold a membership row's
+  strict settle forever.
 - [ ] **Fleet upgrade before seal** (operational): the seal blocks legacy
   writes for every role, so all GUIs and workers on every machine must run the
   typed build before the root is sealed; production install + seal need
@@ -162,8 +222,12 @@ moment it is made, so a large task list never lives only in conversation.
   pre-existing receipt-ACK parity; would need retained lineage.
 - [ ] Optional: typed `full` result from execute (UX only, not safety); measure
   send-path RPC latency in diagnostics.
-- [ ] **Disposable migration acceptance on Scratch** (needs credentials on this
-  Mac), then PR stack consolidation (item below).
+- [ ] **Disposable migration acceptance on Scratch**: meta append accepted on
+  hosted Scratch through the MCP connector (2026-10-14; one rolled-back DO
+  block). Still open: `doc_compare_put` and `reaction_pair` hosted runs (now
+  possible: the Scratch version trigger is in place) and any HTTP-level
+  acceptance (needs credentials on this Mac), then PR stack consolidation
+  (item below).
 - [ ] Housekeeping: rewrite the stale local (git-excluded) `CLAUDE.md` as a
   pointer to AGENTS.md (offered, unanswered); prune ~40 prunable
   `/private/tmp` worktrees (ask first).

@@ -80,7 +80,7 @@ class ApplicationMutationWriter:
             raise ValueError("typed operation replay identity changed")
         return self.driver.resume(retained.expectation.protocol_epoch, operation_id)
 
-    def update_document(self, path: str, build, *, operation_for=None):
+    def update_document(self, path: str, build, *, operation_for=None, log=None):
         """Recover, then compare-and-swap a freshly observed document.
 
         The factory receives raw current data, never an authority verdict. It
@@ -94,8 +94,17 @@ class ApplicationMutationWriter:
         a crash (``settle_operation``). Such keyed attempts keep their ticket:
         the caller releases it (``release_operation``) once it has consumed
         the outcome, so an epoch closure cannot prune the receipt first.
+
+        ``log=(chat_id, log_name)`` makes each attempt a meta append: ``path``
+        must be that chat's meta, ``build`` returns ``(document, records)`` and
+        the provider appends the records to that log in the same transaction,
+        only if the swap applies (``operation_for`` still gets the document).
         """
         validate_source_paths((path,))
+        if log is not None:
+            chat_id, log_name = log
+            if path != f"chats/{chat_id}/meta.json":
+                raise ValueError("a meta append swaps its own chat's meta")
         parts = path.split('/')
         if (len(parts) == 5 and parts[0] == 'chats'
                 and parts[2] == 'overlays' and parts[3] in {'state', 'reactions'}):
@@ -112,20 +121,27 @@ class ApplicationMutationWriter:
         for _ in range(3):
             observed = self.driver.rpc.read_document_for_update(path)
             current = observed.payload
-            payload = build(current)
-            if payload is None:
+            built = build(current)
+            if built is None:
                 return current, False
             ticket = None
-            arguments = observed.arguments(payload)
+            if log is None:
+                kind, payload = "doc_compare_put", built
+                arguments = observed.arguments(payload)
+            else:
+                kind, (payload, records) = "meta_append", built
+                arguments = observed.arguments(payload)
+                del arguments["p_path"]
+                arguments.update(p_chat=chat_id, p_log=log_name, p_records=records)
             keyed = None if operation_for is None else operation_for(payload)
             if keyed is not None:
                 _uuid(keyed, "typed mutation operation")
             if journal.lifecycle_enabled():
-                ticket = (journal.allocate_ticket("doc_compare_put", arguments) if keyed is None
-                          else journal.allocate_keyed_ticket("doc_compare_put", arguments, keyed))
+                ticket = (journal.allocate_ticket(kind, arguments) if keyed is None
+                          else journal.allocate_keyed_ticket(kind, arguments, keyed))
                 operation = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
             else:
-                operation = self.submit("doc_compare_put", arguments,
+                operation = self.submit(kind, arguments,
                                         operation_id=keyed or str(uuid4()))
             applied = dict(operation.receipt.result)["applied"]
             document = json.loads(operation.request.arguments_json)["p_data"]
@@ -222,23 +238,6 @@ class ApplicationMutationWriter:
                                           operation_id)
         if ticket is not None:
             journal.release_ticket(ticket)
-
-    def attempt_superseded(self, operation_id: str) -> bool:
-        """Whether a refused compare-and-swap attempt can never apply.
-
-        True only when the provider document (or source epoch) has moved past
-        the version the attempt expects: versions never repeat, so a replay
-        can only conflict. A refused attempt otherwise stays pending.
-        """
-        _uuid(operation_id, "typed mutation operation")
-        record = self.driver.journal.get_operation(operation_id)
-        if record is None or record.request.expectation.kind != "doc_compare_put":
-            return False
-        arguments = json.loads(record.request.arguments_json)
-        observed = self.driver.rpc.read_document_for_update(arguments["p_path"])
-        return (observed.source_epoch != arguments["p_expected_source_epoch"]
-                or observed.seq != arguments["p_expected_seq"]
-                or observed.deleted != arguments["p_expected_deleted"])
 
     def replace_document(self, path: str, build):
         """Replace a device snapshot only after older operations settle."""

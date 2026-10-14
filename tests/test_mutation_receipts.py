@@ -22,6 +22,7 @@ CASES = [
     ("member_claim", {"username": "alice"}, {"claimed": True}),
     ("member_leave", {}, {"username": "alice", "left": True}),
     ("reaction_pair", {"chat_id": "room", "username": "alice"}, {"applied": False}),
+    ("meta_append", {"chat_id": "room", "log_name": "alice|m1"}, {"applied": True}),
     ("blob_manifest", {"chat_id": "room", "blob_id": "blob-1",
                        "object_id": OBJECT, "sealed_bytes": 4096}, {}),
 ]

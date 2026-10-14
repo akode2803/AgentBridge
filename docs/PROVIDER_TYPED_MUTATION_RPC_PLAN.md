@@ -462,9 +462,19 @@ lease-bound `sent` tombstone before consuming/releasing its root tickets. Consum
 slots remain through Store deletion and are reaped only after that exact registered
 Store no longer contains the owner row. A restarted worker drains sent cleanup
 before new sends. Missing or stale rows never authorize allocation. Startup still
-does not enable this path. Fresh terminal delete/leave events remain unavailable
-until their cleanup/refold owner is migrated; snapshots never stand in for a
-committed typed receipt.
+does not enable this path. Terminal delete/leave events do not use the outbox:
+the `meta_append` family (below) logs them with the swap that ends the actor's
+access; snapshots never stand in for a committed typed receipt.
+
+The `meta_append` family (2026-10-14) is a conditional `meta.json` swap plus
+1..256 of the actor's records appended to one log in array order, in one
+transaction, under actor key-share, exclusive chat and shared ledger locks.
+The version is compared before membership: anyone in the chat's tenure gets
+the terminal `applied=false` for a version that moved on, and only a current
+member of the exact pre-swap version may swap. It never creates a meta or
+replaces a tombstone, and replay precedes authority, so a member who left
+still recovers the exact receipt. Every typed membership action except genesis uses it
+(PROVIDER_ADMISSION_CHECKPOINT.md "Terminal flows", DECISIONS.md D-017).
 
 Store cache-only writes retain NORMAL synchronization. All outbox enqueue variants
 and typed sent/finalize transitions use scoped FULL synchronization, since a

@@ -12,9 +12,12 @@ ported from v1's verified ``_missing_owners``.
 
 Under a bound typed writer the order flips (meta first): each action is one
 compare-and-swap of ``meta.json`` whose build re-checks authority against the
-fresh provider copy and mints the action's events above its watermark; the
-events are logged only once that write applied. A ``membership_actions``
-Store row carries them across a crash in between.
+fresh provider copy and applies the action's newly signed events on top; the
+provider appends those events to the actor's log in the same transaction
+(a meta append), so they land exactly when the ACL changes. That is also what
+lets a member who leaves, or an admin who deletes the group, record the event
+that ends their own access. A ``membership_actions`` Store row names the
+exact attempt so a crash or lost reply can find its outcome.
 """
 
 from __future__ import annotations
@@ -25,14 +28,15 @@ import logging
 import re
 import secrets
 import threading
+import time
 from uuid import UUID, uuid5
 
 from ..core.errors import NotAMember, PermissionDenied, TransportError, ValidationError
 from ..core.models import ChatKind, ChatPermissions, ChatSnapshot, Role, UserKind
 from ..store.db import Store
+from ..store.local_source import SourceChanged
 from ..transport.application_mutations import DocumentContended
 from ..transport.base import Transport
-from ..transport.typed_mutations import TypedMutationRPCError
 from . import authz, events
 from .directory import Directory
 from .messaging import MessagingService
@@ -46,6 +50,12 @@ log = logging.getLogger("agentbridge.mesh")
 # Permanent domain for a membership action's meta CAS operation id, derived
 # from its first envelope so the exact attempt is findable after a crash.
 _ACTION_NAMESPACE = UUID("5fbe1499-3434-46e4-8fe1-406262e61fa7")
+# One meta append carries at most this many events (the provider's bound).
+MAX_ACTION_EVENTS = 256
+# How long the outbox cycle's sweep leaves an attempt that could not settle,
+# and how many provider settles one sweep makes at most.
+SWEEP_BACKOFF_S = 60.0
+SWEEP_LIMIT = 16
 
 
 def _meta_doc(snap: ChatSnapshot) -> dict:
@@ -76,6 +86,7 @@ class MembershipService:
         self.keys = keys
         self.user = messaging.user
         self._action_lock = threading.RLock()
+        self._sweep_after: dict[int, float] = {}  # row id -> next sweep try
 
     def _typed(self) -> bool:
         from ..transport.local_mutations import LocalMutationTransport
@@ -209,7 +220,7 @@ class MembershipService:
                 chat_id, self.tx.exact_create_id(path), [envelope])
             self.tx.create_exact_doc(path, doc, keep_ticket=True)
             self.messaging.remember_meta(chat_id, doc)
-            self.messaging.commit_action(action)
+            self.messaging.commit_action(action, genesis=True)
             self.tx.release_operation(action.operation_id)
         return snap
 
@@ -307,11 +318,21 @@ class MembershipService:
             self.keys.on_members_added(chat_id, healed, newcomers)
         return healed
 
-    def remove_member(self, chat_id: str, who: str) -> ChatSnapshot:
+    def remove_member(self, chat_id: str, who: str, *,
+                      missing_ok: bool = False) -> ChatSnapshot:
+        """``missing_ok`` (bound writer only): a target the fresh provider
+        meta no longer lists is done (agent deletion)."""
+        gone = []
+        missing_ok = missing_ok and self._typed()
+
         def plan(snap):
+            gone[:] = []
             if who == self.user:
                 raise ValidationError("use leave() to exit a chat yourself")
             if who not in snap.members:
+                if missing_ok:
+                    gone.append(who)
+                    return []
                 raise ValidationError(f"@{who} is not a member")
             if self.directory.kind(self.user) is UserKind.AGENT:
                 raise PermissionDenied("agents can add members but never remove them")
@@ -333,11 +354,17 @@ class MembershipService:
             ]
 
         healed = self._act(chat_id, plan)
-        if self.keys is not None:  # rotate away from the removed member now
+        if self.keys is not None and not gone:  # rotate away from them now
             self.keys.on_members_removed(chat_id, healed)
         return healed
 
-    def leave(self, chat_id: str, *, reason: str = "") -> ChatSnapshot:
+    def leave(self, chat_id: str, *, reason: str = "",
+              missing_ok: bool = False) -> ChatSnapshot:
+        """``missing_ok`` (bound writer only): when the fresh provider meta
+        shows I already left, that is done. The legacy local view never
+        counts, since there it can mean my leave is still queued."""
+        if self._typed():
+            return self._leave_typed(chat_id, reason, missing_ok)
         # Refuse the whole action before queuing any cascading agent removals.
         self.messaging._require_event_supported({'type': events.EV_MEMBER_LEFT})
         # R56 (V37): record the owned agents the heal will cascade out with
@@ -361,6 +388,69 @@ class MembershipService:
             self.keys.on_member_left(chat_id, healed)
         self.messaging.flush_outbox()
         return healed
+
+    def _settle_terminal(self, chat_id: str, kind: str) -> bool:
+        """Before a leave or delete: settle this chat's earlier actions (an
+        unsettled one would also make the drain's sends overlap it) and say
+        whether one of them was this same terminal action, retried after a
+        lost reply. True means it applied and nothing is left to do."""
+        with self._action_lock:
+            retried = any(env["event"].get("type") == kind
+                          for row in self.store.membership_actions_pending(chat_id=chat_id)
+                          for env in row.envelopes)
+            self._settle_actions(chat_id, strict=True)
+        if not retried:
+            return False
+        try:
+            return not self.messaging.snapshot(chat_id).is_member(self.user)
+        except NotAMember:
+            return True
+
+    def _drain_sends(self, chat_id: str) -> None:
+        """Deliver what I queued for this chat (from any of my devices'
+        logs in this Store) while I can still write it.
+
+        After a leave or delete the provider refuses those appends for good,
+        so the terminal swap waits until none is left (the user retries)."""
+        prefix = f"{chat_id}|{P.log_name(self.user, '')}"
+        if not self.store.outbox_pending_count(prefix):
+            return
+        self.store.outbox_expedite(prefix)
+        try:
+            self.messaging.flush_outbox()
+        except Exception:  # noqa: BLE001 — the count below decides
+            log.warning("outbox flush before leaving %s failed", chat_id, exc_info=True)
+        if self.store.outbox_pending_count(prefix):
+            raise TransportError("messages to this chat are still sending; try again shortly")
+
+    def _leave_typed(self, chat_id: str, reason: str, missing_ok: bool) -> ChatSnapshot:
+        if self._settle_terminal(chat_id, events.EV_MEMBER_LEFT):
+            return ChatSnapshot(id=chat_id)  # my earlier leave applied
+        self._drain_sends(chat_id)
+
+        def plan(snap):
+            if snap.kind is not ChatKind.GROUP:
+                raise ValidationError("only groups can be left")
+            event = {"type": events.EV_MEMBER_LEFT}
+            if reason:
+                event["reason"] = reason
+            # R56 (V37): my agents leave with me, recorded before my departure.
+            return [
+                *(({"type": events.EV_MEMBER_REMOVED, "who": agent, "by": self.user,
+                    "reason": "with_owner", "owner": self.user}, False)
+                  for agent in self._cascading_agents(snap, self.user)),
+                (event, True),
+            ]
+
+        # No R69 rotation here: once the swap applied I can no longer write
+        # this chat, and ensure() already re-keys whenever the newest epoch's
+        # wraps or creator disagree with the members (DECISIONS D-017).
+        try:
+            return self._act(chat_id, plan)
+        except NotAMember:
+            if not missing_ok:
+                raise
+            return ChatSnapshot(id=chat_id)
 
     def grant_admin(self, chat_id: str, who: str) -> ChatSnapshot:
         def plan(snap):
@@ -427,6 +517,20 @@ class MembershipService:
         """Group deletion for everyone — admin-only, TERMINAL in the fold
         (members empty afterwards, so every read and write refuses). Bodies
         stay on disk until a future janitor round reclaims them."""
+        if self._typed():
+            def plan(snap):
+                if snap.kind is not ChatKind.GROUP:
+                    raise ValidationError("only groups can be deleted for everyone")
+                if not authz.is_admin(snap, self.user):
+                    raise PermissionDenied("only an admin can delete this group")
+                return [({"type": events.EV_DELETED, "by": self.user}, True)]
+
+            # Attachments wait for the janitor: blob deletes are not typed yet
+            # (members of a deleted group keep delete access to its storage).
+            if self._settle_terminal(chat_id, events.EV_DELETED):
+                return ChatSnapshot(id=chat_id)  # my earlier delete applied
+            self._drain_sends(chat_id)
+            return self._act(chat_id, plan)
         self.messaging._require_event_supported({'type': events.EV_DELETED})
         snap = self.messaging.snapshot(chat_id)
         if snap.kind is not ChatKind.GROUP:
@@ -477,9 +581,9 @@ class MembershipService:
     def _act_typed(self, chat_id: str, plan) -> ChatSnapshot:
         """Meta first: one CAS whose build re-checks authority on the fresh
         provider meta and applies the newly minted events on top of it, in
-        CAS order. The events are logged only after the swap applied; the
-        Store row bridges a crash in between and names the exact attempt,
-        whose journal ticket is released only once the row is consumed."""
+        CAS order; the provider appends the events in the same transaction.
+        The Store row names the exact attempt for a crash or lost reply; its
+        journal ticket is released only once the row is consumed."""
         with self._action_lock:
             self._settle_actions(chat_id, strict=True)
             minted: list[list[dict]] = []
@@ -501,8 +605,12 @@ class MembershipService:
                 if not planned:
                     return None
                 envelopes, primary = [], set()
+                if len(planned) > MAX_ACTION_EVENTS:
+                    raise ValidationError("too many changes in one action")
                 for event, is_primary in planned:
-                    env = self.messaging.build_event(chat_id, event).to_dict()
+                    # Exact log JSON (enums as their values), as the provider stores it.
+                    env = json.loads(json.dumps(
+                        self.messaging.build_event(chat_id, event).to_dict()))
                     envelopes.append(env)
                     if is_primary:
                         primary.add(env["id"])
@@ -510,7 +618,7 @@ class MembershipService:
                 if not primary <= applied:
                     raise PermissionDenied("this change is not allowed in this chat any more")
                 minted[:] = [envelopes]
-                return _meta_doc(after)
+                return _meta_doc(after), envelopes
 
             def operation_for(_payload):
                 (envelopes,) = minted
@@ -522,10 +630,18 @@ class MembershipService:
 
             try:
                 document, changed = self.tx.update_doc(
-                    P.meta(chat_id), build, operation_for=operation_for)
+                    P.meta(chat_id), build, operation_for=operation_for,
+                    log=(chat_id, self.messaging.membership_log()))
             except DocumentContended:
                 drop_recorded()
                 raise
+            except SourceChanged as exc:
+                if str(exc) != "typed_operation_overlapping_intent":
+                    raise
+                # Refused before the attempt was prepared: a send to this
+                # chat (or an earlier write to its meta) is still in flight.
+                drop_recorded()
+                raise TransportError("this chat is busy; try again in a moment") from exc
             if not changed:
                 return self._fresh(chat_id, document)
             (action,) = recorded
@@ -535,10 +651,11 @@ class MembershipService:
             return ChatSnapshot.from_dict(document)
 
     def _consume(self, action, document: dict) -> None:
-        """An interrupted action applied: show its meta, log its events, and
-        run the key steps its caller never reached."""
+        """An interrupted action applied: show its meta and events, and run
+        the key steps its caller never reached."""
+        genesis = action.envelopes[0]["event"].get("type") == events.EV_CREATED
         self.messaging.remember_meta(action.chat_id, document)
-        self.messaging.commit_action(action)
+        self.messaging.commit_action(action, genesis=genesis)
         if self.keys is None:
             return
         added = [(env["event"].get("who"), env["ns"]) for env in action.envelopes
@@ -549,6 +666,8 @@ class MembershipService:
             return
         try:
             snap = self.messaging.snapshot(action.chat_id)
+            if not snap.is_member(self.user):
+                return  # I left (or was removed): the remaining members re-key
             # Bound to this exact membership instance, and only when the
             # current view agrees: a stale view must never re-key for (or
             # re-wrap history to) someone who has since left or been removed.
@@ -589,16 +708,12 @@ class MembershipService:
             after = rows[-1].id
 
     def _settle_one(self, action) -> None:
-        try:
-            outcome = self.tx.settle_operation(action.operation_id)
-        except TypedMutationRPCError as exc:
-            # A refused swap whose document moved on can never apply: every
-            # membership change bumps its version. Anything else stays.
-            if exc.code is None or not self.tx.attempt_superseded(action.operation_id):
-                raise
-            self.store.membership_action_discard(action.id)
-            return
-        if outcome is None:  # never prepared, so never dispatched
+        # A refused attempt (an error reply rolled it back) stays: its journal
+        # operation still holds the chat until a replay gets a receipt (e.g.
+        # once re-added: applied=false) or an epoch closure proves it never
+        # executed, and this row is how it is replayed (DECISIONS D-016).
+        outcome = self.tx.settle_operation(action.operation_id)
+        if outcome is None:  # never prepared, or proven unexecuted by closure
             self.store.membership_action_discard(action.id)
             return
         result, arguments = outcome
@@ -615,6 +730,50 @@ class MembershipService:
             return 0
         with self._action_lock:
             return self._settle_actions()
+
+    def sweep(self) -> int:
+        """``recover`` for the outbox worker's cycle, which holds its dispatch
+        gate meanwhile: never waits for a running action (it settles its own
+        chat first), makes at most ``SWEEP_LIMIT`` provider settles, retries a
+        row that could not settle only after ``SWEEP_BACKOFF_S`` (other rows
+        are not held back), and never raises into the cycle."""
+        if not self._typed() or not self._action_lock.acquire(blocking=False):
+            return 0
+        try:
+            return self._sweep_rows()
+        except Exception:  # noqa: BLE001 — delivery must keep running
+            log.warning("membership action sweep failed", exc_info=True)
+            return 0
+        finally:
+            self._action_lock.release()
+
+    def _sweep_rows(self) -> int:
+        now, rows, after = time.monotonic(), [], 0
+        while True:
+            page = self.store.membership_actions_pending(limit=64, after_id=after)
+            rows.extend(page)
+            if len(page) < 64:
+                break
+            after = page[-1].id
+        waits = {row.id: self._sweep_after.get(row.id, 0.0) for row in rows}
+        self._sweep_after = waits  # forget rows that settled elsewhere
+        settled = tried = 0
+        for action in rows:
+            if waits[action.id] > now:
+                continue
+            if tried == SWEEP_LIMIT:
+                break
+            tried += 1
+            try:
+                self._settle_one(action)
+            except Exception:  # noqa: BLE001 — retried after the backoff
+                waits[action.id] = time.monotonic() + SWEEP_BACKOFF_S
+                log.warning("membership action for %s is still unsettled",
+                            action.chat_id, exc_info=True)
+                continue
+            waits.pop(action.id, None)
+            settled += 1
+        return settled
 
     # -------------------------------------------------------------- snapshots
     def materialize(self, chat_id: str, *, write: bool = True) -> ChatSnapshot:
@@ -706,5 +865,5 @@ class MembershipService:
         for chat_id in [*listed, *written]:
             try:
                 yield self.messaging.snapshot(chat_id)
-            except (NotAMember, ValueError, TypeError):
-                continue
+            except (NotAMember, ValueError, TypeError, OverflowError):
+                continue  # OverflowError: a member wrote an absurd watermark
