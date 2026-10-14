@@ -140,7 +140,8 @@ moment it is made, so a large task list never lives only in conversation.
   Claude reviews (design, then implementation) found two chat-wedging HIGHs
   and smaller gaps, all fixed with tests. DECISIONS.md D-016..D-018.
   Evidence: tests/test_membership_owner.py (34 mutants, each killed),
-  docs/provider-mutation-acceptance/20261014061026-* and 20261014064104-*.
+  docs/provider-mutation-acceptance/20261014061026-*, 20261014064104-* and
+  (uniform answer to former members) 20261014103831-*.
 - [ ] **Release completed meta-append tickets without a row** (review,
   2026-10-14): a crash after `commit_action` consumed the Store row but
   before `release_operation` leaves that acknowledged operation held until

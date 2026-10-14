@@ -392,11 +392,13 @@ typed membership action except genesis moved to it (DECISIONS.md D-017).
    a create) and 1..256 records appended to one log in array order, in one
    transaction, under actor key-share, exclusive chat and shared ledger
    locks (the `doc_compare_put` order). Replay precedes authority as in every
-   family. Then the version is compared before membership: anyone in the
-   chat's tenure (current or former member) gets the terminal `applied=false`
-   for a version that moved on, so an action that lost a race to its own
-   removal or to the group's deletion settles; only a current member of the
-   exact pre-swap version may swap (`ab_is_member`); anyone else is refused.
+   family. Anyone in the chat's tenure (current or former member) gets an
+   answer: only a current member of the exact pre-swap version swaps
+   (`ab_is_member`), and every other answer is the same terminal
+   `applied=false` whatever the version. So an action that lost a race to its
+   own removal or to the group's deletion settles, and a former member learns
+   nothing about the chat after leaving (the uniform-answer correction,
+   2026-10-14); anyone outside the tenure is refused.
    It grants nothing a member could not already do with `doc_compare_put`
    plus `log_append`. Receipt result `{chat_id, log_name, applied}`.
 2. **Client wire.** `update_document(path, build, log=(chat, log_name))`:
@@ -442,7 +444,10 @@ invalid requests, stale version and source epoch, outsiders, atomic leave in
 array order, digest binding, replay after losing membership, delete for
 everyone, anon refused; rolled back), then the version-first correction
 (`20261014064104-*`: races lost to one's own leave or to the deletion answer
-`applied=false`; a root member never in the chat is refused). Independent
+`applied=false`; a root member never in the chat is refused), then the
+uniform-answer correction (`20261014103831-*`: a former member, and the admin
+after deleting, get the same `applied=false` at the current version as at a
+stale one, with nothing written; outsiders refused at both). Independent
 Claude review of the design and first draft: a refused, superseded row was
 dropped while its journal operation still held the chat (chat blocked for
 good), the row was not durable before dispatch, pre-leave sends could be

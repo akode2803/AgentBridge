@@ -1,5 +1,22 @@
 # Cloud source handoff
 
+## 2026-10-14 uniform meta-append answer (D-017)
+
+`ab_mutation_meta_append` now gives every principal in the chat's tenure who
+is not a current member the same `applied=false`, whatever version they send
+(before, the current version was refused while others answered, so a former
+member could probe whether the chat changed after they left). Only a current
+member of the exact version swaps; outsiders are refused. Simpler and closes
+the probe. Scratch: `agentbridge_p1b_meta_append_uniform_answer`
+(20261014103831) applied and accepted in one rolled-back block, residue 0;
+evidence docs/provider-mutation-acceptance/20261014103831-*. The CI PG gate
+schedule checks both versions for a former member and the outsider at the
+current version. Aryan's standing rule (2026-10-14): keep the architecture as
+simple as possible unless security, latency or another relevant property
+suffers. Harness commands need no new lane (owner commands, peer access,
+AppLink exist; none work under a bound writer yet, BACKLOG "Bound generic
+submits").
+
 ## 2026-10-14 terminal flows (meta append)
 
 Branch `codex/provider-owner-admission` (PR #146 continues). New provider RPC

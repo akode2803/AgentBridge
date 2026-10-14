@@ -40,8 +40,9 @@ class _Refused(Exception):
 
 class _Provider(agent._Provider):
     """Adds the atomic meta swap + log append, with the provider's
-    authority rule: a version that moved on answers applied=false to anyone
-    in the chat's tenure; only a member of the CURRENT meta may swap it."""
+    authority rule: anyone in the chat's tenure gets an answer; only a member
+    of the CURRENT meta swaps it at its exact version, and every other answer
+    is applied=false whatever the version."""
 
     def __init__(self, client, docs):
         super().__init__(client, docs)
@@ -66,10 +67,8 @@ class _Provider(agent._Provider):
                     or "alice" in current.get("tenure", {})):
                 raise _Refused("meta append is unauthorized")
             seq = self.seqs.get(path, 1)
-            if args["p_expected_seq"] != seq:
+            if args["p_expected_seq"] != seq or "alice" not in current.get("members", {}):
                 self.conflicts.add(op)
-            elif "alice" not in current.get("members", {}):
-                raise _Refused("meta append is unauthorized")
             else:
                 self.docs.docs[path] = args["p_data"]
                 self.seqs[path] = seq + 1

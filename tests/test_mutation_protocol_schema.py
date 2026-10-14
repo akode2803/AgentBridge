@@ -614,19 +614,22 @@ def test_meta_append_swaps_meta_and_appends_records_atomically():
     tenure = body.index("not coalesce(v_meta->'members' ? v_member\n"
                         "                     or v_meta->'tenure' ? v_member, false)")
     source_lock = body.index("'agentbridge-change-ledger:'")
-    compare = body.index('if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq')
-    authority = body.index('if not public.ab_is_member(p_root, p_chat) then')
+    compare = body.index('if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq\n'
+                         '     and v_deleted = p_expected_deleted\n'
+                         '     and public.ab_is_member(p_root, p_chat) then')
     update = body.index('and d.seq = p_expected_seq and d.deleted = p_expected_deleted')
     applied = body.index('if v_applied then')
     append = body.index('insert into public.ab_logs(root, chat_id, log_name, line)')
     finish = body.index('return private.ab_mutation_finish')
-    # Tenure earns the terminal answer for a version that moved on (a race
-    # lost to one's own removal settles); only a current member of the exact
-    # pre-swap version may swap; records land only with an applied swap.
+    # Tenure earns an answer; only a current member of the exact pre-swap
+    # version swaps, and every other tenure answer is the same applied=false
+    # (a race lost to one's own removal settles; nothing leaks about later
+    # versions); records land only with an applied swap.
     assert validate < replay < actor < chat_lock < observed < tenure < source_lock
-    assert source_lock < compare < authority < update < applied < append < finish
+    assert source_lock < compare < update < applied < append < finish
     assert "v_member = '' or v_meta is null" in body
-    assert body.count("raise exception 'meta append is unauthorized'") == 2
+    assert body.count("raise exception 'meta append is unauthorized'") == 1
+    assert body.count('ab_is_member') == 1
     assert "d.path = 'chats/' || p_chat || '/meta.json'" in body
     assert 'on conflict' not in body and 'insert into public.ab_docs' not in body
     assert 'p_expected_seq < 1' in body

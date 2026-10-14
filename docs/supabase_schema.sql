@@ -4732,11 +4732,13 @@ grant execute on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid
 -- or deletes the chat still records the event that removes their access.
 -- This grants nothing those two families do not: any member may already
 -- replace the meta and append to a log of the chat. It never creates a meta
--- or replaces a tombstoned one. The version is compared before membership:
--- anyone in the chat's tenure (a current or former member) gets the terminal
--- applied=false for a version that moved on, so an attempt that lost a race
--- to its own removal, or to the group's deletion, settles instead of being
--- refused until an epoch closure. Only a current member may swap.
+-- or replaces a tombstoned one. Anyone in the chat's tenure (a current or
+-- former member) gets an answer: only a current member of the exact version
+-- swaps, and everyone else gets the same terminal applied=false whatever
+-- version they send. So an attempt that lost a race to its own removal, or to
+-- the group's deletion, settles instead of being refused until an epoch
+-- closure, and the answer tells a former member nothing about the chat since
+-- they left (whether its meta changed, or when). Others are refused.
 alter table public.ab_mutation_admission_legs
   drop constraint if exists ab_mutation_admission_legs_operation_kind_check;
 alter table public.ab_mutation_admission_legs
@@ -4822,12 +4824,11 @@ begin
   );
   select e.epoch into v_source_epoch from public.ab_change_epochs e
   where e.root = p_root and e.source_schema_version = 2;
+  -- Only a current member of the exact version swaps; for anyone else in the
+  -- tenure the answer is applied=false whatever the version (see the header).
   if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq
-     and v_deleted = p_expected_deleted then
-    -- Only a current member of the version being replaced may replace it.
-    if not public.ab_is_member(p_root, p_chat) then
-      raise exception 'meta append is unauthorized' using errcode = '42501';
-    end if;
+     and v_deleted = p_expected_deleted
+     and public.ab_is_member(p_root, p_chat) then
     update public.ab_docs d set data = p_data, deleted = false
     where d.root = p_root and d.path = 'chats/' || p_chat || '/meta.json'
       and d.seq = p_expected_seq and d.deleted = p_expected_deleted;

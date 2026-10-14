@@ -469,9 +469,10 @@ access; snapshots never stand in for a committed typed receipt.
 The `meta_append` family (2026-10-14) is a conditional `meta.json` swap plus
 1..256 of the actor's records appended to one log in array order, in one
 transaction, under actor key-share, exclusive chat and shared ledger locks.
-The version is compared before membership: anyone in the chat's tenure gets
-the terminal `applied=false` for a version that moved on, and only a current
-member of the exact pre-swap version may swap. It never creates a meta or
+Anyone in the chat's tenure gets an answer: only a current member of the
+exact pre-swap version swaps, and everyone else gets the same terminal
+`applied=false` whatever the version, so the answer reveals nothing about the
+chat after they left. It never creates a meta or
 replaces a tombstone, and replay precedes authority, so a member who left
 still recovers the exact receipt. Every typed membership action except genesis uses it
 (PROVIDER_ADMISSION_CHECKPOINT.md "Terminal flows", DECISIONS.md D-017).

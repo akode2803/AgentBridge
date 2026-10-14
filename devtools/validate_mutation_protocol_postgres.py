@@ -2767,18 +2767,21 @@ def _validate_meta_append(database_url: str) -> None:
     if 'collides with existing receipt' not in collision:
         raise GateFailure('meta append digest omitted its records')
     # Replay precedes authority: the former member recovers the exact receipt
-    # without a second append; fresh work is refused.
+    # without a second append.
     if run(leave) != receipt or run(stale) != stale_receipt or state() != after:
         raise GateFailure('meta append replay required membership or re-appended')
+    # A former member gets the same applied=false at the current version as
+    # at the one they last saw, so the answer reveals nothing about the chat
+    # since they left, and swaps nothing. An attempt that lost a race to the
+    # leaver's own departure therefore settles too.
+    unchanged = {'chat_id': chat, 'log_name': log, 'applied': False}
+    for version, n in ((after['seq'], 4), (seq, 5)):
+        if (run(call(version, {'peer': {}, member: {}}, [record(n)]))['result'] != unchanged
+                or state() != after):
+            raise GateFailure('a former member swapped the meta or learned its version')
     if 'meta append is unauthorized' not in refused(
-            call(after['seq'], {'peer': {}, member: {}}, [record(4)])):
-        raise GateFailure('a former member could still swap the meta')
-    # An attempt that lost a race to the leaver's own departure settles: the
-    # version moved on and the leaver is in tenure, so applied=false.
-    lost = run(call(seq, {'peer': {}, member: {}}, [record(5)]))
-    if (lost['result'] != {'chat_id': chat, 'log_name': log, 'applied': False}
-            or state() != after):
-        raise GateFailure('a race lost to removal did not settle as applied=false')
+            call(after['seq'], {'peer': {}}, [record(6)]), uid=stranger):
+        raise GateFailure('meta append answered a principal outside the chat')
 
     # A concurrent swap holding the exclusive chat lock: the waiting append
     # rechecks the version after the holder commits and appends nothing.

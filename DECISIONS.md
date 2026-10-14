@@ -25,12 +25,12 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   actor's signed events, appended to the actor's own log in array order, in
   one PostgreSQL transaction. Authority is the pre-swap meta, so a member who
   leaves, or the admin who deletes the group, records the event that ends
-  their own access. Genesis stays an exact create plus outbox. The version
-  is compared before membership: anyone in the chat's tenure (a current or
-  former member) gets `applied=false` for a version that moved on, so an
-  action that lost a race to its own removal or to the group's deletion
-  settles instead of holding its journal operation; only a current member
-  of the exact version may swap.
+  their own access. Genesis stays an exact create plus outbox. Anyone in
+  the chat's tenure (a current or former member) gets an answer: only a
+  current member of the exact version swaps, and everyone else gets the same
+  `applied=false` whatever version they send. So an action that lost a race
+  to its own removal or to the group's deletion settles instead of holding
+  its journal operation, and the answer tells a former member nothing.
 - **Why:** meta-first plus outbox (D-015) could not log a terminal event (by
   the time the outbox drains the actor is no longer a member) and left a
   removed actor's queued pills retrying forever. Logging first brings back
@@ -45,15 +45,21 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   member whenever the newest epoch's wraps or creator disagree with the
   members. Attachments wait for the janitor (blob deletes are not typed yet).
   Deleting an agent or an account treats an already-gone membership as done.
-- **Accepted cost:** a former member can learn that a chat's meta changed
-  since a version they saw (the `applied=false` answer); members' content
-  and the current meta stay unreadable to them.
+- **Former members learn nothing (changed 2026-10-14, same day):** the first
+  version answered `applied=false` only for a version that moved on and
+  refused the current one, so a former member could probe whether (and, with
+  many probes, when) the meta changed after they left. Aryan asked to keep
+  the design simple unless security suffers; the uniform answer is both
+  simpler (one condition) and closes that probe. A stale client of a former
+  member now settles with `applied=false`, rereads, cannot see the meta and
+  raises "not a member", instead of holding the chat (D-016).
 - **Accepted limits (BACKLOG):** an agent transferred to a new owner is not
   removed from rooms the new owner is not in (the old departure ran with the
   owner's session and the provider refuses it); a send queued by another
   thread between the drain and the swap retries forever (typed outbox has no
   dead-letter for refused appends).
-- **Evidence:** Scratch acceptance `docs/provider-mutation-acceptance/20261014061026-*`.
+- **Evidence:** Scratch acceptance `docs/provider-mutation-acceptance/20261014061026-*`,
+  `20261014064104-*` (version-first) and `20261014103831-*` (uniform answer).
 - **Revisit:** if a chat is ever wedged by a pending action.
 - **Cost to reverse:** moderate (one RPC and the owner's write path).
 
