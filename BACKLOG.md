@@ -293,6 +293,12 @@ moment it is made, so a large task list never lives only in conversation.
 - [ ] **Server-assigned chat order** (docs/FOUNDATION_REVIEW.md F6/P7,
   2026-10-14): `ns` is the sender's clock. Decide now whether new cursors
   use a per-chat server sequence; build later.
+- [ ] **Phone app and UI stack** (Aryan, 2026-10-15): React Native would have
+  suited the phone app goal; the no-dependency rule was taken too far. The
+  bigger blocker is that the client core (crypto, fold, outbox, sync) is
+  Python. docs/FOUNDATION_REVIEW.md F11/P11: protocol spec plus test
+  vectors, a TypeScript core, then one React Native UI (Expo) for phone and
+  desktop; Python keeps the agent harness. Aryan to decide (D-020).
 - [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
   folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.
 - [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,

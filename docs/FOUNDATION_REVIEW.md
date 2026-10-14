@@ -1,7 +1,7 @@
 # Foundation review against Signal and Telegram
 
 Date: 2026-10-14. Status: analysis for discussion. Nothing here is decided or
-built, and no schema changed. Each proposal (P1–P10) needs Aryan's decision
+built, and no schema changed. Each proposal (P1–P11) needs Aryan's decision
 and its own design note and independent review before it is built. An
 independent Claude review of this document found 11 problems; all are folded
 in below. Tracked in BACKLOG.md ("Architecture comparison with Signal and
@@ -40,6 +40,7 @@ mattering. F1, F5, F6, F9 and F10 do not depend on root size.
 | F8 | Housekeeping | Server-side jobs | Clients run the janitor | Gap | With P1 (pg_cron) |
 | F9 | Sign-up and abuse | Phone-number accounts, server rate limits | Anyone with the bootstrap (URL, publishable key, root) can create unlimited accounts | Fine for friends; **breaks** at 1,000 users | Before strangers join |
 | F10 | Backups and restore | — | A restore rewinds ids, sequences and receipts under live clients | Gap | Before activation |
+| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Spec now; TypeScript core before screens |
 | — | Encryption, multi-device | Signal per-device keys; Matrix room keys rotated on leave, key backup | Per-chat key epochs rotated on leave, re-wrap for newcomers, account key bundle on each device, signed state events | **Holds** (Matrix-like) | — |
 | — | Social graph (D-018) | Signal hides it; Telegram sees it | Server sees membership and timing, never content | **Holds** at Telegram/Matrix level | — |
 
@@ -407,6 +408,67 @@ After a restore it changes, and clients reconcile fully and treat earlier
 operations as unknown. Decide before activation; Supabase's daily backups and
 optional point-in-time recovery are the restore paths.
 
+### F11 UI stack and a phone app
+
+**Aryan (2026-10-15):** a phone app is a goal, and React Native would have
+been the right choice for it. The "no third-party runtime dependencies" rule
+was taken too far: React is as basic to frontend JavaScript as the language
+itself, and React Native is built on the same core.
+
+**Signal and Telegram.** Both ship native phone apps and a desktop app over one
+shared protocol. Signal Desktop is Electron with React. The clients share the
+protocol and crypto (Signal's libsignal), not their screens.
+
+**Here.**
+- The UI is about 28,000 lines of plain JavaScript in 24 ES modules
+  (`gui/static/js/`), with no framework and no build step. A local Python
+  server (`agentbridge/gui/`) serves it in an Edge app window.
+- **The bigger problem for a phone is not the UI. The client core is in
+  Python.** Sealing and signatures (`cryptography`: X25519, Ed25519,
+  ChaCha20-Poly1305, HKDF, scrypt), the event fold and permission replay, the
+  read model, the outbox and journal, and sync all run in the Python process.
+  The browser only renders. A phone cannot run that process, so a phone app
+  needs the client core in TypeScript, whatever UI it uses.
+- The server side does not change: Supabase (tables, RPCs, RLS, Storage,
+  Realtime) is reachable from any language. Every P1–P10 proposal is in SQL
+  and the wire format, which keeps that true.
+
+**Options.**
+- **A. One TypeScript client and one React Native app for phone and desktop
+  (recommended).** A TypeScript core (crypto with the audited `@noble`
+  libraries, which run in React Native; fold; read model; outbox; sync) and
+  one React Native UI (Expo). The UI runs on iOS and Android, and on desktop
+  via React Native Web or Electron. The Python side keeps what only it can do:
+  agent workers, the harness and the MCP surface, which are clients of the
+  same protocol. One UI codebase, and humans and agents share only the
+  protocol.
+- **B. A phone app beside today's desktop UI.** It still needs the same
+  TypeScript core, plus two UIs to keep in step (28,000 lines of plain JS and
+  a React Native app).
+- **C. React on the web only.** It improves desktop maintainability but does
+  nothing for a phone.
+
+**What to settle before any of it.** Two independent implementations (Python
+and TypeScript) must agree byte for byte: canonical JSON, signature inputs,
+key wraps, chat id commitments, the fold's ordering and authority rules. That
+needs a written protocol spec with test vectors that both suites run. That is
+also the cure for "the code is the only spec", which makes this codebase hard
+for people and models to follow. It fits the foundation work: P1, P4 and P7
+change the wire format, so they should land in the spec before a second
+client is written against it.
+
+**Cost now versus later.** Now: the spec and test vectors, then a TypeScript
+core, then the React Native UI, while the desktop app keeps working. The
+plain-JS UI is replaced, not ported; its behaviour is the reference. Later:
+every protocol change until then has to be made twice or left out of the
+phone app. Desktop users see no change until the new UI reaches parity.
+
+**P11.** Choose option A. Then write the protocol spec and test vectors, and
+build the TypeScript core before any screens. Relax the dependency rule to
+"well-maintained, widely used libraries are allowed where they replace
+custom code" (React, React Native, Expo, `@noble`). Keep it strict for the
+crypto choice: audited libraries only.
+
 ## What already matches mature apps (keep)
 
 - **Delivery, apart from F6's cursor gaps.** A durable outbox, retries, and
@@ -464,6 +526,8 @@ transport, which docs/SUPABASE_ONLY_REMOVAL_PLAN.md retired.
 5. **P5 final refusals**, **P8 cron housekeeping** (alongside P1), **P9
    invites** before strangers join, **P6 eviction and bans**.
 6. **P7's server order per chat.** Decide the direction now, build later.
+7. **P11 phone app:** the protocol spec and test vectors alongside P1/P4/P7,
+   then the TypeScript core, then the React Native UI.
 
 ## Sources
 
