@@ -63,6 +63,23 @@ def test_chat_snapshot_helpers_and_roundtrip():
     assert back.permissions.send_history is True
 
 
+def test_final_members_serialize_only_for_a_deleted_group():
+    live = ChatSnapshot(id="c1", members={"aryan": Member(role=Role.ADMIN)},
+                        tenure={"aryan": [[1, 0]], "left": [[1, 2]]})
+    assert "final_members" not in live.to_dict()  # live metas are unchanged
+    assert not live.terminal_reader("aryan")
+    dead = ChatSnapshot(id="c1", deleted=True, final_members=["aryan"],
+                        tenure={"aryan": [[1, 3]], "left": [[1, 2]]})
+    back = ChatSnapshot.from_dict(json.loads(json.dumps(dead.to_dict())))
+    assert back.to_dict() == dead.to_dict() and back.final_members == ["aryan"]
+    assert back.terminal_reader("aryan") and not back.terminal_reader("left")
+    # A deletion by an older client carries none: its tenure decides.
+    legacy = ChatSnapshot.from_dict({"id": "c1", "deleted": True,
+                                     "tenure": {"left": [[1, 2]]}})
+    assert legacy.terminal_reader("left") and not legacy.terminal_reader("eve")
+    assert ChatSnapshot.from_dict({"final_members": ["a", 1]}).final_members == []
+
+
 def test_envelope_message_vs_info_shapes():
     msg = Envelope(id="m1", ns=10, from_="aryan", kind=MsgKind.MESSAGE,
                    epoch=2, nonce="nn", ct="cc", sig="ss")

@@ -519,6 +519,8 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> bool:
         snap.deleted = True
         for name in list(snap.members):
             _tenure_close(snap, name, ns)
+        # Only they may still read it, to see the deletion and clean up (D-018).
+        snap.final_members = sorted(snap.members)
         snap.members = {}  # nobody is a member of a dead chat (reads all stop)
         return True
 

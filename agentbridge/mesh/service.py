@@ -260,14 +260,13 @@ class Mesh:
         """Current membership plus terminal-evidence catch-up authority.
 
         Deleted metadata empties ``members`` before another client may have
-        fetched the signed terminal log. Former authenticated tenure is enough
-        to fetch that evidence, but does not restore GUI/message membership.
+        fetched the signed terminal log. Its final members (older deletions:
+        its tenure) may fetch that evidence, which does not restore
+        GUI/message membership.
         """
         try:
             snap = self.messaging.snapshot(chat_id)
-            return snap.is_member(self.user) or (
-                snap.deleted and self.user in snap.tenure
-            )
+            return snap.is_member(self.user) or snap.terminal_reader(self.user)
         except Exception:  # noqa: BLE001 — unreadable meta = not sync-visible
             return False
 

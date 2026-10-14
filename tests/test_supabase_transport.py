@@ -351,7 +351,7 @@ def test_blob_delete_does_not_treat_storage_list_failure_as_missing(
     tx.put_blob("chats/c1/files/f1", b"owned")
     bucket = tx._store()
 
-    def fail_list(_prefix):
+    def fail_list(_prefix, _options=None):
         raise ConnectionError("storage list unavailable")
 
     monkeypatch.setattr(bucket, "list", fail_list)
@@ -360,6 +360,52 @@ def test_blob_delete_does_not_treat_storage_list_failure_as_missing(
     with pytest.raises(ConnectionError, match="list unavailable"):
         tx.delete_blob("chats/c1/files/f1")
     assert tx.get_blob("chats/c1/files/f1") == b"owned"
+
+
+def test_blob_lookup_and_listing_see_past_the_first_storage_page(tx):
+    # Storage returns 100 names per list call. An object sorting after the
+    # 100th must still be found (else delete would skip it and the purge
+    # would orphan it) and listed.
+    for n in range(130):
+        tx.put_blob(f"chats/c1/files/f{n:03d}", b"x" * (n + 1))
+    tx.put_blob("chats/c1/avatar.jpg", b"photo")
+    tx.put_blob("chats/c10/files/other", b"sibling chat")
+    assert tx.blob_size("chats/c1/files/f129") == 130
+    assert tx.blob_size("chats/c1/files/f12") is None  # f120..f129 only share a prefix
+    listed = tx.list_blobs("chats/c1")
+    assert len(listed) == 131 and "chats/c1/avatar.jpg" in listed
+    assert "chats/c1/files/f129" in listed and "chats/c10/files/other" not in listed
+    tx.delete_blob("chats/c1/files/f129")
+    assert tx.blob_size("chats/c1/files/f129") is None
+    assert tx.list_blobs("chats/none") == []
+    # Storage's search matches case-insensitively, so 100 case variants can
+    # sort ahead of the exact name and push it to a later page.
+    for n in range(100):
+        tx.put_blob(f"chats/c2/files/F7-{n:03d}", b"v")
+    tx.put_blob("chats/c2/files/f7", b"exact")
+    assert tx.blob_size("chats/c2/files/f7") == 5
+    # A 0-byte object is still present (a skipped delete would keep the
+    # folder non-empty and stall the purge forever).
+    tx.put_blob("chats/c1/files/empty", b"")
+    tx.delete_blob("chats/c1/files/empty")
+    assert "chats/c1/files/empty" not in tx.list_blobs("chats/c1")
+
+
+def test_batched_blob_delete_removes_100_exact_keys_a_call(tx, monkeypatch):
+    for n in range(150):
+        tx.put_blob(f"chats/c1/files/f{n:03d}", b"x")
+    tx.put_blob("chats/c1/files/f000x", b"shares a prefix")
+    bucket = tx._store()
+    real_remove, calls = bucket.remove, []
+    monkeypatch.setattr(bucket, "remove", lambda keys: calls.append(list(keys))
+                        or real_remove(keys))
+    monkeypatch.setattr(tx._client.storage, "from_", lambda _name: bucket)
+    tx.delete_blobs([f"chats/c1/files/f{n:03d}" for n in range(150)])
+    assert [len(keys) for keys in calls] == [100, 50]
+    assert all(key.startswith(tx.root + "/chats/c1/files/") for keys in calls for key in keys)
+    assert tx.list_blobs("chats/c1") == ["chats/c1/files/f000x"]
+    tx.delete_blobs([])  # nothing to do, no call
+    assert len(calls) == 2
 
 
 def test_blob_delete_requires_exact_storage_confirmation(tx, monkeypatch):

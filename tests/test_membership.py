@@ -594,7 +594,7 @@ def test_terminal_events_append_before_rls_terminal_meta(world, monkeypatch):
     ]
 
 
-def test_terminal_delete_reclaims_exact_attachments_before_empty_acl(
+def test_terminal_delete_reclaims_the_chats_objects_before_empty_acl(
         world, monkeypatch):
     aryan = world["aryan"]
     doomed = aryan.create_chat("Exact terminal cleanup", members=["fable"])
@@ -608,22 +608,23 @@ def test_terminal_delete_reclaims_exact_attachments_before_empty_acl(
         "id": blob_id, "name": "owned.txt", "bytes": 5,
     }])
     aryan.outbox.flush_once()
-    original_delete = aryan.tx.delete_blob
+    original_delete = aryan.tx.delete_blobs
     observed = []
 
-    def delete_while_member(path):
+    def delete_while_member(paths):
         before = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
         assert before.is_member("aryan") and not before.deleted
-        observed.append(path)
-        original_delete(path)
+        observed.extend(paths)
+        original_delete(paths)
 
-    monkeypatch.setattr(aryan.tx, "delete_blob", delete_while_member)
+    monkeypatch.setattr(aryan.tx, "delete_blobs", delete_while_member)
     aryan.delete_chat(doomed.id)
     terminal = ChatSnapshot.from_dict(aryan.tx.get_doc(P.meta(doomed.id)))
     assert terminal.deleted and terminal.members == {}
-    assert observed == [owned]
-    assert aryan.tx.blob_size(owned) is None
-    assert aryan.tx.get_blob(unknown) == b"unknown"
+    assert terminal.final_members == ["aryan", "fable"]  # D-018
+    # Every object in the chat's own folders, named by a message or not.
+    assert sorted(observed) == sorted([owned, unknown])
+    assert aryan.tx.blob_size(owned) is None and aryan.tx.blob_size(unknown) is None
 
 
 def test_terminal_delete_retries_cleanup_before_materializing_acl(
@@ -638,17 +639,17 @@ def test_terminal_delete_retries_cleanup_before_materializing_acl(
         "id": blob_id, "name": "retry.txt", "bytes": 5,
     }])
     aryan.outbox.flush_once()
-    original_delete = aryan.tx.delete_blob
+    original_delete = aryan.tx.delete_blobs
     failed = False
 
-    def fail_once(target):
+    def fail_once(targets):
         nonlocal failed
         if not failed:
             failed = True
             raise OSError("storage unavailable")
-        original_delete(target)
+        original_delete(targets)
 
-    monkeypatch.setattr(aryan.tx, "delete_blob", fail_once)
+    monkeypatch.setattr(aryan.tx, "delete_blobs", fail_once)
     aryan.outbox.base_delay = 0.001
     aryan.outbox.max_delay = 0.001
     clock = SimpleNamespace(now_ns=time.time_ns())

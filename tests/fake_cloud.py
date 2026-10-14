@@ -15,6 +15,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from agentbridge.transport import make_transport as _production_factory
 from agentbridge.transport.cache import CachingTransport
@@ -250,10 +251,26 @@ class FakeBucketApi:
         with self._lock:
             return self.objects[key]
 
-    def list(self, parent):
+    def list(self, parent, options=None):
+        """Storage's folder listing: direct objects (with an id) and
+        sub-folders (id None), sorted by name, a name-prefix ``search``
+        (case-insensitive), and pages of ``limit`` (default 100)."""
+        options = options or {}
+        limit, offset = int(options.get("limit", 100)), int(options.get("offset", 0))
+        search = str(options.get("search", "")).lower()
         with self._lock:
-            return [{"name": key.rpartition("/")[2], "metadata": {"size": len(data)}}
-                    for key, data in self.objects.items() if key.rpartition("/")[0] == parent]
+            entries = {}
+            for key, data in self.objects.items():
+                if not key.startswith(parent + "/"):
+                    continue
+                name, _, rest = key[len(parent) + 1:].partition("/")
+                if rest:
+                    entries.setdefault(name, {"name": name, "id": None, "metadata": None})
+                else:
+                    entries[name] = {"name": name, "id": str(uuid5(NAMESPACE_URL, key)),
+                                     "metadata": {"size": len(data)}}
+            rows = [entries[n] for n in sorted(entries) if n.lower().startswith(search)]
+            return copy.deepcopy(rows[offset:offset + limit])
 
     def remove(self, keys):
         with self._lock:

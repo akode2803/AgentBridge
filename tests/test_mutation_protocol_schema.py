@@ -319,12 +319,17 @@ def test_p1b_lifecycle_authority_is_self_bound_and_terminal_exact():
     assert "and not d.deleted" in delete
     assert delete.index("private.ab_mutation_lock_actor(p_root)") < \
         delete.index("private.ab_mutation_lock_chat(p_root, p_chat, true)") < \
-        delete.index("select d.data into v_meta")
+        delete.index("select d.data, d.deleted into v_meta, v_purged")
+    # An already-purged room settles a lost race with the same empty answer
+    # for every root member; otherwise only its final members purge (D-018).
+    purged = delete.index("if v_purged then")
+    empty = delete.index("'logs_deleted', 0, 'documents_tombstoned', 0")
+    authority = delete.index("or not public.ab_can_read_chat(p_root, p_chat) then")
+    assert purged < empty < authority < delete.index("delete from public.ab_logs l")
     assert "v_meta @> '{\"deleted\": true}'::jsonb" in delete
     assert "v_meta->'members' is distinct from '{}'::jsonb" in delete
     assert "jsonb_typeof(v_meta->'members') is distinct from 'object'" in delete
-    assert "jsonb_typeof(v_meta->'tenure') is distinct from 'object'" in delete
-    assert "v_meta->'tenure' ? v_member" in delete
+    assert "v_meta->'tenure'" not in delete
     assert "pg_catalog.left(d.path, pg_catalog.length(v_prefix)) = v_prefix" \
         in delete
     assert "d.path like" not in delete.lower()
@@ -443,8 +448,9 @@ def test_p1b_staged_read_predicate_fails_closed_after_any_manifest():
         "revoke all on function public.ab_staged_blob_readable(",
     )
     any_manifest = helper.index("if exists (")
-    exact_manifest = helper.index("return public.ab_can_read_chat", any_manifest)
-    owner_fallback = helper.index("return p_owner_id = v_actor::text")
+    exact_manifest = helper.index("if public.ab_can_read_chat", any_manifest)
+    # The owner fallback is the else branch of "any manifest exists".
+    owner_fallback = helper.index("elsif p_owner_id = v_actor::text")
     assert any_manifest < exact_manifest < owner_fallback
     assert "m.object_id = p_object_id" in helper
     assert "m.sealed_bytes = v_sealed_bytes" in helper
@@ -611,8 +617,8 @@ def test_meta_append_swaps_meta_and_appends_records_atomically():
     actor = body.index('v_member := private.ab_mutation_lock_actor')
     chat_lock = body.index('perform private.ab_mutation_lock_chat(p_root, p_chat, true)')
     observed = body.index('select d.data, d.seq, d.deleted into v_meta, v_seq, v_deleted')
-    tenure = body.index("not coalesce(v_meta->'members' ? v_member\n"
-                        "                     or v_meta->'tenure' ? v_member, false)")
+    tenure = body.index("or not (v_deleted or coalesce(v_meta->'members' ? v_member\n"
+                        "                                   or v_meta->'tenure' ? v_member, false))")
     source_lock = body.index("'agentbridge-change-ledger:'")
     compare = body.index('if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq\n'
                          '     and v_deleted = p_expected_deleted\n'
@@ -653,6 +659,48 @@ def test_meta_append_swaps_meta_and_appends_records_atomically():
     grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_meta_append('):]
     assert 'from public, anon, authenticated, service_role' in grant
     assert 'to authenticated' in grant
+
+
+def test_deleted_rooms_are_readable_only_by_their_final_members():
+    read = _body('create or replace function public.ab_can_read_chat(',
+                 'revoke all on function public.ab_can_read_chat(')
+    # One lookup (every chat-path policy calls it per row): current members,
+    # or a deleted room's final members; older deletions fall back to tenure.
+    assert read.count('select 1 from public.ab_docs m') == 1
+    assert 'terminal_reader' not in read and 'ab_is_member' not in read
+    final = read.index("when m.data ? 'final_members'")
+    assert read.index("m.data @> '{\"deleted\": true}'::jsonb") < final
+    assert final < read.index("jsonb_typeof(m.data->'final_members') = 'array'") \
+        < read.index("m.data->'final_members' ? public.ab_member(p_root)") \
+        < read.index("else m.data->'tenure' ? public.ab_member(p_root)")
+    terminal = _body('create or replace function public.ab_chat_terminal_reader(',
+                     'revoke all on function public.ab_chat_terminal_reader(')
+    assert ('public.ab_can_read_chat(p_root, p_chat)\n'
+            '    and not public.ab_is_member(p_root, p_chat)') in terminal
+    assert 'grant execute on function public.ab_chat_terminal_reader(text, text) ' \
+        'to authenticated' in SCHEMA
+    staged = _last_body('create or replace function public.ab_staged_blob_readable(',
+                        'revoke all on function public.ab_staged_blob_readable(')
+    # Checked last: a live room's published and own staged reads never pay
+    # for it, and a mismatched or unpublished object of a dead room is still
+    # the final members' to remove.
+    assert staged.count('ab_chat_terminal_reader') == 1
+    assert staged.index('select 1 from public.ab_blob_manifests m') \
+        < staged.index("elsif p_owner_id = v_actor::text") \
+        < staged.index('return public.ab_chat_terminal_reader(p_root, p_chat);\nend')
+    delete = _body('create or replace function public.ab_mutation_doc_delete(',
+                   'revoke all on function public.ab_mutation_doc_delete(')
+    refusal = delete[delete.index('if v_actor is null'):delete.index("raise exception 'typed "
+                                                                     "document delete")]
+    assert "(p_path = 'chats/' || v_chat || '/meta.json'\n" in refusal
+    policy = SCHEMA[SCHEMA.rindex('create policy ab_blobs_member_delete on storage.objects'):]
+    policy = policy[:policy.index(');\n') + 3]
+    stage = policy[policy.index("pg_catalog.split_part(name, '/', 2) = 'blob-stage'"):]
+    assert "owner_id = auth.uid()::text" in stage
+    assert "or public.ab_chat_terminal_reader(" in stage
+    trigger = _body('create or replace function private.ab_record_doc_change()',
+                    "drop trigger if exists")
+    assert "old.data->'final_members' is distinct from new.data->'final_members'" in trigger
 
 
 def test_owner_admission_tables_bound_slots_and_keep_receipt_wire_separate():

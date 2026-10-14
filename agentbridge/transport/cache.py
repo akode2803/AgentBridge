@@ -1335,6 +1335,12 @@ class CachingTransport(Transport):
     def delete_blob(self, path: str) -> None:
         self.inner.delete_blob(path)
 
+    def delete_blobs(self, paths: list[str]) -> None:
+        self.inner.delete_blobs(paths)
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        return self.inner.list_blobs(prefix)
+
     def local_path(self, path: str) -> Path | None:
         return self.inner.local_path(path)
 

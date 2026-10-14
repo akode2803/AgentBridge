@@ -555,23 +555,34 @@ live only in an adapter preset.
   append but before local acknowledgement; stable ids make the read projection
   exactly once. True remote exactly-once append would require a format/schema
   migration and is not claimed.
-- **Terminal-chat blob reclamation** (R119) — terminal outbox dispatch appends
-  the signed deletion event, proves terminal state by folding authenticated
-  info events, reclaims exact owned attachments while the pre-terminal member
-  ACL still authorizes Storage, and only then materializes empty-members meta.
-  A failed exact delete therefore preserves both authorization and the durable
-  retry row. Ownership comes from decryptable sender-signed envelopes whose
-  timestamps fall inside folded sender tenure; the complete remote scan is
-  merged with already-ingested signed local envelopes to tolerate immediate
-  provider read lag. Stable blob ids pass the shared attachment validator and
-  deduplicate to exact paths. The later janitor repeats the proof before
-  relational retention cleanup. Supabase requires confirmation of each exact
-  full deletion key and never lists/removes a chat Storage prefix; the cache
-  wrapper explicitly delegates exact deletes. Folder record deletion likewise
-  leaves unproven files/avatar artifacts inert, and record-backed discovery
-  does not resurrect such an artifact-only directory as a chat. Supabase's
-  deletion-only existence check propagates provider failures, unlike tolerant
-  read-side size probes, so an outage cannot masquerade as an absent object.
+- **Terminal-chat blob reclamation** (R119, reshaped 2026-10-14 by D-018) —
+  a delete-for-everyone folds `final_members` (the members at deletion)
+  before emptying `members`; only they (older deletions: the tenure) read the
+  deleted room, see and delete its Storage objects and purge it
+  (`ab_can_read_chat`, `ab_chat_terminal_reader`). Legacy terminal outbox
+  dispatch reclaims after appending the signed deletion event; the typed
+  path reclaims right after its `meta_append` swap (a failure only logs).
+  Both call `Janitor.reclaim_deleted_chat_attachments`, which requires a
+  fold-verified deletion and then deletes every object under the chat's own
+  folders. `chats/<chat>`, `chats/<chat>/files` and `blob-stage/<chat>` are
+  each listed by name, page by page (Storage returns 100 names per call),
+  recursing into any other sub-folder Storage reports. The exact
+  message-referenced paths of the removed folder transport are gone: a chat
+  owns its folders, and listing also reclaims files no message references.
+  Deletes go out as `delete_blobs`, 100 exact keys a Storage call with no
+  per-object lookup or confirmation (an RLS-filtered key is silently kept):
+  the janitor purges the records only after the grace window, only once a
+  fresh listing is empty and, when bound, only once the provider meta is
+  terminal, and a transport that cannot list never purges. Bound, the purge
+  is a `chat_delete` under a fresh key, and each sweep first settles one
+  whose reply was lost (its unacknowledged receipt would otherwise hold
+  every epoch rotation). Bound blob deletes are direct, identity-checked
+  Storage removes limited to paths inside a chat's own folders (Storage
+  sits outside the seal; RLS decides). `doc_delete` never tombstones a chat
+  meta, so only `chat_delete` ends a room and a purge always takes its logs.
+  The single `delete_blob` keeps its exact lookup (a 0-byte object counts as
+  present) and exact-key confirmation, and propagates provider failures, so
+  an outage cannot masquerade as an absent object.
 - **`broker.py`** (R18) — the Codex/Claude-Code-style PermissionBroker. Decision
   order: workspace path → allow; deny-root (harness home, mesh root) → refuse
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →

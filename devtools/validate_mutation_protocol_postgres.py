@@ -200,10 +200,21 @@ language sql stable security definer set search_path = pg_catalog as $$
         m.data->'members' ? public.ab_member(p_root)
         or (
           m.data @> '{"deleted": true}'::jsonb
-          and m.data->'tenure' ? public.ab_member(p_root)
+          and case
+            when m.data ? 'final_members'
+            then pg_catalog.jsonb_typeof(m.data->'final_members') = 'array'
+                 and m.data->'final_members' ? public.ab_member(p_root)
+            else m.data->'tenure' ? public.ab_member(p_root)
+          end
         )
       )
   )
+$$;
+create or replace function public.ab_chat_terminal_reader(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = pg_catalog as $$
+  select public.ab_can_read_chat(p_root, p_chat)
+    and not public.ab_is_member(p_root, p_chat)
 $$;
 """
 
@@ -2844,6 +2855,123 @@ def _validate_meta_append(database_url: str) -> None:
         raise GateFailure('meta append overwrote a concurrent swap or appended anyway')
 
 
+def _validate_terminal_readers(database_url: str) -> None:
+    """Only a deleted room's final members read, clean up and purge it; once
+    purged, every root member gets the same empty answers (D-017, D-018)."""
+    root = 'typed-terminal-readers'
+    final, uploader, departed, outsider = uuid4(), uuid4(), uuid4(), uuid4()
+    names = {final: root + '-member', uploader: root + '-uploader',
+             departed: root + '-departed', outsider: root + '-outsider'}
+    before = _prepare_root(database_url, root, final)
+    dead = {'deleted': True, 'members': {},
+            'tenure': {names[final]: [[1, 4]], names[uploader]: [[1, 4]],
+                       names[departed]: [[1, 2]]},
+            'final_members': sorted((names[final], names[uploader]))}
+    legacy = {'deleted': True, 'members': {},
+              'tenure': {names[final]: [[1, 4]], names[departed]: [[1, 2]]}}
+    live = {'members': {names[final]: {}, names[uploader]: {}}}
+    staged, legacy_file, live_staged = (
+        f'{root}/blob-stage/room/f2-x', f'{root}/chats/room/files/f-1',
+        f'{root}/blob-stage/live/f2-y')
+    _run(database_url,
+         'insert into public.ab_members(root,username,uid) values '
+         + ', '.join(f'({_quote(root)}, {_quote(names[uid])}, {_quote(str(uid))})'
+                     for uid in (uploader, departed, outsider)) + '; '
+         'insert into public.ab_docs(root,path,data) values '
+         f"({_quote(root)}, 'chats/room/meta.json', {_jsonb(dead)}), "
+         f"({_quote(root)}, 'chats/room/note.json', '{{}}'::jsonb), "
+         f"({_quote(root)}, 'chats/legacy/meta.json', {_jsonb(legacy)}), "
+         f"({_quote(root)}, 'chats/live/meta.json', {_jsonb(live)}); "
+         'insert into public.ab_logs(root,chat_id,log_name,line) values '
+         f"({_quote(root)}, 'room', 'writer', '{{}}'); "
+         'insert into storage.objects(bucket_id,name,owner_id,metadata) values '
+         + ', '.join(f"('ab-mesh', {_quote(name)}, {_quote(str(uploader))}, "
+                     "'{\"size\":1}'::jsonb)"
+                     for name in (staged, legacy_file, live_staged)) + ';')
+
+    def as_(uid, sql):
+        return _scalar(database_url, 'begin; set local role authenticated; '
+                       + _claims(uid) + sql + '; commit;')
+
+    def reads(uid, chat):
+        return as_(uid, f"select public.ab_can_read_chat({_quote(root)}, {_quote(chat)})")
+
+    def sees(uid, name):
+        return as_(uid, "select count(*) from storage.objects where bucket_id='ab-mesh' "
+                        f"and name={_quote(name)}")
+
+    if [reads(uid, 'room') for uid in (final, uploader, departed, outsider)] \
+            != ['t', 't', 'f', 'f']:
+        raise GateFailure('a deleted room is readable beyond its final members')
+    if reads(departed, 'legacy') != 't' or reads(outsider, 'legacy') != 'f':
+        raise GateFailure('a deletion without final members lost its tenure fallback')
+    # The final members (not only the uploader) see and remove the dead room's
+    # staged objects; a departed member cannot; a live room stays owner-only.
+    if sees(final, staged) != '1' or sees(departed, staged) != '0':
+        raise GateFailure('staged objects of a deleted room are not final-members-only')
+    # The delete policy alone (a real DELETE also needs SELECT visibility,
+    # which would hide a too-wide delete rule behind the read rule).
+    qual = _scalar(database_url, "select qual from pg_policies where schemaname='storage' "
+                   "and tablename='objects' and policyname='ab_blobs_member_delete'")
+
+    def deletable(uid, name):
+        return _scalar(database_url, 'begin; ' + _claims(uid)
+                       + "select count(*) from storage.objects where bucket_id='ab-mesh' "
+                       f'and name={_quote(name)} and ({qual}); commit;')
+
+    if [deletable(uid, name) for uid, name in (
+            (departed, staged), (departed, legacy_file), (outsider, staged),
+            (final, live_staged), (uploader, live_staged))] != ['0', '0', '0', '0', '1']:
+        raise GateFailure('the delete policy reaches beyond owners and final members')
+    for name in (staged, legacy_file):
+        if as_(final, 'with gone as (delete from storage.objects where '
+                      f"bucket_id='ab-mesh' and name={_quote(name)} returning 1) "
+                      'select count(*) from gone') != '1':
+            raise GateFailure('a final member could not clear a deleted room object')
+
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch, source = UUID(sealed['protocol_epoch']), UUID(sealed['source_epoch'])
+
+    def purge(uid, *, ok=True):
+        sql = ('select public.ab_mutation_chat_delete('
+               f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+               f"{_quote(str(uuid4()))}::uuid, {_quote('c' * 64)}, 'room')")
+        if not ok:
+            return _run(database_url, 'begin; set local role authenticated; '
+                        + _claims(uid) + sql + '; commit;', expect_ok=False).stderr
+        return json.loads(as_(uid, sql))['result']
+
+    meta_delete = ('select public.ab_mutation_doc_delete('
+                   f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                   f"{_quote(str(uuid4()))}::uuid, {_quote('e' * 64)}, "
+                   "'chats/room/meta.json')")
+    if 'typed document delete is unauthorized' not in _run(
+            database_url, 'begin; set local role authenticated; ' + _claims(final)
+            + meta_delete + '; commit;', expect_ok=False).stderr:
+        raise GateFailure('a chat meta was tombstoned outside chat_delete')
+    if 'typed chat delete is unauthorized' not in purge(departed, ok=False):
+        raise GateFailure('a member who left before the deletion purged the room')
+    if purge(final) != {'chat_id': 'room', 'logs_deleted': 1, 'documents_tombstoned': 2}:
+        raise GateFailure('a final member could not purge the deleted room')
+    empty = {'chat_id': 'room', 'logs_deleted': 0, 'documents_tombstoned': 0}
+    if purge(uploader) != empty or purge(outsider) != empty:
+        raise GateFailure('an already-purged room did not answer every root member alike')
+
+    def append(uid):
+        return json.loads(as_(uid, 'select public.ab_mutation_meta_append('
+            f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid, '
+            f"{_quote('d' * 64)}, 'room', '{{\"members\":{{}}}}'::jsonb, "
+            f"{_quote(str(source))}::uuid, 1, false, {_quote(names[uid] + '|m1')}, "
+            '\'[{"id":"e1"}]\'::jsonb)'))['result']['applied']
+
+    if append(departed) is not False or append(outsider) is not False:
+        raise GateFailure('a purged room answered a meta append differently by principal')
+    after = _scalar(database_url, "select count(*) from public.ab_logs where root="
+                    f"{_quote(root)} and chat_id='room'")
+    if after != '0':
+        raise GateFailure('a purged room received records')
+
+
 def _validate_reaction_pairs(database_url: str) -> None:
     """Real row/unique-key races must never expose half a checkpoint pair."""
     root, actor, chat = 'typed-reaction-pair', uuid4(), 'room'
@@ -3309,6 +3437,7 @@ def main() -> int:
     _validate_conditional_documents(database_url)
     _validate_reaction_pairs(database_url)
     _validate_meta_append(database_url)
+    _validate_terminal_readers(database_url)
     _validate_receipt_retirement(database_url)
     _validate_provider_admission(database_url)
     if __package__:

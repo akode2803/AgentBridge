@@ -156,13 +156,64 @@ moment it is made, so a large task list never lives only in conversation.
   leave (and so account deletion) with "still sending". Dead-letter
   ticketless rows on a membership refusal and mark `local_send_status`
   failed; consider a "discard unsent" choice in the leave dialog.
-- [ ] **Janitor and blob deletion under a bound writer** (review, 2026-10-14):
-  blob deletes are not typed, so a typed delete-for-everyone leaves its
-  attachments (and `blob-stage/<chat>/` objects, whose deletes need current
-  membership) for the janitor. Under typed the janitor should trust
-  `meta.deleted` instead of an ns-ordered refold (which can reject a delete
-  that was valid in swap order), then purge via `ab_mutation_chat_delete`.
-  Also D-018 (former members can read a deleted group's info events).
+- [x] **Janitor and blob deletion under a bound writer** (review, 2026-10-14;
+  inactive, deterministic tests plus hosted Scratch acceptance). The
+  delete-for-everyone fold records `final_members`; only they read, clean
+  and purge a deleted room (D-018; older deletions fall back to tenure). The
+  deleting member reclaims the chat's own Storage folders (`chats/<chat>/`,
+  `blob-stage/<chat>/`, listed page by page) right after the swap, a failure
+  only logs. Deletes are batched (100 keys a Storage call, no per-object
+  lookup); bound, they are direct, identity-checked Storage removes limited
+  to the chat's own folders (Storage is outside the seal). The janitor lists
+  the three known folders by name, purges only once a fresh listing is
+  empty and, when bound, the provider meta is terminal, via a `chat_delete`
+  under a fresh key; each sweep first settles a purge whose reply was lost
+  (else its unacknowledged receipt would hold every rotation). `doc_delete`
+  never tombstones a chat meta. A purged room answers every root member
+  alike. Storage listings now page past 100 names (`_strict_blob_size` had
+  silently missed later files) and a 0-byte object counts as present. A
+  transport that cannot list never purges. Kept: the janitor's ns-ordered
+  refold still gates purging (it fails closed; see the open item below).
+  Evidence: tests/test_janitor.py, test_membership*.py,
+  test_staged_attachments.py, test_supabase_transport.py,
+  test_application_mutations.py (27 mutants, each killed),
+  docs/provider-mutation-acceptance/20261014111654-* and (review fixes)
+  20261014114329-*.
+- [ ] **Hosted Storage listing check** (review, 2026-10-14): the purge is
+  irreversible and is decided by an empty listing, but only SQL policies
+  were accepted on Scratch, not the Storage list/remove HTTP API. Run
+  `devtools/validate_blob_storage_http.py`-style checks as a final member:
+  more than 100 files, `files/` and an unexpected sub-folder, batched
+  remove. Needs an authenticated Scratch test session (Aryan's; Claude does
+  not create accounts). The janitor already lists its three folders by
+  name, so a Storage that hides sub-folder rows only misses unexpected ones.
+- [ ] **Derivable exact-create keys** (review, 2026-10-14; pre-existing,
+  accepted at this scale): `exact_create_id` is a uuid5 of the path, and
+  receipts are keyed across actors, so any root member can take another
+  member's key first and that member's create then fails (55000) until the
+  epoch changes. Purges moved to fresh keys for this reason. Fix: mix in
+  the actor id plus a per-journal secret.
+- [ ] **Janitor integration test under a bound writer** (review, 2026-10-14):
+  the bound pieces are unit-tested (batch route and path rule, publisher
+  remove, settle of lost purges) and the janitor runs over the real
+  Supabase transport unbound, but no test runs a real Janitor over a bound
+  `LocalMutationTransport`.
+- [ ] **Janitor refold can disagree with swap order** (review, 2026-10-14):
+  the janitor confirms a deletion by refolding events in ns order, which can
+  reject a delete that was valid in meta swap order (a clock-skewed earlier
+  removal). It fails closed: the room is never purged and its files stay
+  until someone deletes it again. Under typed, trust the provider meta
+  (`deleted`, `members == {}`) once a bound writer is the only writer.
+- [ ] **Pending refused write blocks this device's purge** (accepted limit,
+  2026-10-14): the journal's overlapping-intent check holds a device's
+  `chat_delete` while a refused write on the same chat is pending (D-016,
+  until epoch closure). Another final member's janitor can still purge, and
+  Storage reclaim is not blocked. Revisit with the dead-letter item above.
+- [ ] **Manifests outlive a purge** (2026-10-14): `ab_blob_manifests` rows
+  of a purged chat stay (`ab_mutation_chat_delete` drops logs and tombstones
+  docs only). Harmless (sizes and digests, no bytes, readable only through
+  the room's final members) but they accumulate; drop them in the purge once
+  it is clear no manifest receipt replay depends on them.
 - [ ] **Agent ownership transfer under a bound writer**: `_depart_owner_changed`
   is skipped when bound (it ran with the owner's session, which the provider
   refuses where the owner is not a member), and `_heal` runs only on
@@ -174,6 +225,17 @@ moment it is made, so a large task list never lives only in conversation.
   watermark of 2^63 or more makes `state_events_after` raise OverflowError.
   `_snapshots` now skips that chat, but `_fresh` still raises, so nobody can
   leave it. Validate or clamp on read.
+- [ ] **Unpublished staged attachments become orphans** (2026-10-14): an
+  object uploaded to `blob-stage/<chat>/` whose manifest never published (the
+  send was refused after a removal, or the sender gave up) is readable and
+  deletable only by its uploader while a current member, and no message
+  references it. In a deleted room the final members now reclaim every
+  object of the room's folders, so this remains only for live rooms: needs
+  an uploader-side sweep of its own unpublished objects (the outbox knows
+  the blob ids) before the membership ends, or a provider-side expiry.
+- [ ] **Typed tombstone purge** (2026-10-14): `purge_deleted_docs` (the
+  janitor's 30-day hard drop of tombstoned docs) raises under a bound writer;
+  needs a typed RPC or an operator job. Until then tombstones accumulate.
 - [ ] **Hardening: bind `p_log` to the actor** (review, 2026-10-14): meta
   append and `log_append` accept any log name in a chat the actor is in.
   Require the actor's own `<name>|` prefix in SQL.

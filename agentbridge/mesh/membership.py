@@ -525,12 +525,13 @@ class MembershipService:
                     raise PermissionDenied("only an admin can delete this group")
                 return [({"type": events.EV_DELETED, "by": self.user}, True)]
 
-            # Attachments wait for the janitor: blob deletes are not typed yet
-            # (members of a deleted group keep delete access to its storage).
             if self._settle_terminal(chat_id, events.EV_DELETED):
+                self._reclaim_files(chat_id)
                 return ChatSnapshot(id=chat_id)  # my earlier delete applied
             self._drain_sends(chat_id)
-            return self._act(chat_id, plan)
+            snap = self._act(chat_id, plan)
+            self._reclaim_files(chat_id)
+            return snap
         self.messaging._require_event_supported({'type': events.EV_DELETED})
         snap = self.messaging.snapshot(chat_id)
         if snap.kind is not ChatKind.GROUP:
@@ -543,6 +544,15 @@ class MembershipService:
         preview = self.materialize(chat_id, write=False)
         self.messaging.flush_outbox()
         return preview
+
+    def _reclaim_files(self, chat_id: str) -> None:
+        """Remove a group's Storage objects right after its deletion applied;
+        as a final member I still may (D-018). Best effort: the janitor
+        retries before it purges the group."""
+        try:
+            self.messaging._reclaim_terminal(chat_id)
+        except Exception:  # noqa: BLE001 — the janitor finishes the job
+            log.warning("reclaiming a deleted group's files failed", exc_info=True)
 
     def set_permissions(self, chat_id: str, changes: dict) -> ChatSnapshot:
         def plan(snap):

@@ -96,6 +96,7 @@ _POSTGREST_TIMEOUT_S = 6
 _STORAGE_TIMEOUT_S = 20
 _FUNCTION_TIMEOUT_S = 6
 _RT_MAX_BACKOFF_S = 15.0
+_LIST_PAGE = 100  # Storage's maximum page of names per list call
 
 # R76 (docs/SCALING.md §3) — writer-side hint coalescing. A hint is a
 # content-free wake-up; per-class intervals bound how long a write may wait
@@ -1705,21 +1706,55 @@ class SupabaseTransport(Transport):
 
     def _strict_blob_size(self, path: str) -> int | None:
         """Return exact object size; unlike the read API, propagate failures."""
+        obj = self._strict_object(path)
+        return None if obj is None else int((obj.get("metadata") or {}).get("size") or 0) or None
+
+    def _strict_object(self, path: str) -> dict | None:
+        """The exact object's listing row, or None; propagates failures.
+
+        Storage lists 100 names per page, so the lookup searches for the exact
+        name and pages through every match: a folder with more objects must
+        never make a present object look missing.
+        """
         full = f"{self.root}/{_check(path)}"
         parent, _, name = full.rpartition("/")
-        rows = self._retry(lambda: self._store().list(parent))
-        for obj in rows or []:
-            if obj.get("name") == name:
-                meta = obj.get("metadata") or {}
-                return int(meta.get("size") or 0) or None
-        return None
+        offset = 0
+        while True:
+            rows = self._retry(lambda at=offset: self._store().list(
+                parent, {"limit": _LIST_PAGE, "offset": at, "search": name})) or []
+            for obj in rows:
+                if obj.get("name") == name and obj.get("id") is not None:
+                    return obj
+            if len(rows) < _LIST_PAGE:
+                return None
+            offset += _LIST_PAGE
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        """Every object path under the folder ``prefix``, recursively, every
+        page (Storage folder listings are exact: no wildcards)."""
+        folders, out = [_check(prefix.rstrip("/"))], []
+        while folders:
+            folder, offset = folders.pop(), 0
+            while True:
+                rows = self._retry(lambda f=folder, at=offset: self._store().list(
+                    f"{self.root}/{f}", {"limit": _LIST_PAGE, "offset": at})) or []
+                for obj in rows:
+                    name = obj.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    # Storage reports a sub-folder as an entry without an id.
+                    (folders if obj.get("id") is None else out).append(f"{folder}/{name}")
+                if len(rows) < _LIST_PAGE:
+                    break
+                offset += _LIST_PAGE
+        return sorted(out)
 
     def delete_blob(self, path: str) -> None:
         path = _check(path)
         # A missing object is already the goal. When it is currently visible,
         # require Storage to confirm that exact full key in its delete result;
         # the SDK may otherwise return an empty success under RLS.
-        if self._strict_blob_size(path) is None:
+        if self._strict_object(path) is None:
             return
         full = f"{self.root}/{path}"
 
@@ -1733,6 +1768,13 @@ class SupabaseTransport(Transport):
                 raise TransportError("storage did not confirm exact blob deletion")
 
         self._retry(remove)
+
+    def delete_blobs(self, paths: list[str]) -> None:
+        """Remove many objects, 100 keys a call, without confirmation (an
+        RLS-filtered key is silently kept: list again to know)."""
+        keys = [f"{self.root}/{_check(path)}" for path in paths]
+        for at in range(0, len(keys), _LIST_PAGE):
+            self._retry(lambda chunk=keys[at:at + _LIST_PAGE]: self._store().remove(chunk))
 
     # ---------------------------------------------------------------- events
     def watch(self) -> Watcher:

@@ -1,5 +1,27 @@
 # Cloud source handoff
 
+## 2026-10-14 deleted-chat cleanup (D-018)
+
+A typed delete-for-everyone now reclaims the chat's files right after its
+swap, and only the room's final members (recorded by the deletion fold as
+`final_members`; older deletions fall back to tenure) can read, clean and
+purge a deleted room. Reclaim lists the chat's own folders (`chats/<chat>/`,
+`blob-stage/<chat>/`, 100 names per Storage page) and deletes everything.
+Deletes are batched (100 keys a Storage call); bound, they are direct,
+identity-checked Storage removes inside the chat's own folders. Bound
+`delete_chat` is a `chat_delete` under a fresh key, and each janitor sweep
+first settles a purge whose reply was lost. `doc_delete` never tombstones a
+chat meta. A purged room answers every root member alike. Scratch:
+`agentbridge_p1b_terminal_readers` (20261014111654) and the review
+follow-up `agentbridge_p1b_terminal_readers_review` (20261014114329)
+applied and accepted in rolled-back blocks, residue 0; evidence
+docs/provider-mutation-acceptance/20261014111654-* and 20261014114329-*.
+Details:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md "Deleted-chat cleanup"; open limits in
+BACKLOG.md (refold vs swap order, pending-write purge hold, manifests after
+purge, live-room staged orphans, typed tombstone purge, hosted Storage HTTP
+listing check, derivable exact-create keys).
+
 ## 2026-10-14 uniform meta-append answer (D-017)
 
 `ab_mutation_meta_append` now gives every principal in the chat's tenure who

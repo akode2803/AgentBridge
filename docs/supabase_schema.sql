@@ -176,10 +176,14 @@ $$;
 revoke all on function public.ab_is_member(text, text) from public;
 grant execute on function public.ab_is_member(text, text) to authenticated;
 
--- A deleted room has no current members, but its former members must still be
--- able to observe the terminal meta/log evidence and perform bounded janitor
--- cleanup. This is read/delete authority only; insert/update policies continue
--- to use ab_is_member, so terminal rooms cannot receive new content.
+-- A deleted room has no current members, but the members it had when it was
+-- deleted (its final_members, written by the deleting client's fold) must
+-- still be able to observe the terminal meta/log evidence and perform bounded
+-- janitor cleanup. People who had left before the deletion may not (D-018). A
+-- deletion by an older client carries no final_members; then its tenure (all
+-- past members) decides. This is read/delete authority only; insert/update
+-- policies continue to use ab_is_member, so terminal rooms cannot receive new
+-- content. One lookup: every chat-path policy calls this per row.
 create or replace function public.ab_can_read_chat(p_root text, p_chat text)
 returns boolean
 language sql stable security definer set search_path = public as $$
@@ -191,13 +195,30 @@ language sql stable security definer set search_path = public as $$
         m.data->'members' ? public.ab_member(p_root)
         or (
           m.data @> '{"deleted": true}'::jsonb
-          and m.data->'tenure' ? public.ab_member(p_root)
+          and case
+            when m.data ? 'final_members'
+            then pg_catalog.jsonb_typeof(m.data->'final_members') = 'array'
+                 and m.data->'final_members' ? public.ab_member(p_root)
+            else m.data->'tenure' ? public.ab_member(p_root)
+          end
         )
       )
   )
 $$;
 revoke all on function public.ab_can_read_chat(text, text) from public;
 grant execute on function public.ab_can_read_chat(text, text) to authenticated;
+
+-- Of those, the ones who are not current members: a deleted room's final
+-- members. Its staged attachments are theirs to list and remove before the
+-- purge (no other principal may touch another uploader's staged object).
+create or replace function public.ab_chat_terminal_reader(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.ab_can_read_chat(p_root, p_chat)
+    and not public.ab_is_member(p_root, p_chat)
+$$;
+revoke all on function public.ab_chat_terminal_reader(text, text) from public;
+grant execute on function public.ab_chat_terminal_reader(text, text) to authenticated;
 
 -- Discover candidate chat ids while bypassing row-by-row RLS over every log
 -- and document, then apply the same current-member/deleted-tenure authority
@@ -685,6 +706,7 @@ begin
         ) values (new.root, 'root', '', 'visibility');
       elsif old.data->'members' is distinct from new.data->'members'
          or old.data->'tenure' is distinct from new.data->'tenure'
+         or old.data->'final_members' is distinct from new.data->'final_members'
          or old.data->'deleted' is distinct from new.data->'deleted'
          or old.deleted is distinct from new.deleted then
         insert into public.ab_change_events(
@@ -3406,9 +3428,12 @@ begin
       p_root, v_chat, p_path = 'chats/' || v_chat || '/meta.json'
     );
   end if;
+  -- A chat's meta is never tombstoned directly: only chat_delete ends a
+  -- room, so a purge always removes its logs too.
   if v_actor is null or v_member = ''
      or p_path like 'chats/%/runtime/effects/%'
-     or (v_chat <> '' and not public.ab_can_read_chat(p_root, v_chat)) then
+     or (v_chat <> '' and (p_path = 'chats/' || v_chat || '/meta.json'
+                           or not public.ab_can_read_chat(p_root, v_chat))) then
     raise exception 'typed document delete is unauthorized'
       using errcode = '42501';
   end if;
@@ -3615,6 +3640,7 @@ declare
   v_actor uuid := auth.uid();
   v_member text;
   v_meta jsonb;
+  v_purged boolean;
   v_prefix text;
   v_provider_digest text;
   v_begin jsonb;
@@ -3644,18 +3670,28 @@ begin
       using errcode = '42501';
   end if;
   perform private.ab_mutation_lock_chat(p_root, p_chat, true);
-  select d.data into v_meta
+  select d.data, d.deleted into v_meta, v_purged
   from public.ab_docs d
   where d.root = p_root
     and d.path = 'chats/' || p_chat || '/meta.json'
-    and not d.deleted
   for update;
+  if v_purged then
+    -- Already purged (another final member's janitor got there first):
+    -- nothing is left to purge or to authorize against, so every root member
+    -- gets the same empty answer and a lost race settles.
+    return private.ab_mutation_finish(
+      p_root, p_protocol_epoch, p_operation_id, 'chat_delete',
+      p_payload_digest, v_provider_digest,
+      pg_catalog.jsonb_build_object(
+        'chat_id', p_chat, 'logs_deleted', 0, 'documents_tombstoned', 0)
+    );
+  end if;
+  -- Only a deleted room's final members (D-018) purge it.
   if v_meta is null
      or not coalesce(v_meta @> '{"deleted": true}'::jsonb, false)
      or pg_catalog.jsonb_typeof(v_meta->'members') is distinct from 'object'
      or v_meta->'members' is distinct from '{}'::jsonb
-     or pg_catalog.jsonb_typeof(v_meta->'tenure') is distinct from 'object'
-     or not coalesce(v_meta->'tenure' ? v_member, false) then
+     or not public.ab_can_read_chat(p_root, p_chat) then
     raise exception 'typed chat delete is unauthorized'
       using errcode = '42501';
   end if;
@@ -3965,24 +4001,32 @@ declare
   v_actor uuid := auth.uid();
   v_sealed_bytes bigint := private.ab_storage_object_size(p_metadata);
 begin
-  if v_actor is null or p_root is null or p_chat is null or p_blob is null
-     or p_owner_id is null or p_object_id is null
-     or v_sealed_bytes is null then
+  if v_actor is null or p_root is null or p_chat is null or p_blob is null then
     return false;
   end if;
-  if exists (
-    select 1 from public.ab_blob_manifests m
-    where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
-  ) then
-    return public.ab_can_read_chat(p_root, p_chat) and exists (
+  if p_owner_id is not null and p_object_id is not null
+     and v_sealed_bytes is not null then
+    if exists (
       select 1 from public.ab_blob_manifests m
       where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
-        and m.object_id = p_object_id
-        and m.sealed_bytes = v_sealed_bytes
-    );
+    ) then
+      if public.ab_can_read_chat(p_root, p_chat) and exists (
+        select 1 from public.ab_blob_manifests m
+        where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
+          and m.object_id = p_object_id
+          and m.sealed_bytes = v_sealed_bytes
+      ) then
+        return true;
+      end if;
+    elsif p_owner_id = v_actor::text
+          and public.ab_is_member(p_root, p_chat) then
+      return true;
+    end if;
   end if;
-  return p_owner_id = v_actor::text
-    and public.ab_is_member(p_root, p_chat);
+  -- A deleted room's final members see every staged object it holds, so
+  -- their janitor can list and remove them all before the purge. Checked
+  -- last, so a live room's common reads never pay for it.
+  return public.ab_chat_terminal_reader(p_root, p_chat);
 end
 $$;
 revoke all on function public.ab_staged_blob_readable(
@@ -4105,10 +4149,19 @@ for delete to authenticated using (
       and pg_catalog.split_part(name, '/', 3) <> ''
       and pg_catalog.split_part(name, '/', 4) <> ''
       and pg_catalog.split_part(name, '/', 5) = ''
-      and owner_id = auth.uid()::text
-      and public.ab_is_member(
-        pg_catalog.split_part(name, '/', 1),
-        pg_catalog.split_part(name, '/', 3)
+      and (
+        (
+          owner_id = auth.uid()::text
+          and public.ab_is_member(
+            pg_catalog.split_part(name, '/', 1),
+            pg_catalog.split_part(name, '/', 3)
+          )
+        )
+        -- A deleted room's final members clear its staged objects (D-018).
+        or public.ab_chat_terminal_reader(
+          pg_catalog.split_part(name, '/', 1),
+          pg_catalog.split_part(name, '/', 3)
+        )
       )
     )
   )
@@ -4738,7 +4791,9 @@ grant execute on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid
 -- version they send. So an attempt that lost a race to its own removal, or to
 -- the group's deletion, settles instead of being refused until an epoch
 -- closure, and the answer tells a former member nothing about the chat since
--- they left (whether its meta changed, or when). Others are refused.
+-- they left (whether its meta changed, or when). Others are refused, except
+-- once the room is purged (its meta row tombstoned): then every root member
+-- gets that applied=false, so a former member cannot learn of the purge.
 alter table public.ab_mutation_admission_legs
   drop constraint if exists ab_mutation_admission_legs_operation_kind_check;
 alter table public.ab_mutation_admission_legs
@@ -4813,10 +4868,12 @@ begin
   select d.data, d.seq, d.deleted into v_meta, v_seq, v_deleted
   from public.ab_docs d
   where d.root = p_root and d.path = 'chats/' || p_chat || '/meta.json';
-  -- Tenure (current or former member) earns an answer; see the header.
+  -- Tenure (current or former member) earns an answer; see the header. So
+  -- does every root member once the room is purged: nothing is left to tell
+  -- former members from others, and a refusal would reveal the purge to them.
   if v_actor is null or v_member = '' or v_meta is null
-     or not coalesce(v_meta->'members' ? v_member
-                     or v_meta->'tenure' ? v_member, false) then
+     or not (v_deleted or coalesce(v_meta->'members' ? v_member
+                                   or v_meta->'tenure' ? v_member, false)) then
     raise exception 'meta append is unauthorized' using errcode = '42501';
   end if;
   perform pg_catalog.pg_advisory_xact_lock_shared(

@@ -6,6 +6,7 @@ explicit: a new mutating driver API must not silently bypass this owner.
 from __future__ import annotations
 
 import threading
+from uuid import uuid4
 
 from .base import Transport
 from ..store.source_selectors import Selector
@@ -372,6 +373,19 @@ class LocalMutationTransport(Transport):
 
         return str(uuid5(NAMESPACE_URL, 'agentbridge-exact-create:' + path))
 
+    def settle_chat_purges(self):
+        """Resume a bound writer's unfinished purges (a lost reply leaves the
+        receipt unacknowledged, which would hold every later epoch rotation;
+        the purged chat is gone, so nothing would ever retry it)."""
+        writer = self._bound_writer()
+        if writer is None:
+            return 0
+        settled = writer.settle_pending('chat_delete', skip_failures=True)
+        self._bound_writer()
+        if settled:
+            self._typed_success()
+        return settled
+
     def settle_exact_creates(self, prefix, on_created=None, *, skip_failures=False,
                              include=None):
         """Resume a bound writer's unfinished exact creates under ``prefix``."""
@@ -433,6 +447,16 @@ class LocalMutationTransport(Transport):
 
     def delete_chat(self, chat_id, *, operation_id=None):
         if self._journal_writer is not None:
+            if operation_id is None:
+                # The janitor's purge, under a fresh key (a derived one could
+                # be taken first by another principal); a lost reply is
+                # settled by ``settle_chat_purges`` on the next sweep.
+                writer = self._bound_writer()
+                writer.submit_keyed('chat_delete', {'p_chat': chat_id},
+                                    operation_id=str(uuid4()))
+                self._bound_writer()
+                self._typed_success()
+                return None
             return self._typed_submit('chat_delete', {'p_chat': chat_id}, operation_id)
         self._reject_unbound_key(operation_id)
         # The log selector validates the chat identity before any external call.
@@ -734,9 +758,50 @@ class LocalMutationTransport(Transport):
         return self._transport.blob_size(path)
 
     def delete_blob(self, path):
-        if self._journal_writer is not None:
-            raise NotImplementedError('blob writes need typed journal admission')
+        if self._bound_writer() is not None:
+            return self.delete_blobs([path])
         return self._mutate(self._blob_changes(path), lambda: self._transport.delete_blob(path))
+
+    def delete_blobs(self, paths):
+        paths = list(paths)
+        writer = self._bound_writer()
+        if writer is not None:
+            # Storage is outside the seal and a delete is idempotent, so no
+            # receipt: objects of chats' own folders, as the bound principal.
+            from ..mesh.attachments import is_chat_object_path
+            from .staged_attachments import StagedAttachmentPublisher
+
+            if not all(is_chat_object_path(path) for path in paths):
+                raise ValueError('only chat objects are deleted directly')
+            StagedAttachmentPublisher(writer).remove(paths)
+            self._bound_writer()
+            return None
+        for at in range(0, len(paths), 100):
+            chunk = paths[at:at + 100]
+            changes = self._folder_changes(chunk)
+            if len(changes) > 8:  # an intent holds 8 selectors: one per object
+                for path in chunk:
+                    self.delete_blob(path)
+                continue
+            self._mutate(changes, lambda chunk=chunk: self._transport.delete_blobs(chunk))
+        return None
+
+    @classmethod
+    def _folder_changes(cls, paths):
+        """``_blob_changes`` for many paths, each chat folder covered once."""
+        changes = set()
+        for path in paths:
+            parts = path.split('/') if type(path) is str else ()
+            if len(parts) < 3:
+                changes.update(cls._blob_changes(path))
+                continue
+            changes.add(Selector('doc_prefix', '/'.join(parts[:2])))
+            if len(parts) == 4 and parts[0] == 'chats' and parts[2] == 'msgs':
+                changes.add(Selector('log_chat', parts[1]))
+        return tuple(sorted(changes))
+
+    def list_blobs(self, prefix):
+        return self._transport.list_blobs(prefix)
 
     def purge_deleted_docs(self, older_than_days=30.0):
         if self._journal_writer is not None:

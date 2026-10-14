@@ -162,11 +162,19 @@ class ApplicationMutationWriter:
         to consume it (``release=False``; see ``release_operation``). Before
         opt-in this is an ordinary keyed submit.
         """
-        arguments = {"p_path": path, "p_data": data}
+        return self.submit_keyed("doc_create", {"p_path": path, "p_data": data},
+                                 operation_id=operation_id, release=release)
+
+    def submit_keyed(self, kind: str, arguments: dict, *, operation_id: str,
+                     release: bool = True):
+        """Run one operation under a caller-rediscoverable key (derived from
+        what it changes), so a retry replays the retained attempt. After
+        lifecycle opt-in it holds a keyed ticket, released once acknowledged
+        unless ``release=False``; before opt-in it is an ordinary submit."""
         journal = self.driver.journal
         if not journal.lifecycle_enabled():
-            return self.submit("doc_create", arguments, operation_id=operation_id)
-        ticket = journal.allocate_keyed_ticket("doc_create", arguments, operation_id)
+            return self.submit(kind, arguments, operation_id=operation_id)
+        ticket = journal.allocate_keyed_ticket(kind, arguments, operation_id)
         record = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
         if release:
             journal.release_ticket(ticket)
@@ -183,6 +191,24 @@ class ApplicationMutationWriter:
         settle stays pending (retried next time) instead of stopping the rest.
         ``include(path)`` limits the sweep to one owner's records.
         """
+        def chosen(arguments):
+            path = arguments["p_path"]
+            return path.startswith(prefix) and (include is None or include(path))
+
+        def settled(arguments, record):
+            if (on_created is not None
+                    and dict(record.receipt.result).get("created") is True):
+                on_created(arguments["p_path"], arguments["p_data"])
+
+        return self.settle_pending("doc_create", chosen, skip_failures=skip_failures,
+                                   on_settled=settled)
+
+    def settle_pending(self, kind: str, include=None, *, skip_failures: bool = False,
+                       on_settled=None) -> int:
+        """Resume this journal's unfinished ``kind`` operations to their exact
+        outcome and release their tickets. ``include(arguments)`` narrows
+        them; ``on_settled(arguments, record)`` sees each outcome;
+        ``skip_failures`` leaves one that still cannot settle for next time."""
         journal = self.driver.journal
         settled, after = 0, None
         while True:
@@ -190,9 +216,8 @@ class ApplicationMutationWriter:
             for epoch, operation in keys:
                 request = journal.get(epoch, operation).request
                 arguments = json.loads(request.arguments_json)
-                if (request.expectation.kind != "doc_create"
-                        or not arguments["p_path"].startswith(prefix)
-                        or (include is not None and not include(arguments["p_path"]))):
+                if (request.expectation.kind != kind
+                        or (include is not None and not include(arguments))):
                     continue
                 try:
                     record = self.driver.resume(epoch, operation)
@@ -204,9 +229,8 @@ class ApplicationMutationWriter:
                 if ticket is not None:
                     journal.release_ticket(ticket)
                 settled += 1
-                if (on_created is not None
-                        and dict(record.receipt.result).get("created") is True):
-                    on_created(arguments["p_path"], arguments["p_data"])
+                if on_settled is not None:
+                    on_settled(arguments, record)
             if len(keys) < 64:
                 return settled
             after = keys[-1]

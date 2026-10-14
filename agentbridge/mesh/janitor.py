@@ -16,14 +16,20 @@ conservatively:
   append-only log) while the attachment is gone for good — documented
   behaviour, the price of actually freeing space.
 - **Chats** — a group whose event fold says deleted (signed + admin-gated
-  by the fold itself) with the deletion older than the grace window is
-  purged via ``tx.delete_chat``. Info events are plaintext by design, so
-  this leg works even for chats this identity was folded out of.
+  by the fold itself) with the deletion older than the grace window loses
+  every Storage object it owns (its own folders, listed exactly and
+  completely, so files nobody can decrypt and the group photo go too), and
+  only once a fresh listing is empty is it purged via ``tx.delete_chat``.
+  Under a bound writer the provider meta must also be terminal, and each
+  sweep first settles any purge whose reply was lost. Its final members
+  (older deletions: everyone in its tenure) are the ones who can still read
+  it, so their janitors do this (D-018).
 
 Scope: naming a redacted message's file ids requires unsealing its body,
 so each member's janitor sweeps only chats it can read — every chat has
-members, so every chat has a janitor. Every delete is idempotent; two
-janitors racing is fine.
+members, so every chat has a janitor. A live chat's staged attachment can be
+removed only by its uploader, so each janitor reclaims its own. Every delete
+is idempotent; two janitors racing is fine.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from ..core.models import Envelope
 from . import events
 from .attachments import attachment_path
 from .overlays import ChatOverlays
-from .readmodel import member_at
+from .paths import P
 
 __all__ = ["Janitor", "GRACE_DAYS"]
 
@@ -51,6 +57,11 @@ class Janitor:
         """One full pass. Returns {"chats": n, "blobs": n, "bytes": n}."""
         horizon = time.time_ns() - int(grace_days * 86_400 * 1e9)
         out = {"chats": 0, "blobs": 0, "bytes": 0}
+        if self._typed():
+            try:  # a purge whose reply was lost is acknowledged here, or never
+                self.mesh.tx.settle_chat_purges()
+            except Exception:  # noqa: BLE001 — the next sweep retries
+                pass
         for chat_id in list(self.mesh.tx.list_chat_ids()):
             try:
                 if self._purge_deleted_chat(chat_id, horizon):
@@ -77,80 +88,80 @@ class Janitor:
         return out
 
     # ------------------------------------------------------------- chat leg
-    def _purge_deleted_chat(self, chat_id: str, horizon: int) -> bool:
-        """Purge a chat whose (plaintext, signed) event fold says deleted,
-        with the deletion older than the grace window."""
-        records: list[dict] = []
+    def _deletion(self, chat_id: str) -> int:
+        """The ns of a signed, fold-verified deletion of this chat, else 0.
+        The FOLD is the judge — it verifies signatures and admin authority,
+        so a forged chat_deleted from a non-admin reclaims nothing. (Under a
+        bound writer a delete valid in swap order that the ns order rejects
+        is left alone: fail closed.)"""
         info_records: list[dict] = []
         deleted_ns = 0
         for log_name, _size in self.mesh.tx.list_logs(chat_id):
             recs, _ = self.mesh.tx.read_log(chat_id, log_name, 0)
             for r in recs:
-                records.append(r)
                 if r.get("kind") != "info":
                     continue
                 info_records.append(r)
                 if (r.get("event") or {}).get("type") == events.EV_DELETED:
                     deleted_ns = max(deleted_ns, int(r.get("ns", 0)))
+        if not deleted_ns:
+            return 0
+        snap = events.fold(chat_id, info_records, self.mesh.directory)
+        return deleted_ns if snap.deleted else 0
+
+    def _chat_objects(self, chat_id: str) -> list[str]:
+        """Every Storage object this chat owns: its group photo, its files
+        and its staged attachments, every page. The three folders are listed
+        by name, so nothing depends on Storage reporting sub-folders (it
+        still recurses into any it does report)."""
+        if not chat_id or chat_id in {".", ".."} or "/" in chat_id or "\x00" in chat_id:
+            raise ValidationError("malformed chat id")
+        found: set[str] = set()
+        for folder in (f"chats/{chat_id}", f"chats/{chat_id}/files",
+                       f"blob-stage/{chat_id}"):
+            found.update(self.mesh.tx.list_blobs(folder))
+        return sorted(found)
+
+    def _purge_deleted_chat(self, chat_id: str, horizon: int) -> bool:
+        """Purge a chat whose (plaintext, signed) event fold says deleted,
+        with the deletion older than the grace window: its Storage objects
+        first, then (once a fresh listing is empty) its records. The purge
+        ends every read, so nothing it missed could be reclaimed later; a
+        transport that cannot list never purges."""
+        deleted_ns = self._deletion(chat_id)
         if not deleted_ns or deleted_ns > horizon:
             return False
-        # the FOLD is the judge — it verifies signatures and admin authority,
-        # so a forged chat_deleted from a non-admin purges nothing
-        snap = events.fold(chat_id, info_records, self.mesh.directory)
-        if not snap.deleted:
-            return False
-        for path in self._owned_attachment_paths(chat_id, records, snap.tenure):
-            self.mesh.tx.delete_blob(path)
+        if self._typed() and not self._provider_terminal(chat_id):
+            return False  # the provider would refuse; its mirror may lag
+        self.mesh.tx.delete_blobs(self._chat_objects(chat_id))
+        if self._chat_objects(chat_id):
+            return False  # new or undeletable objects: the next sweep retries
         self.mesh.tx.delete_chat(chat_id)
         return True
 
     def reclaim_deleted_chat_attachments(self, chat_id: str) -> int:
-        """Delete exact signed references before terminal ACL materialization."""
-        records: list[dict] = []
-        info_records: list[dict] = []
-        for log_name, _size in self.mesh.tx.list_logs(chat_id):
-            recs, _ = self.mesh.tx.read_log(chat_id, log_name, 0)
-            records.extend(recs)
-            info_records.extend(r for r in recs if r.get("kind") == "info")
-        snap = events.fold(chat_id, info_records, self.mesh.directory)
-        if not snap.deleted:
+        """Delete a just-deleted chat's Storage objects (no grace: deleted
+        files are unreadable to everyone but its final members anyway).
+        Best effort: the janitor lists again before it purges."""
+        if not self._deletion(chat_id):
             raise TransportError("terminal deletion event is not yet readable")
-        # A provider read immediately after append can briefly omit an older
-        # row even though this client already durably ingested it. Merge that
-        # signed local evidence before deriving exact paths; IDs deduplicate
-        # the normal case where the remote scan is already complete.
-        seen = {r.get("id") for r in records if r.get("id")}
-        records.extend(
-            r for r in self.mesh.store.messages(chat_id)
-            if r.get("id") not in seen
-        )
-        paths = self._owned_attachment_paths(chat_id, records, snap.tenure)
-        for path in paths:
-            self.mesh.tx.delete_blob(path)
+        try:
+            paths = self._chat_objects(chat_id)
+        except NotImplementedError:
+            return 0  # nothing to reclaim on a transport without listing
+        self.mesh.tx.delete_blobs(paths)
         return len(paths)
 
-    def _owned_attachment_paths(
-        self, chat_id: str, records: list[dict], tenure: dict[str, list[list[int]]]
-    ) -> list[str]:
-        """Exact blob paths proven by signed, decryptable message bodies."""
-        paths: set[str] = set()
-        for rec in records:
-            if rec.get("kind", "message") != "message":
-                continue
-            env = Envelope.from_dict(rec)
-            if (not isinstance(env.id, str) or not env.id
-                    or not isinstance(env.from_, str) or not env.from_
-                    or not isinstance(env.ns, int) or isinstance(env.ns, bool)
-                    or not member_at(
-                        tenure.get(env.from_), env.ns)):
-                continue
-            body = self.mesh.sealer.unseal(chat_id, env)
-            for item in (body.files if body else None) or []:
-                try:
-                    paths.add(attachment_path(chat_id, item.get("id"), item))
-                except (AttributeError, ValidationError):
-                    continue  # malformed signed body: skip, never guess
-        return sorted(paths)
+    def _typed(self) -> bool:
+        from ..transport.local_mutations import LocalMutationTransport
+
+        tx = self.mesh.tx
+        return isinstance(tx, LocalMutationTransport) and tx._bound_writer() is not None
+
+    def _provider_terminal(self, chat_id: str) -> bool:
+        meta = self.mesh.tx.get_doc(P.meta(chat_id))
+        return (isinstance(meta, dict) and meta.get("deleted") is True
+                and meta.get("members") == {})
 
     # ------------------------------------------------------------- blob leg
     def _purge_redacted_blobs(self, chat_id: str, horizon: int) -> tuple[int, int]:
@@ -189,6 +200,8 @@ class Janitor:
                     path = attachment_path(chat_id, blob_id, f)
                 except ValidationError:  # malformed signed body: skip, never guess
                     continue
+                if path.startswith("blob-stage/") and env.from_ != self.mesh.user:
+                    continue  # only its uploader may remove a live staged object
                 got = self.mesh.tx.blob_size(path)
                 if got is None:
                     continue                   # already reclaimed

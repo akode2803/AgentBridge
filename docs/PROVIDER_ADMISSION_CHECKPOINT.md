@@ -417,8 +417,8 @@ typed membership action except genesis moved to it (DECISIONS.md D-017).
    member. Account deletion passes `missing_ok`.
 4. **Delete for everyone** (admins, groups): the same settle and drain (a
    retried delete that applied is done), then one meta append of
-   `chat_deleted` (members empty afterwards). Attachments wait for the
-   janitor, since blob deletes are not typed yet.
+   `chat_deleted` (members empty afterwards), then the chat's files are
+   reclaimed (see Deleted-chat cleanup below).
 5. **Delete agent/account** keep their order (each removal or leave settles
    before deactivation and key deletion) and treat an already-gone membership
    as done (bound writer only); an already-gone agent triggers no rotation.
@@ -430,10 +430,10 @@ typed membership action except genesis moved to it (DECISIONS.md D-017).
    raises into the cycle.
 
 Limits (BACKLOG): the typed outbox retries refused appends forever (sends
-queued after the drain by another thread, other members' queued sends);
-janitor and blob reclamation are not typed; an agent transferred to a new
-owner stays in rooms the owner is not in; former members can read a deleted
-group's plaintext info events (D-018, pre-existing).
+queued after the drain by another thread, other members' queued sends); an
+agent transferred to a new owner stays in rooms the owner is not in. Janitor
+and blob reclamation, and who reads a deleted group (D-018), are handled in
+the next section.
 
 Evidence: tests/test_membership_owner.py (leave lands with its event, lost
 leave recovered and retried, refused swap kept until a replay resolves it,
@@ -463,6 +463,93 @@ scope, sweep lock/limit/backoff/guard/wiring, busy mapping, overlay, cache-only
 commit, journal selectors, wire bounds, FULL sync, account deletion wiring);
 a test fails for every one.
 
+## Deleted-chat cleanup (inactive typed path, 2026-10-14)
+
+A typed delete-for-everyone left its files behind: blob deletes were not
+typed, staged objects needed current membership to delete, and the janitor's
+purge raised under a bound writer. Separately, a deleted room stayed readable
+by everyone ever in its tenure (D-018). One change closes both.
+
+1. **Final members** (DECISIONS.md D-018). The EV_DELETED fold writes
+   `final_members` (sorted) before emptying `members`. `ab_can_read_chat`
+   admits, for a deleted room, exactly those names: one CASE in the same
+   single lookup, with the tenure kept as the fallback for deletions written
+   before the key existed. `ab_chat_terminal_reader` (can read, not a member)
+   lets them see and delete the room's staged objects, which otherwise only
+   their uploader can. The client mirrors it (`ChatSnapshot.terminal_reader`,
+   `_can_sync_chat`), and the doc-change trigger treats a `final_members`
+   change as a visibility change.
+2. **Folder reclaim.** `Janitor.reclaim_deleted_chat_attachments` requires a
+   fold-verified deletion, then deletes every object under `chats/<chat>`,
+   `chats/<chat>/files` and `blob-stage/<chat>` (each listed by name, so
+   nothing depends on Storage reporting sub-folders; any it does report are
+   walked too), 100 names per page (the exact existence check behind
+   `delete_blob` had silently missed files past the first page and now
+   searches by exact name). Deletes are batched, 100 keys a Storage call,
+   with no per-object lookup. The typed delete calls it right after its
+   swap; a failure only logs and the janitor retries.
+3. **Bound deletes.** `delete_blob(s)` under a bound writer is a direct
+   Storage remove through `StagedAttachmentPublisher.remove` (identity
+   checked, paths inside a chat's own folders only). Storage sits outside
+   the seal and deletes are idempotent, so no receipt is needed.
+   `delete_chat` without an operation id is a `chat_delete` under a fresh
+   key (a derived key could be taken first by another principal, since
+   receipts are keyed across actors). Each sweep first settles this
+   journal's unfinished purges (`settle_pending('chat_delete')`): after a
+   lost reply the purged chat is gone, so nothing else would retry it, and
+   its unacknowledged receipt would hold every epoch rotation.
+4. **Purge.** The janitor purges the records only past the grace window,
+   only once a fresh listing is empty, and, when bound, only once the
+   provider meta is terminal; a transport that cannot list never purges.
+   `ab_mutation_chat_delete` now requires the caller to read the room (final
+   members) and answers a purged room with zero counts to every root member;
+   `meta_append` answers a purged room with `applied=false` to every root
+   member. `ab_mutation_doc_delete` refuses `chats/<chat>/meta.json` for
+   everyone, so only `chat_delete` ends a room and a purge always takes the
+   logs.
+
+Limits (BACKLOG): the janitor's ns-ordered refold still gates the purge and
+can disagree with swap order (fails closed); a pending refused write holds
+this device's purge until epoch closure; manifests outlive a purge;
+unpublished staged objects in live rooms stay orphaned; the typed tombstone
+purge is not built; the Storage list/remove HTTP API was not exercised on
+Scratch (needs Aryan's test session); exact-create keys stay derivable.
+
+Evidence: tests/test_janitor.py (every object of the room's own folders,
+past a page, siblings untouched; purge only once empty; typed purge waits for
+a terminal provider meta; reclaim needs no readable message body),
+test_membership*.py (final members recorded, reclaim after the swap, a
+failed reclaim never fails the delete), test_staged_attachments.py,
+test_supabase_transport.py, test_application_mutations.py (keyed purge
+replays per principal), test_models.py; the PostgreSQL gate's terminal-reader
+schedule (CI); and hosted Scratch acceptance
+(docs/provider-mutation-acceptance/20261014111654-*: reads, Storage
+visibility and the delete policy for final, uploader, departed and outsider
+principals; the legacy tenure fallback; purge refused for departed and
+stranger, then applied; empty answers after; nothing written; rolled back,
+residue 0), then the review follow-up (`20261014114329-*`: staged
+visibility unchanged with the dead-room branch last, a published live
+object visible to a non-owner member, an unpublished one owner-only; meta
+tombstones refused in live and deleted rooms; the purge still takes logs
+and docs). An independent Claude review of the design replaced exact
+message-referenced paths with folder listing, found the 100-name Storage
+page, and asked for uniform answers after a purge and a single-lookup read
+rule. A second review of the implementation found a lost purge reply left
+a receipt nobody acknowledged (blocking every rotation), an irreversible
+purge resting on Storage reporting sub-folders, a janitor that stalled on
+an object it listed but would not delete (non-attachment paths, 0-byte
+objects), meta tombstones bypassing the purge, guessable purge keys,
+vacuous CI delete checks, per-object Storage round trips inside the user's
+delete, a base transport that listed empty, and an extra lookup on every
+staged read. All fixed with tests, except the hosted HTTP check and
+derivable create keys (BACKLOG). A mutation pass removed each of 27 safety
+properties one at a time (final members, terminal sync, settle wiring and
+kind, fresh key, folder listing, relisting, terminal-meta wait, verified
+deletion, unlistable transports, path rule, batch routing, selector
+covering and fallback, 0-byte presence, lookup paging, recursion, batch
+sizes, per-call identity, reclaim wiring, the meta refusal, staged order,
+purged answer); a test fails for every one.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.
@@ -491,7 +578,8 @@ a test fails for every one.
    acknowledged; lifecycle writes first settle earlier exact creates for that
    subject. Minting keys for a keyless agent still requires an identity owner.
    Human creation is done above, then key rotation, membership-bound
-   wrapping and the terminal flows. Next: terminal cleanup (janitor, blobs). Retain keys through
+   wrapping, the terminal flows and deleted-chat cleanup. Next: message
+   overlays (edits, redactions, pins) and the typed outbox dead-letter. Retain keys through
    unknown outcomes. Distinguish pre-existing namespace weaknesses from new
    migration regressions.
 4. Complete disposable authenticated migration acceptance, then release and

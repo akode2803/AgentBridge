@@ -131,39 +131,148 @@ def test_deleted_group_purges_after_grace(world):
     assert Janitor(world["fable"]).sweep(grace_days=0)["chats"] == 0
 
 
-def test_deleted_group_derives_only_exact_verified_attachment_paths(
-        world, monkeypatch):
+def test_deleted_group_reclaims_every_object_of_its_own_folders_only(world):
     aryan = world["aryan"]
-    dead = aryan.create_chat("Exact cleanup", members=["fable"])
-    valid, valid_path = _post_with_blob(aryan, dead.id, "owned.txt")
-
-    # A signed body with a malformed id is still not allowed to choose a path.
+    dead = aryan.create_chat("Folder cleanup", members=["fable"])
+    live = aryan.create_chat("Neighbour", members=["fable"])
+    _post_with_blob(aryan, dead.id, "owned.txt")
+    # Objects no message body names (nobody could decrypt one, or none
+    # references it), past Storage's 100-name page, the group photo and a
+    # staged attachment all belong to the dead chat's folders.
+    for n in range(105):
+        aryan.tx.put_blob(f"chats/{dead.id}/files/f-orphan-{n:03d}", b"x")
+    aryan.tx.put_blob(f"chats/{dead.id}/avatar.jpg", b"photo")
+    aryan.tx.put_blob(f"blob-stage/{dead.id}/f2-staged", b"sealed")
+    # A body cannot choose a path, and a sibling folder sharing the id as a
+    # prefix, or another chat, is never listed.
     aryan.post(dead.id, "bad path", files=[{
         "id": "../not-owned", "name": "bad.txt", "bytes": 1,
     }])
     aryan.outbox.flush_once()
-
-    # A transport-forged copy cannot become ownership evidence: changing the
-    # AAD-bound id invalidates the original sender's signature.
-    forged = valid.to_dict()
-    forged["id"] = "m-forged-attachment-owner"
-    forged["ns"] += 1
-    aryan.tx.append_log(dead.id, "attacker@box", forged)
+    kept = [f"chats/{dead.id}x/files/f-sibling", f"chats/{live.id}/files/f-live",
+            f"blob-stage/{dead.id}x/f2-sibling", "chats/not-owned"]
+    for path in kept:
+        aryan.tx.put_blob(path, b"keep")
 
     aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
     aryan.membership.delete_chat(dead.id)
     aryan.outbox.flush_once()
-    deleted_paths = []
-    deleted_chats = []
-    monkeypatch.setattr(aryan.tx, "delete_blob", deleted_paths.append)
-    monkeypatch.setattr(aryan.tx, "delete_chat", deleted_chats.append)
+    import time as _time
+    deadline = _time.time() + 2
+    out = Janitor(aryan).sweep(grace_days=0)
+    while out["chats"] == 0 and _time.time() < deadline:
+        out = Janitor(aryan).sweep(grace_days=0)
+    assert out["chats"] == 1
+    assert aryan.tx.list_blobs(f"chats/{dead.id}") == []
+    assert aryan.tx.list_blobs(f"blob-stage/{dead.id}") == []
+    assert all(aryan.tx.blob_size(path) == 4 for path in kept)
+    assert dead.id not in aryan.tx.list_chat_ids()
 
-    assert Janitor(aryan).sweep(grace_days=0)["chats"] == 1
-    assert deleted_paths == [valid_path]
-    assert deleted_chats == [dead.id]
+
+def test_folder_reclaim_does_not_depend_on_storage_reporting_subfolders(
+        world, monkeypatch):
+    import fake_cloud
+
+    aryan = world["aryan"]
+    dead = aryan.create_chat("No folder rows", members=["fable"])
+    _, path = _post_with_blob(aryan, dead.id, "deep.txt")
+    avatar, staged = f"chats/{dead.id}/avatar.jpg", f"blob-stage/{dead.id}/f2-staged"
+    nested = f"chats/{dead.id}/x/y"  # not attachment-shaped: a member uploaded it
+    for extra in (avatar, staged, nested):
+        aryan.tx.put_blob(extra, b"z")
+    aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
+    aryan.membership.delete_chat(dead.id)
+    aryan.outbox.flush_once()
+    janitor = Janitor(aryan)
+    assert janitor._chat_objects(dead.id) == sorted([path, avatar, staged, nested])
+    # Were Storage to stop reporting sub-folders, the known folders are still
+    # listed by name: the files are not missed and the room not purged early.
+    real_list = fake_cloud.FakeBucketApi.list
+    monkeypatch.setattr(fake_cloud.FakeBucketApi, "list", lambda self, parent, options=None: [
+        row for row in real_list(self, parent, options) if row["id"] is not None])
+    assert janitor._chat_objects(dead.id) == sorted([path, avatar, staged])
 
 
-def test_deleted_group_keeps_evidence_when_exact_blob_delete_fails(
+def test_a_transport_that_cannot_list_never_purges(world, monkeypatch):
+    aryan = world["aryan"]
+    dead = aryan.create_chat("Unlistable", members=["fable"])
+    _, path = _post_with_blob(aryan, dead.id, "kept.txt")
+    aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
+    aryan.membership.delete_chat(dead.id)
+    aryan.outbox.flush_once()
+
+    def cannot_list(_prefix):
+        raise NotImplementedError("this transport cannot list blobs")
+
+    monkeypatch.setattr(aryan.tx, "list_blobs", cannot_list)
+    purged = []
+    monkeypatch.setattr(aryan.tx, "delete_chat", purged.append)
+    assert Janitor(aryan).sweep(grace_days=0)["chats"] == 0 and purged == []
+    assert Janitor(aryan).reclaim_deleted_chat_attachments(dead.id) == 0
+    assert aryan.tx.blob_size(path) is not None
+
+
+def test_typed_sweep_first_settles_purges_whose_reply_was_lost(world, monkeypatch):
+    from agentbridge.transport.base import Transport
+
+    aryan = world["aryan"]
+    janitor, settled = Janitor(aryan), []
+
+    def settle():
+        settled.append(True)
+        raise OSError("provider unavailable")  # never stops the sweep
+
+    monkeypatch.setattr(aryan.tx, "settle_chat_purges", settle, raising=False)
+    janitor.sweep(grace_days=0)
+    assert settled == []  # unbound: nothing to settle
+    monkeypatch.setattr(janitor, "_typed", lambda: True)
+    assert janitor.sweep(grace_days=0) == {"chats": 0, "blobs": 0, "bytes": 0}
+    assert settled == [True]
+    # A transport without listing says so instead of answering "empty".
+    with pytest.raises(NotImplementedError):
+        Transport.list_blobs(aryan.tx, "chats/x")
+
+
+def test_deleted_group_is_purged_only_once_its_folders_are_empty(world, monkeypatch):
+    aryan = world["aryan"]
+    dead = aryan.create_chat("Stubborn", members=["fable"])
+    _post_with_blob(aryan, dead.id, "stuck.txt")
+    aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
+    aryan.membership.delete_chat(dead.id)
+    aryan.outbox.flush_once()
+    # Storage answers the delete but keeps the object (e.g. a new upload
+    # raced in): the purge would end every read and orphan it, so it waits.
+    monkeypatch.setattr(aryan.tx, "delete_blobs", lambda _paths: None)
+    purged = []
+    monkeypatch.setattr(aryan.tx, "delete_chat", purged.append)
+    assert Janitor(aryan).sweep(grace_days=0)["chats"] == 0 and purged == []
+
+
+def test_typed_janitor_waits_for_a_terminal_provider_meta(world, monkeypatch):
+    aryan = world["aryan"]
+    dead = aryan.create_chat("Lagging meta", members=["fable"])
+    aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
+    aryan.membership.delete_chat(dead.id)
+    aryan.outbox.flush_once()
+    janitor = Janitor(aryan)
+    monkeypatch.setattr(janitor, "_typed", lambda: True)
+    purged = []
+    monkeypatch.setattr(aryan.tx, "delete_chat", purged.append)
+    meta_path, real_get = f"chats/{dead.id}/meta.json", aryan.tx.get_doc
+    provider = {"meta": dict(real_get(meta_path), deleted=False, members={"aryan": {}})}
+    monkeypatch.setattr(aryan.tx, "get_doc", lambda path, default=None: (
+        provider["meta"] if path == meta_path else real_get(path, default)))
+    assert janitor._deletion(dead.id)  # the signed fold says deleted
+    assert janitor.sweep(grace_days=0)["chats"] == 0 and purged == []
+    provider["meta"] = dict(provider["meta"], deleted=True, members={})
+    import time as _time
+    deadline = _time.time() + 2
+    while not purged and _time.time() < deadline:
+        janitor.sweep(grace_days=0)
+    assert purged == [dead.id]
+
+
+def test_deleted_group_keeps_evidence_when_a_blob_delete_fails(
         world, monkeypatch):
     aryan = world["aryan"]
     dead = aryan.create_chat("Retry cleanup", members=["fable"])
@@ -172,23 +281,23 @@ def test_deleted_group_keeps_evidence_when_exact_blob_delete_fails(
     aryan.messaging.set_terminal_reclaimer(lambda _chat_id: None)
     aryan.membership.delete_chat(dead.id)
     aryan.outbox.flush_once()
-    original_delete = aryan.tx.delete_blob
+    original_delete = aryan.tx.delete_blobs
     failed = False
 
-    def fail_second_once(path):
+    def fail_once(paths):
         nonlocal failed
-        if path == second_path and not failed:
+        if not failed:
+            assert sorted(paths) == sorted([first_path, second_path])  # one batch
             failed = True
             raise OSError("storage unavailable")
-        original_delete(path)
+        original_delete(paths)
 
-    monkeypatch.setattr(aryan.tx, "delete_blob", fail_second_once)
+    monkeypatch.setattr(aryan.tx, "delete_blobs", fail_once)
     import time as _time
     deadline = _time.time() + 2
     while not failed and _time.time() < deadline:
         assert Janitor(aryan).sweep(grace_days=0)["chats"] == 0
     assert failed
-    assert aryan.tx.blob_size(first_path) is None
     assert aryan.tx.blob_size(second_path) is not None
     assert dead.id in aryan.tx.list_chat_ids()
 
@@ -197,47 +306,19 @@ def test_deleted_group_keeps_evidence_when_exact_blob_delete_fails(
     while out["chats"] == 0 and _time.time() < deadline:
         out = Janitor(aryan).sweep(grace_days=0)
     assert out["chats"] == 1
+    assert aryan.tx.blob_size(first_path) is None
     assert aryan.tx.blob_size(second_path) is None
     assert dead.id not in aryan.tx.list_chat_ids()
 
 
-def test_owned_paths_reject_out_of_tenure_and_malformed_envelopes(
-        world, monkeypatch):
+def test_terminal_reclaim_needs_no_readable_message_body(world, monkeypatch):
     aryan = world["aryan"]
-    janitor = Janitor(aryan)
-    opened = []
-
-    def unseal(_chat_id, env):
-        opened.append(env.id)
-        return type("Body", (), {"files": [{"id": "f-owned.txt"}]})()
-
-    monkeypatch.setattr(aryan.sealer, "unseal", unseal)
-    records = [
-        {"id": "m-late", "from": "fable", "ns": 20, "kind": "message"},
-        {"id": "m-bad-ns", "from": "fable", "ns": "bad", "kind": "message"},
-        {"id": "m-valid", "from": "fable", "ns": 5, "kind": "message"},
-    ]
-    paths = janitor._owned_attachment_paths(
-        "c-exact", records, {"fable": [[1, 10]]})
-    assert paths == ["chats/c-exact/files/f-owned.txt"]
-    assert opened == ["m-valid"]
-
-
-def test_terminal_reclaim_merges_signed_local_message_when_remote_read_lags(
-        world, monkeypatch):
-    aryan = world["aryan"]
-    dead = aryan.create_chat("Lagged cleanup", members=["fable"])
-    message, path = _post_with_blob(aryan, dead.id, "lagged.txt")
+    dead = aryan.create_chat("Unreadable cleanup", members=["fable"])
+    _, path = _post_with_blob(aryan, dead.id, "sealed.txt")
     terminal = aryan.messaging.build_event(
         dead.id, {"type": "chat_deleted", "by": "aryan"})
     aryan.tx.append_log(dead.id, "aryan@mach1.jsonl", terminal.to_dict())
-    original_read = aryan.tx.read_log
-
-    def lagged_read(chat_id, log_name, offset=0):
-        rows, head = original_read(chat_id, log_name, offset)
-        return [r for r in rows if r.get("id") != message.id], head
-
-    monkeypatch.setattr(aryan.tx, "read_log", lagged_read)
+    monkeypatch.setattr(aryan.sealer, "unseal", lambda *_args: None)
     assert Janitor(aryan).reclaim_deleted_chat_attachments(dead.id) == 1
     assert aryan.tx.blob_size(path) is None
 

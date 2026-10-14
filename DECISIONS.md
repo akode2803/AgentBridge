@@ -9,15 +9,43 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
 
 ## Typed-writer migration (2026-10-13 onward)
 
-### D-018 Former members can read a deleted group's plaintext events (deferred, pre-existing)
-- **State:** for a chat deleted for everyone, `ab_can_read_chat` admits every
-  name in the chat's tenure, including people who left or were removed long
-  before. They can read its plaintext info events (joins, renames, removals);
-  message bodies stay sealed under chat keys they no longer receive.
-- **Why deferred:** pre-existing, needed so the janitor and members can
-  reclaim storage; the mesh is Aryan plus one friend.
-- **Revisit:** with the janitor/blob typed round (BACKLOG), or before inviting
-  anyone you do not fully trust. Fix: admit only the tenure open at deletion.
+### D-018 A deleted group belongs to its final members (taken, 2026-10-14)
+- **Decision:** the delete-for-everyone fold records `final_members` (the
+  members at the moment of deletion) before it empties `members`. Only those
+  names can read a deleted room, see and delete its Storage objects, and
+  purge it. That is one key in the existing meta doc and one CASE in the
+  existing `ab_can_read_chat` lookup, plus `ab_chat_terminal_reader` (can
+  read and is not a member) for the Storage rules. Deletions written by
+  older clients carry no `final_members` and keep the tenure rule. Once
+  purged, a room gives every root member the same answer: `chat_delete`
+  reports zero counts and `meta_append` reports `applied=false`.
+- **Cleanup:** the deleting member lists and deletes the chat's own folders
+  (`chats/<chat>/`, `files/` and `blob-stage/<chat>/`, each listed by name)
+  right after the delete swap, 100 keys a Storage call. A failure there
+  only logs, and the janitor retries. The janitor purges the rows only when
+  a fresh listing is empty and, when bound, only after the provider meta is
+  terminal; each sweep first settles a purge whose reply was lost. Only
+  `chat_delete` tombstones a chat meta, so a purge always takes the logs.
+- **Why:** before this, anyone ever in the tenure could read the deleted
+  room's plaintext info events (joins, renames, removals) and list or delete
+  its files, including someone removed long before. Message bodies were
+  always sealed. This is not social-graph encryption, which would be a large
+  project: it narrows who may read to the people who were there at the end.
+  Deleting by folder replaces exact message-referenced paths. That rule
+  (V146) guarded the old folder transport, where a path could reach another
+  chat's files. On Storage each chat owns its folders, so listing them is
+  simpler, and it also reclaims files that no message references.
+- **Accepted exposures:** final members can still read a purged room's
+  tombstoned meta (their own room). A root member who knows a chat id can
+  tell a purged room (zero-count answer) from a live or unknown one
+  (refused). Chat ids are random, and the uniform answer is what lets a
+  late janitor or a lost reply settle. Rooms deleted before this change keep
+  the tenure rule.
+- **Evidence:** Scratch `docs/provider-mutation-acceptance/20261014111654-*`
+  and the review follow-up `20261014114329-*`.
+- **Revisit:** before inviting anyone you do not fully trust (older
+  deletions), or if social-graph privacy becomes a goal.
+- **Cost to reverse:** low (one key and one CASE; tenure is still recorded).
 
 ### D-017 Typed membership writes are one atomic meta append (taken, 2026-10-14)
 - **Decision:** under a bound writer every membership action except genesis
@@ -43,8 +71,10 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   R69 leaver-minted key rotation: after the swap the leaver can no longer
   write a key doc, and `ensure()` re-keys on the next send by a remaining
   member whenever the newest epoch's wraps or creator disagree with the
-  members. Attachments wait for the janitor (blob deletes are not typed yet).
-  Deleting an agent or an account treats an already-gone membership as done.
+  members. A delete-for-everyone reclaims the chat's files right after the
+  swap (D-018). Storage deletes are direct, since Storage sits outside the
+  seal. Deleting an agent or an account treats an already-gone membership
+  as done.
 - **Former members learn nothing (changed 2026-10-14, same day):** the first
   version answered `applied=false` only for a version that moved on and
   refused the current one, so a former member could probe whether (and, with
@@ -59,7 +89,8 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   thread between the drain and the swap retries forever (typed outbox has no
   dead-letter for refused appends).
 - **Evidence:** Scratch acceptance `docs/provider-mutation-acceptance/20261014061026-*`,
-  `20261014064104-*` (version-first) and `20261014103831-*` (uniform answer).
+  `20261014064104-*` (version-first), `20261014103831-*` (uniform answer) and
+  `20261014111654-*` (a purged room answers every root member alike).
 - **Revisit:** if a chat is ever wedged by a pending action.
 - **Cost to reverse:** moderate (one RPC and the owner's write path).
 

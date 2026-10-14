@@ -728,17 +728,35 @@ def test_a_lost_leave_is_finished_by_recover_without_key_steps(m):
 
 
 def test_delete_for_everyone_is_one_admin_swap(m):
-    chat = room(m, ("bob",))
+    chat = room(m, ("bob", "carol"))
+    m.service.remove_member(chat, "carol")
+    reclaimed = []
+    m.service.messaging.set_terminal_reclaimer(reclaimed.append)
     deleted = m.service.delete_chat(chat)
     final = meta(m, chat)
     assert deleted.deleted and final.deleted and final.members == {}
     assert all(spans[-1][1] for spans in final.tenure.values())  # every tenure closed
-    (gone,) = logged(m, chat)[1:]
+    # Only those still in the group may read and clean it up (D-018); its
+    # files go right after the swap.
+    assert m.docs[P.meta(chat)]["final_members"] == ["alice", "bob"]
+    assert "carol" in final.tenure and not final.terminal_reader("carol")
+    assert final.terminal_reader("bob") and reclaimed == [chat]
+    gone = logged(m, chat)[-1]
     assert gone["event"] == {"type": "chat_deleted", "by": "alice"}
-    assert len(calls(m, APPEND)) == 1 and pending(m) == ()
+    assert len(calls(m, APPEND)) == 2 and pending(m) == ()
     with pytest.raises(NotAMember):
         m.service.add_members(chat, ["carol"])
-    assert len(calls(m, APPEND)) == 1
+    assert len(calls(m, APPEND)) == 2
+
+
+def test_a_failed_file_reclaim_never_fails_the_delete(m):
+    chat = room(m, ("bob",))
+
+    def unavailable(_chat_id):
+        raise TransportError("storage unavailable")
+
+    m.service.messaging.set_terminal_reclaimer(unavailable)
+    assert m.service.delete_chat(chat).deleted and meta(m, chat).deleted
 
 
 def test_only_a_current_admin_deletes_for_everyone(m):
@@ -848,7 +866,10 @@ def test_a_lost_delete_retried_by_the_user_succeeds(m):
     m.provider.lose.add(APPEND)
     with pytest.raises(TypedMutationRPCError):
         m.service.delete_chat(chat)
+    reclaimed = []
+    m.service.messaging.set_terminal_reclaimer(reclaimed.append)
     assert m.service.delete_chat(chat).id == chat  # settled, not an error
+    assert reclaimed == [chat]  # the files still go
     assert pending(m) == () and len(calls(m, APPEND)) == 2
     assert meta(m, chat).members == {}
 
