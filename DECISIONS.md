@@ -40,9 +40,10 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
   - P9: invite tokens and per-root limits before strangers get the
     bootstrap.
   - P10: a root incarnation id so a backup restore cannot mislead clients.
-  - P11 (2026-10-15): one TypeScript client core and one React Native UI
-    for phone and desktop, after a protocol spec with test vectors; relax
-    the dependency rule for widely used libraries (React, Expo, `@noble`).
+  - P11 (2026-10-15): TypeScript for every human client, then the harness
+    (option D, Aryan's stated direction). React Native on the phone; Tauri on
+    the desktop (Linux required, Electron start-up rejected). Gated by a
+    protocol spec with test vectors and a 1–2 week spike measuring start-up.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.

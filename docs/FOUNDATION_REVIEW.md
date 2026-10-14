@@ -40,7 +40,7 @@ mattering. F1, F5, F6, F9 and F10 do not depend on root size.
 | F8 | Housekeeping | Server-side jobs | Clients run the janitor | Gap | With P1 (pg_cron) |
 | F9 | Sign-up and abuse | Phone-number accounts, server rate limits | Anyone with the bootstrap (URL, publishable key, root) can create unlimited accounts | Fine for friends; **breaks** at 1,000 users | Before strangers join |
 | F10 | Backups and restore | — | A restore rewinds ids, sequences and receipts under live clients | Gap | Before activation |
-| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Spec now; TypeScript core before screens |
+| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Direction D (TypeScript everywhere, Tauri desktop); spec and spike first |
 | — | Encryption, multi-device | Signal per-device keys; Matrix room keys rotated on leave, key backup | Per-chat key epochs rotated on leave, re-wrap for newcomers, account key bundle on each device, signed state events | **Holds** (Matrix-like) | — |
 | — | Social graph (D-018) | Signal hides it; Telegram sees it | Server sees membership and timing, never content | **Holds** at Telegram/Matrix level | — |
 
@@ -427,47 +427,85 @@ protocol and crypto (Signal's libsignal), not their screens.
   Python.** Sealing and signatures (`cryptography`: X25519, Ed25519,
   ChaCha20-Poly1305, HKDF, scrypt), the event fold and permission replay, the
   read model, the outbox and journal, and sync all run in the Python process.
-  The browser only renders. A phone cannot run that process, so a phone app
-  needs the client core in TypeScript, whatever UI it uses.
+  The browser only renders. Phones can run Python (Chaquopy, BeeWare;
+  official iOS and Android support since Python 3.13, PEP 730/738), but not
+  this design: phones suspend background apps, so a long-lived local server
+  with sync threads does not fit, and React Native would reach a bundled
+  Python core only through native bridge code on each platform.
 - The server side does not change: Supabase (tables, RPCs, RLS, Storage,
   Realtime) is reachable from any language. Every P1–P10 proposal is in SQL
   and the wire format, which keeps that true.
 
-**Options.**
-- **A. One TypeScript client and one React Native app for phone and desktop
-  (recommended).** A TypeScript core (crypto with the audited `@noble`
-  libraries, which run in React Native; fold; read model; outbox; sync) and
-  one React Native UI (Expo). The UI runs on iOS and Android, and on desktop
-  via React Native Web or Electron. The Python side keeps what only it can do:
-  agent workers, the harness and the MCP surface, which are clients of the
-  same protocol. One UI codebase, and humans and agents share only the
-  protocol.
-- **B. A phone app beside today's desktop UI.** It still needs the same
-  TypeScript core, plus two UIs to keep in step (28,000 lines of plain JS and
-  a React Native app).
-- **C. React on the web only.** It improves desktop maintainability but does
-  nothing for a phone.
+**Size.** The phone needs `mesh/` (22,400 lines), `store/` (15,400),
+`transport/` (9,500), parts of `node/` (10,900) and `core/` + `crypto/`
+(2,100): about 60,000 lines today. Without legacy branches, and after P1
+shrinks the receipt machinery, that is about 25,000–35,000 lines of
+TypeScript. The harness (17,500) stays out at first.
+
+**Options compared (2026-10-15).**
+- **A. TypeScript core and React Native on the phone; the desktop stays
+  Python.** The core port takes about 2–3 months. But two human clients
+  remain, so every human feature is built twice.
+- **B. Embed the Python core on the phone** behind React Native. It avoids
+  the port, but costs native bridge code, start-up time and memory on every
+  wake, and ongoing packaging friction (compiled `cryptography` builds).
+- **C. The phone as a remote for the user's own desktop.** About a month,
+  but the phone works only while that desktop is on.
+- **D. TypeScript for every human client (chosen direction, Aryan
+  2026-10-15).** One TypeScript core and one React Native UI for phone and
+  desktop. Features ship once, desktop users install no Python, and the
+  Python core shrinks to what agents need. It costs about a month more than
+  A. Then the harness moves to TypeScript too (Node drives CLI agents as
+  subprocesses; there is an official TypeScript MCP SDK), leaving one
+  implementation.
+
+The UI costs the same in A, B and D: a new React Native app that must reach
+parity with today's 28,000 lines. Rough total for D, with AI help, give or
+take 50%: spec and vectors 2–3 weeks, TypeScript core 2–3 months, UI to
+parity 2–3 months partly in parallel, about 4–6 months.
+
+**Porting traps.**
+- **`ns` timestamps (~1.76×10¹⁸) exceed JavaScript's exact integers
+  (9×10¹⁵).** They must be `BigInt` or strings everywhere, or ordering and
+  signatures silently break.
+- Canonical JSON must match byte for byte: key order, how floats print, and
+  Python's `ensure_ascii` escaping.
+- `bytes` versus `Uint8Array`, and base64 variants and padding.
+- Threads and locks become async/await. Per-chat locking is redesigned, not
+  translated.
+
+**Desktop shell: Tauri (2026-10-15).** Linux support is required (Aryan).
+Electron is out on start-up weight: it bundles Chromium and Node per app
+(Aryan finds such apps, VS Code for one, slow to start). React Native for
+Windows and macOS has no Linux. Tauri wraps the operating system's own web
+view (WebView2 on Windows, WebKit on macOS and Linux) in a small Rust shell.
+Installers are a few MB, memory is low and start-up is fast; the UI runs as
+React Native Web, so screens are shared with the phone; and it has plugins for
+SQLite, notifications, tray and updates. It is also the closest match to
+today's app, which already renders in an Edge web view. Watch for WebKit
+quirks on macOS and Linux.
 
 **What to settle before any of it.** Two independent implementations (Python
-and TypeScript) must agree byte for byte: canonical JSON, signature inputs,
-key wraps, chat id commitments, the fold's ordering and authority rules. That
-needs a written protocol spec with test vectors that both suites run. That is
-also the cure for "the code is the only spec", which makes this codebase hard
-for people and models to follow. It fits the foundation work: P1, P4 and P7
+and TypeScript, until the harness moves) must agree byte for byte: canonical
+JSON, signature inputs, key wraps, chat id commitments, the fold's ordering
+and authority rules. That needs a written protocol spec with test vectors
+that both suites run. It is also the cure for "the code is the only spec",
+which makes this codebase hard for people and models to follow. P1, P4 and P7
 change the wire format, so they should land in the spec before a second
 client is written against it.
 
-**Cost now versus later.** Now: the spec and test vectors, then a TypeScript
-core, then the React Native UI, while the desktop app keeps working. The
-plain-JS UI is replaced, not ported; its behaviour is the reference. Later:
-every protocol change until then has to be made twice or left out of the
-phone app. Desktop users see no change until the new UI reaches parity.
-
-**P11.** Choose option A. Then write the protocol spec and test vectors, and
-build the TypeScript core before any screens. Relax the dependency rule to
-"well-maintained, widely used libraries are allowed where they replace
-custom code" (React, React Native, Expo, `@noble`). Keep it strict for the
-crypto choice: audited libraries only.
+**P11.**
+1. A protocol spec with golden test vectors exported from Python.
+2. A 1–2 week spike: port encoding, crypto and the fold to TypeScript until
+   they pass the vectors, and build a minimal sidebar and chat screen in Tauri
+   on macOS, Windows and Linux. Measure cold start, warm start and memory
+   against a target such as under 1 second cold.
+3. If the spike holds: the TypeScript core, then the React Native UI for
+   phone and desktop (Tauri), while today's app keeps working until parity.
+   Then the harness.
+4. Relax the dependency rule: well-maintained, widely used libraries are
+   allowed where they replace custom code (React, React Native, Expo, Tauri,
+   `@noble`, supabase-js). Crypto stays audited libraries only.
 
 ## What already matches mature apps (keep)
 
@@ -526,8 +564,9 @@ transport, which docs/SUPABASE_ONLY_REMOVAL_PLAN.md retired.
 5. **P5 final refusals**, **P8 cron housekeeping** (alongside P1), **P9
    invites** before strangers join, **P6 eviction and bans**.
 6. **P7's server order per chat.** Decide the direction now, build later.
-7. **P11 phone app:** the protocol spec and test vectors alongside P1/P4/P7,
-   then the TypeScript core, then the React Native UI.
+7. **P11 TypeScript everywhere:** the protocol spec and test vectors
+   alongside P1/P4/P7, the Tauri spike, the TypeScript core, the React Native
+   UI for phone and desktop, then the harness.
 
 ## Sources
 

@@ -294,11 +294,13 @@ moment it is made, so a large task list never lives only in conversation.
   2026-10-14): `ns` is the sender's clock. Decide now whether new cursors
   use a per-chat server sequence; build later.
 - [ ] **Phone app and UI stack** (Aryan, 2026-10-15): React Native would have
-  suited the phone app goal; the no-dependency rule was taken too far. The
-  bigger blocker is that the client core (crypto, fold, outbox, sync) is
-  Python. docs/FOUNDATION_REVIEW.md F11/P11: protocol spec plus test
-  vectors, a TypeScript core, then one React Native UI (Expo) for phone and
-  desktop; Python keeps the agent harness. Aryan to decide (D-020).
+  suited the phone app goal; the no-dependency rule was taken too far.
+  Direction (FOUNDATION_REVIEW F11/P11, option D): TypeScript for every
+  human client and later the harness; React Native on phones; Tauri on
+  desktop (Linux is a must; Electron rejected for slow start-up). First: a
+  protocol spec with golden vectors, then a 1–2 week spike (encoding, crypto
+  and fold passing the vectors; Tauri start-up and memory on macOS, Windows
+  and Linux). Trap: `ns` exceeds JS safe integers, so use BigInt.
 - [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
   folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.
 - [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,
