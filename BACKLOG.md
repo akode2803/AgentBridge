@@ -61,9 +61,26 @@ moment it is made, so a large task list never lives only in conversation.
   sends headers and body in separate writes, so Nagle plus Windows delayed ACK
   can hold the body longer than the 100 ms discard window; widen it (still
   bounded by the 2 s socket timeout) if the error recurs on #145 or later.
-- [ ] **Supabase connector**: installed but `pending` in the 2026-10-14
-  session (no tools). Once connected it can run Scratch migration acceptance
-  (confirm before applying); never production; never the destructive gate.
+- [x] **Supabase connector** (connected 2026-10-14 after Aryan restarted the
+  app): lists both projects; read-only queries on Scratch work. Scratch has
+  migrations through `agentbridge_p1b_blob_manifest_object_id_correction`
+  (12 typed RPCs; the branch schema adds `doc_compare_put`, `reaction_pair`,
+  `epoch_state` and later pieces), so acceptance needs the current schema
+  applied first: confirm with Aryan before applying; never production; never
+  the destructive gate.
+- [ ] **Decisions log** (Aryan, 2026-10-14): DECISIONS.md lists every choice
+  that may need revisiting with the path taken; update it as decisions land.
+- [ ] **Provider-side membership authority** (DECISIONS.md D-014, found
+  2026-10-14): any current member may replace `meta.json` (plain RLS and typed
+  `doc_put`/`doc_compare_put`), so admin rules hold only for honest clients.
+  Pre-existing; fix before untrusted members: a typed membership RPC that
+  validates the member/role diff against the old meta in SQL.
+- [x] **Refused typed operations stay pending** (DECISIONS.md D-016, 2026-10-14):
+  a provider error reply leaves the op `attempted` until epoch closure.
+  Recovery sweeps now skip one that still cannot settle and finish the rest
+  (`settle_exact_creates(skip_failures=True)` in `ChatKeyService.recover`;
+  `MembershipService.recover` is per row); per-chat paths stay fail-closed.
+  A refused key-epoch create replays harmlessly (fresh ns epoch numbers).
 - [D] **`revoke` under a seal** (2026-10-14): refuses before any change;
   eviction needs a typed operator flow (and the key-rotation owner).
 - [ ] **Bound migrated-account login upgrade**: `upgrade_login` (pbkdf2 →
@@ -83,14 +100,28 @@ moment it is made, so a large task list never lives only in conversation.
   queued (a crash between loses history for the newcomer, never leaks it);
   legacy meta without `joined_ns` gets no typed history re-wrap. Reachable only
   once the membership owner below lands. Evidence: tests/test_chat_key_owner.py.
-- [ ] **Membership genesis/materialization owner** (found 2026-10-14): under a
-  bound writer `create_chat`'s genesis meta insert and `materialize`/`refold`
-  meta writes raise (no operation identity; only `TransportError` is caught),
-  so chat creation and every member add/remove fail before the key step.
-  Needs a forward-only owner (genesis insert + meta snapshot replacement).
+- [x] **Membership genesis/materialization owner** (Aryan, 2026-10-14;
+  inactive, deterministic tests). Meta first under a bound writer: each action
+  (add/remove members, grant/revoke admin, rename, description, permissions,
+  clear avatar) is one `meta.json` CAS whose build re-checks authority on the
+  fresh provider meta and applies the newly signed events on top in swap
+  order; events are logged only after the swap applied, bridged by a
+  `membership_actions` Store row keyed to the exact attempt (ticket held until
+  the row is consumed). Genesis is an exact create; written meta is served
+  until the mirror shows it. `MembershipService.recover()` finishes
+  interrupted actions and their key steps. Unbound path unchanged.
+  Independent Claude review findings all fixed (the Lamport floor it
+  criticised was dropped). Design/limits: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+  "Membership owner"; DECISIONS.md D-014/D-015. Evidence:
+  tests/test_membership_owner.py (20 mutants, each killed).
+- [ ] **Avatar uploads under a bound writer**: `put_blob` raises when bound, so
+  group photos (`set_avatar`, refused before any event) and profile photos
+  (`accounts.py`) need a typed blob path like attachments' manifest.
 - [ ] **Terminal flows under a bound writer**: leave, delete chat, delete
   agent/account need typed terminal events plus their cleanup/refold owner
-  (keys are retained until outcomes settle; the key owner is done).
+  (keys are retained until outcomes settle; the key owner is done). They must
+  follow the membership owner's meta-first rule (event minted inside the meta
+  CAS above its watermark), or readers will skip them.
 - [ ] **Message overlays under a bound writer**: edits, redactions (delete for
   everyone) and pins use plain `put_doc`/`delete_doc` (mesh/overlays.py) and
   raise when bound. Classify: edits/redactions are immutable-ish records,
@@ -115,8 +146,9 @@ moment it is made, so a large task list never lives only in conversation.
   non-receipt channel instead of the typed writer.
 - [ ] **Activation wiring**: nothing binds the typed writer in production yet.
   At bind: drain pre-consumer outbox rows with the old owner, then run every
-  recovery sweep (identity owners, `ChatKeyService.recover`, state actions,
-  outbox owners, exact creates) before serving writes.
+  recovery sweep (identity owners, `MembershipService.recover` then
+  `ChatKeyService.recover`, state actions, outbox owners, exact creates)
+  before serving writes.
 - [ ] **Fleet upgrade before seal** (operational): the seal blocks legacy
   writes for every role, so all GUIs and workers on every machine must run the
   typed build before the root is sealed; production install + seal need

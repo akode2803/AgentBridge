@@ -40,6 +40,10 @@ def stable_append_id(chat_id: str, log_name: str, envelope_id: str) -> str:
     return str(uuid5(_APPEND_NAMESPACE, material))
 
 
+class DocumentContended(RuntimeError):
+    """Every compare-and-swap attempt lost to a concurrent writer."""
+
+
 @dataclass(frozen=True)
 class ApplicationMutationWriter:
     """Prepare an exact application operation before one journaled attempt."""
@@ -76,20 +80,27 @@ class ApplicationMutationWriter:
             raise ValueError("typed operation replay identity changed")
         return self.driver.resume(retained.expectation.protocol_epoch, operation_id)
 
-    def update_document(self, path: str, build):
+    def update_document(self, path: str, build, *, operation_for=None):
         """Recover, then compare-and-swap a freshly observed document.
 
         The factory receives raw current data, never an authority verdict. It
         must be a replaceable snapshot or a repeatable calculation. Durable
         user actions use the separate semantic action queue. None means no change. Ambiguous attempts retain
         exact bytes and must settle before the factory can run again.
+
+        ``operation_for(payload)``, when given, runs after each build and
+        before that attempt is prepared; it returns the attempt's operation id
+        so a caller that durably recorded it can find the exact outcome after
+        a crash (``settle_operation``). Such keyed attempts keep their ticket:
+        the caller releases it (``release_operation``) once it has consumed
+        the outcome, so an epoch closure cannot prune the receipt first.
         """
         validate_source_paths((path,))
         parts = path.split('/')
         if (len(parts) == 5 and parts[0] == 'chats'
                 and parts[2] == 'overlays' and parts[3] in {'state', 'reactions'}):
             raise ValueError('user state requires a durable semantic action')
-        if not callable(build):
+        if not callable(build) or (operation_for is not None and not callable(operation_for)):
             raise TypeError("document factory must be callable")
         self.driver._check_owner()
         journal = self.driver.journal
@@ -105,29 +116,35 @@ class ApplicationMutationWriter:
             if payload is None:
                 return current, False
             ticket = None
+            arguments = observed.arguments(payload)
+            keyed = None if operation_for is None else operation_for(payload)
+            if keyed is not None:
+                _uuid(keyed, "typed mutation operation")
             if journal.lifecycle_enabled():
-                ticket = journal.allocate_ticket("doc_compare_put", observed.arguments(payload))
+                ticket = (journal.allocate_ticket("doc_compare_put", arguments) if keyed is None
+                          else journal.allocate_keyed_ticket("doc_compare_put", arguments, keyed))
                 operation = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
             else:
-                operation = self.submit("doc_compare_put", observed.arguments(payload),
-                                        operation_id=str(uuid4()))
+                operation = self.submit("doc_compare_put", arguments,
+                                        operation_id=keyed or str(uuid4()))
             applied = dict(operation.receipt.result)["applied"]
             document = json.loads(operation.request.arguments_json)["p_data"]
             # Snapshot work is discoverable by path. Once settled it may be
             # superseded by the next freshly built snapshot; no external work
-            # item depends on retaining this result.
-            if ticket is not None:
+            # item depends on retaining this result, unless the caller keyed it.
+            if ticket is not None and keyed is None:
                 journal.release_ticket(ticket)
             if applied:
                 return document, True
-        raise RuntimeError("document changed repeatedly; retry the action")
+        raise DocumentContended("document changed repeatedly; retry the action")
 
-    def create_exact(self, path: str, data, *, operation_id: str):
+    def create_exact(self, path: str, data, *, operation_id: str, release: bool = True):
         """Create one immutable record under a key derived from its path.
 
         After lifecycle opt-in the record's receipt is its whole outcome, so
-        the ticket is released once acknowledged. Before opt-in this is an
-        ordinary keyed submit.
+        the ticket is released once acknowledged, unless the caller still has
+        to consume it (``release=False``; see ``release_operation``). Before
+        opt-in this is an ordinary keyed submit.
         """
         arguments = {"p_path": path, "p_data": data}
         journal = self.driver.journal
@@ -135,15 +152,20 @@ class ApplicationMutationWriter:
             return self.submit("doc_create", arguments, operation_id=operation_id)
         ticket = journal.allocate_keyed_ticket("doc_create", arguments, operation_id)
         record = self.driver.resume(ticket.protocol_epoch, ticket.operation_id)
-        journal.release_ticket(ticket)
+        if release:
+            journal.release_ticket(ticket)
         return record
 
-    def settle_exact_creates(self, prefix: str, on_created=None) -> int:
+    def settle_exact_creates(self, prefix: str, on_created=None, *,
+                             skip_failures: bool = False, include=None) -> int:
         """Resume unfinished exact creates under ``prefix`` before new records.
 
         A retry may mint a different record after an ambiguous reply; the old
         attempt must still reach its exact outcome rather than linger.
         ``on_created(path, data)`` learns each record the provider created.
+        ``skip_failures`` is for recovery sweeps: an attempt that still cannot
+        settle stays pending (retried next time) instead of stopping the rest.
+        ``include(path)`` limits the sweep to one owner's records.
         """
         journal = self.driver.journal
         settled, after = 0, None
@@ -153,9 +175,15 @@ class ApplicationMutationWriter:
                 request = journal.get(epoch, operation).request
                 arguments = json.loads(request.arguments_json)
                 if (request.expectation.kind != "doc_create"
-                        or not arguments["p_path"].startswith(prefix)):
+                        or not arguments["p_path"].startswith(prefix)
+                        or (include is not None and not include(arguments["p_path"]))):
                     continue
-                record = self.driver.resume(epoch, operation)
+                try:
+                    record = self.driver.resume(epoch, operation)
+                except Exception:
+                    if not skip_failures:
+                        raise
+                    continue
                 ticket = journal.operation_ticket(epoch, operation)
                 if ticket is not None:
                     journal.release_ticket(ticket)
@@ -166,6 +194,51 @@ class ApplicationMutationWriter:
             if len(keys) < 64:
                 return settled
             after = keys[-1]
+
+    def settle_operation(self, operation_id: str):
+        """Bring one keyed operation to its exact outcome.
+
+        Returns the provider receipt's result and the exact request arguments,
+        or None when no attempt was ever prepared under this id (so nothing can
+        have been dispatched). The ticket stays held: the caller releases it
+        after consuming the result, because an epoch closure prunes released
+        records.
+        """
+        _uuid(operation_id, "typed mutation operation")
+        record = self.driver.journal.get_operation(operation_id)
+        if record is None:
+            return None
+        record = self.driver.resume(record.request.expectation.protocol_epoch, operation_id)
+        return dict(record.receipt.result), json.loads(record.request.arguments_json)
+
+    def release_operation(self, operation_id: str) -> None:
+        """Release a keyed attempt's ticket after its outcome was consumed."""
+        _uuid(operation_id, "typed mutation operation")
+        journal = self.driver.journal
+        record = journal.get_operation(operation_id)
+        if record is None:
+            return
+        ticket = journal.operation_ticket(record.request.expectation.protocol_epoch,
+                                          operation_id)
+        if ticket is not None:
+            journal.release_ticket(ticket)
+
+    def attempt_superseded(self, operation_id: str) -> bool:
+        """Whether a refused compare-and-swap attempt can never apply.
+
+        True only when the provider document (or source epoch) has moved past
+        the version the attempt expects: versions never repeat, so a replay
+        can only conflict. A refused attempt otherwise stays pending.
+        """
+        _uuid(operation_id, "typed mutation operation")
+        record = self.driver.journal.get_operation(operation_id)
+        if record is None or record.request.expectation.kind != "doc_compare_put":
+            return False
+        arguments = json.loads(record.request.arguments_json)
+        observed = self.driver.rpc.read_document_for_update(arguments["p_path"])
+        return (observed.source_epoch != arguments["p_expected_source_epoch"]
+                or observed.seq != arguments["p_expected_seq"]
+                or observed.deleted != arguments["p_expected_deleted"])
 
     def replace_document(self, path: str, build):
         """Replace a device snapshot only after older operations settle."""
@@ -207,4 +280,4 @@ class ApplicationMutationWriter:
         return True
 
 
-__all__ = ["ApplicationMutationWriter", "stable_append_id"]
+__all__ = ["ApplicationMutationWriter", "DocumentContended", "stable_append_id"]

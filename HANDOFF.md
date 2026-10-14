@@ -1,5 +1,33 @@
 # Cloud source handoff
 
+## 2026-10-14 membership owner (meta first)
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound
+writer every membership/settings action is one `meta.json` CAS: the build
+re-checks authority on the fresh provider meta and applies the newly signed
+events on top in swap order (the watermark only moves forward); the events
+are logged only after the swap applied, via a `membership_actions` Store row
+keyed to the exact attempt whose journal ticket is held until the row is
+consumed. Genesis is an exact create; written meta is served until the mirror
+shows it (120 s cap). `MembershipService.recover()` (run before
+`ChatKeyService.recover()` at activation) finishes interrupted actions and
+their key steps; recovery sweeps skip work that still cannot settle. Unbound
+path unchanged. An independent Claude review found a clock-poisoning flaw in
+the first draft's Lamport floor (dropped) and six smaller gaps, all fixed with
+tests. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Membership owner".
+
+New this round: DECISIONS.md (Aryan asked for a running list of revisitable
+decisions with the path taken; keep it current). The Supabase connector works:
+read-only on Scratch is fine, migrations need Aryan's confirmation, production
+untouched; Scratch lacks the branch's later RPCs (`doc_compare_put` etc.).
+Codex review has ended (plan expired); consequential designs get an
+independent Claude reviewer. Open decisions: D-009 (ephemeral status channel),
+D-014 (provider trusts any member to rewrite meta.json).
+
+Next: terminal flows (leave, delete chat, delete agent/account) on the same
+meta-first rule, then message overlays, read-ack reservation, avatar blobs,
+harness/GUI write classification, activation wiring, Scratch acceptance.
+
 ## 2026-10-14 chat-key rotation owner
 
 Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound

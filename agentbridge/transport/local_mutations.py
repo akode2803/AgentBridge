@@ -271,16 +271,17 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return outcomes
 
-    def update_doc(self, path, build):
+    def update_doc(self, path, build, *, operation_for=None):
         """Compare-and-swap a freshly observed document via the bound writer.
 
         ``build(current)`` must be a repeatable calculation over raw current
         data; it may run again after a conflict. Returns (document, changed).
+        ``operation_for`` names each attempt (see the writer).
         """
         writer = self._bound_writer()
         if writer is None:
             raise ValueError('typed mutation journal is not bound')
-        document, changed = writer.update_document(path, build)
+        document, changed = writer.update_document(path, build, operation_for=operation_for)
         self._bound_writer()
         if changed:
             self._typed_success()
@@ -326,30 +327,66 @@ class LocalMutationTransport(Transport):
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.create_doc(path, data))
 
-    def create_exact_doc(self, path, data):
+    def create_exact_doc(self, path, data, *, keep_ticket=False):
         """Create an immutable, uniquely named record.
 
         Under a bound writer the operation id derives from the path, so an
         exact retry of the same record replays its retained attempt instead of
         issuing a second write. A changed payload for that path fails closed.
+        ``keep_ticket`` leaves the release to the caller (``release_operation``).
         """
         writer = self._bound_writer()
         if writer is None:
             return self.create_doc(path, data)
-        from uuid import NAMESPACE_URL, uuid5
-
-        writer.create_exact(path, data, operation_id=str(
-            uuid5(NAMESPACE_URL, 'agentbridge-exact-create:' + path)))
+        writer.create_exact(path, data, operation_id=self.exact_create_id(path),
+                            release=not keep_ticket)
         self._bound_writer()
         self._typed_success()
         return None
 
-    def settle_exact_creates(self, prefix, on_created=None):
+    def settle_operation(self, operation_id):
+        """Exact outcome of a bound writer's keyed attempt (None: never prepared).
+        The ticket stays held until ``release_operation``."""
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        result = writer.settle_operation(operation_id)
+        self._bound_writer()
+        if result is not None:
+            self._typed_success()
+        return result
+
+    def release_operation(self, operation_id):
+        """Release a keyed attempt once its outcome was durably consumed."""
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        writer.release_operation(operation_id)
+        self._bound_writer()
+
+    def attempt_superseded(self, operation_id):
+        """Whether a refused keyed compare-and-swap can never apply."""
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        superseded = writer.attempt_superseded(operation_id)
+        self._bound_writer()
+        return superseded
+
+    def exact_create_id(self, path):
+        """The operation id ``create_exact_doc`` uses for ``path``."""
+        from uuid import NAMESPACE_URL, uuid5
+
+        return str(uuid5(NAMESPACE_URL, 'agentbridge-exact-create:' + path))
+
+    def settle_exact_creates(self, prefix, on_created=None, *, skip_failures=False,
+                             include=None):
         """Resume a bound writer's unfinished exact creates under ``prefix``."""
         writer = self._bound_writer()
         if writer is None:
             return 0
-        settled = writer.settle_exact_creates(prefix, on_created)
+        settled = writer.settle_exact_creates(prefix, on_created, skip_failures=skip_failures,
+                                              include=include)
         self._bound_writer()
         if settled:
             self._typed_success()

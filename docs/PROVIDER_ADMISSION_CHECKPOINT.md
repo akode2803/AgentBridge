@@ -294,6 +294,86 @@ Found while wiring it: under a bound writer `create_chat`'s genesis meta insert
 and `materialize`/`refold` meta writes raise, so chat creation and member
 add/remove fail before reaching the key step. The membership owner is next.
 
+## Membership owner (inactive typed path, 2026-10-14)
+
+`chats/<id>/meta.json` is the chat's materialized state and also the provider
+ACL (`ab_is_member`). Unbound, a mutation queues its signed info events first
+and then overwrites meta with `put_doc` (last writer wins). That loses a
+concurrent writer's change, and because readers only advance meta with events
+newer than its `materialized_ns`, an event at or below another writer's
+watermark (concurrency or clock skew) is never applied: the log shows "X
+removed Y" while the ACL never changed. The unbound path is unchanged.
+
+Bound writer:
+
+1. **Meta first, one CAS per action, in CAS order.** `update_doc(meta,
+   build)`. The build takes the fresh provider meta, advances it with locally
+   ingested newer state events (as `materialize` does), re-runs the action's
+   authority checks on that snapshot (a concurrently dismissed admin fails
+   closed), mints the signed events, applies them on top (`events.apply_own`,
+   whatever their ns: the swap orders them, not wall clocks) and requires the
+   primary ones to take effect (events everyone's fold would reject never
+   reach the ACL). The watermark moves strictly forward (`max(W + 1, newest
+   minted ns)`), so it also versions the document. Events reach the outbox
+   only after the swap applied. Membership `joined_ns` is the adder's own
+   clock; no process clock is changed.
+2. **Durable bridge.** Before each attempt is dispatched a Store row
+   (`membership_actions`: chat, operation id, envelopes) is written, and the
+   CAS uses an operation id derived from the first envelope id. Applied: one
+   Store transaction caches and enqueues the envelopes and deletes the row, and
+   only then is the attempt's journal ticket released (an epoch closure prunes
+   released records, so a ticket released earlier could lose the receipt
+   before a crashed row is settled). A conflicted attempt's row is dropped and
+   its ticket released before the rebuild (also when all three attempts lose).
+   Interrupted rows settle by exact journal lookup: applied, the events are
+   logged and the key steps the caller never reached run (bound to the exact
+   `joined_ns`, and only when the current view agrees); not applied or never
+   prepared, the row is dropped; refused by the provider with a document that
+   has since moved on, it can never apply (versions never repeat) and is
+   dropped. Anything else stays: the next action on that chat settles it first
+   (fail closed), `recover()` skips it and finishes the rest.
+3. **Genesis.** Same row, keyed by the meta path's exact-create id, then
+   `create_exact_doc` and the genesis event. DM and self-chat creation settle
+   pending geneses and hold the owner's lock across the dedupe scan and the
+   create, so a retry after a lost reply finds the chat rather than a twin.
+4. **Mirror lag.** Typed receipts do not refresh the mirror, so meta this
+   process wrote is served (snapshot and chat listing) until the mirror shows
+   that version or newer, for at most 120 s (a chat the mirror never shows may
+   have been denied meanwhile).
+5. **refold** under a bound writer only backfills missing `tenure` (its one
+   automatic use, pre-R25 metas); it never replaces members, roles or settings
+   from a local fold that may lack another writer's log.
+6. Key recovery (`ChatKeyService.recover`) settles only epoch documents, so
+   meta creates stay held for this owner; recovery sweeps skip work that still
+   cannot settle.
+
+Limits: actions are serialized per `MembershipService` (one lock across
+chats, including network I/O; membership actions are rare). Another process
+whose mirror holds a newer watermark than an event's ns shows that change only
+once its mirror refreshes (seconds); events from legacy writers before the
+seal are outside the CAS order (drain and fleet upgrade first). `recover()`
+has no caller until activation wiring, which runs it before
+`ChatKeyService.recover`. Group/profile photo uploads still need a typed blob
+path (`set_avatar` refuses before any event). A crash between consuming a row
+and releasing its ticket leaves one acknowledged record held until rotation.
+
+Independent review (Claude reviewer, 2026-10-14; Codex is no longer
+available) of the first implementation found: a Lamport ns floor taken from
+untrusted meta could poison the process clock (huge watermark: sends fail
+everywhere) and mute newcomers under honest skew (replaced by CAS-order
+application, above); tickets were released before the row was consumed;
+settled actions skipped key steps; refused rows lingered; typed refold could
+resurrect a removed member; a DM retry after a lost genesis made a twin; the
+overlay never expired. All fixed with tests. `recover()` having no caller is
+the activation-wiring item. Evidence: tests/test_membership_owner.py (36
+tests); a mutation pass removing each safety property (20 mutants, including
+the key-owner recovery changes) fails a test every time.
+
+Not changed here (DECISIONS.md D-014): the provider lets any current member
+replace meta.json, so admin rules are enforced by every honest client's fold,
+not by PostgreSQL. Leave and delete-for-everyone stay refused under a bound
+writer (terminal flows) and must follow the same meta-first rule.
+
 ## Next
 
 1. Done above: durable exact cancellation and owner settlement.

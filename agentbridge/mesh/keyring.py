@@ -585,10 +585,11 @@ class ChatKeyService:
                 wrapped[name] = crypto.wrap_key_for(acc.keys.agree_pub, key)
         return wrapped
 
-    def _settle_epochs(self, prefix: str) -> int:
+    def _settle_epochs(self, prefix: str, *, skip_failures: bool = False) -> int:
         """Bring earlier epoch creates whose replies were lost to their exact
         outcome (retained wraps, never re-minted); created ones are overlaid
-        so they are usable before the mirror shows them."""
+        so they are usable before the mirror shows them. A recovery sweep
+        skips one that still cannot settle; a chat's own rotation does not."""
         def created(path: str, doc) -> None:
             parts = path.split("/")
             if (len(parts) == 4 and parts[2] == "keys" and isinstance(doc, dict)
@@ -598,7 +599,11 @@ class ChatKeyService:
                 with self._cache_lock:
                     self._published[(parts[1], doc["epoch"])] = copy.deepcopy(doc)
 
-        return self.tx.settle_exact_creates(prefix, created)
+        # Only epoch documents: meta creates belong to the membership owner,
+        # which must consume their outcome before their tickets are released.
+        return self.tx.settle_exact_creates(
+            prefix, created, skip_failures=skip_failures,
+            include=lambda path: path.split("/")[2:3] == ["keys"])
 
     def _publish_epoch(self, chat_id: str, members: list[str], key: bytes) -> int:
         """Publish one new epoch wrapping ``key`` for exactly ``members``."""
@@ -785,7 +790,7 @@ class ChatKeyService:
         """
         if not self._typed():
             return 0
-        done = self._settle_epochs("chats/")
+        done = self._settle_epochs("chats/", skip_failures=True)
         if self.store is None:
             return done
         after = 0

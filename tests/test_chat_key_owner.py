@@ -385,3 +385,27 @@ def test_unbound_concurrent_sends_mint_one_epoch(tmp_path):
         released.set()
         results = {first.result(timeout=10), second.result(timeout=10)}
     assert len(results) == 1 and len(puts) == 1
+
+
+def test_recover_skips_an_epoch_that_still_cannot_settle(keys):
+    other = ChatSnapshot(id="room2", members={n: Member(joined_ns=j) for n, j in AB.items()},
+                         permissions=ChatPermissions())
+    for chat, snapshot in ((CHAT, snap(AB)), ("room2", other)):
+        keys.provider.lose.add(agent.CREATE_RPC)
+        with pytest.raises(TypedMutationRPCError):
+            keys.service.ensure(chat, snapshot)
+
+    def down():
+        raise TimeoutError("provider unreachable")
+
+    keys.provider.before[agent.CREATE_RPC] = down  # the first resume fails
+    assert keys.service.recover(lambda chat: snap(AB)) == 1
+    assert keys.service.recover(lambda chat: snap(AB)) == 1
+    assert keys.service.recover(lambda chat: snap(AB)) == 0
+    # A chat's own rotation still fails closed on an unsettled earlier epoch.
+    keys.provider.lose.add(agent.CREATE_RPC)
+    with pytest.raises(TypedMutationRPCError):
+        keys.service.rotate(CHAT, ["alice", "bob"])
+    keys.provider.before[agent.CREATE_RPC] = down
+    with pytest.raises(TypedMutationRPCError):
+        keys.service.rotate(CHAT, ["alice", "bob"])

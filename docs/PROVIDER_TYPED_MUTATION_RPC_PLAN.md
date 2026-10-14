@@ -503,6 +503,9 @@ Remaining lifecycle owners require real durable sequencing, not only operation I
   steps and keys until outcomes settle. Swallowed leave failures cannot justify
   deactivation or private-key deletion. Membership genesis/refolding and fresh
   terminal outbox events still need their own forward-only phase reducers.
+  (Membership genesis, actions and refold implemented 2026-10-14, inactive,
+  meta first: see PROVIDER_ADMISSION_CHECKPOINT.md "Membership owner".
+  Terminal events remain.)
 - Reserved read acknowledgement currently retains its callback/payload only in
   process memory. Bind canonical finalization provenance, the semantic action
   and its exact ticket in the same root-to-node-to-Store cut; enqueueing a fresh
