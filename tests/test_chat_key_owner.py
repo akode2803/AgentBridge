@@ -222,6 +222,32 @@ def test_ambiguous_rewrap_replays_exactly_on_resume(keys):
     assert opens(keys, docs[2], "carol") == opens(keys, docs[2], "alice")
 
 
+def test_keyless_newcomer_keeps_the_rewrap_until_its_key_exists(keys, monkeypatch):
+    # #146 4292560884: a newcomer without a published agreement key must not
+    # lose history; the row stays pending and a later pass wraps every epoch.
+    epochs = _three_epochs(keys)
+    real_get = keys.service.directory.get
+    monkeypatch.setattr(keys.service.directory, "get",
+                        lambda name: None if name == "dave" else real_get(name))
+    with_both = {**WITH_CAROL, "dave": 11}
+    keys.service.on_members_added(CHAT, snap(with_both), ["carol", "dave"])
+    (row,) = keys.store.key_rewraps_pending()
+    assert row.after_epoch == -1 and row.newcomers == {"carol": 10, "dave": 11}
+    for epoch in epochs:
+        wrapped = keys.docs[f"{PREFIX}/{epoch}.json"]["wrapped"]
+        assert "carol" in wrapped and "dave" not in wrapped
+    carol = {e: keys.docs[f"{PREFIX}/{e}.json"]["wrapped"]["carol"] for e in epochs}
+    keys.service.recover(lambda chat: snap(with_both))
+    assert len(keys.store.key_rewraps_pending()) == 1  # still waiting for dave
+    monkeypatch.setattr(keys.service.directory, "get", real_get)
+    keys.service.recover(lambda chat: snap(with_both))
+    assert keys.store.key_rewraps_pending() == ()
+    for epoch in epochs:
+        doc = keys.docs[f"{PREFIX}/{epoch}.json"]
+        assert opens(keys, doc, "dave") == opens(keys, doc, "alice")
+        assert doc["wrapped"]["carol"] == carol[epoch]  # never redone
+
+
 @pytest.mark.parametrize("later", ["removed", "readded", "history_off", "me_removed", "not_member"])
 def test_resume_wraps_nothing_unless_the_same_membership_holds(keys, monkeypatch, later):
     epochs = _three_epochs(keys)

@@ -738,13 +738,21 @@ class ChatKeyService:
             names = {name: joined for name, joined in row.newcomers.items()
                      if joined > 0 and name in snap.members
                      and snap.members[name].joined_ns == joined}
+        # A newcomer without a published agreement key cannot be wrapped yet:
+        # wrap the others but keep the row (and its epoch position) so a
+        # later recover() pass gives that newcomer the same history. Repeat
+        # passes only add wraps still missing.
+        keyless = {name for name in names
+                   if not ((acc := self.directory.get(name)) and acc.keys.agree_pub)}
         if names:
             for epoch, _doc in self.epochs(row.chat_id):
                 if epoch <= row.after_epoch:
                     continue
                 self._rewrap_epoch(row.chat_id, epoch, names)
-                self.store.key_rewrap_advance(row.id, epoch)
-        self.store.key_rewrap_finish(row.id)
+                if not keyless:
+                    self.store.key_rewrap_advance(row.id, epoch)
+        if not keyless:
+            self.store.key_rewrap_finish(row.id)
 
     def _rewrap_epoch(self, chat_id: str, epoch: int, names: dict) -> None:
         bundle = self.keystore.load(self.user)
