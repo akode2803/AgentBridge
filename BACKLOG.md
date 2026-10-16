@@ -47,6 +47,9 @@ moment it is made, so a large task list never lives only in conversation.
   membership commits, so it is bounded like any member's writes), earlier
   #145/#144/#143/#142/#140 rounds, #133 (last review clean). Codex hit its
   quota after #146 15:28Z, so `394bebe` onward is unreviewed by Codex.
+  Codex reviewed again 2026-10-16 (`f73df55`): #146 4292560884 (P2, a
+  keyless newcomer lost history because the rewrap row finished anyway)
+  fixed in `51de59f` with a regression test; thread resolved.
 - [D] **#145 4259098058 stable append ID across typed owners**: unreachable
   today (every `commit_envelope` caller mints a fresh envelope ID; messages are
   PK-guarded in `local_send_status`); revisit if any caller re-commits one.
