@@ -40,7 +40,7 @@ mattering. F1, F5, F6, F9 and F10 do not depend on root size.
 | F8 | Housekeeping | Server-side jobs | Clients run the janitor | Gap | With P1 (pg_cron) |
 | F9 | Sign-up and abuse | Phone-number accounts, server rate limits | Anyone with the bootstrap (URL, publishable key, root) can create unlimited accounts | Fine for friends; **breaks** at 1,000 users | Before strangers join |
 | F10 | Backups and restore | — | A restore rewinds ids, sequences and receipts under live clients | Gap | Before activation |
-| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Direction D (one client language everywhere); TypeScript + Tauri vs Flutter decided by a spike |
+| F11 | UI stack, phone app | Native phone apps plus desktop over one shared protocol and crypto library | Plain-JS desktop UI; the whole client core (crypto, fold, outbox, sync) is Python | **Blocks a phone app** | Direction D (one client language everywhere); Flutter favoured; spike with stop rules |
 | — | Encryption, multi-device | Signal per-device keys; Matrix room keys rotated on leave, key backup | Per-chat key epochs rotated on leave, re-wrap for newcomers, account key bundle on each device, signed state events | **Holds** (Matrix-like) | — |
 | — | Social graph (D-018) | Signal hides it; Telegram sees it | Server sees membership and timing, never content | **Holds** at Telegram/Matrix level | — |
 
@@ -485,31 +485,45 @@ SQLite, notifications, tray and updates. It is also the closest match to
 today's app, which already renders in an Edge web view. Watch for WebKit
 quirks on macOS and Linux.
 
-**Alternative: Flutter (Aryan asked, 2026-10-15).** Flutter is the strongest
-rival to React Native plus Tauri on these constraints, and is still open.
-- **Its strengths:**
-  - One toolkit for iOS, Android, Windows, macOS and Linux, all first-class
-    (Canonical builds Ubuntu's installer with it), with no web view and no
-    Tauri.
-  - Fast start-up: ahead-of-time native code and its own renderer, no browser
-    engine.
-  - Identical rendering on every platform, so no WebKit quirks.
+**Flutter is the favoured stack (Aryan, 2026-10-16), pending the spike.**
+Aryan prefers Flutter if its cost stays reasonable: it is faster, keeps one
+app identity everywhere, and compiles to WASM.
+- **Strengths:**
+  - One toolkit for iOS, Android, Windows, macOS and Linux, all first-class,
+    with no web view and no Tauri.
+  - Fast start-up from ahead-of-time native code.
+  - Identical rendering everywhere.
   - An official Supabase SDK.
-- **Its costs:**
-  - The core is in Dart, not TypeScript. Keeping one language for clients and
-    the harness then means a Dart harness. That is possible (Dart runs CLI
-    tools and servers), but the official MCP SDKs are TypeScript and Python;
-    the Dart ones are community-maintained.
-  - Less-proven crypto: a pure-Dart `cryptography` package (less vetted than
-    `@noble`), or libsodium bindings (`sodium_libs`) with native builds on
-    every platform.
-  - Fewer people, and less model fluency, than TypeScript and React.
-  - Self-drawn controls: desktop text selection, menus and keyboard handling
-    can feel slightly off.
-- **Verdict:** as a UI toolkit for phone plus three desktops with fast start,
-  Flutter wins. As one platform shared by clients and agents, TypeScript
-  wins, on crypto maturity, the MCP SDKs and model fluency. Leaning
-  TypeScript, decided by the spike below.
+  - Dart's FFI reaches llama.cpp or ONNX Runtime cleanly for future
+    on-device models. On the web, WebGPU model runtimes are JavaScript
+    libraries reached by interop, so that point is roughly neutral.
+- **Dart itself** is garbage-collected and statically typed with null
+  safety and async/await: close to TypeScript, Java or C#, nothing like
+  C or C++. Models write it well but not as fluently as TypeScript; expect
+  roughly 1.2–1.4× the effort, which the spike measures. Aryan cannot review
+  Dart, so tests and the shared vectors carry more weight.
+- **Crypto:** `sodium_libs` wraps audited libsodium on every Flutter
+  platform (sodium.js on the web): X25519, Ed25519, ChaCha20-Poly1305,
+  scrypt, HKDF. Check byte-for-byte scrypt and HKDF parity with the vectors.
+- **One core, in Dart.** Every client that seals, signs, folds and syncs uses
+  the Dart core: the Flutter app and any headless agent runner. TypeScript is
+  allowed only for thin tooling that does not duplicate core logic, where its
+  official support is better, such as MCP servers that forward tool calls to
+  the Dart core over a narrow local interface. The Dart team also publishes
+  `dart_mcp`, to be checked in the spike.
+- **Agent runtime (Aryan, 2026-10-16):** move towards adopting an existing
+  agent harness (for example the open-source Codex CLI, or Anthropic's Agent
+  SDK under its own terms) that connects to AgentBridge as MCP tools. The
+  harness then owns tool permissions instead of our terminal wrappers, which
+  remain only a fallback for running binaries. That also moves agent use onto
+  each vendor's supported integration path, out of the grey area Aryan
+  noted in the current approach.
+- **Stop rules.** Fall back to TypeScript with React Native and Tauri if:
+  - the Dart port of encoding, crypto and the fold takes more than about
+    1.5× the TypeScript port;
+  - the vectors do not pass cleanly with libsodium;
+  - Flutter on desktop (especially Linux) misses the start-up and memory
+    targets.
 
 **What to settle before any of it.** Two independent implementations (Python
 and TypeScript, until the harness moves) must agree byte for byte: canonical
@@ -531,9 +545,9 @@ client is written against it.
      under 1 second cold, and note how the port felt in each language
      (crypto libraries, BigInt `ns` handling, tooling).
    Choose the stack on those results.
-3. Then the chosen core and UI (TypeScript with React Native and Tauri, or
-   Dart with Flutter) for phone and desktop, while today's app keeps working
-   until parity. Then the harness, in the same language.
+3. Then the chosen core and UI (Dart with Flutter, unless a stop rule fires)
+   for phone and desktop, while today's app keeps working until parity. Agents
+   move to an adopted harness connected through MCP, using the same core.
 4. Relax the dependency rule: well-maintained, widely used libraries are
    allowed where they replace custom code (React, React Native, Expo, Tauri or
    Flutter, `@noble`, supabase-js). Crypto stays audited libraries only.

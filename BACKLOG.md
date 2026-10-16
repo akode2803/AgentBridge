@@ -301,7 +301,9 @@ moment it is made, so a large task list never lives only in conversation.
   protocol spec with golden vectors, then a 2–3 week spike comparing
   TypeScript + React Native/Tauri with Dart + Flutter (Aryan, 2026-10-15):
   both ports pass the vectors; the same screen in both on macOS, Windows,
-  Linux and a phone; cold start, warm start and memory measured. Trap: `ns`
+  Linux and a phone; cold start, warm start and memory measured. 2026-10-16:
+  Flutter favoured (one Dart core; TS only for thin MCP tooling; adopt an
+  open harness over MCP), with stop rules in F11. Trap: `ns`
   exceeds JS safe integers, so use BigInt.
 - [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
   folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.

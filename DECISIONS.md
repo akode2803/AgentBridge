@@ -45,7 +45,10 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
     the desktop (Linux required, Electron start-up rejected). Gated by a
     protocol spec with test vectors and a 2–3 week spike that also builds
     the client in Flutter (Dart), so the stack is chosen on measured
-    start-up, memory and porting experience.
+    start-up, memory and porting experience. 2026-10-16: Flutter favoured
+    with one Dart core; TypeScript only for thin tooling such as MCP
+    servers; agents move to an adopted harness (e.g. Codex CLI) over MCP;
+    stop rules fall back to TypeScript.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.
