@@ -21,7 +21,10 @@ a subdirectory can't import ``agentbridge`` either):
         ...supabase_admin seed <username> [--install|--out FILE]
                                           mint a credential for a machine
                                           that can't run join itself
-        ...supabase_admin revoke <username>   eviction (row + auth user)
+        ...supabase_admin revoke <username> --permanent
+                                          eviction: the row is revoked (the
+                                          name is never reused) and the auth
+                                          user deleted
 
 ``join`` is also the primitive the app's account-creation flow calls when
 the setup overhaul lands (V-2026-07-16: "create a user key during the
@@ -43,6 +46,7 @@ from __future__ import annotations
 import argparse
 import secrets
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME, load_app_config, validate_root_spec
@@ -166,8 +170,9 @@ def join_mesh(env: dict[str, str], username: str, root: str,
             raise SystemExit(
                 f"{email} already has an auth user this machine holds no "
                 f"password for (a half-finished join, or confirmations "
-                f"were ON). Ask the owner to run: supabase_admin revoke "
-                f"{username} — then rerun join.")
+                f"were ON). Ask the owner to run: supabase_admin seed "
+                f"{username} --out FILE, and install that credential here. "
+                f"Do not revoke: a revoked name is never reused.")
         session = res
 
     # 2. the credential works — install it NOW (a failed claim below must
@@ -214,6 +219,9 @@ def _legacy_claim(client, root: str, username: str, uid: str) -> None:
                 "the ab_members table is missing — paste "
                 "docs/supabase_schema.sql first, then rerun join "
                 "(your credential is installed and will be reused)")
+        elif "belongs to an existing account" in msg:
+            raise SystemExit(f"@{username} belongs to an existing account on "
+                             f"{root} and cannot be claimed")
         elif "duplicate" in msg.lower() or "23505" in msg:
             raise SystemExit(f"@{username} is already claimed on {root} "
                              f"by someone else")
@@ -235,6 +243,8 @@ def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
     email = _member_email(username, root)
     password = secrets.token_urlsafe(24)
     existing = _find_user(client.auth.admin, email)
+    _require_seedable(client, root, username,
+                      existing.id if existing is not None else None)
     if existing is not None:
         client.auth.admin.update_user_by_id(existing.id, {
             "password": password, "email_confirm": True})
@@ -262,16 +272,36 @@ def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
     return email, password
 
 
+def _require_seedable(client, root: str, username: str, uid) -> None:
+    """Refuse to seed over a name that is revoked or held by another login:
+    names are never freed (docs/NAME_RETENTION_AND_PRIVATE_POKES.md)."""
+    rows = (client.table("ab_members").select("uid,revoked_at")
+            .eq("root", root).eq("username", username).execute().data or [])
+    if not rows:
+        return
+    row = rows[0]
+    if row.get("revoked_at"):
+        raise SystemExit(f"@{username} was revoked on {root}; a revoked name "
+                         f"is never reused, so choose a new name")
+    if uid is None or str(row.get("uid")) != str(uid):
+        raise SystemExit(f"@{username} is held on {root} by another login; "
+                         f"names are never reused")
+
+
 def revoke(env: dict[str, str], username: str, root: str) -> bool:
-    """Owner-only: eviction — the members row AND the auth user. The
-    evictee's chats stay closed either way (meta ACLs + E2EE epochs)."""
+    """Owner-only, permanent: eviction marks the members row revoked (the
+    name is never freed, docs/NAME_RETENTION_AND_PRIVATE_POKES.md) and
+    deletes the auth user. The evictee's chats stay closed either way
+    (meta ACLs + E2EE epochs)."""
     client = _client(env, admin=True)
     try:
-        client.table("ab_members").delete().eq("root", root) \
-            .eq("username", username).execute()
+        revoked_at = datetime.now(timezone.utc).isoformat()
+        client.table("ab_members").update({"revoked_at": revoked_at}) \
+            .eq("root", root).eq("username", username) \
+            .is_("revoked_at", "null").execute()
     except Exception as e:  # noqa: BLE001 - classify only the seal
         if _SEALED in str(e):
-            # Nothing changed: the row delete is the first step.
+            # Nothing changed: the row update is the first step.
             raise SystemExit("this root is sealed: eviction needs the typed "
                              "operator flow, which is not built yet") from None
         raise
@@ -294,8 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     p_seed.add_argument("--install", action="store_true",
                         help="write the credential into THIS machine's supabase.env")
     p_seed.add_argument("--out", default="", help="write the env lines to a file")
-    p_rev = sub.add_parser("revoke", help="owner: evict a member (service key)")
+    p_rev = sub.add_parser(
+        "revoke", help="owner: evict a member for good (service key)")
     p_rev.add_argument("username")
+    p_rev.add_argument("--permanent", action="store_true",
+                       help="confirm: the name is never reused afterwards")
     args = ap.parse_args(argv)
 
     home = Path(args.home) if args.home else None
@@ -326,8 +359,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"SUPABASE_MEMBER_EMAIL={email}")
             print(f"SUPABASE_MEMBER_PASSWORD={password}")
     elif args.cmd == "revoke":
+        if not args.permanent:
+            ap.error(f"revoking @{name} is permanent: the name is never "
+                     "reused. Rerun with --permanent to confirm; to replace "
+                     "a lost password, use seed instead")
         gone = revoke(env, name, root)
-        print(f"@{name}: " + ("revoked" if gone else "members row cleared; "
+        print(f"@{name}: " + ("revoked" if gone else "members row revoked; "
                               "no auth user found"))
     return 0
 

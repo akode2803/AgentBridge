@@ -58,6 +58,8 @@ class FakeQuery:
         self._lock = lock if lock is not None else threading.RLock()
         self.filters = []
         self._like = self._gt = self._lt = self._lte = None
+        self._not_like = None
+        self._negate = False
         self._in = None
         self._orders = []
         self._limit = self._range = None
@@ -92,9 +94,26 @@ class FakeQuery:
         self._in = (col, tuple(copy.deepcopy(values)))
         return self
 
-    def like(self, col, pat):
-        self._like = (col, str(pat))
+    @property
+    def not_(self):
+        self._negate = True
         return self
+
+    def like(self, col, pat):
+        if self._negate:
+            self._negate = False
+            self._not_like = (col, str(pat))
+        else:
+            self._like = (col, str(pat))
+        return self
+
+    @staticmethod
+    def _like_match(like, row):
+        pattern = "".join(
+            ".*" if char == "%" else "." if char == "_" else re.escape(char)
+            for char in like[1]
+        )
+        return re.fullmatch(pattern, str(row.get(like[0], ""))) is not None
 
     def gt(self, col, val):
         self._gt = (col, val)
@@ -123,13 +142,10 @@ class FakeQuery:
     def _match(self, row):
         if any(row.get(col) != val for col, val in self.filters):
             return False
-        if self._like:
-            pattern = "".join(
-                ".*" if char == "%" else "." if char == "_" else re.escape(char)
-                for char in self._like[1]
-            )
-            if re.fullmatch(pattern, str(row.get(self._like[0], ""))) is None:
-                return False
+        if self._like and not self._like_match(self._like, row):
+            return False
+        if self._not_like and self._like_match(self._not_like, row):
+            return False
         if self._gt and not row.get(self._gt[0], 0) > self._gt[1]:
             return False
         if self._lt and not str(row.get(self._lt[0], "")) < str(self._lt[1]):

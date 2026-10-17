@@ -73,9 +73,49 @@ def test_member_self_service_auth_lookup_uses_one_init_plan_per_statement():
     assert "with check (uid = (select auth.uid()))" in _policy(
         sql, "ab_members_claim",
     )
-    assert "using (uid = (select auth.uid()))" in _policy(
-        sql, "ab_members_leave",
+    # The legacy self-delete freed the name for the next claimer.
+    assert "create policy ab_members_leave" not in sql
+    assert "drop policy if exists ab_members_leave" in sql
+
+
+def test_names_are_never_freed_and_have_one_owner():
+    """docs/NAME_RETENTION_AND_PRIVATE_POKES.md: the schema keeps every
+    claimed name, refuses claims over accounts, and keeps account rows."""
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
     )
+    member = sql[sql.index("create or replace function public.ab_member("):]
+    assert "and revoked_at is null" in member[:member.index("$$;")]
+    lock = sql[sql.rindex("create or replace function private.ab_mutation_lock_actor"):]
+    assert "m.revoked_at is null" in lock[:lock.index("$$;")]
+    leave = sql[sql.rindex("create or replace function public.ab_mutation_member_leave"):]
+    leave = leave[:leave.index("$$;")]
+    assert "delete from public.ab_members" not in leave
+    assert "set revoked_at = pg_catalog.now()" in leave
+    assert "for update" in leave
+    assert ("when 'member_leave' then p_table = 'ab_members' "
+            "and p_operation = 'UPDATE'") in sql
+    for trigger in ("ab_members_keep_names", "ab_members_one_owner",
+                    "ab_docs_one_owner", "ab_docs_keep_accounts"):
+        assert f"create trigger {trigger}" in sql
+    assert "when (old.path like 'users/%')" in sql
+    assert "'agentbridge-name:'" in sql
+
+
+def test_poke_channel_policies_parse_the_topic_without_splitting():
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    topic = sql[sql.index("create or replace function public.ab_poke_topic_ok"):]
+    topic = topic[:topic.index("$$;")]
+    assert "pg_catalog.left(p_topic, 3) = 'ab-'" in topic
+    assert "pg_catalog.substr(p_topic, 4)" in topic
+    assert "split_part" not in topic
+    for name in ("ab_poke_receive", "ab_poke_send"):
+        body = sql.split(f"create policy {name}", 1)[1].split("$policy$", 1)[0]
+        assert "realtime.messages.extension = 'broadcast'" in body
+        assert "(select public.ab_poke_topic_ok((select realtime.topic())))" in body
+    assert "pg_catalog.to_regclass('realtime.messages') is null" in sql
 
 
 class _Table:
@@ -236,7 +276,9 @@ def test_join_explains_an_orphaned_auth_user(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit) as e:
         admin.join_mesh(_env(), "ben", "mesh2", tmp_path / "supabase.env")
-    assert "revoke" in str(e.value)
+    # A lost password is replaced by seed; revoke would burn the name.
+    assert "supabase_admin seed ben" in str(e.value)
+    assert "never reused" in str(e.value)
 
 
 def test_join_explains_a_refused_signup(tmp_path, monkeypatch):
@@ -339,22 +381,42 @@ def test_sealed_join_unknown_outcome_says_rerun(tmp_path, monkeypatch, sealed):
 
 
 class _AdminTable:
-    def __init__(self, error=""):
+    """``error`` fails the writes; ``rows`` answers the name lookup."""
+
+    def __init__(self, error="", rows=()):
         self.error = error
+        self.rows = list(rows)
         self.calls = []
+        self._op = ""
+
+    def select(self, columns):
+        self._op = "select"
+        return self
 
     def upsert(self, row):
         self.calls.append(("upsert", row))
+        self._op = "upsert"
+        return self
+
+    def update(self, row):
+        self.calls.append(("update", row))
+        self._op = "update"
         return self
 
     def delete(self):
         self.calls.append(("delete",))
+        self._op = "delete"
         return self
 
     def eq(self, *_args):
         return self
 
+    def is_(self, *_args):
+        return self
+
     def execute(self):
+        if self._op == "select":
+            return SimpleNamespace(data=self.rows)
         if self.error:
             raise RuntimeError(self.error)
         return SimpleNamespace(data=[])
@@ -399,3 +461,47 @@ def test_sealed_revoke_refuses_before_deleting_the_auth_user(monkeypatch):
                       "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
     assert "sealed" in str(e.value)
     assert client.deleted == []
+
+
+def test_seed_refuses_a_revoked_name(monkeypatch):
+    table = _AdminTable(rows=[{"uid": "uid-1", "revoked_at": "2026-10-17T00:00:00Z"}])
+    _patch(monkeypatch, _admin_client(table, "uid-1"))
+    with pytest.raises(SystemExit) as e:
+        admin.seed({"SUPABASE_URL": "https://x.supabase.co",
+                    "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "never reused" in str(e.value)
+    assert table.calls == []
+
+
+def test_seed_refuses_a_name_held_by_another_login(monkeypatch):
+    table = _AdminTable(rows=[{"uid": "uid-old", "revoked_at": None}])
+    _patch(monkeypatch, _admin_client(table, "uid-new"))
+    with pytest.raises(SystemExit) as e:
+        admin.seed({"SUPABASE_URL": "https://x.supabase.co",
+                    "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "another login" in str(e.value)
+    assert table.calls == []
+
+
+def test_revoke_marks_the_row_instead_of_deleting(monkeypatch):
+    table = _AdminTable()
+    client = _admin_client(table, "uid-1")
+    _patch(monkeypatch, client)
+    admin.revoke({"SUPABASE_URL": "https://x.supabase.co",
+                  "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert [call[0] for call in table.calls] == ["update"]
+    assert set(table.calls[0][1]) == {"revoked_at"}
+
+
+def test_revoke_requires_explicit_permanence(tmp_path, monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(admin, "revoke", lambda *args: called.append(args))
+    monkeypatch.setattr(admin, "load_supabase_env", lambda home: {})
+    with pytest.raises(SystemExit):
+        admin.main(["--root", "supabase://mesh2", "--home", str(tmp_path),
+                    "revoke", "ben"])
+    assert called == []
+    assert "--permanent" in capsys.readouterr().err
+    admin.main(["--root", "supabase://mesh2", "--home", str(tmp_path),
+                "revoke", "ben", "--permanent"])
+    assert called == [({}, "ben", "mesh2")]

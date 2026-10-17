@@ -188,7 +188,7 @@ moment it is made, so a large task list never lives only in conversation.
   test_application_mutations.py (27 mutants, each killed),
   docs/provider-mutation-acceptance/20261014111654-* and (review fixes)
   20261014114329-*.
-- [ ] **Hosted Storage listing check** (review, 2026-10-14): the purge is
+- [x] **Hosted Storage listing check** (review, 2026-10-14): the purge is
   irreversible and is decided by an empty listing, but only SQL policies
   were accepted on Scratch, not the Storage list/remove HTTP API. Run
   `devtools/validate_blob_storage_http.py`-style checks as a final member:
@@ -208,8 +208,14 @@ moment it is made, so a large task list never lives only in conversation.
   in a live room over 5 pages including nested folders, and 121 plus 3
   staged objects for a deleted room's final member. A member who left
   earlier and a root member outside the room saw none. Evidence:
-  docs/provider-mutation-acceptance/20261014-storage-listing-*. Still open:
-  the HTTP layer and batched remove, which need the session above.
+  docs/provider-mutation-acceptance/20261014-storage-listing-*. HTTP half
+  passed 2026-10-17 (Aryan ran it): with the production `list_blobs`, the
+  owner listed all 152 room objects (150 files, the avatar and a nested
+  unexpected folder) and the uploader 155 with its 3 staged; an exact-name
+  search found a file past the first page; removing RLS-hidden keys was an
+  empty success that changed nothing; batched removes reported [100, 52]
+  and [3]; both listings were empty after, and Scratch kept no objects.
+  Evidence: docs/provider-mutation-acceptance/20261017-storage-listing-http-results.json.
 - [ ] **Architecture comparison with Signal and Telegram** (Aryan,
   2026-10-14): check that the architecture holds as users join without
   another rewrite. Compare delivery and idempotency, multi-device state,
@@ -224,7 +230,7 @@ moment it is made, so a large task list never lives only in conversation.
   gaps, root-wide scans and locks, cursor gaps, N² read marks, closure's
   other roles, backups); each was verified in code and folded in. Open:
   Aryan's decisions.
-- [ ] **Usernames are reusable, and the next claimer inherits chat access**
+- [~] **Usernames are reusable, and the next claimer inherits chat access**
   (security, pre-existing, found by review 2026-10-14). Chat ACLs match
   usernames in `meta.members`. `ab_mutation_member_claim` lets any signed-in
   account claim an unclaimed name, and root-level `member_leave` deletes the
@@ -240,7 +246,9 @@ moment it is made, so a large task list never lives only in conversation.
   by Aryan 2026-10-17. Wider than first found: agents never get an
   `ab_members` row, so any login can claim an existing agent's name with no
   one leaving. Design, revised after an independent review:
-  docs/NAME_RETENTION_AND_PRIVATE_POKES.md.
+  docs/NAME_RETENTION_AND_PRIVATE_POKES.md. Built in v0.24.378; Scratch
+  acceptance passed. Open: CI Postgres gate, production rollout (Aryan),
+  generated names and server-owned handles with the sign-up overhaul.
 - [ ] **Handles are unique only by a client check** (found 2026-10-17):
   `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
   and two accounts can race to the same @handle, which allows
@@ -263,10 +271,13 @@ moment it is made, so a large task list never lives only in conversation.
   chat. Aryan asked whether the full pull is needed at all: with P7, a
   scoped catch-up on join and a "cursor too old" answer it becomes a rare
   safety net (FOUNDATION_REVIEW F6).
-- [ ] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
+- [~] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
   with the publishable key can send pokes that make every process pull. Make
   it private now (Realtime authorization; "Allow public access" off), ahead
-  of P2's per-user topics. **Agreed by Aryan 2026-10-17.**
+  of P2's per-user topics. **Agreed by Aryan 2026-10-17.** Built in
+  v0.24.378 (policies, private join with the session token); open: Aryan's
+  HTTP check on Scratch before and after turning off "Allow public access",
+  then production.
 - [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
   `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
   so cost grows with total history. Replace it with membership changes on

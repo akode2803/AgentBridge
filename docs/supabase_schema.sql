@@ -134,6 +134,10 @@ create table if not exists public.ab_members (
   unique (root, uid)
 );
 alter table public.ab_members enable row level security;
+-- A name is never freed (docs/NAME_RETENTION_AND_PRIVATE_POKES.md): leaving
+-- sets revoked_at instead of deleting the row, so the name stays taken and
+-- the login keeps no access. Null means active.
+alter table public.ab_members add column if not exists revoked_at timestamptz;
 
 -- SECURITY DEFINER: these run inside policies over the very tables they
 -- read — without definer they'd recurse through RLS. Owned by the schema
@@ -141,7 +145,8 @@ alter table public.ab_members enable row level security;
 create or replace function public.ab_member(p_root text) returns text
 language sql stable security definer set search_path = public as $$
   select coalesce((select username from public.ab_members
-                   where root = p_root and uid = (select auth.uid())), '')
+                   where root = p_root and uid = (select auth.uid())
+                     and revoked_at is null), '')
 $$;
 revoke all on function public.ab_member(text) from public;
 grant execute on function public.ab_member(text) to authenticated;
@@ -256,9 +261,10 @@ grant execute on function public.ab_chat_ids(text)
 -- ab_members: SELF-claim on insert — your own uid, an unclaimed username
 -- (the PK is the arbiter, first come first served, mirroring the app
 -- directory's rule); one identity per uid per root (unique root+uid).
--- You may remove yourself; removing OTHERS is the owner's act (service
--- key), so a hostile member can't evict the mesh. Members see their
--- root's roster; outsiders see nothing.
+-- Rows are never deleted (the name-retention section near the end of this
+-- file): leaving is the typed member_leave, eviction is the operator's
+-- revoke, and both set revoked_at. Members see their root's roster;
+-- outsiders and revoked logins see nothing.
 drop policy if exists ab_members_select on public.ab_members;
 create policy ab_members_select on public.ab_members
 for select to authenticated using (public.ab_root_ok(root));
@@ -268,9 +274,8 @@ drop policy if exists ab_members_claim on public.ab_members;
 create policy ab_members_claim on public.ab_members
 for insert to authenticated with check (uid = (select auth.uid()));
 
+-- The legacy self-delete freed the name for the next claimer; it is gone.
 drop policy if exists ab_members_leave on public.ab_members;
-create policy ab_members_leave on public.ab_members
-for delete to authenticated using (uid = (select auth.uid()));
 
 -- (v2.1's ab_pending queue is retired — account creation is membership;
 -- drop it if an earlier paste created it)
@@ -2519,7 +2524,7 @@ language sql immutable set search_path = pg_catalog as $$
       (p_table = 'ab_logs' and p_operation = 'DELETE')
       or (p_table = 'ab_docs' and p_operation in ('UPDATE', 'DELETE'))
     when 'member_claim' then p_table = 'ab_members' and p_operation = 'INSERT'
-    when 'member_leave' then p_table = 'ab_members' and p_operation = 'DELETE'
+    when 'member_leave' then p_table = 'ab_members' and p_operation = 'UPDATE'
     when 'blob_manifest' then p_table = 'ab_blob_manifests'
       and p_operation = 'INSERT'
     else false
@@ -3228,9 +3233,11 @@ language plpgsql volatile security definer set search_path = pg_catalog as $$
 declare
   v_member text;
 begin
+  -- A revoked row is no member. A concurrent leave holds FOR UPDATE, so
+  -- this waits for it and then re-checks the revoked row: ''.
   select m.username into v_member
   from public.ab_members m
-  where m.root = p_root and m.uid = auth.uid()
+  where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   for key share;
   return coalesce(v_member, '');
 end
@@ -3604,16 +3611,19 @@ begin
     raise exception 'typed member leave is unauthorized'
       using errcode = '42501';
   end if;
+  -- FOR UPDATE is load-bearing: the revoking UPDATE alone takes FOR NO KEY
+  -- UPDATE, which does not wait for writes in flight holding lock_actor's
+  -- FOR KEY SHARE. Leaving revokes; the row and its name are kept forever.
   select m.username into v_username
   from public.ab_members m
-  where m.root = p_root and m.uid = v_actor
+  where m.root = p_root and m.uid = v_actor and m.revoked_at is null
   for update;
   if v_username is null then
     raise exception 'typed member leave is unauthorized'
       using errcode = '42501';
   end if;
-  delete from public.ab_members m
-  where m.root = p_root and m.uid = v_actor;
+  update public.ab_members m set revoked_at = pg_catalog.now()
+  where m.root = p_root and m.uid = v_actor and m.revoked_at is null;
   if not found then
     raise exception 'typed member leave authority changed'
       using errcode = '55000';
@@ -4915,3 +4925,188 @@ revoke all on function public.ab_mutation_meta_append(
 grant execute on function public.ab_mutation_meta_append(
   text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean,text,jsonb)
   to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Name retention and the private poke channel (2026-10-17). Idempotent;
+-- paste and Run. Design: docs/NAME_RETENTION_AND_PRIVATE_POKES.md.
+--
+-- A name is held by an ab_members row (a login), by a users/<name>.json row
+-- (an account, human or agent), or by both. Rows of both kinds are kept
+-- forever, and the two tables agree on who owns a name, so no login can
+-- inherit chat access by claiming a name someone else used or uses.
+
+alter table public.ab_members add column if not exists revoked_at timestamptz;
+-- Declared since R84, but a database built another way may lack it, and
+-- the trigger below compares it.
+alter table public.ab_members
+  add column if not exists added_at timestamptz not null default now();
+
+-- Every role, the service role included: no delete; username, uid and
+-- added_at are fixed; revoked_at only goes from null to a time. The database
+-- owner can still remove a row by disabling this trigger on purpose.
+create or replace function private.ab_members_keep_names()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'a claimed name is never freed; revoke it instead'
+      using errcode = '55000';
+  end if;
+  if new.username is distinct from old.username
+     or new.uid is distinct from old.uid
+     or new.added_at is distinct from old.added_at then
+    raise exception 'member identity is immutable' using errcode = '22023';
+  end if;
+  if old.revoked_at is not null
+     and new.revoked_at is distinct from old.revoked_at then
+    raise exception 'a revoked name stays revoked' using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_members_keep_names()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_members_keep_names on public.ab_members;
+create trigger ab_members_keep_names
+before update or delete on public.ab_members for each row
+execute function private.ab_members_keep_names();
+
+-- One transaction lock per (root, name), taken by both triggers below
+-- before they look, so a claim and an account creation for the same name
+-- cannot both pass under READ COMMITTED.
+create or replace function private.ab_lock_name(p_root text, p_name text)
+returns void language sql volatile set search_path = pg_catalog as $$
+  select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'agentbridge-name:' || pg_catalog.jsonb_build_array(p_root, p_name)::text,
+    0))
+$$;
+revoke all on function private.ab_lock_name(text, text)
+  from public, anon, authenticated, service_role;
+
+-- A login may not claim a name that belongs to an account (an agent, or a
+-- human whose doc exists), live or tombstoned. A row this login or name
+-- already has falls through to the unique constraints, which refuse it as
+-- before, so "already yours" stays recognisable. Definer: a not-yet-member
+-- cannot read ab_docs. The service role and the database owner are exempt
+-- (the operator's seed; the legacy service-key fleet).
+create or replace function private.ab_members_one_owner()
+returns trigger language plpgsql security definer set search_path = pg_catalog as $$
+begin
+  perform private.ab_lock_name(new.root, new.username);
+  if coalesce(auth.role(), '') in ('', 'service_role') then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_members m
+    where m.root = new.root and (m.uid = new.uid or m.username = new.username)
+  ) then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_docs d
+    where d.root = new.root and d.path = 'users/' || new.username || '.json'
+  ) then
+    raise exception 'name belongs to an existing account'
+      using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_members_one_owner()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_members_one_owner on public.ab_members;
+create trigger ab_members_one_owner
+before insert on public.ab_members for each row
+execute function private.ab_members_one_owner();
+
+-- An account doc may not be created for a name another login holds. A
+-- human's own doc passes (their login holds the name), and so does a new
+-- agent's (no login holds it). An upsert fires this too, which is cheap.
+create or replace function private.ab_docs_one_owner()
+returns trigger language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_name text;
+begin
+  if new.path !~ '^users/[^/]+\.json$' then
+    return new;
+  end if;
+  v_name := pg_catalog.substr(new.path, 7, pg_catalog.length(new.path) - 11);
+  perform private.ab_lock_name(new.root, v_name);
+  if coalesce(auth.role(), '') in ('', 'service_role') then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_members m
+    where m.root = new.root and m.username = v_name
+      and m.uid is distinct from auth.uid()
+  ) then
+    raise exception 'name is claimed by another login'
+      using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_docs_one_owner()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_docs_one_owner on public.ab_docs;
+create trigger ab_docs_one_owner
+before insert on public.ab_docs for each row
+when (new.path like 'users/%')
+execute function private.ab_docs_one_owner();
+
+-- Account rows outlive everything: a hard delete of a users/ row is skipped
+-- (the row stays, no error), for every role. Skipping rather than raising
+-- keeps an older client's bulk tombstone purge working for every other row.
+-- Soft deletes (deleted = true) are updates and still work.
+create or replace function private.ab_docs_keep_accounts()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  return null;
+end
+$$;
+revoke all on function private.ab_docs_keep_accounts()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_docs_keep_accounts on public.ab_docs;
+create trigger ab_docs_keep_accounts
+before delete on public.ab_docs for each row
+when (old.path like 'users/%')
+execute function private.ab_docs_keep_accounts();
+
+-- The poke channel ab-<root> is private: only active members of the root
+-- may join (receive) or send. Roots may contain '-', so the topic is never
+-- split; the root is everything after the 'ab-' prefix. Supabase also needs
+-- "Allow public access" turned off in the Realtime settings.
+create or replace function public.ab_poke_topic_ok(p_topic text)
+returns boolean language sql stable set search_path = pg_catalog as $$
+  select coalesce(
+    pg_catalog.left(p_topic, 3) = 'ab-'
+    and pg_catalog.length(p_topic) > 3
+    and public.ab_root_ok(pg_catalog.substr(p_topic, 4)),
+    false)
+$$;
+revoke all on function public.ab_poke_topic_ok(text) from public, anon;
+grant execute on function public.ab_poke_topic_ok(text) to authenticated;
+
+do $realtime$
+begin
+  -- Plain PostgreSQL (the CI gate) has no Realtime schema.
+  if pg_catalog.to_regclass('realtime.messages') is null then
+    return;
+  end if;
+  execute 'drop policy if exists ab_poke_receive on realtime.messages';
+  execute $policy$
+    create policy ab_poke_receive on realtime.messages
+    for select to authenticated using (
+      realtime.messages.extension = 'broadcast'
+      and (select public.ab_poke_topic_ok((select realtime.topic())))
+    )
+  $policy$;
+  execute 'drop policy if exists ab_poke_send on realtime.messages';
+  execute $policy$
+    create policy ab_poke_send on realtime.messages
+    for insert to authenticated with check (
+      realtime.messages.extension = 'broadcast'
+      and (select public.ab_poke_topic_ok((select realtime.topic())))
+    )
+  $policy$;
+end
+$realtime$;

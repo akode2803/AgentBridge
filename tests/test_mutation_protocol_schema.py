@@ -283,7 +283,7 @@ def test_p1b_lifecycle_rpcs_bind_receipts_before_exact_effects():
         effect = min(
             value for value in (
                 body.find("insert into public.ab_members", replay),
-                body.find("delete from public.ab_members", replay),
+                body.find("update public.ab_members", replay),
                 body.find("delete from public.ab_logs", replay),
             ) if value >= 0
         )

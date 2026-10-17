@@ -19,8 +19,9 @@ docs/provider-mutation-acceptance/20261014111654-* and 20261014114329-*.
 Details:
 docs/PROVIDER_ADMISSION_CHECKPOINT.md "Deleted-chat cleanup"; open limits in
 BACKLOG.md (refold vs swap order, pending-write purge hold, manifests after
-purge, live-room staged orphans, typed tombstone purge, hosted Storage HTTP
-listing check, derivable exact-create keys).
+purge, live-room staged orphans, typed tombstone purge, derivable
+exact-create keys). The hosted Storage HTTP listing check passed on
+2026-10-17 (docs/provider-mutation-acceptance/20261017-storage-listing-http-results.json).
 
 ## 2026-10-14 uniform meta-append answer (D-017)
 
@@ -2085,3 +2086,37 @@ must use immutable staged-object identity, byte size and digest evidence before
 publishing the database manifest; it must not claim object upload and database
 receipt are one atomic transaction. The P1b readiness marker and inactive Python
 wire remain last.
+
+## Names are never freed; private poke channel — v0.24.378
+
+Design and independent review: docs/NAME_RETENTION_AND_PRIVATE_POKES.md
+(D-020, agreed by Aryan 2026-10-17). Schema (docs/supabase_schema.sql, the
+name-retention section at the end plus in-place edits):
+
+- `ab_members.revoked_at`. `ab_member`, `lock_actor` and `member_leave`
+  ignore revoked rows. Typed leave revokes instead of deleting, the legacy
+  self-delete policy is gone, and a trigger refuses deletes and un-revokes
+  for every role.
+- One owner per name across `ab_members` and `users/<name>.json`, under a
+  shared per-name transaction lock. A login cannot claim an existing
+  account's name (agents had no row, so any login could take theirs), and
+  an account doc cannot take another login's name. Hard deletes of
+  `users/` rows are skipped.
+- `realtime.messages` policies make `ab-<root>` private to active members.
+
+Client: the Realtime thread joins with `private: true` using the PostgREST
+session's token (re-read every 30 s; no second password sign-in), or the
+service key. It stays off without either, and backs off 5 minutes after an
+authorization refusal. The janitor's tombstone purge skips `users/`.
+`supabase_admin revoke` needs `--permanent`, `seed` refuses revoked or
+foreign names, and `join` points a lost password at `seed`.
+
+Verified: unit tests; Scratch schema applied and a rolled-back hosted
+acceptance passed
+(docs/provider-mutation-acceptance/20261017-name-retention-results.json).
+Pending:
+- the CI Postgres gate on push;
+- Aryan's HTTP check (devtools/validate_private_pokes_http.py, before and
+  after turning off "Allow public access" on Scratch);
+- production, only when Aryan says so, after the read-only checks in the
+  note's Rollout.

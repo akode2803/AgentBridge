@@ -110,7 +110,8 @@ def claim_member(rpc: TypedMutationRPC, username: str, *, attempts: int = 4,
                     "rotate it before anyone can join") from None
             if exc.code == "55000":
                 # Refused without effect: the epoch rotated after it was read,
-                # or the name is already held (possibly by this account).
+                # or the name is already held (possibly by this account), or
+                # it belongs to an existing account (names are never freed).
                 current = _epoch(rpc)
                 if current != epoch:
                     epoch = current
@@ -118,8 +119,8 @@ def claim_member(rpc: TypedMutationRPC, username: str, *, attempts: int = 4,
                 if _own_username(rpc) == username:
                     return ALREADY_MEMBER
                 raise MemberClaimError(
-                    "taken", f"@{username} is already claimed on {rpc.root} "
-                    "by someone else") from None
+                    "taken", f"@{username} is already taken on {rpc.root}: "
+                    "claimed by someone else or by an existing account") from None
             if exc.code not in (None, "40001"):
                 raise MemberClaimError(
                     "refused", f"the provider refused the claim ({exc.code})") from None

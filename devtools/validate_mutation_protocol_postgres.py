@@ -103,6 +103,8 @@ create table public.ab_members (
   root text not null,
   username text not null,
   uid uuid not null,
+  added_at timestamptz not null default now(),
+  revoked_at timestamptz,
   primary key (root, username),
   unique (root, uid)
 );
@@ -161,14 +163,14 @@ create or replace function public.ab_member(p_root text) returns text
 language sql stable security definer set search_path = pg_catalog as $$
   select coalesce((
     select m.username from public.ab_members m
-    where m.root = p_root and m.uid = auth.uid()
+    where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   ), '')
 $$;
 create or replace function public.ab_root_ok(p_root text) returns boolean
 language sql stable security definer set search_path = pg_catalog as $$
   select exists (
     select 1 from public.ab_members m
-    where m.root = p_root and m.uid = auth.uid()
+    where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   )
 $$;
 revoke all on function public.ab_root_ok(text) from public;
@@ -918,7 +920,7 @@ def _validate_p1b_core(database_url: str) -> None:
             root, epoch, leave_id, "member_leave",
             leave_client, leave_provider,
         )
-        + "; delete from public.ab_members where root = "
+        + "; update public.ab_members set revoked_at = now() where root = "
         f"{_quote(root)} and uid = {_quote(str(actor))}::uuid; "
         + _finish_sql(
             root, epoch, leave_id, "member_leave",
@@ -1497,6 +1499,13 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
         f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
         f"({_quote(root)}, {_quote(sibling)}, 'writer', '{{}}');",
     )
+    # An agent's account doc: its name has no login, and none may claim it.
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data) values ("
+        f"{_quote(root)}, 'users/typed-agent.json', "
+        "'{\"kind\":\"agent\"}'::jsonb);",
+    )
     sealed = json.loads(_scalar(
         database_url, _seal_sql(root, before, uuid4())))
     epoch = UUID(sealed["protocol_epoch"])
@@ -1559,6 +1568,25 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
         f"{_quote(str(duplicate_id))}::uuid;",
     )):
         raise GateFailure("conflicting member claim retained a receipt")
+    agent_claim_id = uuid4()
+    agent_claim = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(uuid4())
+        + "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(agent_claim_id))}::uuid, {_quote('9' * 64)}, "
+        "'typed-agent'); commit;",
+        expect_ok=False,
+    )
+    if "name belongs to an existing account" not in agent_claim.stderr:
+        raise GateFailure("typed claim took an existing account's name")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(agent_claim_id))}::uuid;",
+    )):
+        raise GateFailure("refused account-name claim retained a receipt")
 
     leave_id = uuid4()
     leave_digest = "7" * 64
@@ -1580,12 +1608,13 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
     if leave_receipt != leave_replay or leave_receipt["result"] != {
             "left": True, "username": "typed-new-member"}:
         raise GateFailure("member leave did not replay after membership loss")
-    if int(_scalar(
+    if _scalar(
         database_url,
-        "select count(*) from public.ab_members where root = "
+        "select count(*)::text || ':' || count(revoked_at)::text "
+        "from public.ab_members where root = "
         f"{_quote(root)} and uid = {_quote(str(claimant))}::uuid;",
-    )):
-        raise GateFailure("typed member leave did not remove exact self row")
+    ) != "1:1":
+        raise GateFailure("typed member leave did not revoke exact self row")
     second_leave_id = uuid4()
     second_leave = _run(
         database_url,
@@ -3165,7 +3194,7 @@ def _validate_receipt_retirement(database_url: str) -> None:
     operation, client, provider = uuid4(), 'a' * 64, 'b' * 64
     _run(database_url, 'begin; ' + _claims(actor)
          + _begin_sql(root, epoch, operation, 'member_leave', client, provider)
-         + f"; delete from public.ab_members where root={_quote(root)}; "
+         + f"; update public.ab_members set revoked_at=now() where root={_quote(root)}; "
          + _finish_sql(root, epoch, operation, 'member_leave', client, provider, '{"left":true}')
          + '; commit;')
     rotation_id = uuid4()
@@ -3205,6 +3234,93 @@ def _validate_receipt_retirement(database_url: str) -> None:
     final = json.loads(_scalar(database_url, observation_sql))
     if final['protocol_epoch'] != later['protocol_epoch']:
         raise GateFailure('failed exhausted rotation changed the current epoch')
+
+
+def _validate_name_retention(database_url: str) -> None:
+    """A claimed name is never freed, and one name has one owner across
+    ab_members and users/ docs (docs/NAME_RETENTION_AND_PRIVATE_POKES.md)."""
+    root, actor = 'name-retention', uuid4()
+    _prepare_root(database_url, root, actor)
+    name = root + '-member'
+
+    # This gate installs no table grants or RLS policies, so a login's
+    # writes run as the owner under that login's claims: the triggers see
+    # the login. The policy side is checked on Scratch.
+    def as_login(uid: UUID, sql: str, *, ok: bool = True):
+        return _run(database_url, 'begin; ' + _claims(uid) + sql + '; commit;',
+                    expect_ok=ok)
+
+    refused = as_login(actor, 'delete from public.ab_members where root = '
+                       f'{_quote(root)}', ok=False)
+    if 'never freed' not in refused.stderr:
+        raise GateFailure('a claimed name was deleted')
+    renamed = _run(database_url, "update public.ab_members set username = 'other' "
+                   f'where root = {_quote(root)};', expect_ok=False)
+    if 'member identity is immutable' not in renamed.stderr:
+        raise GateFailure('a membership row changed its name')
+
+    _run(database_url, 'update public.ab_members set revoked_at = now() '
+         f'where root = {_quote(root)} and uid = {_quote(str(actor))}::uuid;')
+    restored = _run(database_url, 'update public.ab_members set revoked_at = null '
+                    f'where root = {_quote(root)};', expect_ok=False)
+    if 'a revoked name stays revoked' not in restored.stderr:
+        raise GateFailure('a revoked name was restored')
+    seen = _scalar(database_url, 'begin; ' + _claims(actor)
+                   + f"select public.ab_member({_quote(root)}) || '|' || "
+                   f'public.ab_root_ok({_quote(root)})::text || '
+                   "'|' || private.ab_mutation_lock_actor("
+                   f'{_quote(root)}); commit;')
+    if seen != '|false|':
+        raise GateFailure('a revoked login still resolved to its name')
+
+    # Another login cannot take the revoked name: the unique key holds.
+    taken = as_login(uuid4(), 'insert into public.ab_members(root, username, uid) '
+                     f'values ({_quote(root)}, {_quote(name)}, auth.uid())',
+                     ok=False)
+    if 'duplicate key' not in taken.stderr:
+        raise GateFailure('a revoked name was claimed again')
+
+    # An account's name (an agent, no login) cannot be claimed by anyone.
+    _run(database_url, 'insert into public.ab_docs(root, path, data) values ('
+         f"{_quote(root)}, 'users/helper-agent.json', "
+         """'{"kind":"agent"}'::jsonb);""")
+    squat = as_login(uuid4(), 'insert into public.ab_members(root, username, uid) '
+                     f"values ({_quote(root)}, 'helper-agent', auth.uid())",
+                     ok=False)
+    if 'name belongs to an existing account' not in squat.stderr:
+        raise GateFailure("a login claimed an existing account's name")
+
+    # A name a login holds cannot get another login's account doc, while
+    # the holder's own doc and the service role's write both pass.
+    holder, other = uuid4(), uuid4()
+    as_login(holder, 'insert into public.ab_members(root, username, uid) '
+             f"values ({_quote(root)}, 'held', auth.uid())")
+    foreign = _run(database_url, 'begin; ' + _claims(other)
+                   + 'insert into public.ab_docs(root, path, data) values ('
+                   f"{_quote(root)}, 'users/held.json', '{{}}'::jsonb); commit;",
+                   expect_ok=False)
+    if 'name is claimed by another login' not in foreign.stderr:
+        raise GateFailure("an account doc took another login's name")
+    _run(database_url, 'begin; ' + _claims(holder)
+         + 'insert into public.ab_docs(root, path, data) values ('
+         f"{_quote(root)}, 'users/held.json', '{{}}'::jsonb); commit;")
+    as_login(other, 'insert into public.ab_members(root, username, uid) '
+             f"values ({_quote(root)}, 'held-too', auth.uid())")
+    _run(database_url, 'begin; set local "request.jwt.claim.role" = '
+         "'service_role'; insert into public.ab_docs(root, path, data) values ("
+         f"{_quote(root)}, 'users/held-too.json', '{{}}'::jsonb); commit;")
+
+    # Hard deletes of account rows are skipped; other rows still go.
+    _run(database_url, 'insert into public.ab_docs(root, path, data, deleted) '
+         f"values ({_quote(root)}, 'status/old.json', '{{}}'::jsonb, true);"
+         'update public.ab_docs set deleted = true where root = '
+         f"{_quote(root)} and path = 'users/helper-agent.json';")
+    _run(database_url, 'delete from public.ab_docs where root = '
+         f'{_quote(root)} and deleted;')
+    left = _scalar(database_url, "select string_agg(path, ',' order by path) "
+                   f'from public.ab_docs where root = {_quote(root)} and deleted;')
+    if left != 'users/helper-agent.json':
+        raise GateFailure('a bulk purge removed an account row or kept another')
 
 
 def _validate_provider_admission(database_url: str) -> None:
@@ -3439,6 +3555,7 @@ def main() -> int:
     _validate_meta_append(database_url)
     _validate_terminal_readers(database_url)
     _validate_receipt_retirement(database_url)
+    _validate_name_retention(database_url)
     _validate_provider_admission(database_url)
     if __package__:
         from devtools.provider_admission_race_gate import _validate_provider_admission_races
@@ -3459,6 +3576,7 @@ def main() -> int:
             "typed-doc-put", "typed-doc-create", "typed-doc-delete",
             "typed-log-append", "typed-chat-genesis",
             "typed-member-claim", "typed-member-leave",
+            "name-retention", "name-one-owner",
             "typed-terminal-chat-delete", "typed-chat-delete-exact-prefix",
             "typed-room-terminal-lock",
             "typed-effect-claim", "typed-effect-state-chain",
