@@ -3,8 +3,10 @@
 Status: built in v0.24.378, 2026-10-17. Revised after an independent
 review. Scratch schema applied and its rolled-back acceptance passed
 (docs/provider-mutation-acceptance/20261017-name-retention-results.json).
-Pending: the CI Postgres gate, Aryan's HTTP check of the live channel, and
-production when Aryan says so. Aryan decided both directions (DECISIONS.md
+Aryan's HTTP check of the live channel passed before and after turning
+"Allow public access" off on Scratch
+(docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json).
+Pending: the CI Postgres gate, and production when Aryan says so. Aryan decided both directions (DECISIONS.md
 D-020; docs/FOUNDATION_REVIEW.md F2 and F5). This note covers only the
 first step. Generated names,
 server-owned handles, invites, root-owner eviction and bans come later (see
@@ -167,8 +169,11 @@ squatter keeps the name. Generated names make future names unguessable.
      reserve them;
    - every human who uses production has a roster row of their own, the
      friend included.
-3. Production: apply the schema; update every machine; then turn "Allow
-   public access" off. Until every machine is updated, old and new clients
+3. Production: apply the schema; check that `realtime.messages` has
+   today's partition (Realtime makes them daily; on Scratch, which had none,
+   the first private join failed with "MissingPartition" and Realtime made
+   them right after; the client retries that within seconds, it is not a
+   refusal); update every machine; then turn "Allow public access" off. Until every machine is updated, old and new clients
    do not hear each other's pokes (Realtime addresses private and public
    subscribers separately); the 45 s safety polls cover the gap. After the
    switch, an un-updated client cannot join and polls instead.

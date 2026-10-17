@@ -861,6 +861,11 @@ def test_realtime_refusal_is_recognised_from_the_join_error():
         '{"reason": "Unauthorized: You do not have permissions to read from '
         'this Channel topic: ab-team"}'))
     assert not _authorization_refusal(Exception('{"reason": "timeout"}'))
+    # Seen on Scratch 2026-10-17: the first private join before Realtime
+    # made its daily partitions. It heals by itself, so retry fast.
+    assert not _authorization_refusal(Exception(
+        '{"reason": "MissingPartition: Realtime was unable to find the '
+        'expected messages partition"}'))
     assert not _authorization_refusal(None)
 
 

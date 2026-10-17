@@ -275,9 +275,14 @@ moment it is made, so a large task list never lives only in conversation.
   with the publishable key can send pokes that make every process pull. Make
   it private now (Realtime authorization; "Allow public access" off), ahead
   of P2's per-user topics. **Agreed by Aryan 2026-10-17.** Built in
-  v0.24.378 (policies, private join with the session token); open: Aryan's
-  HTTP check on Scratch before and after turning off "Allow public access",
-  then production.
+  v0.24.378 (policies, private join with the session token). Aryan's HTTP
+  check passed on Scratch 2026-10-17, before and after turning off "Allow
+  public access" (members hear each other; a non-member, a revoked member
+  and, once off, a public join are refused; a public listener never hears
+  private pokes). Evidence:
+  docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json.
+  Open: production (Aryan's call; check today's `realtime.messages`
+  partition first, see the design note's Rollout).
 - [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
   `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
   so cost grows with total history. Replace it with membership changes on

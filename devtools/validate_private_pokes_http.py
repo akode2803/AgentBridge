@@ -12,9 +12,10 @@ logins and joins real channels:
 - the production ``_RealtimeThread`` (the transport's own session token):
   the owner's is ready on ``--root`` and woken by the reader's poke; the
   reader's is refused on ``<root>-out``;
-- a public (non-private) join of ``ab-<root>``: refused once "Allow public
-  access" is off; while it is on, whether it hears a private poke shows how
-  old and new clients mix during a rollout.
+- a public (non-private) join of ``ab-<root>``, last and on a connection of
+  its own: refused once "Allow public access" is off; while it is on,
+  whether it hears a private poke shows how old and new clients mix during
+  a rollout.
 
 The three roots are prepared on Scratch beforehand (owner member of all
 three; reader member of ``--root``, absent from ``-out``, revoked in
@@ -137,7 +138,7 @@ def _wait(predicate, timeout: float) -> bool:
 
 
 async def _check(root: str, url: str, key: str, owner: Login,
-                 reader: Login) -> dict[str, Any]:
+                 reader: Login, public: Login) -> dict[str, Any]:
     out: dict[str, Any] = {"mode": "pokes", "root": root}
     await owner.open()
     await reader.open()
@@ -160,11 +161,6 @@ async def _check(root: str, url: str, key: str, owner: Login,
         out[f"{label}_join"] = {"state": state, "refused": _refused(state, error)}
         if not out[f"{label}_join"]["refused"]:
             raise GateFailure(f"the {label} reader was not refused: {state}")
-
-    public_ch, public_state, _err, public_got = await reader.join(topic, private=False)
-    out["public_join"] = public_state
-    if public_state == "SUBSCRIBED":
-        out["public_hears_private"] = await _delivered(owner_ch, public_got)
 
     hints: list[int] = []
     ready = _production_thread(url, key, root, owner.token, lambda: hints.append(1))
@@ -190,6 +186,15 @@ async def _check(root: str, url: str, key: str, owner: Login,
             and out.get("production_thread_woken")
             and out["production_thread_outsider_refused"]):
         raise GateFailure(f"the production thread misbehaved: {out}")
+
+    # Last, on a connection of its own: the client keeps one channel per
+    # topic, so a public join of the same topic on the reader's connection
+    # would replace its private channel.
+    await public.open()
+    _ch, public_state, _err, public_got = await public.join(topic, private=False)
+    out["public_join"] = public_state
+    if public_state == "SUBSCRIBED":
+        out["public_hears_private"] = await _delivered(owner_ch, public_got)
     out["public_access_enforced"] = public_state != "SUBSCRIBED"
     out["result"] = "passed"
     return out
@@ -203,15 +208,17 @@ def main() -> int:
     key = _required("AGENTBRIDGE_SCRATCH_SUPABASE_PUBLISHABLE_KEY")
     owner = Login(url, key, _required("AGENTBRIDGE_SCRATCH_OWNER_EMAIL"),
                   _required("AGENTBRIDGE_SCRATCH_OWNER_PASSWORD"))
-    reader = Login(url, key, _required("AGENTBRIDGE_SCRATCH_READER_EMAIL"),
-                   _required("AGENTBRIDGE_SCRATCH_READER_PASSWORD"))
+    reader_email = _required("AGENTBRIDGE_SCRATCH_READER_EMAIL")
+    reader_password = _required("AGENTBRIDGE_SCRATCH_READER_PASSWORD")
+    reader = Login(url, key, reader_email, reader_password)
+    public = Login(url, key, reader_email, reader_password)
 
     async def run():
         try:
-            return await _check(args.root, url, key, owner, reader)
+            return await _check(args.root, url, key, owner, reader, public)
         finally:
-            await owner.close()
-            await reader.close()
+            for login in (owner, reader, public):
+                await login.close()
 
     print(json.dumps(asyncio.run(run()), sort_keys=True))
     return 0

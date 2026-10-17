@@ -2113,10 +2113,14 @@ foreign names, and `join` points a lost password at `seed`.
 
 Verified: unit tests; Scratch schema applied and a rolled-back hosted
 acceptance passed
-(docs/provider-mutation-acceptance/20261017-name-retention-results.json).
+(docs/provider-mutation-acceptance/20261017-name-retention-results.json);
+Aryan's live-channel check (devtools/validate_private_pokes_http.py) passed
+on Scratch before and after turning off "Allow public access", which is now
+off there
+(docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json).
+A fresh project has no `realtime.messages` partitions until the first
+private join, which fails once with "MissingPartition" and is retried.
 Pending:
 - the CI Postgres gate on push;
-- Aryan's HTTP check (devtools/validate_private_pokes_http.py, before and
-  after turning off "Allow public access" on Scratch);
 - production, only when Aryan says so, after the read-only checks in the
   note's Rollout.
