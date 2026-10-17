@@ -1,0 +1,59 @@
+{
+ "check": "read-only pre-rollout checks for docs/NAME_RETENTION_AND_PRIVATE_POKES.md (its Rollout step 2)",
+ "project": "production (eakewaaqbilmtswbbxix)",
+ "date": "2026-10-18",
+ "method": "SELECT-only queries through the Supabase MCP connector (Aryan allowed safe experiments on production, 2026-10-18)",
+ "schema_shape": {
+  "migrations": [
+   "r142_effect_records_append_only",
+   "r142_effect_transition_protocol",
+   "r142_effect_transition_owner_binding",
+   "r142_effect_grant_evidence_lane",
+   "install_local_node_recovery_reference_20261012"
+  ],
+  "typed_mutation_protocol": "absent (no ab_mutation_* functions)",
+  "ab_members_columns": [
+   "root",
+   "username",
+   "uid",
+   "added_at"
+  ],
+  "ab_members_policies": [
+   "ab_members_claim (INSERT)",
+   "ab_members_leave (DELETE)",
+   "ab_members_select (SELECT)"
+  ],
+  "direct_ab_members_reads": "only public.ab_member; every table and storage policy goes through ab_member / ab_root_ok / ab_is_member / ab_can_read_chat",
+  "realtime_messages_policies": "none",
+  "realtime_messages_partitions": "2026-10-09 .. 2026-10-15 (none for today: the first private join will fail once with MissingPartition, as on Scratch)",
+  "foreign_keys_on_ab_members_or_ab_docs": "none"
+ },
+ "data": {
+  "roots": [
+   "mesh2"
+  ],
+  "auth_users": 1,
+  "login_rows": 1,
+  "chat_metas": 135,
+  "distinct_names_in_chat_metas": 12,
+  "names_in_chats_with_no_login_and_no_account_doc": 0,
+  "account_docs": {
+   "human": 5,
+   "agent": 12,
+   "tombstoned": 0
+  },
+  "human_accounts_without_a_login_row": [
+   "aryan1",
+   "aryanonavd",
+   "fable",
+   "musk27aan"
+  ]
+ },
+ "reading": [
+  "no name is claimable today: every name in a chat has an account doc, so the one-owner trigger reserves all of them",
+  "the four humans without a login row cannot claim their names themselves after the slice (the design's known limitation); the operator's seed with the service key still can, because mesh2 is unsealed",
+  "the fix ships to production as a standalone slice (20261018-production-name-retention-slice.sql) without the unmerged typed protocol",
+  "the app on main never deletes ab_members rows and upserts users/ docs only for names no other login holds, so the slice does not change its flows; main's public poke channel keeps working until public access is turned off"
+ ],
+ "pending": "the rolled-back experiment (20261018-production-name-retention-experiment.sql): blocked for Claude by the auto-mode classifier as a protected-scope apply; Aryan runs it in the SQL editor or allows the tool"
+}
