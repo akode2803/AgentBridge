@@ -236,7 +236,11 @@ moment it is made, so a large task list never lives only in conversation.
   freed. R7 already splits the fixed `name` from the changeable `handle`;
   the gap is that users choose `name` and the server frees it. Proposed:
   never free `name` now (server only); with the sign-up overhaul, generate
-  `name` for new accounts and make the chosen username the handle.
+  `name` for new accounts and make the chosen username the handle. Agreed
+  by Aryan 2026-10-17. Wider than first found: agents never get an
+  `ab_members` row, so any login can claim an existing agent's name with no
+  one leaving. Design, revised after an independent review:
+  docs/NAME_RETENTION_AND_PRIVATE_POKES.md.
 - [ ] **Handles are unique only by a client check** (found 2026-10-17):
   `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
   and two accounts can race to the same @handle, which allows

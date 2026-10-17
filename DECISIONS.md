@@ -61,6 +61,14 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
     join it becomes a rare safety net (FOUNDATION_REVIEW F6).
   - P9: lands with the setup overhaul (private servers by invite link,
     code or file; public servers later). Findings in FOUNDATION_REVIEW F9.
+  - Later the same day Aryan agreed to all four suggestions: never free
+    `name` now, then generated names and server-owned handles with the
+    sign-up overhaul; P7 plus a scoped catch-up on join and a "cursor too
+    old" answer, leaving the full pull as a rare safety net; the private
+    poke channel; invites checked by a Before User Created hook and used up
+    by the claim, synthetic addresses keyed to the generated name, and a
+    Supabase password derived from the app password. Each still gets a
+    design note and an independent review before code.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.
