@@ -231,18 +231,38 @@ moment it is made, so a large task list never lives only in conversation.
   `ab_members` row. The next claimer then reads every chat that still lists
   the name (including deleted rooms' `final_members`) and can rewrite its
   meta. Fix (FOUNDATION_REVIEW P6): never free a name; mark the row revoked
-  and check that flag in `ab_member`, or key ACLs on uid.
+  and check that flag in `ab_member`, or key ACLs on uid. Aryan
+  (2026-10-17) asked for fixed identifiers so usernames can change and be
+  freed. R7 already splits the fixed `name` from the changeable `handle`;
+  the gap is that users choose `name` and the server frees it. Proposed:
+  never free `name` now (server only); with the sign-up overhaul, generate
+  `name` for new accounts and make the chosen username the handle.
+- [ ] **Handles are unique only by a client check** (found 2026-10-17):
+  `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
+  and two accounts can race to the same @handle, which allows
+  impersonation. Claim handles on the server (a unique row) before handles
+  become the only visible username.
+- [ ] **A chat joined mid-session misses its older docs** (found 2026-10-17,
+  confirmed by a probe against `CachingTransport`): the delta returns only
+  rows above the cursor, so a newly visible chat's older edits, deletions,
+  pins and reactions wait for the next full pull. Fix with a scoped
+  catch-up when a chat appears (logs already do this via `SyncEngine._known`).
 - [ ] **Delta cursors can skip late commits** (correctness, pre-existing,
   review 2026-10-14). `get_docs_delta` reads `seq > cursor` and logs
   `id > cursor`, but both are assigned before commit, so a slower transaction
   lands below a cursor a reader already passed and is missed until the 6 h
   reconcile. Fix (P7): commit-ordered frontier via the row's transaction id
   and `pg_snapshot_xmin`; it also replaces the change ledger's root-wide
-  exclusive page lock.
+  exclusive page lock. Precision (2026-10-17): the 6 h full pull is a
+  per-process timer and covers docs only; a skipped message heals on a
+  restart or when the same sender posts again from the same machine in that
+  chat. Aryan asked whether the full pull is needed at all: with P7, a
+  scoped catch-up on join and a "cursor too old" answer it becomes a rare
+  safety net (FOUNDATION_REVIEW F6).
 - [ ] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
   with the publishable key can send pokes that make every process pull. Make
   it private now (Realtime authorization; "Allow public access" off), ahead
-  of P2's per-user topics.
+  of P2's per-user topics. **Agreed by Aryan 2026-10-17.**
 - [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
   `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
   so cost grows with total history. Replace it with membership changes on
@@ -251,7 +271,13 @@ moment it is made, so a large task list never lives only in conversation.
   friends, SECURITY_RLS.md): anyone with URL, publishable key and root can
   create unlimited accounts, defeating per-account limits. Before strangers
   join: invite tokens checked in the claim RPC, per-root limits, optional
-  CAPTCHA (P9).
+  CAPTCHA (P9). Aryan (2026-10-17): this lands with the setup overhaul.
+  Setup picks a server: one's own new server (with instructions), or an
+  invite link, code or credentials file. Servers will later split into
+  private and public (public deferred: agents have local access). No
+  unnecessary email. Findings: synthetic addresses stay; anonymous sign-ins
+  lose the account on another device; the Before User Created hook (a
+  Postgres function) can require an invite (FOUNDATION_REVIEW F9).
 - [ ] **Backups and restore** (review 2026-10-14): a restore rewinds ids,
   sequences and receipts under live clients. Add a root incarnation id that
   feeds, cursors and resolve check (P10); decide before activation.

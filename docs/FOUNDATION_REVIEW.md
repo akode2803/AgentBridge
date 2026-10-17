@@ -307,6 +307,12 @@ enforces it immediately. An identity is never handed to someone else.
   new token.
 - Removal from a chat works (typed meta append, with key rotation). Removing an
   account from the whole root after the seal has no typed path (D-013).
+- **Identity and username are already split (R7).** `Account.name`
+  (core/models.py) is the immutable identity: logs, membership, cursors and
+  keys hang off it. `handle` is the changeable @username, Telegram-style.
+  The gap: the user picks `name` at sign-up, and the server frees it on
+  leave. Handles are unique only by a client check (`handle_taken` reads
+  every `users/` doc), so two accounts can race to the same @handle.
 
 **P6.**
 - **Never free a username.** Ending an account sets a `revoked` (or `banned`)
@@ -317,8 +323,18 @@ enforces it immediately. An identity is never handed to someone else.
   the existing owners. Optionally an Edge Function signs out the account's
   sessions.
 
-**Cost.** The never-free rule is small and should come now, since
-`member_leave` already frees names. Eviction and bans are additive.
+- **Aryan (2026-10-17): fixed identifiers, so usernames can change and be
+  freed.** Suggested: keep `name` as the fixed id and never free it. For new
+  accounts the app generates `name` (random, never shown) and the chosen
+  username becomes the `handle`, claimed unique on the server. A freed
+  handle then grants nothing: old messages show the old account. Existing
+  accounts keep their names as ids. The auth uid itself is not the id:
+  agents have no login, and the id must survive a move to another server.
+
+**Cost.** The never-free rule is small, server-only, and should come now,
+since `member_leave` already frees names. Generated ids and server-unique
+handles belong with the sign-up overhaul (F9). Eviction and bans are
+additive.
 
 ### F6 Order and cursors
 
@@ -334,6 +350,23 @@ by server stream position. Signal has no server history.
   below a cursor a reader already passed, and the reader skips that row until
   the 6-hour reconcile. docs/DURABLE_REALTIME_FRONTIER.md warns against this
   exact read for the change ledger.
+- **How it heals (2026-10-17).** The 6 hours is `reconcile_s` in the
+  Supabase profile, timed per process from its last full pull (start-up
+  counts), so there are no shared clocks. The full pull covers docs only. A
+  skipped message heals on a restart, or when the same sender posts again
+  from the same machine in that chat (per-log offsets).
+- **Join gap (2026-10-17, confirmed by a probe against the mirror).** A
+  chat that becomes visible mid-session gets only its docs written after
+  the join. Older docs in it (edits, deletions, pins, reactions) have `seq`
+  below the cursor and arrive at the next full pull. The page reader
+  fetches edits and deletions per message, which may cover the main view;
+  readers of the mirror still lag.
+- **What the full pull is for.** Most of its work is these two gaps plus
+  tombstones purged after 30 days. With commit-ordered cursors, a scoped
+  catch-up when a chat appears, and a "cursor too old" answer (Telegram's
+  `differenceTooLong`), the timer becomes a rare safety net. At 1,000 users
+  a full pull is several MB per process (every user's profile), so four a
+  day across the fleet is real egress.
 - **Sender clock.** `ns` is the sender's clock. It orders messages, the read
   cursor (`read_ns`) and the janitor's refold, which already gave one wrong
   outcome after a skewed clock (BACKLOG). Membership order already follows the
@@ -395,6 +428,34 @@ on the server.
 members within a quota. Per-root limits on new accounts. Optionally CAPTCHA
 on sign-up, which Supabase Auth supports. Needed before strangers can get the
 bootstrap.
+
+**Aryan's setup plan (2026-10-17).** At setup a user picks a server. A new
+server of their own comes with set-up instructions. Otherwise they open an
+invite link, paste an invite code, or point the app at a credentials file.
+Later, servers split into private (this flow) and public (listed in setup;
+deferred, because strangers' messages reach agents with local access). The
+current sign-up is in effect a public server whose address is semi-secret.
+
+**How Supabase accounts get made without email:**
+- Today: email and password with a synthetic address
+  (`<username>@<root>.agentbridge.local`), confirmations off, so Supabase
+  sends no mail. The password is random and kept in the machine's
+  `supabase.env`; the app password is separate.
+- Anonymous sign-ins need no email, but the account is lost on sign-out or
+  on another device. Not suitable for phone plus desktop.
+- Phone sign-in costs SMS fees; Google or GitHub sign-in can come later for
+  public servers.
+- The **Before User Created** hook (Free and Pro) can be a Postgres function
+  that rejects a sign-up. It sees the sign-up metadata and IP, so it can
+  require a valid invite. The claim RPC then uses the invite up in the same
+  transaction as membership.
+- Suggested: keep synthetic addresses, keyed to the generated id rather than
+  the username. Derive the Supabase password from the app password, kept
+  separate from the key that unlocks the private keys, so a second device
+  signs in with username and password alone.
+- Server setup: a personal access token for the Supabase Management API
+  could let the app apply the schema and auth settings, then forget the
+  token.
 
 ### F10 Backups and restore
 
@@ -599,6 +660,7 @@ transport, which docs/SUPABASE_ONLY_REMOVAL_PLAN.md retired.
 ## Suggested order (for discussion)
 
 1. **P6's never-free-a-username rule.** A pre-existing security hole; small.
+   **Private poke channel** (agreed by Aryan, 2026-10-17) alongside it.
 2. **P1 receipts and P10 incarnation.** Decide before activation; activation
    freezes the protocol on users' machines.
 3. **P7's commit-ordered cursors.** A correctness fix for every client; also

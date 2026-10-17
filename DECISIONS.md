@@ -49,6 +49,18 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
     with one Dart core; TypeScript only for thin tooling such as MCP
     servers; agents move to an adopted harness (e.g. Codex CLI) over MCP;
     stop rules fall back to TypeScript.
+- **Aryan, 2026-10-17:**
+  - Taken: make the current `ab-<root>` poke channel private now, ahead of
+    P2.
+  - P6: asked for fixed identifiers so usernames can change and be freed.
+    R7 already splits the fixed `name` from the changeable `handle`.
+    Suggested: never free `name` now; generate it for new accounts with the
+    sign-up overhaul, and claim handles on the server.
+  - P7: asked how the 6 h full pull works and whether it is needed. It is a
+    per-process timer covering docs only; with P7 and a scoped catch-up on
+    join it becomes a rare safety net (FOUNDATION_REVIEW F6).
+  - P9: lands with the setup overhaul (private servers by invite link,
+    code or file; public servers later). Findings in FOUNDATION_REVIEW F9.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.
